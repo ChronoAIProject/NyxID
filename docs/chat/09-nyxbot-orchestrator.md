@@ -661,8 +661,9 @@ judged from the update (an @username or text mention, a reply to the bot); Lark
 and Feishu count only a mention of the bot itself, by its `open_id` (looked up
 through the adapter's `bot_user_id` when a message mentions someone and cached
 in memory per bot and app for an hour; apps granted every group message also
-get mentions of other people, and `@all` is not a mention of the bot), or any
-mention for five minutes after a failed lookup (logged as a warning); Slack
+get mentions of other people, and `@all` is not a mention of the bot). Missing
+identity supplies no positive native mention evidence (failed lookups are
+cached for five minutes and logged); Slack
 counts `app_mention` events and
 Discord its `mentions` and replied-to author; a reply to one of the bot's sent
 messages counts everywhere, and Discord slash commands always do. When a
@@ -1296,3 +1297,14 @@ Authored skill cards return `review_url` instead of `confirm_phrase`. Send the
 full link in channel chats and groups; replies cannot approve publication.
 Group pending actions offer **Review draft** to the reviewing owner and open
 the full file review at the exact card, including hidden member threads.
+
+Exact native bot-authored group mentions use the same receiving bot's linked
+agent and chat consent as human guests. They require a known native receiver,
+foreign bot actor and positive native mention (Telegram entities or Lark open ID).
+Bots are always guests, never owner-link/card/queue participants, and `all` or a
+reply alone never admits them. Mongo atomically spends the existing chat's
+`max_group_handoffs` allowance and owner hourly handoff budget, with replay
+claims; admitted human messages alone reset the chat allowance. Busy/uncertain
+work is not refunded. Bots cannot allocate chat settings or open/renew following.
+Gateway opt-in is capability negotiated and reconciled on existing connections;
+see [relay rollout and authority contract](../CHANNEL_BOT_RELAY.md).

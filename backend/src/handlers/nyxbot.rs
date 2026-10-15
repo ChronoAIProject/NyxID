@@ -7,10 +7,10 @@
 //! answers as the gateway's `nyxbot` provider (Agent Card, bindings,
 //! conversations, Responses SSE, event context). Platforms the gateway relay
 //! does not support yet (Lark, Feishu, Discord, Slack, WhatsApp, ...) use
-//! NyxID's own relay directly. Both paths run the same NyxBot turn: one
-//! orchestrator conversation per chat and sender, owned by the bot owner, with
-//! Full access. Only senders verified as the owner reach it; everyone else gets
-//! a short refusal and no turn.
+//! NyxID's own relay directly. Both paths use the receiving bot's linked agent
+//! or live chat override. Verified owners and admitted human guests retain
+//! their existing authority. Exactly addressed native bots are bounded guests;
+//! they cannot become owners, approve cards or queue owner work.
 use crate::services::assistant_links::AssistantPage;
 use axum::{
     Json,
@@ -658,6 +658,7 @@ pub async fn connect(
         agent_key_raw = Some(Zeroizing::new(agent.full_key));
     }
     let row = NyxbotChannel {
+        gateway_bot_mentions: Default::default(),
         gateway_threads: Default::default(),
         follow_capacity_revision: 0,
         follow_binding_generation: 0,
@@ -941,6 +942,12 @@ fn gateway_policy(
     } else if let Some(bot_id) = row.gateway_bot_id.as_deref() {
         source["bot_id"] = json!(bot_id);
     }
+    if gateway_bot_mentions::desired(row, bot) {
+        source["admission"]["bot_messages"] = json!("native_mentions");
+        if platform == "telegram" {
+            source["bot_id"] = json!(bot.platform_bot_id);
+        }
+    }
     let name: String = format!("NyxBot {}", row.bot_label)
         .chars()
         .take(60)
@@ -1155,7 +1162,7 @@ static OWN_USER_IDS: std::sync::LazyLock<std::sync::Mutex<OwnUserIds>> =
 
 /// The bot's own user ID on Lark / Feishu (its `open_id`), so group messages
 /// that mention someone else are not taken as addressed to the bot. `None`
-/// (the lookup failed) makes any mention count, as before.
+/// (the lookup failed) provides no positive native addressing evidence.
 async fn own_user_id(state: &AppState, bot: &ChannelBot) -> Option<String> {
     if !matches!(canonical_platform(&bot.platform), "lark" | "feishu") {
         return None;
@@ -1175,7 +1182,7 @@ async fn own_user_id(state: &AppState, bot: &ChannelBot) -> Option<String> {
     if found.is_none() {
         tracing::warn!(
             platform = %bot.platform,
-            "NyxBot could not look up the bot's own ID; any mention counts for five minutes"
+            "NyxBot could not look up the bot's own ID; native mention identity is unknown for five minutes"
         );
     }
     if let Ok(mut ids) = OWN_USER_IDS.lock() {
@@ -2464,6 +2471,8 @@ enum Inbound {
 }
 
 struct Sender<'a> {
+    kind: crate::models::channel_thread::ThreadSenderKind,
+    owner_eligible: bool,
     id: &'a str,
     display_name: Option<&'a str>,
 }
@@ -2490,30 +2499,75 @@ async fn inbound_message(
         &row.channel_bot_id,
     )
     .await?;
+    use crate::models::channel_thread::ThreadSenderKind;
     let private = chat.kind.as_deref() == Some("private");
-    if let Some(linked) = link_owner(state, row, sender, text, private).await? {
-        return Ok(linked);
+    let is_bot = sender.kind == ThreadSenderKind::Bot;
+    if sender.kind == ThreadSenderKind::Unknown {
+        return Ok(Inbound::Silent);
     }
-    let chat = &chats::note_owner_presence(state, row, chat, sender.id).await?;
-    let guest = match chats::admission(row, chat, sender.id, addressed) {
-        chats::Admission::Owner => false,
-        chats::Admission::Guest => true,
-        chats::Admission::Refuse => return Ok(Inbound::Reply(PRIVATE_REFUSAL.into())),
-        chats::Admission::Silent => return Ok(Inbound::Silent),
-        chats::Admission::Waiting => {
-            return Ok(match chats::waiting_hint(state, chat).await? {
-                Some(hint) => Inbound::Reply(hint),
-                None => Inbound::Silent,
-            });
+    let mut current_chat = chat.clone();
+    let guest = if is_bot {
+        // A bot's native ID or link-code text never proves a human owner.
+        if !chats::bot_guest_allowed(chat, addressed) {
+            return Ok(Inbound::Silent);
+        }
+        true
+    } else if !sender.owner_eligible {
+        // Authenticated channel posts have no user identity. Keep their
+        // legacy guest path while excluding owner linking/presence and the
+        // human group-hop reset.
+        match chats::admission(row, chat, sender.id, addressed) {
+            // A channel-post actor is never an owner, even if its synthetic
+            // provider ID happens to match an owner sender record.
+            chats::Admission::Guest => true,
+            chats::Admission::Refuse
+            | chats::Admission::Silent
+            | chats::Admission::Waiting
+            | chats::Admission::Owner => return Ok(Inbound::Silent),
+        }
+    } else {
+        if let Some(linked) = link_owner(state, row, sender, text, private).await? {
+            return Ok(linked);
+        }
+        current_chat = chats::note_owner_presence(state, row, chat, sender.id).await?;
+        match chats::admission(row, &current_chat, sender.id, addressed) {
+            chats::Admission::Owner => false,
+            chats::Admission::Guest => true,
+            chats::Admission::Refuse => return Ok(Inbound::Reply(PRIVATE_REFUSAL.into())),
+            chats::Admission::Silent => return Ok(Inbound::Silent),
+            chats::Admission::Waiting => {
+                return Ok(match chats::waiting_hint(state, &current_chat).await? {
+                    Some(hint) => Inbound::Reply(hint),
+                    None => Inbound::Silent,
+                });
+            }
         }
     };
+    let chat = &current_chat;
+    if !crate::services::channel_bot_turn_service::admit_with_owner_reset(
+        &state.db,
+        row,
+        chat,
+        sender.kind,
+        sender.owner_eligible,
+        event_key,
+    )
+    .await?
+    {
+        return Ok(Inbound::Silent);
+    }
     let addressed = chat.kind.as_deref() == Some("private") || addressed == Some(true);
     // Channel admission nests several large futures before claiming the turn.
     // Keep them off the polling stack for both gateway and direct-relay calls.
-    Box::pin(start_chat_turn(
+    let result = Box::pin(start_chat_turn(
         state, row, chat, sender, text, guest, addressed, None, event_key,
     ))
-    .await
+    .await?;
+    Ok(if is_bot && matches!(result, Inbound::Busy) {
+        Inbound::Silent
+    } else {
+        result
+    })
 }
 
 /// Link the owner's chat-app account: a sender presenting the owner's
@@ -2527,6 +2581,12 @@ async fn link_owner(
     text: &str,
     private: bool,
 ) -> AppResult<Option<Inbound>> {
+    if sender.kind != crate::models::channel_thread::ThreadSenderKind::Human {
+        return Ok(None);
+    }
+    if !sender.owner_eligible {
+        return Ok(None);
+    }
     let known = row.owner_sender_ids.iter().any(|id| id == sender.id);
     if let (Some(hash), Some(expires_at)) =
         (row.link_code_hash.as_deref(), row.link_code_expires_at)
@@ -2895,7 +2955,7 @@ async fn start_chat_turn(
             )
         }))
     };
-    late_delivery::prepare(state, event_key, row, &origin, sender.id, guest, addressed).await?;
+    late_delivery::prepare(state, event_key, row, &origin, sender, guest, addressed).await?;
     let start = TurnStart {
         acknowledgement_id: None,
         retry_of: None,
@@ -2952,6 +3012,9 @@ async fn start_chat_turn(
                 .await;
             }
 
+            if sender.kind == crate::models::channel_thread::ThreadSenderKind::Bot {
+                return Ok(Inbound::Silent);
+            }
             // The same question is never worked on twice: a repeat waits for
             // the answer in progress (sent to this chat too) or already queued.
             if exists
@@ -3520,7 +3583,39 @@ pub async fn responses(State(state): State<AppState>, headers: HeaderMap, body: 
         return problem(StatusCode::BAD_REQUEST, "invalid_request");
     }
     // Durable admission: one turn per idempotency key, context kept verbatim.
-    let event_key = sha256_hex(format!("{}\0{idempotency}", row.id));
+    let native_group_event = row.gateway_bot_mentions.enabled
+        && activity["source"]["type"] == "nyxid_relay"
+        && activity["conversation"]["kind"] == "group";
+    let native_source_key = if native_group_event
+        && matches!(activity["actor"]["kind"].as_str(), Some("human" | "bot"))
+    {
+        match crate::services::channel_bot_turn_service::relay_event_key(
+            &state.db,
+            &row,
+            &event_id,
+            activity["conversation"]["id"].as_str().unwrap_or_default(),
+            activity["actor"]["id"].as_str().unwrap_or_default(),
+        )
+        .await
+        {
+            Ok(key) => key,
+            Err(_) => return problem(StatusCode::SERVICE_UNAVAILABLE, "provider_unavailable"),
+        }
+    } else {
+        None
+    };
+    let event_key = if let Some(key) = native_source_key {
+        key
+    } else if native_group_event {
+        // Native source identity, shared by direct/follow/gateway paths. A
+        // changed transport retry key cannot repeat effects or human resets.
+        sha256_hex(format!(
+            "thread-follow:v1\0{}\0{}",
+            row.channel_bot_id, event_id
+        ))
+    } else {
+        sha256_hex(format!("{}\0{idempotency}", row.id))
+    };
     let ciphertext = match serde_json::to_vec(context) {
         Ok(bytes) => match state.encryption_keys.encrypt(&bytes).await {
             Ok(ciphertext) => ciphertext,
@@ -3528,8 +3623,11 @@ pub async fn responses(State(state): State<AppState>, headers: HeaderMap, body: 
         },
         Err(_) => return problem(StatusCode::BAD_REQUEST, "invalid_request"),
     };
-    let now = Utc::now();
+    let mut now = Utc::now();
+    let retry_digest = sha256_hex(request.to_string());
     let admitted = NyxbotEvent {
+        native_bot_budget_claimed: false,
+        retry_request_sha256: Some(retry_digest.clone()),
         delivery: None,
         resolved_thread_id: None,
         resolved_conversation_id: None,
@@ -3552,8 +3650,27 @@ pub async fn responses(State(state): State<AppState>, headers: HeaderMap, body: 
         if !is_duplicate(&error) {
             return problem(StatusCode::SERVICE_UNAVAILABLE, "provider_unavailable");
         }
-        // A retry of an admitted event never starts a second turn.
-        return replay(&state, &row, &event_key, &response_id).await;
+        // Only an identical, verified human request that previously started
+        // no turn may resume. Keep its original budget claim and deadline;
+        // concurrent retries contend on this transition before any turn work.
+        let resumed = if activity["actor"]["kind"] == "human" {
+            events
+                .find_one_and_update(
+                    doc! {"_id": &event_key, "channel_id": &row.id, "user_id": &row.user_id,
+                    "status": "retryable", "native_bot_budget_claimed": true,
+                    "retry_request_sha256": &retry_digest, "turn_id": bson::Bson::Null,
+                    "expires_at": {"$gt": bson::DateTime::from_chrono(now)}},
+                    doc! {"$set": {"status": "resuming"}},
+                )
+                .await
+        } else {
+            Ok(None)
+        };
+        match resumed {
+            Ok(Some(prior)) => now = prior.created_at,
+            Ok(None) => return replay(&state, &row, &event_key, &response_id).await,
+            Err(_) => return problem(StatusCode::SERVICE_UNAVAILABLE, "provider_unavailable"),
+        }
     }
     let sender_id = activity["actor"]["id"]
         .as_str()
@@ -3562,7 +3679,12 @@ pub async fn responses(State(state): State<AppState>, headers: HeaderMap, body: 
     let display = activity["actor"]["display_name"]
         .as_str()
         .map(str::to_owned);
-    let human = activity["actor"]["kind"] == "human";
+    let sender_kind = match activity["actor"]["kind"].as_str() {
+        Some("human") => crate::models::channel_thread::ThreadSenderKind::Human,
+        Some("bot") => crate::models::channel_thread::ThreadSenderKind::Bot,
+        _ => crate::models::channel_thread::ThreadSenderKind::Unknown,
+    };
+    let human = sender_kind == crate::models::channel_thread::ThreadSenderKind::Human;
     // Admission includes chat reconciliation and turn preparation. Keep that
     // large future off the provider handler's stack as the protocol grows.
     let mut thread_reply = false;
@@ -3573,6 +3695,8 @@ pub async fn responses(State(state): State<AppState>, headers: HeaderMap, body: 
         activity,
         context["event_ref"].as_str(),
         &Sender {
+            kind: sender_kind,
+            owner_eligible: true,
             id: &sender_id,
             display_name: display.as_deref(),
         },
@@ -3622,7 +3746,20 @@ pub async fn responses(State(state): State<AppState>, headers: HeaderMap, body: 
         }
         Ok(Inbound::Busy) => {
             // Let the gateway retry this same event after the running turn.
-            let _ = events.delete_one(doc! {"_id": &event_key}).await;
+            let _ = events
+                .delete_one(doc! {"_id": &event_key,"native_bot_budget_claimed":{"$ne":true}})
+                .await;
+            if human {
+                // Busy proves this event started no turn. Retain the reset
+                // claim so retries cannot refill automated hops again.
+                let _ = events
+                    .update_one(
+                        doc! {"_id": &event_key, "native_bot_budget_claimed": true,
+                        "turn_id": bson::Bson::Null},
+                        doc! {"$set": {"status": "retryable"}},
+                    )
+                    .await;
+            }
             let mut response = problem(StatusCode::CONFLICT, "conversation_in_progress");
             response
                 .headers_mut()
@@ -3633,7 +3770,15 @@ pub async fn responses(State(state): State<AppState>, headers: HeaderMap, body: 
             late_delivery::provider_stream(state, event_key, response_id, created, receiver, now)
         }
         Err(_) => {
-            let _ = events.delete_one(doc! {"_id": &event_key}).await;
+            let _ = events
+                .delete_one(doc! {"_id": &event_key,"native_bot_budget_claimed":{"$ne":true}})
+                .await;
+            let _ = events
+                .update_one(
+                    doc! {"_id":&event_key,"native_bot_budget_claimed":true},
+                    doc! {"$set":{"status":"failed"},"$unset":{"event_context_ciphertext":""}},
+                )
+                .await;
             problem(StatusCode::SERVICE_UNAVAILABLE, "provider_unavailable")
         }
     }
@@ -3659,7 +3804,27 @@ async fn gateway_inbound(
     let kind = chats::chat_kind(conversation["kind"].as_str().unwrap_or("private"));
     let chat_id = conversation["id"].as_str().unwrap_or_default();
     let thread_id = conversation["thread_id"].as_str();
-    if crate::services::channel_thread_service::gateway::candidate(row, activity)
+    use crate::models::channel_thread::ThreadSenderKind;
+    if sender.id.is_empty() || sender.kind == ThreadSenderKind::Unknown {
+        return Ok(Inbound::Silent);
+    }
+    if sender.kind == ThreadSenderKind::Bot {
+        let bot = channel_bot_service::get_bot(&state.db, &row.channel_bot_id).await?;
+        if !row.gateway_bot_mentions.enabled
+            || kind != "group"
+            || activity["kind"]["mentions_bot"] != true
+            || !chats::foreign_bot(&bot, row.gateway_bot_id.as_deref(), sender.id)
+        {
+            return Ok(Inbound::Silent);
+        }
+    }
+    let receiver_known = !matches!(canonical_platform(&row.platform), "lark" | "feishu")
+        || row
+            .gateway_bot_id
+            .as_deref()
+            .is_some_and(|id| id.starts_with("ou_") && id.len() > 3);
+    if receiver_known
+        && crate::services::channel_thread_service::gateway::candidate(row, activity)
         && let Some(result) = Box::pin(thread_follow::gateway_inbound(
             state, row, activity, text, event_key,
         ))
@@ -3679,23 +3844,32 @@ async fn gateway_inbound(
     };
     let relay_message_id = (activity["source"]["type"] == json!("nyxid_relay"))
         .then(|| activity["event_id"].as_str().unwrap_or_default().to_owned());
-    let chat = chats::record_chat_with_relay(
-        state,
-        row,
-        &chat_partition,
-        &chats::ChatFacts {
-            kind,
-            chat_id: chat_id.to_owned(),
-            thread_id: thread_id.map(str::to_owned),
-            owner: row.owner_sender_ids.iter().any(|id| id == sender.id),
-            title: (kind == "private")
-                .then(|| chats::private_title(row, sender.id, sender.display_name)),
-        },
-        None,
-        relay_message_id.as_deref(),
-    )
-    .await?;
-    chats::spawn_title_lookup(state, row, &chat);
+    let chat = if sender.kind == ThreadSenderKind::Bot {
+        let Some(chat) = chats::existing_bot_chat(state, row, &chat_partition).await? else {
+            return Ok(Inbound::Silent);
+        };
+        chat
+    } else {
+        chats::record_chat_with_relay(
+            state,
+            row,
+            &chat_partition,
+            &chats::ChatFacts {
+                kind,
+                chat_id: chat_id.to_owned(),
+                thread_id: thread_id.map(str::to_owned),
+                owner: human && row.owner_sender_ids.iter().any(|id| id == sender.id),
+                title: (kind == "private")
+                    .then(|| chats::private_title(row, sender.id, sender.display_name)),
+            },
+            None,
+            relay_message_id.as_deref(),
+        )
+        .await?
+    };
+    if human {
+        chats::spawn_title_lookup(state, row, &chat);
+    }
     // Keep the exact private-chat mapping for a later flag-off return to
     // the relay; no mentioned names, sender IDs or message content are added.
     let mut metadata = doc! {};
@@ -3743,31 +3917,35 @@ async fn gateway_inbound(
             .update_one(doc! {"_id": &chat.id}, doc! {"$set": metadata})
             .await;
     }
-    if !human || sender.id.is_empty() {
-        return Ok(Inbound::Silent);
-    }
     // Only legacy admission implies addressing. A gateway may already have
     // accepted broader thread admission before its acknowledgement is stored.
     // Versioned facts must use explicit evidence even during that window.
-    let addressed = Some(
-        kind == "private"
-            || activity["kind"]["mentions_bot"] == true
-            || (row.gateway_groups.as_deref() != Some("all")
-                && activity["thread"].is_null()
-                && !row
-                    .gateway_threads
-                    .follow_chat_ids
-                    .iter()
-                    .any(|id| id == chat_id))
-            || match activity["event_id"].as_str() {
-                Some(message_id) => {
-                    let bot = channel_bot_service::get_bot(&state.db, &row.channel_bot_id).await?;
-                    let reply_to = chats::inbound_reply_to(state, row, message_id).await?;
-                    chats::replies_to_bot(state, &bot, chat_id, reply_to.as_deref()).await?
-                }
-                None => false,
-            },
-    );
+    let addressed = if !human {
+        Some(activity["kind"]["mentions_bot"] == true)
+    } else {
+        Some(
+            kind == "private"
+                || (receiver_known && activity["kind"]["mentions_bot"] == true)
+                || (receiver_known
+                    && human
+                    && row.gateway_groups.as_deref() != Some("all")
+                    && activity["thread"].is_null()
+                    && !row
+                        .gateway_threads
+                        .follow_chat_ids
+                        .iter()
+                        .any(|id| id == chat_id))
+                || match activity["event_id"].as_str() {
+                    Some(message_id) => {
+                        let bot =
+                            channel_bot_service::get_bot(&state.db, &row.channel_bot_id).await?;
+                        let reply_to = chats::inbound_reply_to(state, row, message_id).await?;
+                        chats::replies_to_bot(state, &bot, chat_id, reply_to.as_deref()).await?
+                    }
+                    None => false,
+                },
+        )
+    };
     Box::pin(inbound_message(
         state, row, &chat, sender, text, addressed, event_key,
     ))
@@ -3795,7 +3973,7 @@ async fn replay(
     let created = json!({"type": "response.created",
         "response": {"id": response_id, "status": "in_progress"}});
     match event.map(|event| event.status) {
-        Some(status) if status == "running" => {
+        Some(status) if matches!(status.as_str(), "running" | "resuming" | "retryable") => {
             let mut response = problem(StatusCode::CONFLICT, "conversation_in_progress");
             response
                 .headers_mut()
@@ -4076,7 +4254,41 @@ pub async fn relay_callback(
         Err(_) => return problem(StatusCode::SERVICE_UNAVAILABLE, "provider_unavailable"),
     }
     // Dedup redeliveries of the same inbound message.
-    let event_key = if payload["thread_context"].is_object() {
+    let sender_kind = chats::native_sender_kind(&row.platform, &payload["raw_platform_data"]);
+    let native_source_key = if payload["conversation"]["type"] == "group"
+        && matches!(
+            canonical_platform(&row.platform),
+            "telegram" | "lark" | "feishu"
+        )
+        && matches!(
+            sender_kind,
+            crate::models::channel_thread::ThreadSenderKind::Human
+                | crate::models::channel_thread::ThreadSenderKind::Bot
+        ) {
+        match crate::services::channel_bot_turn_service::relay_event_key(
+            &state.db,
+            &row,
+            &claims.message_id,
+            payload["conversation"]["platform_id"]
+                .as_str()
+                .unwrap_or_default(),
+            payload["sender"]["platform_id"]
+                .as_str()
+                .unwrap_or_default(),
+        )
+        .await
+        {
+            Ok(key) => key,
+            Err(_) => return problem(StatusCode::SERVICE_UNAVAILABLE, "provider_unavailable"),
+        }
+    } else {
+        None
+    };
+    let event_key = if let Some(key) = native_source_key {
+        key
+    } else if payload["thread_context"].is_object()
+        || sender_kind == crate::models::channel_thread::ThreadSenderKind::Bot
+    {
         sha256_hex(format!(
             "thread-follow:v1\0{}\0{}",
             row.channel_bot_id, claims.message_id
@@ -4117,6 +4329,8 @@ pub async fn relay_callback(
         partition
     };
     let admitted = NyxbotEvent {
+        native_bot_budget_claimed: false,
+        retry_request_sha256: None,
         delivery: None,
         resolved_thread_id: None,
         resolved_conversation_id: None,
@@ -4175,41 +4389,82 @@ pub async fn relay_callback(
     let message_id = claims.message_id.clone();
     tokio::spawn(async move {
         let result: AppResult<()> = async {
+            use crate::models::channel_thread::ThreadSenderKind;
+            if sender_kind == ThreadSenderKind::Unknown {
+                return Ok(());
+            }
+            if sender_kind == ThreadSenderKind::Bot {
+                let bot = channel_bot_service::get_bot(&state.db, &row.channel_bot_id).await?;
+                let own = own_user_id(&state, &bot).await;
+                if kind == "private" || !chats::foreign_bot(&bot, own.as_deref(), &sender_id) {
+                    return Ok(());
+                }
+            }
             if Box::pin(thread_follow::inbound(
                 &state,
                 &row,
                 &payload,
                 &message_id,
                 &text,
+                &admitted.id,
             ))
             .await?
             {
                 return Ok(());
             }
-            let chat = chats::record_chat_with_relay(
-                &state,
-                &row,
-                &partition,
-                &chats::ChatFacts {
-                    kind,
-                    chat_id: chat_id.clone(),
-                    thread_id,
-                    owner: row.owner_sender_ids.iter().any(|id| id == &sender_id),
-                    title: if kind == "private" {
-                        Some(chats::private_title(&row, &sender_id, display.as_deref()))
-                    } else {
-                        raw_title
+            let chat = if sender_kind == ThreadSenderKind::Bot {
+                let Some(chat) = chats::existing_bot_chat(&state, &row, &partition).await? else {
+                    return Ok(());
+                };
+                chat
+            } else {
+                chats::record_chat_with_relay(
+                    &state,
+                    &row,
+                    &partition,
+                    &chats::ChatFacts {
+                        kind,
+                        chat_id: chat_id.clone(),
+                        thread_id,
+                        owner: sender_kind
+                            == crate::models::channel_thread::ThreadSenderKind::Human
+                            && row.owner_sender_ids.iter().any(|id| id == &sender_id),
+                        title: if kind == "private" {
+                            Some(chats::private_title(&row, &sender_id, display.as_deref()))
+                        } else {
+                            raw_title
+                        },
                     },
-                },
-                Some(&message_id),
-                Some(&message_id),
-            )
-            .await?;
-            chats::spawn_title_lookup(&state, &row, &chat);
+                    Some(&message_id),
+                    Some(&message_id),
+                )
+                .await?
+            };
+            if sender_kind == ThreadSenderKind::Human {
+                chats::spawn_title_lookup(&state, &row, &chat);
+            }
             if text.trim().is_empty() || sender_id.is_empty() {
                 return Ok(());
             }
-            let addressed = if kind == "private" {
+            let addressed = if sender_kind == ThreadSenderKind::Bot {
+                let bot = channel_bot_service::get_bot(&state.db, &row.channel_bot_id).await?;
+                let own = own_user_id(&state, &bot).await;
+                Some(match canonical_platform(&row.platform) {
+                    "telegram" => chats::native_message(&raw)
+                        .map(|message| {
+                            crate::services::channel_native_mentions::telegram(message, &bot).bot
+                        })
+                        .unwrap_or(false),
+                    "lark" | "feishu" => {
+                        crate::services::channel_native_mentions::lark(
+                            &raw["event"]["message"],
+                            own.as_deref(),
+                        )
+                        .bot
+                    }
+                    _ => false,
+                })
+            } else if kind == "private" {
                 Some(true)
             } else {
                 let bot = channel_bot_service::get_bot(&state.db, &row.channel_bot_id).await?;
@@ -4229,6 +4484,8 @@ pub async fn relay_callback(
                 }
             };
             let sender = Sender {
+                kind: sender_kind,
+                owner_eligible: chats::native_owner_eligible(&row.platform, &raw),
                 id: &sender_id,
                 display_name: display.as_deref(),
             };
@@ -4284,6 +4541,8 @@ pub async fn relay_callback(
     StatusCode::ACCEPTED.into_response()
 }
 
+#[path = "nyxbot_gateway_bot_mentions.rs"]
+mod gateway_bot_mentions;
 #[path = "nyxbot_gateway_threads.rs"]
 mod gateway_threads;
 #[path = "nyxbot_transport.rs"]

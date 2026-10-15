@@ -61,6 +61,7 @@ async fn private_telegram_with_follow_off_is_a_zero_read_legacy_fast_path() {
                 &json!({"conversation": {"type": "private"}}),
                 "message-that-does-not-exist",
                 "legacy DM",
+                "unused-event-key",
             ))
             .await
             .unwrap()
@@ -80,6 +81,7 @@ async fn private_telegram_with_follow_off_is_a_zero_read_legacy_fast_path() {
             &json!({"conversation": {"type": "private"}}),
             "message-that-does-not-exist",
             "legacy DM",
+            "unused-event-key",
         ))
         .await
         .unwrap()
@@ -99,6 +101,38 @@ async fn callback(
     addressed: bool,
     text: &str,
 ) {
+    callback_as(
+        state,
+        row,
+        n,
+        topic,
+        sender,
+        addressed,
+        text,
+        ThreadSenderKind::Human,
+    )
+    .await;
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn callback_as(
+    state: &AppState,
+    row: &NyxbotChannel,
+    n: u32,
+    topic: &str,
+    sender: &str,
+    addressed: bool,
+    text: &str,
+    kind: ThreadSenderKind,
+) {
+    let raw = if kind == ThreadSenderKind::Bot {
+        json!({"message":{"message_id":n,"message_thread_id":topic.parse::<i64>().unwrap(),"is_topic_message":true,
+            "from":{"id":sender.parse::<i64>().unwrap(),"is_bot":true},
+            "chat":{"id":-100,"type":"supergroup"},"text":text,
+            "entities":[{"type":"mention","offset":0,"length":11}]}})
+    } else {
+        json!({"message":{"from":{"is_bot":false}}})
+    };
     let inbound = InboundMessage {
         platform_message_id: n.to_string(),
         conversation_id: "-100".into(),
@@ -110,7 +144,7 @@ async fn callback(
         attachments: Vec::new(),
         reply_to_platform_message_id: None,
         thread_id: Some(topic.into()),
-        raw_data: json!({}),
+        raw_data: raw.clone(),
     };
     let facts = ChannelThreadFacts {
         version: 1,
@@ -119,7 +153,7 @@ async fn callback(
         message_id: n.to_string(),
         root_id: Some(topic.into()),
         native_thread_id: Some(topic.into()),
-        sender_kind: ThreadSenderKind::Human,
+        sender_kind: kind,
         address: if addressed {
             ThreadAddress::Mention
         } else {
@@ -146,7 +180,7 @@ async fn callback(
         .unwrap();
     let body = json!({"message_id":id,"correlation_id":format!("jti-{n}"),"platform":"telegram","thread_context":facts,"thread_id":topic,
         "conversation":{"id":row.route_id,"platform_id":"-100","type":"group"},"sender":{"platform_id":sender,"display_name":"Sender"},
-        "content":{"type":"text","text":text},"raw_platform_data":{}});
+        "content":{"type":"text","text":text},"raw_platform_data":raw});
     let bytes = serde_json::to_vec(&body).unwrap();
     let token = crate::crypto::jwt::generate_relay_callback_token(
         &state.jwt_keys,
@@ -313,8 +347,52 @@ async fn direct_follow_uses_separate_native_children_and_owner_stop_without_mode
             .len(),
         2
     );
+    let before_bot = children()
+        .await
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|child| child.follow.thread_root_id.as_deref() == Some("8"))
+        .unwrap();
+    callback_as(
+        &state,
+        &row,
+        108,
+        "8",
+        "9009",
+        true,
+        "@helper_bot Bot follow-up",
+        ThreadSenderKind::Bot,
+    )
+    .await;
+    assert_eq!(calls.lock().await.len(), 5);
+    let after_bot = thread_rows
+        .find_one(doc! {"_id": &before_bot.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        after_bot.follow.follow_expires_at,
+        before_bot.follow.follow_expires_at
+    );
+    assert!(
+        engine::get(
+            &state.db,
+            OWNER,
+            after_bot.conversation_id.as_deref().unwrap()
+        )
+        .await
+        .unwrap()
+        .guest_turn
+    );
     let requests = provider.received_requests().await.unwrap();
-    assert_eq!(requests.len(), 5);
+    assert_eq!(
+        requests.len(),
+        6,
+        "both human and bot native answers are delivered"
+    );
     for request in &requests[..4] {
         assert_eq!(
             request.body_json::<Value>().unwrap()["message_thread_id"],
@@ -323,6 +401,10 @@ async fn direct_follow_uses_separate_native_children_and_owner_stop_without_mode
     }
     assert_eq!(
         requests[4].body_json::<Value>().unwrap()["message_thread_id"],
+        8
+    );
+    assert_eq!(
+        requests[5].body_json::<Value>().unwrap()["message_thread_id"],
         8
     );
     let parents = chats::list_chats(&state, OWNER, Some(&row.id))

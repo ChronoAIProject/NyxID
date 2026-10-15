@@ -2105,3 +2105,20 @@ provider call, then accepted only after validation and outbound persistence.
 There is no persisted message queue or automatic replay. See
 [Complete IM replies](CHANNEL_COMPLETE_REPLIES.md) for the API and rollout
 contract.
+
+## Native channel mention admission
+
+`channel_native_mentions` interprets bounded, authenticated Telegram and
+Lark/Feishu addressing facts. The receiving `NyxbotChannel` and live chat settings
+select the linked agent; display labels never resolve an agent or grant identity.
+Bot actors require an exact native mention in an existing enabled group and
+retain guest authority through execution, thread following and delayed delivery.
+
+`channel_bot_turn_service` atomically spends the existing `nyxbot_threads`
+chat/topic allowance and the owner's `assistant_group_handoffs` hourly window.
+The `nyxbot_events` claim fences duplicate execution and human budget resets;
+only admitted human messages refill the chat allowance. These are metadata-only
+additions to existing collections. The gateway policy is capability negotiated
+at management time, and existing connections reconcile without participant
+OAuth. See [the relay contract](CHANNEL_BOT_RELAY.md) for admission, compatibility
+and the required reader-before-writer rollout.

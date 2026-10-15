@@ -248,9 +248,12 @@ Ordered admission:
    and source-message binding. Keep sender-specific/exact/default route priority.
    For org bots recheck the linked person's current admin authority; org route
    credentials never become personal assistant execution credentials.
-2. Resolve adapter facts and reject bot/self/system/unknown-human events for
-   follow. Gateway `actor.kind=human` alone is insufficient if persisted inbound
-   facts contradict it. An empty/synthetic broadcast sender cannot subscribe.
+2. Resolve adapter facts and reject self/system/unknown events. Exactly
+   mentioned foreign native bots may answer only in an already active child,
+   always as guests, spending the parent/settings chat's durable handoff budget.
+   Only admitted humans may open or renew following. Gateway `actor.kind=human`
+   alone is insufficient if persisted inbound facts contradict it. An
+   empty/synthetic broadcast sender cannot subscribe.
 3. Deduplicate by stable bot/link + inbound event identity using existing
    `NyxbotEvent` admission, with a unique source-event fence shared by both paths
    during transport moves. Different gateway retry keys cannot bypass it. Keep

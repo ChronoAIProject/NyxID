@@ -133,6 +133,21 @@ async fn outbound_reason(state: &AppState, bot: &str, expected: &str) -> Channel
     panic!("outbound error {expected} was never recorded");
 }
 
+async fn outbound_success(state: &AppState, bot: &str) -> ChannelBot {
+    // The mock sees the HTTP request before the reply path records its
+    // outcome. Turn settlement alone does not fence that asynchronous write.
+    for _ in 0..400 {
+        let current = crate::services::channel_bot_service::get_bot(&state.db, bot)
+            .await
+            .unwrap();
+        if current.diagnostics.last_outbound_at.is_some() {
+            return current;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    panic!("outbound success was never recorded");
+}
+
 async fn idle(state: &AppState, conversation: &str) {
     for _ in 0..400 {
         let thread = crate::services::assistant_nyxagent::get(&state.db, OWNER, conversation)
@@ -257,9 +272,7 @@ async fn x_dm_reaches_nyxbot_and_the_reply_reaches_x_with_diagnostics() {
             .iter()
             .any(|message| message.role == "assistant" && message.text == "Here is your answer")
     );
-    let healthy = crate::services::channel_bot_service::get_bot(&state.db, &bot.id)
-        .await
-        .unwrap();
+    let healthy = outbound_success(&state, &bot.id).await;
     assert!(healthy.diagnostics.last_inbound_at.is_some());
     assert_eq!(
         healthy.diagnostics.last_inbound_source.as_deref(),

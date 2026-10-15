@@ -4511,6 +4511,7 @@ fn answer_routing_matches_image_and_settlement_destinations_in_768_rows() {
             partition: partition.into(),
             thread: bound.then(|| {
                 Box::new(ThreadTurnBinding {
+                    sender_kind: None,
                     child_id: partition.into(),
                     source_message_id: "source".into(),
                     sender_id: "sender".into(),
