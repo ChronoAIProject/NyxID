@@ -406,28 +406,15 @@ fn rpc_scope_forbidden(id: Option<serde_json::Value>, message: &str) -> Response
     rpc_error(id, -32003, message)
 }
 
-const VOICE_ACTIVITY_RECORDING_RETRY: &str = "Tool execution could not be recorded; retry shortly";
+const ACTIVITY_RECORDING_RETRY: &str = "Tool execution could not be recorded; retry shortly";
 
-fn untracked_voice_tool_error(id: Option<serde_json::Value>, voice_task: bool) -> Option<Response> {
-    voice_task.then(|| rpc_error(id, -32603, VOICE_ACTIVITY_RECORDING_RETRY))
-}
-
-async fn is_voice_task_conversation(
-    db: &mongodb::Database,
-    chat: &crate::services::assistant_acknowledgement_service::ChatAuthority,
-) -> mongodb::error::Result<bool> {
-    Ok(db
-        .collection::<mongodb::bson::Document>(
-            crate::models::assistant_conversation::COLLECTION_NAME,
-        )
-        .find_one(doc! {
-            "_id": &chat.conversation_id,
-            "user_id": &chat.user_id,
-            "voice_parent_conversation_id": {"$type": "string"},
-        })
-        .projection(doc! {"_id": 1})
-        .await?
-        .is_some())
+fn untracked_discovery_allowed(name: Option<&str>) -> bool {
+    matches!(
+        name,
+        Some("nyx__search_tools")
+            | Some("nyx__discover_services")
+            | Some("nyx__list_connected_services")
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -1836,11 +1823,7 @@ async fn handle_tools_call(
                 return refuse_retry_duplicate(state, auth, chat, request, params, &digest).await;
             }
             Err(_) => {
-                return rpc_error(
-                    request.id.clone(),
-                    -32603,
-                    "Tool execution could not be recorded; retry shortly",
-                );
+                return rpc_error(request.id.clone(), -32603, ACTIVITY_RECORDING_RETRY);
             }
         }
     }
@@ -1854,11 +1837,7 @@ async fn handle_tools_call(
         {
             Ok(window) => window,
             Err(_) => {
-                return rpc_error(
-                    request.id.clone(),
-                    -32603,
-                    "Tool execution could not be recorded; retry shortly",
-                );
+                return rpc_error(request.id.clone(), -32603, ACTIVITY_RECORDING_RETRY);
             }
         }
     } else {
@@ -1876,27 +1855,25 @@ async fn handle_tools_call(
             .await
             {
                 Ok(Some(id)) => Some((chat, id)),
-                Ok(None) => None,
+                Ok(None) => {
+                    if untracked_discovery_allowed(
+                        params.get("name").and_then(serde_json::Value::as_str),
+                    ) {
+                        None
+                    } else {
+                        return rpc_error(
+                            request.id.clone(),
+                            -32603,
+                            "Assistant turn is no longer active",
+                        );
+                    }
+                }
                 Err(_) => {
-                    // Ordinary chats retain the historical best-effort behavior.
-                    // Voice task turns must never dispatch without the activity
-                    // fence that makes restart replay safe, so inspect the row
-                    // only on this failure path.
                     tracing::warn!(
                         conversation_id = %chat.conversation_id,
                         "Could not record tool activity"
                     );
-                    // If the database cannot answer either, fail closed: a
-                    // retryable refusal is safe, untracked voice execution is not.
-                    let voice_task = is_voice_task_conversation(&state.db, chat)
-                        .await
-                        .unwrap_or(true);
-                    if let Some(response) =
-                        untracked_voice_tool_error(request.id.clone(), voice_task)
-                    {
-                        return response;
-                    }
-                    None
+                    return rpc_error(request.id.clone(), -32603, ACTIVITY_RECORDING_RETRY);
                 }
             }
         }
@@ -7076,12 +7053,24 @@ mod typed_outcome_tests {
     use serde_json::json;
 
     #[test]
-    fn voice_activity_recording_failure_is_retryable_only_for_voice_tasks() {
-        let response = untracked_voice_tool_error(Some(json!(1)), true)
-            .expect("voice task must refuse untracked execution");
-        assert_eq!(response.status(), StatusCode::OK);
-        assert!(!tool_succeeded(&response));
-        assert!(untracked_voice_tool_error(Some(json!(1)), false).is_none());
+    fn missing_live_activity_only_exempts_discovery_operations() {
+        for name in [
+            "nyx__search_tools",
+            "nyx__discover_services",
+            "nyx__list_connected_services",
+        ] {
+            assert!(untracked_discovery_allowed(Some(name)));
+        }
+        for name in [
+            "drive__upload",
+            "nyx__machine_browser",
+            "nyx__request_approval",
+            "",
+            "nyx__search_tools_evil",
+        ] {
+            assert!(!untracked_discovery_allowed(Some(name)));
+        }
+        assert!(!untracked_discovery_allowed(None));
     }
 
     #[test]

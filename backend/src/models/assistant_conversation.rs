@@ -128,6 +128,10 @@ pub struct ActiveTurn {
     /// The failed turn this turn retries (owner Retry only).
     #[serde(default)]
     pub retry_of: Option<String>,
+    /// New turns count every dispatched tool call, including entries evicted
+    /// from the bounded activity display. Absent on legacy turns.
+    #[serde(default)]
+    pub activity_count: Option<i64>,
     /// Canonical call digests the retried turn completed. A repeated call
     /// with the same tool and arguments is refused (`retry_duplicate_action`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

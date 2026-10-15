@@ -719,6 +719,64 @@ mod tests {
     }
 
     #[test]
+    fn firecrawl_overlay_exposes_render_cache_sitemap_and_provenance() {
+        let spec = spec_for_slug("api-firecrawl").unwrap();
+        let endpoints = openapi_parser::parse_hosted_openapi_spec_value(&spec).unwrap();
+        let scrape = endpoints
+            .iter()
+            .find(|endpoint| endpoint.name == "scrape")
+            .unwrap();
+        let map = endpoints
+            .iter()
+            .find(|endpoint| endpoint.name == "map_site")
+            .unwrap();
+        let scrape_request = scrape.request_body_schema.as_ref().unwrap();
+        let map_request = map.request_body_schema.as_ref().unwrap();
+        assert_eq!(scrape_request["additionalProperties"], true);
+        for control in ["formats", "waitFor", "timeout", "maxAge", "storeInCache"] {
+            assert!(
+                scrape_request["properties"].get(control).is_some(),
+                "scrape {control}"
+            );
+        }
+        for control in [
+            "sitemap",
+            "ignoreQueryParameters",
+            "ignoreCache",
+            "limit",
+            "timeout",
+        ] {
+            assert!(
+                map_request["properties"].get(control).is_some(),
+                "map {control}"
+            );
+        }
+        assert_eq!(
+            map_request["properties"]["sitemap"]["enum"],
+            serde_json::json!(["include", "only", "skip"])
+        );
+        let scrape_response = &spec["paths"]["/v2/scrape"]["post"]["responses"]["200"]["content"]["application/json"]
+            ["schema"]["properties"]["data"];
+        assert_eq!(scrape_response["properties"]["markdown"]["type"], "string");
+        for field in ["sourceURL", "url", "statusCode", "provider"] {
+            assert!(
+                scrape_response["properties"]["metadata"]["properties"]
+                    .get(field)
+                    .is_some(),
+                "scrape metadata {field}"
+            );
+        }
+        assert_eq!(
+            scrape_response["properties"]["metadata"]["properties"]["provider"]["properties"]["id"]
+                ["type"],
+            "string"
+        );
+        let map_response = &spec["paths"]["/v2/map"]["post"]["responses"]["200"]["content"]["application/json"]
+            ["schema"]["properties"]["links"];
+        assert_eq!(map_response["type"], "array");
+    }
+
+    #[test]
     fn google_workspace_is_the_union_of_all_six_products() {
         let workspace = spec_for_slug("api-google-workspace").unwrap();
         let drive = spec_for_slug("api-google-drive").unwrap();

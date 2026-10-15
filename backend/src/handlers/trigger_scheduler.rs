@@ -970,6 +970,8 @@ pub(crate) async fn webhook(
                     .collection::<AssistantMessage>(MESSAGES)
                     .insert_one(AssistantMessage {
                     retry_of: None,
+                        retry_claimed_by: None,
+                        activity_count: None,
                         specialist_id: None,
                         steering: None,
                         voice: None,

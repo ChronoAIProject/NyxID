@@ -2233,6 +2233,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             get(handlers::assistant_nyxagent::history).patch(handlers::assistant_nyxagent::rename),
         )
         .route(
+            "/nyxagent/conversations/{id}/messages/{message_id}/recovery",
+            get(handlers::assistant_nyxagent::recovery),
+        )
+        .route(
             "/nyxagent/conversations/{id}/model",
             patch(handlers::assistant_nyxagent::change_model),
         )

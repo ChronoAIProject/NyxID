@@ -14,7 +14,9 @@ import {
   Check,
   ChevronRight,
   CircleAlert,
+  Copy,
   MessageSquare,
+  RotateCcw,
   Sparkles,
   X,
   ThumbsDown,
@@ -36,6 +38,21 @@ import { useAssistantFeedback } from "@/hooks/use-assistant-feedback";
 import { capture } from "@/lib/telemetry";
 
 const EMPTY_MESSAGES: readonly ChatMessage[] = [];
+
+function recoveryReason(reason: string): string {
+  switch (reason) {
+    case "turn_active": return "Another turn is active. Check its result before retrying.";
+    case "already_retried": return "This reply was already retried. Review the newer result.";
+    case "agent_destroyed": return "This agent's threads are read-only.";
+    case "attachment_expired": return "An original attachment is no longer available.";
+    case "activity_outcome_uncertain": return "A tool may have taken effect. Check its result before another attempt.";
+    case "activity_evidence_incomplete":
+    case "lineage_incomplete": return "Completed actions cannot be verified for this retry.";
+    case "input_unavailable": return "The original request is no longer available.";
+    case "status_unavailable": return "Retry availability could not be checked. Check again before retrying.";
+    default: return "This reply cannot be retried automatically.";
+  }
+}
 
 function PulseDot({ className }: { readonly className?: string }) {
   return (
@@ -295,18 +312,24 @@ export function ChatMessageBubble({
   message,
   interactiveCards = true,
   onRetry,
+  onCheckRecovery,
   conversationId,
   feedbackEnabled = true,
 }: {
   readonly message: ChatMessage;
   readonly interactiveCards?: boolean;
   readonly onRetry?: () => Promise<void> | void;
+  readonly onCheckRecovery?: () => Promise<unknown> | void;
   readonly conversationId?: string;
   readonly feedbackEnabled?: boolean;
 }) {
   const streaming = message.status === "streaming";
   const [retrying, setRetrying] = useState(false);
   const [retryError, setRetryError] = useState<string>();
+  const [reviewOpen, setReviewOpen] = useState(false);
+  const [copyState, setCopyState] = useState<"copied" | "failed">();
+  const [checking, setChecking] = useState(false);
+  const [checkError, setCheckError] = useState<string>();
   const retry = async () => {
     if (!onRetry) return;
     setRetrying(true);
@@ -436,10 +459,11 @@ export function ChatMessageBubble({
           <div className="mt-2">
             <button
               type="button"
-              className="text-11 underline disabled:opacity-50"
+              className="inline-flex items-center gap-1 text-11 underline disabled:opacity-50"
               disabled={retrying}
               onClick={() => void retry()}
             >
+              <RotateCcw className="size-3" aria-hidden />
               {retrying ? "Retrying…" : "Retry"}
             </button>
             {retryError ? (
@@ -447,6 +471,62 @@ export function ChatMessageBubble({
                 {retryError}
               </p>
             ) : null}
+          </div>
+        ) : null}
+        {message.status === "error" && message.recovery?.status === "review" ? (
+          <div className="mt-2 space-y-2 text-11 text-muted-foreground">
+            <p>{recoveryReason(message.recovery.reason)}</p>
+            {message.recovery.text !== null ? (
+              <>
+                <button type="button" className="inline-flex items-center gap-1 underline"
+                  onClick={() => setReviewOpen((open) => !open)} aria-expanded={reviewOpen}>
+                  <ChevronRight className={cn("size-3", reviewOpen && "rotate-90")} aria-hidden />
+                  Review request
+                </button>
+                {reviewOpen ? (
+                  <div className="max-h-56 overflow-auto rounded-md border border-border p-2">
+                    <p className="whitespace-pre-wrap break-words text-foreground">{message.recovery.text}</p>
+                    {message.recovery.attachments.length ? (
+                      <p className="mt-2 break-all">Attachments: {message.recovery.attachments.join(", ")}</p>
+                    ) : null}
+                    <button type="button" className="mt-2 inline-flex items-center gap-1 underline"
+                      onClick={() => {
+                        const text = message.recovery?.text;
+                        if (text === null || text === undefined) return;
+                        void (async () => {
+                          try {
+                            await navigator.clipboard.writeText(text);
+                            setCopyState("copied");
+                          } catch {
+                            setCopyState("failed");
+                          }
+                        })();
+                      }}>
+                      <Copy className="size-3" aria-hidden /> Copy request
+                    </button>
+                    {copyState ? <p role="status" className="mt-1">
+                      {copyState === "copied" ? "Request copied." : "Copy failed. Select the text above."}
+                    </p> : null}
+                  </div>
+                ) : null}
+              </>
+            ) : null}
+          </div>
+        ) : null}
+        {message.status === "error" && onCheckRecovery ? (
+          <div className="mt-2 text-11">
+            <button type="button" className="inline-flex items-center gap-1 underline disabled:opacity-50"
+              disabled={checking} onClick={() => {
+                setChecking(true);
+                setCheckError(undefined);
+                void Promise.resolve().then(onCheckRecovery).catch((error: unknown) => {
+                  setCheckError(error instanceof Error ? error.message : "Could not check retry availability.");
+                }).finally(() => setChecking(false));
+              }}>
+              <RotateCcw className="size-3" aria-hidden />
+              {checking ? "Checking…" : "Check retry availability"}
+            </button>
+            {checkError ? <p role="alert" className="mt-1 text-destructive">{checkError}</p> : null}
           </div>
         ) : null}
         {interactiveCards
@@ -581,12 +661,14 @@ export function ChatMessageEntry({
   conversationId,
   feedbackEnabled = true,
   onRetry,
+  onCheckRecovery,
 }: {
   readonly message: ChatMessage;
   readonly interactiveCards?: boolean;
   readonly conversationId?: string;
   readonly feedbackEnabled?: boolean;
   readonly onRetry?: () => Promise<void> | void;
+  readonly onCheckRecovery?: () => Promise<unknown> | void;
 }) {
   if (
     message.role === "system" &&
@@ -622,6 +704,7 @@ export function ChatMessageEntry({
           conversationId={conversationId}
           feedbackEnabled={feedbackEnabled}
           onRetry={onRetry}
+          onCheckRecovery={onCheckRecovery}
         />
       </div>
     );

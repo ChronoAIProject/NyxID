@@ -259,6 +259,10 @@ describe("NyxAgent server-backed transport", () => {
     };
     const bodies: Record<string, unknown>[] = [];
     globalThis.__nyxidAssistantHttpMock = ({ endpoint, init }) => {
+      if (endpoint.endsWith("/messages/f1/recovery")) return json({
+        status: "available", reason: "available", text: "Send the brief",
+        attachments: ["brief.txt"],
+      });
       if (endpoint.endsWith("/turns")) {
         bodies.push(JSON.parse(String(init.body)));
         return stream();
@@ -270,8 +274,103 @@ describe("NyxAgent server-backed transport", () => {
     await transport.retry(id, "f1", () => undefined);
     expect(bodies).toEqual([{ conversation_id: id, text: "Send the brief", retry_of: "t1" }]);
     await expect(transport.retry(id, "u2", () => undefined)).rejects.toThrow(
-      "This reply can no longer be retried",
+      "Failed reply not found",
     );
+  });
+  it("checks a temporarily unavailable paginated attachment-only retry before sending", async () => {
+    const transcript = history();
+    transcript.messages = [{
+      id: "old-failed", seq: 1, turn_id: "old-turn", role: "assistant", text: "",
+      status: "failed", error_code: "turn_lost", created_at: start,
+      activities: [], attachments: [],
+      recovery: { status: "review", reason: "turn_active", text: "", attachments: ["scan.pdf"] },
+    }];
+    let checks = 0;
+    const bodies: Record<string, unknown>[] = [];
+    globalThis.__nyxidAssistantHttpMock = ({ endpoint, init }) => {
+      if (endpoint.endsWith("/messages/old-failed/recovery")) {
+        checks += 1;
+        return checks === 1 ? json({ error: "temporarily unavailable" }, 503)
+          : json({ status: "available", reason: "available", text: "", attachments: ["scan.pdf"] });
+      }
+      if (endpoint.endsWith("/turns")) {
+        bodies.push(JSON.parse(String(init.body)));
+        return stream();
+      }
+      return json(transcript);
+    };
+    const transport = new NyxAgentTransport();
+    await transport.history(id);
+    expect((await transport.checkRecovery(id, "old-failed")).reason).toBe("status_unavailable");
+    expect(transport.session(id).messages.find((message) => message.id === "old-failed")?.recovery?.reason)
+      .toBe("status_unavailable");
+    expect((await transport.checkRecovery(id, "old-failed")).status).toBe("available");
+    await transport.retry(id, "old-failed", () => undefined);
+    expect(bodies).toEqual([{ conversation_id: id, text: "", retry_of: "old-turn" }]);
+  });
+  it("does not turn an admitted retry into an error when final recovery refresh races history", async () => {
+    const oldPage = history();
+    oldPage.messages = [{ id: "failed", seq: 1, turn_id: "old-turn", role: "assistant",
+      text: "", status: "failed", error_code: "turn_lost", created_at: start,
+      activities: [], attachments: [], recovery: { status: "available", reason: "available",
+        text: "restore", attachments: [] } }];
+    const newest = history();
+    newest.messages = Array.from({ length: 100 }, (_, index) => ({
+      id: `new-${index}`, seq: 101 + index, turn_id: `new-turn-${index}`, role: "user",
+      text: "newer", status: "completed", error_code: null, created_at: start,
+      activities: [], attachments: [],
+    }));
+    newest.before_seq = 100;
+    let checks = 0;
+    let finalStarted: () => void = () => undefined;
+    const started = new Promise<void>((resolve) => { finalStarted = resolve; });
+    let resolveFinal: (response: Response) => void = () => undefined;
+    globalThis.__nyxidAssistantHttpMock = ({ endpoint }) => {
+      if (endpoint.endsWith("/messages/failed/recovery")) {
+        checks += 1;
+        if (checks === 1) return json({ status: "available", reason: "available", text: "restore", attachments: [] });
+        return new Promise<Response>((resolve) => { resolveFinal = resolve; finalStarted(); });
+      }
+      if (endpoint.endsWith("/turns")) return stream();
+      return json(endpoint.includes("before_seq=100") ? oldPage : newest);
+    };
+    const transport = new NyxAgentTransport();
+    await transport.history(id);
+    await transport.history(id, 100);
+    const attempt = transport.retry(id, "failed", () => undefined);
+    await started;
+    await transport.history(id);
+    resolveFinal(json({ status: "available", reason: "available", text: "restore", attachments: [] }));
+    await expect(attempt).resolves.toBeUndefined();
+    expect(transport.session(id).messages[0]?.recovery?.reason).toBe("already_retried");
+  });
+  it("reconciles an admission rejection through the clicked reply without resending", async () => {
+    const transcript = history();
+    transcript.messages = [{ id: "failed", seq: 1, turn_id: "old-turn", role: "assistant",
+      text: "", status: "failed", error_code: "turn_lost", created_at: start,
+      activities: [], attachments: [], recovery: { status: "available", reason: "available",
+        text: "restore", attachments: ["old.txt"] } }];
+    let checks = 0;
+    let posts = 0;
+    globalThis.__nyxidAssistantHttpMock = ({ endpoint }) => {
+      if (endpoint.endsWith("/messages/failed/recovery")) {
+        checks += 1;
+        return json(checks === 1
+          ? { status: "available", reason: "available", text: "restore", attachments: ["old.txt"] }
+          : { status: "review", reason: "attachment_expired", text: "restore", attachments: ["old.txt"] });
+      }
+      if (endpoint.endsWith("/turns")) {
+        posts += 1;
+        return json({ error: "attachment_expired" }, 410);
+      }
+      return json(transcript);
+    };
+    const transport = new NyxAgentTransport();
+    await transport.history(id);
+    await expect(transport.retry(id, "failed", () => undefined)).rejects.toThrow();
+    expect(posts).toBe(1);
+    expect(checks).toBe(2);
+    expect(transport.session(id).messages[0]?.recovery?.reason).toBe("attachment_expired");
   });
   it("retains a linked card during internal refresh and pagination, then clears its scope", async () => {
     const card = "12345678-1234-4123-8123-1234567890ab";

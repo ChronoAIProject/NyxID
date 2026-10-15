@@ -7,7 +7,7 @@ import {
 } from "@/lib/assistant/direct-transport";
 import { getAssistantIdentityUserId, subscribeAssistantIdentity } from "@/lib/assistant/identity";
 import { isNyxAgentConversationId } from "@/lib/assistant/conversation-ids";
-import { markAdmitted } from "@/lib/assistant/send-admission";
+import { isAdmittedSendError, markAdmitted } from "@/lib/assistant/send-admission";
 import type { ChatImage, ChatSessionState, ChatMessage } from "@/lib/assistant/chat-types";
 import type { RuntimeToolCallInfo } from "@/lib/assistant/runtime-event-semantics";
 import {
@@ -18,6 +18,7 @@ import {
   nyxAgentHistorySchema,
   nyxAgentIndexSchema,
   nyxAgentEventSchema,
+  nyxAgentRecoverySchema,
   type NyxAgentConversation,
   type NyxAgentConversationAgent,
   type NyxAgentHistory,
@@ -155,6 +156,7 @@ export class NyxAgentTransport {
   private listeners = new Set<() => void>();
   private index = new Map<string, NyxAgentConversation>();
   private histories = new Map<string, NyxAgentHistory>();
+  private consumedRetries = new Map<string, Set<string>>();
   private reviewCards = new Map<string, string>();
   private live = new Map<string, LiveTurn>();
   private requests = new Set<AbortController>();
@@ -192,6 +194,7 @@ export class NyxAgentTransport {
     this.live.clear();
     this.index.clear();
     this.histories.clear();
+    this.consumedRetries.clear();
     this.reviewCards.clear();
     this.views.clear();
     this.draftModel = "nyxagent/chat";
@@ -230,6 +233,7 @@ export class NyxAgentTransport {
       this.rowRevisions.set(row.id, (this.rowRevisions.get(row.id) ?? 0) + 1);
       this.index.delete(row.id);
       this.histories.delete(row.id);
+      this.consumedRetries.delete(row.id);
       this.reviewCards.delete(row.id);
       this.views.delete(row.id);
     }
@@ -341,9 +345,12 @@ export class NyxAgentTransport {
     const merged = new Map((existing?.messages ?? []).map((message) => [message.seq, message]));
     for (const message of page.messages) {
       const previous = merged.get(message.seq);
+      const received = this.consumedRetries.get(id)?.has(message.id) && message.recovery
+        ? { ...message, recovery: { ...message.recovery, status: "review" as const, reason: "already_retried" } }
+        : message;
       merged.set(
         message.seq,
-        previous && JSON.stringify(previous) === JSON.stringify(message) ? previous : message,
+        previous && JSON.stringify(previous) === JSON.stringify(received) ? previous : received,
       );
     }
     const before_seq = beforeSeq || !existing ? page.before_seq : existing.before_seq;
@@ -425,6 +432,7 @@ export class NyxAgentTransport {
     this.rowRevisions.set(id, (this.rowRevisions.get(id) ?? 0) + 1);
     this.index.delete(id);
     this.histories.delete(id);
+    this.consumedRetries.delete(id);
     this.reviewCards.delete(id);
     this.views.delete(id);
     this.changed();
@@ -495,6 +503,7 @@ export class NyxAgentTransport {
       if (cached) return cached;
       const failed = message.status === "failed" && message.error_code !== "cancelled";
       const view: ChatMessage = {
+        recovery: message.recovery,
         id: message.id,
         feedback: message.feedback ?? undefined,
         role: message.role,
@@ -535,6 +544,7 @@ export class NyxAgentTransport {
         const cached = streaming ? undefined : this.liveViews.get(message);
         if (cached && cached.id === id && cached.settled === settled) return cached.view;
         const view: ChatMessage = {
+          recovery: settled?.recovery,
           id: message.id,
           role: settled?.role ?? message.role,
           feedback: settled?.feedback ?? undefined,
@@ -659,7 +669,7 @@ export class NyxAgentTransport {
   ) {
     const generation = this.identity();
     if (this.isRunning(id)) throw new Error("A turn is already active.");
-    if ((!text.trim() && !options.attachmentIds?.length && !options.attachments?.length) || [...text].length > 32768) {
+    if ((!text.trim() && !options.attachmentIds?.length && !options.attachments?.length && !options.retryOf) || [...text].length > 32768) {
       throw new Error("Message must contain 1 to 32768 characters.");
     }
     const controller = new AbortController();
@@ -854,20 +864,95 @@ export class NyxAgentTransport {
   /** Retry the failed reply `messageId`. The server fences the calls that
    * failed turn completed and re-attaches its input's uploads (they are
    * already bound, so their ids are never re-sent). */
+  private async refreshRecovery(id: string, messageId: string, generation: number) {
+    const revision = this.rowRevisions.get(id);
+    const source = this.histories.get(id)?.messages.find((message) => message.id === messageId);
+    if (!source || source.role !== "assistant" || source.status !== "failed") {
+      throw new Error("Failed reply not found. Refresh the conversation.");
+    }
+    let recovery;
+    try {
+      recovery = nyxAgentRecoverySchema.parse(
+        await assistantJson(`${path(id)}/messages/${encodeURIComponent(messageId)}/recovery`),
+      );
+    } catch {
+      const previous = this.histories.get(id)?.messages.find((message) => message.id === messageId)?.recovery;
+      recovery = { status: "review" as const, reason: "status_unavailable", text: previous?.text ?? null,
+        attachments: previous?.attachments ?? [] };
+    }
+    this.current(generation);
+    if (this.consumedRetries.get(id)?.has(messageId)) {
+      recovery = { ...recovery, status: "review" as const, reason: "already_retried" };
+    }
+    if (revision !== this.rowRevisions.get(id) ||
+      this.histories.get(id)?.messages.find((message) => message.id === messageId) !== source) {
+      throw new DOMException("Conversation changed", "AbortError");
+    }
+    const history = this.histories.get(id);
+    if (history && history.messages.some((message) => message.id === messageId)) {
+      this.rowRevisions.set(id, (this.rowRevisions.get(id) ?? 0) + 1);
+      this.histories.set(id, {
+        ...history,
+        messages: history.messages.map((message) => message.id === messageId
+          ? { ...message, recovery } : message),
+      });
+      this.changed();
+    }
+    return recovery;
+  }
+
+  async checkRecovery(id: string, messageId: string) {
+    return this.refreshRecovery(id, messageId, this.identity());
+  }
+
+  private markRecoveryConsumed(id: string, messageId: string, turnId: string) {
+    const history = this.histories.get(id);
+    if (!history?.messages.some((message) => message.id === messageId && message.turn_id === turnId)) return;
+    const consumed = this.consumedRetries.get(id) ?? new Set<string>();
+    consumed.add(messageId);
+    this.consumedRetries.set(id, consumed);
+    this.rowRevisions.set(id, (this.rowRevisions.get(id) ?? 0) + 1);
+    this.histories.set(id, { ...history, messages: history.messages.map((message) =>
+      message.id === messageId && message.turn_id === turnId
+        ? { ...message, recovery: { ...message.recovery, status: "review", reason: "already_retried",
+          text: message.recovery?.text ?? null, attachments: message.recovery?.attachments ?? [] } }
+        : message),
+    });
+    this.changed();
+  }
+
   async retry(id: string, messageId: string, onAdopt: (id: string) => void) {
     const messages = this.histories.get(id)?.messages ?? [];
     const failed = messages.find(
       (message) => message.id === messageId && message.role === "assistant" && message.status === "failed",
     );
-    const input = failed && messages.find(
-      (message) => message.turn_id === failed.turn_id && message.role === "user",
-    );
-    if (!failed || !input) throw new Error("This reply can no longer be retried. Send the request again.");
-    return this.send(id, input.text, onAdopt, undefined, {
-      adoptExisting: true,
-      retryOf: failed.turn_id,
-      attachments: input.attachments,
-    });
+    if (!failed) throw new Error("Failed reply not found. Refresh the conversation.");
+    const generation = this.identity();
+    const recovery = await this.refreshRecovery(id, messageId, generation);
+    const current = this.histories.get(id)?.messages.find((message) => message.id === messageId);
+    if (!current || current.status !== "failed" || current.turn_id !== failed.turn_id) {
+      throw new DOMException("Conversation changed", "AbortError");
+    }
+    if (recovery.status !== "available" || recovery.text === null) {
+      throw new Error("This reply needs review before another attempt.");
+    }
+    let admitted = false;
+    try {
+      const result = await this.send(id, recovery.text, onAdopt, undefined, {
+        adoptExisting: true,
+        retryOf: failed.turn_id,
+      });
+      admitted = true;
+      return result;
+    } catch (error) {
+      admitted = isAdmittedSendError(error);
+      throw error;
+    } finally {
+      if (generation === this.generation) {
+        if (admitted) this.markRecoveryConsumed(id, messageId, failed.turn_id);
+        await this.refreshRecovery(id, messageId, generation).catch(() => undefined);
+      }
+    }
   }
 }
 

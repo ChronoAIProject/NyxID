@@ -121,7 +121,15 @@ export type NyxAgentSteering = z.infer<typeof nyxAgentSteeringSchema>;
 export const nyxAgentCapabilitiesSchema = z.object({
   steer: z.object({ max_chars: z.number().int().positive(), max_per_turn: z.number().int().positive() }).nullable(),
 });
+export const nyxAgentRecoverySchema = z.object({
+  status: z.enum(["available", "review"]),
+  reason: z.string(),
+  text: z.string().nullable(),
+  attachments: z.array(z.string()),
+});
+export type NyxAgentRecovery = z.infer<typeof nyxAgentRecoverySchema>;
 export const nyxAgentMessageSchema = z.object({
+  recovery: nyxAgentRecoverySchema.nullable().optional(),
   feedback: z.object({ vote: z.enum(["up", "down"]), comment: z.string().nullish(), updated_at: z.string().optional() }).nullish(),
   steering: nyxAgentSteeringSchema.nullish(),
   id: z.string(),

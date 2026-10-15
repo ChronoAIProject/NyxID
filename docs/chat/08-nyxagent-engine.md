@@ -59,18 +59,27 @@ longer contains memory), and while old and new replicas serve the same thread
 its turns can alternate resets until every replica runs the new build.
 
 **Retry.** The owner retries a failed reply with `retry_of` (its turn id) on
-`POST /turns`. The server checks that it names a failed reply of the same
-conversation (else 400), re-attaches that turn's input uploads without
-rebinding them (the client re-sends only the text), and adds a retry note
-listing the completed and the unfinished actions. Calls that turn completed are
-fenced: a chat-key `tools/call` whose tool and canonical (key-order
-independent) argument digest match one is refused with the MCP error
-`retry_duplicate_action` before it counts as progress or runs, recorded on the
-live turn as completed (so a retry of the retry stays fenced), and audited as
-`assistant_mcp_tool_call` with the tool label and error code only. Reads are
-fenced too. Ordinary turns are never fenced. Acknowledgement cards are not
-re-presented or expired by a retry: pending cards keep their own expiry, and
-decisions since the previous user message reach the next turn as before.
+`POST /turns`. History and `GET /conversations/{id}/messages/{message_id}/recovery`
+return a server-owned `available` or `review` decision for a failed owner reply,
+independent of which input page the browser has loaded. The focused read is
+owner-only. The browser refreshes it before posting the exact original text;
+attachment-only requests send empty text and no new attachment IDs. An
+unavailable or stale read offers a non-executing status check and request review.
+
+Admission rechecks the same evidence in its claim transaction and consumes the
+failed reply once. It restores only original, still-bound uploads. Missing or
+expired uploads, destroyed agents, active turns, consumed replies, unknown
+outcomes, running/errored or digest-less activities, capped activity history,
+and missing or overlong retry ancestry require review. A full 40-entry activity
+list is also treated as incomplete during rollout. Legacy turns without a
+complete activity count also require review; no backfill can infer omitted
+effects. Upgrade every serving replica before relying on these retry claims and
+evidence checks, since old replicas do not enforce them. A retry of a retry inherits every
+ancestor's completed-action digest; a completed chat-key `tools/call` with the
+same canonical tool and arguments is refused as `retry_duplicate_action` before
+execution. This is a fence for known completed calls, not an exactly-once
+guarantee for unknown outcomes. Ordinary turns are unaffected. Pending
+acknowledgement cards keep their own expiry and are not re-presented by Retry.
 
 Normative NyxID 0.24.0 contract, verified against the read-only NxyAgent clone
 at commit `58f647e4`. The retained design records are

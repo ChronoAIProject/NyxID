@@ -40,16 +40,24 @@ pub struct AssistantMessage {
     /// Images tools returned during the turn that produced this reply.
     #[serde(default)]
     pub attachments: Vec<super::assistant_conversation::TurnAttachment>,
-    /// What started the turn this message belongs to; `None` on rows written
-    /// before it was recorded. A chat app saw only channel and event turns.
+    /// What started the turn this message belongs to. Guest turns and older
+    /// rows use `None`, which cannot authorize owner retry.
     #[serde(default)]
     pub origin: Option<super::assistant_conversation::TurnOrigin>,
     /// A user message written in a chat app: its platform.
     #[serde(default)]
     pub via: Option<String>,
-    /// Failed turn this user message retries, when applicable.
+    /// Failed turn this turn retries, on its user input and assistant reply.
     #[serde(default)]
     pub retry_of: Option<String>,
+    /// A failed reply can be consumed by one retry only. Stored on the source
+    /// reply in the same transaction that claims its successor turn.
+    #[serde(default)]
+    pub retry_claimed_by: Option<String>,
+    /// None means a legacy turn whose bounded activity list is insufficient
+    /// evidence for automatic recovery.
+    #[serde(default)]
+    pub activity_count: Option<i64>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]

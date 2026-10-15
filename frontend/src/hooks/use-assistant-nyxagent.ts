@@ -402,6 +402,8 @@ export function useNyxAgentAssistantChat({
     send,
     retry: (id: string, messageId: string) =>
       nyxAgentTransport.retry(id, messageId, onConversationAdopted),
+    checkRecovery: (id: string, messageId: string) =>
+      nyxAgentTransport.checkRecovery(id, messageId),
     /** Reload the selected thread's transcript (after a context reset). */
     refreshHistory: async () => {
       if (selectedConversationId) await nyxAgentTransport.history(selectedConversationId);

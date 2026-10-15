@@ -368,6 +368,7 @@ impl From<crate::models::assistant_message::AssistantErrorDetail> for ErrorDetai
 
 #[derive(Serialize)]
 pub struct MessageResponse {
+    recovery: Option<RecoveryResponse>,
     pub feedback: Option<crate::handlers::assistant_feedback::FeedbackResponse>,
     steering: Option<steering::SteeringResponse>,
     voice: Option<VoiceTranscriptResponse>,
@@ -390,6 +391,7 @@ pub struct MessageResponse {
 impl From<AssistantMessage> for MessageResponse {
     fn from(row: AssistantMessage) -> Self {
         Self {
+            recovery: None,
             feedback: None,
             steering: row
                 .steering
@@ -418,6 +420,23 @@ impl From<AssistantMessage> for MessageResponse {
                 .map(AttachmentResponse::from)
                 .collect(),
             via: row.via,
+        }
+    }
+}
+#[derive(Serialize)]
+pub struct RecoveryResponse {
+    status: &'static str,
+    reason: &'static str,
+    text: Option<String>,
+    attachments: Vec<String>,
+}
+impl From<engine::RecoveryPreview> for RecoveryResponse {
+    fn from(preview: engine::RecoveryPreview) -> Self {
+        Self {
+            status: preview.status,
+            reason: preview.reason,
+            text: preview.text,
+            attachments: preview.attachments.into_iter().map(|a| a.label).collect(),
         }
     }
 }
@@ -606,6 +625,21 @@ pub async fn history(
     .await?;
     let agents = crate::services::assistant_team_service::agents(&state.db, &user_id, true).await?;
     let agent_id = conversation.agent_id.clone();
+    let agent_available = agents.iter().any(|agent| {
+        agent_id
+            .as_deref()
+            .map_or_else(|| agent.is_nyxbot(), |id| agent.id == id)
+            && agent.destroyed_at.is_none()
+    });
+    let recovery = engine::recovery_previews(
+        &state.db,
+        &user_id,
+        &id,
+        &conversation,
+        &rows,
+        agent_available,
+    )
+    .await?;
     let chats = super::nyxbot::chats::thread_details(&state, &user_id, &[&conversation]).await?;
     let mut conversation = ConversationResponse::from(conversation)
         .with_agent(agent_id.as_deref(), &agents)
@@ -615,6 +649,9 @@ pub async fn history(
         .filter(|ack| ack.status == "pending")
         .count() as u32;
     let mut messages: Vec<MessageResponse> = rows.into_iter().map(Into::into).collect();
+    for message in &mut messages {
+        message.recovery = recovery.get(&message.id).cloned().map(Into::into);
+    }
     let ids: Vec<_> = messages.iter().map(|m| m.id.clone()).collect();
     let feedback =
         crate::services::assistant_feedback_service::states_for_messages(&state.db, &user_id, &ids)
@@ -651,6 +688,19 @@ pub async fn history(
         messages,
         before_seq,
     }))
+}
+
+/// Refresh one failed reply's recovery decision before any execution attempt.
+pub async fn recovery(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path((id, message_id)): Path<(String, String)>,
+) -> AppResult<Json<RecoveryResponse>> {
+    super::login_client_context::require_first_party_human(&auth)?;
+    let user_id = auth.user_id.to_string();
+    engine::require_enabled(&state.db, &user_id).await?;
+    let preview = engine::recovery_for_message(&state.db, &user_id, &id, &message_id).await?;
+    Ok(Json(preview.into()))
 }
 
 #[derive(Serialize)]

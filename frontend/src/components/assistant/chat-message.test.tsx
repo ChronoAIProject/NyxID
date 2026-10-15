@@ -34,14 +34,16 @@ describe("canonical chat presentation", () => {
       expectedTurnCount: 0,
     };
     const retry = vi.fn().mockResolvedValue(undefined);
-    const failed: ChatMessage = { ...BASE, id: "failed-1", status: "error", error: "Turn lost" };
+    const failed: ChatMessage = { ...BASE, id: "failed-1", status: "error", error: "Turn lost",
+      recovery: { status: "available", reason: "available", text: "Question", attachments: [] } };
     // The page's own assistant renderer, as the thread page passes it.
     const { rerender } = render(
       <NyxAgentThreadMessageList
         session={{ ...session, messages: [BASE, failed] }}
         bottomInset={0}
         renderMessage={(message) => (
-          <NyxAgentAssistantEntry message={message} conversationId={session.conversationId} retry={retry} />
+          <NyxAgentAssistantEntry message={message} conversationId={session.conversationId}
+            retry={retry} checkRecovery={vi.fn()} />
         )}
       />,
     );
@@ -271,6 +273,22 @@ describe("canonical chat presentation", () => {
     fireEvent.click(screen.getByRole("button", { name: "Retry" }));
     expect(await screen.findByRole("alert")).toHaveTextContent("A turn is already active.");
     expect(screen.getByRole("button", { name: "Retry" })).toBeEnabled();
+  });
+
+  it("checks temporary recovery status without posting and reports copy failure", async () => {
+    const check = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", { value: { writeText: vi.fn().mockRejectedValue(new Error("denied")) }, configurable: true });
+    render(<ChatMessageBubble message={{ ...BASE, status: "error", recovery: {
+      status: "review", reason: "status_unavailable", text: "Original request", attachments: ["scan.txt"],
+    } }} onCheckRecovery={check} />);
+    expect(screen.queryByRole("button", { name: "Retry" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Check retry availability" }));
+    await screen.findByRole("button", { name: "Check retry availability" });
+    expect(check).toHaveBeenCalledOnce();
+    fireEvent.click(screen.getByRole("button", { name: "Review request" }));
+    expect(screen.getByText("Original request")).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Copy request" }));
+    expect(await screen.findByRole("status")).toHaveTextContent("Copy failed");
   });
 
   it("shows every diagnostic field and copies the diagnostic ID", async () => {

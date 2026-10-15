@@ -1,4 +1,5 @@
 use super::*;
+use crate::models::assistant_attachment::COLLECTION_NAME as ATTACHMENTS;
 use crate::models::user::{COLLECTION_NAME as USERS, UserType};
 use crate::services::assistant_agent_credential_service as credentials;
 use crate::test_utils::{connect_transaction_test_database, test_app_state, test_user};
@@ -263,6 +264,8 @@ fn recap_is_labeled_recent_and_bounded_without_splitting_unicode() {
     let messages: Vec<_> = (0..30)
         .map(|i| AssistantMessage {
             retry_of: None,
+            retry_claimed_by: None,
+            activity_count: None,
             specialist_id: None,
             steering: None,
             voice: None,
@@ -311,6 +314,33 @@ fn failure_diagnostics_normalize_unknown_upstream_codes() {
 }
 
 #[test]
+fn web_research_guidance_reaches_both_roles_without_lifting_guest_limits() {
+    let mut row = stale_test_row(Utc::now());
+    for role in [AgentRole::Orchestrator, AgentRole::Subagent] {
+        row.role = role;
+        let prompt = base_prompt(&row, None);
+        for guidance in [
+            "Firecrawl scrape",
+            "markdown body",
+            "sitemap=include",
+            "nyx__machine_browser",
+            "private or authenticated URLs",
+            "untrusted data",
+            "cache hit or rendering cannot be verified",
+        ] {
+            assert!(prompt.contains(guidance), "missing {guidance} for {role:?}");
+        }
+        row.guest_turn = true;
+        let guest = base_prompt(&row, None);
+        assert!(guest.contains("Guests retain their existing tool and private-data limits"));
+        assert!(guest.contains(
+            "Never send private or authenticated URLs, browser content, cookies or headers"
+        ));
+        row.guest_turn = false;
+    }
+}
+
+#[test]
 fn failure_matrix_maps_transport_failures_to_recoverable_classes() {
     assert_eq!(
         TurnError::new("first_byte_timeout").code,
@@ -330,6 +360,8 @@ fn recap_preserves_goal_head_and_tail_under_long_last_reply() {
     let rows = vec![
         AssistantMessage {
             retry_of: None,
+            retry_claimed_by: None,
+            activity_count: None,
             specialist_id: None,
             steering: None,
             voice: None,
@@ -353,6 +385,8 @@ fn recap_preserves_goal_head_and_tail_under_long_last_reply() {
         },
         AssistantMessage {
             retry_of: None,
+            retry_claimed_by: None,
+            activity_count: None,
             specialist_id: None,
             steering: None,
             voice: None,
@@ -387,6 +421,8 @@ fn recap_preserves_goal_head_and_tail_under_long_last_reply() {
 fn recap_caps_each_activity_list_and_reserves_bounded_total_budget() {
     let row = AssistantMessage {
         retry_of: None,
+        retry_claimed_by: None,
+        activity_count: None,
         specialist_id: None,
         steering: None,
         voice: None,
@@ -450,6 +486,8 @@ fn recap_caps_each_activity_list_and_reserves_bounded_total_budget() {
 fn recap_v2_keeps_action_status_and_attachment_checkpoint() {
     let row = AssistantMessage {
         retry_of: None,
+        retry_claimed_by: None,
+        activity_count: None,
         specialist_id: None,
         steering: None,
         voice: None,
@@ -498,6 +536,8 @@ fn recap_v2_keeps_action_status_and_attachment_checkpoint() {
 fn guest_recap_omits_owner_tool_metadata() {
     let row = AssistantMessage {
         retry_of: None,
+        retry_claimed_by: None,
+        activity_count: None,
         specialist_id: None,
         steering: None,
         voice: None,
@@ -546,6 +586,8 @@ fn guest_recap_omits_owner_tool_metadata() {
 fn retry_recap_lists_completed_activity_ids_for_no_duplicate_replay() {
     let row = AssistantMessage {
         retry_of: None,
+        retry_claimed_by: None,
+        activity_count: None,
         specialist_id: None,
         steering: None,
         voice: None,
@@ -812,6 +854,7 @@ fn stale_test_row(now: DateTime<Utc>) -> AssistantConversation {
         active_turn: Some(ActiveTurn {
             retry_digests: Vec::new(),
             retry_of: None,
+            activity_count: None,
             running_response: None,
             channel_event_id: None,
             initiating_message_seq: None,
@@ -944,6 +987,39 @@ async fn stale_fence_is_reclaimed_with_lost_reply_and_late_settlement_is_a_noop(
         next.active_turn.unwrap().turn_id
     );
     assert!(saved.nyxagent_session_id.is_none());
+}
+
+#[tokio::test]
+async fn reclaim_preserves_lost_turn_audience_across_guest_transitions() {
+    for (old_guest, next_guest) in [(false, true), (true, false)] {
+        let db = connect_transaction_test_database("nyxa_reclaim_guest").await;
+        ensure_indexes(&db).await.unwrap();
+        let user = Uuid::new_v4().to_string();
+        db.collection(USERS)
+            .insert_one(test_user(&user, UserType::Person))
+            .await
+            .unwrap();
+        let state = test_app_state(db.clone());
+        let keys = &state.encryption_keys;
+        let mut initial: TurnStart = (&request(None, "old request")).into();
+        initial.guest = old_guest;
+        let old = begin_turn(&db, &user, initial, keys).await.unwrap();
+        expire_turn(&db, &old).await;
+        let mut next: TurnStart = (&request(Some(&old.id), "next request")).into();
+        next.guest = next_guest;
+        begin_turn(&db, &user, next, keys).await.unwrap();
+        let lost = db
+            .collection::<AssistantMessage>(MESSAGES)
+            .find_one(doc! {
+                "conversation_id": &old.id,
+                "turn_id": &old.active_turn.as_ref().unwrap().turn_id,
+                "role": "assistant",
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(lost.origin, (!old_guest).then_some(TurnOrigin::User));
+    }
 }
 
 #[tokio::test]
@@ -1446,20 +1522,52 @@ async fn b4_retry_fences_completed_calls_carries_attachments_and_chains() {
     activity_finished(&db, &user, &first.id, &sent, true)
         .await
         .unwrap();
-    let broken = activity_started_with_digest(
-        &db,
-        &user,
-        &first.id,
-        "drive__upload",
-        Some("digest-upload"),
-    )
-    .await
-    .unwrap()
-    .unwrap();
-    activity_finished(&db, &user, &first.id, &broken, false)
+    settle(&db, keys, &user, &failed, "partial", Some("idle_timeout")).await;
+    let failed_reply = db
+        .collection::<AssistantMessage>(MESSAGES)
+        .find_one(doc! {
+            "conversation_id": &first.id, "turn_id": &failed_turn, "role": "assistant",
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    let preview = recovery_for_message(&db, &user, &first.id, &failed_reply.id)
         .await
         .unwrap();
-    settle(&db, keys, &user, &failed, "partial", Some("idle_timeout")).await;
+    assert_eq!(preview.status, "available");
+    assert_eq!(preview.text.as_deref(), Some("send the brief"));
+    assert_eq!(preview.attachments[0].id, upload.id);
+    let row = get(&db, &user, &first.id).await.unwrap();
+    let page = recovery_previews(&db, &user, &first.id, &row, &[failed_reply.clone()], true)
+        .await
+        .unwrap();
+    assert_eq!(
+        page.get(&failed_reply.id).unwrap().text.as_deref(),
+        Some("send the brief")
+    );
+    assert!(
+        recovery_for_message(&db, "another-owner", &first.id, &failed_reply.id)
+            .await
+            .is_err()
+    );
+    let busy = begin_turn(&db, &user, &request(Some(&first.id), "other work"), keys)
+        .await
+        .unwrap();
+    assert_eq!(
+        recovery_for_message(&db, &user, &first.id, &failed_reply.id)
+            .await
+            .unwrap()
+            .reason,
+        "turn_active"
+    );
+    settle(&db, keys, &user, &busy, "done", None).await;
+    assert_eq!(
+        recovery_for_message(&db, &user, &first.id, &failed_reply.id)
+            .await
+            .unwrap()
+            .status,
+        "available"
+    );
 
     // Only a failed owner turn of this conversation can be retried.
     for target in [
@@ -1495,7 +1603,7 @@ async fn b4_retry_fences_completed_calls_carries_attachments_and_chains() {
     assert_eq!(
         note,
         format!(
-            "[NyxID retry context: the owner is retrying turn {failed_turn}, which failed (idle_timeout). These actions already completed there; use their results. NyxID refuses repeating any of them with the same arguments: mail__send. These did not complete; check their effect before running them again: drive__upload. The original message's attachments are attached again.]"
+            "[NyxID retry context: the owner is retrying turn {failed_turn}, which failed (idle_timeout). These actions already completed there; use their results. NyxID refuses repeating any of them with the same arguments: mail__send. The original message's attachments are attached again.]"
         )
     );
     let input = messages(&db, &user, &first.id, 1, None)
@@ -1518,20 +1626,12 @@ async fn b4_retry_fences_completed_calls_carries_attachments_and_chains() {
             .unwrap()
     );
     assert!(
-        !retry_duplicate(&db, &user, &first.id, "digest-upload")
-            .await
-            .unwrap()
-    );
-    assert!(
         !retry_duplicate(&db, &user, &first.id, "digest-other")
             .await
             .unwrap()
     );
-    // The refused repeat is recorded as completed, so a retry of this retry
-    // inherits the fence even though the call did not run again here.
-    record_retry_duplicate(&db, &user, &first.id, "mail__send", "digest-send")
-        .await
-        .unwrap();
+    // A retry of this retry inherits the first turn's fence even when no
+    // duplicate call was attempted in the intermediate turn.
     let retried_turn = turn.turn_id.clone();
     settle(
         &db,
@@ -1542,6 +1642,25 @@ async fn b4_retry_fences_completed_calls_carries_attachments_and_chains() {
         Some("assistant_unavailable"),
     )
     .await;
+    let consumed = recovery_for_message(&db, &user, &first.id, &failed_reply.id)
+        .await
+        .unwrap();
+    assert_eq!(consumed.reason, "already_retried");
+    let old_source = begin_turn(
+        &db,
+        &user,
+        &retry(&first.id, "send the brief", &failed_turn),
+        keys,
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(old_source, AppError::Conflict(_)));
+    let reply = messages(&db, &user, &first.id, 2, None)
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert_eq!(reply.retry_of.as_deref(), Some(failed_turn.as_str()));
     let chained = begin_turn(
         &db,
         &user,
@@ -1577,6 +1696,439 @@ async fn b4_retry_fences_completed_calls_carries_attachments_and_chains() {
             .await
             .unwrap()
     );
+}
+
+#[tokio::test]
+async fn retry_rejects_unknown_and_incomplete_effect_evidence() {
+    let db = connect_transaction_test_database("nyxa_retry_uncertain").await;
+    ensure_indexes(&db).await.unwrap();
+    let user = Uuid::new_v4().to_string();
+    db.collection(USERS)
+        .insert_one(test_user(&user, UserType::Person))
+        .await
+        .unwrap();
+    let state = test_app_state(db.clone());
+    let keys = &state.encryption_keys;
+    let first = begin_turn(&db, &user, &request(None, "first"), keys)
+        .await
+        .unwrap();
+    settle(&db, keys, &user, &first, "done", None).await;
+
+    let unknown = begin_turn(&db, &user, &request(Some(&first.id), "unknown"), keys)
+        .await
+        .unwrap();
+    let unknown_id = unknown.active_turn.as_ref().unwrap().turn_id.clone();
+    settle(&db, keys, &user, &unknown, "", Some("outcome_unknown")).await;
+    let unknown_reply = db
+        .collection::<AssistantMessage>(MESSAGES)
+        .find_one(doc! {
+            "conversation_id": &first.id, "turn_id": &unknown_id, "role": "assistant",
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        recovery_for_message(&db, &user, &first.id, &unknown_reply.id)
+            .await
+            .unwrap()
+            .reason,
+        "activity_outcome_uncertain"
+    );
+    let unknown_input = db
+        .collection::<AssistantMessage>(MESSAGES)
+        .find_one(doc! {
+            "conversation_id": &first.id, "turn_id": &unknown_id, "role": "user",
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    let mut long_head = RetryEvidence::from(&unknown_reply);
+    long_head.retry_of = Some("ancestor-0".into());
+    let mut ancestors = std::collections::HashMap::new();
+    for index in 0..32 {
+        let mut ancestor = RetryEvidence::from(&unknown_reply);
+        ancestor.turn_id = format!("ancestor-{index}");
+        ancestor.retry_of = Some(format!("ancestor-{}", index + 1));
+        ancestors.insert(ancestor.turn_id.clone(), ancestor);
+    }
+    assert!(matches!(
+        retry_evidence(&long_head, Some(&unknown_input), &ancestors),
+        Err("lineage_incomplete")
+    ));
+    let result = begin_turn(&db, &user, &retry(&first.id, "unknown", &unknown_id), keys).await;
+    assert!(
+        matches!(result, Err(AppError::Conflict(_))),
+        "unknown outcome must need review"
+    );
+
+    let incomplete = begin_turn(&db, &user, &request(Some(&first.id), "incomplete"), keys)
+        .await
+        .unwrap();
+    let incomplete_id = incomplete.active_turn.as_ref().unwrap().turn_id.clone();
+    let activity = activity_started_with_digest(&db, &user, &first.id, "$$ROOT", Some("$digest"))
+        .await
+        .unwrap()
+        .unwrap();
+    activity_finished(&db, &user, &first.id, &activity, true)
+        .await
+        .unwrap();
+    settle(&db, keys, &user, &incomplete, "", Some("idle_timeout")).await;
+    let reply = db
+        .collection::<AssistantMessage>(MESSAGES)
+        .find_one(doc! {
+            "conversation_id": &first.id, "turn_id": &incomplete_id, "role": "assistant",
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(reply.activities[0].label, "$$ROOT");
+    assert_eq!(reply.activities[0].digest.as_deref(), Some("$digest"));
+    let accepted = begin_turn(
+        &db,
+        &user,
+        &retry(&first.id, "incomplete", &incomplete_id),
+        keys,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        accepted.active_turn.as_ref().unwrap().retry_digests,
+        ["$digest"]
+    );
+    settle(&db, keys, &user, &accepted, "done", None).await;
+
+    let truncated = begin_turn(&db, &user, &request(Some(&first.id), "truncated"), keys)
+        .await
+        .unwrap();
+    let truncated_id = truncated.active_turn.as_ref().unwrap().turn_id.clone();
+    let activity = activity_started_with_digest(&db, &user, &first.id, "call", Some("digest"))
+        .await
+        .unwrap()
+        .unwrap();
+    activity_finished(&db, &user, &first.id, &activity, true)
+        .await
+        .unwrap();
+    settle(&db, keys, &user, &truncated, "", Some("idle_timeout")).await;
+    db.collection::<bson::Document>(MESSAGES)
+        .update_one(
+            doc! {
+                "conversation_id": &first.id, "turn_id": &truncated_id, "role": "assistant",
+            },
+            doc! {"$set": {"activity_count": 2}},
+        )
+        .await
+        .unwrap();
+    let result = begin_turn(
+        &db,
+        &user,
+        &retry(&first.id, "truncated", &truncated_id),
+        keys,
+    )
+    .await;
+    assert!(
+        matches!(result, Err(AppError::Conflict(_))),
+        "truncated history must need review"
+    );
+    let replies = db.collection::<bson::Document>(MESSAGES);
+    let filter = doc! {"conversation_id": &first.id, "turn_id": &truncated_id, "role": "assistant"};
+    replies
+        .update_one(
+            filter.clone(),
+            doc! {"$set": {"activity_count": bson::Bson::Null}},
+        )
+        .await
+        .unwrap();
+    assert!(
+        matches!(
+            begin_turn(
+                &db,
+                &user,
+                &retry(&first.id, "truncated", &truncated_id),
+                keys
+            )
+            .await,
+            Err(AppError::Conflict(_))
+        ),
+        "legacy unknown count must need review"
+    );
+    replies
+        .update_one(
+            filter.clone(),
+            doc! {"$set": {"activity_count": 1, "activities.0.status": "error"}},
+        )
+        .await
+        .unwrap();
+    assert!(
+        matches!(
+            begin_turn(
+                &db,
+                &user,
+                &retry(&first.id, "truncated", &truncated_id),
+                keys
+            )
+            .await,
+            Err(AppError::Conflict(_))
+        ),
+        "failed activity may have taken effect"
+    );
+    replies
+        .update_one(
+            filter.clone(),
+            doc! {"$set": {"activities.0.status": "completed",
+            "activities.0.digest": bson::Bson::Null}},
+        )
+        .await
+        .unwrap();
+    assert!(
+        matches!(
+            begin_turn(
+                &db,
+                &user,
+                &retry(&first.id, "truncated", &truncated_id),
+                keys
+            )
+            .await,
+            Err(AppError::Conflict(_))
+        ),
+        "digest-less action cannot be fenced"
+    );
+    replies
+        .update_one(
+            filter,
+            doc! {"$set": {"activities.0.digest": "digest",
+            "retry_of": "missing-ancestor"}},
+        )
+        .await
+        .unwrap();
+    assert!(
+        matches!(
+            begin_turn(
+                &db,
+                &user,
+                &retry(&first.id, "truncated", &truncated_id),
+                keys
+            )
+            .await,
+            Err(AppError::Conflict(_))
+        ),
+        "missing ancestry must need review"
+    );
+    replies
+        .update_one(
+            doc! {"conversation_id": &first.id, "turn_id": &truncated_id,
+            "role": "assistant"},
+            doc! {"$set": {"retry_of": &truncated_id}},
+        )
+        .await
+        .unwrap();
+    assert!(
+        matches!(
+            begin_turn(
+                &db,
+                &user,
+                &retry(&first.id, "truncated", &truncated_id),
+                keys
+            )
+            .await,
+            Err(AppError::Conflict(_))
+        ),
+        "cyclic ancestry must need review"
+    );
+
+    let capped = begin_turn(&db, &user, &request(Some(&first.id), "many calls"), keys)
+        .await
+        .unwrap();
+    let capped_id = capped.active_turn.as_ref().unwrap().turn_id.clone();
+    for index in 0..=MAX_TURN_ACTIVITIES {
+        let activity = activity_started_with_digest(
+            &db,
+            &user,
+            &first.id,
+            "read",
+            Some(&format!("digest-{index}")),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        activity_finished(&db, &user, &first.id, &activity, true)
+            .await
+            .unwrap();
+    }
+    settle(&db, keys, &user, &capped, "", Some("idle_timeout")).await;
+    let reply = db
+        .collection::<AssistantMessage>(MESSAGES)
+        .find_one(doc! {
+            "conversation_id": &first.id, "turn_id": &capped_id, "role": "assistant",
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(reply.activity_count, Some(MAX_TURN_ACTIVITIES + 1));
+    assert_eq!(reply.activities.len() as i64, MAX_TURN_ACTIVITIES);
+    assert!(
+        matches!(
+            begin_turn(
+                &db,
+                &user,
+                &retry(&first.id, "many calls", &capped_id),
+                keys
+            )
+            .await,
+            Err(AppError::Conflict(_))
+        ),
+        "capped activity history must need review"
+    );
+    db.collection::<bson::Document>(MESSAGES)
+        .update_one(
+            doc! {
+                "conversation_id": &first.id, "turn_id": &capped_id, "role": "assistant",
+            },
+            doc! {"$set": {"activity_count": MAX_TURN_ACTIVITIES}},
+        )
+        .await
+        .unwrap();
+    assert!(
+        matches!(
+            begin_turn(
+                &db,
+                &user,
+                &retry(&first.id, "many calls", &capped_id),
+                keys
+            )
+            .await,
+            Err(AppError::Conflict(_))
+        ),
+        "a full retained list is ambiguous during rollout"
+    );
+}
+
+#[tokio::test]
+async fn guest_failure_cannot_be_retried_as_owner_turn() {
+    let db = connect_transaction_test_database("nyxa_retry_guest").await;
+    ensure_indexes(&db).await.unwrap();
+    let user = Uuid::new_v4().to_string();
+    db.collection(USERS)
+        .insert_one(test_user(&user, UserType::Person))
+        .await
+        .unwrap();
+    let state = test_app_state(db.clone());
+    let keys = &state.encryption_keys;
+    let mut start: TurnStart = (&request(None, "guest request")).into();
+    start.guest = true;
+    let guest = begin_turn(&db, &user, start, keys).await.unwrap();
+    let guest_turn = guest.active_turn.as_ref().unwrap().turn_id.clone();
+    settle(&db, keys, &user, &guest, "", Some("idle_timeout")).await;
+    let input = db
+        .collection::<AssistantMessage>(MESSAGES)
+        .find_one(doc! {
+            "conversation_id": &guest.id, "turn_id": &guest_turn, "role": "user",
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(input.origin, None);
+    let result = begin_turn(
+        &db,
+        &user,
+        &retry(&guest.id, "guest request", &guest_turn),
+        keys,
+    )
+    .await;
+    assert!(matches!(result, Err(AppError::BadRequest(_))));
+}
+
+#[tokio::test]
+async fn retry_rejects_missing_original_upload_and_concurrent_claim() {
+    let db = connect_transaction_test_database("nyxa_retry_claim").await;
+    ensure_indexes(&db).await.unwrap();
+    let user = Uuid::new_v4().to_string();
+    db.collection(USERS)
+        .insert_one(test_user(&user, UserType::Person))
+        .await
+        .unwrap();
+    let state = test_app_state(db.clone());
+    let keys = &state.encryption_keys;
+    let first = begin_turn(&db, &user, &request(None, "first"), keys)
+        .await
+        .unwrap();
+    settle(&db, keys, &user, &first, "done", None).await;
+    let upload = crate::services::assistant_upload_service::upload(
+        &db,
+        keys,
+        &user,
+        &first.id,
+        "scan.txt",
+        b"scan".to_vec(),
+    )
+    .await
+    .unwrap();
+    let failed = begin_turn(
+        &db,
+        &user,
+        &TurnRequest {
+            attachment_ids: vec![upload.id.clone()],
+            ..request(Some(&first.id), "inspect")
+        },
+        keys,
+    )
+    .await
+    .unwrap();
+    let turn_id = failed.active_turn.as_ref().unwrap().turn_id.clone();
+    settle(&db, keys, &user, &failed, "", Some("idle_timeout")).await;
+    let attachments = db.collection::<bson::Document>(ATTACHMENTS);
+    attachments
+        .update_one(
+            doc! {"_id": &upload.id},
+            doc! {"$set": {
+                "bound_at": bson::DateTime::from_chrono(Utc::now() - chrono::Duration::days(400)),
+            }},
+        )
+        .await
+        .unwrap();
+    let expired = begin_turn(&db, &user, &retry(&first.id, "inspect", &turn_id), keys).await;
+    assert!(matches!(expired, Err(AppError::AssistantAttachmentExpired)));
+    attachments
+        .update_one(
+            doc! {"_id": &upload.id},
+            doc! {"$set": {
+                "bound_at": bson::DateTime::now(),
+            }},
+        )
+        .await
+        .unwrap();
+    db.collection::<bson::Document>(ATTACHMENTS)
+        .delete_one(doc! {"_id": &upload.id})
+        .await
+        .unwrap();
+    let failed_reply = db
+        .collection::<AssistantMessage>(MESSAGES)
+        .find_one(doc! {
+            "conversation_id": &first.id, "turn_id": &turn_id, "role": "assistant",
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        recovery_for_message(&db, &user, &first.id, &failed_reply.id)
+            .await
+            .unwrap()
+            .reason,
+        "attachment_expired"
+    );
+    let result = begin_turn(&db, &user, &retry(&first.id, "inspect", &turn_id), keys).await;
+    assert!(matches!(result, Err(AppError::AssistantAttachmentExpired)));
+
+    let retryable = begin_turn(&db, &user, &request(Some(&first.id), "try again"), keys)
+        .await
+        .unwrap();
+    let retryable_id = retryable.active_turn.as_ref().unwrap().turn_id.clone();
+    settle(&db, keys, &user, &retryable, "", Some("idle_timeout")).await;
+    let request = retry(&first.id, "try again", &retryable_id);
+    let (a, b) = tokio::join!(
+        begin_turn(&db, &user, &request, keys),
+        begin_turn(&db, &user, &request, keys),
+    );
+    assert_eq!(usize::from(a.is_ok()) + usize::from(b.is_ok()), 1);
 }
 
 #[tokio::test]
@@ -1759,6 +2311,8 @@ async fn reset_context_is_fenced_and_drops_the_checkpoint() {
 fn recap_reserves_the_goal_before_long_recent_rows() {
     let row = |seq: i64, role: &str, text: String| AssistantMessage {
         retry_of: None,
+        retry_claimed_by: None,
+        activity_count: None,
         specialist_id: None,
         steering: None,
         voice: None,
