@@ -22,7 +22,8 @@ failed on 56 unused-code diagnostics under `-D warnings`; the backend test targe
 failed on 37 unused-code diagnostics before tests could execute. These include
 public paths awaiting real consumers and superseded contract interfaces. They
 must be connected or removed, without blanket lint suppression or fabricated
-readiness. Frontend and other checks were still running at this checkpoint.
+readiness. Frontend tests/coverage, CLI tests/coverage, wizard freshness and all
+four CodeQL language checks passed on that revision.
 
 Earlier missing webhook arguments, transaction callback `Send` diagnostics and
 four merge-related test-target errors have been corrected. Main `828009878` was
@@ -32,11 +33,21 @@ separate personal-inventory request; all ten settings tests, focused ESLint and
 TypeScript passed after the merge. The canonical wizard build and an independent
 check of all 175 manifest inputs matched the regenerated source hash.
 
-A local nextest run of `platform_manager_transport::journey_tests` is compiling
-`f8f623a42` with the explicit transaction-capable MongoDB URI below, one Cargo
-build job, no incremental compilation and line-table-only test debug information.
-Log: `/tmp/nyxbot-manager-journey-1.log`. No backend feature runtime test or full
-acceptance gate has passed yet.
+A local nextest run of `platform_manager_transport::journey_tests` on `f8f623a42`
+was stopped after roughly an hour of host paging before tests executed. It used
+the explicit transaction-capable MongoDB URI below, one Cargo build job, no
+incremental compilation and line-table-only test debug information. The compiler
+reported unused-code warnings and no type errors before interruption. This is
+not a successful build or runtime result. Log:
+`/tmp/nyxbot-manager-journey-1.log`. Runtime validation moves to CI after the
+production consumer fixes. No backend feature runtime test or full acceptance
+gate has passed yet.
+
+Main advanced again to `616a9131c`; merge `bf1ae6211` retains its inherited request
+span and turn-start trace in the extracted runtime. Public budget recovery fixes
+and public-intent minting are integrated through `c06123c47`. Opus's follow-up
+source review found P3-1/P3-2 corrected; it does not replace executed regressions
+or real upstream proof. The final independent review will use Astra.
 
 Frontend worker checkpoint `8ac676907`, integrated as `678409e8b`, passed 187
 tests across 12 files, focused ESLint, TypeScript checking, production and
