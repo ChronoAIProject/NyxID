@@ -161,7 +161,17 @@ pub async fn start(
     super::login_client_context::require_first_party_human(&auth)?;
     let actor = auth.user_id.to_string();
     let node = updates::owner_node(&state.db, &actor, &id).await?;
-    Ok(Json(begin(&state, &node, &actor, None, false).await?))
+    Ok(Json(
+        begin(
+            &state,
+            &node,
+            &actor,
+            None,
+            false,
+            &crate::services::nyxbot_watch_service::ReportProvenance::LEGACY,
+        )
+        .await?,
+    ))
 }
 
 pub async fn begin(
@@ -170,10 +180,20 @@ pub async fn begin(
     actor: &str,
     conversation: Option<&str>,
     automatic: bool,
+    provenance: &crate::services::nyxbot_watch_service::ReportProvenance,
 ) -> AppResult<Value> {
     let legacy = updates::legacy_companion(node);
     let manual = legacy || !node.machine.as_ref().is_some_and(|m| m.updater_ready);
-    let row = updates::begin(&state.db, node, actor, conversation, automatic, manual).await?;
+    let row = updates::begin(
+        &state.db,
+        node,
+        actor,
+        conversation,
+        automatic,
+        manual,
+        provenance,
+    )
+    .await?;
     let path = AssistantPage::MachineSettings { node: &node.id }.path();
     if legacy {
         return Ok(json!({
@@ -379,6 +399,7 @@ pub async fn tool(
                 Some(&chat.conversation_id),
                 false,
                 true,
+                &crate::services::nyxbot_watch_service::ReportProvenance::from_chat(chat),
             ))
             .await?;
             canonical["version"] = json!(updates::TARGET);
@@ -414,6 +435,7 @@ pub async fn tool(
             &chat.user_id,
             Some(&chat.conversation_id),
             false,
+            &crate::services::nyxbot_watch_service::ReportProvenance::from_chat(chat),
         ))
         .await?;
         if result["status"] != "failed"
@@ -503,7 +525,15 @@ async fn sweep(state: &AppState) -> AppResult<()> {
             && updates::idle(&state.db, &node.id).await?
             && row.updated_at < chrono::Utc::now() - chrono::Duration::minutes(15)
         {
-            let _ = begin(state, &node, &row.user_id, None, true).await;
+            let _ = begin(
+                state,
+                &node,
+                &row.user_id,
+                None,
+                true,
+                &crate::services::nyxbot_watch_service::ReportProvenance::LEGACY,
+            )
+            .await;
         }
         if row.notify_pending {
             // The persisted notification claim is cross-replica; no duplicate fanout.
@@ -565,7 +595,9 @@ mod tests {
     use crate::services::{
         assistant_authority_tests::{fixture, orchestrator_fixture},
         machine_integration_tests::{node, peer},
+        nyxbot_watch_service::ReportProvenance,
     };
+    const LEGACY: ReportProvenance = ReportProvenance::LEGACY;
 
     #[tokio::test]
     async fn full_access_machine_update_dispatches_with_receipt_while_auto_asks() {
@@ -802,7 +834,7 @@ mod tests {
             .replace_one(doc! {"_id": &node.id}, &node)
             .await
             .unwrap();
-        begin(&f.state, &node, &f.owner, Some(&f.row.id), false)
+        begin(&f.state, &node, &f.owner, Some(&f.row.id), false, &LEGACY)
             .await
             .unwrap();
         f.state.db.collection::<bson::Document>(COLLECTION_NAME)
@@ -879,7 +911,7 @@ mod tests {
             ip_address: None,
             provisioning_source: None,
         });
-        updates::begin(&f.state.db, &node, &f.owner, None, false, false)
+        updates::begin(&f.state.db, &node, &f.owner, None, false, false, &LEGACY)
             .await
             .unwrap();
         updates::observe(
@@ -909,9 +941,17 @@ mod tests {
             "verify_updater_image:trust_root_unavailable",
             "SECRET_UPSTREAM_BODY",
         ] {
-            updates::begin(&f.state.db, &node, &f.owner, Some(&f.row.id), false, true)
-                .await
-                .unwrap();
+            updates::begin(
+                &f.state.db,
+                &node,
+                &f.owner,
+                Some(&f.row.id),
+                false,
+                true,
+                &LEGACY,
+            )
+            .await
+            .unwrap();
             updates::observe(
                 &f.state.db,
                 &node,
@@ -1066,7 +1106,11 @@ mod tests {
             .await
             .unwrap();
         assert!(!updates::idle(&f.state.db, &node.id).await.unwrap());
-        assert!(begin(&f.state, &node, &f.owner, None, true).await.is_err());
+        assert!(
+            begin(&f.state, &node, &f.owner, None, true, &LEGACY)
+                .await
+                .is_err()
+        );
         assert!(seen.try_recv().is_err());
         f.state
             .db
@@ -1078,7 +1122,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(
-            begin(&f.state, &node, &f.owner, Some(&f.row.id), true)
+            begin(&f.state, &node, &f.owner, Some(&f.row.id), true, &LEGACY)
                 .await
                 .unwrap()["status"],
             "queued"
@@ -1301,13 +1345,21 @@ mod tests {
         let f = orchestrator_fixture("machine_update_attempts").await;
         let mut node = node(&f, &f.owner).await;
         updates::policy(&f.state.db, &node, true).await.unwrap();
-        let first = updates::begin(&f.state.db, &node, &f.owner, Some(&f.row.id), false, true)
-            .await
-            .unwrap();
+        let first = updates::begin(
+            &f.state.db,
+            &node,
+            &f.owner,
+            Some(&f.row.id),
+            false,
+            true,
+            &LEGACY,
+        )
+        .await
+        .unwrap();
         updates::finish(&f.state.db, &first, "failed", Some("old_failure"))
             .await
             .unwrap();
-        let second = updates::begin(&f.state.db, &node, &f.owner, None, false, true)
+        let second = updates::begin(&f.state.db, &node, &f.owner, None, false, true, &LEGACY)
             .await
             .unwrap();
         let saved = updates::watched(&f.state.db, first.attempt_id.as_deref().unwrap())
@@ -1333,9 +1385,17 @@ mod tests {
         use std::time::Duration;
         let f = orchestrator_fixture("machine_update_live").await;
         let node = node(&f, &f.owner).await;
-        updates::begin(&f.state.db, &node, &f.owner, Some(&f.row.id), false, true)
-            .await
-            .unwrap();
+        updates::begin(
+            &f.state.db,
+            &node,
+            &f.owner,
+            Some(&f.row.id),
+            false,
+            true,
+            &LEGACY,
+        )
+        .await
+        .unwrap();
         let live = f.state.assistant_live.clone();
         let db = f.state.db.clone();
         let runner = tokio::spawn(async move { live.run(db).await });

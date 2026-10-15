@@ -284,19 +284,7 @@ fn build_post_message_body(reply: &OutboundReply, conversation_id: &str) -> serd
         "text": text,
     });
 
-    // Thread the reply correctly. Slack expects `thread_ts` to be the
-    // ROOT message's `ts`. The relay layer surfaces the inbound event's
-    // root in `metadata.thread_ts`, so prefer that. Fall back to
-    // `reply_to_platform_message_id` only when the agent is explicitly
-    // replying to a specific message (Slack will auto-resolve to the
-    // parent thread, but the explicit root anchor is more reliable).
-    let thread_ts = reply
-        .metadata
-        .as_ref()
-        .and_then(|m| m.get("thread_ts"))
-        .and_then(|v| v.as_str())
-        .map(String::from)
-        .or_else(|| reply.reply_to_platform_message_id.clone());
+    let thread_ts = crate::services::channel_image_audience::native_thread("slack", reply);
     if let Some(ts) = thread_ts {
         body["thread_ts"] = serde_json::json!(ts);
     }
@@ -639,6 +627,7 @@ impl PlatformAdapter for SlackAdapter {
                     Some(&self.base_url),
                 )
                 .await?;
+                crate::services::channel_platform::mark_provider_attempt();
                 let response = client
                     .put(url)
                     .body(attachment.bytes.clone())

@@ -619,6 +619,8 @@ async fn schedule_specialist_authority_threads_and_guest_refusal() {
     let chat = ChatAuthority {
         platform_thread: false,
         platform_origin: None,
+        report_to: None,
+        with_nyxbot: false,
         org_agent_access: None,
         turn_id: None,
         turn_stopped: false,
@@ -643,6 +645,8 @@ async fn schedule_specialist_authority_threads_and_guest_refusal() {
     .await;
     assert!(refused);
     let guest = ChatAuthority {
+        report_to: None,
+        with_nyxbot: false,
         guest: true,
         role: crate::models::assistant_conversation::AgentRole::Orchestrator,
         ..chat
@@ -1073,6 +1077,7 @@ async fn confirmation_waits_and_resumes(kind: &str) {
         .db
         .collection::<AssistantAcknowledgement>(ACKS)
         .insert_one(AssistantAcknowledgement {
+            routing: None,
             link: None,
             requester_agent_id: None,
             confirmation: None,
@@ -1140,15 +1145,27 @@ async fn confirmation_waits_and_resumes(kind: &str) {
             .is_none()
     );
     let skill_destination = if kind == "skills" {
-        // Park a distinct owner NyxBot thread with a live turn. Use the
-        // production permission routing without injecting a second ordinary
-        // event turn into the automation thread being measured below.
+        // Park the card's saved assigning thread so its notification queues
+        // without starting another turn in the automation under measurement.
         let destination = crate::services::assistant_authority_tests::new_orchestrator(
             &state,
             OWNER,
             "Review approved skills",
         )
         .await;
+        state
+            .db
+            .collection::<Document>(ACKS)
+            .update_one(
+                doc! {"_id": &ack_id},
+                doc! {"$set": {"routing": bson::to_bson(
+                    &crate::models::assistant_acknowledgement::CardRouting::Assigned {
+                        report_to: destination.id.clone(),
+                    },
+                ).unwrap()}},
+            )
+            .await
+            .unwrap();
         state
             .db
             .collection::<Document>(CONVERSATIONS)
@@ -1212,6 +1229,20 @@ async fn confirmation_waits_and_resumes(kind: &str) {
         completed(&state, &trigger).await.outcome,
         RunOutcome::Completed
     );
+    // The confirmation-resumed trigger turn never reports to NyxBot, even
+    // beside the stale legacy marker set on the thread above (skills).
+    let resumed_reply = engine::messages(&state.db, OWNER, &thread.id, 100, None)
+        .await
+        .unwrap()
+        .into_iter()
+        .rev()
+        .find(|message| message.role == "assistant" && message.status == "completed")
+        .expect("the resumed reply");
+    assert_eq!(
+        resumed_reply.origin,
+        Some(crate::models::assistant_conversation::TurnOrigin::Trigger)
+    );
+    assert_eq!(resumed_reply.report_to, None);
     assert!(decided_at.elapsed() < std::time::Duration::from_secs(5));
     eprintln!(
         "S7 confirmation decision to completed turn: {:?}",
@@ -1992,6 +2023,7 @@ async fn schedule_webhook_prefill_watch_and_human_api_boundary() {
             thread_policy: Some(ThreadPolicy::Home),
             confirmation_policy: Default::default(),
         },
+        crate::services::nyxbot_watch_service::ReportProvenance::LEGACY,
     )
     .await
     .unwrap();
@@ -2515,6 +2547,7 @@ async fn setup_watch_prefill_is_private_expiring_and_consumed_atomically() {
             thread_policy: None,
             confirmation_policy: Default::default(),
         },
+        crate::services::nyxbot_watch_service::ReportProvenance::LEGACY,
     )
     .await
     .unwrap();

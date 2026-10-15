@@ -585,7 +585,7 @@ pub(crate) async fn send(
     if let Some(images) = images {
         let child = follow::validate_delivery(&state.db, owner, origin, conversation).await?;
         let binding = origin.thread.as_ref().ok_or_else(follow::not_found)?;
-        let claim_key = format!("thread:{}", binding.child_id);
+
         let report = super::images::report_or_failure(
             state,
             super::images::ImageSendContext {
@@ -603,8 +603,9 @@ pub(crate) async fn send(
                             || (child.kind.as_deref() == Some("private") && child.owner_chat)),
                 },
                 deadline: None,
-                claim_key: &claim_key,
+
                 initiated: None,
+                fence: None,
             },
             images.plan,
         )
@@ -636,6 +637,75 @@ pub(crate) async fn send(
 }
 
 /// Resolve live thread credentials identically for image and text components.
+pub(super) async fn bound_image_audience(
+    state: &AppState,
+    channel: &NyxbotChannel,
+    owner: &str,
+    origin: &ChannelOrigin,
+    conversation: &str,
+) -> AppResult<String> {
+    let bot = channel_bot_service::get_bot(&state.db, &channel.channel_bot_id).await?;
+    let adapter = adapter(state, &bot)?;
+    let token = crate::services::channel_credentials::resolve_bot_token(
+        &state.db,
+        &state.encryption_keys,
+        adapter.as_ref(),
+        &bot,
+    )
+    .await?;
+    let secrets = if bot.credential_source == "platform" {
+        Some(
+            crate::services::channel_managed::build_verify_secrets(
+                &state.db,
+                &state.encryption_keys,
+                adapter.as_ref(),
+                &bot,
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
+    let billing = crate::services::channel_billing_service::ChannelBilling::for_bot(
+        &state.db,
+        &state.billing,
+        &bot,
+        Some(&channel.route_api_key_id),
+    );
+    let credentials = BotCredentials {
+        token: &token,
+        platform_bot_id: Some(&bot.platform_bot_id),
+        platform_secrets: secrets.as_ref(),
+        billing: billing.as_ref(),
+    };
+    let target = threads::resolution::resolve_admitted(
+        &state.db,
+        adapter.as_ref(),
+        &bot,
+        &credentials,
+        owner,
+        origin,
+        conversation,
+    )
+    .await?
+    .ok_or_else(follow::not_found)?;
+    let mut outbound = OutboundReply {
+        text: None,
+        metadata: None,
+        attachments: Vec::new(),
+        reply_to_platform_message_id: Some(target.facts().message_id.clone()),
+    };
+    let thread =
+        crate::services::channel_image_audience::facts_thread(&bot.platform, target.facts());
+    adapter.reply_context(thread, chrono::Utc::now(), &mut outbound.metadata);
+    Ok(crate::services::channel_image_audience::resolve(
+        &bot.id,
+        &bot.platform,
+        &target.facts().chat_id,
+        &outbound,
+    ))
+}
+
 pub(super) async fn send_bound_reply(
     state: &AppState,
     channel: &NyxbotChannel,

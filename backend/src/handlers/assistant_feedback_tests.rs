@@ -36,6 +36,7 @@ mod fixtures {
             platform_origin: None,
             author: None,
             activity_total: 0,
+            report_to: None,
             continuation_of: None,
             retry_of: None,
             retry_claimed_by: None,

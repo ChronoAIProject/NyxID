@@ -238,6 +238,7 @@ pub(crate) async fn enqueue_in_session(
         db.collection::<AssistantMessage>(MESSAGES)
             .insert_one(AssistantMessage {
                 platform_origin: None,
+                report_to: None,
                 continuation_of: None,
                 retry_of: None,
                 retry_claimed_by: None,
@@ -353,6 +354,7 @@ pub(crate) async fn publish_result(
                 db.collection::<AssistantMessage>(MESSAGES)
                     .insert_one(AssistantMessage {
         platform_origin: None,
+        report_to: None,
         continuation_of: None,
         retry_of: None,
                         retry_claimed_by: None,
@@ -761,6 +763,7 @@ async fn settle_lost_in_session(
     db.collection::<AssistantMessage>(MESSAGES)
         .insert_one(AssistantMessage {
             platform_origin: None,
+            report_to: None,
             continuation_of: None,
             retry_of: None,
             retry_claimed_by: None,

@@ -920,3 +920,322 @@ async fn machine_preview_retention_shortens_immediately_and_sweep_is_fenced() {
     LeaseStore::release(&state.db, &fresh).await.unwrap();
     state.db.drop().await.unwrap();
 }
+
+/// A tool image attachment (the source of channel image deliveries), with
+/// the given age; bytes are encrypted like the real writer's.
+async fn tool_image(
+    state: &AppState,
+    owner: &str,
+    conversation: &str,
+    turn: &str,
+    age: Duration,
+) -> String {
+    let id = Uuid::new_v4().to_string();
+    state
+        .db
+        .collection::<Document>(ATTACHMENTS)
+        .insert_one(doc! {
+            "_id": &id, "origin": "tool", "user_id": owner, "conversation_id": conversation,
+            "turn_id": turn, "content_type": "image/png", "size": 4_i64,
+            "data_encrypted": bson::Binary {
+                subtype: bson::spec::BinarySubtype::Generic,
+                bytes: state.encryption_keys.encrypt(b"png!").await.unwrap(),
+            },
+            "created_at": bson::DateTime::from_chrono(Utc::now() - age),
+        })
+        .await
+        .unwrap();
+    id
+}
+
+/// #1884 claim v2 lifetime: claims live exactly as long as their source
+/// image. Retention deletes an expired tool image together with every one of
+/// its audience claims, in the same fenced transaction; a stale holder
+/// deletes neither, and claims of live images are never touched.
+#[tokio::test]
+async fn expired_tool_image_deletion_removes_every_audience_claim_and_keeps_live_ones() {
+    use super::super::channel_image_delivery as images;
+    use crate::models::nyxbot_image_delivery::{COLLECTION_NAME as CLAIMS, ImageDeliveryState};
+    let (state, owner, thread) = fixture().await;
+    let old = tool_image(&state, &owner, &thread, "turn-old", Duration::days(400)).await;
+    let live = tool_image(&state, &owner, &thread, "turn-live", Duration::zero()).await;
+    let audiences = [
+        "bot\u{1f}chat-a\u{1f}",
+        "bot\u{1f}chat-a\u{1f}42",
+        "bot\u{1f}chat-b\u{1f}",
+    ];
+    for audience in audiences {
+        let images::ImageClaim::Dispatch { id, attempt } =
+            images::claim(&state.db, &owner, &thread, &old, audience)
+                .await
+                .unwrap()
+        else {
+            panic!("fresh audience claim")
+        };
+        images::finish(&state.db, &id, &attempt, ImageDeliveryState::Sent, None)
+            .await
+            .unwrap();
+    }
+    for audience in &audiences[..2] {
+        images::claim(&state.db, &owner, &thread, &live, audience)
+            .await
+            .unwrap();
+    }
+    let claims = state.db.collection::<Document>(CLAIMS);
+    let attachments = state.db.collection::<Document>(ATTACHMENTS);
+    assert_eq!(
+        claims
+            .count_documents(doc! {"attachment_id": &old})
+            .await
+            .unwrap(),
+        3
+    );
+    policy(
+        &state,
+        &owner,
+        Policy {
+            tool_image_days: Some(365),
+            ..Policy::default()
+        },
+    )
+    .await;
+    // A stale lease holder deletes nothing: source and claims stay together.
+    let runtime = cluster_lease_runtime();
+    let stale = runtime.acquire(&state.db, LEASE).await.unwrap().unwrap();
+    LeaseStore::release(&state.db, &stale).await.unwrap();
+    assert!(!delete_fenced(&state.db, &stale, &old).await.unwrap());
+    assert_eq!(
+        claims
+            .count_documents(doc! {"attachment_id": &old})
+            .await
+            .unwrap(),
+        3
+    );
+    assert_eq!(
+        attachments
+            .count_documents(doc! {"_id": &old})
+            .await
+            .unwrap(),
+        1
+    );
+    // The sweep deletes the expired source with all of its audience claims.
+    assert_eq!(sweep(&state.db).await.unwrap(), 1);
+    assert_eq!(
+        claims
+            .count_documents(doc! {"attachment_id": &old})
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        attachments
+            .count_documents(doc! {"_id": &old})
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        claims
+            .count_documents(doc! {"attachment_id": &live})
+            .await
+            .unwrap(),
+        2
+    );
+    assert_eq!(claims.count_documents(doc! {}).await.unwrap(), 2);
+    // A later sender finds neither a claim nor a source: nothing is resent.
+    assert!(
+        images::read(&state.db, &owner, &old, audiences[0])
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        !images::source_exists(&state.db, &owner, &thread, "turn-old", &old)
+            .await
+            .unwrap()
+    );
+    assert_eq!(sweep(&state.db).await.unwrap(), 0);
+    assert_eq!(claims.count_documents(doc! {}).await.unwrap(), 2);
+    state.db.drop().await.unwrap();
+}
+
+/// #1884 orphan-claim sweep: the sweep pages claims by unique id on the
+/// existing retention cadence, persists `image_claim_cursor` in the lease
+/// checkpoint between pages, resumes from it (also for a replacement
+/// holder), resets it after a completed pass, and never touches claims of
+/// a live source.
+#[tokio::test]
+async fn image_claim_cursor_round_trips_the_lease_checkpoint_across_pages_and_holders() {
+    use super::super::channel_image_delivery as images;
+    use crate::models::{
+        coordination::{CoordinationHolder, LEASE_COLLECTION_NAME},
+        nyxbot_image_delivery::COLLECTION_NAME as CLAIMS,
+    };
+    let (state, owner, thread) = fixture().await;
+    let live = tool_image(&state, &owner, &thread, "turn-live", Duration::zero()).await;
+    let late = tool_image(&state, &owner, &thread, "turn-late", Duration::zero()).await;
+    // Claims whose source was deleted before (or crashed before) any sweep.
+    let gone = Uuid::new_v4().to_string();
+    for i in 0..(BATCH as usize + 5) {
+        images::claim(
+            &state.db,
+            &owner,
+            &thread,
+            &gone,
+            &format!("bot\u{1f}gone-{i}\u{1f}"),
+        )
+        .await
+        .unwrap();
+    }
+    for i in 0..10 {
+        for (image, label) in [(&live, "live"), (&late, "late")] {
+            images::claim(
+                &state.db,
+                &owner,
+                &thread,
+                image,
+                &format!("bot\u{1f}{label}-{i}\u{1f}"),
+            )
+            .await
+            .unwrap();
+        }
+    }
+    let claims = state.db.collection::<Document>(CLAIMS);
+    let ids_of = |filter: Document| {
+        let claims = claims.clone();
+        async move {
+            let rows: Vec<Document> = claims
+                .find(filter)
+                .projection(doc! {"_id": 1})
+                .sort(doc! {"_id": 1})
+                .await
+                .unwrap()
+                .try_collect()
+                .await
+                .unwrap();
+            rows.iter()
+                .map(|row| row.get_str("_id").unwrap().to_owned())
+                .collect::<Vec<String>>()
+        }
+    };
+    let all = ids_of(doc! {}).await;
+    assert_eq!(all.len(), BATCH as usize + 25);
+    let page_one: HashSet<String> = all[..BATCH as usize].iter().cloned().collect();
+    let expected_cursor = all[BATCH as usize - 1].clone();
+    let gone_ids = ids_of(doc! {"attachment_id": &gone}).await;
+    let late_ids = ids_of(doc! {"attachment_id": &late}).await;
+    // Pass 1, page 1: the page's orphans go, the cursor is persisted on the
+    // lease record even though the lease itself is released afterwards.
+    sweep(&state.db).await.unwrap();
+    let checkpoint_cursor = || {
+        let leases = state.db.collection::<Document>(LEASE_COLLECTION_NAME);
+        async move {
+            leases
+                .find_one(doc! {"_id": LEASE})
+                .await
+                .unwrap()
+                .expect("lease record retained with its checkpoint")
+                .get_document("checkpoint")
+                .unwrap()
+                .get_str("image_claim_cursor")
+                .unwrap()
+                .to_owned()
+        }
+    };
+    assert_eq!(checkpoint_cursor().await, expected_cursor);
+    assert_eq!(
+        claims
+            .count_documents(doc! {"attachment_id": &gone})
+            .await
+            .unwrap() as usize,
+        gone_ids.iter().filter(|id| !page_one.contains(*id)).count()
+    );
+    assert_eq!(
+        claims
+            .count_documents(doc! {"attachment_id": &live})
+            .await
+            .unwrap(),
+        10
+    );
+    // A replacement holder (a restarted replica) reads the same checkpoint
+    // before taking over the pass.
+    let replacement = LeaseStore::acquire(
+        &state.db,
+        LEASE,
+        &CoordinationHolder {
+            instance_id: "replacement".into(),
+            generation_id: "1".into(),
+        },
+        std::time::Duration::from_secs(30),
+    )
+    .await
+    .unwrap()
+    .expect("a released lease is claimable by another holder");
+    let checkpoint = LeaseStore::load_checkpoint(&state.db, &replacement)
+        .await
+        .unwrap()
+        .expect("checkpoint survives the holder change");
+    assert_eq!(
+        checkpoint
+            .as_document()
+            .unwrap()
+            .get_str("image_claim_cursor")
+            .unwrap(),
+        expected_cursor
+    );
+    LeaseStore::release(&state.db, &replacement).await.unwrap();
+    // The late source disappears mid-pass. Its claims behind the cursor are
+    // not revisited by the resumed pass; the ones ahead of it are collected.
+    state
+        .db
+        .collection::<Document>(ATTACHMENTS)
+        .delete_one(doc! {"_id": &late})
+        .await
+        .unwrap();
+    let behind = late_ids.iter().filter(|id| **id <= expected_cursor).count();
+    sweep(&state.db).await.unwrap();
+    assert_eq!(
+        claims
+            .count_documents(doc! {"attachment_id": &gone})
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        claims
+            .count_documents(doc! {"attachment_id": &late})
+            .await
+            .unwrap() as usize,
+        behind
+    );
+    assert_eq!(
+        claims
+            .count_documents(doc! {"attachment_id": &live})
+            .await
+            .unwrap(),
+        10
+    );
+    // The pass completed: the cursor resets, and the next pass starts over
+    // and collects what the first pass could not see.
+    assert_eq!(checkpoint_cursor().await, "");
+    sweep(&state.db).await.unwrap();
+    assert_eq!(
+        claims
+            .count_documents(doc! {"attachment_id": &late})
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        claims
+            .count_documents(doc! {"attachment_id": &live})
+            .await
+            .unwrap(),
+        10
+    );
+    assert_eq!(checkpoint_cursor().await, "");
+    state.db.drop().await.unwrap();
+}
+
+#[path = "assistant_group_image_cleanup_tests.rs"]
+mod group_image_cleanup;

@@ -219,9 +219,11 @@ function AttachedSkill({
 export function AgentSkills({
   agentId,
   readOnly = false,
+  id,
 }: {
   readonly agentId: string;
   readonly readOnly?: boolean;
+  readonly id?: string;
 }) {
   const current = useAgentSkills(agentId);
   const canDisable = useAuthStore((s) =>
@@ -285,7 +287,12 @@ export function AgentSkills({
     });
   };
   return (
-    <section aria-label="Skills" className="space-y-3">
+    <section
+      id={id}
+      tabIndex={id ? -1 : undefined}
+      aria-label="Skills"
+      className="space-y-3 outline-none"
+    >
       <div className="space-y-1">
         <h3 className="text-13 font-semibold">Skills</h3>
         <p className="text-12 text-muted-foreground">

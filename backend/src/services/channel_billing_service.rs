@@ -313,6 +313,7 @@ impl ChannelBilling {
         self.billing.mark_forwarded(&meter).await?;
         self.forwarded
             .store(true, std::sync::atomic::Ordering::Relaxed);
+        super::channel_platform::mark_provider_attempt();
         let response = request
             .timeout(std::time::Duration::from_secs(20))
             .send()

@@ -112,6 +112,7 @@ pub async fn append(db: &Database, tx: &mut ClientSession, call: &VoiceSession) 
     db.collection::<AssistantMessage>(MESSAGES)
         .insert_one(AssistantMessage {
             platform_origin: None,
+            report_to: None,
             continuation_of: None,
             retry_of: None,
             retry_claimed_by: None,
@@ -274,6 +275,7 @@ mod tests {
             "m1".into(),
             AssistantMessage {
                 platform_origin: None,
+                report_to: None,
                 continuation_of: None,
                 retry_of: None,
                 retry_claimed_by: None,

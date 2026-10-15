@@ -673,9 +673,10 @@ async fn notify_failing(
         state,
         &row.user_id,
         &target,
-        vec![crate::services::assistant_team_service::event(
+        vec![crate::services::assistant_team_service::bound_event(
             "channel_delivery_failing",
             text,
+            None,
             None,
         )],
     )

@@ -388,7 +388,8 @@ pub(crate) async fn claim_personal_turn_in_session(
         Some(&model_origin(&origin)),
         None,
     )
-    .await?;
+    .await?
+    .into_started()?;
     identity
         .claim_binding_turn(db, session, &origin, &turn)
         .await?;

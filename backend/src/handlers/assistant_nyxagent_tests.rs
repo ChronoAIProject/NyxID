@@ -61,6 +61,7 @@ fn failed_message_response_serializes_error_detail_as_rfc3339() {
         platform_origin: None,
         author: None,
         activity_total: 0,
+        report_to: None,
         continuation_of: None,
         retry_of: None,
         retry_claimed_by: None,
@@ -2211,6 +2212,7 @@ async fn cards_decided_during_a_turn_are_reported_to_the_next_turn_exactly_once(
         .unwrap()
         .unwrap();
     let ack = |kind: &str, status: &str, decided: Option<DateTime<Utc>>| AssistantAcknowledgement {
+        routing: None,
         link: None,
         requester_agent_id: None,
         confirmation: None,

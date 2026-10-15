@@ -4572,3 +4572,51 @@ async fn full_access_service_approval_executes_with_receipt_while_auto_waits() {
         f.state.db.drop().await.unwrap();
     }
 }
+
+#[tokio::test]
+async fn missing_access_mcp_service_and_connect_results_have_absolute_instruction_links() {
+    let f = crate::services::assistant_authority_tests::direct_fixture("mcp_missing_access_links")
+        .await;
+    let service_id = connected(&f.state.db, &f.owner, "github", "https://api.github.com").await;
+    let auth = authenticate(&f).await;
+    let services = load_all_services_for_meta_tools(&f.state, &auth)
+        .await
+        .unwrap();
+    let service = services
+        .iter()
+        .find(|service| service.service_id == service_id)
+        .unwrap();
+    let service = result(
+        chat_service_gate(&f.state, &auth, service, None)
+            .await
+            .unwrap(),
+        true,
+    )
+    .await;
+    let connect = result(
+        handle_meta_connect(
+            &f.state,
+            &auth,
+            None,
+            &json!({"service_id": service_id}),
+            None,
+            false,
+        )
+        .await,
+        true,
+    )
+    .await;
+    for value in [service, connect] {
+        assert_eq!(value["error"], "missing_access");
+        let instructions = value["instructions"].as_str().unwrap();
+        assert!(
+            instructions.contains(&format!(
+                "({}/assistant?",
+                f.state.config.frontend_url.trim_end_matches('/')
+            )),
+            "{instructions}"
+        );
+        assert!(!instructions.contains("(/assistant?"));
+    }
+    f.state.db.drop().await.unwrap();
+}

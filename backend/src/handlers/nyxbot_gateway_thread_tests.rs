@@ -9,6 +9,7 @@ use crate::{
         channel_thread_service as threads,
     },
 };
+use futures::TryStreamExt;
 use wiremock::{Mock, MockServer, ResponseTemplate, matchers::*};
 
 struct Fixture {
@@ -756,11 +757,18 @@ async fn nyxbot_followed_thread_images_use_native_components_before_direct_or_ga
             .collection::<crate::models::nyxbot_image_delivery::NyxbotImageDelivery>(
                 crate::models::nyxbot_image_delivery::COLLECTION_NAME,
             )
-            .find_one(doc! {"turn_id":&turn_id})
+            .find(doc! {"conversation_id":&row.id})
             .await
             .unwrap()
+            .try_collect::<Vec<_>>()
+            .await
             .unwrap();
-        assert!(claims.items.iter().all(|i| i.state == "sent"));
+        assert_eq!(claims.len(), 2);
+        assert!(
+            claims
+                .iter()
+                .all(|i| i.state == crate::models::nyxbot_image_delivery::ImageDeliveryState::Sent)
+        );
         f.state.db.drop().await.unwrap();
     }
 }

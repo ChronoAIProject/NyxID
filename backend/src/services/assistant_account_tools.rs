@@ -260,7 +260,7 @@ pub fn virtual_service(chat: &acks::ChatAuthority) -> McpToolService {
             .endpoints
             .retain(|endpoint| read_only(&endpoint.name));
         service.description = Some(
-            "Read the user's NyxID account (specialist: read-only, with NyxBot's grant) and \
+            "Read the user's NyxID account (specialist: read-only, when granted) and \
             manage your memory."
                 .into(),
         );
@@ -424,8 +424,47 @@ impl std::fmt::Debug for ToolResult {
 }
 
 pub fn error_result(error: AppError) -> ToolResult {
+    error_result_inner(error, None, "")
+}
+
+pub fn error_result_for(
+    error: AppError,
+    chat: Option<&acks::ChatAuthority>,
+    frontend: &str,
+) -> ToolResult {
+    let mut result = error_result_inner(error, chat, frontend);
+    result.value = super::assistant_access_policy::with_frontend(result.value, frontend);
+    result
+}
+
+fn error_result_inner(
+    error: AppError,
+    chat: Option<&acks::ChatAuthority>,
+    frontend: &str,
+) -> ToolResult {
     let body = error.response_body();
     let message = match error {
+        AppError::AssistantMissingAccess(value) => {
+            return ToolResult {
+                permission_request: None,
+                is_error: true,
+                value: *value,
+            };
+        }
+        AppError::MachinePermissionRevoked => {
+            let mut value = json!({"error": body.error, "error_code": body.error_code,
+                "message": body.message});
+            if let Some(chat) = chat {
+                value["instructions"] = json!(
+                    super::assistant_access_policy::machine_permission_guidance(chat, frontend)
+                );
+            }
+            return ToolResult {
+                permission_request: None,
+                is_error: true,
+                value,
+            };
+        }
         AppError::SkillDraftValidation(_) => {
             return ToolResult {
                 permission_request: None,
@@ -455,6 +494,7 @@ pub fn error_result(error: AppError) -> ToolResult {
                 value: super::assistant_acknowledgement_service::access_request_denied(),
             };
         }
+
         error if error.is_forbidden() || matches!(error, AppError::Unauthorized(_)) => {
             "This operation requires a conversation key and human acknowledgement."
         }
@@ -552,7 +592,9 @@ impl AccountTools<'_> {
             Ok(None) => Err(AppError::Forbidden("Conversation key required".into())),
             Err(error) => Err(error),
         };
-        let result = result.unwrap_or_else(error_result);
+        let mut result = result.unwrap_or_else(error_result);
+        result.value =
+            super::assistant_access_policy::with_frontend(result.value, &self.config.frontend_url);
         // Never audit arguments, output, URLs, names or raw service-layer errors.
         let actor = audit_service::AuditActor::from_auth_user(auth);
         let target = ["api_key_id", "bot_id", "route_id", "service_id", "node_id"]

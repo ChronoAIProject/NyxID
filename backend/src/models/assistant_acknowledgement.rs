@@ -74,6 +74,58 @@ pub struct AssistantAcknowledgement {
     /// only after the owner allows this action card.
     #[serde(default)]
     pub machine_context: Option<super::machine_access::HumanContextAction>,
+    /// Absent on rows written before the snapshot existed: legacy, unproven,
+    /// never NyxBot involvement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routing: Option<CardRouting>,
+}
+
+/// Decisions, expiry and continuation events read this stored value, never
+/// the thread's current turn.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum CardRouting {
+    /// NyxBot assigned the work from this exact NyxBot thread.
+    Assigned { report_to: String },
+    /// The work ran in a personal group the owner's NyxBot is a member of.
+    GroupWithNyxbot { group_id: String },
+    /// NyxBot did not start this work and is not in the room.
+    NotInvolved,
+}
+
+impl CardRouting {
+    pub fn report_to(&self) -> Option<&str> {
+        match self {
+            Self::Assigned { report_to } => Some(report_to),
+            Self::GroupWithNyxbot { .. } | Self::NotInvolved => None,
+        }
+    }
+
+    pub fn involved(&self) -> bool {
+        !matches!(self, Self::NotInvolved)
+    }
+
+    /// Projection onto a continuation event (R5-5): always bound; only
+    /// `Assigned` names a report target, group and not-involved cards report
+    /// nowhere.
+    pub fn bind(
+        &self,
+        event: super::assistant_conversation::AgentEvent,
+    ) -> super::assistant_conversation::AgentEvent {
+        event.bound_to(self.report_to())
+    }
+}
+
+/// No routing (a card written before the snapshot existed) leaves the event
+/// unbound.
+pub fn bind_continuation(
+    routing: Option<&CardRouting>,
+    event: super::assistant_conversation::AgentEvent,
+) -> super::assistant_conversation::AgentEvent {
+    match routing {
+        Some(routing) => routing.bind(event),
+        None => event,
+    }
 }
 
 /// The server's classification of an action card: its risk class, the

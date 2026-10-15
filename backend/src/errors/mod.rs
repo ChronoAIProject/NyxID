@@ -112,6 +112,9 @@ pub enum AppError {
         guidance: Box<access_denial::AccessDenial>,
     },
 
+    #[error("Access is not granted and no request was created")]
+    AssistantMissingAccess(Box<serde_json::Value>),
+
     #[error("Not found: {0}")]
     NotFound(String),
 
@@ -344,7 +347,7 @@ pub enum AppError {
     #[error("Machine authority v2 is required; update the machine before configuring capabilities")]
     MachineAuthorityUnsupported,
     #[error(
-        "Machine permission was revoked or is not granted; request the capability from the owner through NyxBot"
+        "Machine permission was revoked or is not granted; see the capability guidance for this chat"
     )]
     MachinePermissionRevoked,
     #[error(
@@ -769,7 +772,9 @@ impl AppError {
     pub fn is_forbidden(&self) -> bool {
         matches!(
             self,
-            Self::Forbidden(_) | Self::ForbiddenWithGuidance { .. }
+            Self::Forbidden(_)
+                | Self::ForbiddenWithGuidance { .. }
+                | Self::AssistantMissingAccess(_)
         )
     }
 
@@ -784,7 +789,9 @@ impl AppError {
             Self::Unauthorized(_) | Self::AuthenticationFailed(_) | Self::TokenExpired => {
                 StatusCode::UNAUTHORIZED
             }
-            Self::Forbidden(_) | Self::ForbiddenWithGuidance { .. } => StatusCode::FORBIDDEN,
+            Self::Forbidden(_)
+            | Self::ForbiddenWithGuidance { .. }
+            | Self::AssistantMissingAccess(_) => StatusCode::FORBIDDEN,
             Self::NotFound(_) => StatusCode::NOT_FOUND,
             Self::Conflict(_) | Self::GrantCascadeConfirmationRequired(_) => StatusCode::CONFLICT,
             Self::AssistantTurnActive => StatusCode::CONFLICT,
@@ -1005,7 +1012,9 @@ impl AppError {
             Self::BadRequest(_) | Self::CredentialUnavailable(_) => 1000,
             Self::RequestBodyTooLarge { .. } => 11700,
             Self::Unauthorized(_) => 1001,
-            Self::Forbidden(_) | Self::ForbiddenWithGuidance { .. } => 1002,
+            Self::Forbidden(_)
+            | Self::ForbiddenWithGuidance { .. }
+            | Self::AssistantMissingAccess(_) => 1002,
             Self::NotFound(_) => 1003,
             Self::Conflict(_) => 1004,
             Self::AssistantTurnActive => 12100,
@@ -1268,6 +1277,7 @@ impl AppError {
             Self::RequestBodyTooLarge { .. } => "request_body_too_large",
             Self::Unauthorized(_) => "unauthorized",
             Self::Forbidden(_) | Self::ForbiddenWithGuidance { .. } => "forbidden",
+            Self::AssistantMissingAccess(_) => "missing_access",
             Self::NotFound(_) => "not_found",
             Self::Conflict(_) => "conflict",
             Self::AssistantTurnActive => "turn_active",
@@ -1526,6 +1536,7 @@ impl AppError {
             AppError::ForbiddenWithGuidance { guidance, .. } => {
                 Some(serde_json::to_value(guidance).expect("fixed access denial metadata"))
             }
+            AppError::AssistantMissingAccess(value) => Some(value.as_ref().clone()),
             AppError::Unauthorized(_) | AppError::AuthenticationFailed(_) => {
                 Some(serde_json::json!({"reason":"authentication_failed"}))
             }
@@ -1619,6 +1630,23 @@ mod tests {
     use super::*;
     use axum::body::to_bytes;
     use serde_json::Value;
+
+    #[test]
+    fn assistant_missing_access_is_forbidden_class_with_contextual_details() {
+        let value = serde_json::json!({"error": "missing_access", "scope": "service",
+            "target": "GitHub", "request_created": false, "grants_path": "/assistant?agent=a"});
+        let error = AppError::AssistantMissingAccess(Box::new(value.clone()));
+        assert!(error.is_forbidden());
+        assert_eq!(error.status_code(), StatusCode::FORBIDDEN);
+        assert_eq!(error.error_code(), 1002);
+        assert_eq!(error.error_key(), "missing_access");
+        assert!(!error.to_string().contains("NyxBot"));
+        assert!(!error.to_string().contains("GitHub"));
+        let body = error.response_body();
+        assert_eq!(body.error, "missing_access");
+        assert_eq!(body.error_code, 1002);
+        assert_eq!(body.details, Some(value));
+    }
 
     #[test]
     fn generic_forbidden_classification_includes_guidance_only() {
@@ -2172,6 +2200,13 @@ mod tests {
             "unauthorized"
         );
         assert_eq!(AppError::Forbidden("".into()).error_key(), "forbidden");
+        assert_eq!(
+            AppError::AssistantMissingAccess(Box::new(
+                serde_json::json!({"error": "missing_access"})
+            ))
+            .error_key(),
+            "missing_access"
+        );
         assert_eq!(AppError::NotFound("".into()).error_key(), "not_found");
         assert_eq!(AppError::Conflict("".into()).error_key(), "conflict");
         assert_eq!(AppError::RateLimited.error_key(), "rate_limited");

@@ -377,6 +377,21 @@ async fn delete_root(db: &Database, session: &mut ClientSession, row: &Document)
             .session(&mut *session)
             .await?;
     }
+    let mut children = db
+        .collection::<Document>(ATTACHMENTS)
+        .find(doc! {"$or":[{"_id":id},{"parent_attachment_id":id}]})
+        .projection(doc! {"_id":1})
+        .session(&mut *session)
+        .await?;
+    let roots: Vec<Document> = children.stream(&mut *session).try_collect().await?;
+    let ids: Vec<&str> = roots
+        .iter()
+        .filter_map(|row| row.get_str("_id").ok())
+        .collect();
+    db.collection::<Document>(crate::models::nyxbot_image_delivery::COLLECTION_NAME)
+        .delete_many(doc! {"attachment_id":{"$in":ids}})
+        .session(&mut *session)
+        .await?;
     db.collection::<Document>(ATTACHMENTS)
         .delete_many(doc! {"$or":[{"_id":id},{"parent_attachment_id":id}]})
         .session(&mut *session)
@@ -605,11 +620,15 @@ async fn sweep_batch(db: &Database, token: &LeaseToken) -> AppResult<usize> {
     } else {
         ""
     };
+    let image_cursor = previous
+        .and_then(|value| value.get_str("image_claim_cursor").ok())
+        .unwrap_or_default();
+    let image_next = super::channel_image_delivery::sweep_orphans(db, image_cursor, BATCH).await?;
     LeaseStore::store_checkpoint(
         db,
         token,
         bson::Bson::Document(
-            doc! {"revision":settings.revision,"cursor":next,"chunk_cursor":chunk_next},
+            doc! {"revision":settings.revision,"cursor":next,"chunk_cursor":chunk_next,"image_claim_cursor":image_next},
         ),
     )
     .await?;

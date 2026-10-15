@@ -259,6 +259,50 @@ fn extract_message(update: &serde_json::Value) -> Option<&serde_json::Value> {
         .or_else(|| update.get("channel_post"))
 }
 
+/// The forum topic a native Telegram message belongs to, as its decimal
+/// `message_thread_id`, only when Telegram itself flags the message with
+/// `is_topic_message: true` (set on every topic message since Bot API 6.3).
+///
+/// Telegram also sets `message_thread_id` on replies in non-forum supergroups
+/// and inside a forum's General topic, where it is the reply-chain root, so
+/// neither the field alone nor `chat.is_forum` is evidence of a topic.
+pub(super) fn topic_of(native: &serde_json::Value) -> Option<String> {
+    (native.get("is_topic_message").and_then(|v| v.as_bool()) == Some(true))
+        .then(|| {
+            native
+                .get("message_thread_id")
+                .and_then(|v| v.as_i64())
+                .filter(|id| *id > 0)
+                .map(|id| id.to_string())
+        })
+        .flatten()
+}
+
+/// Resolve only the outbound topic declared by a gateway Activity. Inbound
+/// partitioning keeps conversation.thread_id exactly as the gateway sent it.
+/// Telegram facts are the gateway's declaration, not NyxID-verified facts.
+pub fn gateway_topic_id(platform: &str, activity: &serde_json::Value) -> Option<String> {
+    let sent = activity["conversation"]["thread_id"]
+        .as_str()
+        .map(str::to_owned);
+    if !matches!(platform, "telegram" | "telegram-new") {
+        return sent;
+    }
+    let positive = |id: &String| id.parse::<i64>().is_ok_and(|id| id > 0);
+    let facts = &activity["thread"];
+    if facts["version"] == 1 {
+        return (facts["kind"] == "topic")
+            .then(|| {
+                facts["native_thread_id"]
+                    .as_str()
+                    .map(str::to_owned)
+                    .filter(positive)
+            })
+            .flatten();
+    }
+    sent.filter(positive)
+}
+
 /// Parse a single Telegram message value into an [`InboundMessage`].
 fn parse_message(msg: &serde_json::Value, raw: serde_json::Value) -> Option<InboundMessage> {
     let message_id = msg.get("message_id")?.as_i64()?;
@@ -332,20 +376,10 @@ fn build_message_body(conversation_id: &str, reply: &OutboundReply) -> serde_jso
         body["reply_to_message_id"] = serde_json::json!(id);
     }
 
-    // Honor `message_thread_id` from reply metadata when the original
-    // inbound message came from a forum topic. Without this, replies
-    // would fall back to the root chat. Accepted as either an integer
-    // or a string that parses as i64 (handlers/channel_relay.rs
-    // forwards it as a JSON string).
-    if let Some(md) = reply.metadata.as_ref()
-        && let Some(thread_val) = md.get("message_thread_id")
+    if let Some(thread) = crate::services::channel_image_audience::native_thread("telegram", reply)
+        && let Ok(id) = thread.parse::<i64>()
     {
-        let parsed = thread_val
-            .as_i64()
-            .or_else(|| thread_val.as_str().and_then(|s| s.parse::<i64>().ok()));
-        if let Some(thread_id) = parsed {
-            body["message_thread_id"] = serde_json::json!(thread_id);
-        }
+        body["message_thread_id"] = serde_json::json!(id);
     }
 
     body
@@ -1620,25 +1654,166 @@ mod tests {
 
     // -- thread_id -----------------------------------------------------------
 
-    #[tokio::test]
-    async fn parse_message_with_thread_id() {
-        let adapter = TelegramAdapter::new();
-        let body = serde_json::json!({
-            "update_id": 600,
-            "message": {
-                "message_id": 88,
-                "message_thread_id": 42,
-                "from": { "id": 111, "is_bot": false, "first_name": "Thread" },
+    async fn parse_one(
+        adapter: &TelegramAdapter,
+        key: &str,
+        message: serde_json::Value,
+    ) -> InboundMessage {
+        let mut update = serde_json::json!({ "update_id": 600 });
+        update[key] = message;
+        let raw = serde_json::to_vec(&update).unwrap();
+        let mut msgs = adapter.parse_inbound(&raw).await.unwrap();
+        assert_eq!(msgs.len(), 1);
+        msgs.remove(0)
+    }
+
+    fn supergroup_reply(message_id: i64, root: i64, topic: bool, forum: bool) -> serde_json::Value {
+        let mut chat = serde_json::json!({ "id": -100999, "type": "supergroup" });
+        if forum {
+            chat["is_forum"] = serde_json::json!(true);
+        }
+        let mut message = serde_json::json!({
+            "message_id": message_id,
+            "message_thread_id": root,
+            "from": { "id": 111, "is_bot": false, "first_name": "Thread" },
+            "chat": chat,
+            "date": 1700000050,
+            "text": "Reply",
+            "reply_to_message": {
+                "message_id": root,
+                "from": { "id": 222, "is_bot": false, "first_name": "Root" },
                 "chat": { "id": -100999, "type": "supergroup" },
-                "date": 1700000050,
-                "text": "Topic message"
+                "date": 1700000040,
+                "text": "Root message"
             }
         });
-        let raw = serde_json::to_vec(&body).unwrap();
-        let msgs = adapter.parse_inbound(&raw).await.unwrap();
+        if topic {
+            message["is_topic_message"] = serde_json::json!(true);
+        }
+        message
+    }
 
-        assert_eq!(msgs.len(), 1);
-        assert_eq!(msgs[0].thread_id.as_deref(), Some("42"));
+    #[tokio::test]
+    async fn parse_thread_id_preserves_existing_reply_chain_partitions() {
+        let adapter = TelegramAdapter::new();
+        // A forum topic message: `is_topic_message` marks it, with or without
+        // a reply inside the topic, on messages and edits alike.
+        let topic = parse_one(&adapter, "message", supergroup_reply(88, 42, true, true)).await;
+        assert_eq!(topic.thread_id.as_deref(), Some("42"));
+        assert_eq!(topic.reply_to_platform_message_id.as_deref(), Some("42"));
+        let mut plain_topic = supergroup_reply(89, 42, true, true);
+        plain_topic
+            .as_object_mut()
+            .unwrap()
+            .remove("reply_to_message");
+        assert_eq!(
+            parse_one(&adapter, "message", plain_topic)
+                .await
+                .thread_id
+                .as_deref(),
+            Some("42")
+        );
+        assert_eq!(
+            parse_one(
+                &adapter,
+                "edited_message",
+                supergroup_reply(90, 42, true, true)
+            )
+            .await
+            .thread_id
+            .as_deref(),
+            Some("42")
+        );
+        // A reply in a plain supergroup carries the reply-chain root as
+        // `message_thread_id`: its inbound thread key stays intact while its
+        // outbound audience is chat-level.
+        let chain = parse_one(&adapter, "message", supergroup_reply(91, 16, false, false)).await;
+        assert_eq!(chain.thread_id.as_deref(), Some("16"));
+        assert_eq!(chain.reply_to_platform_message_id.as_deref(), Some("16"));
+        // Nor is a reply chain in a forum's General topic: the forum flag on
+        // the chat alone proves nothing about this message.
+        assert_eq!(
+            parse_one(&adapter, "message", supergroup_reply(92, 16, false, true))
+                .await
+                .thread_id
+                .as_deref(),
+            Some("16")
+        );
+        // The literal flag must be true; any other value is no evidence.
+        let mut falsy = supergroup_reply(93, 42, false, true);
+        falsy["is_topic_message"] = serde_json::json!(false);
+        assert_eq!(
+            parse_one(&adapter, "message", falsy)
+                .await
+                .thread_id
+                .as_deref(),
+            Some("42")
+        );
+        let mut string_flag = supergroup_reply(94, 42, false, true);
+        string_flag["is_topic_message"] = serde_json::json!("true");
+        assert_eq!(
+            parse_one(&adapter, "message", string_flag)
+                .await
+                .thread_id
+                .as_deref(),
+            Some("42")
+        );
+    }
+
+    /// Replies and tool images use outbound topic evidence independently: a reply-chain
+    /// answer stays in the chat (no `message_thread_id`, one image audience
+    /// with the chat), a topic answer carries the topic and is its own
+    /// audience (#1884 P15).
+    #[tokio::test]
+    async fn reply_chain_answers_stay_in_the_chat_and_share_its_image_audience() {
+        use crate::services::channel_image_audience::resolve;
+        let adapter = TelegramAdapter::new();
+        let chain = parse_one(&adapter, "message", supergroup_reply(17, 16, false, false)).await;
+        let topic = parse_one(&adapter, "message", supergroup_reply(18, 7, true, true)).await;
+        let answer = |inbound: &InboundMessage| {
+            let mut reply = OutboundReply {
+                text: Some("hi".into()),
+                metadata: None,
+                attachments: vec![],
+                reply_to_platform_message_id: Some(inbound.platform_message_id.clone()),
+            };
+            adapter.reply_context(
+                topic_of(&inbound.raw_data["message"]).as_deref(),
+                chrono::Utc::now(),
+                &mut reply.metadata,
+            );
+            reply
+        };
+        let chain_reply = answer(&chain);
+        let body = build_message_body("-100999", &chain_reply);
+        assert_eq!(body["reply_to_message_id"], 17);
+        assert!(body.get("message_thread_id").is_none(), "{body}");
+        let topic_reply = answer(&topic);
+        let body = build_message_body("-100999", &topic_reply);
+        assert_eq!(body["reply_to_message_id"], 18);
+        assert_eq!(body["message_thread_id"], 7);
+        let chat_level = OutboundReply {
+            text: None,
+            metadata: None,
+            attachments: vec![],
+            reply_to_platform_message_id: None,
+        };
+        assert_eq!(
+            resolve("bot", "telegram", "-100999", &chain_reply),
+            resolve("bot", "telegram", "-100999", &chat_level)
+        );
+        assert_eq!(
+            resolve("bot", "telegram", "-100999", &chain_reply),
+            "bot\u{1f}-100999\u{1f}"
+        );
+        assert_eq!(
+            resolve("bot", "telegram", "-100999", &topic_reply),
+            "bot\u{1f}-100999\u{1f}7"
+        );
+        assert_ne!(
+            resolve("bot", "telegram", "-100999", &topic_reply),
+            resolve("bot", "telegram", "-100999", &chat_level)
+        );
     }
     #[test]
     fn initiated_request_and_declared_reply_thread_capabilities() {
@@ -1722,5 +1897,128 @@ mod tests {
         ] {
             assert!(!photo_document_fallback(marker), "{marker}");
         }
+    }
+
+    /// Gateway Activities carry no native payload: version 1 thread facts
+    /// decide, otherwise the gateway's id is kept only as a positive integer
+    /// and never rewritten. Other platforms pass through exactly as sent.
+    #[test]
+    fn gateway_telegram_thread_ids_follow_version_1_thread_facts_and_stay_decimal() {
+        let activity = |thread_id: serde_json::Value, facts: serde_json::Value| {
+            serde_json::json!({
+                "conversation": {
+                    "id": "-100999",
+                    "kind": "group",
+                    "thread_id": thread_id,
+                },
+                "thread": facts,
+            })
+        };
+        let topic = serde_json::json!({ "version": 1, "kind": "topic", "chat_id": "-100999", "message_id": "18", "native_thread_id": "7", "root_id": "7" });
+        let chain = serde_json::json!({ "version": 1, "kind": "reply_chain", "chat_id": "-100999", "message_id": "17", "parent_message_id": "16" });
+        for platform in ["telegram", "telegram-new"] {
+            assert_eq!(
+                gateway_topic_id(platform, &activity(serde_json::json!("7"), topic.clone()))
+                    .as_deref(),
+                Some("7")
+            );
+            // A reply chain is chat-level even though the gateway sent an id.
+            assert_eq!(
+                gateway_topic_id(platform, &activity(serde_json::json!("16"), chain.clone())),
+                None
+            );
+            assert_eq!(
+                gateway_topic_id(
+                    platform,
+                    &activity(
+                        serde_json::json!("16"),
+                        serde_json::json!({ "version": 1, "kind": "native" })
+                    )
+                ),
+                None
+            );
+            // A topic fact without a usable native id is not a topic either.
+            assert_eq!(
+                gateway_topic_id(
+                    platform,
+                    &activity(
+                        serde_json::json!("7"),
+                        serde_json::json!({ "version": 1, "kind": "topic", "native_thread_id": "topic-7" })
+                    )
+                ),
+                None
+            );
+            // Other versions or absent facts: positive integers survive as sent.
+            assert_eq!(
+                gateway_topic_id(
+                    platform,
+                    &activity(serde_json::json!("16"), serde_json::Value::Null)
+                )
+                .as_deref(),
+                Some("16")
+            );
+            assert_eq!(
+                gateway_topic_id(
+                    platform,
+                    &activity(
+                        serde_json::json!("0007"),
+                        serde_json::json!({ "version": 2, "kind": "reply_chain" })
+                    )
+                )
+                .as_deref(),
+                Some("0007")
+            );
+            assert_eq!(
+                gateway_topic_id(
+                    platform,
+                    &activity(serde_json::json!("0"), serde_json::Value::Null)
+                ),
+                None
+            );
+            assert_eq!(
+                gateway_topic_id(
+                    platform,
+                    &activity(serde_json::json!("omt_thread"), serde_json::Value::Null)
+                ),
+                None
+            );
+            assert_eq!(
+                gateway_topic_id(
+                    platform,
+                    &activity(serde_json::json!(""), serde_json::Value::Null)
+                ),
+                None
+            );
+            assert_eq!(
+                gateway_topic_id(
+                    platform,
+                    &activity(serde_json::Value::Null, serde_json::Value::Null)
+                ),
+                None
+            );
+        }
+        assert_eq!(
+            gateway_topic_id("lark", &activity(serde_json::json!("omt_thread"), chain)).as_deref(),
+            Some("omt_thread")
+        );
+        assert_eq!(
+            gateway_topic_id(
+                "slack",
+                &activity(
+                    serde_json::json!("1700000000.000100"),
+                    serde_json::Value::Null
+                )
+            )
+            .as_deref(),
+            Some("1700000000.000100")
+        );
+        assert_eq!(
+            gateway_topic_id(
+                "lark",
+                &activity(serde_json::json!(""), serde_json::Value::Null)
+            )
+            .as_deref(),
+            Some("")
+        );
     }
 }
