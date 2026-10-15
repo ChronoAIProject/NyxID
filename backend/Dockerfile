@@ -65,6 +65,7 @@ RUN rm -rf backend/src cloud-auth/src service-adapters/src machine/src machine-u
 COPY backend/src backend/src
 COPY backend/build.rs backend/build.rs
 COPY backend/prompts backend/prompts
+COPY backend/content backend/content
 COPY backend/specs backend/specs
 COPY backend/assets backend/assets
 COPY cloud-auth/src cloud-auth/src
