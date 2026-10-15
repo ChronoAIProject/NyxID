@@ -906,7 +906,10 @@ pub async fn repair_channel_homes(db: &Database) -> mongodb::error::Result<u64> 
             doc! {"$match": {"home_conversation_id": {"$ne": bson::Bson::Null}}},
             doc! {"$lookup": {"from": CONVERSATIONS, "localField": "home_conversation_id",
             "foreignField": "_id", "as": "home"}},
-            doc! {"$match": {"home.channel": {"$ne": bson::Bson::Null}}},
+            doc! {"$match": {"$or": [
+                {"home.channel": {"$ne": bson::Bson::Null}},
+                {"home.platform_thread": {"$ne": bson::Bson::Null}}
+            ]}},
             doc! {"$project": {"_id": 1}},
         ])
         .await?
@@ -1810,6 +1813,7 @@ pub async fn begin_turn_with_voice(
                         .ok_or_else(not_found)?
                 } else {
                     AssistantConversation {
+                        platform_thread: None,
                         machine_previews: false,
         platform_cleanup_pending: false,
         platform_cleanup_id: None,
@@ -2076,6 +2080,7 @@ pub async fn begin_turn_with_voice(
                     let lost_turn = lost.clone();
                     row.message_count += 1;
                     let message = AssistantMessage {
+                        platform_origin: None,
                         retry_of: lost.retry_of.clone(),
                         retry_claimed_by: None,
                         activity_count: lost.activity_count,
@@ -2177,6 +2182,7 @@ pub async fn begin_turn_with_voice(
                     (None, None) => None,
                 };
                 row.active_turn = Some(ActiveTurn {
+                    platform_origin: None,
                     activity_count: Some(0),
                     retry_digests: retry
                         .as_ref()
@@ -2272,7 +2278,8 @@ pub async fn begin_turn_with_voice(
                 }
                 // An agent's first own thread becomes its home; a hidden group
                 // member, channel or isolated automation thread never does.
-                if row.group_id.is_none() && row.channel.is_none() && !row.automation_thread {
+                if row.group_id.is_none() && row.channel.is_none()
+                    && row.platform_thread.is_none() && !row.automation_thread {
                     db.collection::<bson::Document>(
                         crate::models::assistant_agent::COLLECTION_NAME,
                     )
@@ -2322,6 +2329,7 @@ pub async fn begin_turn_with_voice(
                     }
                 }
                 let message = AssistantMessage {
+                    platform_origin: None,
                     retry_of: start.retry_of.clone(),
                     retry_claimed_by: None,
                     activity_count: None,
@@ -2827,6 +2835,7 @@ async fn finish_turn_inner(
                     tracing::warn!(conversation_id = %row.id, turn_id = %turn_id, stage = %error.stage, http_status = ?error.http_status, upstream_request_id = ?error.upstream_request_id, response_id = ?error.response_id, continuations, upstream_error_code = error.upstream_code.as_deref().unwrap_or(error.code), "Assistant turn failed");
                 }
                 let message = AssistantMessage {
+                    platform_origin: settled_turn.as_ref().and_then(|turn| turn.platform_origin.clone()),
                     retry_of: settled_turn.as_ref().and_then(|turn| turn.retry_of.clone()),
                     retry_claimed_by: None,
                     activity_count: settled_turn.as_ref().and_then(|turn| turn.activity_count),

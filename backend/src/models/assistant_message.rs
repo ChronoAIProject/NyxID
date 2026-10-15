@@ -12,6 +12,9 @@ pub enum MessageAuthor {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct AssistantMessage {
+    /// Retained after settlement for exact transport delivery and recovery.
+    #[serde(default)]
+    pub platform_origin: Option<super::assistant_conversation::PlatformTurnOrigin>,
     #[serde(default)]
     pub author: Option<MessageAuthor>,
     /// Guidance delivered to an existing response, never a new instruction turn.

@@ -264,6 +264,7 @@ fn insufficient_credits_is_a_stable_terminal_code() {
 fn recap_is_labeled_recent_and_bounded_without_splitting_unicode() {
     let messages: Vec<_> = (0..30)
         .map(|i| AssistantMessage {
+            platform_origin: None,
             author: None,
             activity_total: 0,
             continuation_of: None,
@@ -391,6 +392,7 @@ fn failure_matrix_maps_transport_failures_to_recoverable_classes() {
 fn recap_preserves_goal_head_and_tail_under_long_last_reply() {
     let rows = vec![
         AssistantMessage {
+            platform_origin: None,
             author: None,
             activity_total: 0,
             continuation_of: None,
@@ -419,6 +421,7 @@ fn recap_preserves_goal_head_and_tail_under_long_last_reply() {
             via: None,
         },
         AssistantMessage {
+            platform_origin: None,
             author: None,
             activity_total: 0,
             continuation_of: None,
@@ -458,6 +461,7 @@ fn recap_preserves_goal_head_and_tail_under_long_last_reply() {
 #[test]
 fn recap_caps_each_activity_list_and_reserves_bounded_total_budget() {
     let row = AssistantMessage {
+        platform_origin: None,
         author: None,
         activity_total: 0,
         continuation_of: None,
@@ -527,6 +531,7 @@ fn recap_caps_each_activity_list_and_reserves_bounded_total_budget() {
 #[test]
 fn recap_v2_keeps_action_status_and_attachment_checkpoint() {
     let row = AssistantMessage {
+        platform_origin: None,
         author: None,
         activity_total: 0,
         continuation_of: None,
@@ -582,6 +587,7 @@ fn recap_v2_keeps_action_status_and_attachment_checkpoint() {
 #[test]
 fn guest_recap_omits_owner_tool_metadata() {
     let row = AssistantMessage {
+        platform_origin: None,
         author: None,
         activity_total: 0,
         continuation_of: None,
@@ -637,6 +643,7 @@ fn guest_recap_omits_owner_tool_metadata() {
 #[test]
 fn retry_recap_lists_completed_activity_ids_for_no_duplicate_replay() {
     let row = AssistantMessage {
+        platform_origin: None,
         author: None,
         activity_total: 0,
         continuation_of: None,
@@ -890,6 +897,7 @@ fn live_turn_expires_at_the_exact_ttl_boundary() {
 
 fn stale_test_row(now: DateTime<Utc>) -> AssistantConversation {
     AssistantConversation {
+        platform_thread: None,
         machine_previews: false,
         platform_cleanup_pending: false,
         platform_cleanup_id: None,
@@ -908,6 +916,7 @@ fn stale_test_row(now: DateTime<Utc>) -> AssistantConversation {
         credential_api_key_id: "key".into(),
         message_count: 0,
         active_turn: Some(ActiveTurn {
+            platform_origin: None,
             activity_total: 0,
             retry_digests: Vec::new(),
             retry_of: None,
@@ -953,6 +962,227 @@ fn stale_test_row(now: DateTime<Utc>) -> AssistantConversation {
         reply_channel: None,
         deliver_also: Vec::new(),
     }
+}
+
+fn platform_test_origin(
+    row: &AssistantConversation,
+) -> crate::models::assistant_conversation::PlatformTurnOrigin {
+    use crate::models::assistant_conversation::{
+        PlatformOriginSource, PlatformThread, PlatformTurnOrigin,
+    };
+    PlatformTurnOrigin {
+        thread: PlatformThread {
+            platform: "telegram".into(),
+            profile_id: "manager-profile".into(),
+            manager_bot_id: "manager".into(),
+            telegram_bot_id: 123,
+            binding_id: "personal-binding".into(),
+            binding_generation: 7,
+            user_id: row.user_id.clone(),
+            nyxbot_agent_id: row.agent_id.clone().unwrap_or_else(|| "agent".into()),
+        },
+        manager_authority_epoch: 3,
+        personal_control_revision: 11,
+        sender_id: 456,
+        chat_id: 789,
+        source: PlatformOriginSource::Ingress {
+            receipt_id: "receipt".into(),
+            claim_id: "claim".into(),
+        },
+    }
+}
+
+#[test]
+fn platform_provenance_round_trips_and_legacy_rows_remain_origin_free() {
+    let mut row = stale_test_row(Utc::now());
+    let mut legacy = bson::to_document(&row).unwrap();
+    legacy.remove("platform_thread");
+    legacy
+        .get_document_mut("active_turn")
+        .unwrap()
+        .remove("platform_origin");
+    let restored: AssistantConversation = bson::from_document(legacy).unwrap();
+    assert!(restored.platform_thread.is_none());
+    assert!(restored.active_turn.unwrap().platform_origin.is_none());
+    let proof = platform_test_origin(&row);
+    row.platform_thread = Some(proof.thread.clone());
+    row.active_turn.as_mut().unwrap().platform_origin = Some(proof.clone());
+    let restored: AssistantConversation =
+        bson::from_document(bson::to_document(&row).unwrap()).unwrap();
+    assert_eq!(restored.platform_thread.as_ref(), Some(&proof.thread));
+    assert_eq!(
+        restored.active_turn.unwrap().platform_origin,
+        Some(proof.clone())
+    );
+    let debug = format!("{proof:?}");
+    for internal in ["receipt", "claim", "456", "789", "personal-binding"] {
+        assert!(!debug.contains(internal));
+    }
+}
+
+#[tokio::test]
+async fn platform_thread_is_excluded_from_home_validation_fallback_repair_and_web_adoption() {
+    let db = connect_transaction_test_database("nyxa_platform_home").await;
+    ensure_indexes(&db).await.unwrap();
+    let state = test_app_state(db.clone());
+    let owner = Uuid::new_v4().to_string();
+    db.collection(USERS)
+        .insert_one(test_user(&owner, UserType::Person))
+        .await
+        .unwrap();
+    let ordinary = begin_turn(
+        &db,
+        &owner,
+        &request(None, "ordinary"),
+        &state.encryption_keys,
+    )
+    .await
+    .unwrap();
+    let result = TurnResult {
+        text: "reply".into(),
+        session_id: None,
+        response_id: None,
+        error: None,
+    };
+    finish_turn(
+        &db,
+        &ordinary,
+        &ordinary.credential_api_key_id,
+        &Uuid::new_v4().to_string(),
+        &result,
+    )
+    .await
+    .unwrap();
+    let platform = begin_turn(
+        &db,
+        &owner,
+        &request(None, "personal"),
+        &state.encryption_keys,
+    )
+    .await
+    .unwrap();
+    finish_turn(
+        &db,
+        &platform,
+        &platform.credential_api_key_id,
+        &Uuid::new_v4().to_string(),
+        &result,
+    )
+    .await
+    .unwrap();
+    let proof = platform_test_origin(&platform);
+    db.collection::<bson::Document>(CONVERSATIONS)
+        .update_one(
+            doc! {"_id": &platform.id},
+            doc! {"$set": {"platform_thread": bson::to_bson(&proof.thread).unwrap()}},
+        )
+        .await
+        .unwrap();
+    let agents = db.collection::<bson::Document>(crate::models::assistant_agent::COLLECTION_NAME);
+    let agent_id = platform.agent_id.as_deref().unwrap();
+    agents
+        .update_one(
+            doc! {"_id": agent_id},
+            doc! {"$set": {"home_conversation_id": &platform.id}},
+        )
+        .await
+        .unwrap();
+    let team = crate::services::assistant_team_service::agent(&db, &owner, agent_id)
+        .await
+        .unwrap();
+    let home =
+        crate::services::assistant_team_service::home_thread_for(&db, &state.encryption_keys, &owner, &team)
+            .await
+            .unwrap();
+    assert_eq!(home.id, ordinary.id);
+    agents
+        .update_one(
+            doc! {"_id": agent_id},
+            doc! {"$set": {"home_conversation_id": &platform.id}},
+        )
+        .await
+        .unwrap();
+    assert_eq!(repair_channel_homes(&db).await.unwrap(), 1);
+    let web = begin_turn(
+        &db,
+        &owner,
+        &request(Some(&platform.id), "web after unlink"),
+        &state.encryption_keys,
+    )
+    .await
+    .unwrap();
+    assert!(web.platform_thread.is_some());
+    assert!(web.active_turn.as_ref().unwrap().platform_origin.is_none());
+    let team = crate::services::assistant_team_service::agent(&db, &owner, agent_id)
+        .await
+        .unwrap();
+    assert!(team.home_conversation_id.is_none());
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn settlement_retains_platform_origin_after_active_turn_is_cleared() {
+    let db = connect_transaction_test_database("nyxa_platform_settlement").await;
+    ensure_indexes(&db).await.unwrap();
+    let state = test_app_state(db.clone());
+    let owner = Uuid::new_v4().to_string();
+    db.collection(USERS)
+        .insert_one(test_user(&owner, UserType::Person))
+        .await
+        .unwrap();
+    let mut row = begin_turn(
+        &db,
+        &owner,
+        &request(None, "personal"),
+        &state.encryption_keys,
+    )
+    .await
+    .unwrap();
+    let proof = platform_test_origin(&row);
+    row.platform_thread = Some(proof.thread.clone());
+    row.active_turn.as_mut().unwrap().platform_origin = Some(proof.clone());
+    db.collection::<AssistantConversation>(CONVERSATIONS)
+        .replace_one(doc! {"_id": &row.id}, &row)
+        .await
+        .unwrap();
+    let message_id = Uuid::new_v4().to_string();
+    finish_turn(
+        &db,
+        &row,
+        &row.credential_api_key_id,
+        &message_id,
+        &TurnResult {
+            text: "personal reply".into(),
+            session_id: None,
+            response_id: None,
+            error: None,
+        },
+    )
+    .await
+    .unwrap();
+    assert!(
+        get(&db, &owner, &row.id)
+            .await
+            .unwrap()
+            .active_turn
+            .is_none()
+    );
+    let reply = db
+        .collection::<AssistantMessage>(MESSAGES)
+        .find_one(doc! {"_id": &message_id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(reply.platform_origin, Some(proof));
+    let mut legacy = bson::to_document(&reply).unwrap();
+    legacy.remove("platform_origin");
+    assert!(
+        bson::from_document::<AssistantMessage>(legacy)
+            .unwrap()
+            .platform_origin
+            .is_none()
+    );
+    db.drop().await.unwrap();
 }
 
 async fn expire_turn(db: &Database, row: &AssistantConversation) {
@@ -2594,6 +2824,7 @@ async fn reset_context_is_fenced_and_drops_the_checkpoint() {
 #[test]
 fn recap_reserves_the_goal_before_long_recent_rows() {
     let row = |seq: i64, role: &str, text: String| AssistantMessage {
+        platform_origin: None,
         author: None,
         activity_total: 0,
         continuation_of: None,
@@ -3612,6 +3843,7 @@ fn production_recap_keeps_unrendered_tail_owners_in_requirements_and_omission_co
 #[test]
 fn recap_sections_keep_mid_history_owner_rules_tail_and_manifest_with_cjk() {
     let message = |i, text: String| AssistantMessage {
+        platform_origin: None,
         retry_claimed_by: None,
         activity_count: None,
         continuation_of: None,
@@ -3664,6 +3896,7 @@ fn recap_sections_keep_mid_history_owner_rules_tail_and_manifest_with_cjk() {
 #[test]
 fn recap_owner_overflow_points_to_history_tool() {
     let message = |i: i64| AssistantMessage {
+        platform_origin: None,
         retry_claimed_by: None,
         activity_count: None,
         continuation_of: None,

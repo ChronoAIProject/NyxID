@@ -33,6 +33,7 @@ mod fixtures {
     /// A completed assistant reply; override fields with struct update syntax.
     pub fn message(id: String, conversation_id: String, user_id: String) -> AssistantMessage {
         AssistantMessage {
+            platform_origin: None,
             author: None,
             activity_total: 0,
             continuation_of: None,

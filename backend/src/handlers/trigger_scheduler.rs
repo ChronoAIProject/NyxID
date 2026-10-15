@@ -1001,6 +1001,7 @@ pub(crate) async fn webhook(
                     .db
                     .collection::<AssistantMessage>(MESSAGES)
                     .insert_one(AssistantMessage {
+                    platform_origin: None,
                     continuation_of: None,
                     retry_of: None,
                         retry_claimed_by: None,

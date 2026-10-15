@@ -80,6 +80,59 @@ pub struct ChannelOrigin {
     pub platform: String,
 }
 
+/// Stable ownership of a personal manager thread. Retained after transport
+/// unlink so the owner can continue the thread in NyxID.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlatformThread {
+    pub platform: String,
+    pub profile_id: String,
+    pub manager_bot_id: String,
+    pub telegram_bot_id: i64,
+    pub binding_id: String,
+    pub binding_generation: i64,
+    pub user_id: String,
+    pub nyxbot_agent_id: String,
+}
+
+/// An event receives fresh admission; it never reuses an ingress receipt.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PlatformOriginSource {
+    Ingress {
+        receipt_id: String,
+        claim_id: String,
+    },
+    ThreadEvent {
+        admission_id: String,
+    },
+}
+
+/// Exact server-authored execution and delivery proof. Never accepted from an
+/// owner request or projected wholesale into an HTTP response.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlatformTurnOrigin {
+    pub thread: PlatformThread,
+    pub manager_authority_epoch: i64,
+    pub personal_control_revision: i64,
+    pub sender_id: i64,
+    pub chat_id: i64,
+    pub source: PlatformOriginSource,
+}
+
+impl std::fmt::Debug for PlatformThread {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PlatformThread")
+            .field("platform", &self.platform)
+            .finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Debug for PlatformTurnOrigin {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PlatformTurnOrigin").finish_non_exhaustive()
+    }
+}
+
 /// One tool call made with the chat's key during a live turn. Metadata only:
 /// the label is a tool identifier, never arguments, results, or secrets.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -137,6 +190,8 @@ pub struct ToolProgress {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ActiveTurn {
+    #[serde(default)]
+    pub platform_origin: Option<PlatformTurnOrigin>,
     /// The failed turn this turn retries (owner Retry only).
     #[serde(default)]
     pub retry_of: Option<String>,
@@ -223,6 +278,8 @@ pub enum TitleSource {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct AssistantConversation {
+    #[serde(default)]
+    pub platform_thread: Option<PlatformThread>,
     /// Internal conversion fence; typed settlement must preserve it until exact cleanup completes.
     #[serde(default)]
     pub platform_cleanup_pending: bool,

@@ -165,7 +165,42 @@ pub(crate) async fn mark_expired_attachments(
 }
 
 #[derive(Serialize)]
+pub struct PlatformThreadResponse {
+    platform: String,
+    manager_id: String,
+    binding_id: String,
+    binding_generation: i64,
+}
+impl From<&crate::models::assistant_conversation::PlatformThread> for PlatformThreadResponse {
+    fn from(thread: &crate::models::assistant_conversation::PlatformThread) -> Self {
+        Self {
+            platform: thread.platform.clone(),
+            manager_id: thread.manager_bot_id.clone(),
+            binding_id: thread.binding_id.clone(),
+            binding_generation: thread.binding_generation,
+        }
+    }
+}
+#[derive(Serialize)]
+pub struct PlatformTurnOriginResponse {
+    binding_id: String,
+    binding_generation: i64,
+    manager_authority_epoch: i64,
+    personal_control_revision: i64,
+}
+impl From<&crate::models::assistant_conversation::PlatformTurnOrigin> for PlatformTurnOriginResponse {
+    fn from(origin: &crate::models::assistant_conversation::PlatformTurnOrigin) -> Self {
+        Self {
+            binding_id: origin.thread.binding_id.clone(),
+            binding_generation: origin.thread.binding_generation,
+            manager_authority_epoch: origin.manager_authority_epoch,
+            personal_control_revision: origin.personal_control_revision,
+        }
+    }
+}
+#[derive(Serialize)]
 pub struct ActiveTurnResponse {
+    platform_origin: Option<PlatformTurnOriginResponse>,
     response_id: Option<String>,
     steering_allowed: bool,
     stop_requested: bool,
@@ -202,6 +237,7 @@ pub struct ChannelOriginResponse {
 }
 #[derive(Serialize)]
 pub struct ConversationResponse {
+    platform_thread: Option<PlatformThreadResponse>,
     id: String,
     title: String,
     title_source: crate::models::assistant_conversation::TitleSource,
@@ -263,6 +299,7 @@ impl ConversationResponse {
 impl From<AssistantConversation> for ConversationResponse {
     fn from(row: AssistantConversation) -> Self {
         let active_turn = engine::live_turn(&row, Utc::now()).map(|turn| ActiveTurnResponse {
+            platform_origin: turn.platform_origin.as_ref().map(PlatformTurnOriginResponse::from),
             response_id: turn
                 .running_response
                 .as_ref()
@@ -290,6 +327,7 @@ impl From<AssistantConversation> for ConversationResponse {
                 .collect(),
         });
         Self {
+            platform_thread: row.platform_thread.as_ref().map(PlatformThreadResponse::from),
             id: row.id,
             title: row.title,
             title_source: row.title_source,
@@ -373,6 +411,7 @@ impl From<crate::models::assistant_message::AssistantErrorDetail> for ErrorDetai
 
 #[derive(Serialize)]
 pub struct MessageResponse {
+    platform_origin: Option<PlatformTurnOriginResponse>,
     recovery: Option<RecoveryResponse>,
     pub feedback: Option<crate::handlers::assistant_feedback::FeedbackResponse>,
     steering: Option<steering::SteeringResponse>,
@@ -398,6 +437,7 @@ pub struct MessageResponse {
 impl From<AssistantMessage> for MessageResponse {
     fn from(row: AssistantMessage) -> Self {
         Self {
+            platform_origin: row.platform_origin.as_ref().map(PlatformTurnOriginResponse::from),
             recovery: None,
             feedback: None,
             steering: row

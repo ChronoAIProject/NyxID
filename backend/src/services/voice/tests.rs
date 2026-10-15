@@ -488,6 +488,7 @@ async fn completed_hidden_voice_results_publish_after_call_close() {
             crate::models::assistant_message::COLLECTION_NAME,
         )
         .insert_one(crate::models::assistant_message::AssistantMessage {
+            platform_origin: None,
             continuation_of: None,
             retry_of: None,
             retry_claimed_by: None,
@@ -583,6 +584,7 @@ async fn published_result_notes_select_newest_results_after_previous_turn() {
                 crate::models::assistant_message::COLLECTION_NAME,
             )
             .insert_one(crate::models::assistant_message::AssistantMessage {
+                platform_origin: None,
                 continuation_of: None,
                 retry_of: None,
                 retry_claimed_by: None,
