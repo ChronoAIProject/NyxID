@@ -6,7 +6,8 @@ different evidence states. Record the tested commit and actual commands/results
 before changing any row to verified. Mocked upstream calls cannot satisfy A13
 or the external portion of A1/A15.
 
-Initial checkpoint: contract drafting, no feature implementation tests run.
+Current checkpoint: producer proposals complete and implementation started;
+no feature implementation tests run.
 
 | Gate | Owners | Required evidence | Status |
 | --- | --- | --- | --- |
@@ -56,11 +57,25 @@ At the opening environment check, unrelated worktrees were compiling and the
 volume had approximately 12 GiB available. No unrelated processes were stopped
 and no unrelated artifacts were removed. Reassess before granting a build slot.
 
+The primary provisioned an isolated local MongoDB 8.0.34 replica set on
+`127.0.0.1:27188` named `nyxbot_manager_test`. Its explicit test URI is
+`mongodb://127.0.0.1:27188/?replicaSet=nyxbot_manager_test&directConnection=true`.
+An actual transactional insert followed by abort left zero documents, and the
+temporary probe database was dropped. This verifies the test environment only,
+not feature behavior. The temporary data directory and process belong to this
+task and must be shut down after validation; other local MongoDB instances are
+unrelated.
+
 ## External evidence to resolve before activation
 
 - Exact NyxAgent repository/build and public profile contract: native tools,
   extra MCP servers, bounded execution, credential propagation for every priced
   model call, and isolated upstream session deletion/expiry.
+  A [pinned upstream source review](2026-10-15-public-personal-nyxbot-upstream-evidence.md)
+  now records the existing restrictions and concrete missing public-contract,
+  cost-bound and cleanup support. It does not identify the deployed version or
+  satisfy real runtime acceptance. Permission for changes to the separate
+  NyxAgent repository has been requested; NyxID implementation continues.
 - Sponsor authorization/funding, enforced invitation policy, and two distinct
   test people/Telegram identities for A13.
 - All serving auth/MCP/proxy/webhook/worker replicas support the new mode before
