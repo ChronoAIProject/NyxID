@@ -820,18 +820,16 @@ fn mcp_extract_user_agent(headers: &HeaderMap) -> Option<String> {
 /// without the flag, return 401 so the client re-presents its token.
 ///
 /// On failure returns an MCP-formatted 401 response with `WWW-Authenticate`.
-#[allow(clippy::result_large_err)]
 enum McpAuthentication {
     Ordinary(Box<McpAuthContext>),
     Public(Box<crate::services::platform_public_tools::PublicMcpAuthority>),
 }
 
-#[allow(clippy::result_large_err)]
 async fn authenticate_mcp(
     state: &AppState,
     headers: &HeaderMap,
     session_fallback: bool,
-) -> Result<McpAuthContext, Response> {
+) -> Result<McpAuthContext, Box<Response>> {
     authenticate_mcp_for_method(state, headers, session_fallback, axum::http::Method::POST).await
 }
 
@@ -840,10 +838,13 @@ async fn authenticate_mcp_for_method(
     headers: &HeaderMap,
     session_fallback: bool,
     method: axum::http::Method,
-) -> Result<McpAuthContext, Response> {
-    match authenticate_mcp_or_public(state, headers, session_fallback, false, method).await? {
+) -> Result<McpAuthContext, Box<Response>> {
+    match authenticate_mcp_or_public(state, headers, session_fallback, false, method)
+        .await
+        .map_err(Box::new)?
+    {
         McpAuthentication::Ordinary(auth) => Ok(*auth),
-        McpAuthentication::Public(_) => Err(mcp_403_api_key_insufficient_scope()),
+        McpAuthentication::Public(_) => Err(Box::new(mcp_403_api_key_insufficient_scope())),
     }
 }
 
@@ -1751,7 +1752,7 @@ pub async fn mcp_get(State(state): State<AppState>, headers: HeaderMap) -> Respo
     let auth =
         match authenticate_mcp_for_method(&state, &headers, true, axum::http::Method::GET).await {
             Ok(a) => a,
-            Err(resp) => return resp,
+            Err(resp) => return *resp,
         };
 
     if let Err(e) = crate::mw::rate_limit::check_agent_rate_limit_raw(
@@ -1841,7 +1842,7 @@ pub async fn mcp_delete(State(state): State<AppState>, headers: HeaderMap) -> Re
         .await
     {
         Ok(a) => a,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
 
     if let Err(e) = crate::mw::rate_limit::check_agent_rate_limit_raw(
