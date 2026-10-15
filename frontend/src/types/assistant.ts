@@ -1,3 +1,4 @@
+import type { PlatformThread } from "@/schemas/platform-personal";
 import type { ActionCardParams } from "@/schemas/assistant-actions";
 
 export type ConnectCardState =
@@ -110,6 +111,7 @@ export interface ActionCardContentBlock {
 }
 
 export interface Conversation {
+  readonly platform_thread?: PlatformThread | null;
   readonly active_turn?: { readonly turn_id: string; readonly started_at: string } | null;
   readonly id: string;
   readonly title: string;
