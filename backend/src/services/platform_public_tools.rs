@@ -239,8 +239,8 @@ fn faq(call: &PublicToolCall) -> AppResult<Value> {
     }
 }
 
-/// The one-time intent token exists only in this response, never in a public
-/// transcript, audit payload, replay record or delivery queue.
+/// Mint commits before the separate ephemeral provider effect. Only delivery
+/// status reaches the model; the bearer never enters its transcript or reply.
 pub(crate) async fn execute(
     state: &AppState,
     authority: &PublicMcpAuthority,
@@ -270,13 +270,7 @@ pub(crate) async fn execute(
                                         context,
                                     )
                                     .await?;
-                                let token = issued.token.ok_or_else(|| {
-                                    AppError::Conflict(
-                                        "Link already issued; send /link in the private chat"
-                                            .into(),
-                                    )
-                                })?;
-                                Ok(Ok(token))
+                                Ok(Ok(issued.token))
                             }
                             _ => Ok(Err(faq(call)?)),
                         }
@@ -289,9 +283,14 @@ pub(crate) async fn execute(
         .await
         .map_err(tx::map_transaction_error)?;
     let output = match value {
-        Ok(token) => super::platform_manager_command_service::PersonalCommandReply::Link { token }
-            .render(&state.config.frontend_url)?,
-        Err(value) => Zeroizing::new(serde_json::to_string(&value).map_err(|_| denied())?),
+        Ok(Some(token)) => {
+            let status=super::platform_manager_delivery::deliver_public_signup(state,&authority.context,token).await?;
+            Zeroizing::new(serde_json::to_string(&signup_result(status)).map_err(|_|denied())?)
+        }
+        Ok(None) => Zeroizing::new(serde_json::to_string(&json!({
+            "status":"already_issued","message":"A link was already issued for this request. If it is unavailable, send an original /link message in this private chat."
+        })).map_err(|_|denied())?),
+        Err(value) => Zeroizing::new(serde_json::to_string(&value).map_err(|_|denied())?),
     };
     if output.len() > MAX_RESULT_BYTES {
         return Err(denied());
@@ -299,9 +298,41 @@ pub(crate) async fn execute(
     Ok(output)
 }
 
+fn signup_result(status: super::platform_manager_delivery::PublicSignupDeliveryOutcome) -> Value {
+    use super::platform_manager_delivery::PublicSignupDeliveryOutcome;
+    match status {
+        PublicSignupDeliveryOutcome::Sent => {
+            json!({"status":"sent","message":"The account review link was sent separately in this private chat. Website review and a final original confirmation are still required."})
+        }
+        PublicSignupDeliveryOutcome::Unavailable => {
+            json!({"status":"unavailable","message":"The link could not be delivered. Send an original /link message in this private chat."})
+        }
+        PublicSignupDeliveryOutcome::Uncertain => {
+            json!({"status":"uncertain","message":"Link delivery could not be confirmed. If no link arrived, send an original /link message in this private chat."})
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn signup_results_are_status_only_and_do_not_claim_consent_or_retry() {
+        use super::super::platform_manager_delivery::PublicSignupDeliveryOutcome::*;
+        for (state, expected) in [
+            (Sent, "sent"),
+            (Unavailable, "unavailable"),
+            (Uncertain, "uncertain"),
+        ] {
+            let result = signup_result(state);
+            assert_eq!(result["status"], expected);
+            let encoded = result.to_string();
+            assert!(!encoded.contains("nyx_pli_"));
+            assert!(!encoded.contains("https://"));
+            assert!(result.get("token").is_none());
+            assert!(result.get("url").is_none());
+        }
+    }
     #[test]
     fn direct_and_wrapped_tools_share_closed_validation() {
         for args in [
