@@ -534,10 +534,7 @@ pub enum PublicRevocationReason {
 }
 
 #[derive(Clone, Debug)]
-pub struct PublicRevocationRecorded {
-    /// None means no affected session; it never requires public readiness.
-    pub recovery_record_id: Option<String>,
-}
+pub struct PublicRevocationRecorded;
 
 /// Internal execution/egress material, never an event, HTTP DTO or log value.
 pub struct RuntimeCredential {
@@ -805,12 +802,6 @@ pub trait PublicTurnProducer: Send + Sync {
         scope: &PublicRevocationScope,
         reason: PublicRevocationReason,
     ) -> AppResult<PublicRevocationRecorded>;
-
-    async fn process_public_cleanup_record(
-        &self,
-        db: &Database,
-        recovery_record_id: &str,
-    ) -> AppResult<()>;
 }
 
 /// Part 3 supplies this service adapter over the existing metered proxy core.

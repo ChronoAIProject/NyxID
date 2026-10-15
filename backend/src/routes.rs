@@ -73,6 +73,22 @@ macro_rules! llm_billing_routes {
     };
 }
 
+macro_rules! public_nyxbot_model_billing_routes {
+    ($apply:ident, $router:expr) => {
+        $apply!($router;
+            (
+                "/public-nyxbot/models/{service_id}/{*path}",
+                "/api/v1/public-nyxbot/models/{service_id}/{*path}",
+                "handlers::platform_public_model::dispatch",
+                post(handlers::platform_public_model::dispatch),
+                crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
+                    crate::services::billing::BillingIngress::Proxy
+                )
+            ),
+        )
+    };
+}
+
 macro_rules! proxy_billing_routes {
     ($apply:ident, $router:expr) => {
         $apply!($router;
@@ -465,6 +481,10 @@ pub(crate) fn mounted_billing_route_inventory()
         ()
     ));
     routes.extend(proxy_billing_routes!(collect_billing_route_specs, ()));
+    routes.extend(public_nyxbot_model_billing_routes!(
+        collect_billing_route_specs,
+        ()
+    ));
     routes.extend(assistant_direct_billing_routes!(
         collect_billing_route_specs,
         ()
@@ -1975,6 +1995,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .route("/{id}/deny", post(handlers::login_approval::deny));
 
     let api_v1_public = Router::new()
+        .merge(public_nyxbot_model_billing_routes!(
+            register_billing_routes,
+            Router::new()
+        ))
         .merge(if router_state.is_some() {
             Router::new().route(
                 "/platform-personal-links/preview",

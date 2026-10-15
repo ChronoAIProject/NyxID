@@ -522,7 +522,10 @@ pub(crate) async fn dispatch_update(
                     public_session_id: context.public_session_id.clone(),
                     turn: context.turn.clone(),
                 },
-                expires_at: context.expires_at,
+                expires_at: super::platform_public_credential_service::public_reply_expiry(
+                    &state.db, &context,
+                )
+                .await?,
             };
             // Establish the bounded receiver before the execution producer spawns.
             let (events, receiver) = tokio::sync::mpsc::channel(16);
