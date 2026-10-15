@@ -758,6 +758,26 @@ async fn settle_reply_in_session(
     Ok(())
 }
 
+/// Transport retains a delivery deadline separate from the shorter execution
+/// lease. It can only use the exact stored session's immutable absolute expiry.
+pub(crate) async fn public_reply_expiry(
+    db: &Database,
+    context: &PublicExecutionContext,
+) -> AppResult<chrono::DateTime<Utc>> {
+    let row = db
+        .collection::<PlatformPublicSession>(SESSIONS)
+        .find_one(doc! {
+            "_id":&context.public_session_id,"sponsor_owner_user_id":&context.sponsor_owner_user_id,
+            "policy_digest":&context.policy_digest,"active_turn.turn_id":&context.turn.turn_id,
+            "active_turn.receipt_id":&context.ingress.ingress.receipt_id,
+            "active_turn.claim_id":&context.ingress.ingress.claim_id,"revoked_at":bson::Bson::Null,
+            "$expr":{"$gt":["$expires_at","$$NOW"]},
+        })
+        .await?
+        .ok_or_else(denied)?;
+    Ok(row.expires_at)
+}
+
 /// A settled reply fence is independent of the execution deadline/active turn.
 /// Caller owns the delivery transaction; no bytes or bearer are persisted here.
 pub(crate) async fn fence_reply_in_session(

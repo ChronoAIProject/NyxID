@@ -250,13 +250,6 @@ impl PublicTurnProducer for PublicProducer {
     ) -> AppResult<PublicRevocationRecorded> {
         revoke_in_session(db, session, scope, reason).await
     }
-    async fn process_public_cleanup_record(
-        &self,
-        db: &Database,
-        recovery_record_id: &str,
-    ) -> AppResult<()> {
-        process_recovery(db, recovery_record_id).await
-    }
 }
 
 fn reason_label(reason: PublicRevocationReason) -> &'static str {
@@ -350,10 +343,8 @@ pub(crate) async fn revoke_in_session(
             "effect_revision":{"$add":[{"$ifNull":["$effect_revision",0_i64]},1_i64]},
         }}]).upsert(true).return_document(ReturnDocument::After)
         .session(&mut *session).await?.ok_or_else(changed)?;
-    let count = revoke_page_in_session(db, session, &marker).await?;
-    Ok(PublicRevocationRecorded {
-        recovery_record_id: (count != 0).then_some(marker.id),
-    })
+    revoke_page_in_session(db, session, &marker).await?;
+    Ok(PublicRevocationRecorded)
 }
 
 async fn revoke_page_in_session(
@@ -467,32 +458,6 @@ async fn drain_scope(db: &Database, id: &str) -> AppResult<()> {
         })
         .await
         .map_err(transactions::map_transaction_error)
-}
-
-async fn process_recovery(db: &Database, id: &str) -> AppResult<()> {
-    if db
-        .collection::<PublicRevocationMarker>(REVOCATION_SCOPES)
-        .count_documents(doc! {"_id":id})
-        .limit(1)
-        .await?
-        == 0
-    {
-        return process_cleanup(db, id).await;
-    }
-    drain_scope(db, id).await?;
-    let records: Vec<PublicCleanupRecord> = db
-        .collection::<PublicCleanupRecord>(CLEANUP_RECORDS)
-        .find(
-            doc! {"scope_marker_id":id,"completed":false,"retry_at":{"$lte":bson::DateTime::now()}},
-        )
-        .limit(4)
-        .await?
-        .try_collect()
-        .await?;
-    for record in records {
-        process_cleanup(db, &record.id).await?;
-    }
-    Ok(())
 }
 
 /// Local component of the public fence. This never establishes runtime proof.
@@ -892,7 +857,7 @@ pub(crate) mod tests {
         let row = fixture(&db, 5, true).await;
         let mut session = db.client().start_session().await.unwrap();
         session.start_transaction().await.unwrap();
-        let recorded = revoke_in_session(
+        revoke_in_session(
             &db,
             &mut session,
             &PublicRevocationScope::Session {
@@ -902,7 +867,14 @@ pub(crate) mod tests {
         )
         .await
         .unwrap();
-        assert!(recorded.recovery_record_id.is_some());
+        assert_eq!(
+            db.collection::<PublicRevocationMarker>(REVOCATION_SCOPES)
+                .count_documents(doc! {})
+                .session(&mut session)
+                .await
+                .unwrap(),
+            1
+        );
         let in_transaction = db
             .collection::<PlatformPublicSession>(SESSIONS)
             .find_one(doc! {"_id":&row.id})
@@ -943,7 +915,7 @@ pub(crate) mod tests {
         let remote = fixture(&db, 6, true).await;
         let mut session = db.client().start_session().await.unwrap();
         session.start_transaction().await.unwrap();
-        let recorded = revoke_in_session(
+        revoke_in_session(
             &db,
             &mut session,
             &PublicRevocationScope::Manager {
@@ -959,8 +931,8 @@ pub(crate) mod tests {
         .await
         .unwrap();
         session.commit_transaction().await.unwrap();
-        let recovery = recorded.recovery_record_id.unwrap();
-        process_recovery(&db, &recovery).await.unwrap();
+        let state = crate::test_utils::test_app_state(db.clone());
+        sweep_public_lifecycle(&state, 100).await.unwrap();
         let id = session_row(&db, &remote).await.cleanup_record_id.unwrap();
         let local = session_row(&db, &local).await;
         let remote_after = session_row(&db, &remote).await;
@@ -1031,17 +1003,22 @@ pub(crate) mod tests {
         };
         let mut session = db.client().start_session().await.unwrap();
         session.start_transaction().await.unwrap();
-        let recovery = revoke_in_session(
+        revoke_in_session(
             &db,
             &mut session,
             &PublicRevocationScope::Manager { manager },
             PublicRevocationReason::ManagerRetired,
         )
         .await
-        .unwrap()
-        .recovery_record_id
         .unwrap();
         session.commit_transaction().await.unwrap();
+        let recovery = db
+            .collection::<PublicRevocationMarker>(REVOCATION_SCOPES)
+            .find_one(doc! {"drain_pending":true})
+            .await
+            .unwrap()
+            .unwrap()
+            .id;
         assert_eq!(
             db.collection::<PlatformPublicSession>(SESSIONS)
                 .count_documents(doc! {"revoked_at":{"$ne":bson::Bson::Null}})
