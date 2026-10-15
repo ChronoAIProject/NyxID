@@ -490,9 +490,11 @@ impl<'a> RciInjectSession<'a> {
         let pubkey = self.poll_pubkey(&pending.id).await?;
         validate_pubkey_response_matches_pending(&pending, &pubkey)?;
         self.verify_fingerprint(&pubkey)?;
-        let body = {
-            let secret = read_secret(&self.secret_source, &mut self.prompt_secret_override)?;
-            encrypt_pending_secret_for_node(&pending, &pubkey, &secret)?
+        // Keep the fieldless input-error boundary explicit, separate from delivery metadata.
+        // The plaintext is dropped and zeroized before the encrypted envelope is sent.
+        let body = match read_secret(&self.secret_source, &mut self.prompt_secret_override) {
+            Ok(secret) => encrypt_pending_secret_for_node(&pending, &pubkey, &secret)?,
+            Err(error) => return Err(error.into()),
         };
         let response: PendingCredentialCiphertextResponseCli = self
             .api
@@ -1475,6 +1477,80 @@ mod tests {
                 .iter()
                 .any(|request| request.url.path().ends_with("/ciphertext"))
         );
+    }
+
+    #[tokio::test]
+    async fn inject_secret_read_failure_aborts_before_ciphertext_submission() {
+        let missing_env = format!("NYXID_RCI_MISSING_TEST_{}", uuid::Uuid::new_v4().simple());
+        for (source, prompt_override, expected_error) in [
+            (
+                RciSecretSource::Prompt,
+                Some(Zeroizing::new(String::new())),
+                "Secret value must not be empty",
+            ),
+            (
+                RciSecretSource::Env(missing_env.clone()),
+                None,
+                "Secret environment variable is not set or is not valid Unicode",
+            ),
+        ] {
+            let server = MockServer::start().await;
+            let keypair = nyxid_crypto::generate_node_keypair();
+            Mock::given(method("POST"))
+                .and(path(format!(
+                    "/api/v1/nodes/{}/credentials/push",
+                    node_id()
+                )))
+                .respond_with(
+                    ResponseTemplate::new(200).set_body_json(pending_info_json("pending-1")),
+                )
+                .expect(1)
+                .mount(&server)
+                .await;
+            Mock::given(method("GET"))
+                .and(path(format!(
+                    "/api/v1/nodes/{}/credentials/pending/pending-1",
+                    node_id()
+                )))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_body_json(pubkey_response_json("pending-1", &keypair)),
+                )
+                .expect(1)
+                .mount(&server)
+                .await;
+            let mut api = test_api(&server);
+            let mut session = RciInjectSession::new(
+                &mut api,
+                node_id().to_string(),
+                None,
+                Some(inject_metadata()),
+                source,
+                RciFingerprintPolicy::SkipWithYes,
+                RciInjectMode::Terminal,
+            );
+            session.prompt_secret_override = prompt_override;
+
+            let error = session
+                .run()
+                .await
+                .expect_err("input failure must abort injection");
+
+            assert!(error.downcast_ref::<super::RciSecretReadError>().is_some());
+            assert_eq!(format!("{error:#}"), expected_error);
+            assert!(!format!("{error:?}").contains(&missing_env));
+            let received = server.received_requests().await.expect("requests");
+            assert_eq!(
+                received.len(),
+                2,
+                "only metadata and public key may be requested"
+            );
+            assert!(
+                !received
+                    .iter()
+                    .any(|request| request.url.path().ends_with("/ciphertext"))
+            );
+        }
     }
 
     #[tokio::test]
