@@ -55,11 +55,24 @@ export interface DirectAssistantMessage {
   readonly attachments?: readonly import("@/schemas/assistant-nyxagent").NyxAgentAttachment[];
 }
 
+interface DirectTurnError {
+  readonly attempts?: number | null;
+  readonly capacity_wait_ms?: number | null;
+  readonly code: string;
+  readonly message: string;
+  readonly upstream_error_code?: string | null;
+  readonly stage?: string;
+  readonly http_status?: number | null;
+  readonly upstream_request_id?: string | null;
+  readonly response_id?: string | null;
+}
+
 interface DirectActiveTurn {
+  readonly turnMetadata?: { readonly attempts?: number | null; readonly capacityWaitMs?: number | null };
   readonly continuations?: number;
   readonly turnId: string | null;
   readonly status: DirectTurnStatus;
-  readonly error: { readonly code: string; readonly message: string } | null;
+  readonly error: DirectTurnError | null;
 }
 
 export interface DirectTurnState {
@@ -112,12 +125,10 @@ export type DirectTurnEvent =
     })
   | (DirectTurnEventBase & {
       readonly event: "turn.completed";
+      readonly turn_metadata?: { readonly attempts?: number | null; readonly capacity_wait_ms?: number | null } | null;
       readonly turn_id: string | null;
       readonly status: "blocked" | "completed" | "failed" | "cancelled";
-      readonly error: {
-        readonly code: string;
-        readonly message: string;
-      } | null;
+      readonly error: DirectTurnError | null;
     });
 
 export interface DirectTurnHandle {
@@ -232,6 +243,7 @@ export function applyDirectTurnEvent(
         activeTurn: {
           turnId: event.turn_id,
           status: event.status,
+          turnMetadata: event.turn_metadata ? { attempts: event.turn_metadata.attempts, capacityWaitMs: event.turn_metadata.capacity_wait_ms } : undefined,
           error: event.error,
         },
       };

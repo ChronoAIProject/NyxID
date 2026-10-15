@@ -1070,6 +1070,7 @@ async fn notify_nyxbot_denied(
                     .session(&mut *session)
                     .await?;
                 let message = AssistantMessage {
+                    turn_metadata: None,
                     author: None,
                     activity_total: 0,
                     continuation_of: None,

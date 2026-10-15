@@ -319,7 +319,7 @@ pub async fn cancel(db: &Database, user: &str, id: &str) -> AppResult<()> {
     }).await.map_err(transactions::map_transaction_error)
 }
 
-pub async fn cancelled(db: &Database, w: &AsyncServiceOperation) -> AppResult<()> {
+pub async fn cancelled(db: &Database, w: &AsyncServiceOperation, frontend: &str) -> AppResult<()> {
     // Keep task lifecycle pending until cancellation is durably reflected in
     // its run/request. Recovery must not mistake the initial submit reply for
     // the final automation outcome.
@@ -337,6 +337,7 @@ pub async fn cancelled(db: &Database, w: &AsyncServiceOperation) -> AppResult<()
             run,
             crate::models::trigger_run::RunOutcome::Failed,
             Some("cancelled"),
+            frontend,
         )
         .await?;
     }

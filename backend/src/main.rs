@@ -372,6 +372,8 @@ async fn server_main() {
         other => other,
     };
 
+    services::assistant_engine_worker::initialize();
+
     // Load configuration
     let mut config = AppConfig::from_env();
     config.validate_ssh_runtime_config();
