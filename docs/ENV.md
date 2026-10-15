@@ -49,7 +49,6 @@ See [KMS_MIGRATION_GUIDE.md](KMS_MIGRATION_GUIDE.md) and [KMS_OPERATIONS_GUIDE.m
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `PORT` | `3001` | HTTP listen port |
-| `PUBLIC_BIND_IP` | `0.0.0.0` | Public listener IP literal; use `127.0.0.1` for an isolated local startup smoke. `PORT` still selects the port. |
 | `BASE_URL` | `http://localhost:3001` | Backend base URL (used in JWT `aud`) |
 | `FRONTEND_URL` | `http://localhost:3000` | Frontend origin for CORS |
 | `ENVIRONMENT` | `development` | `development`, `staging`, `production` |

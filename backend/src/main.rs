@@ -1474,8 +1474,8 @@ async fn server_main() {
 
     // Bind both listeners before serving. Internal routes never enter the
     // public router and therefore cannot be exposed by an ingress path rule.
-    let addr = config::public_bind_addr(config.port);
-    let listener = TcpListener::bind(addr)
+    let addr = format!("0.0.0.0:{}", config.port);
+    let listener = TcpListener::bind(&addr)
         .await
         .expect("Failed to bind address");
     let internal_listener = TcpListener::bind(&config.internal_bind_addr)

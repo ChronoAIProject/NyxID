@@ -7,17 +7,6 @@ pub const DEFAULT_CHANNEL_MEDIA_MAX_BYTES: u64 = 20 * 1024 * 1024;
 
 const DEFAULT_INTERNAL_BIND_ADDR: &str = "127.0.0.1:3002";
 
-/// Limit the public listener to an explicit local interface when requested.
-/// IP literals avoid startup DNS resolution or an unexpected interface change.
-pub(crate) fn public_bind_addr(port: u16) -> SocketAddr {
-    let ip = env::var("PUBLIC_BIND_IP").unwrap_or_else(|_| "0.0.0.0".into());
-    SocketAddr::new(
-        ip.parse::<IpAddr>()
-            .unwrap_or_else(|_| panic!("PUBLIC_BIND_IP must be an IP address")),
-        port,
-    )
-}
-
 fn resolve_internal_advertise_url(
     explicit_url: Option<&str>,
     pod_ip: Option<&str>,
