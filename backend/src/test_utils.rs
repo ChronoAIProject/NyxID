@@ -2826,6 +2826,7 @@ pub async fn scoped_specialist_auth(
         &state.db,
         owner,
         &engine::TurnRequest {
+            acknowledgement_id: None,
             retry_of: None,
             agent_id: None,
             conversation_id: Some(home.id),

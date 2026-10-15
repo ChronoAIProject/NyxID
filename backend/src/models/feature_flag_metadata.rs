@@ -18,6 +18,9 @@ pub struct FeatureFlagMetadata {
     /// Registry key this documents. Unknown keys are rejected at the service
     /// layer, not stored.
     pub flag_key: String,
+    /// Runtime definition identity; null/missing belongs to a built-in flag.
+    #[serde(default)]
+    pub definition_id: Option<String>,
     /// Admin-written description replacing the code-declared one in admin
     /// surfaces. `None` falls back to `FeatureFlagDef::description`.
     #[serde(default)]
@@ -46,6 +49,7 @@ mod tests {
     #[test]
     fn bson_roundtrip() {
         let row = FeatureFlagMetadata {
+            definition_id: None,
             id: uuid::Uuid::new_v4().to_string(),
             flag_key: "example_ui".to_string(),
             description: Some("Gates the new panel.".to_string()),
@@ -67,6 +71,7 @@ mod tests {
     #[test]
     fn missing_optional_fields_default_to_none() {
         let mut doc = bson::to_document(&FeatureFlagMetadata {
+            definition_id: None,
             id: "x".to_string(),
             flag_key: "example_ui".to_string(),
             description: Some("d".to_string()),

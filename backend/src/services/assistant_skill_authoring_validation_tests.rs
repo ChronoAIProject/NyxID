@@ -1,10 +1,40 @@
 use super::*;
+use crate::services::assistant_skill_authoring::validation::ornn_rules;
 
 const WORKFLOW: &str = include_str!("../../tests/fixtures/skills/community-workflow-zh.md");
 
 fn body() -> GeneratedProposal {
     serde_json::from_value(json!({"schema_version":1,"kind":"new","name":"community-workflow",
         "description":"公开社区检索与验收流程","skill_md":"# Workflow\nRead, verify, then answer."})).unwrap()
+}
+
+#[test]
+fn authored_ornn_contract_accepts_nested_references_and_rejects_wire_rules() {
+    let mut draft = body();
+    draft.files = vec![GeneratedFile {
+        path: "references/nested/guide.md".into(),
+        content: "safe".into(),
+    }];
+    ornn_rules(&draft).unwrap();
+    for (field, value) in [("description", "<bad>"), ("name", "anthropic-helper")] {
+        let mut invalid = draft.clone();
+        if field == "name" {
+            invalid.name = value.into();
+        } else {
+            invalid.description = value.into();
+        }
+        assert!(ornn_rules(&invalid).is_err());
+    }
+    let mut invalid = draft;
+    invalid.files = vec![GeneratedFile {
+        path: "notes/private.md".into(),
+        content: "safe".into(),
+    }];
+    ornn_rules(&invalid).unwrap();
+    assert_eq!(
+        crate::services::assistant_learning_publication::package_path(&invalid.files[0].path),
+        "references/notes/private.md"
+    );
 }
 
 fn details(error: AppError) -> Value {
@@ -349,4 +379,77 @@ async fn authored_chinese_edit_survives_review_and_publication() {
         f.state.db.drop().await.unwrap();
     })
     .await;
+}
+
+#[test]
+fn scope_requires_explicit_declaration_and_authored_text_rules() {
+    let mut value = input("agent");
+    value.as_object_mut().unwrap().remove("scope");
+    assert_eq!(
+        details(parse_input(&value).err().unwrap())["rule"],
+        "required"
+    );
+    for omission in [
+        "password: fixture",
+        "sk-0123456789abcdefghijklmnop",
+        "bad\u{1}control",
+        "<bad>",
+        "",
+    ] {
+        value["scope"] = json!({"status":"reduced","omissions":[omission]});
+        let diagnostic = details(parse_input(&value).err().unwrap());
+        assert!(!diagnostic.to_string().contains(omission) || omission.is_empty());
+    }
+    value["scope"] = json!({"status":"reduced","omissions":["An older source is not included."]});
+    parse_input(&value).unwrap();
+    value["scope"] = json!({"status":"complete","omissions":["An omitted source"]});
+    assert!(parse_input(&value).is_err());
+}
+
+#[test]
+fn generation_contract_is_shared_while_legacy_l1_decoding_stays_tolerant() {
+    for path in ["root.md", "README.md", "notes/nested.md"] {
+        let mut draft = body();
+        draft.files = vec![GeneratedFile {
+            path: path.into(),
+            content: "Public guide".into(),
+        }];
+        validate_body(&draft).unwrap();
+        ornn_rules(&draft).unwrap();
+        let bytes = learning::validate_generated(&serde_json::to_string(&draft).unwrap())
+            .unwrap()
+            .unwrap();
+        learning::validate_generation_contract(&bytes).unwrap();
+        assert_eq!(
+            crate::services::assistant_learning_publication::package_path(path),
+            format!("references/{path}")
+        );
+    }
+    for (name, description) in [
+        ("weekly-review", "Guide <invalid>"),
+        ("claude-helper", "Public guide"),
+    ] {
+        let mut draft = body();
+        draft.name = name.into();
+        draft.description = description.into();
+        // Decoding old proposals stays tolerant; new generation applies the shared rules.
+        let bytes = learning::validate_generated(&serde_json::to_string(&draft).unwrap())
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            learning::validate_generation_contract(&bytes),
+            Err(AppError::ValidationError(_))
+        ));
+    }
+    let mut draft = body();
+    draft.description = "Public guide".into();
+    draft.files = vec![GeneratedFile {
+        path: "references/nested/guide.md".into(),
+        content: "Public guide".into(),
+    }];
+    ornn_rules(&draft).unwrap();
+    let bytes = learning::validate_generated(&serde_json::to_string(&draft).unwrap())
+        .unwrap()
+        .unwrap();
+    learning::validate_generation_contract(&bytes).unwrap();
 }

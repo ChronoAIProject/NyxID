@@ -9,6 +9,7 @@ import { useFeature } from "@/hooks/use-feature-flag";
 import { FEATURE_FLAG } from "@/lib/feature-flags";
 import { publicationFailureText } from "@/lib/assistant/skill-publication-copy";
 import { learningDraftEditable } from "@/schemas/agent-skills";
+import { AuthoredSkillScopePreview } from "./authored-skill-scope-preview";
 import { LearningDraftEditor } from "./learning-draft-editor";
 
 function requestFailure(cause: unknown): string {
@@ -19,14 +20,19 @@ function requestFailure(cause: unknown): string {
 
 export function AgentLearningReview({
   agentId,
+  proposalId,
   readOnly = false,
 }: {
   readonly agentId: string;
+  readonly proposalId?: string;
   readonly readOnly?: boolean;
 }) {
   const enabled = useFeature(FEATURE_FLAG.AGENT_LEARNING);
   const review = useAgentLearningReview(agentId, enabled);
-  const [open, setOpen] = useState<string>();
+  const [open, setOpen] = useState<string | undefined>(proposalId);
+  useEffect(() => {
+    if (proposalId && review.data) document.getElementById(`learning-proposal-${proposalId}`)?.scrollIntoView?.({ block: "nearest" });
+  }, [proposalId, review.data]);
   const [cards, setCards] = useState<Record<string, string>>({});
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [threshold, setThreshold] = useState(15);
@@ -51,7 +57,7 @@ export function AgentLearningReview({
         </h3>
         <p className="text-12 text-muted-foreground">
           Completed work can produce private, untrusted Ornn skill drafts.
-          Publishing and attaching always requires your confirmation.
+          Full access publishes and attaches automatically; other modes require your confirmation.
         </p>
       </div>
       {review.error ? (
@@ -164,6 +170,7 @@ export function AgentLearningReview({
         return (
           <article
             key={proposal.id}
+            id={`learning-proposal-${proposal.id}`}
             className="space-y-3 rounded-lg border border-border/50 p-3"
           >
             <div className="flex items-center justify-between gap-2">
@@ -186,7 +193,7 @@ export function AgentLearningReview({
             ) : null}
             {proposal.failure_code ? (
               <p role="alert" className="text-11 text-destructive">
-                {publicationFailureText(proposal.failure_code, proposal.status)}
+                {publicationFailureText(proposal.failure_code, proposal.status, proposal.source)}
               </p>
             ) : null}
             {errors[proposal.id] ? (
@@ -202,6 +209,9 @@ export function AgentLearningReview({
               </p>
             ) : null}
 
+            {isOpen && proposal.source === "authored" && proposal.auto_allowed ? (
+              <AuthoredSkillScopePreview agentId={agentId} proposalId={proposal.id} />
+            ) : null}
             {isOpen && draft ? (
               <LearningDraftEditor
                 key={`${proposal.id}:${proposal.revision}`}
@@ -220,7 +230,7 @@ export function AgentLearningReview({
               >
                 {isOpen ? "Hide draft" : "Review draft"}
               </Button>
-              {proposal.source === "authored" ? (
+              {proposal.source === "authored" && proposal.status !== "pinned" ? (
                 proposal.card_conversation_id ? (
                   <Link
                     to="/assistant"
@@ -303,7 +313,7 @@ export function AgentLearningReview({
                   publication that may have reached Ornn is refused, and the
                   reason appears in the error line above. */}
               {proposal.status === "pending" ||
-              proposal.status === "publication_failed" ? (
+              proposal.status === "publication_failed" || (proposal.auto_allowed && proposal.status === "pinned") ? (
                 <Button
                   size="sm"
                   disabled={readOnly || review.reject.isPending}
@@ -322,7 +332,7 @@ export function AgentLearningReview({
                     }
                   }}
                 >
-                  Reject
+                  {proposal.auto_allowed && proposal.status === "pinned" ? "Discard and detach" : "Reject"}
                 </Button>
               ) : null}
             </div>

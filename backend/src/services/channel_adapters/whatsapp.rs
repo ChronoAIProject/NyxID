@@ -30,6 +30,12 @@ pub const GRAPH_API_VERSION: &str = "v25.0";
 const TEXT_LIMIT: usize = 4096;
 const GRAPH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 const GRAPH_JSON_LIMIT: usize = 256 * 1024;
+const GRAPH_TIMEOUT_MESSAGE: &str = "WhatsApp Graph request timed out. Credential checks may be retried. Message acceptance may be unknown; check message history before sending again.";
+const GRAPH_TRANSPORT_MESSAGE: &str = "WhatsApp Graph request could not complete. Check server connectivity. Message acceptance may be unknown; check message history before sending again.";
+const GRAPH_RESPONSE_TOO_LARGE_MESSAGE: &str = "WhatsApp Graph response exceeded the size limit";
+const GRAPH_INVALID_JSON_MESSAGE: &str = "WhatsApp returned invalid JSON";
+const GRAPH_MISSING_MESSAGE_ID_MESSAGE: &str =
+    "WhatsApp response has no usable message ID; acceptance is unknown";
 
 pub struct WhatsAppAdapter;
 
@@ -264,10 +270,22 @@ fn graph_error(status: StatusCode, body: &Value, retry_after: Option<&str>) -> A
 
 fn graph_transport_error(error: reqwest::Error) -> AppError {
     AppError::ChannelPlatformError(if error.is_timeout() {
-        "WhatsApp Graph request timed out. Credential checks may be retried. Message acceptance may be unknown; check message history before sending again.".into()
+        GRAPH_TIMEOUT_MESSAGE.into()
     } else {
-        "WhatsApp Graph request could not complete. Check server connectivity. Message acceptance may be unknown; check message history before sending again.".into()
+        GRAPH_TRANSPORT_MESSAGE.into()
     })
+}
+
+/// Only image delivery uses this mapping. Shared Graph errors retain their
+/// operator diagnostics; these locally authored failures provide no acceptance
+/// receipt. Completed provider refusals keep their existing classification.
+pub(crate) fn image_delivery_uncertain(error: &AppError) -> bool {
+    matches!(error, AppError::ChannelPlatformError(message) if matches!(message.as_str(),
+        GRAPH_TIMEOUT_MESSAGE
+        | GRAPH_TRANSPORT_MESSAGE
+        | GRAPH_RESPONSE_TOO_LARGE_MESSAGE
+        | GRAPH_INVALID_JSON_MESSAGE
+        | GRAPH_MISSING_MESSAGE_ID_MESSAGE))
 }
 
 pub(super) async fn graph_send(request: reqwest::RequestBuilder) -> AppResult<Value> {
@@ -317,8 +335,7 @@ async fn classified_graph_response(
         .get("retry-after")
         .and_then(|value| value.to_str().ok())
         .map(String::from);
-    let too_large =
-        || AppError::ChannelPlatformError("WhatsApp Graph response exceeded the size limit".into());
+    let too_large = || AppError::ChannelPlatformError(GRAPH_RESPONSE_TOO_LARGE_MESSAGE.into());
     if response
         .content_length()
         .is_some_and(|length| length > GRAPH_JSON_LIMIT as u64)
@@ -359,7 +376,7 @@ async fn classified_graph_response(
         });
     }
     let body =
-        body.map_err(|_| AppError::ChannelPlatformError("WhatsApp returned invalid JSON".into()))?;
+        body.map_err(|_| AppError::ChannelPlatformError(GRAPH_INVALID_JSON_MESSAGE.into()))?;
     Ok(body)
 }
 
@@ -525,6 +542,7 @@ pub(crate) async fn send_outcome_at(
     let error = result.err();
     Ok(crate::services::channel_platform::SendOutcome {
         final_id: components.last().cloned(),
+        delivered_kinds: None,
         observation: Some(crate::models::channel_delivery::PlatformSendRecord {
             phone_number_id: phone.into(),
             waba_id: None,
@@ -560,11 +578,7 @@ async fn send_component(
         .as_str()
         .filter(|id| crate::services::channel_delivery_service::valid_message_id(id))
         .filter(|id| !components.iter().any(|old| old == id))
-        .ok_or_else(|| {
-            AppError::ChannelPlatformError(
-                "WhatsApp response has no usable message ID; acceptance is unknown".into(),
-            )
-        })?;
+        .ok_or_else(|| AppError::ChannelPlatformError(GRAPH_MISSING_MESSAGE_ID_MESSAGE.into()))?;
     components.push(id.to_string());
     *uncertain = false;
     Ok(())

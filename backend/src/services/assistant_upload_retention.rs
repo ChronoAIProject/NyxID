@@ -301,6 +301,39 @@ pub async fn expired_ids(db: &Database, user: &str, ids: &[String]) -> AppResult
     Ok(result)
 }
 
+/// A recovered owner input needs every original upload, including metadata
+/// that was deleted rather than tombstoned. Never read encrypted bodies here.
+pub async fn recovery_unavailable_ids(
+    db: &Database,
+    user: &str,
+    conversation: &str,
+    ids: &[String],
+) -> AppResult<HashSet<String>> {
+    if ids.is_empty() {
+        return Ok(HashSet::new());
+    }
+    let mut unavailable = expired_ids(db, user, ids).await?;
+    for chunk in ids.chunks(200) {
+        let rows: Vec<Document> = db
+            .collection::<Document>(ATTACHMENTS)
+            .find(doc! {
+                "_id": {"$in": chunk}, "user_id": user,
+                "conversation_id": conversation, "origin": "user_upload",
+                "message_id": {"$type": "string"},
+            })
+            .projection(doc! {"_id": 1})
+            .await?
+            .try_collect()
+            .await?;
+        let present: HashSet<String> = rows
+            .into_iter()
+            .filter_map(|row| row.get_str("_id").ok().map(str::to_owned))
+            .collect();
+        unavailable.extend(chunk.iter().filter(|id| !present.contains(*id)).cloned());
+    }
+    Ok(unavailable)
+}
+
 /// Mark the first referencing turn, including group turns, in the message transaction.
 pub async fn used_in_turn(
     db: &Database,
@@ -322,6 +355,8 @@ async fn delete_root(db: &Database, session: &mut ClientSession, row: &Document)
         .get_str("_id")
         .map_err(|_| AppError::Internal("Attachment metadata".into()))?;
     if bound(row) || !user_upload(row) {
+        // Tombstones retain scope and expiry identity only. Display metadata
+        // lives on the scoped message attachment and is never copied here.
         let mut tombstone = doc! {"_id":id, "expired_at":bson::DateTime::now()};
         for key in [
             "user_id",
@@ -329,6 +364,8 @@ async fn delete_root(db: &Database, session: &mut ClientSession, row: &Document)
             "group_id",
             "origin",
             "message_id",
+            "created_at",
+            "bound_at",
         ] {
             if let Some(value) = row.get(key) {
                 tombstone.insert(key, value.clone());

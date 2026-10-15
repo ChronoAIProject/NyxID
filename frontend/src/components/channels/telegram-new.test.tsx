@@ -132,7 +132,7 @@ it("saves and opens Telegram with one click, then completes from server status w
     view.client.invalidateQueries({ queryKey: ["telegram-new"] }),
   );
   await waitFor(() =>
-    expect(view.onConnected).toHaveBeenCalledExactlyOnceWith(request.id),
+    expect(view.onConnected).toHaveBeenCalledExactlyOnceWith(request.id, ready.bot_username),
   );
   expect(mockPost).toHaveBeenCalledTimes(1);
 });
@@ -163,7 +163,7 @@ it("reads the saved request after reload even when it is already completed", asy
   );
   const view = setup(request.id);
   await waitFor(() =>
-    expect(view.onConnected).toHaveBeenCalledWith(request.id),
+    expect(view.onConnected).toHaveBeenCalledWith(request.id, ready.bot_username),
   );
   expect(mockGet).toHaveBeenCalledWith(
     `/channel-bots/telegram-new?request_id=${request.id}`,
@@ -316,7 +316,7 @@ it("can finish a request created by the previous explicit approval flow", async 
       await screen.findByRole("button", { name: "Finish saved connection" }),
     );
   await waitFor(() =>
-    expect(view.onConnected).toHaveBeenCalledWith(request.id),
+    expect(view.onConnected).toHaveBeenCalledWith(request.id, ready.bot_username),
   );
   expect(mockPost).toHaveBeenCalledWith(
     `/channel-bots/telegram-new/requests/${request.id}/connect`,
@@ -337,4 +337,12 @@ it("does not offer creation until a manager is configured", async () => {
   expect(
     screen.queryByRole("button", { name: "Continue in Telegram" }),
   ).not.toBeInTheDocument();
+});
+
+it("uses dialog copy for an in-place handoff", async () => {
+  mockGet.mockResolvedValue(configuration({ ...request, status: "provisioning" }));
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  render(<QueryClientProvider client={client}><TelegramNew label="Support" orgId={null} stayInPlace onConnected={vi.fn()} /></QueryClientProvider>);
+  expect(await screen.findByText(/You can close this dialog/)).toBeVisible();
+  expect(screen.queryByText(/You can close this page/)).toBeNull();
 });

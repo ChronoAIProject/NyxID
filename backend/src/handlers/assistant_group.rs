@@ -297,6 +297,7 @@ async fn run_member(
         return Ok(());
     }
     let start = TurnStart {
+        acknowledgement_id: None,
         retry_of: None,
         channel_event_id: None,
         org_access: None,
@@ -375,8 +376,23 @@ pub(crate) async fn member_settled(
         let agent = team::agent_for_conversation(&state.db, row).await?;
         match error_code {
             None if !text.trim().is_empty() => {
-                let message =
-                    groups::append(&state.db, owner, group_id, "agent", Some(&agent), text).await?;
+                let attachments = match row.active_turn.as_ref() {
+                    Some(turn) => {
+                        engine::settled_tool_attachments(&state.db, owner, &row.id, &turn.turn_id)
+                            .await
+                    }
+                    None => Vec::new(),
+                };
+                let message = groups::append(
+                    &state.db,
+                    owner,
+                    group_id,
+                    "agent",
+                    Some(&agent),
+                    text,
+                    attachments,
+                )
+                .await?;
                 Box::pin(crate::services::machine_activity_service::publish_group(
                     &state.db, row, &message,
                 ))
@@ -399,6 +415,7 @@ pub(crate) async fn member_settled(
                     "notice",
                     Some(&agent),
                     &format!("{} stopped.", identifier(&agent.name)),
+                    Vec::new(),
                 )
                 .await?;
                 Box::pin(crate::services::machine_activity_service::publish_group(
@@ -414,6 +431,7 @@ pub(crate) async fn member_settled(
                     "notice",
                     Some(&agent),
                     &format!("{} could not reply ({code}).", identifier(&agent.name)),
+                    Vec::new(),
                 )
                 .await?;
                 Box::pin(crate::services::machine_activity_service::publish_group(
@@ -676,7 +694,7 @@ pub(crate) async fn group_note(
         "You are {} in the group chat {} with the user and {}. Your reply is posted to the \
         group as you. Answer what was asked of you. To hand work to a member write their \
         @name; mention nobody when you are done or answering the user. The user cannot see \
-        confirmation cards here: when an action needs confirmation, ask them to reply with \
+        confirmation cards here: only when a tool result contains a confirmation card, ask them to reply with \
         its confirm_phrase (for example \"yes 4821\"). When a result has review_url instead \
         of confirm_phrase, send that full URL so the owner can review all files in NyxID. \
         Group replies never approve publication of a skill draft.",

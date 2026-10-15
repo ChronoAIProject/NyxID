@@ -152,12 +152,34 @@ impl DiscordAdapter {
             }
             request.multipart(form)
         };
-        let response = support::json(request).await?;
+        let has_media = !reply.attachments.is_empty();
+        let response = if has_media {
+            let response =
+                media::platform_json(request, "Discord", UNREACHABLE_TARGET_MARKERS).await?;
+            if response.get("code").is_some() && response.get("message").is_some() {
+                return Err(
+                    crate::services::channel_platform::classify_upstream_refusal(
+                        "Discord",
+                        response["message"].as_str().unwrap_or("provider refusal"),
+                        UNREACHABLE_TARGET_MARKERS,
+                    ),
+                );
+            }
+            response
+        } else {
+            support::json(request).await?
+        };
         response["id"]
             .as_str()
             .filter(|id| support::number(id))
             .map(|id| Some(id.into()))
-            .ok_or_else(threads::unavailable)
+            .ok_or_else(|| {
+                if has_media {
+                    media::upload_failed()
+                } else {
+                    threads::unavailable()
+                }
+            })
     }
 
     pub(super) async fn history_in_thread(

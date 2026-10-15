@@ -206,3 +206,55 @@ describe("Tools management direct URL guard", () => {
       await expect(result).rejects.toMatchObject({ options: { to: "/tools" } });
   });
 });
+
+describe("Feature flag admin route boundary", () => {
+  const admin = Object.values(router.routesById).find(
+    (route) => route.fullPath === "/admin",
+  )!;
+  const guard = admin.options.beforeLoad!;
+  const flagUser: User = {
+    ...catalogUser,
+    is_operator: false,
+    role: "user",
+    capabilities: { read_feature_flags: true, create_feature_flags: true },
+  };
+  it("allows regular feature flag role holders to open their page", async () => {
+    useAuthStore.setState({
+      user: flagUser,
+      isAuthenticated: true,
+      isLoading: false,
+    });
+    await expect(
+      Promise.resolve().then(() =>
+        guard({ location: { pathname: "/admin/feature-flags" } } as never),
+      ),
+    ).resolves.toBeUndefined();
+  });
+  it.each(["/admin/users", "/admin/roles", "/admin/billing", "/admin/usage"])(
+    "redirects flag-only users away from %s",
+    async (pathname) => {
+      useAuthStore.setState({
+        user: flagUser,
+        isAuthenticated: true,
+        isLoading: false,
+      });
+      await expect(
+        Promise.resolve().then(() =>
+          guard({ location: { pathname } } as never),
+        ),
+      ).rejects.toMatchObject({ options: { to: "/admin/feature-flags" } });
+    },
+  );
+  it("rejects a plain user from feature flag administration", async () => {
+    useAuthStore.setState({
+      user: { ...flagUser, capabilities: undefined },
+      isAuthenticated: true,
+      isLoading: false,
+    });
+    await expect(
+      Promise.resolve().then(() =>
+        guard({ location: { pathname: "/admin/feature-flags" } } as never),
+      ),
+    ).rejects.toMatchObject({ options: { to: "/dashboard" } });
+  });
+});

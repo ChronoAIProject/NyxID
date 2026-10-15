@@ -242,7 +242,7 @@ it("confirms destructive actions by default and saves only a changed access mode
   const mode = await within(page).findByRole("combobox", { name: "Access mode" });
   expect(mode).toHaveTextContent("Auto");
   expect(
-    within(page).getByText("Acts on ordinary requests; asks before sensitive or destructive actions."),
+    within(page).getByText("Acts on its own; asks before sensitive or destructive actions."),
   ).toBeVisible();
   const save = within(page).getByRole("button", { name: "Save settings" });
   expect(save).toBeDisabled();

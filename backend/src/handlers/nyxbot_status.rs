@@ -31,6 +31,7 @@ const FIRST_LOOKBACK_HOURS: i64 = 1;
 /// Admission records outlive this, so older accepted messages are not judged.
 const JUDGE_WINDOW_HOURS: i64 = 12;
 
+// Preserve unknown labels verbatim here, including the generic "chat app".
 fn platform_name(platform: &str) -> &str {
     match platform {
         "telegram" | "telegram-new" => "Telegram",

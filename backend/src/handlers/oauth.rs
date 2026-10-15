@@ -101,6 +101,18 @@ pub struct ConsentDecisionForm {
     pub service_access_mode: Option<ServiceAccessMode>,
     #[serde(default)]
     pub requested_service_ids: Vec<String>,
+    /// Older consent pages submitted controls the server never enforced.
+    #[serde(default)]
+    pub write_access: Option<String>,
+}
+
+fn validate_consent_write_access(write_access: Option<&str>) -> AppResult<()> {
+    match write_access {
+        None | Some("all") => Ok(()),
+        _ => Err(AppError::BadRequest(
+            "Read-only service access is not supported. Reload the consent page to review the supported permissions.".to_string(),
+        )),
+    }
 }
 
 fn default_allow_all_services_form() -> bool {
@@ -938,6 +950,8 @@ pub async fn authorize_decision(
     if form.decision != "allow" {
         return Err(AppError::BadRequest("Invalid consent decision".to_string()));
     }
+
+    validate_consent_write_access(form.write_access.as_deref())?;
 
     let (client, validated_scope) = validate_authorize_request(&state, &params).await?;
 
@@ -3795,6 +3809,21 @@ mod wire_decoding_tests {
     }
 
     #[tokio::test]
+    async fn consent_decision_rejects_unenforced_read_only_choices_from_stale_pages() {
+        for choice in ["none", "selected", "unknown"] {
+            let body = format!(
+                "response_type=code&client_id=c1&redirect_uri=http%3A%2F%2Flocalhost%2Fcb&decision=allow&write_access={choice}"
+            );
+            let Form(form) = Form::<ConsentDecisionForm>::from_request(form_request(&body), &())
+                .await
+                .unwrap();
+            assert!(super::validate_consent_write_access(form.write_access.as_deref()).is_err());
+        }
+        assert!(super::validate_consent_write_access(None).is_ok());
+        assert!(super::validate_consent_write_access(Some("all")).is_ok());
+    }
+
+    #[tokio::test]
     async fn consent_decision_form_defaults_absent_vec_fields_to_empty() {
         let body = "response_type=code&client_id=c1&redirect_uri=http%3A%2F%2Flocalhost%2Fcb\
              &decision=allow&allow_all_services=true";
@@ -4829,11 +4858,47 @@ mod tests {
         let consent_request = sign_consent_request(&state, &user_id, &params, "openid")
             .expect("sign consent request");
 
+        for write_access in ["none", "selected"] {
+            let stale_form: ConsentDecisionForm = serde_json::from_value(serde_json::json!({
+                "response_type": "code", "client_id": client_id,
+                "redirect_uri": params.redirect_uri, "decision": "allow",
+                "allow_all_services": true, "write_access": write_access,
+                "consent_request": consent_request,
+            }))
+            .unwrap();
+            let error = authorize_decision(
+                State(state.clone()),
+                OptionalAuthUser(Some(crate::test_utils::test_auth_user(&user_id))),
+                TelemetryContext::default(),
+                Form(stale_form),
+            )
+            .await
+            .expect_err("stale read-only controls must not grant full access");
+            assert!(
+                matches!(error, AppError::BadRequest(message) if message.contains("Read-only service access"))
+            );
+            assert_eq!(
+                db.collection::<Consent>(crate::models::consent::COLLECTION_NAME)
+                    .count_documents(doc! { "user_id": &user_id })
+                    .await
+                    .unwrap(),
+                0
+            );
+            assert_eq!(
+                db.collection::<AuthorizationCode>(AUTH_CODES)
+                    .count_documents(doc! { "user_id": &user_id })
+                    .await
+                    .unwrap(),
+                0
+            );
+        }
+
         let response = authorize_decision(
             State(state),
             OptionalAuthUser(Some(crate::test_utils::test_auth_user(&user_id))),
             TelemetryContext::default(),
             Form(ConsentDecisionForm {
+                write_access: None,
                 service_access_mode: None,
                 requested_service_ids: Vec::new(),
                 response_type: "code".to_string(),
@@ -5321,6 +5386,7 @@ mod tests {
             OptionalAuthUser(Some(crate::test_utils::test_auth_user(&user_id))),
             TelemetryContext::default(),
             Form(ConsentDecisionForm {
+                write_access: None,
                 service_access_mode: None,
                 requested_service_ids: Vec::new(),
                 response_type: params.response_type.clone(),
@@ -6129,6 +6195,7 @@ mod tests {
             OptionalAuthUser(Some(crate::test_utils::test_auth_user(&user_id))),
             TelemetryContext::default(),
             Form(ConsentDecisionForm {
+                write_access: None,
                 service_access_mode: None,
                 requested_service_ids: Vec::new(),
                 response_type: "code".to_string(),

@@ -1601,6 +1601,7 @@ async fn stop_fences_issued_machine_turns_cancels_signed_jobs_and_allows_a_new_t
         &f.state.db,
         &f.owner,
         &super::assistant_nyxagent::TurnRequest {
+            acknowledgement_id: None,
             retry_of: None,
             attachment_ids: Vec::new(),
             agent_id: None,
