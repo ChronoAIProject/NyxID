@@ -4,13 +4,14 @@ use crate::{
     AppState,
     errors::{AppError, AppResult},
     models::{
+        assistant_conversation::{AssistantConversation, COLLECTION_NAME as CONVERSATIONS},
         machine_job::{COLLECTION_NAME as JOBS, MachineJob},
         node::{COLLECTION_NAME as NODES, Node, NodeStatus},
     },
     services::{assistant_acknowledgement_service::ChatAuthority, org_service},
 };
 use chrono::{Duration, Utc};
-use futures::TryStreamExt;
+use futures::{StreamExt, TryStreamExt};
 use mongodb::{
     Database,
     bson::{self, doc},
@@ -593,4 +594,72 @@ async fn fence_turn_operation_in_session(
         }
     }
     Ok(())
+}
+
+pub(crate) async fn cancel_conversation(state: &AppState, user: &str, id: &str) -> AppResult<()> {
+    let row = state
+        .db
+        .collection::<AssistantConversation>(CONVERSATIONS)
+        .find_one_and_update(
+            doc! {"_id":id,"user_id":user,"active_turn":{"$ne":null}},
+            doc! {"$set":{"active_turn.stop_requested":true}},
+        )
+        .return_document(mongodb::options::ReturnDocument::After)
+        .await?;
+    let mut nodes: std::collections::HashSet<String> = row
+        .as_ref()
+        .and_then(|r| r.active_turn.as_ref())
+        .map(|t| t.machine_node_ids.iter().cloned().collect())
+        .unwrap_or_default();
+    let mut jobs = state
+        .db
+        .collection::<MachineJob>(JOBS)
+        .find(doc! {"conversation_id":id,"user_id":user,"state":"running"})
+        .await?;
+    while let Some(job) = jobs.next().await {
+        nodes.insert(job?.node_id);
+    }
+    state
+        .db
+        .collection::<MachineJob>(JOBS)
+        .update_many(
+            doc! {"conversation_id":id,"user_id":user,"state":"running"},
+            doc! {"$set":{"state":"finished","finished_at":bson::DateTime::now()}},
+        )
+        .await?;
+    // Cancelling every job in this conversation also covers background jobs
+    // started by an earlier turn. New turns have new node admission scopes.
+    let args = json!({"conversation_id":id,"turn_id":row.as_ref().and_then(|r|r.active_turn.as_ref()).map(|t|t.turn_id.as_str()).unwrap_or_default()});
+    futures::stream::iter(nodes)
+        .for_each_concurrent(16, |node| {
+            let args = args.clone();
+            async move {
+                send_cancel(state, &node, args).await;
+            }
+        })
+        .await;
+    Ok(())
+}
+
+pub(crate) async fn send_cancel(state: &AppState, id: &str, args: serde_json::Value) {
+    let work = async {
+        if let Some(node) = state
+            .db
+            .collection::<Node>(NODES)
+            .find_one(doc! {"_id":id})
+            .await?
+        {
+            dispatch(state, &node, nyxid_machine::Operation::Cancel, args).await?;
+        }
+        AppResult::Ok(())
+    };
+    if !tokio::time::timeout(std::time::Duration::from_millis(800), work)
+        .await
+        .is_ok_and(|r| r.is_ok())
+    {
+        tracing::warn!(
+            node_id = id,
+            "Machine stop delivery pending or node offline"
+        );
+    }
 }

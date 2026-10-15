@@ -21,17 +21,16 @@ use std::{
     sync::LazyLock,
     time::{Duration, Instant},
 };
-use tokio::sync::{Mutex, broadcast, oneshot};
-use tokio_util::task::AbortOnDropHandle;
+use tokio::sync::{Mutex, broadcast};
 use uuid::Uuid;
 
-use crate::services::assistant_nyxagent_runtime::{
-    Events, SettledExecution, complete_turn, continue_turn, emit_text_suffix,
-    sanitize_upstream_request_id, stream_bounds, stream_timeout,
-};
+#[cfg(test)]
+use crate::services::assistant_nyxagent::TurnError;
+use crate::services::assistant_nyxagent_runtime::Events;
 #[cfg(test)]
 use crate::services::assistant_nyxagent_runtime::{
-    STREAM_BOUNDS, StreamBounds, TEST_STREAM_BOUNDS,
+    STREAM_BOUNDS, SettledExecution, StreamBounds, TEST_STREAM_BOUNDS, complete_turn,
+    proxy_turn_error, sanitize_upstream_request_id, stream_timeout, upstream_error_code,
 };
 
 use crate::{
@@ -42,10 +41,7 @@ use crate::{
     services::{
         assistant_acknowledgement_service as acknowledgements,
         assistant_agent_credential_service::{self as credentials, AssistantCredential},
-        assistant_nyxagent::{
-            self as engine, RecoveryAction, ResponseStream, TurnError, TurnResult,
-        },
-        assistant_service,
+        assistant_nyxagent as engine, assistant_service,
         billing::route_inventory::BillingRoutePolicy,
     },
 };
@@ -1362,6 +1358,30 @@ async fn proxy(
     turn_id: Option<&str>,
     policy: Option<BillingRoutePolicy>,
 ) -> AppResult<Response> {
+    proxy_raw(
+        state,
+        auth,
+        credential.raw_key.as_str(),
+        method,
+        path,
+        body,
+        turn_id,
+        policy,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn proxy_raw(
+    state: &AppState,
+    auth: &AuthUser,
+    raw_key: &str,
+    method: &str,
+    path: &str,
+    body: Option<Value>,
+    turn_id: Option<&str>,
+    policy: Option<BillingRoutePolicy>,
+) -> AppResult<Response> {
     let service =
         assistant_service::resolve_admin_service_by_slug(&state.db, engine::SERVICE_SLUG).await?;
     if !engine::row_contract(Some(&service), None).valid() {
@@ -1391,10 +1411,7 @@ async fn proxy(
     if let Some(policy) = policy {
         request.extensions_mut().insert(policy);
     }
-    let mut headers = vec![(
-        "authorization".into(),
-        format!("Bearer {}", credential.raw_key.as_str()),
-    )];
+    let mut headers = vec![("authorization".into(), format!("Bearer {}", raw_key))];
     if let Some(turn_id) = turn_id {
         headers.push(("idempotency-key".into(), turn_id.into()));
     }
@@ -1408,6 +1425,50 @@ async fn proxy(
         &mut String::new(),
     )
     .await
+}
+
+struct HttpNyxAgentEgress {
+    state: AppState,
+    auth: AuthUser,
+}
+
+pub(crate) fn http_egress(
+    state: AppState,
+    auth: AuthUser,
+) -> std::sync::Arc<dyn crate::services::platform_manager_contract::NyxAgentEgress> {
+    std::sync::Arc::new(HttpNyxAgentEgress { state, auth })
+}
+
+#[async_trait::async_trait]
+impl crate::services::platform_manager_contract::NyxAgentEgress for HttpNyxAgentEgress {
+    async fn request(
+        &self,
+        context: &crate::services::platform_manager_contract::NyxAgentExecutionContext,
+        credential: &crate::services::platform_manager_contract::RuntimeCredential,
+        request: crate::services::platform_manager_contract::NyxAgentRequest,
+    ) -> AppResult<Response> {
+        let crate::services::platform_manager_contract::NyxAgentExecutionContext::Owner {
+            user_id,
+            ..
+        } = context
+        else {
+            return Err(AppError::Forbidden("Owner execution required".into()));
+        };
+        if user_id != &self.auth.user_id.to_string() {
+            return Err(AppError::Forbidden("Owner execution required".into()));
+        }
+        proxy_raw(
+            &self.state,
+            &self.auth,
+            credential.raw_key.as_str(),
+            request.method.as_str(),
+            &request.relative_path,
+            request.body,
+            (!request.idempotency_key.is_empty()).then_some(request.idempotency_key.as_str()),
+            request.billing_policy,
+        )
+        .await
+    }
 }
 
 pub async fn turns(
@@ -1650,182 +1711,46 @@ async fn run_turn(
     auth: AuthUser,
     row: AssistantConversation,
     text: String,
-    mut credential: AssistantCredential,
+    credential: AssistantCredential,
     policy: Option<BillingRoutePolicy>,
     permit: DirectChatPermit,
-    mut events: Events,
+    events: Events,
 ) {
-    let turn_id = row
-        .active_turn
-        .as_ref()
-        .expect("claimed turn")
-        .turn_id
-        .clone();
-    let message_id = Uuid::new_v4().to_string();
-    let block_id = format!("{message_id}-text");
-    let (heartbeat_stop, mut heartbeat_stop_rx) = oneshot::channel();
-    let heartbeat_db = state.db.clone();
-    let heartbeat_user = row.user_id.clone();
-    let heartbeat_conversation = row.id.clone();
-    let heartbeat_turn = turn_id.clone();
-    // AbortOnDropHandle ties the child to this worker: a panic or task abort
-    // cannot leave a fresh heartbeat behind to hide an orphaned turn.
-    let heartbeat_task = AbortOnDropHandle::new(tokio::spawn(async move {
-        let mut interval =
-            tokio::time::interval(Duration::from_secs(engine::ACTIVE_TURN_HEARTBEAT_SECS));
-        interval.tick().await;
-        loop {
-            tokio::select! {
-                _ = &mut heartbeat_stop_rx => break,
-                _ = interval.tick() => {
-                    match engine::heartbeat(&heartbeat_db, &heartbeat_user, &heartbeat_conversation, &heartbeat_turn).await {
-                        Ok(true) => {}
-                        // The turn was fenced (stopped, reclaimed or deleted).
-                        Ok(false) => break,
-                        // A transient database error must not silence a live
-                        // worker: the orphan sweep would reclaim its turn. Retry
-                        // on the next tick.
-                        Err(_) => {}
-                    }
-                }
-            }
-        }
-    }));
-    events.emit(
-        "turn.status",
-        json!({"conversation_id": row.id, "turn_id": turn_id, "status": "running"}),
-    );
-    events.emit(
-        "message.started",
-        json!({"message_id": message_id, "role": "assistant"}),
-    );
-    events.emit(
-        "block.started",
-        json!({
-            "message_id": message_id,
-            "block_id": block_id,
-            "index": 0,
-            "block": {"type": "text", "block_id": block_id, "text": ""},
-        }),
-    );
-    let mut partial = String::new();
-    let mut instruction_context = None;
-    let mut result = {
-        // Execution includes upload planning and upstream streaming. Keep that
-        // state off the caller's stack when this task is created by a tool.
-        let mut execution = Box::pin(execute_turn(
-            &state,
-            &auth,
-            &row,
-            &text,
-            &mut credential,
-            policy,
-            &mut events,
-            &block_id,
-            &mut partial,
-            &mut instruction_context,
-        ));
-        tokio::select! {
-            result = &mut execution => result,
-            () = permit.cancelled() => Err(TurnError::internal("assistant_unavailable", "permit")),
-            error = watch_stop(&state, &row, &turn_id) => Err(error),
-            () = tokio::time::sleep(stream_bounds().turn_cap) => {
-                Err(TurnError::internal("turn_timeout", "turn_deadline"))
-            }
-        }
-    }
-    .unwrap_or_else(|error| TurnResult {
-        text: partial,
-        session_id: None,
-        response_id: None,
-        error: Some(error),
-    });
-    if result
-        .error
-        .as_ref()
-        .is_some_and(|error| error.code == "cancelled")
-    {
-        let _ = super::machine_cancel::conversation(&state, &row.user_id, &row.id).await;
-    }
-    // Never echo the system-managed credential, even if an upstream reflects it.
-    result.text = result
-        .text
-        .replace(credential.raw_key.as_str(), "[redacted]");
-    let settled = complete_turn(
-        &state.db,
-        &row,
-        &turn_id,
-        &message_id,
-        &block_id,
-        &result,
+    let settled = crate::services::assistant_nyxagent_runtime::run_owner_turn(
+        state.clone(),
+        http_egress(state.clone(), auth.clone()),
+        row.clone(),
+        text,
+        credential,
+        policy,
         permit,
         events,
-        Duration::from_secs(engine::SETTLEMENT_GRACE_SECS),
-        || {
-            engine::finish_turn_with_instructions(
-                &state.db,
-                &row,
-                &credential.api_key_id,
-                &message_id,
-                &result,
-                instruction_context.as_ref().map(|context| &context.binding),
-            )
-        },
     )
     .await;
-    if let SettledExecution::Saved { message_id, error } = settled {
-        tracing::debug!(conversation_id = %row.id, message_id, "Assistant reply settled");
-        if error.is_none()
+    if let Some(settled) = settled {
+        tracing::debug!(conversation_id = %row.id, message_id = %settled.message_id, "Assistant reply settled");
+        if settled.error.is_none()
             && row.message_count == 1
             && crate::services::assistant_title_service::eligible(&row)
         {
-            super::assistant_titles::spawn(state.clone(), auth.clone(), row.id.clone());
+            super::assistant_titles::spawn(state.clone(), auth, row.id.clone());
         }
-        // Team wake-ups and channel deliveries follow a durable settlement only.
-        super::assistant_team::after_turn_boxed(
-            state.clone(),
-            row.clone(),
-            result.text.clone(),
-            error,
-        )
-        .await;
-    }
-    let _ = heartbeat_stop.send(());
-    let _ = heartbeat_task.await;
-}
-
-async fn watch_stop(state: &AppState, row: &AssistantConversation, turn_id: &str) -> TurnError {
-    loop {
-        match engine::stop_requested(&state.db, &row.user_id, &row.id, turn_id).await {
-            Ok(false) => tokio::time::sleep(Duration::from_millis(250)).await,
-            Ok(true) => return TurnError::internal("cancelled", "stop"),
-            Err(_) => return TurnError::internal("assistant_unavailable", "stop"),
-        }
+        super::assistant_team::after_turn_boxed(state, row, settled.text, settled.error).await;
     }
 }
 
-/// Typed proxy failures collapse to `assistant_unavailable`, except a billing
-/// refusal, which keeps its stable code so the client can offer a top-up.
-fn proxy_turn_error(error: AppError) -> TurnError {
-    match error {
-        AppError::InsufficientCredits => TurnError::internal("insufficient_credits", "connect"),
-        _ => TurnError::internal("assistant_unavailable", "connect"),
-    }
-}
+#[cfg(test)]
+#[path = "assistant_nyxagent_tests.rs"]
+mod tests;
 
-/// Reads the NyxAgent `error.code` envelope, or NyxID's own flat envelope
-/// (`{"error":"insufficient_credits",...}`) on a 402. Other flat categories are
-/// not turn codes and stay unrecognized.
-fn upstream_error_code(status: u16, envelope: &Value) -> &str {
-    if let Some(code) = envelope["error"]["code"].as_str() {
-        return code;
-    }
-    if status == 402 && envelope["error"].as_str() == Some("insufficient_credits") {
-        return "insufficient_credits";
-    }
-    ""
-}
+#[path = "assistant_nyxagent_steering.rs"]
+mod steering;
+pub use steering::{capabilities, steer};
 
+#[cfg(test)]
+use crate::services::assistant_nyxagent_runtime::images;
+
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 async fn execute_turn(
     state: &AppState,
@@ -1838,11 +1763,14 @@ async fn execute_turn(
     block_id: &str,
     partial: &mut String,
     instruction_context: &mut Option<crate::services::assistant_instruction_context::Prepared>,
-) -> Result<TurnResult, TurnError> {
-    let mut tool_images = images::ToolImages::default();
-    let outcome = Box::pin(execute_turn_inner(
+) -> Result<engine::TurnResult, TurnError> {
+    let egress = http_egress(state.clone(), auth.clone());
+    let context = crate::services::assistant_nyxagent_runtime::owner_context(row)
+        .map_err(|_| TurnError::new("assistant_unavailable"))?;
+    crate::services::assistant_nyxagent_runtime::execute_owner_turn(
         state,
-        auth,
+        egress.as_ref(),
+        &context,
         row,
         text,
         credential,
@@ -1851,744 +1779,6 @@ async fn execute_turn(
         block_id,
         partial,
         instruction_context,
-        &mut tool_images,
-    ))
-    .await;
-    if outcome.as_ref().is_err() || outcome.as_ref().is_ok_and(|r| r.error.is_some()) {
-        tool_images.failed(state, row).await;
-    }
-    if tool_images.rounds > 0
-        && let Some(mut fallback) = tool_images.fallback.take()
-        && (outcome.as_ref().is_err_and(|e| e.code != "cancelled")
-            || outcome
-                .as_ref()
-                .is_ok_and(|r| r.error.as_ref().is_some_and(|e| e.code != "cancelled")))
-    {
-        events.emit("turn.notice", json!({"code":"image_input_unavailable", "message":"Tool images could not be viewed; the completed answer was preserved."}));
-        engine::clear_binding(
-            &state.db,
-            &row.user_id,
-            &row.id,
-            &row.active_turn.as_ref().expect("claimed turn").turn_id,
-            "image_input_unavailable",
-        )
-        .await
-        .map_err(|_| TurnError::internal("assistant_unavailable", "recovery"))?;
-        fallback.session_id = None;
-        fallback.response_id = None;
-        *instruction_context = None;
-        *partial = fallback.text.clone();
-        return Ok(fallback);
-    }
-    outcome
+    )
+    .await
 }
-
-#[allow(clippy::too_many_arguments)]
-async fn execute_turn_inner(
-    state: &AppState,
-    auth: &AuthUser,
-    row: &AssistantConversation,
-    text: &str,
-    credential: &mut AssistantCredential,
-    policy: Option<BillingRoutePolicy>,
-    events: &mut Events,
-    block_id: &str,
-    partial: &mut String,
-    instruction_context: &mut Option<crate::services::assistant_instruction_context::Prepared>,
-    tool_images: &mut images::ToolImages,
-) -> Result<TurnResult, TurnError> {
-    let turn_id = &row.active_turn.as_ref().expect("claimed turn").turn_id;
-    let mut history = engine::messages(
-        &state.db,
-        &row.user_id,
-        &row.id,
-        20,
-        Some(row.message_count + 1),
-    )
-    .await
-    .map_err(|_| TurnError::internal("assistant_unavailable", "prepare"))?;
-    // Queued speech is visible to the human, but never becomes an instruction
-    // until its own claim. Include earlier completed replies even if their
-    // sequence is after the input that queued this turn.
-    history.retain(|message| !message.execution_pending && message.turn_id != *turn_id);
-    // A guest's recap holds only what the chat itself saw.
-    if row.guest_turn {
-        use crate::models::assistant_conversation::TurnOrigin;
-        // Only the chat's own messages and the replies to them; never NyxID's
-        // notices, event-turn replies (not always delivered) or anything
-        // said in the app.
-        history.retain(|message| {
-            message.origin == Some(TurnOrigin::Channel)
-                && matches!(message.role.as_str(), "user" | "assistant")
-        });
-    }
-    // Cards decided while an earlier turn was still running never reached the
-    // model: NyxAgent ends a turn on a card and answers repeats locally. Report
-    // decisions made since the previous user message; a lookup failure only
-    // omits the note.
-    let previous = engine::previous_user_message(
-        &state.db,
-        &row.user_id,
-        &row.id,
-        row.active_turn
-            .as_ref()
-            .and_then(|turn| turn.initiating_message_seq)
-            .or(Some(row.message_count)),
-    )
-    .await
-    .unwrap_or_default()
-    .map(|message| message.created_at);
-    let mut decisions = match previous.filter(|_| !row.guest_turn) {
-        Some(previous) => {
-            acknowledgements::decided_since(&state.db, &row.user_id, &row.id, previous)
-                .await
-                .map(|rows| acknowledgements::decisions_note(&rows))
-                .unwrap_or_default()
-        }
-        None => String::new(),
-    };
-    // Turn-scoped NyxID notes: team state, direct chats, drained events and
-    // channel sender context. Lookup failures only omit a note.
-    let agent =
-        match crate::services::assistant_team_service::agent_for_conversation(&state.db, row).await
-        {
-            Ok(agent) => Some(agent),
-            Err(_) if row.agent_owner_id.is_some() => {
-                return Err(TurnError::internal("assistant_unavailable", "prepare"));
-            }
-            Err(_) => None,
-        };
-    decisions
-        .push_str(&super::assistant_team::turn_notes(state, row, agent.as_ref(), previous).await);
-    decisions.push_str(
-        &crate::services::async_service_operation::input_context(
-            &state.db,
-            &state.encryption_keys,
-            row,
-        )
-        .await
-        .map_err(|_| TurnError::internal("assistant_unavailable", "prepare"))?,
-    );
-    // Rollout-gated authoring rules are instructions, so they belong in the
-    // stable (fingerprinted) part rather than the per-turn quoted context.
-    let guidance = if !row.guest_turn
-        && crate::services::assistant_skill_authoring::enabled(&state.db, &row.user_id)
-            .await
-            .unwrap_or(false)
-    {
-        if row.is_subagent() {
-            crate::services::assistant_skill_authoring::SPECIALIST_GUIDANCE
-        } else {
-            crate::services::assistant_skill_authoring::GUIDANCE
-        }
-    } else {
-        ""
-    };
-    let prepared = crate::services::assistant_instruction_context::Prepared::with_guidance(
-        state.audit_chain_hmac_key.as_ref().as_ref(),
-        row,
-        agent.as_ref(),
-        &history,
-        guidance,
-    )
-    .map_err(|_| TurnError::internal("assistant_unavailable", "prepare"))?;
-    *instruction_context = Some(prepared);
-    let context = instruction_context.as_mut().expect("prepared above");
-    // A recap leads with the durable checkpoint; guest audiences never get it.
-    if !row.guest_turn {
-        context.set_checkpoint(
-            engine::checkpoint(&state.db, &row.user_id, &row.id)
-                .await
-                .map_err(|_| TurnError::internal("assistant_unavailable", "prepare"))?,
-        );
-    }
-    let mut binding = row.nyxagent_session_id.clone();
-    if context.reset {
-        engine::clear_binding(
-            &state.db,
-            &row.user_id,
-            &row.id,
-            turn_id,
-            "instructions_changed",
-        )
-        .await
-        .map_err(|_| TurnError::internal("assistant_unavailable", "prepare"))?;
-        binding = None;
-    }
-    let recap = binding.is_none()
-        && (context.reset
-            || row
-                .context_reset_reason
-                .as_deref()
-                .is_some_and(|reason| reason != "user_reset"));
-    if recap {
-        events.notice();
-    }
-    let saved_recap = tokio::sync::OnceCell::new();
-    let load_recap = || engine::recap(&state.db, row, &history, turn_id);
-    let mut prompt = context
-        .session_instructions(recap, &saved_recap, load_recap)
-        .await
-        .map_err(|_| TurnError::new("assistant_unavailable"))?;
-    let mut attachments = crate::services::assistant_upload_service::turn_attachments(
-        &state.db,
-        &row.user_id,
-        &row.id,
-        turn_id,
-    )
-    .await
-    .map_err(|_| TurnError::internal("assistant_unavailable", "prepare"))?;
-    let expired = Box::pin(crate::services::assistant_upload_retention::expired_ids(
-        &state.db,
-        &row.user_id,
-        &attachments.iter().map(|a| a.id.clone()).collect::<Vec<_>>(),
-    ))
-    .await
-    .map_err(|_| TurnError::internal("assistant_unavailable", "prepare"))?;
-    let mut listing = crate::services::assistant_upload_service::listing(&attachments);
-    if !expired.is_empty() {
-        listing.push_str(&format!(
-            "\nAttachments expired per retention policy; ask the owner to upload them again: {}",
-            serde_json::json!(expired)
-        ));
-        attachments.retain(|a| !expired.contains(&a.id));
-    }
-    let capabilities = if attachments
-        .iter()
-        .any(|a| a.origin == "user_upload" && a.content_type.starts_with("image/"))
-    {
-        steering::upstream_capabilities(state, auth, credential, policy).await
-    } else {
-        Value::Null
-    };
-    let (image_parts, omitted) = crate::services::assistant_upload_service::image_plan(
-        &attachments,
-        &capabilities,
-        &state.config.base_url,
-    );
-    if !omitted.is_empty() {
-        let notice = crate::services::assistant_upload_service::IMAGE_FALLBACK;
-        listing.push_str(&format!(
-            "\n{notice} Unviewable attachment IDs: {}",
-            json!(omitted)
-        ));
-    }
-    decisions.push_str(&listing);
-    // Persist the delivery outcome on metadata, so a reload does not hide the fallback.
-    for item in attachments
-        .iter()
-        .filter(|a| a.origin == "user_upload" && a.content_type.starts_with("image/"))
-    {
-        let status = if omitted.contains(&item.id) {
-            "unavailable"
-        } else {
-            "sent"
-        };
-        state
-            .db
-            .collection::<mongodb::bson::Document>(
-                crate::models::assistant_message::COLLECTION_NAME,
-            )
-            .update_one(
-                doc! {
-                    "user_id": &row.user_id,
-                    "conversation_id": &row.id,
-                    "turn_id": turn_id,
-                    "attachments.id": &item.id,
-                },
-                doc! {"$set": {"attachments.$.image_input": status}},
-            )
-            .await
-            .map_err(|_| TurnError::internal("assistant_unavailable", "prepare"))?;
-        if let Some(group_id) = &row.group_id {
-            let group_owner = if row.group_request_id.is_some() {
-                row.agent_owner_id.as_deref().unwrap_or(&row.user_id)
-            } else {
-                &row.user_id
-            };
-            state
-                .db
-                .collection::<mongodb::bson::Document>(
-                    crate::models::assistant_group::MESSAGES_COLLECTION_NAME,
-                )
-                .update_one(
-                    doc! {"user_id": group_owner,"group_id": group_id,"attachments.id": &item.id},
-                    doc! {"$set": {"attachments.$.image_input":status}},
-                )
-                .await
-                .map_err(|_| TurnError::internal("assistant_unavailable", "prepare"))?;
-        }
-    }
-    // The notice prompts a transcript refresh; publish only after the fallback
-    // metadata is durable, so that refresh cannot miss the explanation.
-    if !omitted.is_empty() {
-        events.emit(
-            "turn.notice",
-            json!({
-                "code": "image_input_unavailable",
-                "message": crate::services::assistant_upload_service::IMAGE_FALLBACK,
-            }),
-        );
-    }
-    let settings = crate::services::assistant_settings_service::get(&state.db, &row.user_id)
-        .await
-        .map_err(|_| TurnError::internal("assistant_unavailable", "prepare"))?;
-    let mut continuations = crate::services::assistant_continuation::Continuations::new(
-        settings.max_auto_continuations,
-    );
-    let mut completed = String::new();
-    let mut emitted = String::new();
-    let mut input = if text.trim().is_empty() {
-        "Please discuss the attachments in this message."
-    } else {
-        text
-    };
-    let mut recovery = engine::Recovery::default();
-    loop {
-        // History and upload preparation can outlive the initial admission
-        // check. Recheck every bound source before model execution, including
-        // continuations; stop/expiry alone preserve already admitted work.
-        let turn = row.active_turn.as_ref().expect("claimed turn");
-        let origins: Vec<_> = match turn.origin {
-            crate::models::assistant_conversation::TurnOrigin::Channel => turn
-                .asked_from
-                .as_ref()
-                .or(row.channel.as_ref())
-                .into_iter()
-                .collect(),
-            crate::models::assistant_conversation::TurnOrigin::Event => {
-                let queued: Vec<_> = turn
-                    .events
-                    .iter()
-                    .flat_map(|e| &e.reply_to)
-                    .filter(|o| o.thread.is_some())
-                    .collect();
-                if queued.is_empty() {
-                    row.channel.iter().collect()
-                } else {
-                    queued
-                }
-            }
-            _ => Vec::new(),
-        };
-        for origin in origins.into_iter().filter(|o| o.thread.is_some()) {
-            Box::pin(
-                crate::services::channel_thread_follow_service::validate_delivery(
-                    &state.db,
-                    &row.user_id,
-                    origin,
-                    &row.id,
-                ),
-            )
-            .await
-            .map_err(|_| TurnError::internal("assistant_unavailable", "prepare"))?;
-        }
-        if !crate::services::assistant_steering::set_running_response(&state.db, row, None)
-            .await
-            .map_err(|_| TurnError::internal("assistant_unavailable", "prepare"))?
-        {
-            return Err(TurnError::internal("cancelled", "stop"));
-        }
-        let request_key = if tool_images.fallback.is_some() {
-            format!("{turn_id}:images:{}", tool_images.rounds)
-        } else if continuations.count == 0 {
-            turn_id.clone()
-        } else {
-            format!("{turn_id}:continuation:{}", continuations.count)
-        };
-        tool_images.attempted(state, row).await;
-        let bounds = stream_bounds();
-        let deadline = tokio::time::Instant::now() + bounds.first_byte;
-        let response = tokio::time::timeout_at(
-            deadline,
-            proxy(
-                state,
-                auth,
-                credential,
-                "POST",
-                "v1/responses",
-                Some({
-                    let request_input = if tool_images.note.is_empty() {
-                        input.to_owned()
-                    } else {
-                        format!("{input}\n\n{}", tool_images.note)
-                    };
-                    let input = context.input_with_memory(
-                        if (continuations.count == 0 && tool_images.fallback.is_none())
-                            || binding.is_none()
-                        {
-                            // Recovery into a fresh session must restore the
-                            // turn facts that its discarded session had seen.
-                            &decisions
-                        } else {
-                            // Documents have no image part. Keep their listing
-                            // and availability notices visible on continuations
-                            // too, once per request, without repeating events.
-                            &listing
-                        },
-                        &request_input,
-                        continuations.count == 0 || binding.is_none(),
-                    );
-                    let mut body =
-                        engine::upstream_body(&row.model, &input, binding.as_deref(), &prompt);
-                    let parts = if !tool_images.parts.is_empty() {
-                        &tool_images.parts
-                    } else if continuations.count == 0 && tool_images.fallback.is_none() {
-                        &image_parts
-                    } else {
-                        &Vec::new()
-                    };
-                    if !parts.is_empty() {
-                        let mut content = vec![json!({"type":"input_text", "text":input})];
-                        content.extend(parts.clone());
-                        body["input"] = json!([{"role":"user", "content":content}]);
-                    }
-                    body
-                }),
-                Some(&request_key),
-                policy,
-            ),
-        )
-        .await
-        .map_err(|_| TurnError::internal("first_byte_timeout", "first_byte"))?
-        .map_err(proxy_turn_error)?;
-        if !response.status().is_success() {
-            if tool_images.fallback.is_some() {
-                let mut error = TurnError::internal("assistant_unavailable", "upstream_response");
-                error.http_status = Some(response.status().as_u16());
-                return Err(error);
-            }
-            let status = response.status().as_u16();
-            let upstream_request_id = response
-                .headers()
-                .get("x-request-id")
-                .and_then(|value| value.to_str().ok())
-                .and_then(sanitize_upstream_request_id);
-            let bytes = tokio::time::timeout(
-                Duration::from_secs(10),
-                axum::body::to_bytes(response.into_body(), 65536),
-            )
-            .await
-            .ok()
-            .and_then(Result::ok);
-            let envelope: Value = bytes
-                .as_ref()
-                .and_then(|bytes| serde_json::from_slice(bytes).ok())
-                .unwrap_or(Value::Null);
-            let code = upstream_error_code(status, &envelope);
-            if matches!(code, "tool_budget_exhausted" | "turn_timeout") {
-                let mut error = TurnError::new(code).at_stage("upstream_response");
-                error.http_status = Some(status);
-                match continue_turn(
-                    state,
-                    row,
-                    events,
-                    &mut continuations,
-                    binding.as_deref(),
-                    &error,
-                    partial,
-                )
-                .await
-                {
-                    Ok(true) => {
-                        input = crate::services::assistant_continuation::INSTRUCTION;
-                        continue;
-                    }
-                    Ok(false) => {
-                        return Ok(TurnResult {
-                            text: partial.clone(),
-                            session_id: binding,
-                            response_id: None,
-                            error: Some(error),
-                        });
-                    }
-                    Err(error) => {
-                        return Ok(TurnResult {
-                            text: partial.clone(),
-                            session_id: binding,
-                            response_id: None,
-                            error: Some(error),
-                        });
-                    }
-                }
-            }
-            match recovery.decide(status, code, binding.is_some()) {
-                RecoveryAction::Rebind => {
-                    events.emit(
-                        "turn.notice",
-                        json!({"code": "retrying", "message": "Retrying…"}),
-                    );
-                    engine::clear_binding(
-                        &state.db,
-                        &row.user_id,
-                        &row.id,
-                        turn_id,
-                        "session_lost",
-                    )
-                    .await
-                    .map_err(|_| TurnError::internal("assistant_unavailable", "recovery"))?;
-                    binding = None;
-                    context.fresh_session();
-                    prompt = context
-                        .session_instructions(true, &saved_recap, load_recap)
-                        .await
-                        .map_err(|_| TurnError::new("assistant_unavailable"))?;
-                    events.notice();
-                }
-                RecoveryAction::ReplaceCredential => {
-                    events.emit(
-                        "turn.notice",
-                        json!({"code": "retrying", "message": "Retrying…"}),
-                    );
-                    *credential = credentials::replace(
-                        &state.db,
-                        &state.encryption_keys,
-                        &row.user_id,
-                        &row.id,
-                        &credential.api_key_id,
-                    )
-                    .await
-                    .map_err(|_| TurnError::internal("agent_key_required", "recovery"))?;
-                    binding = None;
-                    context.fresh_session();
-                    prompt = context
-                        .session_instructions(true, &saved_recap, load_recap)
-                        .await
-                        .map_err(|_| TurnError::new("assistant_unavailable"))?;
-                    events.notice();
-                }
-                RecoveryAction::Backoff => {
-                    events.emit(
-                        "turn.notice",
-                        json!({"code": "retrying", "message": "Retrying…"}),
-                    );
-                    let jitter = u64::from(rand::random::<u16>() % 500);
-                    tokio::time::sleep(Duration::from_millis(
-                        (1 << recovery.retries) * 1000 + jitter,
-                    ))
-                    .await;
-                }
-                RecoveryAction::Fail => {
-                    let mut error = TurnError::new(if status == 401 || status == 403 {
-                        "agent_key_required"
-                    } else {
-                        code
-                    })
-                    .at_stage("upstream_response");
-                    // Keep the upstream's own (sanitized) code, never NyxID's mapping.
-                    error.upstream_code = TurnError::new(code).upstream_code;
-                    error.http_status = Some(status);
-                    error.upstream_request_id = upstream_request_id.map(String::into_boxed_str);
-                    return Err(error);
-                }
-            }
-            continue;
-        }
-        if !response
-            .headers()
-            .get("content-type")
-            .is_some_and(|v| v.to_str().is_ok_and(|v| v.starts_with("text/event-stream")))
-        {
-            let mut error = TurnError::internal("invalid_stream", "upstream_response");
-            error.http_status = Some(response.status().as_u16());
-            return Err(error);
-        }
-        let mut body = response.into_body().into_data_stream();
-        let mut decoder = ResponseStream::default();
-        // Any transport bytes, keepalive comments included, satisfy the
-        // first-byte bound. After that a transport-idle bound and a separate
-        // no-progress bound apply: keepalives keep the connection open but
-        // only data events (text, lifecycle, tool progress) are progress.
-        let mut received = false;
-        let mut last_transport_activity = tokio::time::Instant::now();
-        let mut last_semantic_progress = tokio::time::Instant::now();
-        let mut running_response_id: Option<String> = None;
-        let streamed: Result<(), TurnError> = async {
-            loop {
-                let timeout = if received {
-                    stream_timeout(
-                        bounds,
-                        last_transport_activity.elapsed(),
-                        last_semantic_progress.elapsed(),
-                    )
-                } else {
-                    deadline.saturating_duration_since(tokio::time::Instant::now())
-                };
-                let next = tokio::time::timeout(timeout, body.next())
-                    .await
-                    .map_err(|_| {
-                        if !received {
-                            TurnError::internal("first_byte_timeout", "first_byte")
-                        } else if last_semantic_progress.elapsed() >= bounds.no_progress {
-                            TurnError::internal("idle_timeout", "no_progress")
-                        } else {
-                            TurnError::internal("idle_timeout", "idle")
-                        }
-                    })?;
-                let Some(chunk) = next else {
-                    break;
-                };
-                let chunk = chunk.map_err(|_| TurnError::internal("invalid_stream", "stream"))?;
-                received = true;
-                last_transport_activity = tokio::time::Instant::now();
-                let before = decoder.data_events;
-                let decoded = decoder.push(&chunk);
-                if decoder.data_events != before {
-                    last_semantic_progress = tokio::time::Instant::now();
-                }
-                *partial = completed.clone()
-                    + &context.redact(
-                        &decoder
-                            .text
-                            .replace(credential.raw_key.as_str(), "[redacted]"),
-                    );
-                if partial.len() > engine::MAX_OUTPUT_BYTES {
-                    return Err(TurnError::internal("output_too_large", "stream"));
-                }
-                decoded?;
-                if let Some(mut created) = decoder.created.take() {
-                    created.credential_api_key_id = credential.api_key_id.clone();
-                    running_response_id = Some(created.response_id.clone());
-                    if !crate::services::assistant_steering::set_running_response(
-                        &state.db,
-                        row,
-                        Some(&created),
-                    )
-                    .await
-                    .map_err(|_| TurnError::internal("assistant_unavailable", "stream"))?
-                    {
-                        return Err(TurnError::internal("cancelled", "stop"));
-                    }
-                }
-                if decoder.terminal.is_some() {
-                    break;
-                }
-                let held = engine::secret_prefix_suffix(
-                    partial,
-                    &[
-                        credential.raw_key.as_str(),
-                        context.binding.marker.as_deref().unwrap_or(""),
-                    ],
-                );
-                let safe_end = partial.len() - held.len();
-                emit_text_suffix(events, block_id, &mut emitted, &partial[..safe_end]);
-            }
-            Ok(())
-        }
-        .await;
-        if let Err(mut error) = streamed {
-            if error.response_id.is_none() {
-                error.response_id = running_response_id.map(String::into_boxed_str);
-            }
-            return Err(error);
-        }
-        crate::services::assistant_steering::set_running_response(&state.db, row, None)
-            .await
-            .map_err(|_| TurnError::internal("assistant_unavailable", "stream"))?;
-        let mut result = decoder.terminal.ok_or_else(|| {
-            let mut error = TurnError::internal("invalid_stream", "stream");
-            error.response_id = running_response_id.map(String::into_boxed_str);
-            error
-        })?;
-        result.text = context.redact(
-            &result
-                .text
-                .replace(credential.raw_key.as_str(), "[redacted]"),
-        );
-        binding = result.session_id.clone().or(binding);
-        if tool_images.fallback.is_some() && result.error.is_some() {
-            result.text = completed + &result.text;
-            return Ok(result);
-        }
-        if result.error.is_none() {
-            result.text = completed.clone() + &result.text;
-            *partial = result.text.clone();
-            result.session_id = binding.clone();
-            tool_images.fallback = Some(result.clone());
-            tool_images.sent(state, row).await;
-            let prepared = if binding.is_some() {
-                match tool_images
-                    .prepare(state, auth, row, credential, policy)
-                    .await
-                {
-                    Ok(prepared) => prepared,
-                    Err(error) if error.code == "cancelled" => return Err(error),
-                    Err(_) => {
-                        tracing::warn!("Optional tool image preparation could not complete");
-                        false
-                    }
-                }
-            } else {
-                false
-            };
-            if prepared {
-                images::renew(
-                    state,
-                    row,
-                    binding.as_deref().expect("bound above"),
-                    events,
-                    tool_images.rounds,
-                )
-                .await?;
-                emit_text_suffix(events, block_id, &mut emitted, partial);
-                if !result.text.is_empty() {
-                    events.emit("block.delta", json!({"block_id":block_id,"text":"\n\n"}));
-                    emitted.push_str("\n\n");
-                }
-                completed = if result.text.is_empty() {
-                    String::new()
-                } else {
-                    format!("{}\n\n", result.text)
-                };
-                input = "Continue after viewing the tool images.";
-                continue;
-            }
-            tool_images.fallback = None;
-            return Ok(result);
-        }
-        if let Some(error) = &result.error {
-            match continue_turn(
-                state,
-                row,
-                events,
-                &mut continuations,
-                binding.as_deref(),
-                error,
-                &result.text,
-            )
-            .await
-            {
-                Ok(true) => {
-                    emit_text_suffix(events, block_id, &mut emitted, partial);
-                    if !partial.is_empty() {
-                        events.emit("block.delta", json!({"block_id":block_id,"text":"\n\n"}));
-                        emitted.push_str("\n\n");
-                    }
-                    completed = if partial.is_empty() {
-                        String::new()
-                    } else {
-                        format!("{partial}\n\n")
-                    };
-                    input = crate::services::assistant_continuation::INSTRUCTION;
-                    continue;
-                }
-                Err(error) => result.error = Some(error),
-                Ok(false) => {}
-            }
-        }
-        result.text = completed + &result.text;
-        result.session_id = binding;
-        return Ok(result);
-    }
-}
-
-#[cfg(test)]
-#[path = "assistant_nyxagent_tests.rs"]
-mod tests;
-
-#[path = "assistant_nyxagent_steering.rs"]
-mod steering;
-pub use steering::{capabilities, steer};
-
-#[path = "assistant_nyxagent_images.rs"]
-mod images;

@@ -3502,7 +3502,14 @@ async fn optional_image_preparation_read_failure_does_not_start_a_round() {
     let mut images = images::ToolImages::default();
     assert!(
         !images
-            .prepare(&state, &test_auth_user(OWNER), &row, &credential, None)
+            .prepare(
+                &state,
+                http_egress(state.clone(), test_auth_user(OWNER)).as_ref(),
+                &crate::services::assistant_nyxagent_runtime::owner_context(&row).unwrap(),
+                &row,
+                &credential,
+                None
+            )
             .await
             .unwrap()
     );
