@@ -32,6 +32,141 @@ use tokio::sync::oneshot;
 use tokio_util::task::AbortOnDropHandle;
 use uuid::Uuid;
 
+pub fn producer(
+    state: AppState,
+    egress: std::sync::Arc<dyn contract::NyxAgentEgress>,
+    public_runtime: std::sync::Arc<dyn contract::PublicNyxAgentRuntime>,
+) -> std::sync::Arc<dyn contract::NyxAgentExecutionProducer> {
+    std::sync::Arc::new(ExecutionProducer {
+        state,
+        egress,
+        public_runtime,
+    })
+}
+
+struct ExecutionProducer {
+    state: AppState,
+    egress: std::sync::Arc<dyn contract::NyxAgentEgress>,
+    public_runtime: std::sync::Arc<dyn contract::PublicNyxAgentRuntime>,
+}
+
+#[async_trait::async_trait]
+impl contract::NyxAgentExecutionProducer for ExecutionProducer {
+    async fn execute_nyxagent_turn(
+        &self,
+        db: &mongodb::Database,
+        context: contract::NyxAgentExecutionContext,
+        input: contract::TurnInput,
+        events: tokio::sync::mpsc::Sender<contract::ExecutionEvent>,
+    ) -> AppResult<()> {
+        // Public preparation is selected before feature, owner, history, key,
+        // limiter or agent lookup. A public context never enters the owner loop.
+        let (user_id, turn, origin) = match context {
+            contract::NyxAgentExecutionContext::Public(context) => {
+                let _prepared = self.public_runtime.prepare(db, &context, input).await?;
+                // The bounded public loop still requires accepted runtime proof.
+                return Err(super::platform_public_policy::unavailable());
+            }
+            contract::NyxAgentExecutionContext::Owner {
+                user_id,
+                turn,
+                platform_origin: Some(origin),
+            } => (user_id, turn, origin),
+            // Ordinary HTTP wrappers retain their real-auth egress adapter.
+            contract::NyxAgentExecutionContext::Owner {
+                platform_origin: None,
+                ..
+            } => return Err(AppError::AssistantTurnRequired),
+        };
+        engine::require_enabled(db, &user_id).await?;
+        let row = engine::get(db, &user_id, &turn.conversation_id).await?;
+        let expected = super::platform_personal_turn_service::model_origin(&origin);
+        let active = engine::live_turn(&row, Utc::now())
+            .filter(|active| {
+                active.turn_id == turn.turn_id
+                    && !active.stop_requested
+                    && active.platform_origin.as_ref() == Some(&expected)
+            })
+            .ok_or(AppError::AssistantTurnRequired)?;
+        if origin.authority.user_id != user_id
+            || row.platform_thread.as_ref() != Some(&expected.thread)
+        {
+            return Err(AppError::AssistantTurnRequired);
+        }
+        // Execution resumes the admitted input; the caller cannot replace it.
+        let seq = active
+            .initiating_message_seq
+            .ok_or(AppError::AssistantTurnRequired)?;
+        let message = db
+            .collection::<AssistantMessage>(crate::models::assistant_message::COLLECTION_NAME)
+            .find_one(doc! {
+                "conversation_id":&turn.conversation_id,"user_id":&user_id,
+                "turn_id":&turn.turn_id,"seq":seq,"role":{"$in":["user","system"]},
+            })
+            .await?
+            .ok_or(AppError::AssistantTurnRequired)?;
+        if message.text != input.text || message.platform_origin.as_ref() != Some(&expected) {
+            return Err(AppError::AssistantTurnRequired);
+        }
+        // Load only the existing encrypted key. No provisioning, authority
+        // convergence, admission, replacement or owner fallback occurs here.
+        let credential = credentials::load_for_conversation(
+            db,
+            &self.state.encryption_keys,
+            &user_id,
+            &turn.conversation_id,
+        )
+        .await?
+        .filter(|credential| credential.api_key_id == row.credential_api_key_id)
+        .ok_or(AppError::AssistantTurnRequired)?;
+        let permit = self
+            .state
+            .direct_chat_limiter
+            .try_acquire_pool("assistant_channel", &user_id, 2)
+            .await?
+            .ok_or(AppError::AssistantTurnActive)?;
+        let (sender, _) = broadcast::channel(256);
+        let saved = run_owner_turn(
+            self.state.clone(),
+            self.egress.clone(),
+            row.clone(),
+            message.text,
+            credential,
+            Some(BillingRoutePolicy::Metered(
+                super::billing::route_inventory::BillingIngress::Proxy,
+            )),
+            permit,
+            Events {
+                sender,
+                cursor: 0,
+                reset_notified: false,
+            },
+        )
+        .await
+        .ok_or(AppError::AssistantTurnRequired)?;
+        let _ = tokio::time::timeout(
+            Duration::from_secs(2),
+            events.send(contract::ExecutionEvent::ReplyReady(contract::ReplyRef {
+                turn: turn.clone(),
+                reply_id: saved.message_id,
+            })),
+        )
+        .await;
+        if saved.error.is_none()
+            && row.message_count == 1
+            && super::assistant_title_service::eligible(&row)
+        {
+            super::assistant_title_service::spawn(self.state.clone(), row.user_id, row.id);
+        }
+        let _ = tokio::time::timeout(
+            Duration::from_secs(2),
+            events.send(contract::ExecutionEvent::Settled { turn }),
+        )
+        .await;
+        Ok(())
+    }
+}
+
 pub(crate) struct Events {
     pub(crate) sender: broadcast::Sender<Value>,
     pub(crate) cursor: u64,
@@ -533,6 +668,20 @@ pub(crate) async fn run_owner_turn(
     permit: DirectChatPermit,
     mut events: Events,
 ) -> Option<OwnerTurnSettlement> {
+    if row
+        .active_turn
+        .as_ref()
+        .is_some_and(|turn| turn.platform_origin.is_some())
+        && super::platform_personal_turn_service::claim_platform_worker(
+            &state.db,
+            &row,
+            &credential.api_key_id,
+        )
+        .await
+        .is_err()
+    {
+        return None;
+    }
     let turn_id = row
         .active_turn
         .as_ref()

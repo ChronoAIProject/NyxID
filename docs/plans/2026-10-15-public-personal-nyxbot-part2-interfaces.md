@@ -513,3 +513,43 @@ Stage validation is document-only: source traces and signature review,
 upstream proof, pushes, deployment or live messaging were performed. PM can use
 this commit to reconcile the named producer changes and allocate the precise
 scope additions before scheduling implementation.
+
+## Personal implementation checkpoint
+
+The shared owner loop, personal admission/settlement, exact Stop, reply decision,
+credential recovery and deletion slices are committed. Composition now uses:
+
+```rust
+assistant_nyxagent_runtime::producer(
+    state: AppState,
+    egress: Arc<dyn NyxAgentEgress>,
+    public_runtime: Arc<dyn PublicNyxAgentRuntime>,
+) -> Arc<dyn NyxAgentExecutionProducer>;
+```
+
+The personal factory retains its four arguments `(state, identity, ingress,
+egress)`. No additional registration is needed for the execution factory; it is
+in the existing runtime module. Part 5 constructs both producers. The execution
+factory loads the exact admitted input and existing bound key, without a new
+admission or credential convergence. The shared loop claims
+`active_turn.execution_started` only for platform-origin turns, transactionally
+with the exact turn/origin/key and live consent. A lost worker is settled by
+existing orphan recovery; its claim never reopens. Ordinary HTTP execution keeps
+its real-auth adapter and does not use this marker. Public preparation occurs
+before any owner work and remains unavailable, including if a future runtime
+preparer is supplied before the bounded public loop is implemented.
+
+New regressions cover competing execution workers producing one upstream call,
+altered input/origin refusal, legacy rows without the marker, and public/ordinary
+context rejection before owner I/O. The earlier personal regressions cover
+durable reply references, revoked admission, exact Stop with independent watches,
+and atomic credential successor adoption. Targeted rustfmt and whitespace checks
+passed; no Rust compilation or tests ran in this worker.
+
+The personal journey still needs PM's compiler/test pass and Part 5's real
+webhook/composition/delivery/lifecycle wiring. Queued Part 2 acceptance work is
+fresh event admission, existing after-turn reporting/event draining for personal
+turns, and delayed async-result delivery using the original captured destination
+independently of a fresh execution origin. Public shared-loop execution and
+runtime proof remain queued with Part 3. These gaps are not covered by the
+personal checkpoint.

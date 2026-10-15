@@ -190,6 +190,10 @@ pub struct ToolProgress {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ActiveTurn {
+    /// One platform worker may execute an admitted turn. A lost worker is
+    /// settled by orphan recovery; its execution claim is never reopened.
+    #[serde(default)]
+    pub execution_started: bool,
     #[serde(default)]
     pub machine_scopes: Vec<MachineTurnScope>,
     #[serde(default)]

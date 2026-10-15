@@ -145,6 +145,29 @@ pub(crate) async fn update_platform_turn(
     row: &AssistantConversation,
     update: bson::Document,
 ) -> AppResult<()> {
+    mutate_platform_turn(db, row, update, None).await
+}
+
+pub(crate) async fn claim_platform_worker(
+    db: &Database,
+    row: &AssistantConversation,
+    key_id: &str,
+) -> AppResult<()> {
+    mutate_platform_turn(
+        db,
+        row,
+        doc! {"$set":{"active_turn.execution_started":true}},
+        Some(key_id.to_owned()),
+    )
+    .await
+}
+
+async fn mutate_platform_turn(
+    db: &Database,
+    row: &AssistantConversation,
+    update: bson::Document,
+    worker_key_id: Option<String>,
+) -> AppResult<()> {
     let origin = row
         .active_turn
         .as_ref()
@@ -161,22 +184,78 @@ pub(crate) async fn update_platform_turn(
             .clone(),
     };
     let mut session = db.client().start_session().await?;
-    let context = (db.clone(), row.user_id.clone(), turn, expected, update);
-    session.start_transaction().and_run(context,|session,(db,user,turn,origin,update)|Box::pin(async move {
-        let result:AppResult<()>=async {
-            let row=db.collection::<AssistantConversation>(CONVERSATIONS).find_one(doc! {"_id":&turn.conversation_id,"user_id":&*user,"active_turn.turn_id":&turn.turn_id})
-                .session(&mut *session).await?.ok_or(AppError::AssistantTurnRequired)?;
-            if fence_execution_in_session(db,session,&super::platform_personal_binding_service::IdentityProducer,user,
-                &row.credential_api_key_id,turn,origin).await? != contract::FenceOutcome::Authorized {
-                return Err(AppError::AssistantTurnRequired);
-            }
-            let changed=db.collection::<AssistantConversation>(CONVERSATIONS).update_one(doc! {"_id":&turn.conversation_id,"user_id":&*user,"active_turn.turn_id":&turn.turn_id,"active_turn.stop_requested":false},update.clone())
-                .session(&mut *session).await?;
-            if changed.matched_count!=1 {return Err(AppError::AssistantTurnRequired);}
-            Ok(())
-        }.await;
-        super::api_key_mutation_service::transaction_result(result)
-    })).await.map_err(super::api_key_mutation_service::map_transaction_error)
+    let context = (
+        db.clone(),
+        row.user_id.clone(),
+        turn,
+        expected,
+        update,
+        worker_key_id,
+    );
+    session
+        .start_transaction()
+        .and_run(
+            context,
+            |session, (db, user, turn, origin, update, worker_key_id)| {
+                Box::pin(async move {
+                    let result: AppResult<()> = async {
+                        let row = db
+                            .collection::<AssistantConversation>(CONVERSATIONS)
+                            .find_one(doc! {
+                                "_id": &turn.conversation_id, "user_id": &*user,
+                                "active_turn.turn_id": &turn.turn_id,
+                            })
+                            .session(&mut *session)
+                            .await?
+                            .ok_or(AppError::AssistantTurnRequired)?;
+                        if worker_key_id
+                            .as_ref()
+                            .is_some_and(|key| key != &row.credential_api_key_id)
+                        {
+                            return Err(AppError::AssistantTurnRequired);
+                        }
+                        if fence_execution_in_session(
+                            db,
+                            session,
+                            &super::platform_personal_binding_service::IdentityProducer,
+                            user,
+                            &row.credential_api_key_id,
+                            turn,
+                            origin,
+                        )
+                        .await?
+                            != contract::FenceOutcome::Authorized
+                        {
+                            return Err(AppError::AssistantTurnRequired);
+                        }
+                        let mut filter = doc! {
+                            "_id": &turn.conversation_id, "user_id": &*user,
+                            "active_turn.turn_id": &turn.turn_id,
+                            "active_turn.stop_requested": false,
+                            "active_turn.platform_origin": bson::to_bson(&model_origin(origin))
+                                .map_err(|_| AppError::AssistantTurnRequired)?,
+                        };
+                        if let Some(key) = worker_key_id.as_ref() {
+                            filter.insert("credential_api_key_id", key);
+                            filter.insert("active_turn.execution_started", doc! {"$ne": true});
+                        }
+                        let changed = db
+                            .collection::<AssistantConversation>(CONVERSATIONS)
+                            .update_one(filter, update.clone())
+                            .session(&mut *session)
+                            .await?;
+                        if changed.matched_count != 1 {
+                            return Err(AppError::AssistantTurnRequired);
+                        }
+                        Ok(())
+                    }
+                    .await;
+                    super::api_key_mutation_service::transaction_result(result)
+                })
+            },
+        )
+        .await
+        .map_err(super::api_key_mutation_service::map_transaction_error)
 }
 
 /// Called inside revocation's transaction. It deliberately does not require

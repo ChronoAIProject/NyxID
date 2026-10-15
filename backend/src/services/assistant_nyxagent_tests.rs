@@ -916,6 +916,7 @@ fn stale_test_row(now: DateTime<Utc>) -> AssistantConversation {
         credential_api_key_id: "key".into(),
         message_count: 0,
         active_turn: Some(ActiveTurn {
+            execution_started: false,
             machine_scopes: Vec::new(),
             platform_origin: None,
             activity_total: 0,

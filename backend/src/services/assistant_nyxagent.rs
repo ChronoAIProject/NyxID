@@ -2224,6 +2224,7 @@ pub(crate) async fn begin_owner_turn_in_session(
         (None, None) => None,
     };
     row.active_turn = Some(ActiveTurn {
+        execution_started: false,
         machine_scopes: Vec::new(),
         platform_origin: platform.cloned(),
         activity_count: Some(0),

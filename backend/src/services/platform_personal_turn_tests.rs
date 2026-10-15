@@ -25,6 +25,39 @@ impl contract::NyxAgentEgress for RefusedEgress {
     }
 }
 
+struct CountingEgress(std::sync::atomic::AtomicUsize);
+#[async_trait::async_trait]
+impl contract::NyxAgentEgress for CountingEgress {
+    async fn request(
+        &self,
+        authority: &contract::NyxAgentExecutionContext,
+        _: &contract::RuntimeCredential,
+        request: contract::NyxAgentRequest,
+    ) -> AppResult<axum::response::Response> {
+        assert!(matches!(
+            authority,
+            contract::NyxAgentExecutionContext::Owner {
+                platform_origin: Some(_),
+                ..
+            }
+        ));
+        assert_eq!(request.relative_path, "v1/responses");
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Err(AppError::Internal("test upstream unavailable".into()))
+    }
+}
+
+#[test]
+fn legacy_turn_without_execution_marker_remains_readable() {
+    let turn: model::ActiveTurn = bson::from_document(doc! {
+        "turn_id":uuid::Uuid::new_v4().to_string(),
+        "started_at":bson::DateTime::now(),
+    })
+    .unwrap();
+    assert!(!turn.execution_started);
+    assert!(turn.platform_origin.is_none());
+}
+
 async fn fixture(name: &str) -> (AppState, contract::AdmittedPersonalUpdate) {
     let (db, update, owner) =
         super::super::platform_personal_binding_service::tests::fixture(name).await;
@@ -412,4 +445,213 @@ async fn personal_credential_recovery_adopts_exact_successor_and_revocation_prev
         1
     );
     db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn execution_factory_resumes_exact_input_once_across_competing_workers() {
+    let (state, admitted) = fixture("personal_execution_factory").await;
+    let db = &state.db;
+    let service = personal(state.clone());
+    let agent =
+        super::super::assistant_team_service::ensure_nyxbot(db, &admitted.authority.user_id)
+            .await
+            .unwrap();
+    let start = engine::TurnStart::from(&engine::parse_turn(br#"{"text":"work"}"#).unwrap());
+    let ids = engine::OwnerTurnIds {
+        conversation_id: format!("nyxa-{}", uuid::Uuid::new_v4().simple()),
+        turn_id: uuid::Uuid::new_v4().to_string(),
+        message_id: uuid::Uuid::new_v4().to_string(),
+    };
+    let mut session = db.client().start_session().await.unwrap();
+    session.start_transaction().await.unwrap();
+    let claim = claim_personal_turn_in_session(
+        db,
+        &mut session,
+        &state.encryption_keys,
+        service.identity.as_ref(),
+        service.ingress.as_ref(),
+        &admitted,
+        &start,
+        &ids,
+        &agent,
+    )
+    .await
+    .unwrap();
+    session.commit_transaction().await.unwrap();
+    let authority = runtime::owner_context(&claim.conversation).unwrap();
+    let egress = Arc::new(CountingEgress(std::sync::atomic::AtomicUsize::new(0)));
+    let execution = runtime::producer(
+        state.clone(),
+        egress.clone(),
+        super::super::platform_public_credential_service::producer(state.clone()),
+    );
+    let (sender, mut receiver) = tokio::sync::mpsc::channel(4);
+    assert!(
+        execution
+            .execute_nyxagent_turn(
+                db,
+                authority.clone(),
+                contract::TurnInput {
+                    text: "changed".into()
+                },
+                sender.clone(),
+            )
+            .await
+            .is_err()
+    );
+    let mut wrong = authority.clone();
+    if let contract::NyxAgentExecutionContext::Owner {
+        platform_origin: Some(origin),
+        ..
+    } = &mut wrong
+    {
+        origin.authority.binding_generation += 1;
+    }
+    assert!(
+        execution
+            .execute_nyxagent_turn(
+                db,
+                wrong,
+                contract::TurnInput {
+                    text: "work".into()
+                },
+                sender.clone(),
+            )
+            .await
+            .is_err()
+    );
+    assert!(
+        !engine::get(db, &claim.conversation.user_id, &claim.conversation.id)
+            .await
+            .unwrap()
+            .active_turn
+            .unwrap()
+            .execution_started
+    );
+    let (first, second) = tokio::join!(
+        execution.execute_nyxagent_turn(
+            db,
+            authority.clone(),
+            contract::TurnInput {
+                text: "work".into()
+            },
+            sender.clone()
+        ),
+        execution.execute_nyxagent_turn(
+            db,
+            authority,
+            contract::TurnInput {
+                text: "work".into()
+            },
+            sender
+        ),
+    );
+    assert_eq!(usize::from(first.is_ok()) + usize::from(second.is_ok()), 1);
+    assert_eq!(egress.0.load(std::sync::atomic::Ordering::SeqCst), 1);
+    let Some(contract::ExecutionEvent::ReplyReady(reply)) = receiver.recv().await else {
+        panic!("durable reply required");
+    };
+    assert_eq!(reply.turn.turn_id, ids.turn_id);
+    assert!(matches!(
+        receiver.recv().await,
+        Some(contract::ExecutionEvent::Settled { .. })
+    ));
+    assert!(receiver.recv().await.is_none());
+    assert_eq!(
+        db.collection::<bson::Document>(CONVERSATIONS)
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        db.collection::<bson::Document>(CREDENTIALS)
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        1
+    );
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn execution_factory_selects_public_prepare_and_rejects_ordinary_context_before_owner_io() {
+    let db = mongodb::Client::with_uri_str("mongodb://127.0.0.1:1/?serverSelectionTimeoutMS=25")
+        .await
+        .unwrap()
+        .database("no_owner_io");
+    let state = crate::test_utils::test_app_state(db.clone());
+    let egress = Arc::new(CountingEgress(std::sync::atomic::AtomicUsize::new(0)));
+    let execution = runtime::producer(
+        state.clone(),
+        egress.clone(),
+        super::super::platform_public_credential_service::producer(state),
+    );
+    let turn = contract::TurnRef {
+        conversation_id: "missing".into(),
+        turn_id: uuid::Uuid::new_v4().to_string(),
+    };
+    let (sender, _) = tokio::sync::mpsc::channel(1);
+    let result = execution
+        .execute_nyxagent_turn(
+            &db,
+            contract::NyxAgentExecutionContext::Owner {
+                user_id: "missing".into(),
+                turn: turn.clone(),
+                platform_origin: None,
+            },
+            contract::TurnInput {
+                text: "work".into(),
+            },
+            sender.clone(),
+        )
+        .await;
+    assert!(matches!(result, Err(AppError::AssistantTurnRequired)));
+    let public = contract::PublicExecutionContext {
+        ingress: contract::PublicIngress {
+            ingress: contract::IngressClaim {
+                receipt_id: uuid::Uuid::new_v4().to_string(),
+                claim_id: uuid::Uuid::new_v4().to_string(),
+            },
+            manager: contract::ManagerAuthority {
+                profile_id: "manager".into(),
+                manager_bot_id: "bot".into(),
+                telegram_bot_id: 1,
+                manager_authority_epoch: 1,
+            },
+            sender_id: 1,
+            chat_id: 1,
+            public_policy_revision: 1,
+        },
+        public_session_id: "public".into(),
+        turn,
+        sponsor_owner_user_id: "missing".into(),
+        policy_digest: "unproven".into(),
+        nyxagent_profile: "public".into(),
+        model_operations: Vec::new(),
+        limits: contract::PublicExecutionLimits {
+            max_duration_secs: 1,
+            max_model_calls: 1,
+            max_tool_calls: 1,
+            max_continuations: 0,
+            max_input_tokens: 1,
+            max_output_tokens: 1,
+            max_input_bytes: 1,
+            max_context_bytes: 1,
+            max_output_bytes: 1,
+        },
+        expires_at: chrono::Utc::now() + chrono::Duration::seconds(1),
+    };
+    let result = execution
+        .execute_nyxagent_turn(
+            &db,
+            contract::NyxAgentExecutionContext::Public(public),
+            contract::TurnInput {
+                text: "work".into(),
+            },
+            sender,
+        )
+        .await;
+    assert!(matches!(result, Err(AppError::Conflict(_))));
+    assert_eq!(egress.0.load(std::sync::atomic::Ordering::SeqCst), 0);
 }
