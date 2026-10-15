@@ -18,7 +18,7 @@ type Adapter = std::sync::Arc<dyn crate::services::channel_platform::PlatformAda
 pub(super) static TEST_ADAPTERS: std::sync::LazyLock<
     std::sync::Mutex<std::collections::HashMap<String, Adapter>>,
 > = std::sync::LazyLock::new(Default::default);
-fn adapter(state: &AppState, bot: &ChannelBot) -> AppResult<Adapter> {
+pub(super) fn adapter(state: &AppState, bot: &ChannelBot) -> AppResult<Adapter> {
     adapter_for(state, &bot.id, &bot.platform)
 }
 
@@ -512,7 +512,7 @@ async fn inbound_impl(
         Err(_) => Some("I could not start that. Please try again.".into()),
     };
     if let Some(reply) = reply {
-        send(state, &row.user_id, &origin, conversation, &reply).await?;
+        send(state, &row.user_id, &origin, conversation, &reply, None).await?;
     }
     // Opening reservations expire under the revision-fenced sweep. Another
     // simultaneous event may still be claiming this shared reservation.
@@ -578,12 +578,72 @@ pub(crate) async fn send(
     origin: &ChannelOrigin,
     conversation: &str,
     text: &str,
+    images: Option<super::images::ImageTurn<'_>>,
 ) -> AppResult<()> {
     let channel = follow::access(&state.db, owner, &origin.nyxbot_channel_id).await?;
+    let mut text = bounded_reply(text);
+    if let Some(images) = images {
+        let child = follow::validate_delivery(&state.db, owner, origin, conversation).await?;
+        let binding = origin.thread.as_ref().ok_or_else(follow::not_found)?;
+        let claim_key = format!("thread:{}", binding.child_id);
+        let report = super::images::report_or_failure(
+            state,
+            super::images::ImageSendContext {
+                owner,
+                conversation_id: conversation,
+                turn_id: images.turn_id,
+                channel: &channel,
+                thread: &child,
+                anchor: super::images::ImageAnchor::Thread {
+                    origin: origin.clone(),
+                },
+                audience: super::images::ImageAudience {
+                    owner_private: !binding.guest
+                        && (images.app_visible
+                            || (child.kind.as_deref() == Some("private") && child.owner_chat)),
+                },
+                deadline: None,
+                claim_key: &claim_key,
+                initiated: None,
+            },
+            images.plan,
+        )
+        .await;
+        text = super::images::append_failure(&text, &report);
+    }
     if threads::gateway::negotiated(&channel) {
         follow::validate_delivery(&state.db, owner, origin, conversation).await?;
-        return super::gateway_threads::send(state, &channel, origin, conversation, text).await;
+        return super::gateway_threads::send(state, &channel, origin, conversation, &text).await;
     }
+    let outcome = send_bound_reply(
+        state,
+        &channel,
+        owner,
+        origin,
+        conversation,
+        &OutboundReply {
+            text: Some(text),
+            attachments: Vec::new(),
+            reply_to_platform_message_id: None,
+            metadata: None,
+        },
+    )
+    .await?;
+    match outcome.error {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
+}
+
+/// Resolve live thread credentials identically for image and text components.
+pub(super) async fn send_bound_reply(
+    state: &AppState,
+    channel: &NyxbotChannel,
+    owner: &str,
+    origin: &ChannelOrigin,
+    conversation: &str,
+    outbound: &OutboundReply,
+) -> AppResult<threads::delivery::ThreadDelivery> {
     let bot = channel_bot_service::get_bot(&state.db, &channel.channel_bot_id).await?;
     let adapter = adapter(state, &bot)?;
     let token = crate::services::channel_credentials::resolve_bot_token(
@@ -593,11 +653,30 @@ pub(crate) async fn send(
         &bot,
     )
     .await?;
+    let secrets = if bot.credential_source == "platform" {
+        Some(
+            crate::services::channel_managed::build_verify_secrets(
+                &state.db,
+                &state.encryption_keys,
+                adapter.as_ref(),
+                &bot,
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
+    let billing = crate::services::channel_billing_service::ChannelBilling::for_bot(
+        &state.db,
+        &state.billing,
+        &bot,
+        Some(&channel.route_api_key_id),
+    );
     let credentials = BotCredentials {
         token: &token,
         platform_bot_id: Some(&bot.platform_bot_id),
-        platform_secrets: None,
-        billing: None,
+        platform_secrets: secrets.as_ref(),
+        billing: billing.as_ref(),
     };
     let target = threads::resolution::resolve_admitted(
         &state.db,
@@ -610,24 +689,15 @@ pub(crate) async fn send(
     )
     .await?
     .ok_or_else(follow::not_found)?;
-    let outcome = threads::delivery::send_reply(
+    threads::delivery::send_reply(
         &state.db,
         adapter.as_ref(),
         &bot,
         &credentials,
         &target,
-        &OutboundReply {
-            text: Some(bounded_reply(text)),
-            attachments: Vec::new(),
-            reply_to_platform_message_id: None,
-            metadata: None,
-        },
+        outbound,
     )
-    .await?;
-    match outcome.error {
-        Some(error) => Err(error),
-        None => Ok(()),
-    }
+    .await
 }
 
 /// Append bounded provider/metadata context to a channel turn. The first

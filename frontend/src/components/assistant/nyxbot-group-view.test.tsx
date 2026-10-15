@@ -10,6 +10,12 @@ import type {
 const post = vi.fn();
 let group: AssistantGroup;
 
+vi.mock("@/components/assistant/blocks/tool-image", () => ({
+  ToolImage: ({ image }: { image: { endpoint: string; label: string } }) => (
+    <img src={image.endpoint} alt={image.label} />
+  ),
+}));
+
 vi.mock("@tanstack/react-router", () => ({ useNavigate: () => vi.fn() }));
 vi.mock("@/stores/auth-store", () => ({
   useAuthStore: (select: (state: { user: { id: string } }) => unknown) =>
@@ -243,6 +249,20 @@ describe("group recipient pills", () => {
 });
 
 describe("delivered message recipients", () => {
+  it("renders a member's tool image through the group attachment endpoint", () => {
+    group = makeGroup([NYXBOT]);
+    const message = {
+      id: "reply", group_id: group.id, seq: 2, role: "agent", agent_id: RESEARCHER,
+      agent_name: "researcher", text: "Generated image.", created_at: "2026-10-01T00:00:00Z",
+      activities: [], recipient_agent_ids: [],
+      attachments: [{ id: "image-1", label: "camera__snapshot", origin: "tool", content_type: "image/png", size: 20 }],
+    } as unknown as AssistantGroupMessage;
+    render(<GroupMessageRow groupId={group.id} message={message} names={[]} members={group.members} onOpenAgent={() => undefined} />);
+    expect(screen.getByRole("img", { name: "camera__snapshot" })).toHaveAttribute(
+      "src", `/assistant/nyxagent/groups/${group.id}/attachments/image-1`,
+    );
+  });
+
   it("names the recipients of a sent message instead of their ids", () => {
     group = makeGroup([NYXBOT]);
     const message = {

@@ -431,35 +431,37 @@ pub(crate) async fn after_turn(
                 row,
                 origin,
                 "I couldn't finish answering that question. Please ask again.",
+                None,
             )
             .await;
         }
         return;
     }
-    // Only asynchronous event turns reach the chat: a channel turn answers its
-    // own event, and a turn the owner starts in the web app stays in the web app.
-    if (row.channel.is_some() || row.reply_channel.is_some()) && turn.origin == TurnOrigin::Event {
-        let bound: Vec<_> = turn
-            .events
-            .iter()
-            .flat_map(|e| &e.reply_to)
-            .filter(|o| o.thread.is_some())
-            .collect();
-        if bound.is_empty() {
-            super::nyxbot::deliver_update(state, row, text).await;
-        } else {
-            let mut sent = std::collections::HashSet::new();
-            for origin in bound {
-                if let Some(binding) = origin.thread.as_ref()
-                    && sent.insert(binding.source_message_id.clone())
-                {
-                    super::nyxbot::deliver_to(state, row, origin, text).await;
+    let plan = super::nyxbot::images::ImageSendPlan {
+        attachments: engine::turn_tool_attachments(&state.db, owner, &row.id, &turn.turn_id)
+            .await
+            .unwrap_or_default(),
+    };
+    // Keep the answer destination in lockstep with the model note and image
+    // delivery. Channel turns answer their admitted event; event turns wake
+    // their bound chats (or the configured home chat).
+    match engine::answer_routing(row, turn).primary {
+        engine::PrimaryDestination::ChatUpdate { origins } => {
+            if origins.len() == 1 && origins[0].thread.is_none() {
+                super::nyxbot::deliver_update(state, row, text, Some(&plan)).await;
+            } else {
+                for origin in origins {
+                    super::nyxbot::deliver_to(state, row, &origin, text, Some(&plan)).await;
                 }
             }
         }
+        engine::PrimaryDestination::ChannelEvent { .. }
+        | engine::PrimaryDestination::App
+        | engine::PrimaryDestination::Group { .. }
+        | engine::PrimaryDestination::Trigger { .. } => {}
     }
     for origin in &also {
-        super::nyxbot::deliver_to(state, row, origin, text).await;
+        super::nyxbot::deliver_to(state, row, origin, text, Some(&plan)).await;
     }
 }
 

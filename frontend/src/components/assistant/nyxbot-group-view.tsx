@@ -217,7 +217,21 @@ export function GroupMessageRow({
           {message.activities
             ?.filter((activity) => activity.machine)
             .map((activity) => (
-            <MachineToolCard key={activity.id} receipt={activity.machine!} />
+              <MachineToolCard key={activity.id} receipt={activity.machine!} />
+            ))}
+          {message.attachments?.map((item) => (
+            <ToolImage
+              key={item.id}
+              image={{
+                id: item.id,
+                label: item.label,
+                contentType: item.content_type,
+                origin: item.origin || undefined,
+                imageInput: item.image_input ?? undefined,
+                expired: item.expired,
+                endpoint: `/assistant/nyxagent/groups/${groupId}/attachments/${item.id}`,
+              }}
+            />
           ))}
           <TextBlock text={sanitizeAssistantMessageContent(message.text)} />
           <div className="mt-2 flex gap-1">

@@ -56,6 +56,7 @@ pub fn validate_ids(ids: &[String]) -> AppResult<()> {
 
 pub fn metadata(row: &AssistantUpload) -> TurnAttachment {
     TurnAttachment {
+        chat_delivery: None,
         image_input: None,
         id: row.id.clone(),
         label: row.label.clone(),
@@ -1372,6 +1373,91 @@ mod integration_tests {
     }
 
     #[tokio::test]
+    async fn routed_tool_images_stay_out_of_upload_manifest_list_and_coverage() {
+        let (state, user, id) = fixture().await;
+        let upload = upload(
+            &state.db,
+            &state.encryption_keys,
+            &user,
+            &id,
+            "requirements.txt",
+            b"Owner requirements".to_vec(),
+        )
+        .await
+        .unwrap();
+        let row = engine::begin_turn(
+            &state.db,
+            &user,
+            &request(&id, vec![upload.id.clone()]),
+            &state.encryption_keys,
+        )
+        .await
+        .unwrap();
+        let mut image_ids = Vec::new();
+        for chat_delivery in [true, false] {
+            let image = engine::attach_routed_image(
+                &state.db,
+                &state.encryption_keys,
+                &user,
+                &id,
+                "snapshot",
+                "image/png",
+                b"pixels",
+                chat_delivery,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert_eq!(image.attachment.origin, "tool");
+            assert_eq!(image.attachment.chat_delivery, Some(chat_delivery));
+            image_ids.push(image.attachment.id);
+        }
+        engine::finish_turn(
+            &state.db,
+            &row,
+            &row.credential_api_key_id,
+            &Uuid::new_v4().to_string(),
+            &engine::TurnResult {
+                text: "Images returned".into(),
+                session_id: None,
+                response_id: None,
+                error: None,
+            },
+        )
+        .await
+        .unwrap();
+        let images = engine::turn_tool_attachments(
+            &state.db,
+            &user,
+            &id,
+            &row.active_turn.as_ref().unwrap().turn_id,
+        )
+        .await
+        .unwrap();
+        assert_eq!(images.len(), 2);
+        let (manifest, total) = message_manifest(&state.db, &user, &id, None, Some(50))
+            .await
+            .unwrap();
+        let list = metadata_page(&state.db, &user, &id, None, 50)
+            .await
+            .unwrap();
+        let coverage = review_coverage(&state.db, &state.encryption_keys, &user, &id)
+            .await
+            .unwrap();
+        assert_eq!(total, 1);
+        for items in [
+            &manifest,
+            list["attachments"].as_array().unwrap(),
+            coverage.observations.as_array().unwrap(),
+        ] {
+            assert_eq!(items.len(), 1);
+            assert_eq!(items[0]["id"], upload.id);
+            assert!(!image_ids.iter().any(|id| items[0]["id"] == *id));
+        }
+        state.db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn keyset_list_traverses_oldest_upload_with_live_acl_and_retention() {
         let (state, user, id) = fixture().await;
         let root = upload(
@@ -2273,12 +2359,13 @@ mod integration_tests {
             .await
             .unwrap()
             .unwrap();
-        let image = engine::attach_image(db, keys, &user, &id, "tool", "image/png", &png)
-            .await
-            .unwrap()
-            .unwrap();
+        let image =
+            engine::attach_routed_image(db, keys, &user, &id, "tool", "image/png", &png, true)
+                .await
+                .unwrap()
+                .unwrap();
         assert_eq!(
-            chat_bytes(db, keys, &chat, &image.id, true)
+            chat_bytes(db, keys, &chat, &image.attachment.id, true)
                 .await
                 .unwrap()
                 .1,
@@ -2400,6 +2487,7 @@ mod integration_tests {
             origin: "user_upload".into(),
             size: 20,
             pages: Some(0),
+            chat_delivery: None,
             image_input: None,
         };
         assert_eq!(
@@ -2441,7 +2529,7 @@ mod integration_tests {
             .await
             .unwrap()
             .unwrap();
-        let image = engine::attach_image(
+        let image = engine::attach_routed_image(
             db,
             &state.encryption_keys,
             &user,
@@ -2449,6 +2537,7 @@ mod integration_tests {
             "snapshot",
             "image/png",
             b"pixels",
+            true,
         )
         .await
         .unwrap()
@@ -2469,7 +2558,7 @@ mod integration_tests {
                 Request::builder()
                     .uri(format!(
                         "/api/v1/assistant-attachments/{}/content",
-                        image.id
+                        image.attachment.id
                     ))
                     .header("x-api-key", credential.raw_key.as_str())
                     .body(Body::empty())
@@ -2494,7 +2583,14 @@ mod integration_tests {
             }
             assert!(
                 matches!(
-                    chat_bytes(db, &state.encryption_keys, &wrong, &image.id, true).await,
+                    chat_bytes(
+                        db,
+                        &state.encryption_keys,
+                        &wrong,
+                        &image.attachment.id,
+                        true
+                    )
+                    .await,
                     Err(AppError::NotFound(_))
                 ),
                 "{field}"
@@ -2509,10 +2605,16 @@ mod integration_tests {
         let mut guest = chat.clone();
         guest.guest = true;
         assert_eq!(
-            chat_bytes(db, &state.encryption_keys, &guest, &image.id, true)
-                .await
-                .unwrap()
-                .1,
+            chat_bytes(
+                db,
+                &state.encryption_keys,
+                &guest,
+                &image.attachment.id,
+                true
+            )
+            .await
+            .unwrap()
+            .1,
             b"pixels"
         );
         threads
@@ -2523,7 +2625,14 @@ mod integration_tests {
             .await
             .unwrap();
         assert!(matches!(
-            chat_bytes(db, &state.encryption_keys, &guest, &image.id, true).await,
+            chat_bytes(
+                db,
+                &state.encryption_keys,
+                &guest,
+                &image.attachment.id,
+                true
+            )
+            .await,
             Err(AppError::NotFound(_))
         ));
         threads
@@ -2535,16 +2644,23 @@ mod integration_tests {
             .unwrap();
         db.collection::<bson::Document>(COLLECTION_NAME)
             .update_one(
-                doc! {"_id":&image.id},
+                doc! {"_id":&image.attachment.id},
                 doc! {"$set":{"content_type":"text/plain"}},
             )
             .await
             .unwrap();
         assert!(matches!(
-            chat_bytes(db, &state.encryption_keys, &chat, &image.id, true).await,
+            chat_bytes(
+                db,
+                &state.encryption_keys,
+                &chat,
+                &image.attachment.id,
+                true
+            )
+            .await,
             Err(AppError::NotFound(_))
         ));
-        db.collection::<bson::Document>(COLLECTION_NAME).update_one(doc! {"_id":&image.id}, doc! {"$set":{"content_type":"image/png","created_at":bson::DateTime::from_chrono(Utc::now()-Duration::days(400))}}).await.unwrap();
+        db.collection::<bson::Document>(COLLECTION_NAME).update_one(doc! {"_id":&image.attachment.id}, doc! {"$set":{"content_type":"image/png","created_at":bson::DateTime::from_chrono(Utc::now()-Duration::days(400))}}).await.unwrap();
         let settings = crate::models::assistant_upload_retention::Settings {
             policy: Some(crate::models::assistant_upload_retention::Policy {
                 tool_image_days: Some(1),
@@ -2557,9 +2673,15 @@ mod integration_tests {
             .await
             .unwrap();
         assert!(
-            chat_bytes(db, &state.encryption_keys, &chat, &image.id, true)
-                .await
-                .is_err()
+            chat_bytes(
+                db,
+                &state.encryption_keys,
+                &chat,
+                &image.attachment.id,
+                true
+            )
+            .await
+            .is_err()
         );
         db.drop().await.unwrap();
     }
@@ -2573,6 +2695,7 @@ mod integration_tests {
             size: 10,
             label: "camera".into(),
             pages: None,
+            chat_delivery: None,
             image_input: None,
         };
         let cap = json!({"protocol":"nyxagent-input-image-v1","input_image":{"version":1,"sources":["nyxid_attachment_url"],"max_images":1,"max_image_bytes":10,"max_total_bytes":10,"content_types":["image/png"]}});

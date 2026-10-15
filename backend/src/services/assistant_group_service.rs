@@ -217,6 +217,7 @@ pub async fn create(
         "notice",
         None,
         &format!("Group created with {}.", names(&members)),
+        Vec::new(),
     )
     .await?;
     get(db, owner, &group.id).await
@@ -316,7 +317,7 @@ pub async fn update(
         .update_one(owner_filter(owner, id)?, doc! {"$set": set})
         .await?;
     if let Some(notice) = notice {
-        append(db, owner, id, "notice", None, &notice).await?;
+        append(db, owner, id, "notice", None, &notice, Vec::new()).await?;
     }
     get(db, owner, id).await
 }
@@ -374,11 +375,23 @@ pub async fn append(
     role: &str,
     agent: Option<&AssistantAgent>,
     text: &str,
+    extra_attachments: Vec<crate::models::assistant_conversation::TurnAttachment>,
 ) -> AppResult<GroupMessage> {
-    append_addressed(db, owner, group_id, role, agent, text, &[]).await
+    append_addressed(
+        db,
+        owner,
+        group_id,
+        role,
+        agent,
+        text,
+        &[],
+        extra_attachments,
+    )
+    .await
 }
 
 /// Append a message that records the members it was addressed to.
+#[allow(clippy::too_many_arguments)]
 async fn append_addressed(
     db: &Database,
     owner: &str,
@@ -387,6 +400,7 @@ async fn append_addressed(
     agent: Option<&AssistantAgent>,
     text: &str,
     recipients: &[String],
+    extra_attachments: Vec<crate::models::assistant_conversation::TurnAttachment>,
 ) -> AppResult<GroupMessage> {
     let now = Utc::now();
     let group = db
@@ -406,7 +420,7 @@ async fn append_addressed(
         author_user_id: None,
         author_display_name: None,
         request_id: None,
-        attachments: Vec::new(),
+        attachments: extra_attachments,
         id: Uuid::new_v4().to_string(),
         group_id: group_id.into(),
         user_id: owner.into(),
@@ -452,7 +466,17 @@ pub async fn append_with_recipients(
     recipients: &[String],
 ) -> AppResult<GroupMessage> {
     if ids.is_empty() {
-        return append_addressed(db, owner, group_id, role, agent, text, recipients).await;
+        return append_addressed(
+            db,
+            owner,
+            group_id,
+            role,
+            agent,
+            text,
+            recipients,
+            Vec::new(),
+        )
+        .await;
     }
     if role != "user" {
         return Err(AppError::Forbidden("Only the owner uploads files".into()));

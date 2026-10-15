@@ -271,6 +271,17 @@ pub(super) async fn record_chat(
     facts: &ChatFacts,
     last_message_id: Option<&str>,
 ) -> AppResult<NyxbotThread> {
+    record_chat_with_relay(state, row, partition, facts, last_message_id, None).await
+}
+
+pub(super) async fn record_chat_with_relay(
+    state: &AppState,
+    row: &NyxbotChannel,
+    partition: &str,
+    facts: &ChatFacts,
+    last_message_id: Option<&str>,
+    relay_message_id: Option<&str>,
+) -> AppResult<NyxbotThread> {
     let now = bson::DateTime::now();
     let mut set = doc! {"updated_at": now, "last_message_at": now, "kind": facts.kind,
     "platform_chat_id": &facts.chat_id};
@@ -285,6 +296,9 @@ pub(super) async fn record_chat(
     }
     if let Some(message_id) = last_message_id {
         set.insert("last_message_id", message_id);
+    }
+    if let Some(message_id) = relay_message_id {
+        set.insert("last_relay_message_id", message_id);
     }
     let threads = state.db.collection::<NyxbotThread>(THREADS);
     // Before NyxID passed each message's own chat type on, a group reached
@@ -333,7 +347,10 @@ pub(super) fn unnamed_sender(platform: &str, sender_id: &str) -> String {
         .into_iter()
         .rev()
         .collect();
-    format!("{} user …{tail}", super::platform_name(platform))
+    format!(
+        "{} user …{tail}",
+        crate::services::channel_platform::platform_name(platform)
+    )
 }
 
 /// Lark and Feishu write each mention into the text as a key (`@_user_1`);
@@ -1299,14 +1316,23 @@ pub(crate) async fn post_automation(
     post_inner(state, owner, chat_id, text, agent_id, Some(thread_id)).await
 }
 
-async fn post_inner(
+pub(crate) struct PostTarget {
+    pub channel: NyxbotChannel,
+    pub thread: NyxbotThread,
+    pub bot: ChannelBot,
+    pub auth: crate::mw::auth::AuthUser,
+    pub conversation: ChannelConversation,
+    pub adapter: std::sync::Arc<dyn crate::services::channel_platform::PlatformAdapter>,
+}
+
+/// A single logical post consumes one limiter token here. Its bounded image
+/// components reuse this admitted target and take no additional tokens.
+pub(super) async fn prepare_post(
     state: &AppState,
     owner: &str,
     chat_id: &str,
-    text: &str,
     agent_id: Option<&str>,
-    full_thread: Option<&str>,
-) -> AppResult<Value> {
+) -> AppResult<PostTarget> {
     let (row, chat) = load_chat(state, owner, chat_id).await?;
     if row.status != "active" {
         return Err(AppError::Conflict("The channel bot is not active".into()));
@@ -1327,12 +1353,6 @@ async fn post_inner(
             "Posting is off for this chat; the owner can allow it".into(),
         ));
     }
-    let text = text.trim();
-    if text.is_empty() || (full_thread.is_none() && text.chars().count() > MAX_POST_CHARS) {
-        return Err(AppError::ValidationError(format!(
-            "text must have 1 to {MAX_POST_CHARS} characters"
-        )));
-    }
     let platform_chat_id = chat
         .platform_chat_id
         .clone()
@@ -1351,29 +1371,18 @@ async fn post_inner(
             "Bot has been deactivated".to_string(),
         ));
     }
-    let text = full_thread.map_or_else(
-        || text.to_owned(),
-        |thread| {
-            automation_reply(
-                &bot.platform,
-                text,
-                &format!(
-                    "{}/assistant?c={thread}",
-                    state.config.frontend_url.trim_end_matches('/')
-                ),
-            )
-        },
-    );
     let adapter = resolve_adapter(&bot.platform, &state.token_exchange_cache)?;
+    let adapter: std::sync::Arc<dyn crate::services::channel_platform::PlatformAdapter> =
+        std::sync::Arc::from(adapter);
+    #[cfg(test)]
+    let adapter = crate::handlers::channel_relay::TEST_REPLY_ADAPTERS
+        .lock()
+        .unwrap()
+        .get(&bot.id)
+        .cloned()
+        .unwrap_or(adapter);
     crate::handlers::channel_relay::check_initiate_rate_limit(state, &chat.id).await?;
-    let key_owner = bot_owner(&row);
-    let key = key_service::get_api_key(&state.db, key_owner, &row.route_api_key_id).await?;
-    let mut auth = crate::handlers::assistant_team::owner_auth(key_owner)?;
-    auth.auth_method = crate::mw::auth::AuthMethod::ApiKey;
-    auth.api_key_id = Some(key.id.clone());
-    auth.api_key_name = Some(key.name.clone());
-    auth.scope = key.scopes.clone();
-    auth.allow_all_services = false;
+    let auth = super::route_key_auth(state, &row).await?;
     let now = Utc::now();
     // The bot's own route, addressed at this chat; nothing is stored.
     let conversation = ChannelConversation {
@@ -1393,33 +1402,148 @@ async fn post_inner(
         created_at: now,
         updated_at: now,
     };
-    let sent = crate::handlers::channel_relay::deliver_initiated_message(
+    Ok(PostTarget {
+        channel: row,
+        thread: chat,
+        bot,
+        auth,
+        conversation,
+        adapter,
+    })
+}
+
+pub(super) async fn send_post(
+    state: &AppState,
+    target: &PostTarget,
+    outbound: crate::services::channel_platform::OutboundReply,
+) -> AppResult<crate::handlers::channel_relay::AsyncReplyResponse> {
+    crate::handlers::channel_relay::deliver_prepared_initiated_message(
         state,
         &HeaderMap::new(),
-        &auth,
-        &conversation,
-        &bot,
-        crate::handlers::channel_relay::SendMessageRequest {
-            conversation_id: conversation.id.clone(),
-            message: crate::handlers::channel_relay::AsyncReplyBody {
-                text: Some(text.to_owned()),
-                metadata: None,
-                attachments: Vec::new(),
-            },
-            idempotency_key: None,
+        &target.auth,
+        &target.conversation,
+        &target.bot,
+        outbound,
+        target.adapter.as_ref(),
+    )
+    .await
+}
+
+async fn post_inner(
+    state: &AppState,
+    owner: &str,
+    chat_id: &str,
+    text: &str,
+    agent_id: Option<&str>,
+    full_thread: Option<&str>,
+) -> AppResult<Value> {
+    let text = text.trim();
+    if text.is_empty() || (full_thread.is_none() && text.chars().count() > MAX_POST_CHARS) {
+        return Err(AppError::ValidationError(format!(
+            "text must have 1 to {MAX_POST_CHARS} characters"
+        )));
+    }
+    let target = prepare_post(state, owner, chat_id, agent_id).await?;
+    let text = full_thread.map_or_else(
+        || text.to_owned(),
+        |thread| {
+            automation_reply(
+                &target.bot.platform,
+                text,
+                &format!(
+                    "{}/assistant?c={thread}",
+                    state.config.frontend_url.trim_end_matches('/')
+                ),
+            )
         },
-        adapter.as_ref(),
+    );
+    let sent = send_post(
+        state,
+        &target,
+        crate::services::channel_platform::OutboundReply {
+            text: Some(text),
+            metadata: None,
+            attachments: Vec::new(),
+            reply_to_platform_message_id: None,
+        },
+    )
+    .await?;
+    audit(state, owner, "nyxbot_channel_chat_posted", json!({
+        "channel_agent_id": &target.channel.id, "chat_id": &target.thread.id, "message_id": &sent.message_id,
+    })).await;
+    Ok(json!({"status":"posted", "chat_id": target.thread.id, "message_id": sent.message_id}))
+}
+
+pub(crate) struct AutomationImages<'a> {
+    pub turn_id: &'a str,
+    pub plan: &'a super::images::ImageSendPlan,
+}
+
+/// Result images reuse one prepared owner-authorized post and its limiter token.
+pub(crate) async fn post_automation_images(
+    state: &AppState,
+    owner: &str,
+    chat_id: &str,
+    images: AutomationImages<'_>,
+    agent_id: Option<&str>,
+    conversation_id: &str,
+    text: &str,
+) -> AppResult<Value> {
+    let target = prepare_post(state, owner, chat_id, agent_id).await?;
+    let claim_key = format!("initiated:{chat_id}");
+    let report = super::images::report_or_failure(
+        state,
+        super::images::ImageSendContext {
+            owner,
+            conversation_id,
+            turn_id: images.turn_id,
+            channel: &target.channel,
+            thread: &target.thread,
+            anchor: super::images::ImageAnchor::Initiated {
+                chat_id: chat_id.to_owned(),
+            },
+            audience: super::images::ImageAudience {
+                owner_private: target.thread.kind.as_deref() == Some("private")
+                    && target.thread.owner_chat,
+            },
+            deadline: None,
+            claim_key: &claim_key,
+            initiated: Some(&target),
+        },
+        images.plan,
+    )
+    .await;
+    let note = super::images::failure_note(&report);
+    let reply = automation_reply_with_note(
+        &target.bot.platform,
+        text,
+        &format!(
+            "{}/assistant?c={conversation_id}",
+            state.config.frontend_url.trim_end_matches('/')
+        ),
+        &note,
+    );
+    let sent = send_post(
+        state,
+        &target,
+        crate::services::channel_platform::OutboundReply {
+            text: Some(reply),
+            attachments: Vec::new(),
+            metadata: None,
+            reply_to_platform_message_id: None,
+        },
     )
     .await?;
     audit(
         state,
         owner,
         "nyxbot_channel_chat_posted",
-        json!({"channel_agent_id": &row.id, "chat_id": &chat.id,
-            "message_id": &sent.message_id}),
+        json!({
+            "channel_agent_id":target.channel.id, "chat_id":chat_id, "message_id":sent.message_id,
+        }),
     )
     .await;
-    Ok(json!({"status": "posted", "chat_id": chat.id, "message_id": sent.message_id}))
+    Ok(json!({"status":"posted", "chat_id":chat_id, "message_id":sent.message_id}))
 }
 
 /// Chats given to a destroyed agent go back to their bot's agent (in new
@@ -1556,6 +1680,10 @@ pub async fn update_channel_chat(
 /// Fit a single proactive message to the destination's text contract. The full
 /// result stays in its durable thread; shortening is always explicit.
 fn automation_reply(platform: &str, text: &str, thread_url: &str) -> String {
+    automation_reply_with_note(platform, text, thread_url, "")
+}
+
+fn automation_reply_with_note(platform: &str, text: &str, thread_url: &str, note: &str) -> String {
     let limit = match platform {
         "discord" => 2000,
         "telegram" | "telegram-new" | "whatsapp" => 4096,
@@ -1573,10 +1701,11 @@ fn automation_reply(platform: &str, text: &str, thread_url: &str) -> String {
             value.encode_utf16().count()
         }
     };
-    if cost(text) <= limit {
-        return text.to_owned();
+    let full = format!("{text}{note}");
+    if cost(&full) <= limit {
+        return full;
     }
-    let suffix = format!("\n\n[Reply shortened. Read the full reply: {thread_url}]");
+    let suffix = format!("\n\n[Reply shortened. Read the full reply: {thread_url}]{note}");
     let mut result = String::new();
     let budget = limit.saturating_sub(cost(&suffix));
     let mut used = 0;

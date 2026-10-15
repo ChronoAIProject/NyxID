@@ -119,14 +119,28 @@ pub async fn group_content(
     Path((scope, id)): Path<(String, String)>,
 ) -> AppResult<Response> {
     require_first_party_human(&auth)?;
-    let (mime, bytes) = uploads::owner_read(
+    let result = uploads::owner_read(
         &state.db,
         &state.encryption_keys,
         &auth.user_id.to_string(),
         &scope,
         &id,
     )
-    .await?;
+    .await;
+    let (mime, bytes) = match result {
+        Ok(value) => value,
+        Err(AppError::NotFound(_)) => {
+            engine::read_group_tool_attachment(
+                &state.db,
+                &state.encryption_keys,
+                &auth.user_id.to_string(),
+                &scope,
+                &id,
+            )
+            .await?
+        }
+        Err(error) => return Err(error),
+    };
     content(mime, bytes)
 }
 

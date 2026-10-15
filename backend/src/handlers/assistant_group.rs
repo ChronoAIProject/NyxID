@@ -376,8 +376,23 @@ pub(crate) async fn member_settled(
         let agent = team::agent_for_conversation(&state.db, row).await?;
         match error_code {
             None if !text.trim().is_empty() => {
-                let message =
-                    groups::append(&state.db, owner, group_id, "agent", Some(&agent), text).await?;
+                let attachments = match row.active_turn.as_ref() {
+                    Some(turn) => {
+                        engine::settled_tool_attachments(&state.db, owner, &row.id, &turn.turn_id)
+                            .await
+                    }
+                    None => Vec::new(),
+                };
+                let message = groups::append(
+                    &state.db,
+                    owner,
+                    group_id,
+                    "agent",
+                    Some(&agent),
+                    text,
+                    attachments,
+                )
+                .await?;
                 Box::pin(crate::services::machine_activity_service::publish_group(
                     &state.db, row, &message,
                 ))
@@ -400,6 +415,7 @@ pub(crate) async fn member_settled(
                     "notice",
                     Some(&agent),
                     &format!("{} stopped.", identifier(&agent.name)),
+                    Vec::new(),
                 )
                 .await?;
                 Box::pin(crate::services::machine_activity_service::publish_group(
@@ -415,6 +431,7 @@ pub(crate) async fn member_settled(
                     "notice",
                     Some(&agent),
                     &format!("{} could not reply ({code}).", identifier(&agent.name)),
+                    Vec::new(),
                 )
                 .await?;
                 Box::pin(crate::services::machine_activity_service::publish_group(

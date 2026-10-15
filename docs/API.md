@@ -8556,3 +8556,14 @@ Tool service writes and publication require platform admin authority in Phase 1.
 Tools updates distinguish omission from JSON `null` for `supplier` and `import_source`: omit to retain, null to clear. `GET /api/v1/keys?include_tool_bindings=true` includes otherwise-hidden platform Tool bindings with the existing KeyResponse shape; default listing still hides them and includes BYOK rows. Owner, membership, restricted API-key and delegated read semantics are unchanged. Tools `limits` is null when `PLATFORM_SERVICE_RATE_LIMIT_PER_SECOND=0`, otherwise `{ rate_limit_per_second, burst }`.
 
 CLI catalog creation requires `--endpoint-url` or `--twin-of` (otherwise the local error is `Catalog creation requires --endpoint-url or --twin-of`). Catalog updates support `--clear-supplier`, conflicting with `--supplier`. Tools table output formats prices as `Free` or `<credits> credits / <metric>`, limits as `<n>/s, burst <b>` or `none`, and topics as a comma-separated list. `tools show` prints rows for each operation (name, method, path, risk, data scope, cost class). JSON output remains the raw response.
+
+## Channel media delivery substitutions
+
+`POST /api/v1/channel-relay/reply`, `/thread-reply` and `/send` accept the existing
+media request shape and may add `delivered_as` to a successful response. For
+Telegram and telegram-new, a narrowly classified photo-specific 400 refusal
+can send the same image once as a document under the
+[relay fallback rules](CHANNEL_BOT_RELAY.md#image-outcomes-and-telegram-document-fallback).
+A response with `"delivered_as": ["file"]` reports this actual transport kind,
+and the outbound message's `content_type` is `file`. The reply anchor, topic and
+caption are preserved. Other adapters can omit this field.

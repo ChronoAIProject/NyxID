@@ -183,39 +183,52 @@ impl LarkFamilyAdapter {
                 form.text("file_type", "stream")
                     .text("file_name", media::safe_filename(a.filename.as_deref()))
             };
-            let upload = support::json(
+            let upload = media::platform_json(
                 http.post(format!("{}/open-apis/im/v1/{endpoint}", self.base_url))
                     .bearer_auth(token.as_str())
                     .multipart(form),
+                self.display_name(),
+                &[],
             )
             .await?;
-            if upload["code"] != 0 {
-                return Err(threads::unavailable());
-            }
+            require_media_success(&upload, self.display_name())?;
             let handle = upload["data"][key]
                 .as_str()
-                .ok_or_else(threads::unavailable)?;
+                .ok_or_else(media::upload_failed)?;
             (field, json!({key: handle}).to_string())
         } else {
             build_send_body(reply)
         };
-        let response = support::json(
-            http.post(format!(
+        let request = http
+            .post(format!(
                 "{}/open-apis/im/v1/messages/{root}/reply",
                 self.base_url
             ))
             .bearer_auth(token.as_str())
-            .json(&json!({"msg_type": kind, "content": content, "reply_in_thread": true})),
-        )
-        .await?;
-        if response["code"] != 0 {
-            return Err(threads::unavailable());
-        }
+            .json(&json!({"msg_type": kind, "content": content, "reply_in_thread": true}));
+        let has_media = !reply.attachments.is_empty();
+        let response = if has_media {
+            let value = media::platform_json(request, self.display_name(), &[]).await?;
+            require_media_success(&value, self.display_name())?;
+            value
+        } else {
+            let value = support::json(request).await?;
+            if value["code"] != 0 {
+                return Err(threads::unavailable());
+            }
+            value
+        };
         response["data"]["message_id"]
             .as_str()
             .filter(|id| support::path_id(id))
             .map(|id| Some(id.into()))
-            .ok_or_else(threads::unavailable)
+            .ok_or_else(|| {
+                if has_media {
+                    media::upload_failed()
+                } else {
+                    threads::unavailable()
+                }
+            })
     }
 
     pub(super) async fn history_in_thread(
@@ -303,4 +316,21 @@ impl LarkFamilyAdapter {
 
 fn message_time(m: &Value) -> Option<DateTime<Utc>> {
     DateTime::from_timestamp_millis(m["create_time"].as_str()?.parse().ok()?)
+}
+
+fn require_media_success(value: &Value, platform: &str) -> AppResult<()> {
+    match value["code"].as_i64() {
+        Some(0) => Ok(()),
+        Some(code) => Err(
+            crate::services::channel_platform::classify_upstream_refusal(
+                platform,
+                &format!(
+                    "code {code}: {}",
+                    value["msg"].as_str().unwrap_or("provider refusal")
+                ),
+                &[],
+            ),
+        ),
+        None => Err(media::upload_failed()),
+    }
 }

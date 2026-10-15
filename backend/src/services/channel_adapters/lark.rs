@@ -1134,24 +1134,46 @@ impl PlatformAdapter for LarkFamilyAdapter {
                         media::safe_filename(attachment.filename.as_deref()),
                     );
                 }
-                let upload = media::response_json(
+                let upload = media::platform_json(
                     http.post(format!("{}/open-apis/im/v1/{endpoint}", self.base_url))
                         .bearer_auth(token.as_str())
                         .multipart(form),
+                    self.display_name(),
+                    &[],
                 )
                 .await?;
-                if upload["code"] != 0 {
-                    return Err(media::upload_failed());
+                let code = upload["code"].as_i64().ok_or_else(media::upload_failed)?;
+                if code != 0 {
+                    return Err(
+                        crate::services::channel_platform::classify_upstream_refusal(
+                            self.display_name(),
+                            &format!(
+                                "code {code}: {}",
+                                upload["msg"].as_str().unwrap_or("provider refusal")
+                            ),
+                            &[],
+                        ),
+                    );
                 }
                 let handle = upload["data"][key]
                     .as_str()
                     .ok_or_else(media::upload_failed)?;
                 let content = serde_json::json!({key: handle}).to_string();
-                let response = media::response_json(http.post(format!("{}/open-apis/im/v1/messages", self.base_url))
+                let response = media::platform_json(http.post(format!("{}/open-apis/im/v1/messages", self.base_url))
                     .query(&[("receive_id_type", "chat_id")]).bearer_auth(token.as_str())
-                    .json(&serde_json::json!({"receive_id": conversation_id, "msg_type": field, "content": content}))).await?;
-                if response["code"] != 0 {
-                    return Err(media::upload_failed());
+                    .json(&serde_json::json!({"receive_id": conversation_id, "msg_type": field, "content": content})), self.display_name(), &[]).await?;
+                let code = response["code"].as_i64().ok_or_else(media::upload_failed)?;
+                if code != 0 {
+                    return Err(
+                        crate::services::channel_platform::classify_upstream_refusal(
+                            self.display_name(),
+                            &format!(
+                                "code {code}: {}",
+                                response["msg"].as_str().unwrap_or("provider refusal")
+                            ),
+                            &[],
+                        ),
+                    );
                 }
                 last = Some(
                     response["data"]["message_id"]
