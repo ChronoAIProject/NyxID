@@ -216,12 +216,18 @@ export function DemoAgents() {
         const active = data.demos[s.demoIndex]!.active === index;
         return (
           <div className={`nb-ag ${active ? "new" : ""}`} key={agent.name}>
-            <span className="ic">
+            <span
+              className="ic"
+              style={{ width: 24, height: 24, borderRadius: 7 }}
+            >
               <Icon size={16} />
             </span>
             <span>{agent.name}</span>
             {active && (
-              <span className="badge b-v">
+              <span
+                className="badge b-v"
+                style={{ marginLeft: "auto", padding: "1px 6px", fontSize: 10 }}
+              >
                 {s.language === "zh" ? "新" : "new"}
               </span>
             )}

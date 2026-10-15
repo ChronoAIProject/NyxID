@@ -351,6 +351,12 @@ for (locale of ["en", "zh"]) {
   for (const [route, markup] of Object.entries(entries)) {
     const tree = html(markup);
     // Remove internal review links and prototype-only pending forms.
+    if (route === "nav") {
+      tree.querySelector(".links").insertAdjacentHTML(
+        "beforeend",
+        `<a class="nl m-only" href="#/login">${locale === "zh" ? "登录" : "Log in"}</a>`,
+      );
+    }
     tree.querySelectorAll(".ann").forEach((e) => e.remove());
     tree.querySelectorAll(".legal-links a").forEach((a, i) => {
       if (i === 2) a.remove();
@@ -389,7 +395,7 @@ for (locale of ["en", "zh"]) {
       solGrid.insertAdjacentHTML(
         "beforeend",
         run(
-          `'<a class="card sol" href="#/nyxbot"><div class="ic">'+ic('spark')+'</div><h3>'+L('Describe your own','描述你自己的需求')+'</h3><p>'+L('“When someone asks for a quote, collect their address and email it to me.”','“有人询价时，收集他们的地址并发邮件给我。”')+'</p></a>'`,
+          `'<a class="card sol" href="#/nyxbot" style="border-style:dashed;align-items:center;justify-content:center;text-align:center"><div class="ic">'+ic('spark')+'</div><h3>'+L('Describe your own','描述你自己的需求')+'</h3><p>'+L('“When someone asks for a quote, collect their address and email it to me.”','“有人询价时，收集他们的地址并发邮件给我。”')+'</p><span class="btn sm" style="margin-top:6px">'+L('Ask NyxBot','交给 NyxBot')+'</span></a>'`,
         ),
       );
     }

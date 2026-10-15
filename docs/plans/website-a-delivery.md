@@ -59,9 +59,9 @@ Prototype-only actions cannot claim production success. Public styles stay scope
 
 ## 验证记录 / Verification
 
-实现已完成，以下为正式 React 实现的实际证据；独立验收尚未完成，移动端实测仍受工具阻塞。旧原型 QA 不计作本轮通过证据。
+首次独立验收发现 A-01～A-03，已按下方复验记录修复；独立复验结论待验收对话给出。最初移动端工具限制已解除，本轮实际测得 390×844。旧原型 QA 不计作正式实现通过证据。
 
-Implementation is ready for independent acceptance. The evidence below belongs to the production React implementation. Mobile browser validation remains blocked; prior prototype QA is not counted.
+The first independent acceptance found A-01–A-03. Fixes and targeted evidence are recorded below; independent re-acceptance is pending. The initial mobile tooling limitation has been resolved with an actual 390×844 viewport. Prior prototype QA is not counted.
 
 | Check | Result and evidence |
 | --- | --- |
@@ -73,7 +73,13 @@ Implementation is ready for independent acceptance. The evidence below belongs t
 | Interactions | NyxBot chip selection, MCP code switching, blog filtering, unavailable newsletter, original five-workflow selection/playback and keyboard audience switching. See `interactions-audit.json` and screenshots. |
 | Navigation edges | Unknown solution and unknown public route show 404; existing blog article still renders; legacy Start becomes real registration; `#beta` scrolls to the community section. See `route-edges.json`. |
 | Tool wall v4.1 | Static 24 cards, original order, six columns, 10px gap; first card 175.664×58px with 12px/14px padding and 12px radius. See `tool-wall-audit.json`. |
-| Mobile browser | **BLOCKED**, not passed. The documented viewport API accepted 390×844 but all existing/new tabs continued reporting 1280×720. Only in-app browser is available. `viewport-override-not-applied.jpg` is deliberately labelled a failed attempt. Two-column CSS is retained from A, but this does not prove actual mobile behavior. |
+| Mobile browser | Initial run was blocked (`viewport-override-not-applied.jpg`); this is historical. Independent acceptance subsequently checked all 25 routes × two languages at actual 390×844 and desktop. This fix run also measured actual 390×844, verified both expanded-menu login links and keyboard navigation/query preservation. See `website-a-evidence/fix-1/browser-audit.json`. This is browser evidence, not a physical-device test. |
+
+## 首轮验收修复 / First acceptance fixes
+
+首轮独立验收未通过，发现 A-01（窄屏无直接登录）、A-02（自定义方案卡遗漏 CTA/样式）、A-03（NyxBot 侧栏徽标溢出）。本轮仅修复这三项；验证和截图见 `website-a-evidence/fix-1/README.md`。验收结论由指定独立对话给出，不由实现方自行宣布。
+
+The first independent acceptance failed on mobile login reachability, the custom solution CTA/styles, and sidebar badge overflow. This follow-up fixes those three findings only. Targeted checks and screenshots are in `website-a-evidence/fix-1/README.md`; the assigned acceptance chat owns the re-acceptance conclusion.
 
 ## 已确认的生产适配 / Explicit production adaptations
 
@@ -133,7 +139,7 @@ No real login, OAuth consent, registration, message, purchase or account mutatio
 - `origin/main` is 12 upstream commits behind the verified base. A non-protected `codex/website-a-base` review branch mirrors that exact base for a delivery-scoped fork comparison. `main` is never pushed directly.
 - 按负责人最新确认，本轮通过实现 commit 并推送 `aelf-hzz780/NyxID` 的 `codex/website-a-delivery` 分支交付；组织仓库 PR 由负责人手动创建，不要求先创建 fork PR。
 - Per the owner's latest instruction, implementation commits pushed to the fork delivery branch are the delivery artifact. The owner will create the organization PR manually; a fork PR is optional.
-- Independent acceptance chat: `01a13edf-2b31-75c1-b1ca-824d707f02ff`. Handoff identifies the exact delivery commit, fork branch and blocked mobile check. Independent acceptance remains pending.
+- Independent acceptance chat: `01a13edf-2b31-75c1-b1ca-824d707f02ff`. Handoff identifies the exact delivery commit, fork branch and current verification evidence. Independent re-acceptance of the fixes remains pending.
 
 ### PR 准备与责任 / PR preparation and ownership
 
@@ -143,7 +149,7 @@ The implementation and both branches are pushed. After an earlier connector 403,
 
 ## 剩余风险 / Remaining limits
 
-1. Actual 390px/mobile navigation, touch behavior, device performance and OS reduced-motion transitions require independent browser/device verification. Unit tests cover reduced-motion logic but are not OS/device evidence.
+1. Actual 390px browser navigation has now been checked, including the repaired login menu. Physical-device touch behavior, device performance and OS reduced-motion transitions remain unverified. Unit tests and simulated media changes are not OS/device evidence.
 2. The 145-entry catalog and pricing/business statements retain the approved product source. Individual third-party connection availability and commercial policy were not exhaustively exercised; no anonymous/free-use entitlement is added.
 3. Fonts and provider favicons depend on external networks. Full offline, WebKit and Firefox runs are not claimed.
 4. No real account sign-in, external provider consent, MFA completion or authenticated session browser regression was executed. Existing auth code/guards are retained and covered by targeted tests.

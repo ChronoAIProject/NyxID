@@ -110,6 +110,9 @@ export default function WebsiteHeader() {
             {"  Discord"}
           </a>
           {"\n    "}
+          <a className="nl m-only" href={s.authHref("login")}>
+            {"登录"}
+          </a>
         </div>
         {"\n    "}
         <span className="sp"></span>

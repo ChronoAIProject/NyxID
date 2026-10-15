@@ -1,0 +1,2 @@
+Command: npx eslint src/features/website-a
+Exit code: 0

@@ -613,7 +613,16 @@ export default function SolutionsPage() {
                 </span>
               </div>
             </a>
-            <a className="card sol" href={s.siteHref("/nyxbot")}>
+            <a
+              className="card sol"
+              href={s.siteHref("/nyxbot")}
+              style={{
+                borderStyle: "dashed",
+                alignItems: "center",
+                justifyContent: "center",
+                textAlign: "center",
+              }}
+            >
               <div className="ic">
                 <svg className="i" viewBox="0 0 24 24">
                   <path d="M12 3l1.9 5.8L20 11l-6.1 2.2L12 19l-1.9-5.8L4 11l6.1-2.2z"></path>
@@ -625,6 +634,9 @@ export default function SolutionsPage() {
                   "“When someone asks for a quote, collect their address and email it to me.”"
                 }
               </p>
+              <span className="btn sm" style={{ marginTop: "6px" }}>
+                {"Ask NyxBot"}
+              </span>
             </a>
           </div>
           {"\n  "}
