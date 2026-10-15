@@ -26,6 +26,7 @@ pub mod channel_connect_link;
 pub mod channel_conversation;
 pub mod channel_event_log;
 pub mod channel_message;
+pub mod channel_reply_delivery;
 pub mod channel_send_claim;
 pub mod channel_thread;
 pub mod channel_thread_follow;

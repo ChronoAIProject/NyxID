@@ -49,6 +49,7 @@ pub mod channel_managed;
 #[cfg(test)]
 mod channel_managed_tests;
 pub mod channel_relay;
+pub mod channel_relay_request;
 pub mod channel_webhooks;
 pub mod cli_pairings;
 pub mod codex_connection;

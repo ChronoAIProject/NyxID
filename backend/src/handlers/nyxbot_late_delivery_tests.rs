@@ -245,12 +245,9 @@ async fn partial_failure_survives_both_stream_and_late_delivery() {
     assert_eq!(requests.len(), 1);
     let body: Value = serde_json::from_slice(&requests[0].body).unwrap();
     assert_eq!(body["text"], partial);
-    assert!(
-        late_delivery::answer(&"界".repeat(9000), true)
-            .chars()
-            .count()
-            <= MAX_CHANNEL_REPLY_CHARS
-    );
+    let long = "界".repeat(9000);
+    assert!(late_delivery::answer(&long, true).starts_with(&long));
+    assert_eq!(late_delivery::answer(&long, false), long);
 }
 
 #[tokio::test]

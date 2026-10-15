@@ -1821,8 +1821,8 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         )
         .route(
             "/reply",
-            post(handlers::channel_relay::async_reply).layer(DefaultBodyLimit::max(
-                crate::services::channel_media_service::request_body_limit(
+            post(handlers::channel_relay_request::reply).layer(DefaultBodyLimit::max(
+                handlers::channel_relay_request::request_body_limit(
                     router_state
                         .as_ref()
                         .map_or(crate::config::DEFAULT_CHANNEL_MEDIA_MAX_BYTES, |state| {
@@ -1833,8 +1833,8 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         )
         .route(
             "/thread-reply",
-            post(handlers::channel_relay::async_thread_reply).layer(DefaultBodyLimit::max(
-                crate::services::channel_media_service::request_body_limit(
+            post(handlers::channel_relay_request::thread_reply).layer(DefaultBodyLimit::max(
+                handlers::channel_relay_request::request_body_limit(
                     router_state
                         .as_ref()
                         .map_or(crate::config::DEFAULT_CHANNEL_MEDIA_MAX_BYTES, |state| {

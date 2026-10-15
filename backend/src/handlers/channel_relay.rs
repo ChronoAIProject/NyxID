@@ -1661,23 +1661,48 @@ async fn deliver_reply(
             }),
         }));
     }
-    let send_result = adapter
-        .send_bound_reply_outcome(
+    let mut stored_parts = None;
+    let credentials = crate::services::channel_platform::BotCredentials {
+        billing: billing.as_ref(),
+        token: &bot_token,
+        platform_bot_id: Some(&bot.platform_bot_id),
+        platform_secrets: platform_secrets.as_ref(),
+    };
+    let send_result = if let Some(parts) = crate::services::channel_reply_plan::ordinary(
+        &outbound,
+        adapter.platform_id(),
+        platform_conversation_id,
+    )? {
+        Box::pin(crate::services::channel_reply_delivery::send_parts(
             &state.db,
             &state.http_client,
+            adapter,
             &bot,
             &original,
-            &crate::services::channel_platform::BotCredentials {
-                billing: billing.as_ref(),
-                token: &bot_token,
-                platform_bot_id: Some(&bot.platform_bot_id),
-                platform_secrets: platform_secrets.as_ref(),
-            },
+            &attributed_api_key_id,
             platform_conversation_id,
-            &outbound,
-            None,
-        )
-        .await;
+            &credentials,
+            parts,
+        ))
+        .await
+        .map(|(stored, outcome)| {
+            stored_parts = Some(stored);
+            outcome
+        })
+    } else {
+        adapter
+            .send_bound_reply_outcome(
+                &state.db,
+                &state.http_client,
+                &bot,
+                &original,
+                &credentials,
+                platform_conversation_id,
+                &outbound,
+                None,
+            )
+            .await
+    };
     crate::services::channel_bot_service::record_outbound_outcome(
         &state.db,
         &bot.id,
@@ -1719,20 +1744,25 @@ async fn deliver_reply(
         .unwrap_or_else(|| outbound.attachments.iter().map(|a| a.kind).collect());
     // Store outbound-message metadata only (per ADR-013). The reply text
     // is already on the wire to the platform; we do not persist it.
-    let stored = channel_relay_service::store_outbound_message(
-        &state.db,
-        &bot.id,
-        &conversation.id,
-        &bot.user_id,
-        &bot.platform,
-        &attributed_api_key_id,
-        Some(&original.id),
-        platform_msg_id.as_deref(),
-        original.platform_conversation_id.as_deref(),
-        kinds.first().map_or("text", |kind| kind.as_str()),
-        outcome.observation,
-    )
-    .await?;
+    let stored = match stored_parts {
+        Some(stored) => stored,
+        None => {
+            channel_relay_service::store_outbound_message(
+                &state.db,
+                &bot.id,
+                &conversation.id,
+                &bot.user_id,
+                &bot.platform,
+                &attributed_api_key_id,
+                Some(&original.id),
+                platform_msg_id.as_deref(),
+                original.platform_conversation_id.as_deref(),
+                kinds.first().map_or("text", |kind| kind.as_str()),
+                outcome.observation,
+            )
+            .await?
+        }
+    };
 
     if let Some(error) = outcome.error {
         return Err(error);
@@ -2233,6 +2263,11 @@ mod tests {
     use uuid::Uuid;
 
     use crate::test_utils::{connect_test_database, test_app_state};
+
+    mod complete_replies {
+        use super::*;
+        include!("channel_relay_complete_tests.rs");
+    }
 
     struct ReplyTokenFixture {
         state: AppState,
@@ -2743,8 +2778,28 @@ mod tests {
         );
         let record = stored.platform_send.unwrap();
         assert_eq!(record.component_ids, vec!["wamid.accepted"]);
-        assert!(!record.complete);
-        assert!(record.uncertain);
+        // Each row now describes one platform part; the logical receipt owns completion.
+        assert!(record.complete);
+        assert!(!record.uncertain);
+        let logical = fixture
+            .state
+            .db
+            .collection::<bson::Document>(crate::models::channel_reply_delivery::COLLECTION_NAME)
+            .find_one(doc! {"inbound_message_id": &fixture.message.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!logical.get_bool("complete").unwrap());
+        let parts = logical.get_array("parts").unwrap();
+        assert_eq!(parts.len(), 2);
+        assert_eq!(
+            parts[0].as_document().unwrap().get_str("status").unwrap(),
+            "accepted"
+        );
+        assert_eq!(
+            parts[1].as_document().unwrap().get_str("status").unwrap(),
+            "uncertain"
+        );
         assert_eq!(record.waba_id.as_deref(), Some("456"));
         fixture.state.db.drop().await.unwrap();
     }

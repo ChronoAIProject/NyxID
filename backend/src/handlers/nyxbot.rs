@@ -56,7 +56,6 @@ pub const GATEWAY_SLUG: &str = "cmaeg";
 pub const PROVIDER_SLUG: &str = "nyxbot";
 pub const LINK_CODE_TTL_HOURS: i64 = 24;
 pub const EVENT_RETENTION_HOURS: i64 = 24;
-pub const MAX_CHANNEL_REPLY_CHARS: usize = 8000;
 
 fn canonical_platform(platform: &str) -> &str {
     match platform {
@@ -3187,11 +3186,10 @@ async fn final_reply(mut receiver: broadcast::Receiver<Value>) -> Result<String,
 }
 
 fn bounded_reply(text: &str) -> String {
-    let text = text.trim();
-    if text.is_empty() {
+    if text.trim().is_empty() {
         "Done.".into()
     } else {
-        excerpt(text, MAX_CHANNEL_REPLY_CHARS)
+        text.into()
     }
 }
 

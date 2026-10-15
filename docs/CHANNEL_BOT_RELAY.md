@@ -12,6 +12,13 @@ Combined with [Agent Isolation](./AGENT_ISOLATION.md), the same NyxID user can w
 
 For Telegram's optional native bot creation, see [Telegram bot creation](TELEGRAM_NEW.md). The **Telegram** option uses the separate `telegram-new` adapter; **Telegram bot token** uses the existing `telegram` adapter and token setup. These are display labels; platform identifiers and existing connections remain unchanged.
 
+Ordinary and native thread text replies accept one complete logical reply and
+split it only when required by the destination's limit. HTTP 200 confirms
+platform acceptance of every generated part; partial or uncertain delivery
+returns an error. A single reply token covers the whole request. See the
+[complete-reply contract](CHANNEL_COMPLETE_REPLIES.md) for the 2 MiB wire bound,
+64-part preflight, metadata-only tracking and coordinated CMAEG rollout.
+
 ## Telegram manager channels
 
 A configured Telegram bot-creation manager can also be registered using its existing token as a `telegram` channel. It reports `credential_source: "telegram_manager"` and retains the manager's single webhook. Manager setup events stay in the creation workflow; ordinary messages use the channel's exact or default conversation routes. See [Telegram manager setup and limitations](TELEGRAM_NEW.md#using-the-manager-as-a-channel-bot).

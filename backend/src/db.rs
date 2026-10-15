@@ -2678,6 +2678,8 @@ async fn ensure_service_indexes(db: &Database) -> Result<(), mongodb::error::Err
         )
         .await?;
 
+    crate::services::channel_reply_delivery::ensure_indexes(db).await?;
+
     // ── reply_token_uses ──
     let reply_token_uses = db.collection::<mongodb::bson::Document>("reply_token_uses");
     reply_token_uses
