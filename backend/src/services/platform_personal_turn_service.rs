@@ -334,14 +334,8 @@ pub(crate) async fn claim_personal_turn_in_session(
     if agent.user_id != authority.user_id || !agent.is_nyxbot() || agent.destroyed_at.is_some() {
         return Err(AppError::AssistantTurnRequired);
     }
-    if !matches!(
-        identity
-            .fence_personal_origin(db, session, authority)
-            .await?,
-        contract::FenceOutcome::Authorized
-    ) {
-        return Err(AppError::AssistantTurnRequired);
-    }
+    // claim_binding_thread performs the read validation before key work;
+    // claim_binding_turn takes the shared write fence after that work.
     let thread = identity
         .claim_binding_thread(
             db,
@@ -876,3 +870,7 @@ async fn apply_exact_stop(
 #[cfg(test)]
 #[path = "platform_personal_turn_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "platform_personal_turn_kms_tests.rs"]
+mod kms_tests;

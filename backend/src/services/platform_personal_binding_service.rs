@@ -74,16 +74,30 @@ pub(crate) async fn fence_person(
     session: &mut ClientSession,
     user_id: &str,
 ) -> AppResult<bool> {
-    Ok(db
-        .collection::<Document>(crate::models::user::COLLECTION_NAME)
-        .update_one(
-            doc! {"_id":user_id,"is_active":true,"$or":[{"user_type":"person"},{"user_type":{"$exists":false}}]},
-            doc! {"$inc":{"platform_personal_effect_revision":1_i64}},
-        )
-        .session(session)
-        .await?
-        .matched_count
-        == 1)
+    check_person(db, session, user_id, true).await
+}
+
+async fn check_person(
+    db: &Database,
+    session: &mut ClientSession,
+    user_id: &str,
+    write_fence: bool,
+) -> AppResult<bool> {
+    let users = db.collection::<Document>(crate::models::user::COLLECTION_NAME);
+    let filter = doc! {"_id":user_id,"is_active":true,"$or":[{"user_type":"person"},{"user_type":{"$exists":false}}]};
+    Ok(if write_fence {
+        users
+            .update_one(
+                filter,
+                doc! {"$inc":{"platform_personal_effect_revision":1_i64}},
+            )
+            .session(session)
+            .await?
+            .matched_count
+            == 1
+    } else {
+        users.find_one(filter).session(session).await?.is_some()
+    })
 }
 
 pub async fn latest_for_sender(
@@ -198,16 +212,38 @@ pub async fn fence_binding_in_session(
     binding: &PlatformPersonalBinding,
     personal_revision: i64,
 ) -> AppResult<bool> {
-    let Some(controls) = super::platform_bot_runtime_control_service::fence_manager_in_session(
-        db,
-        session,
-        &binding.platform_config_id,
-        &binding.manager_bot_id,
-        binding.telegram_bot_id,
-        None,
-    )
-    .await?
-    else {
+    check_binding_in_session(db, session, binding, personal_revision, true).await
+}
+
+async fn check_binding_in_session(
+    db: &Database,
+    session: &mut ClientSession,
+    binding: &PlatformPersonalBinding,
+    personal_revision: i64,
+    write_fence: bool,
+) -> AppResult<bool> {
+    let controls = if write_fence {
+        super::platform_bot_runtime_control_service::fence_manager_in_session(
+            db,
+            session,
+            &binding.platform_config_id,
+            &binding.manager_bot_id,
+            binding.telegram_bot_id,
+            None,
+        )
+        .await?
+    } else {
+        super::platform_bot_runtime_control_service::validate_manager_in_session(
+            db,
+            session,
+            &binding.platform_config_id,
+            &binding.manager_bot_id,
+            binding.telegram_bot_id,
+            None,
+        )
+        .await?
+    };
+    let Some(controls) = controls else {
         return Ok(false);
     };
     if controls.retired
@@ -218,10 +254,33 @@ pub async fn fence_binding_in_session(
     {
         return Ok(false);
     }
-    if !fence_person(db, session, &binding.user_id).await? {
+    if !check_person(db, session, &binding.user_id, write_fence).await? {
         return Ok(false);
     }
-    Ok(db.collection::<PlatformPersonalBinding>(COLLECTION_NAME).update_one(doc! {"_id":&binding.id,"generation":binding.generation,"user_id":&binding.user_id,"state":"active","platform_config_id":&binding.platform_config_id,"manager_authority_epoch":binding.manager_authority_epoch,"telegram_sender_id":binding.telegram_sender_id,"telegram_chat_id":binding.telegram_chat_id},doc! {"$inc":{"effect_revision":1_i64}}).session(session).await?.matched_count == 1)
+    let rows = db.collection::<PlatformPersonalBinding>(COLLECTION_NAME);
+    let filter = doc! {"_id":&binding.id,"generation":binding.generation,"user_id":&binding.user_id,"state":"active","platform_config_id":&binding.platform_config_id,"manager_authority_epoch":binding.manager_authority_epoch,"telegram_sender_id":binding.telegram_sender_id,"telegram_chat_id":binding.telegram_chat_id};
+    Ok(if write_fence {
+        rows.update_one(filter, doc! {"$inc":{"effect_revision":1_i64}})
+            .session(session)
+            .await?
+            .matched_count
+            == 1
+    } else {
+        rows.find_one(filter).session(session).await?.is_some()
+    })
+}
+
+/// Validate before private/key work; callers must still take the same write
+/// fence after preparation and before committing any admitted effect.
+pub(crate) async fn validate_personal_origin_in_session(
+    db: &Database,
+    session: &mut ClientSession,
+    expected: &super::platform_manager_contract::PersonalBindingAuthority,
+) -> AppResult<bool> {
+    let Some(row) = binding_for_authority(db, session, expected).await? else {
+        return Ok(false);
+    };
+    check_binding_in_session(db, session, &row, expected.personal_control_revision, false).await
 }
 
 pub async fn claim_thread_in_session(
@@ -232,9 +291,11 @@ pub async fn claim_thread_in_session(
     agent_id: &str,
     conversation_id: &str,
 ) -> AppResult<(String, String)> {
-    if !fence_binding_in_session(db, session, binding, personal_revision).await? {
+    if !check_binding_in_session(db, session, binding, personal_revision, false).await? {
         return Err(conflict());
     }
+    // The final claim_binding_turn fences shared manager rows after Part 2
+    // finishes key preparation. This pointer/agent write is owner-specific.
     // Part 2 also checks its agent authority. This local write protects the pointer
     // from being assigned an unrelated owner's or specialist's agent.
     if db.collection::<Document>(crate::models::assistant_agent::COLLECTION_NAME).find_one_and_update(doc! {"_id":agent_id,"user_id":&binding.user_id,"kind":"nyxbot","destroyed_at":bson::Bson::Null},doc! {"$inc":{"platform_thread_revision":1_i64}}).session(&mut *session).await?.is_none() { return Err(conflict()); }

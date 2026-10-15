@@ -549,89 +549,112 @@ async fn recover_or_replace(
     let audit_conversation = conversation_id.clone();
     let credential = session
         .start_transaction()
-        .and_run2(async move |session| {
-            let operation = async {
-                // Write the conversation as well to fence concurrent deletion.
-                let result = db
-                    .collection::<AssistantConversation>(CONVERSATIONS)
-                    .update_one(
-                        doc! {"_id": &conversation_id, "user_id": &user_id},
-                        doc! {"$inc": {"credential_fence": 1}},
-                    )
-                    .session(&mut *session)
-                    .await?;
-                if result.matched_count != 1 {
-                    return Err(AppError::NotFound("Conversation not found".into()));
-                }
-                let conversation = db
-                    .collection::<AssistantConversation>(CONVERSATIONS)
-                    .find_one(doc! {"_id": &conversation_id, "user_id": &user_id})
-                    .session(&mut *session).await?
-                    .ok_or_else(|| AppError::NotFound("Conversation not found".into()))?;
-                if let Some((turn, expected)) = platform.as_ref() {
-                    use super::platform_manager_contract::{ManagerIdentityProducer, FenceOutcome};
-                    let expected_model=super::platform_personal_turn_service::model_origin(expected);
-                    if expected.authority.user_id!=user_id || turn.conversation_id!=conversation_id
-                        || conversation.active_turn.as_ref().is_none_or(|active|
-                            active.turn_id!=turn.turn_id || active.stop_requested
-                            || active.platform_origin.as_ref()!=Some(&expected_model))
-                        || super::assistant_nyxagent::live_turn(&conversation,Utc::now()).is_none()
-                        || replace_key_id.as_deref().is_some_and(|key|key!=conversation.credential_api_key_id)
-                        || !matches!(super::platform_personal_binding_service::IdentityProducer
-                            .fence_personal_origin(&db,session,&expected.authority).await?,FenceOutcome::Authorized)
-                    {
-                        return Err(AppError::AssistantTurnRequired);
-                    }
-                } else if conversation.active_turn.as_ref().is_some_and(|active|active.platform_origin.is_some()) {
-                    // Metadata/ordinary recovery has no admitted platform proof.
-                    return Err(AppError::AssistantTurnRequired);
-                }
-                let authority = authority_in_session(&db, &conversation, session).await?;
-                let mut revoked_children = Vec::new();
-                if let Some(key_id) = replace_key_id.as_deref() {
-                    require_ordinary_key(&db, &user_id, key_id, Some(&mut *session)).await?;
-                    match key_service::delete_api_key_in_session(
-                        &db,
-                        &user_id,
-                        key_id,
-                        None,
-                        Some(&mut *session),
-                    )
-                    .await
-                    {
-                        Ok(children) => revoked_children = children,
-                        Err(AppError::NotFound(_)) => {
-                            invalidate_for_key(&db, &user_id, key_id, Some(&mut *session)).await?
+        .and_run(
+            (db, keys, user_id, conversation_id, replace_key_id, platform),
+            |session, (db, keys, user_id, conversation_id, replace_key_id, platform)| {
+                Box::pin(async move {
+                    let operation = async {
+                        // Write the conversation as well to fence concurrent deletion.
+                        let result = db
+                            .collection::<AssistantConversation>(CONVERSATIONS)
+                            .update_one(
+                                doc! {"_id": conversation_id.as_str(), "user_id": user_id.as_str()},
+                                doc! {"$inc": {"credential_fence": 1}},
+                            )
+                            .session(&mut *session)
+                            .await?;
+                        if result.matched_count != 1 {
+                            return Err(AppError::NotFound("Conversation not found".into()));
                         }
-                        Err(error) => return Err(error),
-                    }
-                }
-                let mut credential = load_or_provision_in_session(
-                    &db,
-                    &keys,
-                    &user_id,
-                    &conversation_id,
-                    &authority,
-                    session,
-                )
-                .await?;
-                if let Some((turn, expected)) = platform.as_ref() {
-                    let update=db.collection::<AssistantConversation>(CONVERSATIONS).update_one(
-                        doc! {"_id":&conversation_id,"user_id":&user_id,"active_turn.turn_id":&turn.turn_id,
-                            "active_turn.stop_requested":false,
-                            "active_turn.platform_origin":bson::to_bson(&super::platform_personal_turn_service::model_origin(expected)).map_err(|_|AppError::AssistantTurnRequired)?},
-                        doc! {"$set":{"credential_api_key_id":&credential.api_key_id,
-                            "nyxagent_session_id":bson::Bson::Null,"nyxagent_instruction_binding":bson::Bson::Null,
-                            "nyxagent_last_response_id":bson::Bson::Null,"context_reset_at":bson::DateTime::now(),"context_reset_reason":"credential_replaced"}},
-                    ).session(&mut *session).await?;
-                    if update.matched_count!=1 {return Err(AppError::AssistantTurnRequired);}
-                }
-                credential.revoked_children.extend(revoked_children);
-                Ok(credential)
-            }
-            .await;
-            mutations::transaction_result(operation)
-        })
+                        let conversation = db
+                            .collection::<AssistantConversation>(CONVERSATIONS)
+                            .find_one(doc! {"_id": conversation_id.as_str(), "user_id": user_id.as_str()})
+                            .session(&mut *session)
+                            .await?
+                            .ok_or_else(|| AppError::NotFound("Conversation not found".into()))?;
+                        if let Some((turn, expected)) = platform.as_ref() {
+                            let expected_model = super::platform_personal_turn_service::model_origin(expected);
+                            if expected.authority.user_id != user_id.as_str()
+                                || turn.conversation_id != conversation_id.as_str()
+                                || conversation.active_turn.as_ref().is_none_or(|active| {
+                                    active.turn_id != turn.turn_id
+                                        || active.stop_requested
+                                        || active.platform_origin.as_ref() != Some(&expected_model)
+                                })
+                                || super::assistant_nyxagent::live_turn(&conversation, Utc::now()).is_none()
+                                || replace_key_id.as_deref().is_some_and(|key| key != conversation.credential_api_key_id)
+                                || !super::platform_personal_binding_service::validate_personal_origin_in_session(
+                                    db, session, &expected.authority,
+                                ).await?
+                            {
+                                return Err(AppError::AssistantTurnRequired);
+                            }
+                        } else if conversation.active_turn.as_ref().is_some_and(|active| active.platform_origin.is_some()) {
+                            // Metadata/ordinary recovery has no admitted platform proof.
+                            return Err(AppError::AssistantTurnRequired);
+                        }
+                        let authority = authority_in_session(db, &conversation, session).await?;
+                        let mut revoked_children = Vec::new();
+                        if let Some(key_id) = replace_key_id.as_deref() {
+                            require_ordinary_key(db, user_id.as_str(), key_id, Some(&mut *session)).await?;
+                            match key_service::delete_api_key_in_session(
+                                db, user_id.as_str(), key_id, None, Some(&mut *session),
+                            ).await {
+                                Ok(children) => revoked_children = children,
+                                Err(AppError::NotFound(_)) => {
+                                    invalidate_for_key(db, user_id.as_str(), key_id, Some(&mut *session)).await?;
+                                }
+                                Err(error) => return Err(error),
+                            }
+                        }
+                        let mut credential = load_or_provision_in_session(
+                            db, keys, user_id.as_str(), conversation_id.as_str(), &authority, session,
+                        ).await?;
+                        if let Some((turn, expected)) = platform.as_ref() {
+                            let update = db
+                                .collection::<AssistantConversation>(CONVERSATIONS)
+                                .update_one(
+                                    doc! {
+                                        "_id": conversation_id.as_str(),
+                                        "user_id": user_id.as_str(),
+                                        "active_turn.turn_id": &turn.turn_id,
+                                        "credential_api_key_id": &conversation.credential_api_key_id,
+                                        "active_turn.stop_requested": false,
+                                        "active_turn.platform_origin": bson::to_bson(
+                                            &super::platform_personal_turn_service::model_origin(expected),
+                                        ).map_err(|_| AppError::AssistantTurnRequired)?,
+                                    },
+                                    doc! {"$set": {
+                                        "credential_api_key_id": &credential.api_key_id,
+                                        "nyxagent_session_id": bson::Bson::Null,
+                                        "nyxagent_instruction_binding": bson::Bson::Null,
+                                        "nyxagent_last_response_id": bson::Bson::Null,
+                                        "context_reset_at": bson::DateTime::now(),
+                                        "context_reset_reason": "credential_replaced",
+                                    }},
+                                )
+                                .session(&mut *session)
+                                .await?;
+                            if update.matched_count != 1 {
+                                return Err(AppError::AssistantTurnRequired);
+                            }
+                            // KMS unwrap/wrap is finished. Fence the exact adopted key,
+                            // turn and live origin before commit; denial rolls back both
+                            // deletion of the predecessor and creation of the successor.
+                            if super::platform_personal_turn_service::fence_execution_in_session(
+                                db, session, &super::platform_personal_binding_service::IdentityProducer,
+                                user_id.as_str(), &credential.api_key_id, turn, expected,
+                            ).await? != super::platform_manager_contract::FenceOutcome::Authorized {
+                                return Err(AppError::AssistantTurnRequired);
+                            }
+                        }
+                        credential.revoked_children.extend(revoked_children);
+                        Ok(credential)
+                    }.await;
+                    mutations::transaction_result(operation)
+                })
+            },
+        )
         .await
         .map_err(mutations::map_transaction_error)?;
     audit_provision(

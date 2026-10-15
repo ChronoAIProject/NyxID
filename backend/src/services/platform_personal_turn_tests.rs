@@ -58,7 +58,7 @@ fn legacy_turn_without_execution_marker_remains_readable() {
     assert!(turn.platform_origin.is_none());
 }
 
-async fn fixture(name: &str) -> (AppState, contract::AdmittedPersonalUpdate) {
+pub(super) async fn fixture(name: &str) -> (AppState, contract::AdmittedPersonalUpdate) {
     let (db, update, owner) =
         super::super::platform_personal_binding_service::tests::fixture(name).await;
     engine::ensure_indexes(&db).await.unwrap();

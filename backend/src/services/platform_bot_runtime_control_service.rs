@@ -137,16 +137,69 @@ pub(crate) async fn fence_manager_in_session(
     telegram_id: i64,
     observation: Option<&str>,
 ) -> AppResult<Option<PlatformBotRuntimeControls>> {
-    let Some(profile) = db
-        .collection::<PlatformBotConfig>(crate::models::platform_bot_config::COLLECTION_NAME)
-        .find_one_and_update(
-            doc! {"_id":profile_id,"manager_bot_id":manager_id,"deleted_at":bson::Bson::Null},
-            doc! {"$inc":{"personal_identity_revision":1_i64}},
-        )
-        .return_document(ReturnDocument::After)
-        .session(&mut *session)
-        .await?
-    else {
+    check_manager_in_session(
+        db,
+        session,
+        profile_id,
+        manager_id,
+        telegram_id,
+        observation,
+        true,
+    )
+    .await
+}
+
+/// Same identity/transport predicates as the commit fence, without acquiring
+/// shared writes while the caller prepares encrypted conversation material.
+pub(crate) async fn validate_manager_in_session(
+    db: &Database,
+    session: &mut ClientSession,
+    profile_id: &str,
+    manager_id: &str,
+    telegram_id: i64,
+    observation: Option<&str>,
+) -> AppResult<Option<PlatformBotRuntimeControls>> {
+    check_manager_in_session(
+        db,
+        session,
+        profile_id,
+        manager_id,
+        telegram_id,
+        observation,
+        false,
+    )
+    .await
+}
+
+async fn check_manager_in_session(
+    db: &Database,
+    session: &mut ClientSession,
+    profile_id: &str,
+    manager_id: &str,
+    telegram_id: i64,
+    observation: Option<&str>,
+    write_fence: bool,
+) -> AppResult<Option<PlatformBotRuntimeControls>> {
+    let profiles =
+        db.collection::<PlatformBotConfig>(crate::models::platform_bot_config::COLLECTION_NAME);
+    let profile_filter =
+        doc! {"_id":profile_id,"manager_bot_id":manager_id,"deleted_at":bson::Bson::Null};
+    let profile = if write_fence {
+        profiles
+            .find_one_and_update(
+                profile_filter,
+                doc! {"$inc":{"personal_identity_revision":1_i64}},
+            )
+            .return_document(ReturnDocument::After)
+            .session(&mut *session)
+            .await?
+    } else {
+        profiles
+            .find_one(profile_filter)
+            .session(&mut *session)
+            .await?
+    };
+    let Some(profile) = profile else {
         return Ok(None);
     };
     if manager_id.parse::<i64>().ok() != Some(telegram_id) || telegram_id <= 0 {
@@ -156,21 +209,53 @@ pub(crate) async fn fence_manager_in_session(
     if let Some(value) = observation {
         credential_filter.insert("fields.observation_id", value);
     }
-    if db
-        .collection::<Document>(crate::models::platform_credential::COLLECTION_NAME)
-        .update_one(
-            credential_filter,
-            doc! {"$inc":{"personal_effect_revision":1_i64}},
-        )
-        .session(&mut *session)
-        .await?
-        .matched_count
-        != 1
-    {
+    let credentials =
+        db.collection::<Document>(crate::models::platform_credential::COLLECTION_NAME);
+    let credential_exists = if write_fence {
+        credentials
+            .update_one(
+                credential_filter,
+                doc! {"$inc":{"personal_effect_revision":1_i64}},
+            )
+            .session(&mut *session)
+            .await?
+            .matched_count
+            == 1
+    } else {
+        credentials
+            .find_one(credential_filter)
+            .session(&mut *session)
+            .await?
+            .is_some()
+    };
+    if !credential_exists {
         return Ok(None);
     }
-    if db.collection::<Document>(crate::models::channel_bot::COLLECTION_NAME).update_one(doc! {"_id":&profile.channel_bot_id,"platform_profile_id":profile_id,"platform_bot_id":manager_id,"is_active":true},doc! {"$inc":{"personal_effect_revision":1_i64}}).session(&mut *session).await?.matched_count!=1 {return Ok(None);}
-    Ok(db.collection::<PlatformBotRuntimeControls>(COLLECTION_NAME).find_one_and_update(doc! {"platform_config_id":profile_id,"manager_bot_id":manager_id,"telegram_bot_id":telegram_id,"contract_version":1_i32},vec![doc! {"$set":{"effect_revision":{"$add":[{"$ifNull":["$effect_revision",0_i64]},1_i64]},"updated_at":"$$NOW"}}]).return_document(ReturnDocument::After).session(session).await?)
+    let bots = db.collection::<Document>(crate::models::channel_bot::COLLECTION_NAME);
+    let bot_filter = doc! {"_id":&profile.channel_bot_id,"platform_profile_id":profile_id,"platform_bot_id":manager_id,"is_active":true};
+    let bot_exists = if write_fence {
+        bots.update_one(bot_filter, doc! {"$inc":{"personal_effect_revision":1_i64}})
+            .session(&mut *session)
+            .await?
+            .matched_count
+            == 1
+    } else {
+        bots.find_one(bot_filter)
+            .session(&mut *session)
+            .await?
+            .is_some()
+    };
+    if !bot_exists {
+        return Ok(None);
+    }
+    let controls = db.collection::<PlatformBotRuntimeControls>(COLLECTION_NAME);
+    let controls_filter = doc! {"platform_config_id":profile_id,"manager_bot_id":manager_id,"telegram_bot_id":telegram_id,"contract_version":1_i32};
+    Ok(if write_fence {
+        controls.find_one_and_update(controls_filter,vec![doc! {"$set":{"effect_revision":{"$add":[{"$ifNull":["$effect_revision",0_i64]},1_i64]},"updated_at":"$$NOW"}}])
+            .return_document(ReturnDocument::After).session(session).await?
+    } else {
+        controls.find_one(controls_filter).session(session).await?
+    })
 }
 
 fn candidate(
