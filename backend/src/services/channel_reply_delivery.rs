@@ -237,21 +237,6 @@ pub async fn send_parts(
     last.ok_or_else(unconfirmed)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn dispatched_rate_limit_cannot_invite_a_whole_reply_retry() {
-        for error in [AppError::RateLimited, AppError::ServiceConcurrencyLimited] {
-            assert!(matches!(
-                failure_after_dispatch(error),
-                AppError::ChannelPlatformError(_)
-            ));
-        }
-    }
-}
-
 pub async fn ensure_indexes(db: &mongodb::Database) -> mongodb::error::Result<()> {
     use mongodb::{IndexModel, options::IndexOptions};
     let collection = db.collection::<ChannelReplyDelivery>(COLLECTION_NAME);
@@ -274,4 +259,19 @@ pub async fn ensure_indexes(db: &mongodb::Database) -> mongodb::error::Result<()
         ])
         .await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dispatched_rate_limit_cannot_invite_a_whole_reply_retry() {
+        for error in [AppError::RateLimited, AppError::ServiceConcurrencyLimited] {
+            assert!(matches!(
+                failure_after_dispatch(error),
+                AppError::ChannelPlatformError(_)
+            ));
+        }
+    }
 }
