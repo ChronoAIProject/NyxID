@@ -209,7 +209,7 @@ expand inline on narrow screens. Permissions are listed as **Full access**
 (`autopilot`), **Auto** (`nyxmode`), and **Ask every time** (`ask_every_time`), without
 explanatory paragraphs. An agent override remains authoritative and makes the
 permission choices read-only; workspace changes cannot silently override it.
-Models use
+Permission changes are also disabled while a turn runs. Models use
 upstream display names when present, with **Default model** for the legacy
 `nyxagent/chat` alias. The routing ID remains unchanged. Model changes are disabled
 while a turn runs. New-chat selections are local to that composer, passed on the
