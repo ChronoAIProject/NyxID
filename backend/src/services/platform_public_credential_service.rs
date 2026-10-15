@@ -593,7 +593,7 @@ impl PublicNyxAgentRuntime for PublicRuntime {
                 |session, (db, context, reply, cipher, text_bytes, failed)| {
                     Box::pin(async move {
                         let result: AppResult<_> = async {
-                            settle_reply_in_session(
+                            let cleared = settle_reply_in_session(
                                 db,
                                 session,
                                 context,
@@ -602,17 +602,8 @@ impl PublicNyxAgentRuntime for PublicRuntime {
                                 *text_bytes,
                             )
                             .await?;
-                            if *failed {
-                                // Shorten the disposable session after an ambiguous
-                                // upstream failure. Never extend/reuse its bearer.
-                                if db.collection::<PlatformPublicSession>(SESSIONS).update_one(
-                                    doc! {"_id":&context.public_session_id,"upstream_may_exist":true},
-                                    vec![doc! {"$set":{"expires_at":"$$NOW"}}],
-                                ).session(&mut *session).await?.matched_count==1 {
-                                    super::platform_public_agent_service::revoke_in_session(db,session,
-                                        &PublicRevocationScope::Session {public_session_id:context.public_session_id.clone()},
-                                        PublicRevocationReason::SessionExpired).await?;
-                                }
+                            if *failed && cleared {
+                                expire_ambiguous_session_in_session(db, session, context).await?;
                             }
                             Ok(())
                         }
@@ -625,6 +616,30 @@ impl PublicNyxAgentRuntime for PublicRuntime {
             .map_err(tx::map_transaction_error)?;
         Ok(SettledExecution::Saved(reply))
     }
+}
+
+/// Settlement calls this after compare-clearing its own active turn. A stale
+/// duplicate cannot revoke a successor turn or a replaced credential.
+async fn expire_ambiguous_session_in_session(
+    db: &Database,
+    session: &mut ClientSession,
+    context: &PublicExecutionContext,
+) -> AppResult<()> {
+    let retained=db.collection::<PlatformPublicTurn>(TURNS).find_one(doc! {
+        "_id":&context.turn.turn_id,"public_session_id":&context.public_session_id,
+        "receipt_id":&context.ingress.ingress.receipt_id,"claim_id":&context.ingress.ingress.claim_id,
+        "sponsor_owner_user_id":&context.sponsor_owner_user_id,"policy_digest":&context.policy_digest,
+    }).session(&mut *session).await?.ok_or_else(denied)?;
+    if db.collection::<PlatformPublicSession>(SESSIONS).update_one(doc! {
+        "_id":&context.public_session_id,"credential_api_key_id":&retained.credential_api_key_id,
+        "sponsor_owner_user_id":&context.sponsor_owner_user_id,"policy_digest":&context.policy_digest,
+        "upstream_may_exist":true,"active_turn":bson::Bson::Null,"revoked_at":bson::Bson::Null,
+    },vec![doc! {"$set":{"expires_at":"$$NOW"}}]).session(&mut *session).await?.matched_count==1 {
+        super::platform_public_agent_service::revoke_in_session(db,session,
+            &PublicRevocationScope::Session {public_session_id:context.public_session_id.clone()},
+            PublicRevocationReason::SessionExpired).await?;
+    }
+    Ok(())
 }
 
 fn redact_intent_bearers(text: &str) -> String {
@@ -713,7 +728,7 @@ async fn settle_reply_in_session(
     reply: &ReplyRef,
     ciphertext: &[u8],
     text_bytes: usize,
-) -> AppResult<()> {
+) -> AppResult<bool> {
     let row=db.collection::<PlatformPublicTurn>(TURNS).find_one(doc! {
         "_id":&context.turn.turn_id,"public_session_id":&context.public_session_id,
         "conversation_id":&context.turn.conversation_id,"receipt_id":&context.ingress.ingress.receipt_id,
@@ -738,11 +753,13 @@ async fn settle_reply_in_session(
         reply,
     )
     .await?;
-    db.collection::<PlatformPublicSession>(SESSIONS).update_one(doc! {
+    let cleared = db.collection::<PlatformPublicSession>(SESSIONS).update_one(doc! {
         "_id":&context.public_session_id,"active_turn.turn_id":&context.turn.turn_id,
+        "credential_api_key_id":&row.credential_api_key_id,
+        "sponsor_owner_user_id":&context.sponsor_owner_user_id,"policy_digest":&context.policy_digest,
         "active_turn.conversation_id":&context.turn.conversation_id,
         "active_turn.receipt_id":&context.ingress.ingress.receipt_id,"active_turn.claim_id":&context.ingress.ingress.claim_id,
-    },doc! {"$set":{"active_turn":bson::Bson::Null}}).session(&mut *session).await?;
+    },doc! {"$set":{"active_turn":bson::Bson::Null}}).session(&mut *session).await?.matched_count == 1;
     if let Some(loop_row) = db
         .collection::<crate::models::platform_public_budget::PublicBudgetLoop>(
             crate::models::platform_public_budget::LOOPS,
@@ -755,7 +772,7 @@ async fn settle_reply_in_session(
     {
         budget::close_loop_in_session(db, session, &loop_row.id).await?;
     }
-    Ok(())
+    Ok(cleared)
 }
 
 /// Transport retains a delivery deadline separate from the shorter execution
@@ -1409,6 +1426,346 @@ pub(crate) mod tests {
             .unwrap()
             .unwrap();
         (saved, context)
+    }
+    async fn prepared_recovery_fixture(
+        db: &Database,
+    ) -> (PlatformPublicSession, PublicExecutionContext) {
+        let (row, context) = recovery_fixture(db).await;
+        db.collection::<PlatformPublicTurn>(TURNS)
+            .insert_one(PlatformPublicTurn {
+                id: context.turn.turn_id.clone(),
+                public_session_id: row.id.clone(),
+                conversation_id: context.turn.conversation_id.clone(),
+                receipt_id: context.ingress.ingress.receipt_id.clone(),
+                claim_id: context.ingress.ingress.claim_id.clone(),
+                sponsor_owner_user_id: row.sponsor_owner_user_id.clone(),
+                policy_digest: row.policy_digest.clone(),
+                credential_api_key_id: row.credential_api_key_id.clone(),
+                input_ciphertext: vec![1],
+                reply_ciphertext: vec![],
+                reply_id: None,
+                outcome: None,
+                max_output_bytes: context.limits.max_output_bytes,
+                nyxagent_service_id: "outer".into(),
+                nyxagent_catalog_digest: "pin".into(),
+                outer_dispatch_admitted: false,
+                expires_at: row.expires_at,
+            })
+            .await
+            .unwrap();
+        (row, context)
+    }
+    #[tokio::test]
+    async fn ambiguous_outer_failure_settles_revokes_and_allows_fresh_sender_without_refund() {
+        use crate::models::{
+            credits::Credits,
+            platform_public_budget::{
+                CALLS, LOOPS, PublicBudgetLoop, PublicCallReservation, PublicCallState,
+            },
+            platform_public_session::{CLEANUP_RECORDS, PublicCleanupRecord},
+        };
+        let db =
+            crate::test_utils::connect_transaction_test_database("public_outer_failure_settle")
+                .await;
+        super::super::platform_public_agent_service::ensure_indexes(&db)
+            .await
+            .unwrap();
+        let (row, context) = prepared_recovery_fixture(&db).await;
+        let held = Credits::from_pico(10).unwrap();
+        let allocated = Credits::from_pico(6).unwrap();
+        let loop_row = PublicBudgetLoop {
+            id: uuid::Uuid::new_v4().to_string(),
+            public_session_id: row.id.clone(),
+            conversation_id: context.turn.conversation_id.clone(),
+            turn_id: context.turn.turn_id.clone(),
+            receipt_id: context.ingress.ingress.receipt_id.clone(),
+            claim_id: context.ingress.ingress.claim_id.clone(),
+            profile_id: row.profile_id.clone(),
+            sender_id: row.sender_id,
+            sponsor_owner_user_id: row.sponsor_owner_user_id.clone(),
+            credential_api_key_id: row.credential_api_key_id.clone(),
+            policy_digest: row.policy_digest.clone(),
+            bucket_ids: vec![],
+            day: row.created_at,
+            expires_at: context.expires_at,
+            maximum: held,
+            held,
+            allocated,
+            spent: Credits::ZERO,
+            calls: 1,
+            max_calls: 1,
+            input_tokens: 10,
+            output_tokens: 10,
+            max_input_tokens: 100,
+            max_output_tokens: 100,
+            tool_calls: 0,
+            max_tool_calls: 3,
+            closed: false,
+        };
+        let call = PublicCallReservation {
+            id: uuid::Uuid::new_v4().to_string(),
+            loop_id: loop_row.id.clone(),
+            sponsor_owner_user_id: row.sponsor_owner_user_id.clone(),
+            credential_api_key_id: row.credential_api_key_id.clone(),
+            billing_request_id: uuid::Uuid::new_v4().to_string(),
+            route_digest: "pinned-model-route".into(),
+            model_id: "pinned-model".into(),
+            state: PublicCallState::DispatchAdmitted,
+            maximum: allocated,
+            cap_charge: Credits::ZERO,
+            meter_row_ids: vec![],
+            next_reconcile_at: context.expires_at,
+            expires_at: context.expires_at,
+        };
+        db.collection::<PublicBudgetLoop>(LOOPS)
+            .insert_one(&loop_row)
+            .await
+            .unwrap();
+        db.collection::<PublicCallReservation>(CALLS)
+            .insert_one(&call)
+            .await
+            .unwrap();
+        let mut session = db.client().start_session().await.unwrap();
+        session.start_transaction().await.unwrap();
+        super::super::platform_public_proxy_service::mark_outer_attempt_in_session(
+            &db,
+            &mut session,
+            &context,
+            &row.credential_api_key_id,
+            "outer",
+            "pin",
+        )
+        .await
+        .unwrap();
+        session.commit_transaction().await.unwrap();
+        let reply = ReplyRef {
+            turn: context.turn.clone(),
+            reply_id: uuid::Uuid::new_v4().to_string(),
+        };
+        session.start_transaction().await.unwrap();
+        assert!(
+            settle_reply_in_session(&db, &mut session, &context, &reply, &[2], 1)
+                .await
+                .unwrap()
+        );
+        expire_ambiguous_session_in_session(&db, &mut session, &context)
+            .await
+            .unwrap();
+        session.abort_transaction().await.unwrap();
+        let unchanged = db
+            .collection::<PlatformPublicSession>(SESSIONS)
+            .find_one(doc! {"_id":&row.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(unchanged.active_turn.is_some() && unchanged.revoked_at.is_none());
+        assert!(
+            db.collection::<PlatformPublicTurn>(TURNS)
+                .find_one(doc! {"_id":&context.turn.turn_id})
+                .await
+                .unwrap()
+                .unwrap()
+                .reply_id
+                .is_none()
+        );
+        assert_eq!(
+            db.collection::<PublicCleanupRecord>(CLEANUP_RECORDS)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
+        );
+        // No response.created was received. Use the actual settlement producer,
+        // which must preserve a safe error reply while revoking ambiguous auth.
+        let runtime = PublicRuntime {
+            state: crate::test_utils::test_app_state(db.clone()),
+        };
+        let result = super::super::assistant_nyxagent::TurnResult {
+            text: "upstream text must not be saved".into(),
+            session_id: None,
+            response_id: None,
+            error: Some(super::super::assistant_nyxagent::TurnError::internal(
+                "assistant_unavailable",
+                "public_execution",
+            )),
+        };
+        assert!(
+            matches!(runtime.settle(&db, &context, &reply.reply_id, &result).await.unwrap(), SettledExecution::Saved(saved) if saved.turn == reply.turn && saved.reply_id == reply.reply_id)
+        );
+        let saved = db
+            .collection::<PlatformPublicSession>(SESSIONS)
+            .find_one(doc! {"_id":&row.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(saved.active_turn.is_none() && saved.revoked_at.is_some());
+        assert!(saved.upstream_may_exist && saved.upstream_binding_ciphertext.is_empty());
+        assert!(saved.credential_ciphertext.is_empty());
+        assert!(
+            !db.collection::<ApiKey>(KEYS)
+                .find_one(doc! {"_id":&row.credential_api_key_id})
+                .await
+                .unwrap()
+                .unwrap()
+                .is_active
+        );
+        let cleanup = db
+            .collection::<PublicCleanupRecord>(CLEANUP_RECORDS)
+            .find_one(doc! {"_id":saved.cleanup_record_id.unwrap()})
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!cleanup.completed);
+        assert_eq!(cleanup.session_ids, vec![row.id.clone()]);
+        let retained = db
+            .collection::<PlatformPublicTurn>(TURNS)
+            .find_one(doc! {"_id":&context.turn.turn_id})
+            .await
+            .unwrap()
+            .unwrap();
+        let text =
+            crypto::decrypt_runtime_key(&runtime.state.encryption_keys, &retained.reply_ciphertext)
+                .await
+                .unwrap();
+        assert_eq!(
+            text.as_str(),
+            "The public guide could not finish this turn. Send /link to use your own NyxBot."
+        );
+        let receipt = db
+            .collection::<Document>(RECEIPTS)
+            .find_one(doc! {"_id":&context.ingress.ingress.receipt_id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(receipt.get_str("phase").unwrap(), "settled");
+        assert_eq!(receipt.get_str("reply_id").unwrap(), reply.reply_id);
+        // An admitted model call keeps its conservative cap/dispatch evidence;
+        // settlement does not release it or manufacture a billing disposition.
+        assert_eq!(
+            db.collection::<Document>(LOOPS)
+                .find_one(doc! {"_id":&loop_row.id})
+                .await
+                .unwrap()
+                .unwrap(),
+            bson::to_document(&loop_row).unwrap()
+        );
+        assert_eq!(
+            db.collection::<Document>(CALLS)
+                .find_one(doc! {"_id":&call.id})
+                .await
+                .unwrap()
+                .unwrap(),
+            bson::to_document(&call).unwrap()
+        );
+        let (next_row, next_key, next_context) = fixture();
+        assert_eq!(next_row.sender_id, row.sender_id);
+        session.start_transaction().await.unwrap();
+        install_turn_in_session(&db, &mut session, &next_context, &next_row, Some(&next_key))
+            .await
+            .unwrap();
+        session.commit_transaction().await.unwrap();
+        assert_eq!(
+            db.collection::<PlatformPublicSession>(SESSIONS)
+                .count_documents(doc! {"sender_id":row.sender_id,"revoked_at":bson::Bson::Null})
+                .await
+                .unwrap(),
+            1
+        );
+        assert_ne!(next_row.id, row.id);
+        db.drop().await.unwrap();
+    }
+    #[tokio::test]
+    async fn failed_duplicate_settlement_cannot_revoke_an_idle_or_active_successor_or_replaced_key()
+    {
+        let db =
+            crate::test_utils::connect_transaction_test_database("public_stale_settlement").await;
+        let (row, context) = prepared_recovery_fixture(&db).await;
+        db.collection::<PlatformPublicSession>(SESSIONS)
+            .update_one(
+                doc! {"_id":&row.id},
+                doc! {"$set":{"upstream_may_exist":true}},
+            )
+            .await
+            .unwrap();
+        let runtime = PublicRuntime {
+            state: crate::test_utils::test_app_state(db.clone()),
+        };
+        let reply_id = uuid::Uuid::new_v4().to_string();
+        let mut result = super::super::assistant_nyxagent::TurnResult {
+            text: "safe reply".into(),
+            session_id: Some("upstream".into()),
+            response_id: Some("response".into()),
+            error: None,
+        };
+        runtime
+            .settle(&db, &context, &reply_id, &result)
+            .await
+            .unwrap();
+        result.error = Some(super::super::assistant_nyxagent::TurnError::internal(
+            "assistant_unavailable",
+            "public_execution",
+        ));
+        runtime
+            .settle(&db, &context, &reply_id, &result)
+            .await
+            .unwrap();
+        let idle = db
+            .collection::<PlatformPublicSession>(SESSIONS)
+            .find_one(doc! {"_id":&row.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(idle.revoked_at.is_none());
+        let mut next = context.clone();
+        next.turn.turn_id = uuid::Uuid::new_v4().to_string();
+        next.ingress.ingress.receipt_id = uuid::Uuid::new_v4().to_string();
+        next.ingress.ingress.claim_id = uuid::Uuid::new_v4().to_string();
+        install_turn_attempt(&db, &next, &idle).await.unwrap();
+        runtime
+            .settle(&db, &context, &reply_id, &result)
+            .await
+            .unwrap();
+        let active = db
+            .collection::<PlatformPublicSession>(SESSIONS)
+            .find_one(doc! {"_id":&row.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(active.revoked_at.is_none());
+        assert_eq!(active.active_turn.unwrap().turn_id, next.turn.turn_id);
+        // Exact old turn + a replacement key is also insufficient authority to
+        // clear/revoke. The old receipt may still settle idempotently.
+        let (replacement, _) = new_key(
+            &row.sponsor_owner_user_id,
+            row.expires_at,
+            Some(row.credential_api_key_id.clone()),
+        );
+        db.collection::<ApiKey>(KEYS)
+            .insert_one(&replacement)
+            .await
+            .unwrap();
+        db.collection::<PlatformPublicSession>(SESSIONS).update_one(doc! {"_id":&row.id},doc! {"$set":{"credential_api_key_id":&replacement.id,"active_turn":bson::to_bson(&row.active_turn).unwrap()}}).await.unwrap();
+        runtime
+            .settle(&db, &context, &reply_id, &result)
+            .await
+            .unwrap();
+        let replaced = db
+            .collection::<PlatformPublicSession>(SESSIONS)
+            .find_one(doc! {"_id":&row.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(replaced.revoked_at.is_none());
+        assert_eq!(replaced.active_turn.unwrap().turn_id, context.turn.turn_id);
+        assert!(
+            db.collection::<ApiKey>(KEYS)
+                .find_one(doc! {"_id":&replacement.id})
+                .await
+                .unwrap()
+                .unwrap()
+                .is_active
+        );
+        db.drop().await.unwrap();
     }
     #[tokio::test]
     async fn failed_preparation_without_turn_row_releases_only_the_exact_claim_and_allows_next_turn()

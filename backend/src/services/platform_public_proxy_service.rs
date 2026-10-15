@@ -545,7 +545,22 @@ pub(crate) async fn dispatch_model(
         )
         .await?;
     budget::reconcile_call(&state.db, &call_id).await?;
-    let input_tokens = if reported.cached_tokens_included_in_prompt {
+    validate_reported_usage(&operation, &reported)?;
+    let mut response = Response::builder().status(status);
+    if let Some(content_type) = content_type {
+        response = response.header("content-type", content_type);
+    }
+    response
+        .body(Body::from(output.to_vec()))
+        .map_err(|_| denied())
+}
+
+// Called only after the truthful sponsor settlement and cap reconciliation.
+fn validate_reported_usage(
+    operation: &PublicModelOperation,
+    reported: &usage::ReportedLlmUsage,
+) -> AppResult<()> {
+    let input = if reported.cached_tokens_included_in_prompt {
         reported.prompt_tokens
     } else {
         reported
@@ -553,8 +568,16 @@ pub(crate) async fn dispatch_model(
             .saturating_add(reported.cached_tokens)
             .saturating_add(reported.cache_creation_tokens)
     };
-    if input_tokens > u64::from(operation.max_input_tokens)
+    // The shared extractor synthesizes Anthropic total_tokens from uncached
+    // prompt+completion; the separate cache classes still count toward input.
+    if input > u64::from(operation.max_input_tokens)
         || reported.completion_tokens > u64::from(operation.max_output_tokens)
+        || reported.total_tokens
+            > u64::from(operation.max_input_tokens) + u64::from(operation.max_output_tokens)
+        || reported.total_tokens
+            != reported
+                .prompt_tokens
+                .saturating_add(reported.completion_tokens)
         || reported.images > 0
         || reported.audio_input_tokens > 0
         || reported.audio_output_tokens > 0
@@ -563,13 +586,7 @@ pub(crate) async fn dispatch_model(
     {
         return Err(denied());
     }
-    let mut response = Response::builder().status(status);
-    if let Some(content_type) = content_type {
-        response = response.header("content-type", content_type);
-    }
-    response
-        .body(Body::from(output.to_vec()))
-        .map_err(|_| denied())
+    Ok(())
 }
 
 fn require_outer(service: &DownstreamService) -> AppResult<()> {
@@ -600,7 +617,7 @@ pub(crate) async fn load_outer_catalog(db: &Database) -> AppResult<DownstreamSer
 /// Called only after the live public fence, in the same final transaction as
 /// catalog validation. A committed attempt is never reusable, even without a
 /// response/session handle. Cleanup authority is retained outside the TTL row.
-async fn mark_outer_attempt_in_session(
+pub(crate) async fn mark_outer_attempt_in_session(
     db: &Database,
     session: &mut ClientSession,
     context: &PublicExecutionContext,
@@ -891,6 +908,35 @@ mod tests {
         assert!(valid(&op, &value));
         value["messages"][0]["content"][0]["name"] = json!("shell");
         assert!(!valid(&op, &value));
+    }
+    #[test]
+    fn usage_bounds_include_separate_cache_and_reject_inconsistent_total_after_settlement() {
+        let operation = operation(PublicModelProtocol::OpenAiResponses);
+        let mut usage = usage::ReportedLlmUsage {
+            prompt_tokens: 5,
+            completion_tokens: 3,
+            total_tokens: 8,
+            cached_tokens_included_in_prompt: true,
+            ..Default::default()
+        };
+        assert!(validate_reported_usage(&operation, &usage).is_ok());
+        usage.total_tokens =
+            u64::from(operation.max_input_tokens) + u64::from(operation.max_output_tokens) + 1;
+        assert!(validate_reported_usage(&operation, &usage).is_err());
+        usage.total_tokens = 7;
+        assert!(validate_reported_usage(&operation, &usage).is_err());
+        usage.cached_tokens_included_in_prompt = false;
+        usage.cached_tokens = 2;
+        usage.cache_creation_tokens = 4;
+        usage.total_tokens = 8;
+        assert!(validate_reported_usage(&operation, &usage).is_ok());
+        let anthropic = usage::extract_reported_usage(&json!({"usage": {
+            "input_tokens":5,"output_tokens":3,"cache_read_input_tokens":2,"cache_creation_input_tokens":4,
+        }})).unwrap();
+        assert!(validate_reported_usage(&operation, &anthropic).is_ok());
+        usage.completion_tokens = u64::from(operation.max_output_tokens) + 1;
+        usage.total_tokens = usage.prompt_tokens + usage.completion_tokens;
+        assert!(validate_reported_usage(&operation, &usage).is_err());
     }
     #[test]
     fn outer_is_noauth_unpriced_and_catalog_pin_covers_target_and_credentials() {
