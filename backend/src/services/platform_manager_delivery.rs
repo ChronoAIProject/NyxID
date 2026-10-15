@@ -386,6 +386,17 @@ async fn send(
     if row.state != DeliveryState::Pending {
         return Ok(DeliveryOutcome::Duplicate);
     }
+    if row.expires_at <= Utc::now() || body.encode_utf16().count() > 4096 {
+        refuse_pending(state, &row).await?;
+        return Ok(DeliveryOutcome::Refused(
+            UnavailableReason::TransportUnavailable,
+        ));
+    }
+    if row.retry_at > Utc::now() {
+        return Ok(DeliveryOutcome::Deferred {
+            retry_at: row.retry_at,
+        });
+    }
     let personal = matches!(
         row.reference,
         DeliveryReference::Reply { .. } | DeliveryReference::Command

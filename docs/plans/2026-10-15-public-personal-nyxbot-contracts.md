@@ -435,7 +435,7 @@ DTOs and platform_origin on active turns AND settled messages. Field fragment:
 {"platform_thread":{"platform":"telegram","manager_id":"<manager-id>","binding_id":"<binding-id>","binding_generation":1},"active_turn":{"turn_id":"<turn-id>","platform_origin":{"binding_id":"<binding-id>","binding_generation":1,"manager_authority_epoch":1,"personal_control_revision":2}},"messages":[{"platform_origin":{"binding_id":"<binding-id>","binding_generation":1,"manager_authority_epoch":1,"personal_control_revision":2}}]}
 ```
 
-manager_id matches owner inventory manager.id, not admin profile ID. Ordinary web
+manager_id matches owner inventory manager.id and the admin platform profile ID. Ordinary web
 turns have null origin even on a platform thread. No full proof, numeric private
 sender/chat, key ID or body-bearing live event. Existing owner-scoped live
 invalidation/polling preserves field names. A thread badge survives settlement/
@@ -604,3 +604,45 @@ send path. It is not a `DeliveryRef::Fixed` text bypass, is never queued as a bo
 and is never reconstructed on a Telegram replay. A failed link delivery requires
 a new `/link` update. Delivery still checks original-private provenance, live
 manager identity/current observation, and a durable single-send claim.
+
+
+### Personal transport checkpoint and recovery
+
+The mounted personal path uses the real identity, ingress, personal execution,
+NyxAgent egress and lifecycle producers. Public execution remains unavailable;
+no public runtime proof or successful public reply is manufactured. Expected
+personal admission failures yield a bounded status response with their existing
+personal receipt; infrastructure failures remain errors. Forwarded ordinary
+text retains authenticated sender/chat identity, while forwarded proof/control
+cannot approve or decide. Saved replies link to the exact web conversation at
+`/assistant?c=<conversation-id>` for reviewing action cards. Telegram card
+summaries/codes and fresh event/after-turn delivery remain follow-up work owned
+with Part 2, not implemented claims in this checkpoint.
+
+The delivery transaction validates exact ingress, owner, binding generation,
+manager epoch, personal revision, saved reply origin/body and thread. It reads
+the current profile observation, fences that observation, and captures the
+matching current webhook-ready credential. A same-bot rotation can defer a
+retained reply while observation readiness changes; a different numeric bot,
+epoch, retired binding or stopped reply refuses delivery. The provider operation
+runs after commit with `protect_content`; only one durable dispatch claim can
+send. An ambiguous response or a crash after dispatch stays uncertain and is
+never automatically replayed. A proven Telegram 429 may defer a retained reply
+until `retry_after`; command bearer output is ephemeral and never recovered.
+
+Ingress `delivery_recovery_queued` defaults false on legacy rows. It becomes true
+only after delivery metadata is durable, or after deleted/altered proof is
+terminally refused. Recovery drains oldest settled unqueued replies in bounded
+batches; delivery then owns pending retries. Account retirement recovery runs
+before exact-stop recovery. Each sweep bounds selected records and uses state
+CAS; no unbounded update-many cleanup is used in transport recovery. Ingress
+and terminal delivery tombstones currently have no TTL: retaining metadata
+prevents replaying old Telegram update IDs or uncertain/sent attempts. Bodies
+and one-time tokens are absent from these collections. Safe metadata compaction
+requires a separate durable dedupe horizon and is not claimed here.
+
+`platform_manager_transport::journey_tests` uses local transaction-capable MongoDB,
+a local mock Telegram endpoint and a test NyxAgent egress. These are regression
+sources, not upstream/public proof or real Telegram acceptance evidence. Their
+first checkpoint was formatted and whitespace-checked; compilation and execution
+belong to the primary's single build slot.
