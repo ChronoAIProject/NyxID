@@ -34,11 +34,15 @@ Part 1 accepts the candidate with these bounded corrections for the primary:
   epoch/revisions as an absence precondition. Store positive authority starting
   at 1, retain the existing profile sponsor, and perform readiness plus atomic
   Enable behind the same user action. No controls are created on failure.
-- Required `nyxbot_agent_id` needs Part 2's transaction-aware ordinary-agent
-  ensure during final consent. Add an exact active-turn claim/clear seam or
-  agree an equivalent Part 2 lookup within the revocation transaction.
-- `StopRecorded` already promises durable recovery. Part 2 calls Part 1's queue
-  persistence helper in that same session; no duplicate enqueue or broad Stop.
+- Per Part 2's `338d92f5b`, resolve `PersonalBindingAuthority` without an agent.
+  Part 2 ensures ordinary NyxBot before the turn transaction, validates its real
+  ID during thread claim, and completes `PlatformTurnOrigin` afterward. Thread
+  claim takes the real agent ID and returns both winning IDs. This supersedes
+  this proposal's earlier consent-time transaction-aware agent ensure.
+- Amend `StopRecorded` to `Captured(CapturedPlatformStop)`: Part 2 writes exact
+  Stop and returns captured effects; Part 1 inserts its durable recovery record
+  before committing. Clear helpers compare exact owner/binding/generation and
+  old turn/thread only, and remain usable after revocation.
 - Part 3 still needs local readiness recheck, sender-public-session revoke, and
   profile discovery seams. Public-session absence is a successful local no-op.
 - HMAC-only manual proofs cannot be reconstructed for status. Return the
@@ -68,10 +72,10 @@ remain for the implementation turn.
 - Every session-taking identity, thread, turn, lifecycle, and Stop helper joins
   an already-running transaction. It never starts, commits, aborts, or retains
   the caller's `ClientSession`.
-- Part 2's `ExactStopOutcome::StopRecorded` means both the exact Stop and its
-  durable cancellation record are written in that transaction. Part 1 owns the
-  record model and enqueue helper. External cancellation happens after commit.
-  Existing broad conversation Stop is unsuitable for transport unlink.
+- Part 2 returns `Captured(CapturedPlatformStop)` after writing exact Stop in
+  the caller's transaction. Part 1 persists those effects before committing
+  revocation. External cancellation happens after commit. Existing broad
+  conversation Stop is unsuitable for transport unlink.
 - Human HTTP decisions derive the account from `AuthUser`, use the existing
   first-party human guard, and never accept `user_id`, grants, or a mode override.
   Telegram reuses the owner's current NyxBot access and confirmation policy.
@@ -151,20 +155,19 @@ logic and never become HTTP responses directly.
 `platform_personal_bindings` has one document per consent lifetime, with
 `platform_config_id`, `manager_bot_id`, `manager_authority_epoch`, sender/chat,
 `user_id`, positive `generation`, `state` (`active` or `revoked`),
-`revocation_reason`, `consent_version`, `reviewed_policy`, required
+`revocation_reason`, `consent_version`, `reviewed_policy`, optional
 `nyxbot_agent_id`, optional `conversation_id`, optional `active_turn_ref`,
 `effect_revision`, and BSON created/updated/consented/revoked dates.
 
 `reviewed_policy` records the disclosure version and the effective access mode
 shown at approval. It is evidence of consent, not a frozen service grant or a
 Telegram permission editor. Subsequent settings apply through normal NyxBot
-policy. Part 2 supplies the owner's existing or newly created ordinary NyxBot ID
-during final consent confirmation, because the candidate `PlatformTurnOrigin`
-requires a nonnullable ID. This creates no conversation or credential. Only the
-thread reference starts null. Part 2 claims it during first successful thread
-creation. Deletion clears the conversation and active-turn references while
-retaining the NyxBot ID. A missing/malformed ID on an active stored row is
-unavailable or a storage error, never unlinked.
+policy. Consent and sender resolution do not require a NyxBot to exist.
+Agent/thread references start null. Part 2 ensures the ordinary NyxBot before
+its turn transaction, validates the actual agent in that transaction, and calls
+Part 1's thread claim with that ID. It completes the origin afterward. Deletion
+clears the conversation and active-turn references while retaining any agent ID.
+Optional hints never authorize a turn or supply an invented placeholder ID.
 
 Proposed replacement representation: retain A's revoked row, and insert B's new
 UUID row with the next sender generation in the same transaction. Generation is
@@ -284,68 +287,55 @@ Part 2 applies exact cancellation/settlement after commit.
 
 ## Proposed service signatures and transaction ownership
 
-The following identity signatures adopt Part 5's candidate exactly. Shared
-values have no serde representation. Persistent models do not import the
-service-contract module; the owning service maps model fields into these values.
-`VerifiedManagerUpdate` comes only from authenticated Telegram ingress. It carries
-profile ID, internal manager ID, checked numeric Telegram bot/sender/chat IDs,
-current observation, chat kind, update ID, and message ID.
+Use the shared types from Part 5's `1b5aea084`, amended by Part 2's
+`338d92f5b`. `PersonalBindingAuthority` holds manager/sender/chat, binding and
+personal control revisions, and owner, without requiring an agent. Sender
+resolution carries that authority and optional existing agent/conversation hints.
+`PlatformTurnOrigin` combines the authority with the validated real agent ID and
+`PlatformOriginSource` (`Ingress` or fresh `ThreadEvent`). The origin is completed
+at turn claim, not consent or sender resolution. These replace the candidate's
+premature agent requirement; they do not add a second authority API.
+
+The affected identity producer signatures follow Part 2's proposal:
 
 ```rust
-// Shared candidate values, abbreviated only by omitting derives.
-pub struct PlatformTurnOrigin {
-	pub manager: ManagerAuthority,
-	pub sender_id: i64,
-	pub chat_id: i64,
-	pub binding_id: String,
-	pub binding_generation: i64,
-	pub personal_control_revision: i64,
-	pub user_id: String,
-	pub nyxbot_agent_id: String,
-}
+async fn fence_personal_origin(
+	&self, db: &Database, session: &mut ClientSession,
+	authority: &PersonalBindingAuthority,
+) -> AppResult<FenceOutcome>;
 
-pub enum SenderResolution {
-	Unlinked,
-	Personal { origin: PlatformTurnOrigin, conversation_id: Option<String> },
-	Unavailable(UnavailableReason),
-}
+async fn claim_binding_thread(
+	&self, db: &Database, session: &mut ClientSession,
+	authority: &PersonalBindingAuthority, nyxbot_agent_id: &str,
+	candidate_conversation_id: &str,
+) -> AppResult<PersonalThreadClaim>;
 
-#[async_trait::async_trait]
-pub trait ManagerIdentityProducer: Send + Sync {
-	async fn runtime_policy(
-		&self, db: &Database, profile_id: &str,
-	) -> AppResult<Option<ManagerRuntimePolicy>>;
+async fn claim_binding_turn(
+	&self, db: &Database, session: &mut ClientSession,
+	origin: &PlatformTurnOrigin, turn: &TurnRef,
+) -> AppResult<()>;
 
-	async fn resolve_sender(
-		&self, db: &Database, session: &mut ClientSession,
-		update: &VerifiedManagerUpdate,
-	) -> AppResult<SenderResolution>;
+async fn clear_binding_turn(
+	&self, db: &Database, session: &mut ClientSession,
+	user_id: &str, binding_id: &str, binding_generation: i64, turn: &TurnRef,
+) -> AppResult<bool>;
 
-	async fn fence_personal_origin(
-		&self, db: &Database, session: &mut ClientSession,
-		origin: &PlatformTurnOrigin,
-	) -> AppResult<FenceOutcome>;
-
-	async fn claim_binding_thread(
-		&self, db: &Database, session: &mut ClientSession,
-		origin: &PlatformTurnOrigin, conversation_id: &str,
-	) -> AppResult<String>;
-
-	async fn clear_binding_thread_reference(
-		&self, db: &Database, session: &mut ClientSession,
-		origin: &PlatformTurnOrigin, conversation_id: &str,
-	) -> AppResult<bool>;
-}
+async fn clear_binding_thread_reference(
+	&self, db: &Database, session: &mut ClientSession,
+	user_id: &str, binding_id: &str, binding_generation: i64,
+	conversation_id: &str,
+) -> AppResult<bool>;
 ```
 
-The existing `async_trait` dependency supports the candidate's small producer
-traits. Part 1 implements these operations in its owning services. There is no
-second identity trait or alternate DTO vocabulary. `ManagerAuthority` includes
-`profile_id`, internal `manager_bot_id`, numeric `telegram_bot_id`, and stable
-`manager_authority_epoch`. `runtime_policy` returns `None` for missing controls;
-this read does not initialize state. `FenceOutcome::Unavailable` is a bounded
-policy refusal, while storage, decoding, and transaction failures remain `Err`.
-A missing producer cannot fabricate successful authority or readiness.
+`PersonalThreadClaim` returns `nyxbot_agent_id` and `conversation_id`.
+`resolve_sender(db, session, update)` retains the candidate's session ownership
+and `Unlinked/Personal/Unavailable` result distinction. The only change to its
+personal payload is the pre-thread authority and optional hints.
+`runtime_policy(db, profile_id)` still returns `Option<ManagerRuntimePolicy>`.
+Shared values have no serde representation. Persistent models do not import the
+service-contract module; owning services map persisted fields into those values.
+The existing `async_trait` dependency supports the small producer traits.
+Infrastructure, decoding, and transaction failures remain `Err(AppError)`.
 
 Part 5 owns ingress receipt/classification transactions and passes the session
 into `resolve_sender`. Private-chat and non-bot sender checks happen before this
@@ -365,61 +355,31 @@ serialize. Personal resolution also conditionally writes the active binding and
 person rows. A committed receipt retains its audience after later consent changes.
 The personal fence conditionally increments effect counters on controls, binding,
 active person, and durable manager authority rows. It compares manager identity
-and epoch, personal control revision, binding ID/generation/state, user, NyxBot,
-and private sender/chat. Public revision and guide generation/enabled are absent.
+and epoch, personal control revision, binding ID/generation/state, user,
+and private sender/chat. Part 2 validates the actual agent and exact turn/source.
+Public revision and guide generation/enabled are absent.
 Part 3 validates the exact live turn through Part 2 before effect admission.
 Ordinary web/API turns without a platform origin incur no platform lookup.
 
-`claim_binding_thread` returns the winning conversation ID. If it differs from
-the candidate ID, Part 2 aborts its candidate conversation/key transaction and
-retries against the winner. It must never commit an unused candidate. Claims
-compare a null pointer and exact live origin. Clear compares owner, binding
-ID/generation, and the old conversation ID, so an old delete cannot clear a
-new thread. Clear is also permitted for a revoked binding without live controls
-or engine readiness. It never restores authority. Part 2's candidate
-`clear_binding_thread` delegates this collection write to Part 1 within its
-existing deletion transaction.
+`claim_binding_thread` receives the actual validated ordinary NyxBot ID and
+returns both authoritative IDs. Claim the pointer before inserting a new
+conversation/key. If an existing winner differs from already inserted candidates,
+Part 2 aborts and retries instead of committing an orphan. Existing binding agent
+hints must agree with the active owner's ordinary NyxBot.
 
-Two additional Part 1 methods are needed on the identity producer, or as explicit
-module functions consumed by Part 2. They maintain the exact revocation target
-in the same transactions as Part 2's turn claim and settlement:
+Turn claim writes the complete origin and exact turn reference in the same
+transaction as active-turn admission. Clear helpers compare only exact owner,
+binding ID/generation, and old turn/thread reference. They do not require live
+consent, current personal control revision, current controls, or engine readiness.
+Deleting or settling a revoked binding remains legal. An old clear cannot erase
+a newer pointer. Part 2 performs live agent validation and any origin/source
+comparison separately from those clear operations.
 
-```rust
-pub(crate) async fn claim_binding_turn_in_session(
-	db: &Database, session: &mut ClientSession,
-	origin: &PlatformTurnOrigin, turn: &TurnRef,
-) -> AppResult<FenceOutcome>;
-
-pub(crate) async fn clear_binding_turn_in_session(
-	db: &Database, session: &mut ClientSession,
-	origin: &PlatformTurnOrigin, turn: &TurnRef,
-) -> AppResult<bool>;
-```
-
-Claim verifies that `turn.conversation_id` is the current binding thread and
-writes only the exact new turn after the live origin fence. Clear compares the
-entire old turn reference and origin, including personal control revision.
-Delayed settlement cannot erase a newer pointer. The persisted pointer includes
-that revision, so revocation can reconstruct the old origin after controls pause.
-It is not derived by scanning arbitrary owner conversations.
-
-The nonnullable NyxBot ID also needs this Part 2 producer operation before Part 1
-inserts active consent:
-
-```rust
-// Part 2 owns ordinary NyxBot creation rules and the agent collection.
-pub(crate) async fn ensure_nyxbot_for_personal_binding_in_session(
-	db: &Database, session: &mut ClientSession, owner_user_id: &str,
-) -> AppResult<String>;
-```
-
-It joins the consent-confirmation transaction, reuses an existing ordinary
-NyxBot or creates one, and returns its ID. No conversation, key, model request,
-public-readiness probe, or external effect occurs. A duplicate-key/write conflict
-aborts and retries the whole caller transaction. The existing transactionless
-`assistant_team_service::ensure_nyxbot` cannot be called as a writing operation
-inside that transaction. This is a concrete addition required by the candidate's
-nonnull origin, not permission for Part 1 to edit Part 2's files.
+Part 2 uses existing `ensure_nyxbot(db, owner)` before opening its turn
+transaction, then validates the actual agent within it. Losing admission may
+leave an ordinary empty NyxBot, but no thread, credential, transcript, home
+pointer, or executable turn. No transaction-aware agent-creation helper is
+required during consent confirmation.
 
 ### Proof and lifecycle services
 
@@ -524,8 +484,8 @@ consumes the challenge and intent atomically with consent. A repeated matching
 confirmation returns its stored completion ref; it never generates another
 binding/thread. Changed prior authority requires fresh review.
 
-Replacement revokes A, persists A's exact stop effects, and inserts B with B's
-NyxBot ID and null thread/turn references. It cancels other pending personal
+Replacement revokes A, persists A's exact stop effects, and inserts B with null
+agent/thread/turn references. It cancels other pending personal
 intents/challenges for the
 sender, and asks Part 3 to revoke that sender's public session in the same
 transaction. The Part 3 hook must only revoke/queue cleanup locally; external
@@ -569,61 +529,42 @@ before that walk completes. Missing/retired manager markers stay closed.
 
 ### Required Part 2 exact-stop helper
 
-Adopt the candidate's exact signature and outcome. Part 1 invokes Part 2 from
-its revoke/replace/control transaction:
+Adopt Part 2's `338d92f5b` correction to the candidate. Part 1 invokes Part 2
+inside its revoke/replace/control transaction, then persists the returned effects:
 
 ```rust
-// PersonalTurnProducer method. No external/provider effects here.
+pub enum ExactStopOutcome {
+	Captured(CapturedPlatformStop),
+	NoMatchingActiveTurn,
+}
+
 async fn stop_exact_platform_turn(
 	&self, db: &Database, session: &mut ClientSession,
 	origin: &PlatformTurnOrigin, turn: &TurnRef,
 ) -> AppResult<ExactStopOutcome>;
 
-pub enum ExactStopOutcome {
-	StopRecorded { cancellation_id: String },
-	NoMatchingActiveTurn,
-}
-
-// Additional shared non-serialized capture values proposed for this seam.
-pub struct ExactMachineJobRef {
-	pub node_id: String,
-	pub job_id: String,
-}
-pub struct ExactStopCapture {
-	pub async_operation_ids: Vec<String>,
-	pub machine_jobs: Vec<ExactMachineJobRef>,
-}
-
-// Part 1 owns this persistence helper; Part 2 calls it before returning StopRecorded.
+// Part 1 calls this before committing the same transaction.
 pub(crate) async fn enqueue_exact_stop_in_session(
-	db: &Database, session: &mut ClientSession,
-	origin: &PlatformTurnOrigin, turn: &TurnRef, capture: &ExactStopCapture,
+	db: &Database, session: &mut ClientSession, effects: &CapturedPlatformStop,
 ) -> AppResult<String>;
 
-// Part 2 applies effects after commit, also called by durable recovery.
-pub(crate) async fn apply_exact_platform_stop(
-	state: &AppState, cancellation_id: &str,
+// Part 2 applies effects after commit and during durable recovery.
+pub async fn apply_exact_platform_stop(
+	state: &AppState, effects: &CapturedPlatformStop,
 ) -> AppResult<ExactStopProgress>;
 ```
 
-`TurnRef` has conversation and turn ID. Owner identity is already in the origin.
-Part 2 matches conversation owner, exact active turn ID, complete persisted
-origin including binding/generation/manager epoch/personal control revision,
-and the engine's durable source admission. The ingress receipt remains in
-`AdmittedPersonalUpdate`; it need not be duplicated in the shared origin.
-Thread-event continuations need an equivalent server-owned source record.
-No request body supplies these fields. A mismatch returns
-`NoMatchingActiveTurn` and cannot stop a newer or web-origin turn.
-
-`StopRecorded` means Part 2 has written exact Stop and called Part 1's enqueue
-helper in this same session. Part 1 must not enqueue a second copy after the
-result. The helper persists the captured origin and exact identities in
-`platform_personal_stop_effects`, using its unique index for idempotence.
-Only current-turn cancellable operations belong in `ExactStopCapture`.
-Independently committed watches, automations, specialist tasks, proxy work,
-and action cards are excluded. The cancellation row is metadata, not evidence
-that external cancellation already ran. This reconciles the candidate's outcome
-with the allocation's Part 1 model ownership.
+`TurnRef` remains conversation plus turn ID; the origin supplies owner identity.
+Part 2 matches the exact persisted origin/source and active turn, writes Stop,
+and captures exact current-turn runtime/node/job identities in the same session.
+A mismatch returns `NoMatchingActiveTurn`. `Captured` does not claim that a durable
+recovery record already exists. Part 1 maps the capture into its plain
+`platform_personal_stop_effects` model and inserts it before committing revocation
+or replacement. The exact-turn/binding unique key deduplicates recovery.
+Part 1 leases pending records and reconstructs the capture for Part 2's runner.
+No second queue is owned by Part 2. No provider or node request runs inside the
+transaction. Independently committed tasks, watches, cards, and proxy work are
+excluded from capture.
 
 After commit, workers observe Stop and normal exact settlement remains valid.
 Part 5 schedules Part 1's bounded queue recovery; Part 1 leases IDs and asks
@@ -1067,7 +1008,7 @@ Part 5 owns any shared fixture changes and the single host build slot.
 | Part 1, `personal_intent_survives_long_signup_then_fresh_challenge` | An intent older than ten minutes remains usable before 24h; challenge expiry starts after authentication and does not extend the intent. Exact deadline and expired/replayed token are refused. |
 | Part 1, `personal_proof_requires_reviewed_account_and_same_private_chat` | Wrong actor, forwarded/wrong-chat/group proof, onboarding code, denial, cancellation, account switch, and digest mismatch cannot consent. Failed guesses consume spacing and rate limits. |
 | Part 1, `personal_confirmation_has_one_winner_and_replay_result` | Concurrent confirms yield one consent/completion; no second binding or generation/thread. Stale prior-binding review requires new approval. |
-| Part 1 with Part 2 fixture, `personal_replace_commits_revoke_exact_stop_and_new_binding` | Inject abort after each write and show no partial A/B replacement or stop record. Committed replacement leaves A's history/key owner unchanged and B's thread/turn references null with B's own ordinary NyxBot ID. |
+| Part 1 with Part 2 fixture, `personal_replace_commits_revoke_exact_stop_and_new_binding` | Inject abort after each write and show no partial A/B replacement or stop record. Committed replacement leaves A's history/key owner unchanged and B's agent/thread/turn references null; first use resolves B's ordinary NyxBot. |
 | Part 1, `resolve_sender_only_unlinked_can_select_public` | Never-consented/explicit unlink are unlinked; disabled/deleted owner, missing controls, paused personal-bound sender, emergency stop, unknown mode, manager retirement, malformed stored authority, and database failure are unavailable/error. |
 | Part 1 with Part 5 fixture, `unlinked_receipt_conflicts_with_confirmation` | Race the no-binding lookup against confirmation. Common control-row writes force retry; one committed receipt classification survives later replay/linking. |
 | Part 1, `public_changes_do_not_revoke_personal_consent_or_signup` | Change guide generation/enabled, public profile/budgets/revision, onboarding expiry, and same-ID token observation readiness. Consent and pending personal proofs survive; delivery waits while webhook is unverified. |
@@ -1083,8 +1024,9 @@ Part 5 owns any shared fixture changes and the single host build slot.
 The candidate already settles non-serialized values, `async_trait` producers,
 `Unlinked/Personal/Unavailable`, the personal control revision, session-taking
 fences/thread helpers, and owner identity in `PlatformTurnOrigin`. Part 1 accepts
-those choices, the POST proof paths, fragment bearer, owner GET list plus POST
-revoke, and unified admin runtime GET/PUT. Account lifecycle entry-point edits
+the unaffected choices with Part 2's `338d92f5b` amendments above, the POST proof
+paths, fragment bearer, owner GET list plus POST revoke, and unified admin runtime
+GET/PUT. Account lifecycle entry-point edits
 remain with Part 5 as assigned. No alternate contract module is proposed.
 
 The contract owner needs these concrete corrections or additions before freeze:
@@ -1096,18 +1038,18 @@ The contract owner needs these concrete corrections or additions before freeze:
   profile's existing sponsor. Probe and final atomic Enable require one product
   action. Normal updates use positive revisions. No stored zero or read-side
   initialization is permitted.
-- Keep candidate `PlatformTurnOrigin.nyxbot_agent_id` required by adding Part 2's
-  transaction-aware ordinary NyxBot ensure operation during consent confirmation.
-  Agent creation creates no thread/key or public dependency. Part 1 must not call
-  the current transactionless writing helper inside a caller transaction.
+- Adopt Part 2's pre-thread `PersonalBindingAuthority`. Part 2 ensures ordinary
+  NyxBot before the turn transaction, validates the real agent during thread
+  claim, and completes `PlatformTurnOrigin` afterward. Thread claim accepts the
+  actual agent ID and returns both winning IDs. Consent needs no existing agent.
 - Add exact active-turn claim/clear helpers to the identity producer or agree
   their explicit module seam. Part 2 maintains the pointer in claim/settlement
   transactions. Its full origin revision remains available for later Stop.
-- Keep candidate `StopRecorded` as both durable Stop and queued recovery. Part 2
-  calls Part 1's session-aware enqueue helper before returning that outcome.
-  Part 1 owns the record model; Part 2 owns capture, cancellation, and settlement.
-  Agree `ExactStopCapture` and the after-commit runner signature. Never enqueue
-  once in each owner or substitute a best-effort notification.
+- Replace candidate `StopRecorded` with Part 2's `Captured(CapturedPlatformStop)`.
+  Part 2 writes exact Stop and returns effects in the caller's transaction.
+  Part 1 stores its recovery row before commit. Part 2 applies cancellation
+  after commit. Clear operations remain valid after revocation and compare only
+  exact owner/binding/generation and old turn/thread. No duplicate queue exists.
 - Add Part 3's local readiness revalidation and sender-public-session revoke
   hooks. The latter is a no-op without public state and ships independently of
   upstream proof. It durably closes active public authority before linking can
