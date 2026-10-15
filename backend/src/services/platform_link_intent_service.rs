@@ -13,11 +13,13 @@ use crate::{
         },
     },
 };
-use chrono::{Duration, Utc};
+use chrono::Duration;
+#[cfg(test)]
+use chrono::Utc;
 use mongodb::{
     ClientSession, Database, IndexModel,
     bson::{self, Document, doc},
-    options::{IndexOptions, ReturnDocument},
+    options::IndexOptions,
 };
 use rand::{RngCore, rngs::OsRng};
 use zeroize::Zeroizing;

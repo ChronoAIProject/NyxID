@@ -14,7 +14,7 @@ use chrono::Utc;
 use mongodb::{
     ClientSession, Database, IndexModel,
     bson::{self, Document, doc},
-    options::{IndexOptions, ReturnDocument},
+    options::IndexOptions,
 };
 
 pub enum ResolvedPersonalSender {
