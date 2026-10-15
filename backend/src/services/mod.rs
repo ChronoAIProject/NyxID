@@ -221,6 +221,7 @@ pub mod assistant_group_service;
 pub mod assistant_instruction_context;
 pub mod assistant_live;
 pub mod assistant_nyxagent;
+pub mod assistant_nyxagent_runtime;
 pub mod assistant_profile_routing;
 pub mod assistant_settings_service;
 pub mod assistant_steering;
