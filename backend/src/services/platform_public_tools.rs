@@ -208,6 +208,9 @@ pub(crate) fn parse_call(params: Value) -> AppResult<PublicToolCall> {
     parse_direct(&name, args)
 }
 fn parse_direct(name: &str, args: Value) -> AppResult<PublicToolCall> {
+    if !args.is_object() {
+        return Err(denied());
+    }
     match name {
         "public_faq_search" => {
             let input: Search = serde_json::from_value(args).map_err(|_| denied())?;
@@ -469,6 +472,18 @@ mod tests {
         ] {
             assert!(
                 parse_call(json!({"name":"public_signup_link","arguments":arguments})).is_err()
+            );
+            assert!(
+                parse_call(json!({"name":WRAPPER,"arguments":{"tool_name":"public_signup_link","arguments":arguments}})).is_err()
+            );
+        }
+        for (name, arguments) in [
+            ("public_faq_search", json!(["NyxID"])),
+            ("public_faq_read", json!(["overview"])),
+        ] {
+            assert!(parse_call(json!({"name":name,"arguments":arguments})).is_err());
+            assert!(
+                parse_call(json!({"name":WRAPPER,"arguments":{"tool_name":name,"arguments_json":arguments.to_string()}})).is_err()
             );
         }
         assert!(

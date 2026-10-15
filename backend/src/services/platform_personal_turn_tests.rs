@@ -1105,10 +1105,11 @@ async fn async_result_settlement_retains_original_destination_across_new_revisio
         .db
         .collection::<bson::Document>(crate::models::platform_bot_runtime_controls::COLLECTION_NAME)
         .update_one(
-            doc! {"_id":&admitted.authority.manager.profile_id},
+            doc! {"platform_config_id":&admitted.authority.manager.profile_id},
             doc! {"$set":{"personal_control_revision":2_i64}},
         )
         .await
+        .map(|result| assert_eq!(result.matched_count, 1))
         .unwrap();
     for (linked, destination) in [
         (true, original.clone()),

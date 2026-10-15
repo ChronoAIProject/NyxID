@@ -509,12 +509,11 @@ async fn machine_lookups_are_batched_and_gateway_binding_is_one_indexed_read() {
             recorded.lock().unwrap().push(event.command);
         }
     });
-    let db = crate::test_utils::connect_test_database_with_command_handler(
+    let db = crate::test_utils::connect_transaction_test_database_with_command_handler(
         "machine_query_budget",
         handler,
     )
-    .await
-    .unwrap();
+    .await;
     let nodes: Vec<_> = (0..64)
         .map(|_| {
             let mut row = node.clone();
@@ -537,6 +536,17 @@ async fn machine_lookups_are_batched_and_gateway_binding_is_one_indexed_read() {
         2,
         "one membership read and one node read, independent of node count"
     );
+    // Publication fences the persisted node runtime and the issuing live turn.
+    db.collection::<Node>(crate::models::node::COLLECTION_NAME)
+        .insert_one(&node)
+        .await
+        .unwrap();
+    db.collection::<crate::models::assistant_conversation::AssistantConversation>(
+        crate::models::assistant_conversation::COLLECTION_NAME,
+    )
+    .insert_one(&f.row)
+    .await
+    .unwrap();
     let job = machines::issue_job(&db, &f.chat, &node, 120, Vec::new())
         .await
         .unwrap();

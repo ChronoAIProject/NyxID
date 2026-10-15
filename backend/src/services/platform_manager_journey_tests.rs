@@ -39,7 +39,8 @@ impl NyxAgentEgress for SavedReplyEgress {
         assert_eq!(request.relative_path, "v1/responses");
         self.0.fetch_add(1, Ordering::SeqCst);
         use axum::response::IntoResponse;
-        let frame = json!({"type":"response.completed","sequence_number":0,"response":{"id":"response-local-personal","conversation":{"id":"session-local-personal"},"status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Retained personal answer"}]}]}});
+        let session = "1234567890abcdef1234567890abcdef";
+        let frame = json!({"type":"response.completed","sequence_number":0,"response":{"id":format!("resp_{session}_1234567890abcdef1234567890abcdef"),"conversation":{"id":format!("conv_{session}")},"status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Retained personal answer"}]}]}});
         Ok((
             [("content-type", "text/event-stream")],
             format!("data: {frame}\n\n"),
@@ -877,10 +878,10 @@ async fn stopped_reply_and_mismatched_current_token_never_send() {
             &reply,
             delivery::render_saved(&saved, &j.state.config.frontend_url)
         )
-        .await
-        .unwrap(),
-        DeliveryOutcome::Refused(_)
+        .await,
+        Err(AppError::Conflict(_))
     ));
+    assert_eq!(j.sends().await.len(), 2);
     // Numeric identity or epoch changes also fail; an ordinary readiness flag
     // cannot turn an admitted proof into authority for a different manager.
     let (destination, reply, saved) = j.prepared_reply(51).await;
@@ -1451,7 +1452,7 @@ async fn pending_action_renderer_uses_exact_turn_key_routing_and_unique_codes() 
             "requested_turn_id":turn,"created_at":bson::DateTime::now(),"expires_at":bson::DateTime::from_chrono(Utc::now()+Duration::minutes(10)),"routing":routing}).unwrap()
     };
     let exact = card(
-        "render-action-a",
+        "00000100-0000-4000-8000-000000000001",
         &reply.turn.turn_id,
         &row.credential_api_key_id,
         bson::Bson::Document(doc! {"kind":"not_involved"}),
@@ -1495,12 +1496,13 @@ async fn pending_action_renderer_uses_exact_turn_key_routing_and_unique_codes() 
             .await
             .unwrap();
     }
-    let colliding = (0..100_000)
-        .map(|n| format!("render-collision-{n}"))
-        .find(|id| super::super::assistant_acknowledgement_service::confirm_code(id) == code)
-        .unwrap();
+    let colliding = "00271100-0000-4000-8000-000000000002";
+    assert_eq!(
+        super::super::assistant_acknowledgement_service::confirm_code(colliding),
+        code
+    );
     let collision = card(
-        &colliding,
+        colliding,
         &reply.turn.turn_id,
         &row.credential_api_key_id,
         bson::Bson::Document(doc! {"kind":"not_involved"}),
