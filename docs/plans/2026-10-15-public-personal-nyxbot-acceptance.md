@@ -8,7 +8,7 @@ or the external portion of A1/A15.
 
 Current checkpoint: identity, personal execution/settlement/Stop, ingress,
 Telegram transport, account lifecycle recovery and frontend slices are integrated
-through `9c1a1c3df` on [draft PR #1901](https://github.com/ChronoAIProject/NyxID/pull/1901).
+through `0f34c0f72` on [draft PR #1901](https://github.com/ChronoAIProject/NyxID/pull/1901).
 Seven integrated journey/regression tests are written, including real local
 consent and personal execution against mocked upstream/Telegram HTTP. They have
 not yet run. Public execution remains unavailable; exact budget/funding,
@@ -33,8 +33,11 @@ is a type-check result, not a runtime test pass. Log:
 public quota and sponsor funding refusals to fixed transport responses. Four
 precise lint expectations document intentionally unavailable verifier inputs
 and the production Ready constructor; the verifier still refuses all activation.
-There is no blanket lint suppression or fabricated readiness. Fresh strict lint
-and integrated CI validation remain pending. Earlier CodeQL completed all four
+There is no blanket lint suppression or fabricated readiness. Local production Clippy with `-D warnings` passed at `04fa4f308` in 1m49s after
+removing two obsolete response mappings. The final exact-settlement and usage
+consistency correction is integrated as `23508ea09`; Astra reviewed it without a
+confirmed blocker, but its new runtime regressions have not executed. Integrated
+CI validation of that correction remains pending. Earlier CodeQL completed all four
 language checks on `f8f623a42`.
 
 Earlier missing webhook arguments, transaction callback `Send` diagnostics and
@@ -71,12 +74,24 @@ event/reply deduplication, recovery, card rendering or public dispatch consumers
 Astra reviewed the public execution bridge and initially reported a timeout
 recovery gap, then explicitly withdrew it after checking the concrete settlement
 wrapper, which already revokes and schedules cleanup in the same transaction.
-A focused actual-settlement regression and protection against a stale failure
-revoking a successor turn are being added. None of these reviews ran tests or
+The actual-settlement regressions and protection against a stale failure
+revoking a successor turn are integrated in `23508ea09` and passed Astra's bounded
+source review. None of these reviews ran tests or
 endorsed merging. Captured delayed-result
 destinations currently expire with the original 2,100-second turn lease; later
 results remain in web history. A source regression now exercises that limit,
 but runtime execution is still pending.
+
+Main advanced to `897a89c2b` during verification. Merge `f00faf456` preserves its
+composer/model-label/manual-CLI-login changes and the feature's Telegram labels
+and origin decoding. The only conflicts were generated wizard HTML/hash; the
+canonical `npm --prefix frontend run build:wizard` regenerated them on Node
+22.21.1 and passed TypeScript checking. Independent hashing of all 175 manifest
+inputs and extras matched
+`3852abf799a366390be2b284ccc4712ed34eae9eb18bc56153971f4ab40fce26`.
+The four affected frontend suites passed 115 tests after the merge. Workspace
+formatting was checked again. Logs: `/tmp/nyxbot-manager-wizard-main897.log`,
+`/tmp/nyxbot-manager-frontend-main897.log`.
 
 Frontend worker checkpoint `8ac676907`, integrated as `678409e8b`, passed 187
 tests across 12 files, focused ESLint, TypeScript checking, production and
