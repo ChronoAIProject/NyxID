@@ -8,22 +8,35 @@ or the external portion of A1/A15.
 
 Current checkpoint: identity, personal execution/settlement/Stop, ingress,
 Telegram transport, account lifecycle recovery and frontend slices are integrated
-through `c88400b6f` on [draft PR #1901](https://github.com/ChronoAIProject/NyxID/pull/1901).
+through `f8f623a42` on [draft PR #1901](https://github.com/ChronoAIProject/NyxID/pull/1901).
 Seven integrated journey/regression tests are written, including real local
 consent and personal execution against mocked upstream/Telegram HTTP. They have
-not yet compiled or run. Public execution remains unavailable; its real runtime,
-FAQ tools and full-loop budget enforcement are incomplete. Personal event wakes,
+not yet run. Public execution remains unavailable; exact budget/funding primitives
+are integrated, but their runtime consumers, FAQ tools and upstream proof remain
+incomplete. Personal event wakes,
 after-turn continuation and original delayed-result delivery also remain.
 
-The first CI run, on `69e7ffba8`, failed backend compilation on three legacy
-webhook fixture calls missing the new optional producer argument and four
-transaction callback `Send` diagnostics. The callback corrections are integrated
-in `544b6f25e`; compiler verification and fixture fixes are in progress. Its
-frontend run passed 5,611 tests but failed an existing settings test because the
-new Telegram section adds another Retry button. Frontend and wizard freshness
-fixes are assigned to their owner. Main advanced to `828009878`, producing merge
-conflicts that the primary is resolving before the next CI run. No backend
-feature runtime test or full acceptance gate has passed.
+The latest CI run is [38715621808](https://github.com/ChronoAIProject/NyxID/actions/runs/38715621808)
+on `f8f623a42`. Formatting and CLI wizard freshness passed. Backend image/features
+failed on 56 unused-code diagnostics under `-D warnings`; the backend test target
+failed on 37 unused-code diagnostics before tests could execute. These include
+public paths awaiting real consumers and superseded contract interfaces. They
+must be connected or removed, without blanket lint suppression or fabricated
+readiness. Frontend and other checks were still running at this checkpoint.
+
+Earlier missing webhook arguments, transaction callback `Send` diagnostics and
+four merge-related test-target errors have been corrected. Main `828009878` was
+merged in `8e33386d6`; specialist report/card provenance is retained alongside
+platform origin. The settings test now scopes Retry to its section and mocks its
+separate personal-inventory request; all ten settings tests, focused ESLint and
+TypeScript passed after the merge. The canonical wizard build and an independent
+check of all 175 manifest inputs matched the regenerated source hash.
+
+A local nextest run of `platform_manager_transport::journey_tests` is compiling
+`f8f623a42` with the explicit transaction-capable MongoDB URI below, one Cargo
+build job, no incremental compilation and line-table-only test debug information.
+Log: `/tmp/nyxbot-manager-journey-1.log`. No backend feature runtime test or full
+acceptance gate has passed yet.
 
 Frontend worker checkpoint `8ac676907`, integrated as `678409e8b`, passed 187
 tests across 12 files, focused ESLint, TypeScript checking, production and
