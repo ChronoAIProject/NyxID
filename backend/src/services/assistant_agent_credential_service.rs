@@ -238,13 +238,18 @@ async fn require_ordinary_key(
 ) -> AppResult<()> {
     let collection = db.collection::<bson::Document>(KEYS);
     let read = collection
-        .find_one(doc! {"_id": key, "user_id": user})
-        .projection(doc! {"purpose": 1});
+        .find_one(doc! {"_id": key})
+        .projection(doc! {"purpose": 1, "user_id": 1});
     let row = match session {
         Some(session) => read.session(session).await?,
         None => read.await?,
     };
     if let Some(row) = row {
+        if row.get_str("user_id").ok() != Some(user) {
+            return Err(AppError::Forbidden(
+                "Assistant credential owner changed".into(),
+            ));
+        }
         require_ordinary_purpose(&row)?;
     }
     Ok(())
@@ -796,7 +801,7 @@ mod tests {
         for purpose in [
             bson::Bson::Null,
             bson::Bson::Int32(1),
-            "platform_public".into(),
+            "public_nyxbot".into(),
             "scheduled_invocation".into(),
             "permission_bound".into(),
             "unknown".into(),
@@ -817,9 +822,10 @@ mod tests {
             .unwrap()
             .unwrap();
         for purpose in [
-            "platform_public",
+            "public_nyxbot",
             "scheduled_invocation",
             "permission_bound",
+            "unknown",
         ] {
             keys.update_one(
                 doc! {"_id": &row.credential_api_key_id},
@@ -896,6 +902,73 @@ mod tests {
             assert_eq!(after.api_key_id, before.api_key_id);
             assert_eq!(after.key_ciphertext, before.key_ciphertext);
         }
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn foreign_restricted_pointer_cannot_be_recovered_as_an_owner_key() {
+        let (state, owner, row) = fixture("nyxa_foreign_public_credential").await;
+        let db = &state.db;
+        let keys = db.collection::<bson::Document>(KEYS);
+        let mut foreign = keys
+            .find_one(doc! {"_id": &row.credential_api_key_id})
+            .await
+            .unwrap()
+            .unwrap();
+        foreign.insert("_id", "foreign-restricted-key");
+        foreign.insert("user_id", "sponsor-owner");
+        foreign.insert("purpose", "public_nyxbot");
+        keys.insert_one(foreign).await.unwrap();
+        db.collection::<bson::Document>(CREDENTIALS)
+            .update_one(
+                doc! {"conversation_id": &row.id},
+                doc! {"$set": {"api_key_id": "foreign-restricted-key"}},
+            )
+            .await
+            .unwrap();
+        db.collection::<bson::Document>(CONVERSATIONS)
+            .update_one(
+                doc! {"_id": &row.id},
+                doc! {"$set": {"credential_api_key_id": "foreign-restricted-key"}},
+            )
+            .await
+            .unwrap();
+        assert!(
+            load_for_conversation(db, &state.encryption_keys, &owner, &row.id)
+                .await
+                .is_err()
+        );
+        assert!(
+            load_or_provision(db, &state.encryption_keys, &owner, &row.id)
+                .await
+                .is_err()
+        );
+        assert!(
+            replace(
+                db,
+                &state.encryption_keys,
+                &owner,
+                &row.id,
+                "foreign-restricted-key"
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(keys.count_documents(doc! {}).await.unwrap(), 2);
+        let foreign = keys
+            .find_one(doc! {"_id": "foreign-restricted-key"})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(foreign.get_str("purpose").unwrap(), "public_nyxbot");
+        assert!(foreign.get_bool("is_active").unwrap());
+        let stored = db
+            .collection::<AssistantAgentCredential>(CREDENTIALS)
+            .find_one(doc! {"conversation_id": &row.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.api_key_id, "foreign-restricted-key");
         db.drop().await.unwrap();
     }
 
