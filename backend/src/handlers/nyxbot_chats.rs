@@ -303,17 +303,31 @@ pub(super) async fn record_chat_with_relay(
     if matches!(row.platform.as_str(), "telegram" | "telegram-new")
         && let Some(message_id) = last_message_id.or(relay_message_id)
     {
-        let source = state
+        // Best effort: only the stored topic evidence is read, and a missing,
+        // partial or legacy message row (or a failed lookup) means "no
+        // evidence", which keeps the previous outbound target. It never fails
+        // the inbound message.
+        let topic = match state
             .db
-            .collection::<crate::models::channel_message::ChannelMessage>(
-                crate::models::channel_message::COLLECTION_NAME,
-            )
+            .collection::<bson::Document>(crate::models::channel_message::COLLECTION_NAME)
             .find_one(doc! {"_id": message_id, "channel_bot_id": &row.channel_bot_id})
-            .await?;
-        if let Some(topic) = source
-            .and_then(|source| source.thread_context)
-            .and_then(|facts| facts.telegram_topic)
+            .projection(doc! {"_id": 0, "thread_context.telegram_topic": 1})
+            .await
         {
+            Ok(source) => source
+                .as_ref()
+                .and_then(|source| source.get_document("thread_context").ok())
+                .and_then(|facts| facts.get("telegram_topic"))
+                .and_then(|topic| {
+                    bson::from_bson::<crate::models::channel_thread::TelegramTopic>(topic.clone())
+                        .ok()
+                }),
+            Err(error) => {
+                tracing::debug!(%error, "Telegram topic evidence unavailable");
+                None
+            }
+        };
+        if let Some(topic) = topic {
             set.insert(
                 "telegram_topic",
                 bson::to_bson(&topic)
