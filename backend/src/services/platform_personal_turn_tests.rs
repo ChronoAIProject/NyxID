@@ -280,3 +280,136 @@ async fn exact_stop_settles_revoked_turn_and_retains_independent_work() {
     );
     db.drop().await.unwrap();
 }
+
+#[tokio::test]
+async fn personal_credential_recovery_adopts_exact_successor_and_revocation_prevents_mutation() {
+    let (state, admitted) = fixture("personal_credential_recovery").await;
+    let db = &state.db;
+    let service = personal(state.clone());
+    let agent =
+        super::super::assistant_team_service::ensure_nyxbot(db, &admitted.authority.user_id)
+            .await
+            .unwrap();
+    let start = engine::TurnStart::from(&engine::parse_turn(br#"{"text":"work"}"#).unwrap());
+    let ids = engine::OwnerTurnIds {
+        conversation_id: format!("nyxa-{}", uuid::Uuid::new_v4().simple()),
+        turn_id: uuid::Uuid::new_v4().to_string(),
+        message_id: uuid::Uuid::new_v4().to_string(),
+    };
+    let mut session = db.client().start_session().await.unwrap();
+    session.start_transaction().await.unwrap();
+    let claim = claim_personal_turn_in_session(
+        db,
+        &mut session,
+        &state.encryption_keys,
+        service.identity.as_ref(),
+        service.ingress.as_ref(),
+        &admitted,
+        &start,
+        &ids,
+        &agent,
+    )
+    .await
+    .unwrap();
+    session.commit_transaction().await.unwrap();
+    let row = claim.conversation;
+    let old = claim.credential.api_key_id;
+    use super::super::assistant_agent_credential_service as credentials;
+    // Generic metadata/ordinary replacement cannot borrow a platform turn.
+    assert!(
+        credentials::replace(db, &state.encryption_keys, &row.user_id, &row.id, &old)
+            .await
+            .is_err()
+    );
+    let successor = credentials::replace_for_turn(db, &state.encryption_keys, &row, &old)
+        .await
+        .unwrap();
+    assert_ne!(old, successor.api_key_id);
+    let rebound = engine::get(db, &row.user_id, &row.id).await.unwrap();
+    assert_eq!(rebound.credential_api_key_id, successor.api_key_id);
+    assert!(rebound.nyxagent_session_id.is_none());
+    assert!(
+        credentials::load_for_conversation(db, &state.encryption_keys, &row.user_id, &row.id)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    let origin = contract_origin(
+        row.active_turn
+            .as_ref()
+            .unwrap()
+            .platform_origin
+            .as_ref()
+            .unwrap(),
+    )
+    .unwrap();
+    let turn = contract::TurnRef {
+        conversation_id: row.id.clone(),
+        turn_id: ids.turn_id,
+    };
+    session.start_transaction().await.unwrap();
+    assert_eq!(
+        fence_execution_in_session(
+            db,
+            &mut session,
+            service.identity.as_ref(),
+            &row.user_id,
+            &old,
+            &turn,
+            &origin
+        )
+        .await
+        .unwrap(),
+        contract::FenceOutcome::Unavailable(contract::UnavailableReason::OriginRevoked)
+    );
+    assert_eq!(
+        fence_execution_in_session(
+            db,
+            &mut session,
+            service.identity.as_ref(),
+            &row.user_id,
+            &successor.api_key_id,
+            &turn,
+            &origin
+        )
+        .await
+        .unwrap(),
+        contract::FenceOutcome::Authorized
+    );
+    session.abort_transaction().await.unwrap();
+    db.collection::<bson::Document>(BINDINGS)
+        .update_one(
+            doc! {"_id":&admitted.authority.binding_id},
+            doc! {"$set":{"state":"revoked"}},
+        )
+        .await
+        .unwrap();
+    assert!(
+        credentials::replace_for_turn(db, &state.encryption_keys, &row, &successor.api_key_id)
+            .await
+            .is_err()
+    );
+    assert!(
+        update_platform_turn(db, &row, doc! {"$set":{"active_turn.continuations":1_i64}})
+            .await
+            .is_err()
+    );
+    let retained = engine::get(db, &row.user_id, &row.id).await.unwrap();
+    assert_eq!(retained.credential_api_key_id, successor.api_key_id);
+    assert_eq!(retained.active_turn.unwrap().continuations, 0);
+    assert!(
+        db.collection::<crate::models::api_key::ApiKey>(crate::models::api_key::COLLECTION_NAME)
+            .find_one(doc! {"_id":&successor.api_key_id,"user_id":&row.user_id,"purpose":"general"})
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(
+        db.collection::<bson::Document>(CREDENTIALS)
+            .count_documents(doc! {"conversation_id":&row.id})
+            .await
+            .unwrap(),
+        1
+    );
+    db.drop().await.unwrap();
+}

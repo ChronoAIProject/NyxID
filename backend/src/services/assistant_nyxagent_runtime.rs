@@ -205,12 +205,18 @@ pub(crate) async fn continue_turn(
         return Ok(false);
     }
     let lease = chrono::Utc::now() + chrono::Duration::seconds(engine::ACTIVE_TURN_TTL_SECS);
-    let updated = state.db.collection::<AssistantConversation>(crate::models::assistant_conversation::COLLECTION_NAME)
-        .update_one(doc! {"_id":&row.id,"user_id":&row.user_id,"active_turn.turn_id":&active.turn_id,"active_turn.stop_requested":false},
-            doc! {"$set":{"nyxagent_session_id":binding,"active_turn.continuations":continuations.count,"active_turn.tool_progress": {"started": 0_i64, "calls": 0_i64, "digest": ""},"active_turn.lease_expires_at":mongodb::bson::DateTime::from_chrono(lease)}})
-        .await.map_err(|_|TurnError::internal("assistant_unavailable", "continuation"))?;
-    if updated.matched_count != 1 {
-        return Err(TurnError::internal("cancelled", "stop"));
+    let update = doc! {"$set":{"nyxagent_session_id":binding,"active_turn.continuations":continuations.count,"active_turn.tool_progress": {"started": 0_i64, "calls": 0_i64, "digest": ""},"active_turn.lease_expires_at":mongodb::bson::DateTime::from_chrono(lease)}};
+    if active.platform_origin.is_some() {
+        super::platform_personal_turn_service::update_platform_turn(&state.db, row, update)
+            .await
+            .map_err(|_| TurnError::internal("cancelled", "continuation"))?;
+    } else {
+        let updated=state.db.collection::<AssistantConversation>(crate::models::assistant_conversation::COLLECTION_NAME)
+            .update_one(doc! {"_id":&row.id,"user_id":&row.user_id,"active_turn.turn_id":&active.turn_id,"active_turn.stop_requested":false},update)
+            .await.map_err(|_|TurnError::internal("assistant_unavailable", "continuation"))?;
+        if updated.matched_count != 1 {
+            return Err(TurnError::internal("cancelled", "stop"));
+        }
     }
     tracing::info!(conversation_id = %row.id, upstream_error_code = error.code, continuation = continuations.count, "Continuing assistant task on its existing session");
     events.emit(
@@ -708,6 +714,35 @@ pub(crate) fn upstream_error_code(status: u16, envelope: &Value) -> &str {
     ""
 }
 
+async fn clear_session(
+    state: &AppState,
+    row: &AssistantConversation,
+    reason: &str,
+) -> AppResult<()> {
+    if row
+        .active_turn
+        .as_ref()
+        .is_some_and(|turn| turn.platform_origin.is_some())
+    {
+        super::platform_personal_turn_service::update_platform_turn(&state.db,row,doc! {"$set":{
+            "nyxagent_session_id":mongodb::bson::Bson::Null,"nyxagent_instruction_binding":mongodb::bson::Bson::Null,
+            "nyxagent_last_response_id":mongodb::bson::Bson::Null,"context_reset_at":mongodb::bson::DateTime::now(),"context_reset_reason":reason,
+        }}).await
+    } else {
+        engine::clear_binding(
+            &state.db,
+            &row.user_id,
+            &row.id,
+            &row.active_turn
+                .as_ref()
+                .ok_or(AppError::AssistantTurnRequired)?
+                .turn_id,
+            reason,
+        )
+        .await
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn execute_owner_turn(
     state: &AppState,
@@ -722,7 +757,12 @@ pub(crate) async fn execute_owner_turn(
     partial: &mut String,
     instruction_context: &mut Option<crate::services::assistant_instruction_context::Prepared>,
 ) -> Result<TurnResult, TurnError> {
-    let contract::NyxAgentExecutionContext::Owner { user_id, turn, .. } = authority else {
+    let contract::NyxAgentExecutionContext::Owner {
+        user_id,
+        turn,
+        platform_origin,
+    } = authority
+    else {
         return Err(TurnError::internal("assistant_unavailable", "prepare"));
     };
     if user_id != &row.user_id
@@ -733,6 +773,25 @@ pub(crate) async fn execute_owner_turn(
             .is_none_or(|active| active.turn_id != turn.turn_id)
     {
         return Err(TurnError::internal("assistant_unavailable", "prepare"));
+    }
+    let expected = row
+        .active_turn
+        .as_ref()
+        .and_then(|turn| turn.platform_origin.as_ref())
+        .map(super::platform_personal_turn_service::contract_origin)
+        .transpose()
+        .map_err(|_| TurnError::internal("assistant_unavailable", "prepare"))?;
+    if &expected != platform_origin {
+        return Err(TurnError::internal("assistant_unavailable", "prepare"));
+    }
+    if expected.is_some() {
+        super::platform_personal_turn_service::update_platform_turn(
+            &state.db,
+            row,
+            doc! {"$inc":{"execution_fence":1_i64}},
+        )
+        .await
+        .map_err(|_| TurnError::internal("cancelled", "prepare"))?;
     }
     let mut tool_images = images::ToolImages::default();
     let outcome = Box::pin(execute_turn_inner(
@@ -761,15 +820,9 @@ pub(crate) async fn execute_owner_turn(
                 .is_ok_and(|r| r.error.as_ref().is_some_and(|e| e.code != "cancelled")))
     {
         events.emit("turn.notice", json!({"code":"image_input_unavailable", "message":"Tool images could not be viewed; the completed answer was preserved."}));
-        engine::clear_binding(
-            &state.db,
-            &row.user_id,
-            &row.id,
-            &row.active_turn.as_ref().expect("claimed turn").turn_id,
-            "image_input_unavailable",
-        )
-        .await
-        .map_err(|_| TurnError::internal("assistant_unavailable", "recovery"))?;
+        clear_session(state, row, "image_input_unavailable")
+            .await
+            .map_err(|_| TurnError::internal("assistant_unavailable", "recovery"))?;
         fallback.session_id = None;
         fallback.response_id = None;
         *instruction_context = None;
@@ -900,15 +953,9 @@ async fn execute_turn_inner(
     }
     let mut binding = row.nyxagent_session_id.clone();
     if context.reset {
-        engine::clear_binding(
-            &state.db,
-            &row.user_id,
-            &row.id,
-            turn_id,
-            "instructions_changed",
-        )
-        .await
-        .map_err(|_| TurnError::internal("assistant_unavailable", "prepare"))?;
+        clear_session(state, row, "instructions_changed")
+            .await
+            .map_err(|_| TurnError::internal("assistant_unavailable", "prepare"))?;
         binding = None;
     }
     let recap = binding.is_none()
@@ -1215,15 +1262,9 @@ async fn execute_turn_inner(
                         "turn.notice",
                         json!({"code": "retrying", "message": "Retrying…"}),
                     );
-                    engine::clear_binding(
-                        &state.db,
-                        &row.user_id,
-                        &row.id,
-                        turn_id,
-                        "session_lost",
-                    )
-                    .await
-                    .map_err(|_| TurnError::internal("assistant_unavailable", "recovery"))?;
+                    clear_session(state, row, "session_lost")
+                        .await
+                        .map_err(|_| TurnError::internal("assistant_unavailable", "recovery"))?;
                     binding = None;
                     context.fresh_session();
                     prompt = context
@@ -1237,11 +1278,10 @@ async fn execute_turn_inner(
                         "turn.notice",
                         json!({"code": "retrying", "message": "Retrying…"}),
                     );
-                    *credential = credentials::replace(
+                    *credential = credentials::replace_for_turn(
                         &state.db,
                         &state.encryption_keys,
-                        &row.user_id,
-                        &row.id,
+                        row,
                         &credential.api_key_id,
                     )
                     .await

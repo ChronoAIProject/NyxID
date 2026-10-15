@@ -524,7 +524,7 @@ pub async fn load_or_provision(
     user_id: &str,
     conversation_id: &str,
 ) -> AppResult<AssistantCredential> {
-    recover_or_replace(db, keys, user_id, conversation_id, None).await
+    recover_or_replace(db, keys, user_id, conversation_id, None, None).await
 }
 
 async fn recover_or_replace(
@@ -533,6 +533,10 @@ async fn recover_or_replace(
     user_id: &str,
     conversation_id: &str,
     replace_key_id: Option<&str>,
+    platform: Option<(
+        super::platform_manager_contract::TurnRef,
+        super::platform_manager_contract::PlatformTurnOrigin,
+    )>,
 ) -> AppResult<AssistantCredential> {
     let mut session = db.client().start_session().await?;
     let db = db.clone();
@@ -559,6 +563,30 @@ async fn recover_or_replace(
                 if result.matched_count != 1 {
                     return Err(AppError::NotFound("Conversation not found".into()));
                 }
+                let conversation = db
+                    .collection::<AssistantConversation>(CONVERSATIONS)
+                    .find_one(doc! {"_id": &conversation_id, "user_id": &user_id})
+                    .session(&mut *session).await?
+                    .ok_or_else(|| AppError::NotFound("Conversation not found".into()))?;
+                if let Some((turn, expected)) = platform.as_ref() {
+                    use super::platform_manager_contract::{ManagerIdentityProducer, FenceOutcome};
+                    let expected_model=super::platform_personal_turn_service::model_origin(expected);
+                    if expected.authority.user_id!=user_id || turn.conversation_id!=conversation_id
+                        || conversation.active_turn.as_ref().is_none_or(|active|
+                            active.turn_id!=turn.turn_id || active.stop_requested
+                            || active.platform_origin.as_ref()!=Some(&expected_model))
+                        || super::assistant_nyxagent::live_turn(&conversation,Utc::now()).is_none()
+                        || replace_key_id.as_deref().is_some_and(|key|key!=conversation.credential_api_key_id)
+                        || !matches!(super::platform_personal_binding_service::IdentityProducer
+                            .fence_personal_origin(&db,session,&expected.authority).await?,FenceOutcome::Authorized)
+                    {
+                        return Err(AppError::AssistantTurnRequired);
+                    }
+                } else if conversation.active_turn.as_ref().is_some_and(|active|active.platform_origin.is_some()) {
+                    // Metadata/ordinary recovery has no admitted platform proof.
+                    return Err(AppError::AssistantTurnRequired);
+                }
+                let authority = authority_in_session(&db, &conversation, session).await?;
                 let mut revoked_children = Vec::new();
                 if let Some(key_id) = replace_key_id.as_deref() {
                     require_ordinary_key(&db, &user_id, key_id, Some(&mut *session)).await?;
@@ -578,13 +606,6 @@ async fn recover_or_replace(
                         Err(error) => return Err(error),
                     }
                 }
-                let conversation = db
-                    .collection::<AssistantConversation>(CONVERSATIONS)
-                    .find_one(doc! {"_id": &conversation_id, "user_id": &user_id})
-                    .session(&mut *session)
-                    .await?
-                    .ok_or_else(|| AppError::NotFound("Conversation not found".into()))?;
-                let authority = authority_in_session(&db, &conversation, session).await?;
                 let mut credential = load_or_provision_in_session(
                     &db,
                     &keys,
@@ -594,6 +615,17 @@ async fn recover_or_replace(
                     session,
                 )
                 .await?;
+                if let Some((turn, expected)) = platform.as_ref() {
+                    let update=db.collection::<AssistantConversation>(CONVERSATIONS).update_one(
+                        doc! {"_id":&conversation_id,"user_id":&user_id,"active_turn.turn_id":&turn.turn_id,
+                            "active_turn.stop_requested":false,
+                            "active_turn.platform_origin":bson::to_bson(&super::platform_personal_turn_service::model_origin(expected)).map_err(|_|AppError::AssistantTurnRequired)?},
+                        doc! {"$set":{"credential_api_key_id":&credential.api_key_id,
+                            "nyxagent_session_id":bson::Bson::Null,"nyxagent_instruction_binding":bson::Bson::Null,
+                            "nyxagent_last_response_id":bson::Bson::Null,"context_reset_at":bson::DateTime::now(),"context_reset_reason":"credential_replaced"}},
+                    ).session(&mut *session).await?;
+                    if update.matched_count!=1 {return Err(AppError::AssistantTurnRequired);}
+                }
                 credential.revoked_children.extend(revoked_children);
                 Ok(credential)
             }
@@ -656,7 +688,35 @@ pub async fn replace(
     conversation_id: &str,
     old_key_id: &str,
 ) -> AppResult<AssistantCredential> {
-    recover_or_replace(db, keys, user_id, conversation_id, Some(old_key_id)).await
+    recover_or_replace(db, keys, user_id, conversation_id, Some(old_key_id), None).await
+}
+
+/// Personal recovery adopts its successor before the next typed request. Its
+/// old turn/origin and live consent are revalidated before revoking any key.
+pub(crate) async fn replace_for_turn(
+    db: &Database,
+    keys: &std::sync::Arc<EncryptionKeys>,
+    row: &AssistantConversation,
+    old_key_id: &str,
+) -> AppResult<AssistantCredential> {
+    let platform = row
+        .active_turn
+        .as_ref()
+        .and_then(|turn| turn.platform_origin.as_ref().map(|origin| (turn, origin)))
+        .map(|(turn, origin)| {
+            Ok::<_, AppError>((
+                super::platform_manager_contract::TurnRef {
+                    conversation_id: row.id.clone(),
+                    turn_id: turn.turn_id.clone(),
+                },
+                super::platform_personal_turn_service::contract_origin(origin)?,
+            ))
+        })
+        .transpose()?;
+    if platform.is_none() {
+        return replace(db, keys, &row.user_id, &row.id, old_key_id).await;
+    }
+    recover_or_replace(db, keys, &row.user_id, &row.id, Some(old_key_id), platform).await
 }
 
 fn valid_key_filter(user_id: &str, key_id: &str, raw: &str) -> bson::Document {

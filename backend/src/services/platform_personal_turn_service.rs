@@ -138,6 +138,47 @@ pub(crate) async fn fence_execution_in_session(
         .await
 }
 
+/// Inline continuation/rebinding cannot renew a revoked platform execution.
+/// The current credential may be a successor already adopted by recovery.
+pub(crate) async fn update_platform_turn(
+    db: &Database,
+    row: &AssistantConversation,
+    update: bson::Document,
+) -> AppResult<()> {
+    let origin = row
+        .active_turn
+        .as_ref()
+        .and_then(|turn| turn.platform_origin.as_ref())
+        .ok_or(AppError::AssistantTurnRequired)?;
+    let expected = contract_origin(origin)?;
+    let turn = contract::TurnRef {
+        conversation_id: row.id.clone(),
+        turn_id: row
+            .active_turn
+            .as_ref()
+            .ok_or(AppError::AssistantTurnRequired)?
+            .turn_id
+            .clone(),
+    };
+    let mut session = db.client().start_session().await?;
+    let context = (db.clone(), row.user_id.clone(), turn, expected, update);
+    session.start_transaction().and_run(context,|session,(db,user,turn,origin,update)|Box::pin(async move {
+        let result:AppResult<()>=async {
+            let row=db.collection::<AssistantConversation>(CONVERSATIONS).find_one(doc! {"_id":&turn.conversation_id,"user_id":&*user,"active_turn.turn_id":&turn.turn_id})
+                .session(&mut *session).await?.ok_or(AppError::AssistantTurnRequired)?;
+            if fence_execution_in_session(db,session,&super::platform_personal_binding_service::IdentityProducer,user,
+                &row.credential_api_key_id,turn,origin).await? != contract::FenceOutcome::Authorized {
+                return Err(AppError::AssistantTurnRequired);
+            }
+            let changed=db.collection::<AssistantConversation>(CONVERSATIONS).update_one(doc! {"_id":&turn.conversation_id,"user_id":&*user,"active_turn.turn_id":&turn.turn_id,"active_turn.stop_requested":false},update.clone())
+                .session(&mut *session).await?;
+            if changed.matched_count!=1 {return Err(AppError::AssistantTurnRequired);}
+            Ok(())
+        }.await;
+        super::api_key_mutation_service::transaction_result(result)
+    })).await.map_err(super::api_key_mutation_service::map_transaction_error)
+}
+
 /// Called inside revocation's transaction. It deliberately does not require
 /// still-live consent: only the exact previously admitted origin/turn may stop.
 /// Committed independent watches and jobs from older turns remain untouched.
@@ -424,23 +465,38 @@ impl contract::PersonalTurnProducer for PersonalTurns {
             message_id: uuid::Uuid::new_v4().to_string(),
         };
         let mut session = db.client().start_session().await?;
+        let context = (
+            db.clone(),
+            self.state.encryption_keys.clone(),
+            self.identity.clone(),
+            self.ingress.clone(),
+            admitted.clone(),
+            start.clone(),
+            ids,
+            agent,
+        );
         let claim = session
             .start_transaction()
-            .and_run2(async |session| {
-                let result = Box::pin(claim_personal_turn_in_session(
-                    db,
-                    session,
-                    &self.state.encryption_keys,
-                    self.identity.as_ref(),
-                    self.ingress.as_ref(),
-                    admitted,
-                    &start,
-                    &ids,
-                    &agent,
-                ))
-                .await;
-                transactions::transaction_result(result)
-            })
+            .and_run(
+                context,
+                |session, (db, keys, identity, ingress, admitted, start, ids, agent)| {
+                    Box::pin(async move {
+                        let result = claim_personal_turn_in_session(
+                            db,
+                            session,
+                            keys,
+                            identity.as_ref(),
+                            ingress.as_ref(),
+                            admitted,
+                            start,
+                            ids,
+                            agent,
+                        )
+                        .await;
+                        transactions::transaction_result(result)
+                    })
+                },
+            )
             .await
             .map_err(transactions::map_transaction_error)?;
         super::assistant_agent_credential_service::audit_provision(
@@ -460,7 +516,13 @@ impl contract::PersonalTurnProducer for PersonalTurns {
         let origin = contract_origin(origin)?;
         let turn = contract::TurnRef {
             conversation_id: claim.conversation.id.clone(),
-            turn_id: ids.turn_id,
+            turn_id: claim
+                .conversation
+                .active_turn
+                .as_ref()
+                .ok_or(AppError::AssistantTurnRequired)?
+                .turn_id
+                .clone(),
         };
         let destination = contract::ReplyDestination {
             manager: origin.authority.manager.clone(),
@@ -571,25 +633,21 @@ impl contract::PersonalTurnProducer for PersonalTurns {
         command: contract::OriginalManagerCommand,
     ) -> AppResult<contract::PlatformDecisionOutcome> {
         let mut session = db.client().start_session().await?;
-        session
-            .start_transaction()
-            .and_run2(async |session| {
-                let result = Box::pin(
-                    super::assistant_platform_reply_decision::decide_personal_reply_in_session(
-                        db,
-                        session,
-                        self.identity.as_ref(),
-                        self.ingress.as_ref(),
-                        admitted,
-                        conversation_id,
-                        &command,
-                    ),
-                )
-                .await;
+        let context = (
+            db.clone(),
+            self.identity.clone(),
+            self.ingress.clone(),
+            admitted.clone(),
+            conversation_id.to_owned(),
+            command,
+        );
+        session.start_transaction().and_run(context,
+            |session,(db,identity,ingress,admitted,conversation_id,command)|Box::pin(async move {
+                let result=super::assistant_platform_reply_decision::decide_personal_reply_in_session(
+                    db,session,identity.as_ref(),ingress.as_ref(),admitted,conversation_id,command).await;
                 transactions::transaction_result(result)
-            })
-            .await
-            .map_err(transactions::map_transaction_error)
+            }),
+        ).await.map_err(transactions::map_transaction_error)
     }
 
     async fn clear_binding_thread(
