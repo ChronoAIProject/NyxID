@@ -2061,6 +2061,7 @@ pub(crate) async fn begin_owner_turn_in_session(
         && row.role == AgentRole::Subagent
         && match row.group_id.as_deref() {
             Some(group_id) => {
+                let nyxbot = super::assistant_team_service::ensure_nyxbot(db, user_id).await?;
                 group_has_nyxbot_in_session(db, user_id, group_id, &nyxbot.id, session).await?
             }
             None => false,

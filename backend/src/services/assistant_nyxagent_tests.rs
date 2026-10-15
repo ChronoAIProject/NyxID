@@ -4808,6 +4808,8 @@ async fn platform_stop_capture_is_exact_transactional_and_keeps_independent_work
         agent_id: proof.thread.nyxbot_agent_id.clone(),
         state: "running".into(),
         services: Vec::new(),
+        report_to: None,
+        report_provenance: 0,
         created_at: Utc::now(),
         expires_at: Utc::now() + chrono::Duration::hours(1),
         finished_at: None,
@@ -4945,7 +4947,8 @@ fn async_delivery_keeps_original_platform_proof_and_fresh_execution_origin_separ
         group_request_id: None,
         voice_request_id: None,
         trigger_run_id: None,
-        report_to: None,
+        report_to: Some("nyxa-original-report".into()),
+        report_provenance: crate::models::assistant_conversation::REPORT_PROVENANCE_V1,
     };
     let watch = AsyncServiceOperation {
         id: "watch".into(),
@@ -4983,6 +4986,14 @@ fn async_delivery_keeps_original_platform_proof_and_fresh_execution_origin_separ
     crate::services::async_service_operation::apply_delivery(&mut row, &watch);
     assert_eq!(row.active_turn.unwrap().platform_origin, Some(fresh));
     assert_eq!(watch.delivery.platform_origin, Some(original));
+    assert_eq!(
+        crate::models::assistant_conversation::carried_report_to(
+            watch.delivery.report_to.as_deref(),
+            watch.delivery.report_provenance,
+        )
+        .as_deref(),
+        Some("nyxa-original-report"),
+    );
     let mut legacy = bson::to_document(&watch.delivery).unwrap();
     legacy.remove("platform_origin");
     assert!(
@@ -4990,6 +5001,20 @@ fn async_delivery_keeps_original_platform_proof_and_fresh_execution_origin_separ
             .unwrap()
             .platform_origin
             .is_none()
+    );
+    let mut legacy_report = bson::to_document(&watch.delivery).unwrap();
+    legacy_report.remove("report_provenance");
+    let legacy_report = bson::from_document::<DeliveryBinding>(legacy_report).unwrap();
+    assert_eq!(
+        legacy_report.platform_origin,
+        watch.delivery.platform_origin
+    );
+    assert!(
+        crate::models::assistant_conversation::carried_report_to(
+            legacy_report.report_to.as_deref(),
+            legacy_report.report_provenance,
+        )
+        .is_none()
     );
 }
 
