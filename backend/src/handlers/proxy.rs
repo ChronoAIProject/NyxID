@@ -10460,8 +10460,6 @@ mod proxy_resolution_integration_tests {
     use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
     use crate::mw::auth::{AuthMethod, AuthUser};
     use crate::services::node_ws_manager::NodeOutboundMessage;
-    #[cfg(test)]
-    use crate::services::proxy_http_response::{ALLOWED_RESPONSE_HEADERS, STREAMING_CONTENT_TYPES};
     use crate::test_utils::{
         connect_test_database, test_app_state, test_membership, test_user, test_user_endpoint,
         test_user_service,

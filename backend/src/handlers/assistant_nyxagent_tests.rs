@@ -1,4 +1,5 @@
 use super::*;
+use crate::services::assistant_nyxagent::TurnResult;
 use crate::{
     models::{
         assistant_message::{AssistantErrorDetail, AssistantMessage},

@@ -2732,7 +2732,7 @@ fn usage_for(case: &CoverageCase) -> (PlatformUsage, i64) {
         BillingMetric::Tokens => {
             if case.scenario.contains("usage-omitted") {
                 let usage = if case.ingress == BillingIngress::Proxy {
-                    crate::handlers::proxy::llm_platform_usage(None, 19)
+                    crate::services::proxy_http_response::llm_platform_usage(None, 19)
                 } else {
                     crate::handlers::llm_gateway::llm_platform_usage(None, 19)
                 };
