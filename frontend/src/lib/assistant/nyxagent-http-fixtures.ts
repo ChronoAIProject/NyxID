@@ -13,6 +13,7 @@ import {
   type AssistantGroup,
   type AssistantGroupMessage,
   type NyxAgentAcknowledgement,
+  type NyxAgentAttachment,
   type NyxAgentChannelAgent,
   type NyxAgentChannelChat,
   type NyxAgentConversation,
@@ -109,6 +110,7 @@ interface GroupRecord {
 }
 
 interface Settings {
+  access_mode?: "autopilot" | "nyxmode" | "ask_every_time";
   skip_destructive_confirmation: boolean;
   max_live_subagents: number;
   max_concurrent_subagent_turns: number;
@@ -203,6 +205,7 @@ function note(text: string): AssistantAgentMemoryNote {
  */
 export class NyxAgentHttpFixtures {
   private rows = new Map<string, Row>();
+  private uploads = new Map<string, { item: NyxAgentAttachment; bytes: Blob }>();
   private agents: AgentRecord[] = [];
   private settings: Settings = { ...DEFAULT_SETTINGS };
   private channels: NyxAgentChannelAgent[] = [];
@@ -628,7 +631,7 @@ export class NyxAgentHttpFixtures {
   }
 
   private settingsResponse() {
-    return { ...this.settings, ...LIMITS };
+    return { ...this.settings, access_mode: this.settings.access_mode ?? (this.settings.skip_destructive_confirmation ? "autopilot" : "nyxmode"), ...LIMITS };
   }
 
   private agentsRoute(url: URL, method: string, body: () => Record<string, unknown>) {
@@ -1325,6 +1328,57 @@ export class NyxAgentHttpFixtures {
         : failure(404, "Assistant route not found.");
     }
     const body = () => JSON.parse(String(init.body)) as Record<string, unknown>;
+    if (url.pathname === `${ROOT}/models` && method === "GET") {
+      return json([
+        { id: "nyxagent/chat", label: "Claude Sonnet 4.5", available: true },
+        { id: "nyxagent/research", label: "GPT-5", available: true },
+      ]);
+    }
+    const modelRoute = /\/conversations\/(nyxa-[a-f0-9]{32})\/model$/.exec(url.pathname);
+    if (modelRoute && method === "PATCH") {
+      const row = this.rows.get(modelRoute[1]!);
+      if (!row) return failure(404, "Conversation not found");
+      if (row.history.conversation.active_turn) return failure(409, "A turn is already active");
+      const model = body().model;
+      if (model !== "nyxagent/chat" && model !== "nyxagent/research") return failure(400, "Model unavailable");
+      row.history.conversation.model = model;
+      this.save();
+      return json(this.view(row));
+    }
+    if (url.pathname === `${ROOT}/drafts` && method === "POST") {
+      const agentId = body().agent_id;
+      const agent = agentId ? this.agents.find((candidate) => candidate.id === agentId) : this.nyxbot();
+      if (!agent) return failure(404, "Agent not found");
+      const row = this.thread(agent, "New chat");
+      this.save();
+      return json({ id: row.history.conversation.id });
+    }
+    const uploadRoute = /\/(conversations|groups)\/([^/]+)\/attachments(?:\/([^/]+))?$/.exec(url.pathname);
+    if (uploadRoute) {
+      const scope = `${uploadRoute[1]}/${uploadRoute[2]}`;
+      const key = `${scope}/${uploadRoute[3]}`;
+      if (method === "POST" && !uploadRoute[3] && init.body instanceof File) {
+        const file = init.body;
+        const extension = file.name.split(".").pop()?.toLowerCase() ?? "";
+        const types: Record<string, NyxAgentAttachment["content_type"]> = {
+          png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp",
+          pdf: "application/pdf", docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+          md: "text/markdown", markdown: "text/markdown", csv: "text/csv", json: "application/json",
+        };
+        const item: NyxAgentAttachment = {
+          id: crypto.randomUUID(), label: file.name, size: file.size, origin: "user_upload",
+          content_type: types[extension] ?? "text/plain",
+        };
+        this.uploads.set(`${scope}/${item.id}`, { item, bytes: file });
+        return json(item);
+      }
+      const upload = this.uploads.get(key);
+      if (method === "GET" && upload) return new Response(upload.bytes, { headers: { "content-type": upload.item.content_type } });
+      if (method === "DELETE") {
+        this.uploads.delete(key);
+        return json({});
+      }
+    }
     const groups = this.groupsRoute(url, method, body);
     if (groups) return groups;
     const agents = this.agentsRoute(url, method, body);
@@ -1462,6 +1516,7 @@ export class NyxAgentHttpFixtures {
       const request = body() as {
         conversation_id?: string;
         agent_id?: string;
+        attachment_ids?: string[];
         text: string;
         model?: string;
       };
@@ -1503,6 +1558,11 @@ export class NyxAgentHttpFixtures {
         attachments: [],
       };
       this.push(row, "user", request.text, turn);
+      const userMessage = row.history.messages.at(-1)!;
+      userMessage.attachments = (request.attachment_ids ?? []).flatMap((attachmentId) => {
+        const upload = this.uploads.get(`conversations/${id}/${attachmentId}`);
+        return upload ? [upload.item] : [];
+      });
       this.prepareReply(row, request.text);
       row.settleAt = Date.now() + (globalThis.__nyxidAssistantHttpFaults?.progressStallMs ?? 1300);
       this.save();

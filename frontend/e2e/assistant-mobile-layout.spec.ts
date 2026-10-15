@@ -29,7 +29,7 @@ for (const engine of ["actor", "NyxAgent", "group"] as const) {
     if (engine === "NyxAgent") await expect(page.getByText("Your connected services are ready.", { exact: false })).toBeVisible();
     const send = page.getByRole("button", { name: "Send message", exact: true });
     await expect(send).toBeVisible();
-    const input = page.locator("textarea");
+    const input = page.locator("[data-composer-textbox]");
     await input.fill("A longer mobile draft\nwith multiple lines\nand the send control still reachable");
     expect(await input.evaluate((el) => parseFloat(getComputedStyle(el).fontSize))).toBeGreaterThanOrEqual(16);
     const scroller = page.locator("main div.flex-1.overflow-y-auto").first();

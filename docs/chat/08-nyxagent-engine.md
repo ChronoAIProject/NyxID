@@ -1532,11 +1532,20 @@ authorization; including that virtual catalog does not grant execution access.
 `GET /assistant/nyxagent/models` returns NyxAgent's live model list for the
 calling owner (cached per owner for a minute; `available: false` marks a listed
 model NyxAgent cannot serve). When the list cannot be read it returns the
-default model only. Thread headers select a thread's model with
+default model only. Model DTOs preserve an upstream `display_name`, `label`, or
+`name` (in that order), with `Default model` for a nameless `nyxagent/chat`
+profile. These labels never change the routing ID. The composer's combined
+settings menu selects a thread's model with
 `PATCH /assistant/nyxagent/conversations/{id}/model`; agent details select the
 model for an agent's new threads with `PATCH /assistant/nyxagent/agents/{id}`
 (`model`), and NyxBot can change an agent's model with `nyxid__update_subagent`
 `model`, which the owner's access mode treats as a sensitive change.
+
+The default composer exposes a Thinking toggle: on selects `nyxagent/research`,
+off selects `nyxagent/chat`. `assistant:model-controls` (default off) replaces
+Thinking with the advanced Model and Reasoning rows and enables the agent-details model selector for
+staff-selected internal users. It gates presentation, not API authorization;
+Thinking uses the same model mutation and validation as direct selection.
 
 - Validation: a selection must be a well-formed `nyxagent/...` id and, when the
   live list is readable, a listed available model; otherwise the request fails

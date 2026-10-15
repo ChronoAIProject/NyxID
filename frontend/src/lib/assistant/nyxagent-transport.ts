@@ -686,6 +686,7 @@ export class NyxAgentTransport {
     /** New threads only: the agent to talk to (the server defaults to NyxBot). */
     options: {
       readonly agent?: NyxAgentConversationAgent;
+      readonly model?: string;
       readonly attachmentIds?: string[];
       readonly attachments?: readonly NyxAgentAttachment[];
       readonly adoptExisting?: boolean;
@@ -702,7 +703,7 @@ export class NyxAgentTransport {
     this.requests.add(controller);
     let key = id ?? "draft";
     const now = new Date().toISOString();
-    const model = this.getModel(id);
+    const model = (!id ? options.model : undefined) ?? this.getModel(id);
     const userMessageId = crypto.randomUUID();
     const baseMessages = this.histories.get(key)?.messages ?? [];
     const turn: LiveTurn = {

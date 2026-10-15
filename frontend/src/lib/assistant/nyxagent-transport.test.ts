@@ -1811,6 +1811,24 @@ describe("sent images", () => {
   });
 });
 
+it("sends the chosen draft model only for a new thread and never changes the next draft's default", async () => {
+  const transport = new NyxAgentTransport();
+  const bodies: unknown[] = [];
+  globalThis.__nyxidAssistantHttpMock = ({ endpoint, init }) => {
+    if (endpoint.endsWith("/turns")) {
+      bodies.push(JSON.parse(String(init.body)));
+      return stream();
+    }
+    if (endpoint.includes("/conversations?")) return json({ conversations: [conversation()], next_cursor: null });
+    return json(history());
+  };
+  await transport.send(undefined, "Selected model", vi.fn(), undefined, { model: "nyxagent/research" });
+  expect(bodies[0]).toEqual({ model: "nyxagent/research", text: "Selected model" });
+  expect(transport.getModel()).toBe("nyxagent/chat");
+  await transport.send(id, "Continue", vi.fn(), undefined, { model: "nyxagent/research" });
+  expect(bodies[1]).toEqual({ conversation_id: id, text: "Continue" });
+});
+
 it("persists decision continuation provenance through the request, optimistic turn and history without losing its turn count", async () => {
   const transport = new NyxAgentTransport();
   const card = "11111111-1111-4111-8111-111111111111";

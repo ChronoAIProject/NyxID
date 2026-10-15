@@ -80,6 +80,24 @@ export function uploadFile(
 ): Promise<NyxAgentAttachment> {
   if (!file.size || file.size > 20 * 1024 * 1024)
     return Promise.reject(new Error("Choose a file between 1 byte and 20 MB."));
+  // The preview fixture accepts raw files without sending them to a backend.
+  // Vite removes this branch from production builds.
+  if ((import.meta.env.DEV || import.meta.env.MODE === "test") && globalThis.__nyxidAssistantHttpMock) {
+    const mock = globalThis.__nyxidAssistantHttpMock;
+    return (async () => {
+      if (signal.aborted) throw new Error("Upload cancelled.");
+      const response = await mock({
+        endpoint: attachmentPath(scope),
+        init: { method: "POST", body: file, signal, headers: { "x-attachment-name": encodeURIComponent(file.name) } },
+      });
+      if (signal.aborted) throw new Error("Upload cancelled.");
+      if (!response) throw new Error("Preview upload route not found.");
+      const body: unknown = await response.json();
+      if (!response.ok) throw new Error((body as { message?: string }).message ?? "Upload failed.");
+      progress(100);
+      return nyxAgentAttachmentSchema.parse(body);
+    })();
+  }
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     xhr.open("POST", apiUrl(attachmentPath(scope)));

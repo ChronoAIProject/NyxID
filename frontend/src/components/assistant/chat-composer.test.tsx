@@ -1,3 +1,4 @@
+vi.mock("./composer-editor", () => import("./composer-editor.test-support"));
 import {
   act,
   fireEvent,
@@ -665,14 +666,13 @@ class ResizeObserverMock {
   disconnect() {}
 }
 
-function renderMeasuredComposer(toolbar?: React.ReactNode) {
+function renderMeasuredComposer() {
   render(
     <ChatComposer
       active={false}
       sending={false}
       ownerUserId="user-1"
       draftKey="conv:layout"
-      toolbar={toolbar}
       onSend={vi.fn().mockResolvedValue(undefined)}
       onStop={vi.fn().mockResolvedValue(undefined)}
     />,
@@ -681,7 +681,7 @@ function renderMeasuredComposer(toolbar?: React.ReactNode) {
   const textarea = screen.getByRole("textbox");
   const button = screen.getByRole("button", { name: "Send message" });
   const controls = button.parentElement;
-  const composer = controls?.parentElement?.hasAttribute("data-composer-toolbar") ? controls.parentElement.parentElement : controls?.parentElement;
+  const composer = textarea.closest<HTMLElement>("[data-composer-editor]");
   const textMeasure = composer?.querySelector(":scope > span[aria-hidden]");
   if (!controls || !composer || !(textMeasure instanceof HTMLElement)) {
     throw new Error("Composer measurement elements were not rendered");
@@ -748,43 +748,6 @@ describe("ChatComposer measured layout", () => {
     expect(textarea).toHaveClass("min-h-8", "px-0");
   });
 
-  it("keeps toolbar controls on a second row and measures the whole textarea width", () => {
-    const parts = renderMeasuredComposer(<button>Permission mode</button>);
-    setComposerMetrics({ ...parts, textWidth: 350 });
-    fireEvent.change(parts.textarea, { target: { value: "Wide draft" } });
-    expect(parts.composer).toHaveClass("flex-col", "items-stretch");
-    expect(parts.controls).not.toHaveClass("self-end");
-    expect(parts.controls.parentElement).toHaveAttribute("data-composer-toolbar");
-    expect(screen.getByRole("button", { name: "Permission mode" }).parentElement?.parentElement).toBe(parts.controls.parentElement);
-    expect([...parts.composer.children].map((node) => node.tagName)).toMatchInlineSnapshot(`
-      [
-        "SPAN",
-        "DIV",
-        "DIV",
-      ]
-    `);
-    vi.mocked(parts.controls.getBoundingClientRect).mockReturnValue({ width: 160 } as DOMRect);
-    act(() => { for (const callback of resizeCallbacks) callback([], {} as ResizeObserver); });
-    expect(parts.controls).not.toHaveClass("self-end");
-    Object.defineProperty(parts.composer, "clientWidth", { configurable: true, value: 360 });
-    act(() => { for (const callback of resizeCallbacks) callback([], {} as ResizeObserver); });
-    expect(parts.controls).toHaveClass("self-end");
-  });
-
-  it("preserves the single-row composer without a toolbar", () => {
-    const parts = renderMeasuredComposer();
-    expect(parts.composer.querySelector("[data-composer-toolbar]")).toBeNull();
-    expect(parts.controls.parentElement).toBe(parts.composer);
-    expect([...parts.composer.children].map((node) => node.tagName)).toMatchInlineSnapshot(`
-      [
-        "SPAN",
-        "DIV",
-        "DIV",
-      ]
-    `);
-    expect(parts.composer).not.toHaveClass("flex-col");
-  });
-
   it("keeps a short single-line draft and its action inline", () => {
     const parts = renderMeasuredComposer();
     setComposerMetrics({ ...parts, textWidth: 120 });
@@ -796,9 +759,9 @@ describe("ChatComposer measured layout", () => {
     expect(parts.controls).not.toHaveClass("self-end");
   });
 
-  it("moves the action below at 95% of the remaining inline width", () => {
+  it("moves the action below when text exceeds the remaining inline width", () => {
     const parts = renderMeasuredComposer();
-    setComposerMetrics({ ...parts, textWidth: 350 });
+    setComposerMetrics({ ...parts, textWidth: 370 });
 
     fireEvent.change(parts.textarea, {
       target: { value: "Draft reaching the remaining-width threshold" },
@@ -810,7 +773,7 @@ describe("ChatComposer measured layout", () => {
 
   it("returns inline when text falls below the threshold", () => {
     const parts = renderMeasuredComposer();
-    let textWidth = 350;
+    let textWidth = 370;
     setComposerMetrics({ ...parts, textWidth });
     vi.mocked(parts.textMeasure.getBoundingClientRect).mockImplementation(
       () => ({ width: textWidth }) as DOMRect,
@@ -836,7 +799,7 @@ describe("ChatComposer measured layout", () => {
     expect(parts.composer).toHaveClass("flex-col", "items-stretch");
   });
 
-  it("recalculates remaining text width when controls grow", () => {
+  it("recalculates remaining text width when controls grow", async () => {
     const parts = renderMeasuredComposer();
     let controlsWidth = 32;
     setComposerMetrics({ ...parts, controlsWidth, textWidth: 310 });
@@ -853,7 +816,7 @@ describe("ChatComposer measured layout", () => {
         callback([], {} as ResizeObserver);
       }
     });
-    expect(parts.composer).toHaveClass("flex-col");
+    await waitFor(() => expect(parts.composer).toHaveClass("flex-col"));
   });
 
   it("caps long drafts and fades only scrollable textarea edges", () => {
@@ -868,10 +831,10 @@ describe("ChatComposer measured layout", () => {
     });
 
     fireEvent.change(textarea, { target: { value: "A long draft" } });
-    expect(textarea).toHaveStyle({ height: "88px", overflowY: "auto" });
+    expect(textarea).toHaveStyle({ height: "88px", overflowY: "scroll" });
 
     const fades = textarea.parentElement?.querySelectorAll(
-      ':scope > [aria-hidden="true"]',
+      ':scope > [aria-hidden="true"]:not([data-composer-scrollbar])',
     );
     expect(fades).toBeDefined();
     if (!fades) return;
@@ -977,6 +940,7 @@ it("offers voice only for an empty eligible composer and keeps Stop reachable", 
   useAssistantDraftStore.setState({ownerUserId:null,drafts:{}});
   const onVoice=vi.fn();
   const {rerender}=render(<ChatComposer {...baseProps} draftKey={null} onVoice={onVoice} />);
+  expect(screen.queryByRole("button", { name: "Send message" })).not.toBeInTheDocument();
   fireEvent.click(screen.getByRole("button",{name:"Open voice call"}));expect(onVoice).toHaveBeenCalledTimes(1);
   fireEvent.change(screen.getByRole("textbox"),{target:{value:"An unsent draft"}});
   expect(screen.queryByRole("button",{name:"Open voice call"})).not.toBeInTheDocument();

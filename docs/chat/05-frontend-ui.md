@@ -190,6 +190,45 @@ send; the composer is freed without restoring duplicate text.
 
 The composer is anchored at the bottom of the chat surface. The thread reserves its measured height and fades content behind it rather than clipping messages against a hard boundary.
 
+NyxAgent uses one settings menu in the composer footer. By default, it contains
+only **Thinking** (a toggle) and **Permissions**; the trigger shows the effective
+access level, adding **, Thinking** only when enabled (for example, **Full access,
+Thinking**), and exposes no model names. Thinking on selects `nyxagent/research`,
+and off selects `nyxagent/chat`, using the same draft selection and persisted
+thread-model mutation as the advanced selector. The toggle is disabled while a
+turn runs or its target profile is unavailable.
+
+The `assistant:model-controls` feature flag defaults off. Enable it through the
+existing platform-admin user or cohort overrides for internal users. Flagged
+users see **Reasoning**, **Model**, and **Permissions**, without the Thinking
+toggle, and their trigger shows the current model name. The agent-details model selector uses the same flag. This is a UI
+rollout flag; it does not change the model-selection API's authorization.
+
+Model and permission choices open in submenus on desktop and
+expand inline on narrow screens. Permissions are listed as **Full access**
+(`autopilot`), **Auto** (`nyxmode`), and **Ask every time** (`ask_every_time`), without
+explanatory paragraphs. An agent override remains authoritative and makes the
+permission choices read-only; workspace changes cannot silently override it.
+Permission changes are also disabled while a turn runs. Models use
+upstream display names when present, with **Default model** for the legacy
+`nyxagent/chat` alias. The routing ID remains unchanged. Model changes are disabled
+while a turn runs. New-chat selections are local to that composer, passed on the
+first send, and applied to any persisted upload draft before submission.
+
+The composer stays in one row while empty or while its text fits alongside the
+controls. It expands only when text wraps or contains a newline, then collapses
+again when the text fits. In the expanded composer, the text occupies the full
+upper row. Attachments sit
+at the bottom left; the single settings trigger, optional voice action, and
+Send/Stop sit at the bottom right. When enabled by `assistant:voice`, the voice
+waveform occupies the send slot for an empty idle draft. Non-whitespace text or
+attachments switch that slot to the send arrow; an active turn keeps Stop available.
+The menu is bounded by the viewport and scrolls long model lists.
+
+For flagged users, the Reasoning row is visible but marked **Unavailable** and
+is not selectable: the checked-in NyxAgent turn contract has no
+supported effort field. Do not infer supported effort levels from model names.
+
 ### Input rules
 
 - The textbox accepts at most 32,768 characters.
@@ -198,7 +237,9 @@ The composer is anchored at the bottom of the chat surface. The thread reserves 
 - Enter sends.
 - Shift+Enter inserts a newline.
 - Enter during IME composition does not send; both composition state and key code 229 are guarded.
-- The textarea grows from one through four rows, then scrolls internally.
+- The composer uses a minimal Tiptap/ProseMirror editor with atomic inline mention pills. Agent pills show display names; attachment pills show numbered handles: `image-1`, `file-1`, and `text-1` for long pasted text. Autocomplete, plain-text paste, copy, undo/redo, and Shift+Enter are supported. Serialization preserves the existing `@handle` text contract; attachment handles still resolve before sending. Draft storage remains plain text. Undo history resets across conversation/owner changes, after sending, and when removing an upload so deleted references cannot return. Formatting controls are not enabled in this first iteration.
+- Composer attachments occupy one horizontally scrollable row: square image previews and compact document cards with filename, type, and size. Long pastes show a text excerpt. Corner controls remove individual files; upload progress and errors remain within the fixed card height. Attachment mention handles remain available through autocomplete and card hover text. Adding attachments scrolls the row to the newest card; upload progress and removal preserve manual scrolling. Edge fades indicate additional cards offscreen.
+- The text editor grows from one through four rows by default, then scrolls internally. The expanded composer has a top-edge resize handle that changes the maximum text height (64px minimum, up to half the visible viewport or 480px). Short drafts still collapse to one row; the chosen maximum is retained within the mounted composer. Arrow keys adjust it, Home/End select its limits, and double-click resets it. A persistent, draggable thumb appears while text overflows, including after viewport resizing. Expanded controls sit 2px below the editor.
 - A long one-line draft switches controls to the multiline layout before text overlaps the button.
 
 The idle placeholder is `Message NyxID Assistant...`. During an active turn it is `Assistant is working...` and the textbox is disabled.

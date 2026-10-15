@@ -47,6 +47,7 @@ function liveSend(
   attachments?: readonly import("@/schemas/assistant-nyxagent").NyxAgentAttachment[],
   adoptExisting?: boolean,
   acknowledgementId?: string,
+  model?: string,
 ) {
   const actorId = currentCreditsActor();
   const onFailed = (id: string, turnId: string, code: string) =>
@@ -58,11 +59,16 @@ function liveSend(
       attachments,
       adoptExisting,
       acknowledgementId,
+      model,
     });
   }
-  return conversationId || !agent
-    ? nyxAgentTransport.send(conversationId, text, onAdopt, onFailed)
-    : nyxAgentTransport.send(undefined, text, onAdopt, onFailed, { agent });
+  if (!model && (conversationId || !agent)) {
+    return nyxAgentTransport.send(conversationId, text, onAdopt, onFailed);
+  }
+  return nyxAgentTransport.send(conversationId, text, onAdopt, onFailed, {
+    ...(!conversationId && agent ? { agent } : {}),
+    ...(model ? { model } : {}),
+  });
 }
 
 /** The user-visible turn that resumes the assistant after an allowed card. */
@@ -252,7 +258,7 @@ export function useNyxAgentAssistantChat({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [history.data]);
   const send = useCallback(
-    async (text: string, uploads?: UploadedMessage) => {
+    async (text: string, uploads?: UploadedMessage, model?: string) => {
       let draft: string | undefined;
       try {
         const id = selectedConversationId ?? uploads?.conversationId;
@@ -263,12 +269,15 @@ export function useNyxAgentAssistantChat({
         await liveSend(
           id, text, onConversationAdopted, draftAgent,
           uploads?.attachmentIds, uploads?.attachments, Boolean(id && !selectedConversationId),
+          undefined, model,
         );
       } finally {
         if (draft) setSendingDraft((current) => (current === draft ? undefined : current));
-        // A new thread changes its agent's summary. (Model routing is
-        // server-side, so there is no profile list to refresh.)
-        await queryClient.invalidateQueries({ queryKey: agentsKey }, { cancelRefetch: false });
+        // Provisioning on the first send can make the live model list available.
+        await Promise.all([
+          queryClient.invalidateQueries({ queryKey: agentsKey }, { cancelRefetch: false }),
+          queryClient.invalidateQueries({ queryKey: nyxBotQueryKeys.models(userId) }),
+        ]);
       }
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps

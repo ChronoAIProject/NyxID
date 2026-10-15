@@ -7,9 +7,11 @@ import {
   useState,
   type KeyboardEvent,
   type ReactNode,
-  type UIEvent,
+  type PointerEvent,
 } from "react";
-import { FileText, ImageIcon, Mic, Send, Square } from "lucide-react";
+import { ArrowUp, AudioLines, FileText, ImageIcon, Square } from "lucide-react";
+import { ComposerEditor, type ComposerEditorHandle, type ComposerSelection } from "./composer-editor";
+import { tokenSegments, type ComposerToken } from "./composer-editor-model";
 import { Button } from "@/components/ui/button";
 import { AgentAvatar } from "@/components/assistant/nyxbot-agent-avatar";
 import {
@@ -30,7 +32,11 @@ import { useAssistantDraftStore } from "@/stores/assistant-draft-store";
 
 const DRAFT_DEBOUNCE_MS = 300;
 const MAX_ROWS = 4;
-const MULTILINE_THRESHOLD = 0.95;
+const MIN_TEXT_HEIGHT = 64;
+
+function composerHeightLimit(): number {
+  return Math.max(MIN_TEXT_HEIGHT, Math.min(480, Math.floor((window.visualViewport?.height ?? window.innerHeight) / 2)));
+}
 const PASTED_EXTENSIONS: Record<string, string> = {
   "image/png": "png",
   "image/jpeg": "jpg",
@@ -45,19 +51,13 @@ function isGenericPasteName(name: string): boolean {
 
 /** Keeps the clipboard's own format: a JPEG stays `.jpg`, a GIF `.gif`. */
 function pastedExtension(type: string): string {
-  return (
-    PASTED_EXTENSIONS[type] ??
-    (type
-      .split("/")[1]
-      ?.split("+")[0]
-      ?.replace(/[^a-z0-9]/gi, "") ||
-      "png")
-  );
+  return PASTED_EXTENSIONS[type] ?? (type.split("/")[1]?.split("+")[0]?.replace(/[^a-z0-9]/gi, "") || "png");
 }
 
 type ScrollEdges = {
   readonly top: boolean;
   readonly bottom: boolean;
+  readonly thumb: { readonly size: number; readonly top: number } | null;
 };
 
 function readOwnedDraft(userId: string | null, key: string | null): string {
@@ -66,8 +66,11 @@ function readOwnedDraft(userId: string | null, key: string | null): string {
   return store.ownerUserId === userId ? store.getDraft(key) : "";
 }
 
-function getScrollEdges(element: HTMLTextAreaElement): ScrollEdges {
+function getScrollEdges(element: HTMLElement): ScrollEdges {
+  const range = element.scrollHeight - element.clientHeight;
+  const size = Math.min(100, Math.max(12, element.clientHeight / element.scrollHeight * 100));
   return {
+    thumb: range > 1 ? { size, top: Math.max(0, Math.min(1, element.scrollTop / range)) * (100 - size) } : null,
     top: element.scrollTop > 1,
     bottom: element.scrollTop + element.clientHeight < element.scrollHeight - 1,
   };
@@ -100,7 +103,7 @@ function autoFocusAllowed(): boolean {
  * mid-way through an approval card or a sidebar row, and pulling focus out
  * from under that is worse than the click it saves.
  */
-function focusIsParked(textarea: HTMLTextAreaElement): boolean {
+function focusIsParked(textarea: HTMLElement): boolean {
   const active = textarea.ownerDocument.activeElement;
   return (
     active === null ||
@@ -124,12 +127,7 @@ export function ChatComposer({
 }
 
 type MentionOption =
-  | {
-      readonly type: "agent";
-      readonly id: string;
-      readonly name: string;
-      readonly agent: ComposerMention;
-    }
+  | { readonly type: "agent"; readonly id: string; readonly name: string; readonly agent: ComposerMention }
   | {
       readonly type: "attachment";
       readonly id: string;
@@ -166,7 +164,8 @@ interface ChatComposerProps {
    */
   readonly focusRequest?: number;
   readonly controls?: ReactNode;
-  readonly toolbar?: ReactNode;
+  /** Settings beside the action button; move to the footer when text expands. */
+  readonly footerControls?: ReactNode;
   readonly attachmentButton?: ReactNode;
   readonly attachments?: ReactNode;
   readonly recipients?: ReactNode;
@@ -217,7 +216,7 @@ function DraftedChatComposer({
   draftKey,
   focusRequest = 0,
   controls,
-  toolbar,
+  footerControls,
   attachmentButton,
   attachments,
   recipients,
@@ -234,6 +233,10 @@ function DraftedChatComposer({
   onStop,
   onVoice,
 }: ChatComposerProps) {
+  const tokens: ComposerToken[] = [
+    ...(mentions ?? []).map((agent) => ({ id: agent.id, handle: agent.name, label: agent.display_name?.trim() || agent.name, kind: "agent" as const })),
+    ...(attachmentMentions ?? []).map((file) => ({ id: `attachment:${file.handle}`, handle: file.handle, label: file.handle, kind: file.kind })),
+  ];
   const locked = active && !allowActiveInput;
   const [dragging, setDragging] = useState(false);
   const dragDepth = useRef(0);
@@ -273,9 +276,16 @@ function DraftedChatComposer({
     readOwnedDraft(ownerUserId, draftKey),
   );
   const [multiline, setMultiline] = useState(false);
+  const [maxTextHeight, setMaxTextHeight] = useState<number>();
+  const [resizing, setResizing] = useState(false);
+  const [heightRange, setHeightRange] = useState({ current: 92, max: 480 });
+  const resizeStartRef = useRef<{ y: number; height: number } | null>(null);
+  const expanded = multiline;
+  const showVoice = Boolean(onVoice && !active && !content.trim() && !hasAttachments && !uploadBlocked);
   const [scrollEdges, setScrollEdges] = useState<ScrollEdges>({
     top: false,
     bottom: false,
+    thumb: null,
   });
   const contentRef = useRef(content);
   const ownerUserIdRef = useRef(ownerUserId);
@@ -283,11 +293,11 @@ function DraftedChatComposer({
   const renderedOwnerUserIdRef = useRef(ownerUserId);
   const renderedDraftKeyRef = useRef(draftKey);
   const draftTimerRef = useRef<number | null>(null);
-  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const editorRef = useRef<ComposerEditorHandle>(null);
   /** Where the caret goes once an inserted mention is committed. */
   const pendingCaretRef = useRef<number | null>(null);
   useLayoutEffect(() => {
-    const element = textareaRef.current;
+    const element = editorRef.current;
     const caret = pendingCaretRef.current;
     if (!element || caret === null) return;
     pendingCaretRef.current = null;
@@ -296,6 +306,8 @@ function DraftedChatComposer({
   });
   const composerRef = useRef<HTMLDivElement>(null);
   const controlsRef = useRef<HTMLDivElement>(null);
+  const settingsRef = useRef<HTMLDivElement>(null);
+  const attachmentRef = useRef<HTMLDivElement>(null);
   const textMeasureRef = useRef<HTMLSpanElement>(null);
   const composingRef = useRef(false);
   const pendingTransitionRef = useRef<PendingDraftTransition | null>(null);
@@ -340,37 +352,39 @@ function DraftedChatComposer({
     onContentChange?.(nextContent);
   }
 
-  const syncComposerLayout = useCallback(
-    (draft?: string) => {
-      const composer = composerRef.current;
-      const controls = controlsRef.current;
-      const textMeasure = textMeasureRef.current;
-      if (!composer || !controls || !textMeasure) return;
+  const syncComposerLayout = useCallback((draft?: string) => {
+    const composer = composerRef.current;
+    const controls = controlsRef.current;
+    const textMeasure = textMeasureRef.current;
+    if (!composer || !controls || !textMeasure) return;
 
-      const measuredDraft = draft ?? textMeasure.textContent ?? "";
-      const styles = getComputedStyle(composer);
-      const contentWidth =
-        composer.clientWidth -
-        cssPixels(styles.paddingLeft) -
-        cssPixels(styles.paddingRight);
-      const availableInlineWidth =
-        contentWidth -
-        (toolbar
-          ? 0
-          : controls.getBoundingClientRect().width +
-            cssPixels(styles.columnGap));
-      const textWidth = textMeasure.getBoundingClientRect().width;
-      const shouldUseMultiline =
-        measuredDraft.includes("\n") ||
-        (availableInlineWidth > 0 &&
-          textWidth >= availableInlineWidth * MULTILINE_THRESHOLD);
+    const measuredDraft = draft ?? textMeasure.textContent ?? "";
+    const styles = getComputedStyle(composer);
+    const contentWidth =
+      composer.clientWidth -
+      cssPixels(styles.paddingLeft) -
+      cssPixels(styles.paddingRight);
+    const gap = cssPixels(styles.columnGap);
+    const settingsWidth = settingsRef.current?.getBoundingClientRect().width ?? 0;
+    // Expanded text gains the attachment slot's width. Measure against the
+    // compact row in both layouts so crossing the threshold cannot oscillate.
+    const attachmentWidth = composer.classList.contains("flex-col")
+      ? (attachmentRef.current?.getBoundingClientRect().width ?? 0)
+      : 0;
+    const availableInlineWidth =
+      contentWidth - controls.getBoundingClientRect().width - gap -
+      (settingsWidth ? settingsWidth + gap : 0) -
+      (attachmentWidth ? attachmentWidth + gap : 0);
+    const textWidth = textMeasure.getBoundingClientRect().width;
+    const shouldUseMultiline =
+      measuredDraft.includes("\n") ||
+      (availableInlineWidth > 0 &&
+        textWidth > availableInlineWidth);
 
-      setMultiline((current) =>
-        current === shouldUseMultiline ? current : shouldUseMultiline,
-      );
-    },
-    [toolbar],
-  );
+    setMultiline((current) =>
+      current === shouldUseMultiline ? current : shouldUseMultiline,
+    );
+  }, []);
 
   const cancelScheduledSave = useCallback(() => {
     if (draftTimerRef.current !== null) {
@@ -455,16 +469,21 @@ function DraftedChatComposer({
       return;
     }
 
-    const observer = new ResizeObserver(() => syncComposerLayout());
+    let frame = 0;
+    const observer = new ResizeObserver(() => {
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(() => syncComposerLayout());
+    });
     observer.observe(composer);
     observer.observe(controls);
     observer.observe(textMeasure);
-    return () => observer.disconnect();
+    if (settingsRef.current) observer.observe(settingsRef.current);
+    return () => { observer.disconnect(); cancelAnimationFrame(frame); };
   }, [syncComposerLayout]);
 
-  // Grow the textarea to fit the draft, capped at MAX_ROWS.
-  useLayoutEffect(() => {
-    const element = textareaRef.current;
+  // Grow to the draft, bounded by the chosen maximum and available viewport.
+  const syncEditorHeight = useCallback(() => {
+    const element = editorRef.current?.element;
     if (!element) return;
 
     const styles = getComputedStyle(element);
@@ -473,7 +492,9 @@ function DraftedChatComposer({
       Number.parseFloat(styles.paddingTop) +
       Number.parseFloat(styles.paddingBottom);
     const oneRow = lineHeight + padding;
-    const maxHeight = lineHeight * MAX_ROWS + padding;
+    const limit = composerHeightLimit();
+    const maxHeight = Math.max(oneRow, Math.min(maxTextHeight ?? lineHeight * MAX_ROWS + padding, limit));
+    setHeightRange((current) => current.current === Math.round(maxHeight) && current.max === limit ? current : { current: Math.round(maxHeight), max: limit });
 
     // Restore the old height before writing the target so the transition has
     // a stable before-change value instead of snapping to the natural height.
@@ -484,9 +505,44 @@ function DraftedChatComposer({
     void element.offsetHeight;
 
     element.style.height = `${String(Math.max(Math.min(natural, maxHeight), oneRow))}px`;
-    element.style.overflowY = natural > maxHeight ? "auto" : "hidden";
+    element.style.overflowY = natural > maxHeight ? "scroll" : "hidden";
     setScrollEdges(getScrollEdges(element));
-  }, [content]);
+  }, [maxTextHeight]);
+
+  useLayoutEffect(() => {
+    syncComposerLayout(content);
+    syncEditorHeight();
+  }, [content, expanded, syncEditorHeight, syncComposerLayout, draftKey, ownerUserId]);
+
+  useEffect(() => {
+    window.addEventListener("resize", syncEditorHeight);
+    window.visualViewport?.addEventListener("resize", syncEditorHeight);
+    return () => {
+      window.removeEventListener("resize", syncEditorHeight);
+      window.visualViewport?.removeEventListener("resize", syncEditorHeight);
+    };
+  }, [syncEditorHeight]);
+
+  useLayoutEffect(() => {
+    const element = editorRef.current?.element;
+    if (!element || typeof ResizeObserver === "undefined") return;
+    let width = element.getBoundingClientRect().width;
+    let frame = 0;
+    const observer = new ResizeObserver(() => {
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(() => {
+      const nextWidth = element.getBoundingClientRect().width;
+      if (nextWidth === width) {
+        setScrollEdges(getScrollEdges(element));
+        return;
+      }
+      width = nextWidth;
+      syncEditorHeight();
+      });
+    });
+    observer.observe(element);
+    return () => { observer.disconnect(); cancelAnimationFrame(frame); };
+  }, [syncEditorHeight, draftKey, ownerUserId]);
 
   /**
    * A turn disables the textarea, and the browser answers that by dropping
@@ -508,7 +564,7 @@ function DraftedChatComposer({
   const composerHeldFocusRef = useRef(false);
   const renderedActiveRef = useRef(locked);
   if (renderedActiveRef.current !== locked) {
-    if (locked && textareaRef.current?.disabled !== true) {
+    if (locked && editorRef.current?.disabled !== true) {
       composerHeldFocusRef.current = Boolean(
         composerRef.current?.contains(document.activeElement),
       );
@@ -588,7 +644,7 @@ function DraftedChatComposer({
   const previouslyActiveRef = useRef(locked);
   const previousDraftKeyRef = useRef(draftKey);
   useEffect(() => {
-    const element = textareaRef.current;
+    const element = editorRef.current;
     if (!element) return;
 
     const requested = seenFocusRequestRef.current !== focusRequest;
@@ -604,7 +660,7 @@ function DraftedChatComposer({
       focusPendingRef.current = true;
     } else if (
       (draftKeyMoved || (turnJustEnded && composerHeldFocusRef.current)) &&
-      focusIsParked(element)
+      focusIsParked(element.element)
     ) {
       focusPendingRef.current = true;
     }
@@ -632,9 +688,7 @@ function DraftedChatComposer({
   }, [draftKey, focusRequest, locked]);
 
   // A removed attachment takes its `@handle` references with it.
-  const attachmentHandles = (attachmentMentions ?? [])
-    .map((item) => item.handle)
-    .join(" ");
+  const attachmentHandles = (attachmentMentions ?? []).map((item) => item.handle).join(" ");
   const previousHandlesRef = useRef(attachmentHandles);
   useEffect(() => {
     const previous = previousHandlesRef.current.split(" ").filter(Boolean);
@@ -651,30 +705,24 @@ function DraftedChatComposer({
 
   function updateContent(nextContent: string) {
     contentRef.current = nextContent;
-    if (textMeasureRef.current) {
-      textMeasureRef.current.textContent = nextContent;
-    }
     syncComposerLayout(nextContent);
     setContent(nextContent);
     onContentChange?.(nextContent);
   }
 
   /** Re-read the mention under the caret after typing or moving the caret. */
-  function syncMention(element: HTMLTextAreaElement) {
+  function syncMention(element: ComposerSelection) {
     if (!mentions?.length && !attachmentMentions?.length) return;
     const caret = element.selectionStart;
-    const next =
-      caret === element.selectionEnd
-        ? activeMention(element.value, caret)
-        : undefined;
-    if (next?.start === mention?.start && next?.query === mention?.query)
-      return;
+    const next = element.mentionQueryAllowed === false ? undefined :
+      caret === element.selectionEnd ? activeMention(element.value, caret) : undefined;
+    if (next?.start === mention?.start && next?.query === mention?.query) return;
     setMention(next);
     setMentionIndex(0);
   }
 
   function chooseMention(name: string) {
-    const element = textareaRef.current;
+    const element = editorRef.current;
     if (!element || !mention) return;
     const next = insertMention(content, mention, element.selectionStart, name);
     // Placed right after React commits the new text (below), before any
@@ -688,7 +736,7 @@ function DraftedChatComposer({
 
   /** Put `text` where the caret is, replacing any selection, as its own word. */
   function insertAtCaret(text: string) {
-    const element = textareaRef.current;
+    const element = editorRef.current;
     const value = contentRef.current;
     const start = element?.selectionStart ?? value.length;
     const end = element?.selectionEnd ?? value.length;
@@ -701,14 +749,7 @@ function DraftedChatComposer({
 
   async function submit() {
     const message = content.trim();
-    if (
-      (!message && !hasAttachments) ||
-      uploadBlocked ||
-      locked ||
-      disabled ||
-      sending
-    )
-      return;
+    if ((!message && !hasAttachments) || uploadBlocked || locked || disabled || sending) return;
     cancelScheduledSave();
     const userId = ownerUserIdRef.current;
     const key = draftKeyRef.current;
@@ -730,7 +771,7 @@ function DraftedChatComposer({
     }
   }
 
-  function handleKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
+  function handleKeyDown(event: KeyboardEvent<HTMLDivElement>) {
     const isComposing =
       composingRef.current ||
       event.nativeEvent.isComposing ||
@@ -741,9 +782,7 @@ function DraftedChatComposer({
         const step = event.key === "ArrowDown" ? 1 : -1;
         setMentionIndex(
           (index) =>
-            (Math.min(index, mentionOptions.length - 1) +
-              step +
-              mentionOptions.length) %
+            (Math.min(index, mentionOptions.length - 1) + step + mentionOptions.length) %
             mentionOptions.length,
         );
         return;
@@ -765,80 +804,20 @@ function DraftedChatComposer({
     }
   }
 
-  function handleScroll(event: UIEvent<HTMLTextAreaElement>) {
-    setScrollEdges(getScrollEdges(event.currentTarget));
+  function scrubDraft(event: PointerEvent<HTMLDivElement>) {
+    const element = editorRef.current?.element;
+    const thumb = scrollEdges.thumb;
+    if (!element || !thumb) return;
+    const track = event.currentTarget.getBoundingClientRect();
+    const thumbHeight = track.height * thumb.size / 100;
+    const position = (event.clientY - track.top - thumbHeight / 2) / (track.height - thumbHeight);
+    element.scrollTop = Math.max(0, Math.min(1, position)) * (element.scrollHeight - element.clientHeight);
+    setScrollEdges(getScrollEdges(element));
   }
 
-  const buttonControls = (
-    <div
-      ref={controlsRef}
-      className={`flex shrink-0 items-center gap-1.5 ${multiline ? "self-end" : ""}`}
-    >
-      {active && allowActiveInput && (
-        <Button
-          type="button"
-          variant="outline"
-          size="icon"
-          onClick={() => void onStop()}
-          disabled={stopDisabled}
-          aria-label="Stop assistant turn"
-          title="Stop this reply"
-        >
-          <Square className="fill-current" />
-        </Button>
-      )}
-      {locked ? (
-        <Button
-          type="button"
-          variant="outline"
-          size="icon"
-          onClick={() => void onStop()}
-          disabled={stopDisabled}
-          aria-label="Stop assistant turn"
-        >
-          <Square className="fill-current" />
-        </Button>
-      ) : onVoice &&
-        !active &&
-        !content.trim() &&
-        !hasAttachments &&
-        !uploadBlocked ? (
-        <Button
-          type="button"
-          variant="primary"
-          size="icon"
-          disabled={sending || disabled}
-          onClick={onVoice}
-          aria-label="Open voice call"
-        >
-          <Mic />
-        </Button>
-      ) : (
-        <Button
-          type="button"
-          variant="primary"
-          // While a reply runs, sending steers it: say so on the button.
-          size={active && allowActiveInput ? "default" : "icon"}
-          className={active && allowActiveInput ? "gap-1.5" : undefined}
-          title={active && allowActiveInput ? "Steer this reply" : undefined}
-          disabled={
-            (!content.trim() && !hasAttachments) ||
-            uploadBlocked ||
-            sending ||
-            disabled
-          }
-          onClick={() => void submit()}
-          aria-label={
-            sendLabel ??
-            (allowActiveInput ? "Send steering instruction" : "Send message")
-          }
-        >
-          <Send />
-          {active && allowActiveInput ? "Steer" : null}
-        </Button>
-      )}
-    </div>
-  );
+  function handleScroll() {
+    if (editorRef.current) setScrollEdges(getScrollEdges(editorRef.current.element));
+  }
 
   return (
     <div
@@ -861,10 +840,7 @@ function DraftedChatComposer({
       >
         {controls}
         {active && allowActiveInput ? (
-          <p
-            data-steering-hint
-            className="mb-1.5 text-11 text-muted-foreground sm:ml-[30px]"
-          >
+          <p data-steering-hint className="mb-1.5 text-11 text-muted-foreground sm:ml-[30px]">
             Still replying. What you send now steers this reply; Stop ends it.
           </p>
         ) : null}
@@ -884,8 +860,7 @@ function DraftedChatComposer({
           onDragOver={(event) => {
             if (onFiles && event.dataTransfer.types.includes("Files")) {
               event.preventDefault();
-              event.dataTransfer.dropEffect =
-                locked || disabled || sending ? "none" : "copy";
+              event.dataTransfer.dropEffect = locked || disabled || sending ? "none" : "copy";
             }
           }}
           onDrop={(event) => {
@@ -893,28 +868,19 @@ function DraftedChatComposer({
             setDragging(false);
             if (onFiles && event.dataTransfer.files.length) {
               event.preventDefault();
-              if (!locked && !disabled && !sending)
-                onFiles(Array.from(event.dataTransfer.files));
+              if (!locked && !disabled && !sending) onFiles(Array.from(event.dataTransfer.files));
             }
           }}
-          onPaste={(event) => {
+          onPasteCapture={(event) => {
             const files = event.clipboardData.files.length
               ? Array.from(event.clipboardData.files)
               : Array.from(event.clipboardData.items)
                   .map((item) => item.getAsFile())
                   .filter((file): file is File => Boolean(file));
             // A wall of text is attached as a file and referenced at the caret.
-            if (
-              onLongText &&
-              !files.length &&
-              !locked &&
-              !disabled &&
-              !sending
-            ) {
+            if (onLongText && !files.length && !locked && !disabled && !sending) {
               const pastedText = event.clipboardData.getData("text/plain");
-              const handle = isLongPaste(pastedText)
-                ? onLongText(pastedText)
-                : undefined;
+              const handle = isLongPaste(pastedText) ? onLongText(pastedText) : undefined;
               if (handle) {
                 event.preventDefault();
                 insertAtCaret(`@${handle} `);
@@ -924,197 +890,271 @@ function DraftedChatComposer({
             if (onFiles && files.length) {
               event.preventDefault();
               if (!locked && !disabled && !sending) {
-                onFiles(
-                  files.map((file) => {
-                    if (!isGenericPasteName(file.name)) return file;
-                    pastedImages.current += 1;
-                    const type = file.type || "image/png";
-                    return new File(
-                      [file],
-                      `pasted-image-${pastedImages.current}.${pastedExtension(type)}`,
-                      { type },
-                    );
-                  }),
-                );
+                onFiles(files.map((file) => {
+                  if (!isGenericPasteName(file.name)) return file;
+                  pastedImages.current += 1;
+                  const type = file.type || "image/png";
+                  return new File([file], `pasted-image-${pastedImages.current}.${pastedExtension(type)}`, { type });
+                }));
               }
             }
           }}
-          className={cn(
-            "relative sm:ml-[30px] rounded-xl border bg-card px-3 py-2 transition-colors focus-within:border-hairline-strong",
-            dragging ? "border-primary ring-1 ring-primary" : "border-hairline",
-          )}
+          className={cn("relative sm:ml-[30px] rounded-xl border bg-card px-3 py-2 transition-colors focus-within:border-hairline-strong", dragging ? "border-primary ring-1 ring-primary" : "border-hairline")}
         >
-          {dragging && (
+          {expanded && (
             <div
-              role="status"
-              className="pointer-events-none absolute inset-0 z-30 flex items-center justify-center rounded-xl bg-card/95 text-12 font-medium"
+              role="separator"
+              aria-label="Resize composer"
+              aria-orientation="horizontal"
+              aria-valuemin={MIN_TEXT_HEIGHT}
+              aria-valuemax={heightRange.max}
+              aria-valuenow={heightRange.current}
+              tabIndex={0}
+              title="Drag up to show more text. Double-click to reset."
+              className="group absolute -top-1.5 left-1/2 z-20 flex h-3 w-12 -translate-x-1/2 touch-none cursor-ns-resize items-center justify-center rounded-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              onPointerDown={(event) => {
+                if (event.button !== 0) return;
+                event.preventDefault();
+                resizeStartRef.current = { y: event.clientY, height: editorRef.current?.element.getBoundingClientRect().height ?? MIN_TEXT_HEIGHT };
+                event.currentTarget.setPointerCapture(event.pointerId);
+                setResizing(true);
+              }}
+              onPointerMove={(event) => {
+                const start = resizeStartRef.current;
+                if (!start || !event.currentTarget.hasPointerCapture(event.pointerId)) return;
+                setMaxTextHeight(Math.max(MIN_TEXT_HEIGHT, Math.min(composerHeightLimit(), start.height + start.y - event.clientY)));
+              }}
+              onLostPointerCapture={() => {
+                resizeStartRef.current = null;
+                setResizing(false);
+              }}
+              onPointerUp={(event) => {
+                if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+              }}
+              onDoubleClick={() => setMaxTextHeight(undefined)}
+              onKeyDown={(event) => {
+                if (!["ArrowUp", "ArrowDown", "Home", "End"].includes(event.key)) return;
+                event.preventDefault();
+                const current = heightRange.current;
+                const next = event.key === "Home" ? MIN_TEXT_HEIGHT : event.key === "End" ? composerHeightLimit() : current + (event.key === "ArrowUp" ? 24 : -24);
+                setMaxTextHeight(Math.max(MIN_TEXT_HEIGHT, Math.min(composerHeightLimit(), next)));
+              }}
             >
-              Drop files to attach
+              <span aria-hidden className="h-1 w-7 rounded-full bg-border transition-colors group-hover:bg-muted-foreground/60 group-focus-visible:bg-muted-foreground/60" />
             </div>
           )}
+          {dragging && <div role="status" className="pointer-events-none absolute inset-0 z-30 flex items-center justify-center rounded-xl bg-card/95 text-12 font-medium">Drop files to attach</div>}
           {attachments}
           {recipients}
           <div className="flex items-start gap-1.5">
-            {attachmentButton}
-            <div
-              ref={composerRef}
-              className={`relative flex min-w-0 flex-1 gap-1.5 ${
-                toolbar || multiline ? "flex-col items-stretch" : "items-start"
-              }`}
+          {!expanded && attachmentButton && <div ref={attachmentRef} className="shrink-0">{attachmentButton}</div>}
+          <div
+          ref={composerRef}
+          data-composer-editor
+          className={`relative flex min-w-0 flex-1 gap-x-1.5 gap-y-0.5 ${
+            expanded ? "flex-col items-stretch" : "items-start"
+          }`}
+        >
+          {mentionOpen ? (
+            <ul
+              id={mentionListId}
+              role="listbox"
+              aria-label={attachmentMentions?.length ? "Mention an agent or attachment" : "Mention an agent"}
+              className="absolute bottom-full left-0 z-20 mb-2 w-64 max-w-full space-y-0.5 rounded-xl border border-border bg-popover p-1.5 shadow-lg shadow-primary/5"
             >
-              {mentionOpen ? (
-                <ul
-                  id={mentionListId}
-                  role="listbox"
-                  aria-label={
-                    attachmentMentions?.length
-                      ? "Mention an agent or attachment"
-                      : "Mention an agent"
-                  }
-                  className="absolute bottom-full left-0 z-20 mb-2 w-64 max-w-full space-y-0.5 rounded-xl border border-border bg-popover p-1.5 shadow-lg shadow-primary/5"
-                >
-                  {mentionOptions.map((option) => {
-                    const selected = option.id === selectedMention?.id;
-                    return (
-                      <li
-                        key={option.id}
-                        id={`${mentionListId}-${option.id}`}
-                        role="option"
-                        aria-selected={selected}
-                        // Keep focus (and the caret) in the textarea.
-                        onMouseDown={(event) => event.preventDefault()}
-                        onClick={() => chooseMention(option.name)}
-                        className={cn(
-                          "flex cursor-pointer items-center gap-2 rounded-md px-2.5 py-1.5 text-12 text-foreground",
-                          selected ? "bg-overlay-strong" : "hover:bg-overlay",
-                        )}
-                      >
-                        {option.type === "agent" ? (
-                          <>
-                            <AgentAvatar agent={option.agent} size="sm" />
-                            <span className="min-w-0 flex-1 truncate">
-                              {option.agent.display_name?.trim() || option.name}
-                              {option.agent.display_name?.trim() ? (
-                                <span className="ml-1.5 text-11 text-text-tertiary">
-                                  @{option.name}
-                                </span>
-                              ) : null}
-                            </span>
-                            <span className="shrink-0 text-10 text-text-tertiary">
-                              {option.agent.kind === "nyxbot"
-                                ? "Personal agent"
-                                : "Specialist"}
-                            </span>
-                          </>
+              {mentionOptions.map((option) => {
+                const selected = option.id === selectedMention?.id;
+                return (
+                  <li
+                    key={option.id}
+                    id={`${mentionListId}-${option.id}`}
+                    role="option"
+                    aria-selected={selected}
+                    // Keep focus (and the caret) in the textarea.
+                    onMouseDown={(event) => event.preventDefault()}
+                    onClick={() => chooseMention(option.name)}
+                    className={cn(
+                      "flex cursor-pointer items-center gap-2 rounded-md px-2.5 py-1.5 text-12 text-foreground",
+                      selected ? "bg-overlay-strong" : "hover:bg-overlay",
+                    )}
+                  >
+                    {option.type === "agent" ? (
+                      <>
+                        <AgentAvatar agent={option.agent} size="sm" />
+                        <span className="min-w-0 flex-1 truncate">
+                          {option.agent.display_name?.trim() || option.name}
+                          {option.agent.display_name?.trim() ? (
+                            <span className="ml-1.5 text-11 text-text-tertiary">@{option.name}</span>
+                          ) : null}
+                        </span>
+                        <span className="shrink-0 text-10 text-text-tertiary">
+                          {option.agent.kind === "nyxbot" ? "Personal agent" : "Specialist"}
+                        </span>
+                      </>
+                    ) : (
+                      <>
+                        {option.attachment.kind === "image" ? (
+                          <ImageIcon aria-hidden className="h-4 w-4 shrink-0 text-muted-foreground" />
                         ) : (
-                          <>
-                            {option.attachment.kind === "image" ? (
-                              <ImageIcon
-                                aria-hidden
-                                className="h-4 w-4 shrink-0 text-muted-foreground"
-                              />
-                            ) : (
-                              <FileText
-                                aria-hidden
-                                className="h-4 w-4 shrink-0 text-muted-foreground"
-                              />
-                            )}
-                            <span className="min-w-0 flex-1 truncate">
-                              <span className="font-mono">@{option.name}</span>
-                              <span className="ml-1.5 text-11 text-text-tertiary">
-                                {option.attachment.label}
-                              </span>
-                            </span>
-                          </>
+                          <FileText aria-hidden className="h-4 w-4 shrink-0 text-muted-foreground" />
                         )}
-                      </li>
-                    );
-                  })}
-                </ul>
-              ) : null}
-              <span
-                ref={textMeasureRef}
-                data-composer-text-measure
-                aria-hidden
-                className="pointer-events-none absolute invisible inline-block w-max whitespace-pre text-base sm:text-13 leading-relaxed"
-              >
-                {content}
-              </span>
-              <div className="relative min-w-0 flex-1">
-                <textarea
-                  ref={textareaRef}
-                  value={content}
-                  {...(mentions
-                    ? {
-                        role: "combobox",
-                        "aria-autocomplete": "list" as const,
-                        "aria-expanded": mentionOpen,
-                        "aria-controls": mentionListId,
-                        "aria-activedescendant": selectedMention
-                          ? `${mentionListId}-${selectedMention.id}`
-                          : undefined,
-                        "aria-label": placeholder ?? "Message",
-                      }
-                    : {})}
-                  onChange={(event) => {
-                    updateContent(event.target.value);
-                    syncMention(event.target);
-                    if (!composingRef.current) scheduleDraftSave();
-                  }}
-                  onSelect={(event) => syncMention(event.currentTarget)}
-                  onBlur={() => setMention(undefined)}
-                  onKeyDown={handleKeyDown}
-                  onCompositionStart={() => {
-                    composingRef.current = true;
-                    cancelScheduledSave();
-                  }}
-                  onCompositionEnd={(event) => {
-                    composingRef.current = false;
-                    updateContent(event.currentTarget.value);
-                    scheduleDraftSave();
-                  }}
-                  onScroll={handleScroll}
-                  disabled={locked || disabled}
-                  rows={1}
-                  maxLength={32_768}
-                  placeholder={
-                    locked
-                      ? "Assistant is working..."
-                      : disabled
-                        ? "This conversation is read-only."
-                        : allowActiveInput
-                          ? (activePlaceholder ?? "Steer active task...")
-                          : (placeholder ?? "Message NyxID Assistant...")
+                        <span className="min-w-0 flex-1 truncate">
+                          <span className="font-mono">@{option.name}</span>
+                          <span className="ml-1.5 text-11 text-text-tertiary">{option.attachment.label}</span>
+                        </span>
+                      </>
+                    )}
+                  </li>
+                );
+              })}
+            </ul>
+          ) : null}
+          <span
+            ref={textMeasureRef}
+            data-composer-text-measure
+            aria-hidden
+            className="pointer-events-none absolute invisible inline-block w-max whitespace-pre text-base sm:text-13 leading-relaxed"
+          >
+            {tokenSegments(content, tokens).map((part, index) => part.token
+              ? <span key={index} className="composer-mention" data-composer-mention={part.token.kind}>{part.token.kind === "agent" ? "@" : ""}{part.token.label}</span>
+              : part.text)}
+          </span>
+          <div className="relative min-w-0 flex-1">
+            <ComposerEditor
+              key={`${ownerUserId ?? ""}:${draftKey ?? ""}`}
+              ref={editorRef}
+              value={content}
+              tokens={tokens}
+              expanded={expanded}
+              {...(mentions
+                ? {
+                    role: "combobox",
+                    "aria-autocomplete": "list" as const,
+                    "aria-expanded": mentionOpen,
+                    "aria-controls": mentionListId,
+                    "aria-activedescendant": selectedMention
+                      ? `${mentionListId}-${selectedMention.id}`
+                      : undefined,
+                    "aria-label": placeholder ?? "Message",
                   }
-                  className="assistant-scrollbar block min-h-8 w-full resize-none overflow-hidden overscroll-contain bg-transparent px-0 py-1 text-base sm:text-13 leading-relaxed text-foreground outline-none transition-[height] duration-150 ease-out placeholder:text-text-tertiary disabled:cursor-not-allowed disabled:opacity-50 motion-reduce:transition-none"
-                />
-                <div
-                  aria-hidden
-                  className={`pointer-events-none absolute inset-x-0 top-0 h-3 bg-gradient-to-b from-card to-transparent transition-opacity duration-150 motion-reduce:transition-none ${
-                    scrollEdges.top ? "opacity-100" : "opacity-0"
-                  }`}
-                />
-                <div
-                  aria-hidden
-                  className={`pointer-events-none absolute inset-x-0 bottom-0 h-3 bg-gradient-to-t from-card to-transparent transition-opacity duration-150 motion-reduce:transition-none ${
-                    scrollEdges.bottom ? "opacity-100" : "opacity-0"
-                  }`}
-                />
+                : {})}
+              onChange={(value) => {
+                updateContent(value);
+                if (editorRef.current) syncMention(editorRef.current);
+                if (!composingRef.current) scheduleDraftSave();
+              }}
+              onSelectionChange={syncMention}
+              onBlur={() => setMention(undefined)}
+              onKeyDown={handleKeyDown}
+              onCompositionStart={() => {
+                composingRef.current = true;
+                cancelScheduledSave();
+              }}
+              onCompositionEnd={() => {
+                composingRef.current = false;
+                updateContent(editorRef.current?.value ?? contentRef.current);
+                scheduleDraftSave();
+              }}
+              onScroll={handleScroll}
+              disabled={locked || disabled}
+              style={{ transitionDuration: resizing ? "0ms" : undefined }}
+              placeholder={
+                locked
+                  ? "Assistant is working..."
+                  : disabled
+                    ? "This conversation is read-only."
+                    : allowActiveInput
+                     ? (activePlaceholder ?? "Steer active task...")
+                     : (placeholder ?? "Message NyxID Assistant...")
+              }
+              className="assistant-scrollbar composer-scrollbar block min-h-8 w-full resize-none overflow-hidden overscroll-contain bg-transparent px-0 py-1 text-base sm:text-13 leading-relaxed text-foreground outline-none transition-[height] duration-150 ease-out placeholder:text-text-tertiary disabled:cursor-not-allowed disabled:opacity-50 motion-reduce:transition-none"
+            />
+            <div
+              aria-hidden
+              className={`pointer-events-none absolute inset-x-0 top-0 h-3 bg-gradient-to-b from-card to-transparent transition-opacity duration-150 motion-reduce:transition-none ${
+                scrollEdges.top ? "opacity-100" : "opacity-0"
+              }`}
+            />
+            <div
+              aria-hidden
+              className={`pointer-events-none absolute inset-x-0 bottom-0 h-3 bg-gradient-to-t from-card to-transparent transition-opacity duration-150 motion-reduce:transition-none ${
+                scrollEdges.bottom ? "opacity-100" : "opacity-0"
+              }`}
+            />
+            {scrollEdges.thumb && (
+              <div
+                data-composer-scrollbar
+                aria-hidden="true"
+                className="absolute -right-2 top-1 bottom-1 w-1.5 touch-none cursor-default rounded-full"
+                onPointerDown={(event) => {
+                  event.preventDefault();
+                  event.currentTarget.setPointerCapture(event.pointerId);
+                  scrubDraft(event);
+                }}
+                onPointerMove={(event) => {
+                  if (event.currentTarget.hasPointerCapture(event.pointerId)) scrubDraft(event);
+                }}
+                onPointerUp={(event) => {
+                if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+              }}
+              >
+                <div className="absolute inset-x-0 rounded-full bg-muted-foreground/50" style={{ height: `${scrollEdges.thumb.size}%`, top: `${scrollEdges.thumb.top}%` }} />
               </div>
-              {toolbar ? (
-                <div
-                  data-composer-toolbar
-                  className="flex min-w-0 flex-wrap items-center justify-between gap-1.5"
-                >
-                  <div className="flex min-w-0 flex-1 flex-wrap items-center gap-1.5">
-                    {toolbar}
-                  </div>
-                  {buttonControls}
-                </div>
-              ) : (
-                buttonControls
-              )}
-            </div>
+            )}
+          </div>
+          <div data-composer-footer className={cn("flex shrink-0 items-center gap-1.5", expanded && "w-full")}>
+            {expanded && attachmentButton && <div ref={attachmentRef} className="shrink-0">{attachmentButton}</div>}
+            {expanded && <div className="min-w-0 flex-1" />}
+            {footerControls && <div ref={settingsRef} className={cn("min-w-0", active && allowActiveInput ? "max-w-[104px] sm:max-w-[160px]" : "max-w-[160px]")}>{footerControls}</div>}
+          <div
+            ref={controlsRef}
+            className={`flex shrink-0 items-center gap-1.5 ${expanded ? "self-end" : ""}`}
+          >
+            {active && allowActiveInput && (
+              <Button type="button" variant="outline" size="icon" onClick={() => void onStop()}
+                disabled={stopDisabled} aria-label="Stop assistant turn" title="Stop this reply">
+                <Square className="fill-current" />
+              </Button>
+            )}
+            {locked ? (
+              <Button
+                type="button"
+                variant="outline"
+                size="icon"
+                onClick={() => void onStop()}
+                disabled={stopDisabled}
+                aria-label="Stop assistant turn"
+              >
+                <Square className="fill-current" />
+              </Button>
+            ) : showVoice ? (
+              <Button type="button" variant="ghost" size="icon" disabled={sending || disabled}
+                className="[&_svg]:size-5" onClick={onVoice} aria-label="Open voice call">
+                <AudioLines />
+              </Button>
+            ) : (
+              <Button
+                type="button"
+                variant="primary"
+                // While a reply runs, sending steers it: say so on the button.
+                size={active && allowActiveInput ? "default" : "icon"}
+                className={active && allowActiveInput ? "gap-1.5" : undefined}
+                title={active && allowActiveInput ? "Steer this reply" : undefined}
+                disabled={(!content.trim() && !hasAttachments) || uploadBlocked || sending || disabled}
+                onClick={() => void submit()}
+                aria-label={
+                  sendLabel ?? (allowActiveInput
+                    ? "Send steering instruction"
+                    : "Send message")
+                }
+              >
+                <ArrowUp />
+                {active && allowActiveInput ? "Steer" : null}
+              </Button>
+            )}
+          </div>
+          </div>
+        </div>
           </div>
         </div>
       </div>

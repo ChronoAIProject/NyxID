@@ -18,11 +18,12 @@ for HTTP response shapes.
   must be drained before eight-character v2 issuance. Both readers remain.
   Normalize case, separators and I/L→1, O→0, U→V. Ambiguous retained matches in
   either collection fail closed. Reservations survive insertion failures until TTL.
-- Use the server-returned `verification_uri_complete`, built from configured
+- Browser-owned QR login uses the server-returned `verification_uri_complete`, built from configured
   `FRONTEND_URL` and `/login/device?user_code=…`. The installed scanner fixture
   accepts trusted host/query payloads with eight-character codes. A QR identifies
   a request; scanning/signing in never approves it. No new browser handoff or
-  deep-link scheme is introduced.
+  deep-link scheme is introduced. CLI-originated links omit the code: the human
+  copies the separately displayed `user_code` into the approval page.
 - Step 1 shows the actual preview/code. Signed-in approvers acknowledge “This is my request — continue”; signed-out approvers verify inline after choosing browser persistence.
   Step 2 offers full account or restricted access only when `supports_grant_choice`
   permits it. Step 3 shows requested filters, matching keys and the actual grant,
@@ -134,27 +135,28 @@ browser callback if the backend lacks the requested protocol.
 
 The CLI prints `request_id`, `user_code`, the unchanged bare `verification_uri`,
 **`verification_uri_complete`**, `expires_at`, `interval`, `profile` and `auth_kind`.
-Share `verification_uri_complete` directly; no URL-building script is needed. Text
-output and interactive browser opening use that same completed URL. With
+Share the URL and `user_code` separately. The CLI retains the
+`verification_uri_complete` field for compatibility, but it contains only approval
+preferences, never `user_code` or `device_code`. Without preferences it equals the
+bare `verification_uri`. Text output and interactive browser opening use that same
+code-free URL. The human must copy/paste or type the displayed code before reviewing
+the request; `--clipboard` can copy it locally without adding it to a URL. With
 `--no-wait`, the CLI stores the private polling secret locally and returns without
-opening a browser or polling. The new JSON field is additive.
+opening a browser or polling.
 
 Direct API clients can build their own hinted URL from the returned challenge.
-Device requests include `verification_uri_complete`; Agent Key requests provide
-`verification_uri` and `user_code`. Build from those server-returned fields;
-never generate a code locally, substitute a different approval route, or put
-`device_code` in a link.
+Start from the bare `verification_uri` and display `user_code` separately for
+manual entry. Never append either code to a CLI login link, generate a code locally,
+or substitute a different approval route. The backend's completed URL remains
+available for the separate browser-owned QR flow.
 
 For a direct API integration, this builder supports either challenge shape:
 
 ```js
 function buildAgentApprovalUrl(challenge) {
-  const url = new URL(
-    challenge.verification_uri_complete ?? challenge.verification_uri,
-  );
-  if (!challenge.verification_uri_complete) {
-    url.searchParams.set("user_code", challenge.user_code);
-  }
+  const url = new URL(challenge.verification_uri);
+  url.search = "";
+  url.hash = "";
   const hints = {
     login_type: "agent",
     key_source: "new",
@@ -246,9 +248,9 @@ policies, provider permissions and service availability still apply at execution
 ## Signed-out approvers and insufficient authority
 
 1. Public preview shows the requester without granting credentials or exposing the
-   approver's service connections. Browsers and QR payloads use
-   `/login/device?user_code=XXXX-XXXX` with the documented hint parameters.
-   The code is always a query parameter, preserving installed scanner support.
+   approver's service connections. CLI links open `/login/device` with optional
+   approval preferences, and require manual code entry. Browser-owned QR payloads
+   use `/login/device?user_code=XXXX-XXXX`, preserving installed scanner support.
 2. The signed-out approver chooses **Only for this request** (default) or
    **Keep me signed in** on the request page. The shared login component offers
    configured Google, GitHub and Apple providers, the NyxID app, and email/password

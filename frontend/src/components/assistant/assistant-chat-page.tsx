@@ -2,7 +2,6 @@ import { navigateWithBuildUpdate } from "@/lib/build-update-navigation";
 import { AssistantErrorNotice } from "./assistant-error-notice";
 import { assistantErrorSummary, withAssistantTrace } from "@/lib/assistant/request-error";
 import { isAdmittedSendError } from "@/lib/assistant/send-admission";
-import { AccessModeSwitcher, ThreadModelSelect } from "@/components/assistant/nyxbot-access-controls";
 import { parseAccountPanelSearch } from "@/lib/assistant/account-panel-search";
 import { ConversationMachineDesktops } from "./machine-desktop-panel";
 import { ReviewCardTarget } from "./review-card-target";
@@ -702,12 +701,6 @@ function NyxAgentThreadPage() {
   const showHome = home && !chat.isStreaming && !chat.session.messages.length;
   const agentOverride = agents.data?.agents.find((row) => row.id === headerAgent?.id)?.access_mode_override;
   const accessMode = effectiveAccessMode(nyxBotSettings.data?.access_mode, agentOverride);
-  const composerToolbar = <>
-    <AccessModeSwitcher disabled={destroyed || chat.isStreaming}
-      agentOverride={agentOverride} />
-    {selectedId && conversation ? <ThreadModelSelect conversationId={selectedId}
-      model={conversation.model} disabled={destroyed || chat.isStreaming} /> : null}
-  </>;
   const lastReply = chat.isStreaming ? undefined : [...chat.session.messages].reverse().find((message) => message.role === "assistant" || message.role === "user");
   const turnError = lastReply?.status === "error"
     ? withAssistantTrace(lastReply.error ?? "NyxBot could not complete this turn. Check which actions completed before trying again.", lastReply.turnId ?? null)
@@ -924,7 +917,6 @@ function NyxAgentThreadPage() {
         )}
         <div ref={composerRef} className="absolute inset-x-0 bottom-0 z-10">
           <NyxAgentComposer
-            toolbar={composerToolbar}
             conversation={chat.conversation}
             key={`${user?.id}:${selectedId ?? headerAgent?.id ?? "draft"}`}
             onVoice={voiceEnabled && !destroyed && !channelPlatform ? async (id) => {
@@ -945,14 +937,14 @@ function NyxAgentThreadPage() {
                   : "screen:nyxagent:assistant"
             }
             focusRequest={focusRequest}
-            // Model routing is server-side: there is no profile selector here.
+            agentOverride={agentOverride}
             placeholder={`Message ${agentName}`}
-            onSend={async (text, uploads) => {
+            onSend={async (text, uploads, model) => {
               const sending = { scope: errorScope };
               pendingSend.current = sending;
               setRequestError(undefined);
               try {
-                await chat.send(text, uploads);
+                await chat.send(text, uploads, model);
               } catch (error) {
                 const message = error instanceof Error ? error.message : "NyxBot is temporarily unavailable. Try again shortly.";
                 setRequestError({ scope: sending.scope, message });

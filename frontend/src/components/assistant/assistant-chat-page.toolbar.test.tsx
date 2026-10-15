@@ -1,3 +1,4 @@
+import userEvent from "@testing-library/user-event";
 import type { ReactNode } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen, within } from "@testing-library/react";
@@ -65,24 +66,34 @@ beforeEach(() => {
 function mount() {
   return render(<QueryClientProvider client={new QueryClient()}><NyxAgentAssistantChatPage /></QueryClientProvider>);
 }
-it.each([{}, { draft: true }, { draft: true, agent: agent.id }])("puts the permission selector in the home/draft composer %j without a model selector", (search) => {
+it.each([{}, { draft: true }, { draft: true, agent: agent.id }])("puts combined settings in the home/draft composer %j", (search) => {
   state.search = search; const view = mount();
-  const toolbar = view.container.querySelector("[data-composer-toolbar]") as HTMLElement;
-  expect(within(toolbar).getByRole("combobox", { name: "Permission mode" })).toHaveTextContent("Auto");
+  const controls = view.container.querySelector("[data-composer-footer]") as HTMLElement;
+  expect(within(controls).getByRole("button", { name: "Thinking and permissions: Auto" })).toBeEnabled();
   expect(screen.queryByRole("combobox", { name: "Model" })).not.toBeInTheDocument();
   expect(view.container.querySelector("header [role=combobox]")).toBeNull();
 });
-it("puts both selectors inside the real thread composer and removes them from the header", () => {
+it("puts combined settings inside the real thread composer and removes selectors from the header", () => {
   state.search = { c: conversation.id }; const view = mount();
-  const toolbar = view.container.querySelector("[data-composer-toolbar]") as HTMLElement;
-  expect(within(toolbar).getByRole("combobox", { name: "Permission mode" })).toBeEnabled();
-  expect(within(toolbar).getByRole("combobox", { name: "Model" })).toHaveTextContent("Model:chat");
+  const controls = view.container.querySelector("[data-composer-footer]") as HTMLElement;
+  expect(within(controls).getByRole("button", { name: "Thinking and permissions: Auto" })).toBeEnabled();
   expect(within(screen.getByTestId("thread-header")).queryByRole("combobox")).not.toBeInTheDocument();
 });
-it.each(["streaming", "destroyed"] as const)("disables both selectors while %s", (condition) => {
-  state.search = { c: conversation.id }; state[condition] = true; mount();
-  expect(screen.getByRole("combobox", { name: "Permission mode" })).toBeDisabled();
-  expect(screen.getByRole("combobox", { name: "Model" })).toBeDisabled();
+it("disables settings for a destroyed agent", () => {
+  state.search = { c: conversation.id }; state.destroyed = true; mount();
+  expect(screen.getByRole("button", { name: "Thinking and permissions: Auto" })).toBeDisabled();
+});
+it("keeps settings readable but prevents changes during a turn", async () => {
+  state.search = { c: conversation.id }; state.streaming = true; mount();
+  const user = userEvent.setup();
+  await user.click(screen.getByRole("button", { name: "Thinking and permissions: Auto" }));
+  expect(screen.getByRole("menuitemcheckbox", { name: "Thinking mode" })).toHaveAttribute("aria-disabled", "true");
+  const permissions = screen.getByRole("menuitem", { name: /Permissions/ });
+  permissions.focus();
+  await user.keyboard("{ArrowRight}");
+  for (const option of await screen.findAllByRole("menuitemradio")) {
+    expect(option).toHaveAttribute("aria-disabled", "true");
+  }
 });
 it.each([
   ["autopilot", null, false], ["nyxmode", "autopilot", false],
@@ -106,5 +117,5 @@ it("keeps the Aevatar composer without permission or model toolbar", () => {
   const view = render(<QueryClientProvider client={new QueryClient()}><AssistantChatPage /></QueryClientProvider>);
   expect(screen.getByRole("textbox")).toBeInTheDocument();
   expect(view.container.querySelector("[data-composer-toolbar]")).toBeNull();
-  expect(screen.queryByRole("combobox", { name: "Permission mode" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: /Thinking and permissions/ })).not.toBeInTheDocument();
 });

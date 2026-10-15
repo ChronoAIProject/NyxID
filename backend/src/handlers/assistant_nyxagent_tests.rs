@@ -3815,6 +3815,32 @@ async fn model_selection_uses_the_live_list_resets_context_and_is_audited() {
 }
 
 #[test]
+fn model_response_preserves_names_and_handles_legacy_aliases() {
+    let row = model_response(&json!({
+        "id": "nyxagent/chat", "display_name": "Claude Sonnet 4.5",
+        "label": "Chat", "available": false, "description": "Configured model"
+    }))
+    .unwrap();
+    assert_eq!(row.id, "nyxagent/chat");
+    assert_eq!(row.label, "Claude Sonnet 4.5");
+    assert!(!row.available);
+    assert_eq!(row.description.as_deref(), Some("Configured model"));
+    assert_eq!(
+        model_response(&json!({"id": "nyxagent/chat"}))
+            .unwrap()
+            .label,
+        "Default model"
+    );
+    assert_eq!(
+        model_response(&json!({"id": "nyxagent/research", "display_name": " ", "label": "GPT-5"}))
+            .unwrap()
+            .label,
+        "GPT-5"
+    );
+    assert!(model_response(&json!({"id": "untrusted/model", "label": "Anything"})).is_none());
+}
+
+#[test]
 fn activity_response_failure_contract_omits_absent_http_status() {
     use crate::models::assistant_conversation::{ToolFailure, TurnActivity};
     for (kind, status) in [

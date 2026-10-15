@@ -916,7 +916,7 @@ export function NyxAgentGroupPage({
             }}
           />
           <UploadComposer
-            toolbar={<AccessModeSwitcher disabled={transcript.post.isPending} />}
+            footerControls={<AccessModeSwitcher disabled={transcript.post.isPending} />}
             key={`${user?.id}:${groupId}`}
             scope={{ kind: "groups", id: groupId }}
             active={false}

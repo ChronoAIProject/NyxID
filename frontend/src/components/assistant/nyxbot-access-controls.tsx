@@ -1,11 +1,12 @@
 import { useState } from "react";
-import { ShieldCheck, Cpu } from "lucide-react";
+import { ShieldCheck } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import {
   Select,
   SelectContent,
   SelectItem,
   SelectTrigger,
+  SelectValue,
 } from "@/components/ui/select";
 import {
   useChangeNyxAgentModel,
@@ -17,6 +18,7 @@ import {
   ACCESS_MODE_DESCRIPTION,
   ACCESS_MODE_LABEL,
   effectiveAccessMode,
+  modelDisplayName,
 } from "@/lib/assistant/nyxbot-labels";
 import { cn } from "@/lib/utils";
 import {
@@ -51,7 +53,7 @@ export function AccessModeBadge({
     >
       <ShieldCheck aria-hidden="true" className="h-3 w-3" />
       {ACCESS_MODE_LABEL[mode]}
-      {overridden ? " · this agent" : ""}
+      {overridden ? " · agent" : ""}
     </Badge>
   );
 }
@@ -87,17 +89,13 @@ export function AccessModeSwitcher({
             });
         }}
       >
-        <SelectTrigger aria-label="Permission mode" title={ACCESS_MODE_DESCRIPTION[workspace]} className={cn("h-7 w-auto min-w-0 gap-1 px-2 text-11", workspace === "autopilot" && "text-warning")}>
-          <ShieldCheck aria-hidden="true" className="h-3 w-3 shrink-0" />
-          <span className="truncate">{ACCESS_MODE_LABEL[workspace]}</span>
+        <SelectTrigger aria-label="Access mode" className="h-7 w-auto gap-1 px-2 text-11">
+          <SelectValue />
         </SelectTrigger>
         <SelectContent>
           {ACCESS_MODES.map((mode) => (
             <SelectItem key={mode} value={mode}>
-              <span className="flex max-w-72 flex-col gap-0.5 whitespace-normal">
-                <span className="text-12">{ACCESS_MODE_LABEL[mode]}</span>
-                <span className="text-11 text-muted-foreground">{ACCESS_MODE_DESCRIPTION[mode]}</span>
-              </span>
+              {ACCESS_MODE_LABEL[mode]}
             </SelectItem>
           ))}
         </SelectContent>
@@ -148,17 +146,12 @@ export function ModelSelect({
   return (
     <Select value={value ?? ""} disabled={disabled || models.isPending} onValueChange={onChange}>
       <SelectTrigger aria-label={label} className={className}>
-        <Cpu aria-hidden="true" className="h-3 w-3 shrink-0" />
-        <span className="shrink-0 text-text-tertiary">Model:</span>
-        <span className="truncate">{options.find((row) => row.id === value)?.label ?? (models.isPending ? "Loading models..." : "Choose a model")}</span>
+        <SelectValue placeholder={models.isPending ? "Loading models..." : "Choose a model"} />
       </SelectTrigger>
       <SelectContent>
         {options.map((row) => (
           <SelectItem key={row.id} value={row.id} disabled={!row.available}>
-            <span className="flex max-w-72 flex-col gap-0.5 whitespace-normal">
-              <span className="text-12">{row.available ? row.label : `${row.label} (unavailable)`}</span>
-              {row.description ? <span className="text-11 text-muted-foreground">{row.description}</span> : null}
-            </span>
+            {row.available ? modelDisplayName(row) : `${modelDisplayName(row)} (unavailable)`}
           </SelectItem>
         ))}
       </SelectContent>
@@ -183,7 +176,7 @@ export function ThreadModelSelect({
       <ModelSelect
         value={model}
         disabled={disabled || change.isPending}
-        className="h-7 w-auto min-w-0 max-w-full gap-1 px-2 text-11"
+        className="h-7 w-auto gap-1 px-2 text-11"
         onChange={(next) => {
           if (next === model) return;
           setError(undefined);

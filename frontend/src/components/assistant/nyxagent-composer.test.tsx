@@ -1,3 +1,4 @@
+vi.mock("./composer-editor", () => import("./composer-editor.test-support"));
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -104,8 +105,9 @@ describe("NyxAgent web steering", () => {
   });
 });
 
-it("passes the permission toolbar through uploads to the measured composer", () => {
-  const initial = { ...props(), toolbar: <button>Permission mode</button> };
-  const view = mount(initial);
-  expect(view.container.querySelector("[data-composer-toolbar]")).toContainElement(screen.getByRole("button", { name: "Permission mode" }));
+it("includes the combined settings menu inside the composer", () => {
+  const view = mount();
+  expect(view.container.querySelector("[data-composer-footer]")).toContainElement(
+    screen.getByRole("button", { name: /Thinking and permissions/ }),
+  );
 });
