@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 pub const COLLECTION_NAME: &str = "platform_public_sessions";
 pub const CLEANUP_RECORDS: &str = "platform_public_cleanup_records";
 pub const READINESS_RECORDS: &str = "platform_public_readiness_records";
+pub const REVOCATION_SCOPES: &str = "platform_public_revocation_scopes";
 
 /// Public context never belongs to an assistant owner conversation. The key
 /// binding is immutable; revoked rows remain until exact cleanup is confirmed.
@@ -64,6 +65,8 @@ pub struct PublicCleanupRecord {
     #[serde(rename = "_id")]
     pub id: String,
     pub session_ids: Vec<String>,
+    #[serde(default)]
+    pub scope_marker_id: Option<String>,
     pub reason: String,
     pub completed: bool,
     pub claim_id: Option<String>,
@@ -75,6 +78,29 @@ pub struct PublicCleanupRecord {
     pub retry_at: DateTime<Utc>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
+}
+
+/// A scope fence is written by both local admission and revocation. A revoked
+/// cutoff denies old sessions immediately while keys are drained in pages.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct PublicRevocationMarker {
+    #[serde(rename = "_id")]
+    pub id: String,
+    pub session_filter: bson::Document,
+    pub maximum_epoch: Option<i64>,
+    #[serde(with = "crate::models::bson_datetime::optional")]
+    pub revoked_before: Option<DateTime<Utc>>,
+    pub drain_pending: bool,
+    pub reason: String,
+    pub effect_revision: i64,
+}
+
+impl std::fmt::Debug for PublicRevocationMarker {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PublicRevocationMarker")
+            .field("drain_pending", &self.drain_pending)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize)]

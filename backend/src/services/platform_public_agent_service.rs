@@ -10,7 +10,7 @@ use crate::{
         api_key::{ApiKey, ApiKeyPurpose, COLLECTION_NAME as KEYS},
         platform_public_session::{
             CLEANUP_RECORDS, COLLECTION_NAME as SESSIONS, PlatformPublicSession,
-            PublicCleanupRecord, READINESS_RECORDS,
+            PublicCleanupRecord, PublicRevocationMarker, READINESS_RECORDS, REVOCATION_SCOPES,
         },
     },
 };
@@ -60,6 +60,20 @@ pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
             IndexModel::builder()
                 .keys(doc! {"candidate_digest":1})
                 .options(IndexOptions::builder().unique(true).build())
+                .build(),
+        )
+        .await?;
+    db.collection::<PublicRevocationMarker>(REVOCATION_SCOPES)
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"drain_pending":1,"_id":1})
+                .build(),
+        )
+        .await?;
+    db.collection::<PublicCleanupRecord>(CLEANUP_RECORDS)
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"scope_marker_id":1,"completed":1,"retry_at":1})
                 .build(),
         )
         .await?;
@@ -164,7 +178,7 @@ impl PublicTurnProducer for PublicProducer {
         db: &Database,
         recovery_record_id: &str,
     ) -> AppResult<()> {
-        process_cleanup(db, recovery_record_id).await
+        process_recovery(db, recovery_record_id).await
     }
 }
 
@@ -217,41 +231,84 @@ fn empty_binary() -> bson::Binary {
     }
 }
 
-/// Joins the caller transaction. Consent cannot commit ahead of key revocation,
-/// turn cancellation and durable cleanup intent. Oversized work aborts the whole
-/// transaction; it never reports successful partial revocation.
+fn marker_identity(scope: &PublicRevocationScope) -> (String, Document, Option<i64>) {
+    use sha2::{Digest, Sha256};
+    let mut filter = scope_filter(scope);
+    filter.remove("revoked_at");
+    let epoch = filter
+        .remove("manager_authority_epoch")
+        .and_then(|v| v.as_document().and_then(|d| d.get_i64("$lte").ok()));
+    let bytes = bson::to_vec(&filter).expect("fixed scope selector encodes");
+    (hex::encode(Sha256::digest(bytes)), filter, epoch)
+}
+
+fn marker_filter(marker: &PublicRevocationMarker) -> Document {
+    let mut filter = marker.session_filter.clone();
+    filter.insert("revoked_at", bson::Bson::Null);
+    filter.insert(
+        "created_at",
+        doc! {"$lte":marker.revoked_before.map(bson::DateTime::from_chrono)},
+    );
+    if let Some(epoch) = marker.maximum_epoch {
+        filter.insert("manager_authority_epoch", doc! {"$lte":epoch});
+    }
+    filter
+}
+
+/// Joins the caller transaction. The scope marker denies all matching old
+/// sessions immediately, including sessions beyond the first bounded key page.
 pub(crate) async fn revoke_in_session(
     db: &Database,
     session: &mut ClientSession,
     scope: &PublicRevocationScope,
     reason: PublicRevocationReason,
 ) -> AppResult<PublicRevocationRecorded> {
+    let (id, filter, epoch) = marker_identity(scope);
+    let marker = db.collection::<PublicRevocationMarker>(REVOCATION_SCOPES)
+        .find_one_and_update(doc! {"_id":&id}, vec![doc! {"$set": {
+            "session_filter":{"$literal":filter},
+            "maximum_epoch": match epoch { Some(epoch) => bson::Bson::Document(doc! {"$max":[{"$ifNull":["$maximum_epoch",0_i64]},epoch]}), None => bson::Bson::Null },
+            "revoked_before":"$$NOW", "drain_pending":true,"reason":reason_label(reason),
+            "effect_revision":{"$add":[{"$ifNull":["$effect_revision",0_i64]},1_i64]},
+        }}]).upsert(true).return_document(ReturnDocument::After)
+        .session(&mut *session).await?.ok_or_else(changed)?;
+    let count = revoke_page_in_session(db, session, &marker).await?;
+    Ok(PublicRevocationRecorded {
+        recovery_record_id: (count != 0).then_some(id),
+    })
+}
+
+async fn revoke_page_in_session(
+    db: &Database,
+    session: &mut ClientSession,
+    marker: &PublicRevocationMarker,
+) -> AppResult<usize> {
     let mut cursor = db
         .collection::<PlatformPublicSession>(SESSIONS)
-        .find(scope_filter(scope))
-        .limit((MAX_REVOKE_SESSIONS + 1) as i64)
+        .find(marker_filter(marker))
+        .sort(doc! {"_id":1})
+        .limit(MAX_REVOKE_SESSIONS as i64)
         .session(&mut *session)
         .await?;
     let mut rows = Vec::new();
     while let Some(row) = cursor.next(&mut *session).await.transpose()? {
         rows.push(row);
     }
-    if rows.len() > MAX_REVOKE_SESSIONS {
-        return Err(AppError::Conflict(
-            "Public revocation exceeds bounded transaction capacity; keep routing paused".into(),
-        ));
-    }
-    if rows.is_empty() {
-        return Ok(PublicRevocationRecorded {
-            recovery_record_id: None,
-        });
+    let count = rows.len();
+    if db.collection::<PublicRevocationMarker>(REVOCATION_SCOPES).update_one(
+        doc! {"_id":&marker.id,"effect_revision":marker.effect_revision},
+        doc! {"$set":{"drain_pending":count == MAX_REVOKE_SESSIONS},"$inc":{"effect_revision":1_i64}},
+    ).session(&mut *session).await?.matched_count != 1 { return Err(changed()); }
+    if count == 0 {
+        return Ok(0);
     }
     let record_id = uuid::Uuid::new_v4().to_string();
     let now = Utc::now();
     let record = PublicCleanupRecord {
         id: record_id.clone(),
         session_ids: rows.iter().map(|row| row.id.clone()).collect(),
-        reason: reason_label(reason).into(),
+        scope_marker_id: Some(marker.id.clone()),
+        reason: marker.reason.clone(),
         completed: false,
         claim_id: None,
         attempts: 0,
@@ -287,7 +344,7 @@ pub(crate) async fn revoke_in_session(
                 return Err(changed());
             }
         }
-        let mut fields = doc! {"revoked_at":bson::DateTime::from_chrono(now),"revocation_reason":reason_label(reason),
+        let mut fields = doc! {"revoked_at":bson::DateTime::from_chrono(now),"revocation_reason":&marker.reason,
         "cleanup_record_id":&record_id,"credential_ciphertext":empty_binary()};
         if row.active_turn.is_some() {
             fields.insert("active_turn.stop_requested", true);
@@ -306,9 +363,109 @@ pub(crate) async fn revoke_in_session(
         )
         .await?;
     }
-    Ok(PublicRevocationRecorded {
-        recovery_record_id: Some(record_id),
-    })
+    Ok(count)
+}
+
+async fn drain_scope(db: &Database, id: &str) -> AppResult<()> {
+    let mut session = db.client().start_session().await?;
+    session
+        .start_transaction()
+        .and_run((db.clone(), id.to_owned()), |session, (db, id)| {
+            Box::pin(async move {
+                let result: AppResult<_> = async {
+                    if let Some(marker) = db
+                        .collection::<PublicRevocationMarker>(REVOCATION_SCOPES)
+                        .find_one(doc! {"_id":&*id,"drain_pending":true})
+                        .session(&mut *session)
+                        .await?
+                    {
+                        revoke_page_in_session(db, session, &marker).await?;
+                    }
+                    Ok(())
+                }
+                .await;
+                transactions::transaction_result(result)
+            })
+        })
+        .await
+        .map_err(transactions::map_transaction_error)
+}
+
+async fn process_recovery(db: &Database, id: &str) -> AppResult<()> {
+    if db
+        .collection::<PublicRevocationMarker>(REVOCATION_SCOPES)
+        .count_documents(doc! {"_id":id})
+        .limit(1)
+        .await?
+        == 0
+    {
+        return process_cleanup(db, id).await;
+    }
+    drain_scope(db, id).await?;
+    let records: Vec<PublicCleanupRecord> = db
+        .collection::<PublicCleanupRecord>(CLEANUP_RECORDS)
+        .find(
+            doc! {"scope_marker_id":id,"completed":false,"retry_at":{"$lte":bson::DateTime::now()}},
+        )
+        .limit(4)
+        .await?
+        .try_collect()
+        .await?;
+    for record in records {
+        process_cleanup(db, &record.id).await?;
+    }
+    Ok(())
+}
+
+/// Local component of the public fence. This never establishes runtime proof.
+/// Session issuance and every dispatch/reply write the same scope documents as
+/// revocation, so a concurrent marker cannot slip between validation and effect.
+pub(crate) async fn fence_local_session_in_session(
+    db: &Database,
+    session: &mut ClientSession,
+    row: &PlatformPublicSession,
+) -> AppResult<bool> {
+    if row.revoked_at.is_some() || row.expires_at <= Utc::now() {
+        return Ok(false);
+    }
+    let manager = ManagerAuthority {
+        profile_id: row.profile_id.clone(),
+        manager_bot_id: row.manager_bot_id.clone(),
+        telegram_bot_id: row.telegram_bot_id,
+        manager_authority_epoch: row.manager_authority_epoch,
+    };
+    for scope in [
+        PublicRevocationScope::Session {
+            public_session_id: row.id.clone(),
+        },
+        PublicRevocationScope::Sponsor {
+            sponsor_owner_user_id: row.sponsor_owner_user_id.clone(),
+        },
+        PublicRevocationScope::Manager {
+            manager: manager.clone(),
+        },
+        PublicRevocationScope::Sender {
+            manager,
+            sender_id: row.sender_id,
+            chat_id: row.chat_id,
+        },
+    ] {
+        let (id, filter, _) = marker_identity(&scope);
+        let marker = db.collection::<PublicRevocationMarker>(REVOCATION_SCOPES).find_one_and_update(
+            doc! {"_id":&id}, doc! {"$setOnInsert":{"session_filter":filter,"maximum_epoch":bson::Bson::Null,
+                "revoked_before":bson::Bson::Null,"drain_pending":false,"reason":""},"$inc":{"effect_revision":1_i64}},
+        ).upsert(true).return_document(ReturnDocument::After).session(&mut *session).await?.ok_or_else(changed)?;
+        if marker
+            .revoked_before
+            .is_some_and(|cutoff| row.created_at <= cutoff)
+            && marker
+                .maximum_epoch
+                .is_none_or(|epoch| row.manager_authority_epoch <= epoch)
+        {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 async fn process_cleanup(db: &Database, id: &str) -> AppResult<()> {
@@ -379,6 +536,17 @@ async fn process_cleanup(db: &Database, id: &str) -> AppResult<()> {
 pub async fn sweep_public_lifecycle(state: &AppState, limit: u32) -> AppResult<RecoveryBatch> {
     let db = &state.db;
     let limit = limit.clamp(1, 100);
+    let scopes: Vec<PublicRevocationMarker> = db
+        .collection::<PublicRevocationMarker>(REVOCATION_SCOPES)
+        .find(doc! {"drain_pending":true})
+        .sort(doc! {"_id":1})
+        .limit(i64::from(limit))
+        .await?
+        .try_collect()
+        .await?;
+    for marker in &scopes {
+        drain_scope(db, &marker.id).await?;
+    }
     let expired: Vec<PlatformPublicSession> = db
         .collection::<PlatformPublicSession>(SESSIONS)
         .find(doc! {"revoked_at":bson::Bson::Null,"expires_at":{"$lte":bson::DateTime::now()}})
@@ -387,7 +555,7 @@ pub async fn sweep_public_lifecycle(state: &AppState, limit: u32) -> AppResult<R
         .await?
         .try_collect()
         .await?;
-    let mut processed = 0;
+    let mut processed = scopes.len() as u32;
     for row in expired {
         let mut session = db.client().start_session().await?;
         session
@@ -426,11 +594,17 @@ pub async fn sweep_public_lifecycle(state: &AppState, limit: u32) -> AppResult<R
         processed += 1;
     }
     let has_more = db
-        .collection::<PublicCleanupRecord>(CLEANUP_RECORDS)
-        .count_documents(due)
+        .collection::<PublicRevocationMarker>(REVOCATION_SCOPES)
+        .count_documents(doc! {"drain_pending":true})
         .limit(1)
         .await?
         > 0
+        || db
+            .collection::<PublicCleanupRecord>(CLEANUP_RECORDS)
+            .count_documents(due)
+            .limit(1)
+            .await?
+            > 0
         || db
             .collection::<PlatformPublicSession>(SESSIONS)
             .count_documents(
@@ -686,8 +860,9 @@ mod tests {
         .await
         .unwrap();
         session.commit_transaction().await.unwrap();
-        let id = recorded.recovery_record_id.unwrap();
-        process_cleanup(&db, &id).await.unwrap();
+        let recovery = recorded.recovery_record_id.unwrap();
+        process_recovery(&db, &recovery).await.unwrap();
+        let id = session_row(&db, &remote).await.cleanup_record_id.unwrap();
         let local = session_row(&db, &local).await;
         let remote_after = session_row(&db, &remote).await;
         assert!(local.cleanup_complete);
@@ -732,8 +907,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn oversized_scope_aborts_before_any_key_or_session_mutation() {
-        let db = crate::test_utils::connect_transaction_test_database("public_revoke_bound").await;
+    async fn oversized_scope_denies_undrained_sessions_then_drains_bounded_pages() {
+        let db = crate::test_utils::connect_transaction_test_database("public_revoke_pages").await;
         ensure_indexes(&db).await.unwrap();
         let row = fixture(&db, 5, true).await;
         let mut extra = Vec::new();
@@ -749,47 +924,67 @@ mod tests {
             .insert_many(extra)
             .await
             .unwrap();
+        let manager = ManagerAuthority {
+            profile_id: "profile".into(),
+            manager_bot_id: "99".into(),
+            telegram_bot_id: 99,
+            manager_authority_epoch: 3,
+        };
         let mut session = db.client().start_session().await.unwrap();
         session.start_transaction().await.unwrap();
-        assert!(
-            revoke_in_session(
-                &db,
-                &mut session,
-                &PublicRevocationScope::Manager {
-                    manager: ManagerAuthority {
-                        profile_id: "profile".into(),
-                        manager_bot_id: "99".into(),
-                        telegram_bot_id: 99,
-                        manager_authority_epoch: 3
-                    },
-                },
-                PublicRevocationReason::ManagerRetired
-            )
-            .await
-            .is_err()
-        );
-        session.abort_transaction().await.unwrap();
-        assert_eq!(
-            db.collection::<PublicCleanupRecord>(CLEANUP_RECORDS)
-                .count_documents(doc! {})
-                .await
-                .unwrap(),
-            0
-        );
+        let recovery = revoke_in_session(
+            &db,
+            &mut session,
+            &PublicRevocationScope::Manager { manager },
+            PublicRevocationReason::ManagerRetired,
+        )
+        .await
+        .unwrap()
+        .recovery_record_id
+        .unwrap();
+        session.commit_transaction().await.unwrap();
         assert_eq!(
             db.collection::<PlatformPublicSession>(SESSIONS)
                 .count_documents(doc! {"revoked_at":{"$ne":bson::Bson::Null}})
                 .await
                 .unwrap(),
-            0
+            MAX_REVOKE_SESSIONS as u64
         );
+        let undrained = db
+            .collection::<PlatformPublicSession>(SESSIONS)
+            .find_one(doc! {"revoked_at":bson::Bson::Null})
+            .await
+            .unwrap()
+            .unwrap();
+        session.start_transaction().await.unwrap();
         assert!(
-            db.collection::<ApiKey>(KEYS)
-                .find_one(doc! {"_id":row.credential_api_key_id})
+            !fence_local_session_in_session(&db, &mut session, &undrained)
                 .await
                 .unwrap()
-                .unwrap()
-                .is_active
+        );
+        session.abort_transaction().await.unwrap();
+        drain_scope(&db, &recovery).await.unwrap();
+        assert_eq!(
+            db.collection::<PlatformPublicSession>(SESSIONS)
+                .count_documents(doc! {"revoked_at":bson::Bson::Null})
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            db.collection::<PublicCleanupRecord>(CLEANUP_RECORDS)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            2
+        );
+        drain_scope(&db, &recovery).await.unwrap();
+        assert_eq!(
+            db.collection::<PublicCleanupRecord>(CLEANUP_RECORDS)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            2
         );
     }
 
