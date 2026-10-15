@@ -1075,7 +1075,25 @@ async fn reclaim_preserves_lost_turn_audience_across_guest_transitions() {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(lost.origin, (!old_guest).then_some(TurnOrigin::User));
+        assert_eq!(lost.origin, Some(TurnOrigin::User));
+        let input = db
+            .collection::<AssistantMessage>(MESSAGES)
+            .find_one(doc! {
+                "conversation_id": &old.id, "turn_id": &lost.turn_id, "role": "user",
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            retry_evidence(
+                &RetryEvidence::from(&lost),
+                Some(&input),
+                &Default::default()
+            )
+            .is_ok(),
+            !old_guest,
+            "reclamation must use the original author's authority, not the next audience"
+        );
     }
 }
 
