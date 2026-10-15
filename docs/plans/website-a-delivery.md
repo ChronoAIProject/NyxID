@@ -134,6 +134,12 @@ No real login, OAuth consent, registration, message, purchase or account mutatio
 - Create fork review PR first (`codex/website-a-delivery` → `codex/website-a-base`), then upstream draft PR (`aelf-hzz780:codex/website-a-delivery` → `ChronoAIProject:main`). Neither is merged or deployed.
 - Independent acceptance chat: `01a13edf-2b31-75c1-b1ca-824d707f02ff`. Handoff must identify the exact delivery commit, both PRs and the blocked mobile check.
 
+### PR 创建阻塞 / PR creation blocker
+
+交付代码已提交并推送到 fork；GitHub 连接器身份核验为 `aelf-hzz780`，但创建 fork PR 返回 `403 Resource not accessible by integration`。现有 CLI 认证不可用，浏览器 GitHub 会话未登录。因此本轮尚未创建 fork/upstream PR，不能视为两级 PR 流程已完成。分支已在 GitHub 对比页验证为 1 个交付提交、108 个文件，可自动合并。未修改连接器权限或账户设置。
+
+The commit and both branches are pushed. PR creation is blocked by the connector's repository write permissions; the available CLI/browser sessions cannot create it. No PR was created or merged. The ready English description and compare links are in `website-a-pr.md`. Independent acceptance can review the exact commit while PR access is resolved.
+
 ## 剩余风险 / Remaining limits
 
 1. Actual 390px/mobile navigation, touch behavior, device performance and OS reduced-motion transitions require independent browser/device verification. Unit tests cover reduced-motion logic but are not OS/device evidence.
