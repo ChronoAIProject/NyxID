@@ -179,3 +179,5 @@ pub mod async_service_operation;
 pub mod catalog_icon;
 
 pub mod platform_installation;
+
+pub mod platform_manager_delivery;

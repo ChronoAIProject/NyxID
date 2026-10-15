@@ -353,3 +353,6 @@ pub mod platform_setup_notice_service;
 
 pub(crate) mod nyxbot_gateway_service;
 pub mod tools_manager_service;
+
+pub mod platform_manager_delivery;
+pub mod platform_manager_transport;
