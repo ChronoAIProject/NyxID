@@ -377,19 +377,34 @@ pub async fn set_user_active(
         .await?
         .ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
 
+    if is_active && !_target.is_active {
+        super::platform_personal_owner_lifecycle::retire(db, target_user_id, false).await?;
+    }
     let now = Utc::now();
-    db.collection::<User>(USERS)
-        .update_one(
-            doc! { "_id": target_user_id },
-            doc! { "$set": {
-                "is_active": is_active,
-                "updated_at": bson::DateTime::from_chrono(now),
-            }},
-        )
-        .await?;
+    let mut filter = doc! { "_id": target_user_id, "is_active": _target.is_active };
+    if is_active {
+        filter.insert("platform_personal_retirement_pending", doc! {"$ne": true});
+        filter.insert("platform_personal_deleting", doc! {"$ne": true});
+    }
+    let mut fields = doc! {"is_active": is_active, "updated_at": bson::DateTime::from_chrono(now)};
+    if !is_active {
+        fields.insert("platform_personal_retirement_pending", true);
+    }
+    if db
+        .collection::<User>(USERS)
+        .update_one(filter, doc! {"$set": fields})
+        .await?
+        .matched_count
+        != 1
+    {
+        return Err(AppError::Conflict(
+            "Account state changed; refresh before retrying".into(),
+        ));
+    }
 
     // Revoke all sessions and deactivate API keys when disabling a user
     if !is_active {
+        super::platform_personal_owner_lifecycle::retire(db, target_user_id, false).await?;
         revoke_all_user_sessions(db, target_user_id).await?;
 
         key_mutations::update_many(
@@ -510,11 +525,14 @@ async fn delete_user_cascade_internal(
             doc! { "_id": target_user_id },
             doc! { "$set": {
                 "is_active": false,
+                "platform_personal_retirement_pending": true,
+                "platform_personal_deleting": true,
                 "updated_at": bson::DateTime::from_chrono(now),
             }},
         )
         .await?;
 
+    super::platform_personal_owner_lifecycle::retire(db, target_user_id, true).await?;
     super::platform_setup_service::retire_owner(db, target_user_id, true).await?;
 
     // Org bots the user linked to their NyxBot keep an org-owned route and

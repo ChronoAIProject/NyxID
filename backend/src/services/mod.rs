@@ -159,6 +159,7 @@ pub(crate) mod platform_manager_contract;
 pub mod platform_manager_dispatch_service;
 pub mod platform_manager_ingress_service;
 pub mod platform_personal_binding_service;
+pub mod platform_personal_owner_lifecycle;
 pub mod platform_personal_turn_service;
 pub mod platform_public_agent_service;
 pub mod platform_public_credential_service;
