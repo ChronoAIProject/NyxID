@@ -262,6 +262,8 @@ fn insufficient_credits_is_a_stable_terminal_code() {
 fn recap_is_labeled_recent_and_bounded_without_splitting_unicode() {
     let messages: Vec<_> = (0..30)
         .map(|i| AssistantMessage {
+            reply_image_refs: Vec::new(),
+            reply_image_destinations: Vec::new(),
             retry_of: None,
             specialist_id: None,
             steering: None,
@@ -329,6 +331,8 @@ fn failure_matrix_maps_transport_failures_to_recoverable_classes() {
 fn recap_preserves_goal_head_and_tail_under_long_last_reply() {
     let rows = vec![
         AssistantMessage {
+            reply_image_refs: Vec::new(),
+            reply_image_destinations: Vec::new(),
             retry_of: None,
             specialist_id: None,
             steering: None,
@@ -352,6 +356,8 @@ fn recap_preserves_goal_head_and_tail_under_long_last_reply() {
             via: None,
         },
         AssistantMessage {
+            reply_image_refs: Vec::new(),
+            reply_image_destinations: Vec::new(),
             retry_of: None,
             specialist_id: None,
             steering: None,
@@ -386,6 +392,8 @@ fn recap_preserves_goal_head_and_tail_under_long_last_reply() {
 #[test]
 fn recap_caps_each_activity_list_and_reserves_bounded_total_budget() {
     let row = AssistantMessage {
+        reply_image_refs: Vec::new(),
+        reply_image_destinations: Vec::new(),
         retry_of: None,
         specialist_id: None,
         steering: None,
@@ -449,6 +457,8 @@ fn recap_caps_each_activity_list_and_reserves_bounded_total_budget() {
 #[test]
 fn recap_v2_keeps_action_status_and_attachment_checkpoint() {
     let row = AssistantMessage {
+        reply_image_refs: Vec::new(),
+        reply_image_destinations: Vec::new(),
         retry_of: None,
         specialist_id: None,
         steering: None,
@@ -497,6 +507,8 @@ fn recap_v2_keeps_action_status_and_attachment_checkpoint() {
 #[test]
 fn guest_recap_omits_owner_tool_metadata() {
     let row = AssistantMessage {
+        reply_image_refs: Vec::new(),
+        reply_image_destinations: Vec::new(),
         retry_of: None,
         specialist_id: None,
         steering: None,
@@ -545,6 +557,8 @@ fn guest_recap_omits_owner_tool_metadata() {
 #[test]
 fn retry_recap_lists_completed_activity_ids_for_no_duplicate_replay() {
     let row = AssistantMessage {
+        reply_image_refs: Vec::new(),
+        reply_image_destinations: Vec::new(),
         retry_of: None,
         specialist_id: None,
         steering: None,
@@ -808,6 +822,7 @@ fn stale_test_row(now: DateTime<Utc>) -> AssistantConversation {
         credential_api_key_id: "key".into(),
         message_count: 0,
         active_turn: Some(ActiveTurn {
+            reply_image_refs: Vec::new(),
             retry_digests: Vec::new(),
             retry_of: None,
             running_response: None,
@@ -1756,6 +1771,8 @@ async fn reset_context_is_fenced_and_drops_the_checkpoint() {
 #[test]
 fn recap_reserves_the_goal_before_long_recent_rows() {
     let row = |seq: i64, role: &str, text: String| AssistantMessage {
+        reply_image_refs: Vec::new(),
+        reply_image_destinations: Vec::new(),
         retry_of: None,
         specialist_id: None,
         steering: None,
@@ -1869,6 +1886,202 @@ async fn turn_images_are_bounded_copied_to_the_reply_and_deleted_with_the_chat()
             .unwrap()
     };
     assert_eq!(count().await, MAX_TURN_ATTACHMENTS as u64);
+    use crate::services::assistant_reply_images as selected;
+    let live = get(&db, &owner, &row.id).await.unwrap();
+    let refs: Vec<_> = live
+        .active_turn
+        .as_ref()
+        .unwrap()
+        .attachments
+        .iter()
+        .map(|a| a.id.clone())
+        .collect();
+    let producing_turn = row.active_turn.as_ref().map(|t| t.turn_id.as_str());
+    let choose = |ids: Vec<String>| serde_json::json!({"image_refs":ids});
+    assert!(
+        selected::select(
+            &state,
+            &owner,
+            &row.id,
+            Some("previous-turn"),
+            &choose(vec![])
+        )
+        .await
+        .is_err()
+    );
+    assert!(
+        attach_image_for_turn(
+            &db,
+            keys,
+            &owner,
+            &row.id,
+            Some("previous-turn"),
+            "late",
+            "image/png",
+            &png
+        )
+        .await
+        .unwrap()
+        .is_none()
+    );
+    let first = selected::select(
+        &state,
+        &owner,
+        &row.id,
+        producing_turn,
+        &choose(refs[..2].to_vec()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(first["status"], "selected_not_sent");
+    selected::select(
+        &state,
+        &owner,
+        &row.id,
+        producing_turn,
+        &choose(vec![refs[2].clone()]),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        get(&db, &owner, &row.id)
+            .await
+            .unwrap()
+            .active_turn
+            .unwrap()
+            .reply_image_refs,
+        vec![refs[2].clone()]
+    );
+    selected::select(&state, &owner, &row.id, producing_turn, &choose(vec![]))
+        .await
+        .unwrap();
+    assert!(
+        get(&db, &owner, &row.id)
+            .await
+            .unwrap()
+            .active_turn
+            .unwrap()
+            .reply_image_refs
+            .is_empty()
+    );
+    for field in ["conversation_id", "turn_id", "origin"] {
+        let original = db
+            .collection::<bson::Document>(ATTACHMENTS)
+            .find_one(doc! {"_id":&refs[0]})
+            .await
+            .unwrap()
+            .unwrap();
+        db.collection::<bson::Document>(ATTACHMENTS)
+            .update_one(
+                doc! {"_id":&refs[0]},
+                doc! {"$set":{field:if field == "origin" {"user_upload"} else {"foreign"}}},
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            selected::select(
+                &state,
+                &owner,
+                &row.id,
+                producing_turn,
+                &choose(vec![refs[0].clone()])
+            )
+            .await,
+            Err(AppError::NotFound(_))
+        ));
+        db.collection::<bson::Document>(ATTACHMENTS)
+            .replace_one(doc! {"_id":&refs[0]}, original)
+            .await
+            .unwrap();
+    }
+    assert!(matches!(
+        selected::select(
+            &state,
+            &owner,
+            &row.id,
+            producing_turn,
+            &choose(vec!["unknown".into()])
+        )
+        .await,
+        Err(AppError::NotFound(_))
+    ));
+    // A real image from another of the owner's conversations is refused like
+    // an unknown one, although it is selectable in its own conversation.
+    let other = begin_turn(&db, &owner, &request(None, "show the garage"), keys)
+        .await
+        .unwrap();
+    let foreign = attach_image(&db, keys, &owner, &other.id, "cam", "image/png", &png)
+        .await
+        .unwrap()
+        .unwrap()
+        .id;
+    assert!(matches!(
+        selected::select(
+            &state,
+            &owner,
+            &row.id,
+            producing_turn,
+            &choose(vec![foreign.clone()])
+        )
+        .await,
+        Err(AppError::NotFound(_))
+    ));
+    assert!(
+        selected::validate_live(
+            &state,
+            &owner,
+            &row.id,
+            producing_turn,
+            std::slice::from_ref(&foreign)
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(
+        selected::select(
+            &state,
+            &owner,
+            &other.id,
+            other.active_turn.as_ref().map(|t| t.turn_id.as_str()),
+            &choose(vec![foreign.clone()])
+        )
+        .await
+        .unwrap()["status"],
+        "selected_not_sent"
+    );
+    db.collection::<bson::Document>(CONVERSATIONS)
+        .update_one(doc! {"_id":&row.id}, doc! {"$set":{"guest_turn":true}})
+        .await
+        .unwrap();
+    assert!(matches!(
+        selected::select(
+            &state,
+            &owner,
+            &row.id,
+            producing_turn,
+            &choose(vec![refs[0].clone()])
+        )
+        .await,
+        Err(AppError::NotFound(_))
+    ));
+    assert!(
+        selected::validate_live(&state, &owner, &row.id, producing_turn, &refs[..1])
+            .await
+            .is_err()
+    );
+    db.collection::<bson::Document>(CONVERSATIONS)
+        .update_one(doc! {"_id":&row.id}, doc! {"$set":{"guest_turn":false}})
+        .await
+        .unwrap();
+    selected::select(
+        &state,
+        &owner,
+        &row.id,
+        producing_turn,
+        &choose(vec![refs[2].clone()]),
+    )
+    .await
+    .unwrap();
     let message_id = Uuid::new_v4().to_string();
     finish_turn(
         &db,
@@ -1891,6 +2104,7 @@ async fn turn_images_are_bounded_copied_to_the_reply_and_deleted_with_the_chat()
         .find(|m| m.id == message_id)
         .unwrap();
     assert_eq!(reply.attachments.len(), MAX_TURN_ATTACHMENTS);
+    assert_eq!(reply.reply_image_refs, vec![refs[2].clone()]);
     assert_eq!(reply.attachments[0].label, "cam__snapshot_0");
     let (content_type, bytes) =
         read_attachment(&db, keys, &owner, &row.id, &reply.attachments[0].id)
@@ -2590,4 +2804,21 @@ fn upstream_model_rejections_report_model_unavailable_with_guidance() {
             .message
             .contains("model selector")
     );
+}
+
+#[test]
+fn channel_turn_instructions_require_explicit_image_selection() {
+    let mut row = stale_test_row(Utc::now());
+    let turn = row.active_turn.as_mut().unwrap();
+    turn.origin = TurnOrigin::Channel;
+    turn.asked_from = Some(crate::models::assistant_conversation::ChannelOrigin {
+        nyxbot_channel_id: "bot".into(),
+        platform: "telegram".into(),
+        partition: "chat".into(),
+        thread: None,
+    });
+    let note = channel_note(&row);
+    assert!(note.contains("The user is reading this reply in their telegram chat app."));
+    assert!(note.contains("Images are sent only when you explicitly select same-turn tool image handles with nyxid__set_reply_images; otherwise no images are sent."));
+    assert!(note.contains("Selection is not delivery confirmation."));
 }

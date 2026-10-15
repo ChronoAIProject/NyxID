@@ -62,6 +62,7 @@ pub const AGENT_TOOL_NAMES: &[&str] = &[
     "remember",
     "forget",
     "post_to_chat",
+    "set_reply_images",
     "machine_update",
     "machine_capabilities",
     "request_agent_operations",
@@ -159,7 +160,8 @@ pub fn is_agent_tool(name: &str) -> bool {
 pub fn read_only(name: &str) -> bool {
     matches!(
         name,
-        "list_schedules"
+        "set_reply_images"
+            | "list_schedules"
             | "wait_for_subagents"
             | "list_subagents"
             | "read_subagent"
@@ -392,8 +394,12 @@ pub fn schema(name: &str) -> Value {
             vec!["text"],
         ),
         "forget" => (json!({"note_id": string(64)}), vec!["note_id"]),
+        "set_reply_images" => (
+            json!({"image_refs": image_refs_schema()}),
+            vec!["image_refs"],
+        ),
         "post_to_chat" => (
-            json!({"chat_id": {"type": "string", "minLength": 1, "maxLength": 64,
+            json!({"image_refs": image_refs_schema(), "chat_id": {"type": "string", "minLength": 1, "maxLength": 64,
                     "description": "A chat id from nyxid__list_channel_chats (or the chat \
                     id NyxID named in your instructions)"},
                 "text": {"type": "string", "minLength": 1, "maxLength": 4000,
@@ -738,10 +744,13 @@ pub(crate) fn description(name: &str) -> &'static str {
             secrets. Pass replace_id to update a note."
         }
         "forget" => "Delete one of your memory notes by id.",
+        "set_reply_images" => {
+            "Replace the current reply image selection ([] clears). Only tool image handles produced in this owner turn are eligible; user uploads and guest turns are excluded. Selected, not yet sent: this tool has no external effect. The ordinary final reply supplies the text. Channels may report that images could not be shown."
+        }
         "post_to_chat" => {
             "Post a message into a chat your channel bot is in, without being asked there \
             (e.g. a scheduled update). Works only in chats you answer (NyxBot: any of the \
-            user's chats) whose posting is allowed; only when the user asked for it."
+            user's chats) whose posting is allowed; only when the user asked for it. Optional image_refs selects same-turn tool images for this post only; it does not change the final reply selection."
         }
         "list_channel_chats" => {
             "List the chats the user's channel bots are in: each private chat, group, channel \
@@ -911,9 +920,18 @@ fn matches_spec_type(value: &Value, spec: &Value, kind: Option<&str>) -> bool {
                 .as_u64()
                 .is_none_or(|max| items.len() as u64 <= max)
                 && items.iter().all(|item| matches_spec(item, &spec["items"]))
+                && (spec["uniqueItems"] != true
+                    || items
+                        .iter()
+                        .enumerate()
+                        .all(|(i, item)| !items[..i].contains(item)))
         }),
         _ => false,
     }
+}
+
+fn image_refs_schema() -> Value {
+    json!({"type":"array","items":{"type":"string","minLength":1,"maxLength":64},"maxItems":crate::services::assistant_nyxagent::MAX_TURN_ATTACHMENTS,"uniqueItems":true})
 }
 
 #[cfg(test)]
@@ -1055,6 +1073,24 @@ mod tests {
             )
             .is_err()
         );
+        assert!(is_agent_tool("set_reply_images"));
+        assert!(read_only("set_reply_images"));
+        assert!(!read_only("post_to_chat"));
+        assert!(validate("set_reply_images", &json!({"image_refs":[]})).is_ok());
+        assert!(validate("set_reply_images", &json!({})).is_err());
+        assert!(validate("set_reply_images", &json!({"image_refs":["same","same"]})).is_err());
+        assert!(
+            validate(
+                "post_to_chat",
+                &json!({"chat_id":"c","text":"t","image_refs":["image"]})
+            )
+            .is_ok()
+        );
+        let annotations =
+            crate::services::mcp_service::tool_annotations("nyxid__set_reply_images", &[]).unwrap();
+        assert_eq!(annotations["readOnlyHint"], true);
+        assert_eq!(annotations["openWorldHint"], false);
+        assert!(annotations["title"].as_str().is_some());
         assert!(is_team_tool("nyxid__spawn_subagent"));
         assert!(is_team_tool("nyxid__remember"));
         assert!(!is_team_tool("nyxid__list_agent_keys"));

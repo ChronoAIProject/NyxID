@@ -57,6 +57,8 @@ fn stream_timeout_is_the_earlier_of_transport_idle_and_no_progress() {
 fn failed_message_response_serializes_error_detail_as_rfc3339() {
     let occurred_at = Utc::now();
     let response = MessageResponse::from(AssistantMessage {
+        reply_image_refs: Vec::new(),
+        reply_image_destinations: Vec::new(),
         retry_of: None,
         specialist_id: None,
         steering: None,

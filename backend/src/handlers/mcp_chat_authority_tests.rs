@@ -1200,11 +1200,13 @@ async fn chat_tool_images_become_mcp_image_content_and_owner_only_turn_attachmen
         "{note}"
     );
     assert!(
-        note.contains("already displays this image to the user"),
+        note.contains("Stored for the owner's NyxID conversation"),
         "{note}"
     );
     assert!(
-        note.contains("Do not say it could not be displayed"),
+        !note.contains("Delivered")
+            && !note.contains("shown below")
+            && note.contains("nyxid__set_reply_images"),
         "{note}"
     );
     // Small enough that NyxAgent's 10,000-character truncation never reaches the note.
@@ -1227,6 +1229,7 @@ async fn chat_tool_images_become_mcp_image_content_and_owner_only_turn_attachmen
         .unwrap();
     let attachments = row.active_turn.as_ref().unwrap().attachments.clone();
     assert_eq!(attachments.len(), 1);
+    assert!(note.contains(&attachments[0].id));
     assert_eq!(attachments[0].content_type, "image/png");
     assert_eq!(attachments[0].size, png.len() as i64);
     assert_eq!(attachments[0].label, tool);
@@ -1375,7 +1378,11 @@ async fn specialist_guest_turns_never_use_owner_tools_or_ssh() {
             "nyxid__remember",
             json!({"text": "the owner's secret plan"}),
         ),
-        ("nyxid__post_to_chat", json!({"chat_id": "c", "text": "hi"})),
+        (
+            "nyxid__post_to_chat",
+            json!({"chat_id": "c", "text": "hi", "image_refs":["unknown"]}),
+        ),
+        ("nyxid__set_reply_images", json!({"image_refs":[]})),
         ("nyx__connect_service", json!({"service": "github"})),
         ("nyx__oracle_pools", json!({})),
     ] {

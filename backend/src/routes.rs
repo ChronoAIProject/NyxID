@@ -1772,7 +1772,7 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         )
         .route(
             "/reply",
-            post(handlers::channel_relay::async_reply).layer(DefaultBodyLimit::max(
+            post(handlers::channel_relay::async_reply_references).layer(DefaultBodyLimit::max(
                 crate::services::channel_media_service::request_body_limit(
                     router_state
                         .as_ref()

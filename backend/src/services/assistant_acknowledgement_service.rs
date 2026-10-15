@@ -752,6 +752,8 @@ pub async fn audit_access_request_denied(
         )
         .await;
         let message = crate::models::assistant_message::AssistantMessage {
+            reply_image_refs: Vec::new(),
+            reply_image_destinations: Vec::new(),
             retry_of: None,
             specialist_id: Some(chat.agent_id.clone()),
             steering: None,

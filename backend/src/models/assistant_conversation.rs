@@ -125,6 +125,9 @@ pub struct ToolProgress {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ActiveTurn {
+    /// Explicit selection for the final reply, separate from the image inventory.
+    #[serde(default)]
+    pub reply_image_refs: Vec<String>,
     /// The failed turn this turn retries (owner Retry only).
     #[serde(default)]
     pub retry_of: Option<String>,

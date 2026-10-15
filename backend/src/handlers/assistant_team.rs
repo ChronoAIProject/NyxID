@@ -427,20 +427,30 @@ pub(crate) async fn after_turn(
             .filter(|o| o.thread.is_some())
             .collect();
         if bound.is_empty() {
-            super::nyxbot::deliver_update(state, row, text).await;
+            if let Some(origin) = row.channel.as_ref().or(row.reply_channel.as_ref()) {
+                super::nyxbot::deliver_to_selected(state, row, origin, text, Some(&turn.turn_id))
+                    .await;
+            }
         } else {
             let mut sent = std::collections::HashSet::new();
             for origin in bound {
                 if let Some(binding) = origin.thread.as_ref()
                     && sent.insert(binding.source_message_id.clone())
                 {
-                    super::nyxbot::deliver_to(state, row, origin, text).await;
+                    super::nyxbot::deliver_to_selected(
+                        state,
+                        row,
+                        origin,
+                        text,
+                        Some(&turn.turn_id),
+                    )
+                    .await;
                 }
             }
         }
     }
     for origin in &also {
-        super::nyxbot::deliver_to(state, row, origin, text).await;
+        super::nyxbot::deliver_to_selected(state, row, origin, text, Some(&turn.turn_id)).await;
     }
 }
 
@@ -940,6 +950,7 @@ fn action_summary(name: &str, args: &Value) -> String {
         "delete_group" => "Delete a group chat",
         "post_to_group" => "Post to a group chat",
         "post_to_chat" => "Post to a channel chat",
+        "set_reply_images" => "Select reply images",
         "update_settings" => "Change NyxBot settings",
         "connect_channel_bot" => "Connect a channel bot",
         "link_channel_bot" => "Change which agent a channel bot reaches",
@@ -1146,6 +1157,19 @@ fn dispatch<'a>(
     args: &'a Value,
 ) -> futures::future::BoxFuture<'a, AppResult<(Value, bool)>> {
     match name {
+        "set_reply_images" => Box::pin(async move {
+            Ok((
+                crate::services::assistant_reply_images::select(
+                    state,
+                    &chat.user_id,
+                    &chat.conversation_id,
+                    chat.turn_id.as_deref(),
+                    args,
+                )
+                .await?,
+                false,
+            ))
+        }),
         "create_schedule" | "list_schedules" | "update_schedule" | "delete_schedule"
         | "run_schedule_now" => Box::pin(async move {
             Ok((
@@ -2338,21 +2362,48 @@ async fn dispatch_channels(
             false,
         ),
         "post_to_chat" => {
-            // NyxBot posts to any of the owner's chats; a specialist only to
-            // chats it answers.
+            let refs = crate::services::assistant_reply_images::refs(args, false)?;
             let agent = (!chat.is_orchestrator()).then_some(chat.agent_id.as_str());
-            // Boxed: the platform send is a large future.
-            (
-                Box::pin(super::nyxbot::chats::post(
-                    state,
-                    owner,
-                    text_arg(args, "chat_id"),
-                    text_arg(args, "text"),
-                    agent,
-                ))
-                .await?,
-                false,
+            if refs.is_empty() {
+                return Ok((
+                    Box::pin(super::nyxbot::chats::post(
+                        state,
+                        owner,
+                        text_arg(args, "chat_id"),
+                        text_arg(args, "text"),
+                        agent,
+                    ))
+                    .await?,
+                    false,
+                ));
+            }
+            let row = crate::services::assistant_reply_images::validate_live(
+                state,
+                owner,
+                &chat.conversation_id,
+                chat.turn_id.as_deref(),
+                &refs,
             )
+            .await?;
+            let turn = row
+                .active_turn
+                .as_ref()
+                .ok_or_else(crate::services::assistant_reply_images::unavailable)?;
+            let result = Box::pin(super::nyxbot::chats::post_selected(
+                state,
+                owner,
+                text_arg(args, "chat_id"),
+                text_arg(args, "text"),
+                agent,
+                crate::services::assistant_reply_images::Selection {
+                    conversation: &row.id,
+                    turn: &turn.turn_id,
+                    refs: &refs,
+                },
+            ))
+            .await?;
+            let failed = result["status"] != "posted";
+            (result, failed)
         }
         "disconnect_channel_bot" => (
             super::nyxbot::disconnect(state, owner, text_arg(args, "channel_agent_id")).await?,

@@ -54,7 +54,7 @@ pub const GATEWAY_SLUG: &str = "cmaeg";
 pub const PROVIDER_SLUG: &str = "nyxbot";
 pub const LINK_CODE_TTL_HOURS: i64 = 24;
 pub const EVENT_RETENTION_HOURS: i64 = 24;
-pub const MAX_CHANNEL_REPLY_CHARS: usize = 8000;
+pub use crate::services::assistant_reply_images::MAX_CHANNEL_REPLY_CHARS;
 const GATEWAY_TIMEOUT_SECS: u64 = 20;
 
 fn canonical_platform(platform: &str) -> &str {
@@ -3884,49 +3884,140 @@ pub async fn deliver_to(
     origin: &ChannelOrigin,
     text: &str,
 ) {
-    let result: AppResult<()> = async {
-        if origin.thread.is_some() {
-            return thread_follow::send(state, &row.user_id, origin, &row.id, text).await;
-        }
-        let Some((channel, thread)) = delivery_target(state, row, origin).await? else {
-            return Ok(());
-        };
-        let reply = bounded_reply(text);
-        // A chat from before its bot moved to the gateway has no gateway
-        // reference yet: it is answered through NyxID's relay, as before.
-        let relay_era = thread.event_ref_ciphertext.is_none() && thread.last_message_id.is_some();
-        if channel.transport == "gateway" && !relay_era {
-            let (Some(ciphertext), Some(expires_at)) = (
-                thread.event_ref_ciphertext.as_ref(),
-                thread.event_ref_expires_at,
-            ) else {
-                return Ok(());
+    deliver_to_selected(state, row, origin, text, None).await;
+}
+
+pub async fn deliver_to_selected(
+    state: &AppState,
+    row: &crate::models::assistant_conversation::AssistantConversation,
+    origin: &ChannelOrigin,
+    text: &str,
+    turn_id: Option<&str>,
+) {
+    let mut requested = 0;
+    let result: AppResult<Option<crate::services::assistant_reply_images::DeliveryReport>> =
+        async {
+            let selected = if let Some(turn) = turn_id {
+                crate::services::assistant_reply_images::settled(state, &row.user_id, &row.id, turn)
+                    .await?
+            } else {
+                None
             };
-            if expires_at <= Utc::now() {
-                return Ok(());
+            requested = selected.as_ref().map_or(0, |m| m.reply_image_refs.len());
+            if turn_id.is_some()
+                && selected.is_none()
+                && load_channel(state, &row.user_id, &origin.nyxbot_channel_id)
+                    .await?
+                    .transport
+                    == "gateway"
+            {
+                return Err(crate::services::assistant_reply_images::unavailable());
             }
-            let event_ref = Zeroizing::new(
-                String::from_utf8(state.encryption_keys.decrypt(ciphertext).await?)
-                    .map_err(|_| AppError::Internal("Event reference unavailable".into()))?,
-            );
-            let Some(agent_key) = decrypt_agent_key(state, &channel).await? else {
-                return Ok(());
+            if origin.thread.is_some() {
+                return thread_follow::send_selected(
+                    state,
+                    &row.user_id,
+                    origin,
+                    &row.id,
+                    text,
+                    selected.as_ref(),
+                )
+                .await;
+            }
+            let Some((channel, thread)) = delivery_target(state, row, origin).await? else {
+                return Ok(None);
             };
-            gateway_call(
-                state,
-                reqwest::Method::POST,
-                &format!("/events/{}/replies", urlencode(&event_ref)),
-                &agent_key,
-                Some(&json!({"text": reply})),
-                None,
-            )
-            .await?;
-        } else if let Some(message_id) = thread.last_message_id.as_deref() {
-            direct_reply(state, &channel, message_id, &reply, None).await?;
+            let mut reply = bounded_reply(text);
+            // A chat from before its bot moved to the gateway has no gateway
+            // reference yet: it is answered through NyxID's relay, as before.
+            if crate::services::channel_turn_delivery::reply_uses_gateway(&channel, &thread) {
+                if let Some(message) = selected.as_ref().filter(|m| !m.reply_image_refs.is_empty())
+                {
+                    reply = crate::services::assistant_reply_images::notice(
+                        &reply,
+                        &state.config.frontend_url,
+                        &message.conversation_id,
+                    );
+                }
+                let (Some(ciphertext), Some(expires_at)) = (
+                    thread.event_ref_ciphertext.as_ref(),
+                    thread.event_ref_expires_at,
+                ) else {
+                    return Ok(None);
+                };
+                if expires_at <= Utc::now() {
+                    return Ok(None);
+                }
+                let event_ref = Zeroizing::new(
+                    String::from_utf8(state.encryption_keys.decrypt(ciphertext).await?)
+                        .map_err(|_| AppError::Internal("Event reference unavailable".into()))?,
+                );
+                let Some(agent_key) = decrypt_agent_key(state, &channel).await? else {
+                    return Ok(None);
+                };
+                let sent = gateway_call(
+                    state,
+                    reqwest::Method::POST,
+                    &format!("/events/{}/replies", urlencode(&event_ref)),
+                    &agent_key,
+                    Some(&json!({"text": reply})),
+                    None,
+                )
+                .await?;
+                let confirmed = (200..300).contains(&sent.status)
+                    && sent
+                        .body
+                        .pointer("/delivery/outcome")
+                        .or_else(|| sent.body.pointer("/message/delivery/outcome"))
+                        .and_then(Value::as_str)
+                        == Some("confirmed");
+                if confirmed
+                    && let (Some(message), Some(source_id)) =
+                        (selected.as_ref(), thread.last_message_id.as_deref())
+                {
+                    let _ = crate::services::assistant_reply_images::bind_original(
+                        state, message, &channel, source_id,
+                    )
+                    .await;
+                }
+                return Ok((requested > 0).then(|| {
+                    crate::services::assistant_reply_images::DeliveryReport::observed(
+                        confirmed, requested, requested,
+                    )
+                }));
+            } else if let Some(message_id) = thread.last_message_id.as_deref() {
+                return direct_reply_selected(
+                    state,
+                    &channel,
+                    message_id,
+                    &reply,
+                    None,
+                    selected.as_ref(),
+                )
+                .await;
+            }
+            Ok(None)
         }
-        Ok(())
+        .await;
+    let report = match &result {
+        Ok(report) => report.as_ref(),
+        Err(_) => None,
+    };
+    let failed_report = (result.is_err() && requested > 0).then(|| {
+        crate::services::assistant_reply_images::DeliveryReport::observed(false, requested, 0)
+    });
+    if let Some(report) = report.or(failed_report.as_ref()) {
+        audit(
+            state,
+            &row.user_id,
+            "nyxbot_channel_answer_delivery",
+            json!({
+                "conversation_id":row.id, "turn_id":turn_id, "channel_id":origin.nyxbot_channel_id,
+                "outcome":report.status(), "delivery":report,
+            }),
+        )
+        .await;
     }
-    .await;
     if let Err(error) = result {
         tracing::debug!(%error, "NyxBot channel update not delivered");
     }
@@ -3945,6 +4036,20 @@ async fn direct_reply(
     text: &str,
     reply_token: Option<&str>,
 ) -> AppResult<()> {
+    direct_reply_selected(state, channel, message_id, text, reply_token, None)
+        .await
+        .map(|_| ())
+}
+
+async fn direct_reply_selected(
+    state: &AppState,
+    channel: &NyxbotChannel,
+    message_id: &str,
+    text: &str,
+    reply_token: Option<&str>,
+    selected: Option<&crate::models::assistant_message::AssistantMessage>,
+) -> AppResult<Option<crate::services::assistant_reply_images::DeliveryReport>> {
+    let selected = selected.filter(|message| !message.reply_image_refs.is_empty());
     let mut headers = HeaderMap::new();
     let auth = match reply_token {
         Some(token) => {
@@ -3975,7 +4080,40 @@ async fn direct_reply(
             Some(auth)
         }
     };
-    super::channel_relay::async_reply(
+    let source = if selected.is_some() {
+        state
+            .db
+            .collection::<crate::models::channel_message::ChannelMessage>(
+                crate::models::channel_message::COLLECTION_NAME,
+            )
+            .find_one(doc! {"_id":message_id,"channel_bot_id":&channel.channel_bot_id})
+            .await?
+    } else {
+        None
+    };
+    let supported = source
+        .as_ref()
+        .and_then(|s| s.platform_conversation_id.as_deref())
+        .is_some_and(|chat| {
+            crate::services::channel_adapters::conversation_capabilities(
+                &channel.platform,
+                chat,
+                &state.token_exchange_cache,
+            )
+            .media
+            .outbound
+            .contains(&crate::services::channel_platform::MediaKind::Image)
+        });
+    let (text, attachments, omitted) = crate::services::assistant_reply_images::prepare(
+        state,
+        &channel.user_id,
+        text,
+        selected.map(crate::services::assistant_reply_images::Selection::from_message),
+        supported,
+    )
+    .await;
+    let requested = selected.map_or(0, |s| s.reply_image_refs.len());
+    let sent = super::channel_relay::async_reply(
         State(state.clone()),
         headers,
         crate::mw::auth::OptionalAuthUser(auth),
@@ -3985,12 +4123,19 @@ async fn direct_reply(
             reply: super::channel_relay::AsyncReplyBody {
                 text: Some(text.to_owned()),
                 metadata: None,
-                attachments: Vec::new(),
+                attachments,
             },
         }),
     )
-    .await
-    .map(|_| ())
+    .await;
+    let (sent, report) =
+        crate::services::assistant_reply_images::observe(sent, requested, omitted)?;
+    if sent.is_some()
+        && let (Some(message), Some(source)) = (selected, source.as_ref())
+    {
+        let _ = crate::services::assistant_reply_images::bind(state, message, source).await;
+    }
+    Ok(report)
 }
 
 /// `POST /api/v1/nyxbot/relay/{channel_id}`: NyxID's signed relay callback for

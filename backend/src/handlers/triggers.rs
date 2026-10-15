@@ -630,6 +630,7 @@ pub struct RunResponse {
     pub reason: Option<String>,
     pub thread_id: Option<String>,
     pub duration_ms: Option<i64>,
+    pub result_delivery: Option<serde_json::Value>,
     pub missed: Option<MissedResponse>,
 }
 
@@ -650,6 +651,10 @@ pub(crate) fn run_response(run: crate::models::trigger_run::TriggerRun) -> RunRe
         reason: run.reason,
         thread_id: run.thread_id,
         duration_ms: run.duration_ms,
+        result_delivery: run
+            .result_delivery
+            .as_ref()
+            .and_then(|d| serde_json::to_value(d).ok()),
         missed: run.missed.map(|missed| MissedResponse {
             count: missed.count,
             from: missed.from.to_rfc3339(),

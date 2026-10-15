@@ -745,11 +745,12 @@ async fn attach_computer_images(
                     .ok_or_else(|| {
                         AppError::ValidationError("Invalid machine image type or size".into())
                     })?;
-            let attached = engine::attach_image(
+            let attached = engine::attach_image_for_turn(
                 &state.db,
                 &state.encryption_keys,
                 &chat.user_id,
                 &chat.conversation_id,
+                chat.turn_id.as_deref(),
                 "Machine screenshot",
                 &media.content_type,
                 &media.bytes,
@@ -758,13 +759,7 @@ async fn attach_computer_images(
             screenshot_id = attached.as_ref().map(|meta| meta.id.clone());
             *item = json!({
                 "type":"text",
-                "text":if attached.is_some(){
-                    "Image displayed to the owner in this conversation. NyxID shows the image to you \
-                    after this response when this agent can view images. Do not describe its \
-                    contents before you have seen it."
-                }else{
-                    "The image could not be attached: no live turn or attachment limit reached."
-                }
+                "text":attached.as_ref().map(|image| crate::services::assistant_reply_images::stored_note(&image.id)).unwrap_or_else(|| "The image could not be stored: no live turn or attachment limit reached.".into())
             });
         }
     }
@@ -849,17 +844,18 @@ async fn share_file(
         authority,
     )
     .await?;
-    let kind = ["image/png", "image/jpeg", "image/gif", "image/webp"]
+    let kind = crate::services::mcp_service::TOOL_IMAGE_TYPES
         .into_iter()
         .find(|kind| crate::services::mcp_service::image_magic_matches(kind, &bytes))
         .ok_or_else(|| {
             AppError::ValidationError("Only PNG, JPEG, GIF and WebP images may be shared".into())
         })?;
-    let attached = engine::attach_image(
+    let attached = engine::attach_image_for_turn(
         &state.db,
         &state.encryption_keys,
         &chat.user_id,
         &chat.conversation_id,
+        chat.turn_id.as_deref(),
         "Machine image",
         kind,
         &bytes,
@@ -868,7 +864,8 @@ async fn share_file(
     Ok(json!({
         "attached":attached.is_some(),
         "bytes":bytes.len(),
-        "message":"The image is shown only to the owner in this conversation."
+        "image_ref":attached.as_ref().map(|image| &image.id),
+        "message":attached.as_ref().map(|image| crate::services::assistant_reply_images::stored_note(&image.id)).unwrap_or_else(|| "The image could not be stored: no live turn or attachment limit reached.".into())
     }))
 }
 

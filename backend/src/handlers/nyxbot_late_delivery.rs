@@ -121,12 +121,26 @@ pub(super) fn provider_stream(
         yield created;
         match tokio::time::timeout_at(deadline, final_reply(receiver)).await {
             Ok(outcome) => {
+                // Resolve selection before committing the stream status. Missing
+                // state is not an explicitly empty image selection.
+                let outcome = match outcome {
+                    Ok(text) => gateway_text(&state, &event_key, &text).await
+                        .map_err(|_| "reply_selection_unavailable".to_owned()),
+                    Err(code) => Err(code),
+                };
                 let status = if outcome.is_ok() { "completed" } else { "failed" };
                 if delivery::claim_stream(&state.db, &event_key, status).await.unwrap_or(false) {
                     guard.disarm();
                     match outcome {
-                        Ok(text) => for frame in message_frames(&response_id, Some(&bounded_reply(&text))) {
-                            yield frame;
+                        Ok((text, event, message)) => {
+                            if !message.reply_image_refs.is_empty()
+                                && let Ok(channel) = load_channel(&state, &event.user_id, &event.channel_id).await
+                            {
+                                let _ = crate::services::assistant_reply_images::bind_original(
+                                    &state, &message, &channel, &event.event_id,
+                                ).await;
+                            }
+                            for frame in message_frames(&response_id, Some(&text)) { yield frame; }
                         },
                         Err(code) => yield json!({"type": "response.failed", "response": {
                             "id": &response_id, "status": "failed",
@@ -137,7 +151,15 @@ pub(super) fn provider_stream(
                     // asynchronous path, never to both writers.
                     let _ = delivery::detach(&state.db, &event_key).await;
                     guard.disarm();
-                    for frame in message_frames(&response_id, None) { yield frame; }
+                    if let Err(code) = &outcome
+                        && code == "reply_selection_unavailable"
+                    {
+                        yield json!({"type": "response.failed", "response": {
+                            "id": &response_id, "status": "failed",
+                            "error": {"code": code, "message": "NyxBot could not finish this turn."}}});
+                    } else {
+                        for frame in message_frames(&response_id, None) { yield frame; }
+                    }
                     process(&state, &event_key).await;
                 }
             }
@@ -285,11 +307,45 @@ async fn process_inner(state: &AppState, event_id: &str, gateway_only: bool) -> 
     if !delivery::claim_send(&state.db, event_id, &claim).await? {
         return Ok(());
     }
-    let result = dispatch(state, &event, &d, &channel, &conversation, &text).await;
-    let status = match result {
-        Ok(true) => "sent",
-        Ok(false) | Err(_) => "unknown",
-    };
+    let result = dispatch(state, &event, &d, &channel, &conversation, &text, &message).await;
+    let failed_report = (!message.reply_image_refs.is_empty() && !matches!(&result, Ok((true, _))))
+        .then(|| {
+            crate::services::assistant_reply_images::DeliveryReport::observed(
+                false,
+                message.reply_image_refs.len(),
+                0,
+            )
+        });
+    let report = result
+        .as_ref()
+        .ok()
+        .and_then(|(_, report)| report.as_ref())
+        .or(failed_report.as_ref());
+    let status = report.map_or_else(
+        || {
+            if matches!(&result, Ok((true, _))) {
+                "sent"
+            } else {
+                "unknown"
+            }
+        },
+        |r| {
+            if r.status() == "confirmed" {
+                "sent"
+            } else {
+                r.status()
+            }
+        },
+    );
+    if d.transport == "gateway" && matches!(&result, Ok((true, _))) {
+        let _ = crate::services::assistant_reply_images::bind_original(
+            state,
+            &message,
+            &channel,
+            &event.event_id,
+        )
+        .await;
+    }
     delivery::finish(&state.db, event_id, &claim, status).await?;
     events.update_one(doc! {"_id": event_id}, doc! {"$set": {"status": if message.status == "completed" { "completed" } else { "failed" }}}).await?;
     audit(
@@ -298,7 +354,7 @@ async fn process_inner(state: &AppState, event_id: &str, gateway_only: bool) -> 
         "nyxbot_channel_answer_delivery",
         json!({
             "event_id": event.id, "conversation_id": conversation_id, "turn_id": turn_id,
-            "transport": d.transport, "outcome": status,
+            "transport": d.transport, "outcome": status, "delivery": report,
         }),
     )
     .await;
@@ -443,6 +499,7 @@ async fn mint_target(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn dispatch(
     state: &AppState,
     event: &NyxbotEvent,
@@ -450,23 +507,37 @@ async fn dispatch(
     channel: &NyxbotChannel,
     conversation: &AssistantConversation,
     text: &str,
-) -> AppResult<bool> {
+    message: &AssistantMessage,
+) -> AppResult<(
+    bool,
+    Option<crate::services::assistant_reply_images::DeliveryReport>,
+)> {
     if d.origin.thread.is_some() && d.transport == "direct" {
-        thread_follow::send(state, &event.user_id, &d.origin, &conversation.id, text).await?;
-        return Ok(true);
+        let report = thread_follow::send_selected(
+            state,
+            &event.user_id,
+            &d.origin,
+            &conversation.id,
+            text,
+            Some(message),
+        )
+        .await?;
+        return Ok((true, report));
     }
     if d.transport == "direct" {
         // Route-key auth rechecks the current route; an expired callback token
         // never extends the sender's authority. The exact inbound preserves topics.
-        direct_reply(state, channel, &event.event_id, text, None).await?;
-        return Ok(true);
+        let report =
+            direct_reply_selected(state, channel, &event.event_id, text, None, Some(message))
+                .await?;
+        return Ok((true, report));
     }
     let Some(key) = decrypt_agent_key(state, channel).await? else {
-        return Ok(false);
+        return Ok((false, None));
     };
     let (path, idempotency) = if let Some(ciphertext) = &d.target_ciphertext {
         if d.target_expires_at.is_none_or(|t| t <= Utc::now()) {
-            return Ok(false);
+            return Ok((false, None));
         }
         let reference = Zeroizing::new(
             String::from_utf8(state.encryption_keys.decrypt(ciphertext).await?)
@@ -480,13 +551,23 @@ async fn dispatch(
         // Compatibility with gateways predating reply targets: the original
         // short-lived event is safe once, but never replaced by a newer event.
         if event.created_at + ChronoDuration::minutes(29) <= Utc::now() {
-            return Ok(false);
+            return Ok((false, None));
         }
         let reference = event_reference(state, event).await?;
         (
             Zeroizing::new(format!("/events/{}/replies", urlencode(&reference))),
             None,
         )
+    };
+    let omitted = message.reply_image_refs.len();
+    let text = if omitted > 0 {
+        crate::services::assistant_reply_images::notice(
+            text,
+            &state.config.frontend_url,
+            &message.conversation_id,
+        )
+    } else {
+        text.to_owned()
     };
     let mut message = json!({"text": text});
     if d.origin.thread.is_some() {
@@ -502,14 +583,23 @@ async fn dispatch(
     )
     .await?;
     if !(200..300).contains(&response.status) {
-        return Ok(false);
+        return Ok((false, None));
     }
     let outcome = response
         .body
         .pointer("/delivery/outcome")
         .or_else(|| response.body.pointer("/message/delivery/outcome"))
         .and_then(Value::as_str);
-    Ok(outcome == Some("confirmed"))
+    Ok((
+        outcome == Some("confirmed"),
+        (omitted > 0).then(|| {
+            crate::services::assistant_reply_images::DeliveryReport::observed(
+                outcome == Some("confirmed"),
+                omitted,
+                omitted,
+            )
+        }),
+    ))
 }
 
 async fn running(state: &AppState, event_id: &str) -> AppResult<bool> {
@@ -527,4 +617,38 @@ async fn running(state: &AppState, event_id: &str) -> AppResult<bool> {
     let row = engine::get(&state.db, &event.user_id, &conversation).await?;
     Ok(engine::live_turn(&row, Utc::now())
         .is_some_and(|active| active.turn_id == turn && !active.stop_requested))
+}
+
+async fn gateway_text(
+    state: &AppState,
+    event_id: &str,
+    text: &str,
+) -> AppResult<(
+    String,
+    NyxbotEvent,
+    crate::models::assistant_message::AssistantMessage,
+)> {
+    let event = state
+        .db
+        .collection::<NyxbotEvent>(EVENTS)
+        .find_one(doc! {"_id":event_id})
+        .await?
+        .ok_or_else(crate::services::assistant_reply_images::unavailable)?;
+    let (Some(conversation), Some(turn)) = (&event.conversation_id, &event.turn_id) else {
+        return Err(crate::services::assistant_reply_images::unavailable());
+    };
+    let message =
+        crate::services::assistant_reply_images::settled(state, &event.user_id, conversation, turn)
+            .await?
+            .ok_or_else(crate::services::assistant_reply_images::unavailable)?;
+    let text = if message.reply_image_refs.is_empty() {
+        bounded_reply(text)
+    } else {
+        crate::services::assistant_reply_images::notice(
+            &bounded_reply(text),
+            &state.config.frontend_url,
+            &message.conversation_id,
+        )
+    };
+    Ok((text, event, message))
 }

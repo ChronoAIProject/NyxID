@@ -79,3 +79,13 @@ pub async fn finish(db: &Database, event: &str, claim: &str, status: &str) -> Ap
         .await?;
     Ok(())
 }
+
+/// A chat predating its bot's gateway migration keeps its relay reply path
+/// until it has a gateway reference. This decision does not grant authority.
+pub fn reply_uses_gateway(
+    channel: &crate::models::nyxbot_channel::NyxbotChannel,
+    thread: &crate::models::nyxbot_channel::NyxbotThread,
+) -> bool {
+    channel.transport == "gateway"
+        && !(thread.event_ref_ciphertext.is_none() && thread.last_message_id.is_some())
+}

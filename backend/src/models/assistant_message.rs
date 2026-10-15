@@ -5,6 +5,12 @@ pub const COLLECTION_NAME: &str = "assistant_messages";
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct AssistantMessage {
+    /// Agent-selected tool images from this producing turn only.
+    #[serde(default)]
+    pub reply_image_refs: Vec<String>,
+    /// Exact destinations authorized by delivery, never image content.
+    #[serde(default)]
+    pub reply_image_destinations: Vec<String>,
     /// Guidance delivered to an existing response, never a new instruction turn.
     #[serde(default)]
     pub steering: Option<Box<Steering>>,

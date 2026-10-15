@@ -512,7 +512,7 @@ async fn inbound_impl(
         Err(_) => Some("I could not start that. Please try again.".into()),
     };
     if let Some(reply) = reply {
-        send(state, &row.user_id, &origin, conversation, &reply).await?;
+        send_selected(state, &row.user_id, &origin, conversation, &reply, None).await?;
     }
     // Opening reservations expire under the revision-fenced sweep. Another
     // simultaneous event may still be claiming this shared reservation.
@@ -572,17 +572,42 @@ async fn email_settings(
         .unwrap_or_else(|| parent.clone()))
 }
 
-pub(crate) async fn send(
+pub(crate) async fn send_selected(
     state: &AppState,
     owner: &str,
     origin: &ChannelOrigin,
     conversation: &str,
     text: &str,
-) -> AppResult<()> {
+    selected: Option<&crate::models::assistant_message::AssistantMessage>,
+) -> AppResult<Option<crate::services::assistant_reply_images::DeliveryReport>> {
+    let selected = selected.filter(|message| !message.reply_image_refs.is_empty());
     let channel = follow::access(&state.db, owner, &origin.nyxbot_channel_id).await?;
     if threads::gateway::negotiated(&channel) {
         follow::validate_delivery(&state.db, owner, origin, conversation).await?;
-        return super::gateway_threads::send(state, &channel, origin, conversation, text).await;
+        let (text, _, omitted) = crate::services::assistant_reply_images::prepare(
+            state,
+            owner,
+            text,
+            selected.map(crate::services::assistant_reply_images::Selection::from_message),
+            false,
+        )
+        .await;
+        let confirmed =
+            super::gateway_threads::send(state, &channel, origin, conversation, &text).await?;
+        if confirmed && let (Some(message), Some(binding)) = (selected, origin.thread.as_ref()) {
+            let _ = crate::services::assistant_reply_images::bind_original(
+                state,
+                message,
+                &channel,
+                &binding.source_message_id,
+            )
+            .await;
+        }
+        return Ok((omitted > 0).then(|| {
+            crate::services::assistant_reply_images::DeliveryReport::observed(
+                confirmed, omitted, omitted,
+            )
+        }));
     }
     let bot = channel_bot_service::get_bot(&state.db, &channel.channel_bot_id).await?;
     let adapter = adapter(state, &bot)?;
@@ -610,6 +635,20 @@ pub(crate) async fn send(
     )
     .await?
     .ok_or_else(follow::not_found)?;
+    let (text, attachments, omitted) = crate::services::assistant_reply_images::prepare(
+        state,
+        owner,
+        &bounded_reply(text),
+        selected.map(crate::services::assistant_reply_images::Selection::from_message),
+        crate::services::assistant_reply_images::supports_images(adapter.as_ref()),
+    )
+    .await;
+    let attachments = crate::services::channel_media_service::materialize(
+        &attachments,
+        state.config.channel_media_max_bytes,
+    )
+    .await?;
+    let requested = selected.map_or(0, |s| s.reply_image_refs.len());
     let outcome = threads::delivery::send_reply(
         &state.db,
         adapter.as_ref(),
@@ -617,17 +656,34 @@ pub(crate) async fn send(
         &credentials,
         &target,
         &OutboundReply {
-            text: Some(bounded_reply(text)),
-            attachments: Vec::new(),
+            text: Some(text),
+            attachments,
             reply_to_platform_message_id: None,
             metadata: None,
         },
     )
-    .await?;
-    match outcome.error {
+    .await
+    .and_then(|outcome| match outcome.error {
         Some(error) => Err(error),
         None => Ok(()),
+    });
+    let (sent, report) =
+        crate::services::assistant_reply_images::observe(outcome, requested, omitted)?;
+    // The observed send is authoritative; optional reader binding must never
+    // replace it with an error or cause a resend.
+    if sent.is_some()
+        && let Some(message) = selected
+        && let Ok(Some(source)) = state
+            .db
+            .collection::<crate::models::channel_message::ChannelMessage>(
+                crate::models::channel_message::COLLECTION_NAME,
+            )
+            .find_one(doc! {"_id":origin.thread.as_ref().map(|t| &t.source_message_id)})
+            .await
+    {
+        let _ = crate::services::assistant_reply_images::bind(state, message, &source).await;
     }
+    Ok(report)
 }
 
 /// Append bounded provider/metadata context to a channel turn. The first

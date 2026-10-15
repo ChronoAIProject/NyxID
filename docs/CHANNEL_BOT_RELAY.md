@@ -905,6 +905,68 @@ The result is the last platform message ID; Slack may omit it if no share timest
 
 Send idempotency fingerprints include attachment kind, source URL or SHA-256 of decoded bytes, filename, MIME type and caption. Changing any of them with the same key returns 409. The source URL identifies URL-based content; changing bytes behind the same URL cannot be detected on an already-completed replay. A multi-message send can partially succeed before a later upload fails; NyxID cannot roll back a platform send. Existing claim/retry semantics apply.
 
+### Assistant image selections
+
+NyxID assistant delivery accepts only explicit agent selections, separately from
+the encrypted tool-image inventory. `nyxid__set_reply_images` sets the current
+owner turn's final selection; `nyxid__post_to_chat.image_refs` selects for one
+post only. Both use existing attachment IDs, only tool-origin images produced
+in the same turn/conversation, with owner and retention checks. Guest turns and
+user uploads cannot contribute channel images. Existing destination checks and
+send barriers are unchanged. No images are inferred from reply text or inventory.
+
+NyxID-owned relay replies and initiated sends resolve selected images into the
+existing attachment materialization/upload pipeline. Capability is checked
+before composing: text-only destinations receive the original text plus “The
+selected images could not be shown in this chat” and an owner-only thread link.
+Gateway inbound replies remain owned by CMA and use that same degradation;
+phase 1 emits no image attachment blocks to CMA and makes no routing change.
+
+NyxID-owned image-bearing sends use the existing adapter call and routing metadata.
+A successful call is reported as `confirmed`; a failed call is `not_confirmed`
+with “Delivery not confirmed; parts may have been delivered.” NyxID never retries
+that send and makes no per-platform or per-component inference. These outcomes
+are metadata only in the automation run, `post_to_chat` result, and late/async
+answer audit. A successful text-and-notice fallback reports `images_unavailable`,
+not a full image delivery. Text-only sends preserve their existing behavior,
+except that a gateway stream emits `response.failed` with
+`reply_selection_unavailable` if its settled-selection lookup fails, even when
+the reply selected no images. Without that lookup, the stream cannot establish
+whether an image-unavailable notice is required. Optional destination binding
+after a successful send is best-effort: its failure never changes the observed
+send outcome or causes a resend, and empty selections skip binding entirely.
+
+The public `/channel-relay/send` and `/channel-relay/reply` responses, errors,
+outbound records, audits and claim/retry semantics remain unchanged. In
+particular, this feature adds no public delivery report or claim retention rules;
+the existing initiated-send rules above continue to apply.
+
+The reply API also reads this **reserved CMA contract** source, which NyxID
+emits nowhere yet (it is not supported on initiated `/send`):
+
+```json
+{
+  "kind": "image",
+  "source": {
+    "type": "assistant_image",
+    "conversation_id": "nyxa-...",
+    "turn_id": "turn-uuid",
+    "image_ref": "attachment-uuid"
+  }
+}
+```
+
+The authenticated reply token or live route key must resolve to the exact
+bot/route/platform/chat/thread destination recorded on the settled assistant
+message. The image must belong to that message's explicit selection and
+producing turn, its owner must be the NyxBot channel's linking person (including
+org-owned route keys), live org access must hold, and retention must permit the
+read. Failures are uniformly unavailable-shaped and disclose no image existence.
+The destination binding is a digest in `assistant_messages`, never a reference,
+filename, caption or bytes in channel storage. Reference Debug is redacted.
+Future CMA support must negotiate its writer separately; current CMA does not
+receive or render this source.
+
 ### ADR-013 metadata boundary
 
 Inbound `ChannelMessage.attachments` stores only `StoredAttachment { content_type, provider_ref, platform_message_id, file_key, image_key, filename, mime_type, size_bytes }`. Provider references are routing metadata needed to fetch an attachment; they are not its bytes. Old rows without the field deserialize as an empty list. The legacy cleanup retains new provider-reference metadata while removing historical content fields. Outbound rows store only the first attachment's `content_type` and an empty attachment list, never sources, bytes, captions or filenames. Audits contain only attachment kinds/count plus existing routing identifiers; idempotency rows store a fingerprint, never source content. No media is put in token claims and no new telemetry events are introduced.

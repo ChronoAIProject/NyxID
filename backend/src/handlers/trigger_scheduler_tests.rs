@@ -1286,116 +1286,7 @@ async fn confirmation_waits_and_resumes(kind: &str) {
     server.abort();
 }
 
-/// Exercise real reqwest + Telegram/FCM serializers against local TLS endpoints.
-/// DNS overrides are scoped to this client's three hosts, never process-global.
-async fn result_transport() -> (
-    reqwest::Client,
-    Arc<Mutex<Vec<(String, Value)>>>,
-    tokio::task::JoinHandle<()>,
-) {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    let hosts = vec![
-        "api.telegram.org".into(),
-        "fcm.googleapis.com".into(),
-        "oauth2.googleapis.com".into(),
-    ];
-    let certified = rcgen::generate_simple_self_signed(hosts).unwrap();
-    let root = reqwest::Certificate::from_der(certified.cert.der()).unwrap();
-    let private =
-        rustls::pki_types::PrivatePkcs8KeyDer::from(certified.signing_key.serialize_der());
-    let tls = rustls::ServerConfig::builder_with_provider(Arc::new(
-        rustls::crypto::aws_lc_rs::default_provider(),
-    ))
-    .with_safe_default_protocol_versions()
-    .unwrap()
-    .with_no_client_auth()
-    .with_single_cert(vec![certified.cert.der().clone()], private.into())
-    .unwrap();
-    let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(tls));
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
-    let requests = Arc::new(Mutex::new(Vec::new()));
-    let sink = requests.clone();
-    let server = tokio::spawn(async move {
-        loop {
-            let Ok((stream, _)) = listener.accept().await else {
-                break;
-            };
-            let acceptor = acceptor.clone();
-            let sink = sink.clone();
-            tokio::spawn(async move {
-                let mut stream = acceptor.accept(stream).await.unwrap();
-                let mut bytes = Vec::new();
-                let mut buffer = [0; 4096];
-                let body_at = loop {
-                    let n = stream.read(&mut buffer).await.unwrap();
-                    if n == 0 {
-                        return;
-                    }
-                    bytes.extend_from_slice(&buffer[..n]);
-                    if let Some(pos) = bytes.windows(4).position(|v| v == b"\r\n\r\n") {
-                        break pos + 4;
-                    }
-                };
-                let headers = String::from_utf8_lossy(&bytes[..body_at]);
-                let route = headers
-                    .lines()
-                    .next()
-                    .unwrap()
-                    .split_whitespace()
-                    .nth(1)
-                    .unwrap()
-                    .to_owned();
-                let length = headers
-                    .lines()
-                    .find_map(|line| {
-                        line.to_lowercase()
-                            .strip_prefix("content-length:")
-                            .map(|n| n.trim().parse::<usize>().unwrap())
-                    })
-                    .unwrap_or_default();
-                while bytes.len() < body_at + length {
-                    let n = stream.read(&mut buffer).await.unwrap();
-                    if n == 0 {
-                        return;
-                    }
-                    bytes.extend_from_slice(&buffer[..n]);
-                }
-                let body = if route == "/token" {
-                    json!({ "access_token": "fixture-access-token", "expires_in": 3600 })
-                } else {
-                    sink.lock().await.push((
-                        route.clone(),
-                        serde_json::from_slice(&bytes[body_at..body_at + length]).unwrap(),
-                    ));
-                    if route.ends_with("sendMessage") {
-                        json!({ "ok": true, "result": {"message_id":123} })
-                    } else {
-                        json!({ "name": "projects/test/messages/result" })
-                    }
-                }
-                .to_string();
-                let response = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                    body.len(),
-                    body
-                );
-                stream.write_all(response.as_bytes()).await.unwrap();
-                stream.shutdown().await.unwrap();
-            });
-        }
-    });
-    let client = reqwest::Client::builder()
-        .no_proxy()
-        .add_root_certificate(root)
-        .resolve("api.telegram.org", address)
-        .resolve("fcm.googleapis.com", address)
-        .resolve("oauth2.googleapis.com", address)
-        .timeout(std::time::Duration::from_secs(5))
-        .build()
-        .unwrap();
-    (client, requests, server)
-}
+use crate::test_utils::channel_transport::result_transport;
 
 #[tokio::test]
 async fn schedule_result_delivers_to_telegram_and_push_with_live_acl() {
@@ -1518,6 +1409,74 @@ async fn schedule_result_delivers_to_telegram_and_push_with_live_acl() {
         requests.lock().await[0].1["text"],
         "GitHub summary delivered"
     );
+    // A failed image-bearing result is not confirmed and never retried.
+    let mut image_run = run.clone();
+    image_run.id = Uuid::new_v4().to_string();
+    image_run.turn_id = Some(Uuid::new_v4().to_string());
+    state
+        .db
+        .collection::<TriggerRun>(RUNS)
+        .insert_one(&image_run)
+        .await
+        .unwrap();
+    let mut image_refs = Vec::new();
+    for bytes in [
+        b"\x89PNG\r\n\x1a\nCHOSEN_IMAGE".as_slice(),
+        b"\x89PNG\r\n\x1a\nFAIL_IMAGE",
+    ] {
+        let id = Uuid::new_v4().to_string();
+        state
+            .db
+            .collection::<crate::models::assistant_attachment::AssistantAttachment>(
+                crate::models::assistant_attachment::COLLECTION_NAME,
+            )
+            .insert_one(crate::models::assistant_attachment::AssistantAttachment {
+                id: id.clone(),
+                origin: "tool".into(),
+                user_id: OWNER.into(),
+                conversation_id: thread.id.clone(),
+                turn_id: image_run.turn_id.clone().unwrap(),
+                content_type: "image/png".into(),
+                size: bytes.len() as i64,
+                data_encrypted: state.encryption_keys.encrypt(bytes).await.unwrap(),
+                created_at: Utc::now(),
+            })
+            .await
+            .unwrap();
+        image_refs.push(id);
+    }
+    state.db.collection::<Document>(crate::models::assistant_message::COLLECTION_NAME).insert_one(doc! {
+        "_id":Uuid::new_v4().to_string(),"user_id":OWNER,"conversation_id":&thread.id,"turn_id":&image_run.turn_id,"seq":99,"role":"assistant","text":"Image report","status":"completed","created_at":mongodb::bson::DateTime::now(),"reply_image_refs":&image_refs,
+    }).await.unwrap();
+    settle_result(&state, &thread, &image_run, "Image report", None)
+        .await
+        .unwrap();
+    let partial = state
+        .db
+        .collection::<TriggerRun>(RUNS)
+        .find_one(doc! {"_id":&image_run.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(partial.outcome, RunOutcome::Failed);
+    assert_eq!(
+        partial.reason.as_deref(),
+        Some("result_delivery_not_confirmed")
+    );
+    assert_eq!(
+        partial.result_delivery.unwrap().get_str("status").unwrap(),
+        "not_confirmed"
+    );
+    assert_eq!(requests.lock().await.len(), 4);
+    settle_result(&state, &thread, &image_run, "Image report", None)
+        .await
+        .unwrap();
+    assert_eq!(
+        requests.lock().await.len(),
+        4,
+        "uncertain images must not be resent"
+    );
+    requests.lock().await.truncate(1);
     state
         .db
         .collection::<Document>(crate::models::nyxbot_channel::THREADS_COLLECTION_NAME)
@@ -2756,5 +2715,39 @@ async fn schedule_history_counter_tracks_inserts_and_trims_only_excess() {
             .unwrap(),
         1000
     );
+    server.abort();
+}
+
+#[tokio::test]
+async fn automation_chat_delivery_note_requires_explicit_image_selection() {
+    let (state, calls, server) = setup("schedule_image_selection_note").await;
+    let agent = team::ensure_nyxbot(&state.db, OWNER).await.unwrap();
+    let mut trigger = automation(&state, &agent.id, None).await;
+    let TriggerDelivery::Assistant { deliver_to, .. } = &mut trigger.delivery else {
+        panic!("assistant trigger")
+    };
+    // The destination may disappear before result delivery; the admitted turn
+    // must still receive the chat instructions through the real upstream request.
+    *deliver_to = DeliverTo::Chat {
+        chat_id: Uuid::new_v4().to_string(),
+    };
+    state
+        .db
+        .collection::<Trigger>(TRIGGERS)
+        .replace_one(doc! {"_id":&trigger.id}, &trigger)
+        .await
+        .unwrap();
+    let run = schedules::enqueue_now(&state.db, &trigger).await.unwrap();
+    let job = schedules::claim(&state.db, &run.id, Utc::now())
+        .await
+        .unwrap()
+        .unwrap();
+    run_job_once(&state, &job).await.unwrap();
+    completed(&state, &trigger).await;
+    let calls = calls.lock().await;
+    assert_eq!(calls.len(), 1);
+    let input = calls[0].body["input"].as_str().unwrap();
+    assert!(input.contains("Write plain text with full URLs; leave delivery to NyxID."));
+    assert!(input.contains("Images are sent only when you explicitly select same-turn tool image handles with nyxid__set_reply_images; otherwise no images are sent."));
     server.abort();
 }

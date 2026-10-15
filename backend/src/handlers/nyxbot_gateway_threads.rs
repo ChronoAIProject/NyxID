@@ -125,7 +125,7 @@ pub(super) async fn send(
     origin: &ChannelOrigin,
     conversation: &str,
     text: &str,
-) -> AppResult<()> {
+) -> AppResult<bool> {
     let binding = origin
         .thread
         .as_ref()
@@ -162,5 +162,10 @@ pub(super) async fn send(
     if !(200..300).contains(&reply.status) {
         return Err(crate::services::channel_thread_follow_service::not_found());
     }
-    Ok(())
+    Ok(reply
+        .body
+        .pointer("/delivery/outcome")
+        .or_else(|| reply.body.pointer("/message/delivery/outcome"))
+        .and_then(Value::as_str)
+        == Some("confirmed"))
 }

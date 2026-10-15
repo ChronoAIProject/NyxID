@@ -690,10 +690,38 @@ the image is also envelope-encrypted with `EncryptionKeys` into
 `assistant_attachments` and its metadata `{id,content_type,size,label}` is pushed
 onto `active_turn.attachments` (label = the tool identifier, at most 8 per turn;
 the slot is claimed before anything is encrypted or stored). Settlement copies
-the list onto the assistant reply. The note then tells the model the image is
-already displayed under its reply. NyxID can show it to the model after this
+the inventory onto the assistant reply. The tool note identifies the existing
+attachment ID as an image handle stored for the owner's NyxID conversation;
+it makes no channel delivery claim. NyxID can show it to the model after this
 response when image input is supported; the model must not describe its contents
 before viewing it.
+
+`nyxid__set_reply_images({"image_refs":["attachment-id"]})` explicitly replaces
+this live turn's final-reply selection; `[]` clears it, and a new turn starts with
+none. It is available to NyxBot and specialists in owner turns only, classified
+as a read for access-mode purposes, and has no external effect. Its response is
+`selected_not_sent`, with the expected destination capability when known.
+Only tool-origin images produced in this same conversation and turn, still
+within retention, qualify. User uploads and unknown/foreign/other-turn handles
+receive the same unavailable-shaped refusal; guest requests are forbidden. Selection adds no
+destination authority. The final text remains the ordinary assistant reply.
+
+`active_turn.reply_image_refs` settles atomically to
+`assistant_messages.reply_image_refs`, separately from `attachments`. Delivery
+never infers a selection from the inventory, prose or markers. Automation results
+use this same selection. `nyxid__post_to_chat` accepts optional `image_refs` for
+that post only, without reading or changing the final-reply selection. The web
+inventory has no new “sent to chat” indicator. All fields default for old rows.
+NyxID-owned image sends report `confirmed` only after the existing send call
+succeeds. On error they report `not_confirmed`: parts may have been delivered,
+and NyxID never retries the send. No per-platform/component certainty is inferred.
+Reports are metadata only; successful notice fallback is `images_unavailable`.
+Public relay API behavior is unchanged. Text-only sends retain their existing
+behavior except on gateway-stream settled-selection lookup failure: the stream
+emits `response.failed` with `reply_selection_unavailable`, even if no images
+were selected, because the required notice cannot be determined.
+Channel capability degradation and the reserved relay reference reader are
+specified in [Channel Bot Relay](../CHANNEL_BOT_RELAY.md#assistant-image-selections).
 Attachments are deleted with their conversation and in the admin user purge.
 
 After a successful upstream response, NyxID reads unseen tool images from the

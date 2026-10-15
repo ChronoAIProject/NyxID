@@ -3782,3 +3782,6 @@ mod tests {
         }
     }
 }
+
+#[path = "test_channel_transport.rs"]
+pub(crate) mod channel_transport;

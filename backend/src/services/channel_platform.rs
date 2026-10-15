@@ -193,9 +193,9 @@ impl MediaCapabilities {
 
 /// Public request shape. Sources and captions never enter persistent storage.
 #[derive(Clone, Serialize, Deserialize)]
-pub struct OutboundAttachment {
+pub struct OutboundAttachment<S = OutboundMediaSource> {
     pub kind: MediaKind,
-    pub source: OutboundMediaSource,
+    pub source: S,
     pub filename: Option<String>,
     pub mime_type: Option<String>,
     pub caption: Option<String>,
@@ -205,6 +205,48 @@ pub struct OutboundAttachment {
 pub enum OutboundMediaSource {
     Url { url: String },
     Base64 { data: String },
+}
+
+/// Relay request extension, resolved before the unchanged media/adapter boundary.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum RelayMediaSource {
+    Media(OutboundMediaSource),
+    Assistant(AssistantImageSource),
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum AssistantImageSource {
+    /// Reserved for authenticated replies; NyxID emits no references yet.
+    AssistantImage {
+        conversation_id: String,
+        turn_id: String,
+        image_ref: String,
+    },
+}
+
+impl TryFrom<OutboundAttachment<RelayMediaSource>> for OutboundAttachment {
+    type Error = crate::errors::AppError;
+
+    fn try_from(attachment: OutboundAttachment<RelayMediaSource>) -> AppResult<Self> {
+        let RelayMediaSource::Media(source) = attachment.source else {
+            return Err(super::assistant_reply_images::unavailable());
+        };
+        Ok(Self {
+            kind: attachment.kind,
+            source,
+            filename: attachment.filename,
+            mime_type: attachment.mime_type,
+            caption: attachment.caption,
+        })
+    }
+}
+
+impl<S> std::fmt::Debug for OutboundAttachment<S> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("OutboundAttachment([REDACTED])")
+    }
 }
 
 /// Internal adapter boundary: all sources have been validated and materialized.
@@ -235,8 +277,9 @@ macro_rules! redacted_media_debug {
 redacted_media_debug!(
     InboundMessage,
     InboundAttachment,
-    OutboundAttachment,
     OutboundMediaSource,
+    RelayMediaSource,
+    AssistantImageSource,
     MaterializedAttachment,
     FetchedMedia
 );

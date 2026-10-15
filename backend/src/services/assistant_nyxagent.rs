@@ -285,7 +285,7 @@ pub fn channel_note(row: &AssistantConversation) -> String {
         };
         prompt.push_str(&format!(
             "\n\n{place} Replies are delivered as \
-            plain text messages: keep them short, avoid tables and wide code blocks, and \
+            plain text messages. Images are sent only when you explicitly select same-turn tool image handles with nyxid__set_reply_images; otherwise no images are sent. Selection is not delivery confirmation. Keep replies short, avoid tables and wide code blocks, and \
             never paste secrets. The user cannot see NyxID's cards or buttons here: give every \
             link (connect links, setup links) as a full URL in your text, and when an action \
             needs confirmation (acknowledgement_required) ask them to reply with its \
@@ -1851,7 +1851,9 @@ pub async fn begin_turn_with_voice(
                     let lost_turn = lost.clone();
                     row.message_count += 1;
                     let message = AssistantMessage {
-        retry_of: None,
+                        reply_image_refs: Vec::new(),
+                        reply_image_destinations: Vec::new(),
+                        retry_of: None,
                         specialist_id: None,
                         steering: None,
                         voice: None,
@@ -1932,6 +1934,7 @@ pub async fn begin_turn_with_voice(
                     (None, None) => None,
                 };
                 row.active_turn = Some(ActiveTurn {
+                    reply_image_refs: Vec::new(),
                     retry_digests: retry
                         .as_ref()
                         .map(|retry| retry.digests.clone())
@@ -2065,6 +2068,8 @@ pub async fn begin_turn_with_voice(
                 ))
                 .await?;
                 let message = AssistantMessage {
+                    reply_image_refs: Vec::new(),
+                    reply_image_destinations: Vec::new(),
                     retry_of: None,
                     specialist_id: None,
                     steering: None,
@@ -2561,7 +2566,13 @@ async fn finish_turn_inner(
                     tracing::warn!(conversation_id = %row.id, turn_id = %turn_id, stage = %error.stage, http_status = ?error.http_status, upstream_request_id = ?error.upstream_request_id, response_id = ?error.response_id, continuations, upstream_error_code = error.upstream_code.as_deref().unwrap_or(error.code), "Assistant turn failed");
                 }
                 let message = AssistantMessage {
-        retry_of: None,
+                    reply_image_refs: if current.guest_turn {
+                        Vec::new()
+                    } else {
+                        settled_turn.as_ref().map(|t| t.reply_image_refs.clone()).unwrap_or_default()
+                    },
+                    reply_image_destinations: Vec::new(),
+                    retry_of: None,
                     specialist_id: None,
                     steering: None,
                     voice: None,
@@ -2765,8 +2776,8 @@ pub async fn pending_approvals(
 
 pub const MAX_TURN_ATTACHMENTS: usize = 8;
 
-/// Store an image a chat-key tool call returned and link it to the live turn.
-/// Returns `None` when no turn is live or the turn already holds the maximum.
+/// Test convenience; production producers carry their authenticated turn fence.
+#[cfg(test)]
 pub async fn attach_image(
     db: &Database,
     keys: &crate::crypto::aes::EncryptionKeys,
@@ -2776,9 +2787,46 @@ pub async fn attach_image(
     content_type: &str,
     bytes: &[u8],
 ) -> AppResult<Option<crate::models::assistant_conversation::TurnAttachment>> {
+    let row = db
+        .collection::<AssistantConversation>(CONVERSATIONS)
+        .find_one(doc! {"_id":conversation_id,"user_id":user_id})
+        .await?;
+    let turn = row
+        .as_ref()
+        .and_then(|r| live_turn(r, Utc::now()))
+        .map(|t| t.turn_id.as_str());
+    attach_image_for_turn(
+        db,
+        keys,
+        user_id,
+        conversation_id,
+        turn,
+        label,
+        content_type,
+        bytes,
+    )
+    .await
+}
+
+/// Store an image a chat-key tool call returned and link it to the live turn.
+/// Returns `None` when no turn is live or the turn already holds the maximum.
+#[allow(clippy::too_many_arguments)]
+pub async fn attach_image_for_turn(
+    db: &Database,
+    keys: &crate::crypto::aes::EncryptionKeys,
+    user_id: &str,
+    conversation_id: &str,
+    expected_turn: Option<&str>,
+    label: &str,
+    content_type: &str,
+    bytes: &[u8],
+) -> AppResult<Option<crate::models::assistant_conversation::TurnAttachment>> {
     use crate::models::{
         assistant_attachment::{AssistantAttachment, COLLECTION_NAME as ATTACHMENTS},
         assistant_conversation::TurnAttachment,
+    };
+    let Some(expected_turn) = expected_turn else {
+        return Ok(None);
     };
     let meta = TurnAttachment {
         image_input: None,
@@ -2794,7 +2842,9 @@ pub async fn attach_image(
     let mut filter = doc! {
         "_id": conversation_id,
         "user_id": user_id,
-        "active_turn.turn_id": {"$exists": true},
+        "active_turn.turn_id": expected_turn,
+        "active_turn.stop_requested":{"$ne":true},
+        "$expr":{"$gt":[{"$ifNull":["$active_turn.lease_expires_at",{"$add":["$active_turn.started_at",ACTIVE_TURN_TTL_SECS*1000]}]},bson::DateTime::now()]},
     };
     // The last permitted index must still be free.
     filter.insert(

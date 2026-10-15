@@ -260,24 +260,24 @@ async fn service_tool_content(
         return (content, false);
     };
     {
-        match crate::services::assistant_nyxagent::attach_image(
+        match crate::services::assistant_nyxagent::attach_image_for_turn(
             &state.db,
             &state.encryption_keys,
             &chat.user_id,
             &chat.conversation_id,
+            chat.turn_id.as_deref(),
             tool_name,
             &media.content_type,
             &media.bytes,
         )
         .await
         {
-            Ok(Some(_)) => note.push_str(
-                " Delivered: NyxID already displays this image to the user in the chat \
-                under your reply. Tell the user it is shown below. Do not say it could not \
-                be displayed, was sent as base64, or was truncated. NyxID shows the image to you \
-                after this response when this agent can view images. Do not describe its contents \
-                before you have seen it.",
-            ),
+            Ok(Some(image)) => {
+                note.push(' ');
+                note.push_str(&crate::services::assistant_reply_images::stored_note(
+                    &image.id,
+                ));
+            }
             Ok(None) => note.push_str(
                 " It could not be attached to the chat: no turn is running or this turn \
                 already holds the maximum number of images.",

@@ -1267,9 +1267,21 @@ pub(crate) async fn post(
     text: &str,
     agent_id: Option<&str>,
 ) -> AppResult<Value> {
-    post_inner(state, owner, chat_id, text, agent_id, None).await
+    post_inner(state, owner, chat_id, text, agent_id, None, None).await
 }
 
+pub(crate) async fn post_selected(
+    state: &AppState,
+    owner: &str,
+    chat_id: &str,
+    text: &str,
+    agent_id: Option<&str>,
+    selection: crate::services::assistant_reply_images::Selection<'_>,
+) -> AppResult<Value> {
+    post_inner(state, owner, chat_id, text, agent_id, None, Some(selection)).await
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn post_automation(
     state: &AppState,
     owner: &str,
@@ -1277,10 +1289,28 @@ pub(crate) async fn post_automation(
     text: &str,
     agent_id: Option<&str>,
     thread_id: &str,
+    turn_id: Option<&str>,
 ) -> AppResult<Value> {
-    post_inner(state, owner, chat_id, text, agent_id, Some(thread_id)).await
+    let message = if let Some(turn) = turn_id {
+        crate::services::assistant_reply_images::settled(state, owner, thread_id, turn).await?
+    } else {
+        None
+    };
+    post_inner(
+        state,
+        owner,
+        chat_id,
+        text,
+        agent_id,
+        Some(thread_id),
+        message
+            .as_ref()
+            .map(crate::services::assistant_reply_images::Selection::from_message),
+    )
+    .await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn post_inner(
     state: &AppState,
     owner: &str,
@@ -1288,6 +1318,7 @@ async fn post_inner(
     text: &str,
     agent_id: Option<&str>,
     full_thread: Option<&str>,
+    selection: Option<crate::services::assistant_reply_images::Selection<'_>>,
 ) -> AppResult<Value> {
     let (row, chat) = load_chat(state, owner, chat_id).await?;
     if row.status != "active" {
@@ -1347,6 +1378,21 @@ async fn post_inner(
         },
     );
     let adapter = resolve_adapter(&bot.platform, &state.token_exchange_cache)?;
+    let (text, attachments, omitted) = crate::services::assistant_reply_images::prepare(
+        state,
+        owner,
+        &text,
+        selection,
+        crate::services::channel_adapters::conversation_capabilities(
+            &bot.platform,
+            &platform_chat_id,
+            &state.token_exchange_cache,
+        )
+        .media
+        .outbound
+        .contains(&crate::services::channel_platform::MediaKind::Image),
+    )
+    .await;
     crate::handlers::channel_relay::check_initiate_rate_limit(state, &chat.id).await?;
     let key_owner = bot_owner(&row);
     let key = key_service::get_api_key(&state.db, key_owner, &row.route_api_key_id).await?;
@@ -1375,6 +1421,7 @@ async fn post_inner(
         created_at: now,
         updated_at: now,
     };
+    let requested = selection.map_or(0, |s| s.refs.len());
     let sent = crate::handlers::channel_relay::deliver_initiated_message(
         state,
         &HeaderMap::new(),
@@ -1386,13 +1433,29 @@ async fn post_inner(
             message: crate::handlers::channel_relay::AsyncReplyBody {
                 text: Some(text.to_owned()),
                 metadata: None,
-                attachments: Vec::new(),
+                attachments,
             },
             idempotency_key: None,
         },
         adapter.as_ref(),
     )
-    .await?;
+    .await;
+    let (sent, delivery) =
+        crate::services::assistant_reply_images::observe(sent, requested, omitted)?;
+    let Some(sent) = sent else {
+        return Ok(json!({"status":"not_confirmed", "chat_id":chat.id, "delivery":delivery}));
+    };
+    if full_thread.is_some()
+        && let Some(selection) = selection
+    {
+        let _ = crate::services::assistant_reply_images::bind_initiated(
+            state,
+            owner,
+            selection,
+            &conversation,
+        )
+        .await;
+    }
     audit(
         state,
         owner,
@@ -1401,7 +1464,18 @@ async fn post_inner(
             "message_id": &sent.message_id}),
     )
     .await;
-    Ok(json!({"status": "posted", "chat_id": chat.id, "message_id": sent.message_id}))
+    let status = delivery.as_ref().map_or("posted", |d| {
+        if d.status() == "confirmed" {
+            "posted"
+        } else {
+            d.status()
+        }
+    });
+    let mut result = json!({"status":status,"chat_id":chat.id,"message_id":sent.message_id});
+    if let Some(delivery) = delivery {
+        result["delivery"] = json!(delivery);
+    }
+    Ok(result)
 }
 
 /// Chats given to a destroyed agent go back to their bot's agent (in new

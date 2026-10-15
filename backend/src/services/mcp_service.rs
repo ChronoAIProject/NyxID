@@ -2673,6 +2673,7 @@ pub fn generate_tool_definitions(
 /// as potentially destructive. Unknown names return `None`.
 pub fn tool_annotations(name: &str, services: &[McpToolService]) -> Option<serde_json::Value> {
     let (read_only, destructive, open_world) = match name {
+        "nyxid__set_reply_images" => (true, false, false),
         "nyx__search_tools"
         | "nyx__discover_services"
         | "nyx__list_connected_services"
@@ -2716,6 +2717,7 @@ pub fn tool_annotations(name: &str, services: &[McpToolService]) -> Option<serde
 /// Unknown names return `None`.
 pub fn tool_title(name: &str, services: &[McpToolService]) -> Option<String> {
     let fixed = match name {
+        "nyxid__set_reply_images" => "Select reply images",
         "nyx__search_tools" => "Search service tools",
         "nyx__call_tool" => "Call a service tool",
         "nyx__connect_service" => "Connect a service",
@@ -4645,7 +4647,8 @@ pub struct ToolResponse {
 }
 
 /// Only raster formats browsers render without script (never SVG).
-const TOOL_IMAGE_TYPES: [&str; 4] = ["image/png", "image/jpeg", "image/gif", "image/webp"];
+pub(crate) const TOOL_IMAGE_TYPES: [&str; 4] =
+    ["image/png", "image/jpeg", "image/gif", "image/webp"];
 
 fn tool_image_type(content_type: Option<&str>) -> Option<&'static str> {
     let normalized =

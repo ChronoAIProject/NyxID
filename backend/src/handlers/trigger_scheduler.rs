@@ -370,7 +370,7 @@ async fn run_job_once(state: &AppState, job: &Document) -> AppResult<()> {
             deliver_to: DeliverTo::Chat { .. },
             ..
         } => {
-            "NyxID delivers your final reply to the selected chat automatically. Write plain text with full URLs; leave delivery to NyxID."
+            "NyxID delivers your final reply to the selected chat automatically. Write plain text with full URLs; leave delivery to NyxID. Images are sent only when you explicitly select same-turn tool image handles with nyxid__set_reply_images; otherwise no images are sent."
         }
         TriggerDelivery::Assistant {
             deliver_to: DeliverTo::Notification,
@@ -836,16 +836,48 @@ async fn settle_result(
             )
             .await
         }
-        DeliverTo::Chat { chat_id } => Box::pin(super::nyxbot::chats::post_automation(
-            state,
-            &run.user_id,
-            chat_id,
-            final_text,
-            run.agent_id.as_deref().filter(|_| row.is_subagent()),
-            &row.id,
-        ))
-        .await
-        .map(|_| ()),
+        DeliverTo::Chat { chat_id } => {
+            match Box::pin(super::nyxbot::chats::post_automation(
+                state,
+                &run.user_id,
+                chat_id,
+                final_text,
+                run.agent_id.as_deref().filter(|_| row.is_subagent()),
+                &row.id,
+                run.turn_id.as_deref(),
+            ))
+            .await
+            {
+                Ok(result) => {
+                    if let Some(report) = result.get("delivery").filter(|r| !r.is_null()) {
+                        let report = mongodb::bson::to_bson(report).map_err(|_| {
+                            AppError::Internal("Delivery outcome unavailable".into())
+                        })?;
+                        state
+                            .db
+                            .collection::<Document>(RUNS)
+                            .update_one(
+                                doc! {"_id":&run.id,"result_claimed":true},
+                                doc! {"$set":{"result_delivery":report}},
+                            )
+                            .await?;
+                    }
+                    if result["status"] == "posted" {
+                        Ok(())
+                    } else {
+                        Err(AppError::Conflict(
+                            if result["status"] == "images_unavailable" {
+                                "result_images_unavailable"
+                            } else {
+                                "result_delivery_not_confirmed"
+                            }
+                            .into(),
+                        ))
+                    }
+                }
+                Err(error) => Err(error),
+            }
+        }
     };
     schedules::finish(
         &state.db,
@@ -855,7 +887,16 @@ async fn settle_result(
         } else {
             RunOutcome::Completed
         },
-        error.or(outcome.err().map(|_| "result_delivery_failed")),
+        error.or(outcome.err().map(|e| {
+            if matches!(e, AppError::Conflict(ref code) if code == "result_images_unavailable") {
+                "result_images_unavailable"
+            } else if matches!(e, AppError::Conflict(ref code) if code == "result_delivery_not_confirmed")
+            {
+                "result_delivery_not_confirmed"
+            } else {
+                "result_delivery_failed"
+            }
+        })),
     )
     .await
 }
@@ -969,7 +1010,9 @@ pub(crate) async fn webhook(
                     .db
                     .collection::<AssistantMessage>(MESSAGES)
                     .insert_one(AssistantMessage {
-                    retry_of: None,
+                        reply_image_refs: Vec::new(),
+                        reply_image_destinations: Vec::new(),
+                        retry_of: None,
                         specialist_id: None,
                         steering: None,
                         voice: None,

@@ -312,3 +312,5 @@ pub mod tool_twin_service;
 pub mod catalog_icon_service;
 
 pub mod tools_manager_service;
+
+pub mod assistant_reply_images;

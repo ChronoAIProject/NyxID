@@ -49,12 +49,13 @@ use crate::telemetry::{
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Deserialize)]
-pub struct AsyncReplyRequest {
+#[serde(bound(deserialize = "S: Deserialize<'de>"))]
+pub struct AsyncReplyRequest<S = crate::services::channel_platform::OutboundMediaSource> {
     /// Explicitly request the original admitted thread; absent preserves legacy sends.
     #[serde(default)]
     pub thread_reply: bool,
     pub message_id: String,
-    pub reply: AsyncReplyBody,
+    pub reply: AsyncReplyBody<S>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -70,15 +71,16 @@ pub struct UpdateReplyRequest {
 }
 
 #[derive(Deserialize)]
-pub struct AsyncReplyBody {
+#[serde(bound(deserialize = "S: Deserialize<'de>"))]
+pub struct AsyncReplyBody<S = crate::services::channel_platform::OutboundMediaSource> {
     pub text: Option<String>,
     #[serde(default)]
     pub metadata: Option<serde_json::Value>,
     #[serde(default)]
-    pub attachments: Vec<crate::services::channel_platform::OutboundAttachment>,
+    pub attachments: Vec<crate::services::channel_platform::OutboundAttachment<S>>,
 }
 
-impl std::fmt::Debug for AsyncReplyBody {
+impl<S> std::fmt::Debug for AsyncReplyBody<S> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AsyncReplyBody")
             .field("content", &"[REDACTED]")
@@ -280,8 +282,8 @@ pub struct ResolveSenderResponse {
 /// (inline keyboards, embeds) but route through different metadata keys,
 /// so a `card` key sent to them would drop on the floor and the reply
 /// would go out as empty text.
-fn validate_reply_for_adapter(
-    body: &AsyncReplyBody,
+fn validate_reply_for_adapter<S>(
+    body: &AsyncReplyBody<S>,
     adapter: &dyn crate::services::channel_platform::PlatformAdapter,
 ) -> AppResult<()> {
     if body.attachments.len() > 10 {
@@ -1257,6 +1259,66 @@ pub async fn list_agent_conversations(
         page,
         per_page,
     }))
+}
+
+/// Public reply reader. Ordinary sources use the existing reply path unchanged;
+/// reserved references are resolved only after authenticating the exact target.
+pub async fn async_reply_references(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    auth: OptionalAuthUser,
+    Json(body): Json<AsyncReplyRequest<crate::services::channel_platform::RelayMediaSource>>,
+) -> AppResult<Json<AsyncReplyResponse>> {
+    use crate::services::channel_platform::RelayMediaSource;
+    let has_reference = body
+        .reply
+        .attachments
+        .iter()
+        .any(|a| matches!(a.source, RelayMediaSource::Assistant(_)));
+    // Validate reference count/kinds before any image reads; ordinary sources
+    // are validated by the unchanged path below.
+    let mut reply = body.reply;
+    let attachments = std::mem::take(&mut reply.attachments);
+    let mut request = AsyncReplyRequest {
+        thread_reply: body.thread_reply,
+        message_id: body.message_id,
+        reply: AsyncReplyBody {
+            text: reply.text,
+            metadata: reply.metadata,
+            attachments: Vec::new(),
+        },
+    };
+    if !has_reference {
+        request.reply.attachments = attachments
+            .into_iter()
+            .map(TryInto::try_into)
+            .collect::<AppResult<_>>()?;
+        return async_reply(State(state), headers, auth, Json(request)).await;
+    }
+    // Context resolution reads only the inbound ID, not reply content. It owns
+    // the existing reply-token lifecycle and is performed exactly once.
+    let context =
+        resolve_reply_request_context(&state, &headers, auth.0.as_ref(), &request).await?;
+    if is_device_reply_forbidden(&context.original.platform, &context.conversation.platform) {
+        return Err(AppError::DeviceChannelReplyNotAllowed);
+    }
+    let adapter = reply_adapter(&state, &context)?;
+    validate_reply_for_adapter(
+        &AsyncReplyBody {
+            text: request.reply.text.clone(),
+            metadata: request.reply.metadata.clone(),
+            attachments: attachments.clone(),
+        },
+        adapter.as_ref(),
+    )?;
+    request.reply.attachments = crate::services::assistant_reply_images::relay_attachments(
+        &state,
+        &context.original,
+        &context.attributed_api_key_id,
+        attachments,
+    )
+    .await?;
+    deliver_async_reply(&state, &headers, context, request, adapter.as_ref()).await
 }
 
 /// POST /api/v1/channel-relay/reply

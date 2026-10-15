@@ -731,7 +731,31 @@ the gateway refused one (`gateway_groups_retry_at`).
 **Posting.** `nyxid__post_to_chat` sends through the bot's own route (NyxID's
 initiated-send path: rate limit, outbound record and audit) into a chat that
 allows posts: the chat's agent or NyxBot, never a guest turn. Posts go to the
-chat itself, not a topic.
+chat itself, not a topic. Optional `image_refs` explicitly selects same-turn
+tool images for that one post. It neither reads nor changes the final-reply
+selection. This initiated-send route applies to gateway bots too; CMA owns
+replies to inbound gateway events, not initiated sends.
+
+**Reply images.** Owner turns can call `nyxid__set_reply_images` to replace the
+final reply's image list (`[]` clears). No selection means no channel images,
+even when the turn's inventory contains images. Guest turns carry no images.
+Automation result posts and relay interactive/native-thread/event replies use
+exactly that selection, including destinations already authorized by
+`also_deliver`. Existing posting, agent, org and destination checks still apply.
+Adapters without outbound image capability receive the text with an honest
+notice and an explicitly owner-only NyxID thread link. Gateway replies use the
+same notice in phase 1; NyxID sends neither image blocks to CMA nor images
+around it. NyxID-owned image-bearing sends use the existing adapter call with
+the same routing metadata. Success is `confirmed`; any error is `not_confirmed`
+(“Delivery not confirmed; parts may have been delivered”), never full success.
+NyxID does not retry these sends or infer per-platform/component certainty.
+Metadata-only reports appear in `post_to_chat`, automation runs and late/async
+delivery audits. Successful notice fallback is `images_unavailable`. Public
+relay claim/retry behavior and text-only sends retain their existing semantics,
+except that gateway streams emit `response.failed` with
+`reply_selection_unavailable` when the settled-selection lookup fails. This
+applies even to an empty selection: the stream cannot determine whether a
+notice is needed without the settled record.
 
 **UI.** Under each agent, a bot's chats are one collapsed section (label,
 platform, count, a dot while one is working) that opens for the thread being

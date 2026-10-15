@@ -59,6 +59,9 @@ pub struct TriggerRun {
     pub waiting_for: Vec<String>,
     #[serde(default)]
     pub result_claimed: bool,
+    /// Metadata-only component outcome for the one claimed result send.
+    #[serde(default)]
+    pub result_delivery: Option<bson::Document>,
     #[serde(default)]
     pub agent_id: Option<String>,
     #[serde(default)]
