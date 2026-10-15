@@ -93,6 +93,7 @@ pub mod org_role_scopes;
 pub mod orgs;
 pub mod platform_binding;
 pub mod platform_bots;
+pub mod platform_personal_bindings;
 pub mod platform_setups;
 pub mod providers;
 pub mod proxy;
