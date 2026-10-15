@@ -998,9 +998,16 @@ async fn personal_card_decision_queues_one_durable_continuation_that_survives_un
         );
         let (decision_admission, command) =
             admitted_command(&state, &admitted.authority, phrase).await;
+        let replay = contract::OriginalManagerCommand::from_verified(
+            command.update().clone(),
+            contract::TurnInput {
+                text: command.text().to_owned(),
+            },
+        )
+        .unwrap();
         let service = personal(state.clone());
         let result = service
-            .decide_platform_reply(&state.db, &decision_admission, &row.id, command.clone())
+            .decide_platform_reply(&state.db, &decision_admission, &row.id, command)
             .await
             .unwrap();
         assert!(
@@ -1016,7 +1023,7 @@ async fn personal_card_decision_queues_one_durable_continuation_that_survives_un
         assert!(event.report_to.is_none());
         assert!(matches!(
             service
-                .decide_platform_reply(&state.db, &decision_admission, &row.id, command)
+                .decide_platform_reply(&state.db, &decision_admission, &row.id, replay)
                 .await
                 .unwrap(),
             contract::PlatformDecisionOutcome::NoPendingDecision
