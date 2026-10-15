@@ -625,6 +625,21 @@ pub async fn sweep_public_lifecycle(state: &AppState, limit: u32) -> AppResult<R
     for marker in &scopes {
         drain_scope(db, &marker.id).await?;
     }
+    let expired_turns:Vec<PlatformPublicSession>=db.collection::<PlatformPublicSession>(SESSIONS).find(doc! {
+        "active_turn":{"$ne":bson::Bson::Null},"active_turn.expires_at":{"$lte":bson::DateTime::now()},
+        "$or":[{"turn_recovery_retry_at":{"$exists":false}},{"turn_recovery_retry_at":{"$lte":bson::DateTime::now()}}],
+    }).sort(doc! {"active_turn.expires_at":1,"_id":1}).limit(i64::from(limit)).await?.try_collect().await?;
+    for row in &expired_turns {
+        if super::platform_public_credential_service::recover_expired_turn(db, row)
+            .await
+            .is_err()
+        {
+            db.collection::<Document>(SESSIONS).update_one(doc! {"_id":&row.id},doc! {"$set":{
+                "turn_recovery_error":"revalidation_or_storage_failed",
+                "turn_recovery_retry_at":bson::DateTime::from_chrono(Utc::now()+Duration::minutes(1)),
+            }}).await?;
+        }
+    }
     let expired: Vec<PlatformPublicSession> = db
         .collection::<PlatformPublicSession>(SESSIONS)
         .find(doc! {"revoked_at":bson::Bson::Null,"expires_at":{"$lte":bson::DateTime::now()}})
@@ -633,7 +648,7 @@ pub async fn sweep_public_lifecycle(state: &AppState, limit: u32) -> AppResult<R
         .await?
         .try_collect()
         .await?;
-    let mut processed = scopes.len() as u32;
+    let mut processed = (scopes.len() + expired_turns.len()) as u32;
     for row in expired {
         let mut session = db.client().start_session().await?;
         session

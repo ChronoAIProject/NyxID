@@ -354,9 +354,8 @@ async fn load_credential(
     })
 }
 
-#[async_trait]
-impl PublicNyxAgentRuntime for PublicRuntime {
-    async fn prepare(
+impl PublicRuntime {
+    async fn prepare_inner(
         &self,
         db: &Database,
         context: &PublicExecutionContext,
@@ -455,6 +454,26 @@ impl PublicNyxAgentRuntime for PublicRuntime {
             instructions: super::platform_public_tools::INSTRUCTIONS.into(),
             upstream_session_id,
         })
+    }
+}
+
+#[async_trait]
+impl PublicNyxAgentRuntime for PublicRuntime {
+    async fn prepare(
+        &self,
+        db: &Database,
+        context: &PublicExecutionContext,
+        input: TurnInput,
+    ) -> AppResult<PreparedPublicTurn> {
+        match self.prepare_inner(db, context, input).await {
+            Ok(prepared) => Ok(prepared),
+            Err(error) => {
+                // Claim may already be durable even when KMS/quote/cap admission
+                // fails. Release that exact turn; never strand its sender lease.
+                interrupt_turn(db, context, false).await?;
+                Err(error)
+            }
+        }
     }
 
     async fn replace_credential(
@@ -814,6 +833,149 @@ pub(crate) async fn fence_reply_in_session(
     Ok(())
 }
 
+async fn interrupt_turn(
+    db: &Database,
+    context: &PublicExecutionContext,
+    expired: bool,
+) -> AppResult<()> {
+    let mut session = db.client().start_session().await?;
+    session
+        .start_transaction()
+        .and_run(
+            (db.clone(), context.clone(), expired),
+            |session, (db, context, expired)| {
+                Box::pin(async move {
+                    tx::transaction_result(
+                        interrupt_turn_in_session(db, session, context, *expired).await,
+                    )
+                })
+            },
+        )
+        .await
+        .map_err(tx::map_transaction_error)
+}
+
+/// Recovery uses the exact old turn tuple, including when preparation never
+/// created a disposable transcript. It does not declare any provider usage zero.
+pub(crate) async fn interrupt_turn_in_session(
+    db: &Database,
+    session: &mut ClientSession,
+    context: &PublicExecutionContext,
+    expired: bool,
+) -> AppResult<()> {
+    let mut filter = doc! {"_id":&context.public_session_id,"sponsor_owner_user_id":&context.sponsor_owner_user_id,
+    "policy_digest":&context.policy_digest,"active_turn.conversation_id":&context.turn.conversation_id,
+    "active_turn.turn_id":&context.turn.turn_id,"active_turn.receipt_id":&context.ingress.ingress.receipt_id,
+    "active_turn.claim_id":&context.ingress.ingress.claim_id};
+    if expired {
+        filter.insert("$expr", doc! {"$lte":["$active_turn.expires_at","$$NOW"]});
+    }
+    let Some(row) = db
+        .collection::<PlatformPublicSession>(SESSIONS)
+        .find_one_and_update(
+            filter,
+            doc! {"$set":{"active_turn":bson::Bson::Null},"$inc":{"effect_revision":1_i64}},
+        )
+        .session(&mut *session)
+        .await?
+    else {
+        return Ok(());
+    };
+    let reason = if expired {
+        "public_turn_expired"
+    } else {
+        "public_prepare_failed"
+    };
+    let changed=db.collection::<Document>(RECEIPTS).update_one(doc! {
+        "_id":&context.ingress.ingress.receipt_id,"claim_id":&context.ingress.ingress.claim_id,
+        "phase":"executing","audience.kind":"public","execution.public_session_id":&context.public_session_id,
+        "execution.conversation_id":&context.turn.conversation_id,"execution.turn_id":&context.turn.turn_id,
+        "execution.payer_user_id":&context.sponsor_owner_user_id,"execution.public_policy_digest":&context.policy_digest,
+        "reply_id":bson::Bson::Null,
+    },vec![doc! {"$set":{"phase":"interrupted","interrupted_reason":reason,"settled_at":"$$NOW"}}])
+        .session(&mut *session).await?;
+    if changed.matched_count != 1 {
+        return Err(denied());
+    }
+    db.collection::<Document>(TURNS).update_one(doc! {"_id":&context.turn.turn_id,
+        "public_session_id":&context.public_session_id,"receipt_id":&context.ingress.ingress.receipt_id,
+        "claim_id":&context.ingress.ingress.claim_id,"reply_id":bson::Bson::Null},doc! {"$set":{"outcome":reason}})
+        .session(&mut *session).await?;
+    if let Some(loop_row) = db
+        .collection::<crate::models::platform_public_budget::PublicBudgetLoop>(
+            crate::models::platform_public_budget::LOOPS,
+        )
+        .find_one(doc! {"public_session_id":&row.id,"turn_id":&context.turn.turn_id})
+        .session(&mut *session)
+        .await?
+    {
+        budget::close_loop_in_session(db, session, &loop_row.id).await?;
+    }
+    if expired && row.upstream_may_exist {
+        // A timed-out upstream may still be running. Revoke its exact key and
+        // queue cleanup; the proof gap remains recorded, never reported erased.
+        super::platform_public_agent_service::revoke_in_session(
+            db,
+            session,
+            &PublicRevocationScope::Session {
+                public_session_id: row.id,
+            },
+            PublicRevocationReason::SessionExpired,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+pub(crate) async fn recover_expired_turn(
+    db: &Database,
+    row: &PlatformPublicSession,
+) -> AppResult<()> {
+    let Some(turn) = &row.active_turn else {
+        return Ok(());
+    };
+    let context = PublicExecutionContext {
+        ingress: PublicIngress {
+            ingress: IngressClaim {
+                receipt_id: turn.receipt_id.clone(),
+                claim_id: turn.claim_id.clone(),
+            },
+            manager: ManagerAuthority {
+                profile_id: row.profile_id.clone(),
+                manager_bot_id: row.manager_bot_id.clone(),
+                telegram_bot_id: row.telegram_bot_id,
+                manager_authority_epoch: row.manager_authority_epoch,
+            },
+            sender_id: row.sender_id,
+            chat_id: row.chat_id,
+            public_policy_revision: row.public_policy_revision,
+        },
+        public_session_id: row.id.clone(),
+        turn: TurnRef {
+            conversation_id: turn.conversation_id.clone(),
+            turn_id: turn.turn_id.clone(),
+        },
+        sponsor_owner_user_id: row.sponsor_owner_user_id.clone(),
+        policy_digest: row.policy_digest.clone(),
+        nyxagent_profile: row.nyxagent_profile.clone(),
+        model_operations: vec![],
+        // Recovery performs no inference/admission and never uses these limits.
+        limits: PublicExecutionLimits {
+            max_duration_secs: 0,
+            max_model_calls: 0,
+            max_tool_calls: 0,
+            max_continuations: 0,
+            max_input_tokens: 0,
+            max_output_tokens: 0,
+            max_input_bytes: 0,
+            max_context_bytes: 0,
+            max_output_bytes: 0,
+        },
+        expires_at: turn.expires_at,
+    };
+    interrupt_turn(db, &context, true).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1170,6 +1332,141 @@ mod tests {
                 .unwrap()
                 .active_turn
                 .is_none()
+        );
+        db.drop().await.unwrap();
+    }
+    async fn recovery_fixture(db: &Database) -> (PlatformPublicSession, PublicExecutionContext) {
+        let (row, key, context) = fixture();
+        let mut session = db.client().start_session().await.unwrap();
+        session.start_transaction().await.unwrap();
+        install_turn_in_session(db, &mut session, &context, &row, Some(&key))
+            .await
+            .unwrap();
+        session.commit_transaction().await.unwrap();
+        db.collection::<Document>(RECEIPTS).insert_one(doc! {"_id":&context.ingress.ingress.receipt_id,
+            "claim_id":&context.ingress.ingress.claim_id,"phase":"executing","audience":{"kind":"public"},"reply_id":bson::Bson::Null,
+            "execution":{"public_session_id":&context.public_session_id,"conversation_id":&context.turn.conversation_id,
+                "turn_id":&context.turn.turn_id,"payer_user_id":&context.sponsor_owner_user_id,"public_policy_digest":&context.policy_digest},
+        }).await.unwrap();
+        let saved = db
+            .collection::<PlatformPublicSession>(SESSIONS)
+            .find_one(doc! {"_id":&row.id})
+            .await
+            .unwrap()
+            .unwrap();
+        (saved, context)
+    }
+    #[tokio::test]
+    async fn failed_preparation_without_turn_row_releases_only_the_exact_claim_and_allows_next_turn()
+     {
+        let db =
+            crate::test_utils::connect_transaction_test_database("public_prepare_recovery").await;
+        let (row, context) = recovery_fixture(&db).await;
+        assert_eq!(
+            db.collection::<Document>(TURNS)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
+        );
+        let mut session = db.client().start_session().await.unwrap();
+        session.start_transaction().await.unwrap();
+        interrupt_turn_in_session(&db, &mut session, &context, false)
+            .await
+            .unwrap();
+        session.abort_transaction().await.unwrap();
+        assert!(
+            db.collection::<PlatformPublicSession>(SESSIONS)
+                .find_one(doc! {"_id":&row.id})
+                .await
+                .unwrap()
+                .unwrap()
+                .active_turn
+                .is_some()
+        );
+        // Same compensation is used for KMS, quote and reservation errors, even
+        // before a disposable turn/budget row exists.
+        interrupt_turn(&db, &context, false).await.unwrap();
+        let mut idle = db
+            .collection::<PlatformPublicSession>(SESSIONS)
+            .find_one(doc! {"_id":&row.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(idle.active_turn.is_none());
+        assert!(idle.revoked_at.is_none());
+        let receipt = db
+            .collection::<Document>(RECEIPTS)
+            .find_one(doc! {"_id":&context.ingress.ingress.receipt_id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(receipt.get_str("phase").unwrap(), "interrupted");
+        assert_eq!(
+            receipt.get_str("interrupted_reason").unwrap(),
+            "public_prepare_failed"
+        );
+        let mut next = context.clone();
+        next.turn.turn_id = uuid::Uuid::new_v4().to_string();
+        next.ingress.ingress.receipt_id = uuid::Uuid::new_v4().to_string();
+        install_turn_attempt(&db, &next, &idle).await.unwrap();
+        interrupt_turn(&db, &context, false).await.unwrap();
+        idle = db
+            .collection::<PlatformPublicSession>(SESSIONS)
+            .find_one(doc! {"_id":&row.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(idle.active_turn.unwrap().turn_id, next.turn.turn_id);
+        db.drop().await.unwrap();
+    }
+    #[tokio::test]
+    async fn expired_active_turn_recovers_without_waiting_for_the_session_expiry() {
+        let db = crate::test_utils::connect_transaction_test_database("public_turn_lease_recovery")
+            .await;
+        let (row, context) = recovery_fixture(&db).await;
+        recover_expired_turn(&db, &row).await.unwrap();
+        assert!(
+            db.collection::<PlatformPublicSession>(SESSIONS)
+                .find_one(doc! {"_id":&row.id})
+                .await
+                .unwrap()
+                .unwrap()
+                .active_turn
+                .is_some()
+        );
+        db.collection::<Document>(SESSIONS)
+            .update_one(
+                doc! {"_id":&row.id},
+                doc! {"$set":{"active_turn.expires_at":bson::DateTime::from_millis(0)}},
+            )
+            .await
+            .unwrap();
+        let expired = db
+            .collection::<PlatformPublicSession>(SESSIONS)
+            .find_one(doc! {"_id":&row.id})
+            .await
+            .unwrap()
+            .unwrap();
+        recover_expired_turn(&db, &expired).await.unwrap();
+        let saved = db
+            .collection::<PlatformPublicSession>(SESSIONS)
+            .find_one(doc! {"_id":&row.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(saved.active_turn.is_none());
+        assert!(saved.revoked_at.is_none());
+        assert!(saved.expires_at > Utc::now() + Duration::hours(23));
+        let receipt = db
+            .collection::<Document>(RECEIPTS)
+            .find_one(doc! {"_id":&context.ingress.ingress.receipt_id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            receipt.get_str("interrupted_reason").unwrap(),
+            "public_turn_expired"
         );
         db.drop().await.unwrap();
     }
