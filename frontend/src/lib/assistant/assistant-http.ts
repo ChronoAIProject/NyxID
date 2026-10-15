@@ -12,6 +12,7 @@ import {
   useAssistantWireLogStore,
 } from "@/stores/assistant-wire-log-store";
 import { useAuthStore } from "@/stores/auth-store";
+import { assistantRequestErrorMessage, withAssistantTrace } from "./request-error";
 
 const DEBUG_REQUEST_HEADER = "X-NyxID-Debug-Upstream";
 const DEBUG_ID_HEADER = "X-NyxID-Debug-Upstream-Id";
@@ -219,9 +220,19 @@ export async function assistantHttp(
       ...options.headers,
     },
   });
-  const response =
-    (await mockResponse(endpoint, init)) ??
-    (await fetch(apiUrl(endpoint, options.apiBaseUrl), init));
+  let response: Response;
+  try {
+    response =
+      (await mockResponse(endpoint, init)) ??
+      (await fetch(apiUrl(endpoint, options.apiBaseUrl), init));
+  } catch (error) {
+    if (options.signal?.aborted || (error instanceof Error && error.name === "AbortError")) throw error;
+    throw new ApiError(0, {
+      error: "network_error",
+      error_code: -1,
+      message: assistantRequestErrorMessage(0),
+    });
+  }
 
   void captureResponse(endpoint, method, response).catch(() => undefined);
   if (response.ok) return response;
@@ -233,7 +244,13 @@ export async function assistantHttp(
     useAuthStore.getState().setUser(null);
   }
   redirectToConsent(errorBody);
-  throw new ApiError(response.status, errorBody);
+  throw new ApiError(response.status, {
+    ...errorBody,
+    message: withAssistantTrace(
+      assistantRequestErrorMessage(response.status, errorBody.message),
+      response.headers.get("X-NyxID-Trace-Id"),
+    ),
+  });
 }
 
 export async function assistantJson<T>(

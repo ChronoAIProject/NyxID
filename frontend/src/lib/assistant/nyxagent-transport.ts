@@ -8,6 +8,7 @@ import {
 import { getAssistantIdentityUserId, subscribeAssistantIdentity } from "@/lib/assistant/identity";
 import { isNyxAgentConversationId } from "@/lib/assistant/conversation-ids";
 import { isAdmittedSendError, markAdmitted } from "@/lib/assistant/send-admission";
+import { withAssistantTrace } from "@/lib/assistant/request-error";
 import type { ChatImage, ChatSessionState, ChatMessage } from "@/lib/assistant/chat-types";
 import type { RuntimeToolCallInfo } from "@/lib/assistant/runtime-event-semantics";
 import { deriveTurnStatus } from "@/lib/assistant/turn-status";
@@ -755,6 +756,7 @@ export class NyxAgentTransport {
     let adopted = Boolean(id) && !options.adoptExisting;
     let terminal = false;
     let responded = false;
+    let traceId: string | null = null;
     try {
       const response = await subscriptionDeadline(
         assistantHttp(`${ROOT}/turns`, {
@@ -779,6 +781,7 @@ export class NyxAgentTransport {
         controller,
       );
       responded = true;
+      traceId = response.headers.get("X-NyxID-Trace-Id");
       this.current(generation);
       if (!response.body) throw new Error("The assistant returned no stream.");
       const reader = response.body.getReader();
@@ -883,7 +886,18 @@ export class NyxAgentTransport {
     } catch (error) {
       // After a 2xx the server has stored the message and bound its uploads:
       // every later failure (deadline, size, parse, mismatch, early end) is admitted.
-      throw responded ? markAdmitted(error) : error;
+      if (!responded) throw error;
+      // A failed reader can throw a browser's opaque "network error" after
+      // admission. Keep that failure distinct from a rejected send, including
+      // the admission marker that prevents the composer restoring uploads.
+      const failure = new Error(withAssistantTrace(
+        "The live reply was interrupted. NyxBot may still be working; check the chat before sending again.",
+        traceId,
+      ), { cause: error });
+      // DOMException.message may be read-only. Preserve cancellation/type
+      // classification without mutating errors supplied by the browser.
+      if (error instanceof Error) failure.name = error.name;
+      throw markAdmitted(failure);
     } finally {
       this.requests.delete(controller);
       if (generation === this.generation) {

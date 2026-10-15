@@ -17,6 +17,41 @@ const ACTOR_ID = "nyxid-chat-f8369965a444433f92ec50e67ad8ee52";
 const WIRE_LOG_ID = "d7dbbf38-a31c-4331-8ddb-13fda5a70d12";
 
 describe("assistantHttp", () => {
+  it.each([false, true])("shows a server trace without exposing upstream details (JSON: %s)", async (json) => {
+    const traceId = "9ad6d0fa-bb8f-489e-8fdd-f8e34960921b";
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(
+      json ? JSON.stringify({ error: "upstream_error", message: "private upstream diagnostic" }) : "<html>proxy failure</html>",
+      { status: 502, headers: { "X-NyxID-Trace-Id": traceId } },
+    )));
+    await expect(assistantHttp("/assistant/nyxagent/turns")).rejects.toMatchObject({
+      status: 502,
+      message: `NyxBot is temporarily unavailable. Try again shortly.\nTrace ID: ${traceId}`,
+    });
+  });
+
+  it("explains a network failure without inventing a server trace", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new TypeError("network error")));
+    await expect(assistantHttp("/assistant/nyxagent/turns")).rejects.toMatchObject({
+      status: 0,
+      message: "Connection interrupted. Check your connection and the chat before trying again; your message may have arrived.",
+    });
+  });
+
+  it("preserves deliberate cancellation", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const error = new DOMException("Cancelled", "AbortError");
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(error));
+    await expect(assistantHttp("/assistant/nyxagent/turns", { signal: controller.signal })).rejects.toBe(error);
+  });
+
+  it("does not use an approval request_id as a support trace", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      error: "approval_required", request_id: "approval-request", message: "Approval required",
+    }), { status: 403 })));
+    await expect(assistantHttp("/assistant/nyxagent/turns")).rejects.toMatchObject({ message: "Approval required" });
+  });
+
   it("preserves validation details from a real error response", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({ error: "validation_error", error_code: 400, message: "Invalid", details: { rule: "required", field: "name", line: 2, remediation: "Add a name" } }), { status: 400, headers: { "Content-Type": "application/json" } })));
     await expect(assistantHttp("/assistant/test")).rejects.toMatchObject({ errorResponse: { details: { rule: "required", field: "name", line: 2 } } });
