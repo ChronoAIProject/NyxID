@@ -236,6 +236,8 @@ pub struct PublicIngress {
 
 #[derive(Clone, Debug)]
 pub enum ManagerAudience {
+    /// A reserved original-private command, atomically claimed with its effect.
+    Control,
     Personal(AdmittedPersonalUpdate),
     Public(PublicIngress),
     Fixed(UnavailableReason),

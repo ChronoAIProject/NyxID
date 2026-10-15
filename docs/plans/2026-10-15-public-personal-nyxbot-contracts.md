@@ -258,7 +258,8 @@ also use no-store.
 | POST `/api/v1/admin/platform-bots/{id}/public/profiles` | Admin | 1 handler / 3 service |
 | POST `/api/v1/admin/platform-bots/{id}/public/readiness` | Admin | 1 handler / 3 service |
 
-Admin `{id}` is the profile ID; owner `manager.id` is the durable manager bot ID.
+Admin `{id}` and owner `manager.id` are the stable platform profile ID.
+Assistant thread `platform_thread.manager_id` uses the same profile ID.
 Part 3 adds the personal-bindings GET family and reserves the personal-links GET
 family in delegated_read_denied_path before mounting. Existing admin deny class
 already covers admin routes. There is no proof/status GET. All actor/payer/user
@@ -591,3 +592,15 @@ needs real full-loop/cleanup evidence. Mixed versions stay closed.
 Validation for this contract slice is rustfmt parsing/checking, whitespace and
 JSON fixture parsing. No cargo compilation, runtime/transaction tests, live
 Telegram/account use, deployment, push or PR operation is claimed.
+
+
+### Reserved command receipt clarification
+
+Personal `/link`, purpose-prefixed `/confirm P-...`, and broad `/unlink` use a
+`Control` audience in the same ingress collection. Receipt and command effects
+commit together; a control receipt can never claim execution or a card decision.
+One-time intent output stays ephemeral and must use a dedicated typed command
+send path. It is not a `DeliveryRef::Fixed` text bypass, is never queued as a body,
+and is never reconstructed on a Telegram replay. A failed link delivery requires
+a new `/link` update. Delivery still checks original-private provenance, live
+manager identity/current observation, and a durable single-send claim.

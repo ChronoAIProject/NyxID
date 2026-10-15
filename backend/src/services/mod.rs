@@ -154,6 +154,7 @@ pub mod platform_bot_runtime_control_service;
 pub mod platform_credential_service;
 pub mod platform_link_intent_service;
 #[allow(dead_code)]
+pub mod platform_manager_command_service;
 pub(crate) mod platform_manager_contract;
 pub mod platform_manager_dispatch_service;
 pub mod platform_manager_ingress_service;

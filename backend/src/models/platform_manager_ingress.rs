@@ -38,6 +38,7 @@ pub struct PlatformManagerIngress {
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum IngressAudience {
+    Control,
     Personal {
         user_id: String,
         binding_id: String,

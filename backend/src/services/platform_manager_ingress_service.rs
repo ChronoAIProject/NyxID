@@ -96,6 +96,14 @@ pub async fn record_admission_in_session(
         return Err(changed());
     }
     let stored_audience = match audience {
+        ManagerAudience::Control
+            if update.chat_kind == ManagerChatKind::Private
+                && update.command_eligibility
+                    == ManagerCommandEligibility::OriginalPrivateMessage
+                && update.sender_id == update.chat_id =>
+        {
+            IngressAudience::Control
+        }
         ManagerAudience::Personal(admitted)
             if admitted.ingress == *ingress
                 && admitted.authority.manager == *manager
