@@ -64,7 +64,6 @@ pub(crate) async fn relay_response(
             let stream_billing = state.billing.clone();
             let stream_metered = metered.clone();
             let request_len = request_body_len;
-            let resale_metric = resale_metric;
             let task_cancellation = downstream_cancellation.clone();
 
             tokio::spawn(async move {

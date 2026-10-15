@@ -110,7 +110,7 @@ fn reject_authority_override(update: &Document) -> AppResult<()> {
         if operator == "$rename"
             && fields
                 .values()
-                .any(|value| value.as_str().is_some_and(|field| authority_field(field)))
+                .any(|value| value.as_str().is_some_and(authority_field))
         {
             return Err(AppError::Internal(
                 "API key authority fields cannot be rename targets".to_string(),

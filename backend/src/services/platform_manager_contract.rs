@@ -245,6 +245,7 @@ pub enum ManagerAudience {
 }
 
 #[derive(Clone, Debug)]
+#[allow(clippy::large_enum_variant)] // One bounded admission value, passed directly between producers.
 pub enum IngressAdmission {
     Claimed {
         ingress: IngressClaim,
@@ -374,6 +375,7 @@ pub enum ReplyContent {
 }
 
 #[derive(Clone, Debug)]
+#[allow(clippy::large_enum_variant)] // Started carries the complete authority; this is not a collection.
 pub enum PersonalTurnStart {
     Started {
         turn: TurnRef,
@@ -383,6 +385,7 @@ pub enum PersonalTurnStart {
 }
 
 #[derive(Clone, Debug)]
+#[allow(clippy::large_enum_variant)] // Capture moves its owned proof directly into durable recovery.
 pub enum ExactStopOutcome {
     Captured(CapturedPlatformStop),
     NoMatchingActiveTurn,
@@ -483,6 +486,7 @@ pub struct PublicReadinessEvidence {
 }
 
 #[derive(Clone, Debug)]
+#[allow(clippy::large_enum_variant)] // Readiness carries one bounded proof across the producer boundary.
 pub enum PublicReadiness {
     Ready(PublicReadinessEvidence),
     Unavailable(UnavailableReason),
