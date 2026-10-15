@@ -26,6 +26,7 @@ use rand::{RngCore, rngs::OsRng};
 use zeroize::Zeroizing;
 
 pub struct IntentIssued {
+    #[cfg(test)]
     pub intent: PlatformLinkIntent,
     pub token: Option<Zeroizing<String>>,
 }
@@ -329,7 +330,13 @@ async fn mint_intent_in_session(
         return Err(bindings::unavailable());
     }
     let rows = db.collection::<PlatformLinkIntent>(COLLECTION_NAME);
-    if let Some(row)=rows.find_one(doc! {"platform_config_id":&controls.platform_config_id,"manager_authority_epoch":controls.manager_authority_epoch,"telegram_sender_id":subject.sender_id,"initiation_ref":initiation_ref}).session(&mut *session).await? {return Ok(IntentIssued {intent:row,token:None});}
+    if let Some(_existing) = rows.find_one(doc! {"platform_config_id":&controls.platform_config_id,"manager_authority_epoch":controls.manager_authority_epoch,"telegram_sender_id":subject.sender_id,"initiation_ref":initiation_ref}).session(&mut *session).await? {
+        return Ok(IntentIssued {
+            #[cfg(test)]
+            intent: _existing,
+            token: None,
+        });
+    }
     if !super::coordination_service::RateWindowStore::admit_in_session(
         db,
         "personal_intent_sender",
@@ -369,6 +376,7 @@ async fn mint_intent_in_session(
     row.token_hmac = intent_hash(key, &row, &token);
     rows.insert_one(&row).session(session).await?;
     Ok(IntentIssued {
+        #[cfg(test)]
         intent: row,
         token: Some(token),
     })
@@ -758,6 +766,50 @@ pub async fn confirm_in_session(
     };
     super::audit_service::log_actor_event_in_session(db,session,audit_key,&actor,"platform_personal_consent_confirmed",serde_json::json!({"binding_id":binding.id,"generation":binding.generation,"consent_version":binding.consent_version})).await?;
     Ok(completion)
+}
+
+/// Native transport entry points require original-private command provenance.
+/// The transport owns the ingress transaction and must preserve its dedupe claim.
+pub async fn begin_original_in_session(
+    db: &Database,
+    session: &mut ClientSession,
+    key: &[u8],
+    command: &super::platform_manager_contract::OriginalManagerCommand,
+    initiation_ref: &str,
+) -> AppResult<IntentIssued> {
+    begin_in_session(db, session, key, command.update(), false, initiation_ref).await
+}
+
+pub async fn confirm_original_in_session(
+    db: &Database,
+    session: &mut ClientSession,
+    key: &[u8],
+    audit_key: &[u8],
+    command: &super::platform_manager_contract::OriginalManagerCommand,
+    effects: &dyn bindings::PersonalLifecycleEffects,
+) -> AppResult<PersonalBindingCompletion> {
+    let mut words = command.text().split_whitespace();
+    if !words
+        .next()
+        .is_some_and(|w| w.split('@').next() == Some("/confirm"))
+    {
+        return Err(bindings::unavailable());
+    }
+    let code = words.next().ok_or_else(bindings::unavailable)?;
+    if words.next().is_some() {
+        return Err(bindings::unavailable());
+    }
+    confirm_in_session(
+        db,
+        session,
+        key,
+        audit_key,
+        command.update(),
+        false,
+        code,
+        effects,
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -1601,48 +1653,4 @@ mod tests {
         refused_public(&db, &context).await;
         db.drop().await.unwrap();
     }
-}
-
-/// Native transport entry points require original-private command provenance.
-/// The transport owns the ingress transaction and must preserve its dedupe claim.
-pub async fn begin_original_in_session(
-    db: &Database,
-    session: &mut ClientSession,
-    key: &[u8],
-    command: &super::platform_manager_contract::OriginalManagerCommand,
-    initiation_ref: &str,
-) -> AppResult<IntentIssued> {
-    begin_in_session(db, session, key, command.update(), false, initiation_ref).await
-}
-
-pub async fn confirm_original_in_session(
-    db: &Database,
-    session: &mut ClientSession,
-    key: &[u8],
-    audit_key: &[u8],
-    command: &super::platform_manager_contract::OriginalManagerCommand,
-    effects: &dyn bindings::PersonalLifecycleEffects,
-) -> AppResult<PersonalBindingCompletion> {
-    let mut words = command.text().split_whitespace();
-    if !words
-        .next()
-        .is_some_and(|w| w.split('@').next() == Some("/confirm"))
-    {
-        return Err(bindings::unavailable());
-    }
-    let code = words.next().ok_or_else(bindings::unavailable)?;
-    if words.next().is_some() {
-        return Err(bindings::unavailable());
-    }
-    confirm_in_session(
-        db,
-        session,
-        key,
-        audit_key,
-        command.update(),
-        false,
-        code,
-        effects,
-    )
-    .await
 }
