@@ -3912,12 +3912,19 @@ async fn mock_gateway(
         let (calls, version) = (calls.clone(), version.clone());
         move |Path(id): Path<String>, Json(body): Json<Value>| async move {
             let expected = body["expected_version"].as_i64().unwrap_or_default();
-            calls.lock().await.push(("PUT".into(), id, body));
+            calls.lock().await.push(("PUT".into(), id, body.clone()));
             if refuse.load(Ordering::SeqCst) {
                 return (StatusCode::CONFLICT, Json(json!({"code": "conflict"})));
             }
             version.store(expected + 1, Ordering::SeqCst);
-            (StatusCode::OK, Json(json!({"version": expected + 1})))
+            // Return the authored policy as the gateway's source definition.
+            // This keeps the mock faithful to an acknowledged management write;
+            // incomplete echoes intentionally exercise GET reconciliation in the
+            // dedicated management tests.
+            (
+                StatusCode::OK,
+                Json(json!({"version": expected + 1, "definition": body})),
+            )
         }
     };
     let read = {
