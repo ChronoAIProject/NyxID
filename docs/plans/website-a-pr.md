@@ -1,21 +1,21 @@
 # Website A PR preparation
 
-PR creation is pending connector permission (`403 Resource not accessible by integration`). No PR URL or acceptance result is implied by this document.
+Per the owner's latest instruction, delivery consists of implementation commits pushed to `aelf-hzz780/NyxID`. The owner will create the organization PR manually. Connector PR write access and a fork PR are not delivery prerequisites. No PR URL or acceptance result is implied by this document.
 
-Create the fork review first:
+Optional fork comparison:
 
 - Repository: `aelf-hzz780/NyxID`
 - Base: `codex/website-a-base`
 - Head: `codex/website-a-delivery`
 - Compare: https://github.com/aelf-hzz780/NyxID/compare/codex%2Fwebsite-a-base...codex%2Fwebsite-a-delivery?expand=1
-- Draft: yes, while independent acceptance/mobile validation are pending.
 
-Then create the upstream draft PR, linking the fork review:
+Organization PR prepared for manual creation by the owner:
 
 - Repository: `ChronoAIProject/NyxID`
 - Base: `main`
 - Head: `aelf-hzz780:codex/website-a-delivery`
 - Compare: https://github.com/ChronoAIProject/NyxID/compare/main...aelf-hzz780:codex%2Fwebsite-a-delivery?expand=1
+- Suggested state: draft while independent acceptance/mobile validation are pending.
 
 ## Title
 

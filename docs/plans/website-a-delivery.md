@@ -21,7 +21,7 @@ Integrate the baseline content, audiences and display interactions into the exis
 3. 首页 9 秒轮换、点击停止、hover 暂停、focus 停止和键盘切换可用；NyxBot 示例、方案/博客/集成筛选和代码切换可用。
 4. 已有登录、注册、query、可信 return_to、OAuth、MFA、首页登录态跳转保持；不实现原型模拟登录和完成页。
 5. 构建、类型检查、相关 lint/测试与真实浏览器桌面/移动、中英文检查有实际证据。
-6. 交付 commit、fork PR 与明确验证记录交到独立验收对话；不自行合并或部署。
+6. 交付 commit、fork 分支与明确验证记录交到独立验收对话；组织仓库 PR 由负责人手动创建，不自行合并或部署。
 
 Direct public routes, bilingual content, original display interactions, production authentication parity, concrete build/browser evidence and a commit-scoped independent acceptance handoff are required.
 
@@ -130,15 +130,16 @@ No real login, OAuth consent, registration, message, purchase or account mutatio
 
 - `origin`: `git@aelf.github.com:aelf-hzz780/NyxID.git`; SSH and connector identity both verified as `aelf-hzz780`.
 - `upstream`: `git@aelf.github.com:ChronoAIProject/NyxID.git`.
-- `origin/main` is 12 upstream commits behind the verified base. A non-protected `codex/website-a-base` review branch mirrors that exact base so the fork PR has only this delivery's diff. `main` is never pushed directly.
-- Create fork review PR first (`codex/website-a-delivery` → `codex/website-a-base`), then upstream draft PR (`aelf-hzz780:codex/website-a-delivery` → `ChronoAIProject:main`). Neither is merged or deployed.
-- Independent acceptance chat: `01a13edf-2b31-75c1-b1ca-824d707f02ff`. Handoff must identify the exact delivery commit, both PRs and the blocked mobile check.
+- `origin/main` is 12 upstream commits behind the verified base. A non-protected `codex/website-a-base` review branch mirrors that exact base for a delivery-scoped fork comparison. `main` is never pushed directly.
+- 按负责人最新确认，本轮通过实现 commit 并推送 `aelf-hzz780/NyxID` 的 `codex/website-a-delivery` 分支交付；组织仓库 PR 由负责人手动创建，不要求先创建 fork PR。
+- Per the owner's latest instruction, implementation commits pushed to the fork delivery branch are the delivery artifact. The owner will create the organization PR manually; a fork PR is optional.
+- Independent acceptance chat: `01a13edf-2b31-75c1-b1ca-824d707f02ff`. Handoff identifies the exact delivery commit, fork branch and blocked mobile check. Independent acceptance remains pending.
 
-### PR 创建阻塞 / PR creation blocker
+### PR 准备与责任 / PR preparation and ownership
 
-交付代码已提交并推送到 fork；GitHub 连接器身份核验为 `aelf-hzz780`，但创建 fork PR 返回 `403 Resource not accessible by integration`。现有 CLI 认证不可用，浏览器 GitHub 会话未登录。因此本轮尚未创建 fork/upstream PR，不能视为两级 PR 流程已完成。分支已在 GitHub 对比页验证为 1 个交付提交、108 个文件，可自动合并。未修改连接器权限或账户设置。
+交付代码已提交并推送到 fork。此前连接器创建 PR 返回 403；负责人随后明确改为 fork commit 交付、手动创建组织 PR，因此无需开放连接器 PR 写权限，也不再将自动创建 PR 视为交付阻塞。本轮未创建、合并 PR 或部署；英文 PR 描述与对比链接保存在 `website-a-pr.md`，可供负责人使用。
 
-The commit and both branches are pushed. PR creation is blocked by the connector's repository write permissions; the available CLI/browser sessions cannot create it. No PR was created or merged. The ready English description and compare links are in `website-a-pr.md`. Independent acceptance can review the exact commit while PR access is resolved.
+The implementation and both branches are pushed. After an earlier connector 403, the owner explicitly chose fork commit delivery and manual organization PR creation. Connector PR write access is no longer required or a delivery blocker. No PR was created or merged, and nothing was deployed. The ready English description and compare links are in `website-a-pr.md`; independent acceptance reviews the exact commit.
 
 ## 剩余风险 / Remaining limits
 
