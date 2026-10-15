@@ -377,16 +377,7 @@ pub async fn set_user_active(
         .await?
         .ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
 
-    let now = Utc::now();
-    db.collection::<User>(USERS)
-        .update_one(
-            doc! { "_id": target_user_id },
-            doc! { "$set": {
-                "is_active": is_active,
-                "updated_at": bson::DateTime::from_chrono(now),
-            }},
-        )
-        .await?;
+    apply_user_security_state(db, target_user_id, is_active, false).await?;
 
     // Revoke all sessions and deactivate API keys when disabling a user
     if !is_active {
@@ -403,6 +394,122 @@ pub async fn set_user_active(
     }
 
     Ok(())
+}
+
+/// Source state and Machine source-epoch/outbox fence commit together. The
+/// epoch remains after re-enable, so an unswept old grant cannot revive.
+async fn apply_user_security_state(
+    db: &mongodb::Database,
+    user_id: &str,
+    active: bool,
+    deleting: bool,
+) -> AppResult<()> {
+    apply_user_security_state_with_deletion_policy(db, user_id, active, deleting, None).await
+}
+
+async fn apply_user_security_state_with_deletion_policy(
+    db: &mongodb::Database,
+    user_id: &str,
+    active: bool,
+    deleting: bool,
+    owner_deletion_policy: Option<&str>,
+) -> AppResult<()> {
+    if let Some(policy) = owner_deletion_policy {
+        validate_account_deletion_policy(policy)?;
+        if active || !deleting {
+            return Err(AppError::ValidationError(
+                "Owner deletion policy requires account deletion".into(),
+            ));
+        }
+    }
+    let db = db.clone();
+    let user_id = user_id.to_owned();
+    let owner_deletion_policy = owner_deletion_policy.map(str::to_owned);
+    db.client()
+        .start_session()
+        .await?
+        .start_transaction()
+        .write_concern(mongodb::options::WriteConcern::majority())
+        .and_run2(async move |session| {
+            let result: AppResult<()> = async {
+                let current = db
+                    .collection::<bson::Document>(USERS)
+                    .find_one(doc! {"_id":&user_id})
+                    .session(&mut *session)
+                    .await?
+                    .ok_or_else(|| AppError::NotFound("User not found".into()))?;
+                if active
+                    && current
+                        .get("deletion_requested_at")
+                        .is_some_and(|value| !matches!(value, bson::Bson::Null))
+                {
+                    return Err(AppError::Conflict(
+                        "Account deletion has already been accepted".into(),
+                    ));
+                }
+                let now = bson::DateTime::now();
+                let mut set = doc! {"is_active":active,"updated_at":now};
+                if deleting {
+                    let requested = current
+                        .get("deletion_requested_at")
+                        .filter(|value| !matches!(value, bson::Bson::Null))
+                        .cloned()
+                        .unwrap_or(bson::Bson::DateTime(now));
+                    set.insert("deletion_requested_at", requested);
+                }
+                let changed = db
+                    .collection::<bson::Document>(USERS)
+                    .update_one(doc! {"_id":&user_id}, doc! {"$set":set})
+                    .session(&mut *session)
+                    .await?;
+                if changed.matched_count != 1 {
+                    return Err(AppError::NotFound("User not found".into()));
+                }
+                if let Some(policy) = &owner_deletion_policy {
+                    // Same transaction as the account/source fence. These
+                    // retained lifecycle records outlive the user cascade;
+                    // replay preserves the original consent and timestamp.
+                    let accepted_at = current
+                        .get_datetime("deletion_requested_at")
+                        .copied()
+                        .unwrap_or(now);
+                    let basis = crate::models::remote_machine::MachineDeletionBasis {
+                        owner_id: user_id.clone(),
+                        source: crate::models::remote_machine::MachineDeletionSource::AccountOwner,
+                        policy_version: policy.clone(),
+                        accepted_at: accepted_at.to_chrono(),
+                    };
+                    let basis = bson::to_bson(&basis).map_err(|_| {
+                        AppError::Internal("Machine deletion basis encoding failed".into())
+                    })?;
+                    db.collection::<bson::Document>(crate::models::remote_machine::COLLECTION_NAME)
+                        .update_many(
+                            doc! {"owner_id":&user_id,"deletion_basis":bson::Bson::Null},
+                            doc! {"$set":{"deletion_basis":basis}},
+                        )
+                        .session(&mut *session)
+                        .await?;
+                }
+                if !active {
+                    super::machine_external_grant_service::user_security_changed_in_session(
+                        &db,
+                        &user_id,
+                        if deleting {
+                            "user_deletion_requested"
+                        } else {
+                            "user_disabled"
+                        },
+                        session,
+                    )
+                    .await?;
+                }
+                Ok(())
+            }
+            .await;
+            key_mutations::transaction_result(result)
+        })
+        .await
+        .map_err(key_mutations::map_transaction_error)
 }
 
 /// Initiate a forced password reset for a user.
@@ -448,14 +555,32 @@ pub async fn delete_user_cascade(
         ));
     }
 
-    delete_user_cascade_internal(db, target_user_id).await
+    delete_user_cascade_internal(db, target_user_id, None).await
 }
 
 /// Delete the currently authenticated user and cascade-delete all related documents.
 ///
 /// This is intended for self-service account deletion flows (e.g. DELETE /users/me).
-pub async fn delete_current_user_cascade(db: &mongodb::Database, user_id: &str) -> AppResult<()> {
-    delete_user_cascade_internal(db, user_id).await
+pub const ACCOUNT_DELETION_POLICY_VERSION: &str = "machine-data";
+pub const ACCOUNT_DELETION_POLICY_HEADER: &str = "x-nyxid-account-deletion-policy";
+
+pub fn validate_account_deletion_policy(policy: &str) -> AppResult<()> {
+    if policy != ACCOUNT_DELETION_POLICY_VERSION {
+        return Err(AppError::ValidationError(
+            "Confirm the current account deletion policy, including all managed Machine data"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
+pub async fn delete_current_user_cascade(
+    db: &mongodb::Database,
+    user_id: &str,
+    deletion_policy_version: &str,
+) -> AppResult<()> {
+    validate_account_deletion_policy(deletion_policy_version)?;
+    delete_user_cascade_internal(db, user_id, Some(deletion_policy_version)).await
 }
 
 async fn release_nyxbot_org_links(db: &mongodb::Database, user_id: &str) -> AppResult<()> {
@@ -492,6 +617,7 @@ async fn release_nyxbot_org_links(db: &mongodb::Database, user_id: &str) -> AppR
 async fn delete_user_cascade_internal(
     db: &mongodb::Database,
     target_user_id: &str,
+    owner_deletion_policy: Option<&str>,
 ) -> AppResult<()> {
     let _target = db
         .collection::<User>(USERS)
@@ -502,17 +628,16 @@ async fn delete_user_cascade_internal(
     // Busy email effects must leave the user able to authenticate and retry.
     crate::services::channel_bot_service::delete_owner_aurinko_channels(db, target_user_id).await?;
 
-    // Phase 1: mark user inactive so they cannot authenticate during cleanup
-    let now = Utc::now();
-    db.collection::<User>(USERS)
-        .update_one(
-            doc! { "_id": target_user_id },
-            doc! { "$set": {
-                "is_active": false,
-                "updated_at": bson::DateTime::from_chrono(now),
-            }},
-        )
-        .await?;
+    // Only self-service owner confirmation grants Machine erasure authority.
+    // Admin removal fences execution but preserves indefinite workspace data.
+    apply_user_security_state_with_deletion_policy(
+        db,
+        target_user_id,
+        false,
+        true,
+        owner_deletion_policy,
+    )
+    .await?;
 
     // Org bots the user linked to their NyxBot keep an org-owned route and
     // route key; remove them so the org's bot is free for its admins.
@@ -526,7 +651,6 @@ async fn delete_user_cascade_internal(
         crate::models::async_service_operation::QUOTAS_COLLECTION_NAME,
         crate::models::saved_login::COLLECTION_NAME,
         crate::models::machine_setup::COLLECTION_NAME,
-        crate::models::machine_job::COLLECTION_NAME,
         crate::models::machine_desktop::COLLECTION_NAME,
         crate::models::machine_update::COLLECTION_NAME,
         crate::models::machine_update::ATTEMPTS_COLLECTION_NAME,
@@ -572,6 +696,9 @@ async fn delete_user_cascade_internal(
             .delete_many(user_filter.clone())
             .await?;
     }
+    // Machine job metadata remains until its existing retention worker can
+    // retire it. Revocation consumers still need the exact persisted binding
+    // to cancel submitted work after the account row has been removed.
     db.collection::<bson::Document>(
         crate::models::assistant_agent_learning::AUTHORED_CLAIMS_COLLECTION_NAME,
     )
@@ -591,10 +718,33 @@ async fn delete_user_cascade_internal(
         .delete_one(doc! {"_id": target_user_id})
         .await?;
 
-    // Delete OAuth clients created by the deleted user.
-    db.collection::<bson::Document>(OAUTH_CLIENTS)
-        .delete_many(doc! { "created_by": target_user_id })
-        .await?;
+    // Consume the source owner's existing fenced deactivation API before
+    // removing authored clients. Each bounded pass preserves exact revocation
+    // receipts for other users who had granted Machine access to that client.
+    loop {
+        use futures::TryStreamExt;
+        let clients: Vec<bson::Document> = db
+            .collection::<bson::Document>(OAUTH_CLIENTS)
+            .find(doc! {"created_by":target_user_id})
+            .projection(doc! {"_id":1})
+            .sort(doc! {"_id":1})
+            .limit(100)
+            .await?
+            .try_collect()
+            .await?;
+        if clients.is_empty() {
+            break;
+        }
+        for client in clients {
+            let id = client
+                .get_str("_id")
+                .map_err(|_| AppError::Internal("OAuth client identity invalid".into()))?;
+            super::oauth_client_service::delete_client_for_creator(db, id, target_user_id).await?;
+            db.collection::<bson::Document>(OAUTH_CLIENTS)
+                .delete_one(doc! {"_id":id,"created_by":target_user_id,"is_active":false})
+                .await?;
+        }
+    }
 
     // Delete service accounts owned by the deleted user and their issued tokens.
     let service_account_owner_filter = doc! {
@@ -987,6 +1137,212 @@ mod tests {
 
         let result = set_platform_role(&db, &user_id, &user_id, "admin").await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn machine_source_disable_fences_grant_and_outbox_before_reenable() {
+        let db = connect_transaction_test_database("machine_user_disable").await;
+        let user = Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_one(test_user(&user, crate::models::user::UserType::Person))
+            .await
+            .unwrap();
+        let grant = Uuid::new_v4().to_string();
+        let grants = crate::models::machine_external_grant::COLLECTION_NAME;
+        db.collection::<bson::Document>(grants)
+            .insert_one(doc! {
+                "_id":&grant,"user_id":&user,"revision":1_i64,"admission_fence":0_i64,
+                "status":"active","user_security_revision":0_i64,
+            })
+            .await
+            .unwrap();
+        set_user_active(&db, &Uuid::new_v4().to_string(), &user, false)
+            .await
+            .unwrap();
+        set_user_active(&db, &Uuid::new_v4().to_string(), &user, true)
+            .await
+            .unwrap();
+        let source = db
+            .collection::<bson::Document>(USERS)
+            .find_one(doc! {"_id":&user})
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(source.get_bool("is_active").unwrap());
+        assert_eq!(
+            source
+                .get_i64("machine_external_security_revision")
+                .unwrap(),
+            1
+        );
+        let revoked = db
+            .collection::<bson::Document>(grants)
+            .find_one(doc! {"_id":&grant})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(revoked.get_str("status").unwrap(), "revoked");
+        assert_eq!(revoked.get_i64("revision").unwrap(), 2);
+        assert_eq!(
+            db.collection::<bson::Document>(crate::models::machine_access::OUTBOX)
+                .count_documents(
+                    doc! {"kind":"external","reason":"user_disabled","selector.grant_id":&grant}
+                )
+                .await
+                .unwrap(),
+            1
+        );
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn machine_source_hook_failure_aborts_account_deletion_marker() {
+        let db = connect_transaction_test_database("machine_user_rollback").await;
+        let user = Uuid::new_v4().to_string();
+        let machine_id = Uuid::new_v4().to_string();
+        let machines = crate::models::remote_machine::COLLECTION_NAME;
+        db.collection::<bson::Document>(machines)
+            .insert_one(doc! {"_id":&machine_id,"owner_id":&user,"deletion_basis":bson::Bson::Null})
+            .await
+            .unwrap();
+        db.collection::<User>(USERS)
+            .insert_one(test_user(&user, crate::models::user::UserType::Person))
+            .await
+            .unwrap();
+        db.collection::<bson::Document>(crate::models::machine_external_grant::COLLECTION_NAME)
+            .insert_one(doc! {"_id":Uuid::new_v4().to_string(),"user_id":&user,
+                "revision":i64::MAX,"admission_fence":0_i64,"status":"active","user_security_revision":0_i64})
+            .await.unwrap();
+        assert!(
+            apply_user_security_state_with_deletion_policy(
+                &db,
+                &user,
+                false,
+                true,
+                Some(ACCOUNT_DELETION_POLICY_VERSION)
+            )
+            .await
+            .is_err()
+        );
+        let unchanged = db
+            .collection::<bson::Document>(USERS)
+            .find_one(doc! {"_id":&user})
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(unchanged.get_bool("is_active").unwrap());
+        assert!(!unchanged.contains_key("deletion_requested_at"));
+        assert!(!unchanged.contains_key("machine_external_security_revision"));
+        let machine = db
+            .collection::<bson::Document>(machines)
+            .find_one(doc! {"_id":&machine_id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(machine.get("deletion_basis"), Some(bson::Bson::Null)),
+            "aborted source fence must also abort erasure authority"
+        );
+        assert_eq!(
+            db.collection::<bson::Document>(crate::models::machine_access::OUTBOX)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
+        );
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn machine_account_deletion_marker_survives_interruption_and_rejects_reenable() {
+        let db = connect_transaction_test_database("machine_user_marker").await;
+        let user = Uuid::new_v4().to_string();
+        let machine_id = Uuid::new_v4().to_string();
+        let machines = crate::models::remote_machine::COLLECTION_NAME;
+        db.collection::<bson::Document>(machines)
+            .insert_one(doc! {"_id":&machine_id,"owner_id":&user,"deletion_basis":bson::Bson::Null})
+            .await
+            .unwrap();
+        db.collection::<User>(USERS)
+            .insert_one(test_user(&user, crate::models::user::UserType::Person))
+            .await
+            .unwrap();
+        apply_user_security_state_with_deletion_policy(
+            &db,
+            &user,
+            false,
+            true,
+            Some(ACCOUNT_DELETION_POLICY_VERSION),
+        )
+        .await
+        .unwrap();
+        let requested = db
+            .collection::<bson::Document>(USERS)
+            .find_one(doc! {"_id":&user})
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(requested.get_datetime("deletion_requested_at").is_ok());
+        let first_machine = db
+            .collection::<bson::Document>(machines)
+            .find_one(doc! {"_id":&machine_id})
+            .await
+            .unwrap()
+            .unwrap();
+        let first_basis = first_machine
+            .get_document("deletion_basis")
+            .unwrap()
+            .clone();
+        assert_eq!(first_basis.get_str("owner_id").unwrap(), user);
+        assert_eq!(first_basis.get_str("source").unwrap(), "account_owner");
+        assert_eq!(
+            first_basis.get_str("policy_version").unwrap(),
+            ACCOUNT_DELETION_POLICY_VERSION
+        );
+        assert_eq!(
+            first_basis.get_datetime("accepted_at").unwrap(),
+            requested.get_datetime("deletion_requested_at").unwrap()
+        );
+        assert!(
+            set_user_active(&db, &Uuid::new_v4().to_string(), &user, true)
+                .await
+                .is_err()
+        );
+        apply_user_security_state_with_deletion_policy(
+            &db,
+            &user,
+            false,
+            true,
+            Some(ACCOUNT_DELETION_POLICY_VERSION),
+        )
+        .await
+        .unwrap();
+        let replayed = db
+            .collection::<bson::Document>(USERS)
+            .find_one(doc! {"_id":&user})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            replayed.get_datetime("deletion_requested_at").unwrap(),
+            requested.get_datetime("deletion_requested_at").unwrap()
+        );
+        assert!(!replayed.get_bool("is_active").unwrap());
+        db.collection::<bson::Document>(USERS)
+            .delete_one(doc! {"_id":&user})
+            .await
+            .unwrap();
+        let retained = db
+            .collection::<bson::Document>(machines)
+            .find_one(doc! {"_id":&machine_id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            retained.get_document("deletion_basis").unwrap(),
+            &first_basis
+        );
+        db.drop().await.unwrap();
     }
 
     #[tokio::test]

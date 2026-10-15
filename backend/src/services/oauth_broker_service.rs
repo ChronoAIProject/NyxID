@@ -705,6 +705,7 @@ async fn try_exchange_once(ctx: &BrokerExchangeContext<'_>) -> AppResult<Exchang
     let now = Utc::now();
     let refresh_expires = now + Duration::seconds(ctx.config.jwt_refresh_ttl_secs);
     let new_refresh = RefreshToken {
+        protected_consent: refresh_token_doc.protected_consent.clone(),
         id: new_refresh_id.clone(),
         jti: new_jti.clone(),
         client_id: binding.client_id.clone(),
@@ -776,6 +777,18 @@ async fn try_exchange_once(ctx: &BrokerExchangeContext<'_>) -> AppResult<Exchang
         return Ok(ExchangeOutcome::ChainFollow);
     }
 
+    if let Err(error) = super::consent_service::fence_protected_reference(
+        db,
+        &binding.user_id,
+        &binding.client_id,
+        &granted_scope,
+        refresh_token_doc.protected_consent.as_ref(),
+    )
+    .await
+    {
+        cleanup_refresh_token(db, &new_refresh_id).await?;
+        return Err(error);
+    }
     Ok(ExchangeOutcome::Success(BindingExchangeResult {
         access_token,
         token_type: broker_access_token_type(ctx.dpop_jkt).to_string(),
@@ -989,12 +1002,22 @@ async fn mint_broker_access_token(
     granted_scope: &str,
     refresh_token_doc: &RefreshToken,
 ) -> AppResult<String> {
+    super::consent_service::fence_protected_reference(
+        ctx.db,
+        user_id,
+        &refresh_token_doc.client_id,
+        granted_scope,
+        refresh_token_doc.protected_consent.as_ref(),
+    )
+    .await?;
     let user_uuid = Uuid::parse_str(user_id)
         .map_err(|e| AppError::Internal(format!("Invalid user_id in broker binding: {e}")))?;
     let rbac_data =
         crate::services::rbac_helpers::build_rbac_claim_data(ctx.db, user_id, granted_scope)
             .await?;
-    jwt::generate_access_token(
+    // Even a non-Machine broker token is an OAuth client credential. Losing
+    // that identity would let it cross first-party human approval boundaries.
+    jwt::generate_oauth_access_token_with_consent(
         ctx.jwt_keys,
         ctx.config,
         &user_uuid,
@@ -1009,6 +1032,8 @@ async fn mint_broker_access_token(
             allowed_node_ids: &[],
             allow_all_nodes: true,
         }),
+        &refresh_token_doc.client_id,
+        refresh_token_doc.protected_consent.as_ref(),
     )
 }
 
@@ -1556,6 +1581,7 @@ mod tests {
     fn refresh_token_doc(jti: &str, client_id: &str, user_id: &str, revoked: bool) -> RefreshToken {
         let now = Utc::now();
         RefreshToken {
+            protected_consent: None,
             id: Uuid::new_v4().to_string(),
             jti: jti.to_string(),
             client_id: client_id.to_string(),

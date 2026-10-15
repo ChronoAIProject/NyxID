@@ -278,6 +278,48 @@ pub async fn send_channel_bot_failed_notification(
     .await
 }
 
+/// Deliver metadata-only lifecycle notices through existing configured channels.
+/// The durable in-site timeline remains the authoritative owner notification.
+#[allow(clippy::too_many_arguments)]
+pub async fn send_machine_lifecycle_notification(
+    db: &Database,
+    config: &AppConfig,
+    http_client: &Client,
+    fcm_auth: Option<&FcmAuth>,
+    apns_auth: Option<&ApnsAuth>,
+    user_id: &str,
+    machine_id: &str,
+    operation_id: &str,
+    message: &str,
+) -> AppResult<NotificationResult> {
+    let url = format!(
+        "{}/machines?machine={}",
+        config.frontend_url.trim_end_matches('/'),
+        machine_id
+    );
+    let mut data = HashMap::new();
+    data.insert("type".into(), "machine_lifecycle".into());
+    data.insert("machine_id".into(), machine_id.into());
+    data.insert("operation_id".into(), operation_id.into());
+    data.insert("url".into(), url.clone());
+    let rendered = RenderedConnectionExpiredNotification {
+        title: "Machine lifecycle update".into(),
+        body: format!("{message} Open {url}."),
+        data,
+    };
+    deliver_best_effort(
+        db,
+        config,
+        http_client,
+        fcm_auth,
+        apns_auth,
+        user_id,
+        &rendered,
+        "machine lifecycle",
+    )
+    .await
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn deliver_best_effort(
     db: &Database,

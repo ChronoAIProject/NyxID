@@ -14,6 +14,7 @@ pub enum BillingMetric {
     CacheWriteTokens,
     Images,
     VoiceSeconds,
+    MachineRunningSeconds,
 }
 
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
@@ -94,7 +95,7 @@ fn deserialize_components<'de, D: serde::Deserializer<'de>>(
 
 impl BillingMetric {
     /// Stable names enter ledger canonical encoding. Never rename existing units.
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 10] = [
         Self::Tokens,
         Self::Requests,
         Self::Bytes,
@@ -104,6 +105,7 @@ impl BillingMetric {
         Self::CacheWriteTokens,
         Self::Images,
         Self::VoiceSeconds,
+        Self::MachineRunningSeconds,
     ];
 
     fn metadata(self) -> (&'static str, &'static str, bool) {
@@ -117,6 +119,9 @@ impl BillingMetric {
             Self::CacheWriteTokens => ("cache_write_tokens", "Cache-write tokens", true),
             Self::Images => ("images", "Images", false),
             Self::VoiceSeconds => ("voice_seconds", "Voice seconds", false),
+            Self::MachineRunningSeconds => {
+                ("machine_running_seconds", "Machine running seconds", false)
+            }
         }
     }
     pub fn as_str(self) -> &'static str {

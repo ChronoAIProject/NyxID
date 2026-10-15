@@ -1,10 +1,11 @@
+import { MachineGrantCard } from "@/components/shared/machine-grant-card";
 import { useSearch } from "@tanstack/react-router";
 import { ServiceScopeCard } from "@/components/dashboard/api-key-detail/service-scope-card";
 import { useState } from "react";
 import { Link, useParams } from "@tanstack/react-router";
 import { useApiKey } from "@/hooks/use-api-keys";
 import { ApiError } from "@/lib/api-client";
-import { maskApiKey } from "@/lib/utils";
+import { isPastTimestamp, maskApiKey } from "@/lib/utils";
 import { ErrorBanner } from "@/components/shared/error-banner";
 import { PageHeader } from "@/components/shared/page-header";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -163,6 +164,14 @@ export function ApiKeyDetailPage() {
         <UsageStatsCard keyId={apiKey.id} />
       </div>
 
+      <MachineGrantCard
+        source={{ kind: "api_key", id: apiKey.id }}
+        canWrite={canWrite}
+        eligible={apiKey.credential_source?.type !== "org" && apiKey.is_active && !apiKey.assistant_conversation_id && apiKey.purpose === "general" && !isPastTimestamp(apiKey.expires_at) && apiKey.scopes.split(/\s+/).some((scope) => ["proxy", "proxy:*"].includes(scope))}
+        stateVersion={apiKey.state_version}
+        allowedNodeIds={apiKey.allow_all_nodes ? undefined : apiKey.allowed_node_ids}
+        allowedServiceIds={apiKey.allow_all_services ? undefined : [...apiKey.allowed_service_ids, ...(apiKey.allow_auto_connected_services ? apiKey.allowed_services.filter((service) => service.auto_connected).map((service) => service.id) : [])]}
+      />
       <LoginCredentialsSection keyId={apiKey.id} canWrite={canWrite} />
 
       <RotateKeyDialog

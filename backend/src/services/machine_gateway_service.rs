@@ -55,6 +55,18 @@ pub struct Ingress {
     pub git: Option<GitHttp>,
 }
 
+/// Metadata from a persisted, live-authorized job. This is inserted only after
+/// the Node signature and gateway authority checks; never from client headers.
+#[derive(Clone, Debug)]
+pub struct MachineUsageAttribution {
+    pub node_id: String,
+    pub job_id: String,
+    pub runtime_id: String,
+    pub runtime_generation: Option<u64>,
+    pub grant_id: Option<String>,
+    pub principal_kind: &'static str,
+}
+
 impl Ingress {
     /// Only bodies known to use bounded materialization can enter a pool.
     /// Opaque uploads and git packs are one-shot streams, even for an AI pool.
@@ -270,6 +282,96 @@ pub fn declare(
     Ok(selected)
 }
 
+/// External declarations are real UserService identities from the live source
+/// and grant intersection. They never borrow an Assistant key to discover
+/// credentials. Token-dependent services require an actual compatible bearer
+/// and are deliberately absent from this job-bound gateway.
+pub fn external_services<'a>(
+    db: &'a Database,
+    owner: &'a str,
+    service_ids: &'a [String],
+) -> futures::future::BoxFuture<'a, AppResult<Vec<AvailableService>>> {
+    Box::pin(async move {
+        if service_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let grants = platform_key_service::OwnerGrants::load_for_listing(db, owner).await?;
+        let rows = catalog_discovery_service::agent_services_with_memberships(
+            db,
+            owner,
+            Some(service_ids),
+            grants.memberships(),
+        )
+        .await?;
+        let catalog_ids: Vec<_> = rows
+            .iter()
+            .filter_map(|row| row.catalog_service_id.as_deref())
+            .collect();
+        let catalog: Vec<CatalogMetadata> = db.collection(crate::models::downstream_service::COLLECTION_NAME)
+        .find(doc!{"_id":{"$in":catalog_ids},"is_active":true,"forward_access_token":{"$ne":true},"inject_delegation_token":{"$ne":true}})
+        .projection(catalog_projection()).await?.try_collect().await?;
+        let providers = platform_key_service::load_providers(db).await?;
+        let metadata: HashMap<_, _> = catalog.iter().map(|row| (row.id.as_str(), row)).collect();
+        let mut result = Vec::new();
+        for row in rows {
+            if !service_ids.contains(&row.id)
+                || !row.is_active
+                || row.service_type == "ssh"
+                || row.forward_access_token
+                || row.inject_delegation_token
+            {
+                continue;
+            }
+            if row.user_id != owner
+                && !grants.memberships().iter().any(|m| {
+                    m.org_user_id == row.user_id
+                        && super::user_service_service::role_can_proxy_service(m.role, &row)
+                })
+            {
+                continue;
+            }
+            let entry = row
+                .catalog_service_id
+                .as_deref()
+                .and_then(|id| metadata.get(id).copied());
+            // A missing/disabled catalog or a source-bearer-dependent catalog must
+            // not silently become a custom service with different credentials.
+            if row.catalog_service_id.is_some() && entry.is_none() {
+                continue;
+            }
+            let platform = platform_key_service::binding(&row) == "platform";
+            if platform
+                && !entry.is_some_and(|entry| {
+                    platform_key_service::available_metadata_with_grants(
+                        &entry.access,
+                        entry
+                            .access
+                            .provider_config_id
+                            .as_ref()
+                            .and_then(|id| providers.get(id)),
+                        owner,
+                        &grants,
+                    )
+                })
+            {
+                continue;
+            }
+            result.push(AvailableService {
+                user_service: true,
+                id: row.id,
+                slug: row.slug,
+                inference: entry.and_then(|e| e.inference.clone()),
+                git: if platform {
+                    None
+                } else {
+                    entry.and_then(|e| e.git_http.clone())
+                },
+            });
+        }
+        Ok(result)
+    })
+}
+
 pub fn declared(rows: &[AvailableService]) -> Vec<DeclaredService> {
     rows.iter()
         .map(|row| DeclaredService {
@@ -482,6 +584,12 @@ pub async fn job_auth(
     db: &Database,
     job: &crate::models::machine_job::MachineJob,
 ) -> AppResult<crate::mw::auth::AuthUser> {
+    if matches!(
+        job.binding,
+        Some(crate::models::machine_job::MachineJobBinding::External { .. })
+    ) {
+        return super::machine_external_service::gateway_auth(db, job).await;
+    }
     let key = key_service::get_api_key(db, &job.user_id, &job.api_key_id).await?;
     if key.expires_at.is_some_and(|at| at <= chrono::Utc::now()) {
         return Err(AppError::Forbidden("The job's chat key expired".into()));

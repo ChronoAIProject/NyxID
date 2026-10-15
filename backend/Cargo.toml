@@ -90,6 +90,7 @@ nyxid-service-adapters = { path = "../service-adapters" }
 nyxid-machine = { path = "../machine" }
 nyxid-permissions = { path = "../permissions" }
 nyxid-machine-updater = { path = "../machine-updater" }
+nyxid-crypto = { path = "../nyxid-crypto" }
 http = "1.4"
 http-body-util = "0.1"
 httpdate = "1"
@@ -110,6 +111,7 @@ tempfile = "3.27.0"
 axum-extra = { version = "0.12.6", features = ["form", "query"] }
 
 [dev-dependencies]
+nyxid-crypto = { path = "../nyxid-crypto", features = ["decrypt"] }
 flate2 = "1"
 # TLS echo proxy for multi-origin routing and redirect acceptance tests.
 rcgen = "0.14"

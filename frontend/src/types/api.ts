@@ -146,6 +146,9 @@ export function canReadAdminUsage(
 }
 
 export interface ApiKey {
+  /** Approval CAS only; normal use may advance this version. */
+  readonly state_version?: number;
+  readonly purpose?: string;
   readonly assistant_conversation_id?: string | null;
   readonly id: string;
   readonly name: string;

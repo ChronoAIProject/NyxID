@@ -81,6 +81,9 @@ fn encrypt_with_secret_and_nonce(
     ensure_v1(&context.version)?;
     let admin_public = PublicKey::from(&admin_secret);
     let shared = admin_secret.diffie_hellman(&PublicKey::from(recipient_pubkey));
+    if !shared.was_contributory() {
+        return Err(RciCryptoError::Crypto);
+    }
     let key = derive_key(shared.as_bytes(), &context.kdf_info_bytes()?)?;
     let aad = context.aad_bytes()?;
     let cipher = XChaCha20Poly1305::new(Key::from_slice(key.as_slice()));
@@ -168,6 +171,14 @@ pub fn decrypt(
 mod tests {
     use super::*;
     use serde::Deserialize;
+
+    #[test]
+    fn non_contributory_recipient_keys_are_rejected() {
+        assert!(encrypt(b"credential", [0; 32], &context()).is_err());
+        let mut identity = [0; 32];
+        identity[0] = 1;
+        assert!(encrypt(b"credential", identity, &context()).is_err());
+    }
 
     fn context() -> RciContext {
         RciContext::new(

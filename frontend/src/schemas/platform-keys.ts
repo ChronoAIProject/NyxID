@@ -1,6 +1,6 @@
 import { z } from "zod";
 import {
-  BILLING_METRICS,
+  SERVICE_BILLING_METRICS,
   metricLabel,
   unitPriceSchema,
 } from "./billing-metrics";
@@ -112,13 +112,13 @@ export const lanePricingViewSchema = componentViewSchema.extend({
   operations: z.array(operationPriceSchema).nullish(),
 });
 const componentInputSchema = componentViewSchema.extend({
-  metric: z.enum(BILLING_METRICS),
+  metric: z.enum(SERVICE_BILLING_METRICS),
 });
 export const lanePricingInputSchema = componentInputSchema
   .extend({
     components: z
       .array(componentInputSchema)
-      .max(BILLING_METRICS.length - 1)
+      .max(SERVICE_BILLING_METRICS.length - 1)
       .nullish(),
     operations: z.array(operationPriceSchema).max(256).nullish(),
   })

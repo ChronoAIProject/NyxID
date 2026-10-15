@@ -187,37 +187,75 @@ pub fn metadata(node: &Node) -> Value {
     })
 }
 
-pub async fn issue_job(
-    db: &Database,
-    chat: &ChatAuthority,
-    node: &Node,
+pub fn issue_job<'a>(
+    db: &'a Database,
+    chat: &'a ChatAuthority,
+    node: &'a Node,
     timeout: u64,
     services: Vec<crate::models::machine_job::DeclaredService>,
-) -> AppResult<MachineJob> {
-    caller(chat)?;
-    let now = Utc::now();
-    let runtime_id = node
-        .machine
-        .as_ref()
-        .map(|profile| profile.runtime_id.clone())
-        .filter(|id| uuid::Uuid::parse_str(id).is_ok())
-        .ok_or_else(|| AppError::NodeOffline("Machine runtime has not connected".into()))?;
-    let job = MachineJob {
-        id: uuid::Uuid::new_v4().to_string(),
-        user_id: chat.user_id.clone(),
-        node_id: node.id.clone(),
-        runtime_id,
-        conversation_id: chat.conversation_id.clone(),
-        api_key_id: chat.api_key_id.clone(),
-        agent_id: chat.agent_id.clone(),
-        state: "running".into(),
-        services,
-        created_at: now,
-        expires_at: now + Duration::seconds(timeout.min(86400) as i64 + 15),
-        finished_at: None,
-    };
-    db.collection::<MachineJob>(JOBS).insert_one(&job).await?;
-    Ok(job)
+) -> futures::future::BoxFuture<'a, AppResult<MachineJob>> {
+    Box::pin(async move {
+        caller(chat)?;
+        let now = Utc::now();
+        let runtime_id = node
+            .machine
+            .as_ref()
+            .map(|profile| profile.runtime_id.clone())
+            .filter(|id| uuid::Uuid::parse_str(id).is_ok())
+            .ok_or_else(|| AppError::NodeOffline("Machine runtime has not connected".into()))?;
+        let runtime_generation = if super::remote_machine_runtime::is_managed(node) {
+            if timeout == 0 || timeout > 3600 {
+                return Err(AppError::ValidationError(
+                    "Managed command timeout must be 1 to 3600 seconds".into(),
+                ));
+            }
+            let machine = super::remote_machine_service::managed_machine_for_node(db, &node.id)
+                .await?
+                .ok_or(AppError::MachineNotAllowed)?;
+            Some(
+                u64::try_from(machine.runtime_generation)
+                    .map_err(|_| AppError::MachineAuthorityStale)?,
+            )
+        } else {
+            None
+        };
+        let job = MachineJob {
+            id: uuid::Uuid::new_v4().to_string(),
+            user_id: chat.user_id.clone(),
+            node_id: node.id.clone(),
+            runtime_id,
+            binding: chat
+                .turn_id
+                .as_ref()
+                .filter(|_| !chat.turn_stopped)
+                .map(
+                    |turn_id| crate::models::machine_job::MachineJobBinding::Assistant {
+                        version: 1,
+                        conversation_id: chat.conversation_id.clone(),
+                        turn_id: turn_id.clone(),
+                        api_key_id: chat.api_key_id.clone(),
+                        agent_id: chat.agent_id.clone(),
+                    },
+                ),
+            runtime_generation,
+            conversation_id: chat.conversation_id.clone(),
+            api_key_id: chat.api_key_id.clone(),
+            agent_id: chat.agent_id.clone(),
+            state: "running".into(),
+            exit_code: None,
+            stop_reason: None,
+            duration_ms: None,
+            cancellation_requested_by: None,
+            cancellation_requested_at: None,
+            services,
+            created_at: now,
+            expires_at: now + Duration::seconds(timeout.min(86400) as i64 + 15),
+            finished_at: None,
+            retain_until: None,
+        };
+        db.collection::<MachineJob>(JOBS).insert_one(&job).await?;
+        Ok(job)
+    })
 }
 
 pub async fn job(
@@ -246,16 +284,29 @@ pub async fn gateway_job(
     conversation: &str,
     id: &str,
 ) -> AppResult<MachineJob> {
-    db.collection::<MachineJob>(JOBS).find_one(doc!{"_id":id,"node_id":node,"runtime_id":runtime,
-        "conversation_id":conversation,"state":"running","expires_at":{"$gt":bson::DateTime::now()}})
-        .await?.ok_or_else(||AppError::Forbidden("Machine service call has no live server-issued job".into()))
+    let job = db
+        .collection::<MachineJob>(JOBS)
+        .find_one(doc! {"_id":id,"node_id":node,"runtime_id":runtime,
+        "state":"running","expires_at":{"$gt":bson::DateTime::now()}})
+        .await?
+        .ok_or_else(|| {
+            AppError::Forbidden("Machine service call has no live server-issued job".into())
+        })?;
+    if !matches!(
+        job.binding,
+        Some(crate::models::machine_job::MachineJobBinding::External { .. })
+    ) && (conversation.is_empty() || job.conversation_id != conversation)
+    {
+        return Err(AppError::MachinePermissionRevoked);
+    }
+    Ok(job)
 }
 
 pub async fn finish(db: &Database, id: &str) -> AppResult<()> {
     db.collection::<MachineJob>(JOBS)
         .update_one(
             doc! {"_id":id,"state":"running"},
-            doc! {"$set":{"state":"finished","finished_at":bson::DateTime::now()}},
+            doc! {"$set":{"state":"finished","finished_at":bson::DateTime::now(),"retain_until":bson::DateTime::from_chrono(Utc::now()+Duration::days(30))}},
         )
         .await?;
     Ok(())

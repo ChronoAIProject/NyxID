@@ -2000,6 +2000,7 @@ pub(crate) fn test_app_state_with_config(db: mongodb::Database, config: AppConfi
     );
 
     AppState {
+        local_machine_platform: None,
         db: db.clone(),
         config: config.clone(),
         jwt_keys,
@@ -2020,6 +2021,9 @@ pub(crate) fn test_app_state_with_config(db: mongodb::Database, config: AppConfi
         ),
         developer_webhook_dispatcher,
         encryption_keys,
+        managed_bootstrap_verifier: Arc::new(
+            crate::services::remote_machine_bootstrap::UnavailableBootstrapTicketVerifier,
+        ),
         node_ws_manager,
         replica_identity,
         node_dispatch,
@@ -3723,4 +3727,11 @@ mod tests {
             assert_eq!(options.direct_connection, expected);
         }
     }
+}
+
+/// Replaces unavailable local platform I/O configuration only. All owner auth,
+/// quote, funding, lifecycle, source fences and outbox code remains production.
+pub(crate) struct LocalMachinePlatform {
+    pub profile: crate::models::remote_machine::MachineProfileSpec,
+    pub readiness: crate::services::remote_machine_manager::PlatformReadiness,
 }

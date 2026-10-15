@@ -160,6 +160,38 @@ pub fn is_tool(name: &str) -> bool {
     name == "nyx__machine_list" || name == "nyx__saved_logins" || operation(name).is_some()
 }
 
+/// The external MVP exposes eight existing tools and no management, browser,
+/// attachment or saved-login capability. Metadata is additive for MCP clients.
+pub fn external_definitions() -> Vec<McpToolDefinition> {
+    let names = [
+        "nyx__machine_list",
+        "nyx__machine_exec",
+        "nyx__machine_job",
+        "nyx__machine_job_cancel",
+        "nyx__machine_list_files",
+        "nyx__machine_read_file",
+        "nyx__machine_write_file",
+        "nyx__machine_edit_file",
+    ];
+    definitions().into_iter().filter(|tool| names.contains(&tool.name.as_str())).map(|mut tool| {
+        tool.description.push_str(" External Machine protocol v3. Authorization is the live OAuth client or parent Agent Key grant. This shared OS workspace is not client isolation. No inbound ports or persistent environment configuration. Resource management requires the human owner.");
+        tool.input_schema["x-nyxid-machine-protocol"] = json!(3);
+        if tool.name == "nyx__machine_exec" {
+            tool.input_schema["properties"]["timeout_secs"]["maximum"] = json!(3600);
+        }
+        if tool.name == "nyx__machine_job" {
+            tool.description = "Read one authorized job's bounded memory output, or omit job_id to list safe task history. Same-parent children share the grant view; viewing never changes the original execution child. Output may be unavailable after restart and expires within one hour of terminal state. Metadata retained for 30 days.".into();
+            tool.input_schema["required"] = json!(["machine"]);
+            tool.input_schema["properties"]["cursor"] = json!({"type":"string"});
+            tool.input_schema["properties"]["limit"] = json!({"type":"integer","minimum":1,"maximum":50,"default":20});
+            tool.input_schema["properties"]["state"] = json!({"type":"string"});
+            tool.input_schema["properties"]["from"] = json!({"type":"string","format":"date-time","description":"Inclusive job creation time"});
+            tool.input_schema["properties"]["to"] = json!({"type":"string","format":"date-time","description":"Exclusive job creation time"});
+        }
+        tool
+    }).collect()
+}
+
 /// Pagination counts original rows and never loses a continuation when a
 /// machine profile is larger than the model's entire result budget.
 pub fn list_page(

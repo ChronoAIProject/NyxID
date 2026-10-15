@@ -563,11 +563,21 @@ impl ApiClient {
     }
 
     pub async fn delete_empty(&mut self, path: &str) -> Result<()> {
+        self.delete_empty_with_headers(path, reqwest::header::HeaderMap::new())
+            .await
+    }
+
+    pub async fn delete_empty_with_headers(
+        &mut self,
+        path: &str,
+        headers: reqwest::header::HeaderMap,
+    ) -> Result<()> {
         let url = format!("{}{path}", self.base_url);
         let resp = self
             .client
             .delete(&url)
             .bearer_auth(&self.access_token)
+            .headers(headers.clone())
             .send()
             .await
             .with_context(|| format!("DELETE {path} failed"))?;
@@ -578,6 +588,7 @@ impl ApiClient {
                 .client
                 .delete(&url)
                 .bearer_auth(&self.access_token)
+                .headers(headers)
                 .send()
                 .await
                 .with_context(|| format!("DELETE {path} failed (retry)"))?;

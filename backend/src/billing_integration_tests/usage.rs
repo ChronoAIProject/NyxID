@@ -36,6 +36,7 @@ fn meter(owner: &str, quantity: i64) -> UsageMeterRow {
         pending_resale_quantity: None,
         pending_platform_usage: None,
         pool_attempt: None,
+        machine_usage: None,
         status: UsageStatus::Finalized,
         forwarded: true,
         released: false,
@@ -56,6 +57,8 @@ async fn read_usage(state: &crate::AppState, actor: &str) -> BillingUsageRespons
         State(state.clone()),
         test_auth_user(actor),
         Query(UsageQuery {
+            machine_id: None,
+            job_id: None,
             period: None,
             bucket: None,
         }),
@@ -1000,6 +1003,8 @@ async fn day_buckets_split_usage_by_utc_day_without_changing_totals() {
         State(state.clone()),
         test_auth_user(&owner),
         Query(UsageQuery {
+            machine_id: None,
+            job_id: None,
             period: Some("7d".into()),
             bucket: Some("day".into()),
         }),
@@ -1027,6 +1032,8 @@ async fn day_buckets_split_usage_by_utc_day_without_changing_totals() {
         State(state),
         test_auth_user(&owner),
         Query(UsageQuery {
+            machine_id: None,
+            job_id: None,
             period: None,
             bucket: Some("hour".into()),
         }),
@@ -1092,5 +1099,79 @@ async fn operation_rows_report_the_operation_and_keep_pricing_from_retired_rates
         .find(|row| row.operation.is_none())
         .unwrap();
     assert_eq!(base.estimated_credits_micros, Some(1_000_000));
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn machine_job_usage_filters_are_applied_before_totals_and_keep_owner_scope() {
+    let Some(db) = connect_test_database("billing_machine_filters").await else {
+        return;
+    };
+    let owner = insert_owner(&db).await;
+    let foreign_owner = Uuid::new_v4().to_string();
+    let state = billing_route_state(db.clone(), Arc::new(FakeLago::default()), 0);
+    let machine = Uuid::new_v4().to_string();
+    let other_machine = Uuid::new_v4().to_string();
+    let job = Uuid::new_v4().to_string();
+    let other_job = Uuid::new_v4().to_string();
+    for (actor, node, job_id, quantity) in [
+        (&owner, &machine, &job, 7),
+        (&owner, &machine, &other_job, 11),
+        (&owner, &other_machine, &job, 100),
+        (&foreign_owner, &machine, &job, 1000),
+    ] {
+        let mut row = meter(actor, quantity);
+        row.wallet_id = None;
+        row.machine_usage = Some(crate::models::usage_meter::MachineUsageAttribution {
+            node_id: node.clone(),
+            job_id: job_id.clone(),
+            runtime_id: Uuid::new_v4().to_string(),
+            runtime_generation: Some(1),
+            grant_id: None,
+            principal_kind: "api_key".into(),
+        });
+        db.collection::<UsageMeterRow>(USAGE_METER)
+            .insert_one(row)
+            .await
+            .unwrap();
+    }
+    for (job_filter, expected) in [(None, 18), (Some(job.clone()), 7)] {
+        let result = billing::get_usage(
+            State(state.clone()),
+            test_auth_user(&owner),
+            Query(UsageQuery {
+                period: None,
+                bucket: None,
+                machine_id: Some(machine.clone()),
+                job_id: job_filter.clone(),
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(result.machine_id.as_deref(), Some(machine.as_str()));
+        assert_eq!(result.job_id, job_filter);
+        assert_eq!(result.totals.quantity, expected);
+        assert!(
+            result
+                .rows
+                .iter()
+                .all(|row| row.machine_usage.as_ref().unwrap().node_id == machine)
+        );
+    }
+    assert!(
+        billing::get_usage(
+            State(state),
+            test_auth_user(&owner),
+            Query(UsageQuery {
+                period: None,
+                bucket: None,
+                machine_id: Some("not-a-uuid".into()),
+                job_id: None,
+            })
+        )
+        .await
+        .is_err()
+    );
     db.drop().await.unwrap();
 }

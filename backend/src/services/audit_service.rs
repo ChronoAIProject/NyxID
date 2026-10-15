@@ -171,6 +171,27 @@ pub async fn log_actor_event_in_session(
     audit_chain_service::append_chained_entry_in_session(db, session, entry, key).await
 }
 
+/// Provider/background effects can require the same atomic chained audit as
+/// owner mutations without claiming that a human performed the effect.
+pub async fn log_system_event_in_session(
+    db: &mongodb::Database,
+    session: &mut mongodb::ClientSession,
+    key: &[u8],
+    event_type: &str,
+    event_data: serde_json::Value,
+) -> crate::errors::AppResult<()> {
+    let entry = build_audit_entry(
+        None,
+        event_type.into(),
+        Some(event_data),
+        None,
+        None,
+        None,
+        None,
+    );
+    audit_chain_service::append_chained_entry_in_session(db, session, entry, key).await
+}
+
 #[allow(clippy::too_many_arguments)]
 fn build_audit_entry(
     user_id: Option<String>,

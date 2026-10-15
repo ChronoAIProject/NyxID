@@ -86,6 +86,8 @@ const BROKER_POLICY_REFRESH_INTERVAL_SECS: u64 = 5;
 /// Shared application state available to all handlers via Axum's State extractor.
 #[derive(Clone)]
 pub struct AppState {
+    #[cfg(test)]
+    pub local_machine_platform: Option<Arc<crate::test_utils::LocalMachinePlatform>>,
     pub db: DbHandle,
     pub config: AppConfig,
     pub jwt_keys: JwtKeys,
@@ -108,6 +110,10 @@ pub struct AppState {
         Arc<services::developer_webhook_service::DeveloperWebhookDispatcher>,
     /// Versioned encryption keys for AES-256-GCM (current + optional previous for rotation)
     pub encryption_keys: Arc<EncryptionKeys>,
+    /// Trusted workload-ticket verification for managed Node bootstrap. The
+    /// default remains closed until a real provider is integrated and accepted.
+    pub managed_bootstrap_verifier:
+        Arc<dyn services::remote_machine_bootstrap::BootstrapTicketVerifier>,
     /// WebSocket connection manager for credential nodes
     pub node_ws_manager: Arc<NodeWsManager>,
     /// Process and address identity used to fence node ownership.
@@ -828,6 +834,8 @@ async fn server_main() {
         ),
     );
     let state = AppState {
+        #[cfg(test)]
+        local_machine_platform: None,
         db: db.clone(),
         config: config.clone(),
         jwt_keys,
@@ -840,6 +848,8 @@ async fn server_main() {
         connection_expiry_notifier,
         developer_webhook_dispatcher,
         encryption_keys: encryption_keys.clone(),
+        managed_bootstrap_verifier:
+            services::remote_machine_bootstrap_verifier::configured_verifier(),
         node_ws_manager,
         replica_identity,
         node_dispatch,
@@ -1042,6 +1052,7 @@ async fn server_main() {
     handlers::nyxbot::spawn_live_dispatch(state.clone());
     handlers::machine_update::spawn(state.clone());
     services::machine_access_service::spawn(state.clone());
+    services::remote_machine_manager::spawn(state.clone());
     {
         let live = state.assistant_live.clone();
         let db = state.db.clone();
@@ -1400,6 +1411,7 @@ async fn server_main() {
             "X-API-Key".parse().unwrap(),
             "X-NyxID-Client".parse().unwrap(),
             "X-NyxID-Client-Version".parse().unwrap(),
+            "X-NyxID-Account-Deletion-Policy".parse().unwrap(),
         ]))
         .allow_credentials(true);
 
@@ -1462,8 +1474,8 @@ async fn server_main() {
 
     // Bind both listeners before serving. Internal routes never enter the
     // public router and therefore cannot be exposed by an ingress path rule.
-    let addr = format!("0.0.0.0:{}", config.port);
-    let listener = TcpListener::bind(&addr)
+    let addr = config::public_bind_addr(config.port);
+    let listener = TcpListener::bind(addr)
         .await
         .expect("Failed to bind address");
     let internal_listener = TcpListener::bind(&config.internal_bind_addr)

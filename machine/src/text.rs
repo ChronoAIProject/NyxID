@@ -37,6 +37,16 @@ impl OutputRing {
         self.end
     }
 
+    /// Drop retained raw bytes while preserving offsets for an expired index.
+    pub fn discard(&mut self) {
+        self.head.fill(0);
+        self.bytes.iter_mut().for_each(|value| *value = 0);
+        self.head = Vec::new();
+        self.bytes = VecDeque::new();
+        self.head_capacity = 0;
+        self.capacity = 0;
+    }
+
     pub fn push(&mut self, bytes: &[u8]) {
         let initial = bytes.len().min(self.head_capacity - self.head.len());
         self.head.extend_from_slice(&bytes[..initial]);

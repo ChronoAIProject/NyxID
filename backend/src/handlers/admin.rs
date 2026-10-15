@@ -3279,6 +3279,7 @@ mod operator_route_tests {
         let now = chrono::Utc::now();
         db.collection::<AuthorizationCode>(AUTH_CODES)
             .insert_one(AuthorizationCode {
+                protected_consent: None,
                 incremental_consent: None,
                 id: "pending-auth-code".to_string(),
                 code_hash: "pending-auth-code-hash".to_string(),

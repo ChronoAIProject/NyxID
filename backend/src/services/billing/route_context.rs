@@ -50,6 +50,7 @@ pub enum NodeIntent {
 pub struct BillingRouteContext {
     pub ingress: BillingIngress,
     pub pool_attempt: Option<crate::models::usage_meter::PoolAttemptAccounting>,
+    pub machine_usage: Option<crate::models::usage_meter::MachineUsageAttribution>,
     pub billing_request_id: String,
     pub billing_owner_id: String,
     pub actor_user_id: String,
@@ -167,6 +168,7 @@ impl BillingRouteContext {
         Self {
             ingress,
             pool_attempt: None,
+            machine_usage: None,
             billing_request_id,
             billing_owner_id,
             actor_user_id,
@@ -306,6 +308,8 @@ impl BillingRouteContext {
             }
             BillingMetric::Images => self.requested_images,
             BillingMetric::VoiceSeconds => self.requested_voice_seconds.max(0),
+            // Dedicated Machine admission reserves a finite runtime window.
+            BillingMetric::MachineRunningSeconds => 0,
             // Cache quantities are already covered by the input estimate.
             BillingMetric::CacheReadTokens
             | BillingMetric::CacheWriteTokens
