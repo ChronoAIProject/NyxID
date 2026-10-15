@@ -5,6 +5,7 @@ pub mod funding;
 pub mod grants;
 pub mod lago_client;
 pub mod ledger;
+pub mod llm_invocations;
 pub mod meter;
 pub mod metric_resolution;
 pub mod owner_resolver;
@@ -494,6 +495,8 @@ impl BillingService {
                 ctx.resale = None;
             }
             ctx.with_platform_metering(platform_billable)
+        } else if ctx.capture_tokens {
+            ctx.clone().with_platform_metering(false)
         } else {
             ctx.clone()
         };
@@ -581,6 +584,14 @@ impl BillingService {
 
     pub async fn mark_forwarded(&self, metered: &MeteredProxyContext) -> AppResult<()> {
         meter::mark_forwarded(&self.db, metered).await
+    }
+
+    pub(crate) async fn observe_unsettled(
+        &self,
+        metered: &MeteredProxyContext,
+        usage: &crate::models::service_billing::PlatformUsage,
+    ) -> AppResult<()> {
+        meter::observe_unsettled(&self.db, metered, usage).await
     }
 
     pub async fn settle(
@@ -1492,6 +1503,7 @@ mod tests {
                 .settle(
                     &metered,
                     PlatformUsage {
+                        llm_observation: None,
                         input_tokens: 0,
                         output_tokens: 0,
                         cache_read_tokens: 0,
@@ -1988,6 +2000,164 @@ mod tests {
         // Re-authoring reuses the stable codes; the full-row sync un-retires.
         let resynced = reprice(&db, &lago, &mut catalog, Some("0.75")).await;
         assert_eq!(summary(&resynced), expect(750_000, false));
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn llm_four_distinct_rates_exact_settlement_and_retained_charges() {
+        use crate::models::{
+            credits::Credits,
+            downstream_service::{DownstreamService, test_helpers::dummy_service},
+        };
+        use crate::services::billing::{ledger, llm_invocations, pricing};
+        use futures::TryStreamExt;
+        let db = crate::test_utils::connect_transaction_test_database("llm_four_rates").await;
+        ledger::init_billing_ledger_hmac_key(zeroize::Zeroizing::new(
+            ledger::TEST_BILLING_LEDGER_HMAC_KEY,
+        ));
+        let owner = Uuid::new_v4().to_string();
+        insert_wallet(&db, &owner).await;
+        let mut catalog = dummy_service();
+        catalog.id = Uuid::new_v4().to_string();
+        catalog.slug = "service-one".into();
+        let request: crate::handlers::services::UpdateServiceRequest =
+            serde_json::from_value(serde_json::json!({"billing":{"byok_pricing":{
+            "metric":"input_tokens","credits_per_unit":"0.000000100001","components":[
+            {"metric":"output_tokens","credits_per_unit":"0.000000200003"},
+            {"metric":"cache_read_tokens","credits_per_unit":"0.000000300007"},
+            {"metric":"cache_write_tokens","credits_per_unit":"0.000000400009"}]}}}))
+            .unwrap();
+        let mut prices = request.billing.unwrap().value;
+        pricing::normalize_lane_pricing(&catalog.slug, None, &mut prices).unwrap();
+        catalog.billing = Some(prices);
+        db.collection::<DownstreamService>(crate::models::downstream_service::COLLECTION_NAME)
+            .insert_one(&catalog)
+            .await
+            .unwrap();
+        let lago = Arc::new(FakeLago::default());
+        pricing::sync_service_price(&db, lago.as_ref(), "standard", &catalog)
+            .await
+            .unwrap();
+        catalog = db
+            .collection::<DownstreamService>(crate::models::downstream_service::COLLECTION_NAME)
+            .find_one(doc! {"_id":&catalog.id})
+            .await
+            .unwrap()
+            .unwrap();
+        let mut config = test_app_config();
+        config.billing_enabled = true;
+        let billing = BillingService::new_with_lago(db.clone(), Arc::new(config), lago);
+        let ctx = BillingRouteContext::new(
+            BillingIngress::Proxy,
+            Uuid::new_v4().to_string(),
+            owner.clone(),
+            owner.clone(),
+            None,
+            None,
+            Some(catalog.id),
+            Some(catalog.slug),
+            NodeIntent::Direct,
+            "bearer".into(),
+            CredentialClass::UserOwned,
+            BillingMetric::Tokens,
+            catalog.billing.as_ref(),
+            false,
+        );
+        let metered = billing.open(&ctx).await.unwrap();
+        billing.mark_forwarded(&metered).await.unwrap();
+        // Anthropic's existing four billable classes already support all four
+        // independent rates. The new observations do not change that mapping.
+        let reported=crate::services::llm_usage_service::extract_reported_usage(&serde_json::json!({"type":"message","model":"test-model",
+            "usage":{"input_tokens":11,"output_tokens":13,"cache_read_input_tokens":17,"cache_creation_input_tokens":19}})).unwrap();
+        let usage = crate::services::llm_usage_service::platform_usage(Some(&reported), 0, false);
+        llm_invocations::ensure_indexes(&db).await.unwrap();
+        db.run_command(doc!{"collMod":crate::models::llm_usage::COLLECTION_NAME,"validator":{"reject_detail":{"$exists":true}},"validationLevel":"strict"}).await.unwrap();
+        billing
+            .settle(&metered, usage.clone(), None, None)
+            .await
+            .unwrap();
+        let rows: Vec<UsageMeterRow> = db
+            .collection::<UsageMeterRow>(crate::models::usage_meter::COLLECTION_NAME)
+            .find(doc! {"billing_request_id":&ctx.billing_request_id})
+            .await
+            .unwrap()
+            .try_collect()
+            .await
+            .unwrap();
+        let mut expected = Credits::ZERO;
+        for (metric, quantity, pico) in [
+            (BillingMetric::InputTokens, 11, 100001),
+            (BillingMetric::OutputTokens, 13, 200003),
+            (BillingMetric::CacheReadTokens, 17, 300007),
+            (BillingMetric::CacheWriteTokens, 19, 400009),
+        ] {
+            let row = rows.iter().find(|r| r.metric == metric).unwrap();
+            let funding = row.funding.as_ref().unwrap();
+            let cost = Credits::from_pico(pico)
+                .unwrap()
+                .checked_mul(quantity)
+                .unwrap();
+            expected = expected.checked_add(cost).unwrap();
+            assert_eq!(row.quantity, Some(quantity));
+            assert_eq!(funding.total_charge, Some(cost));
+            assert_eq!(funding.wallet_funded, Some(cost));
+            assert!(funding.settled);
+        }
+        assert_eq!(
+            rows.iter().filter(|r| r.llm_observation.is_some()).count(),
+            1
+        );
+        assert_eq!(
+            rows.iter()
+                .map(|r| &r.transaction_id)
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            4
+        );
+        let primary = rows.iter().find(|r| r.llm_observation.is_some()).unwrap();
+        assert_eq!(
+            db.collection::<mongodb::bson::Document>(crate::models::llm_usage::COLLECTION_NAME)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
+        );
+        db.run_command(doc! {"collMod":crate::models::llm_usage::COLLECTION_NAME,"validator":{}})
+            .await
+            .unwrap();
+        llm_invocations::recover(&db).await.unwrap();
+        let detail = llm_invocations::detail(&db, &owner, None, &primary.id)
+            .await
+            .unwrap();
+        assert!(detail.settlement_complete);
+        assert_eq!(detail.charges.len(), 4);
+        assert_eq!(
+            Credits::checked_sum(detail.charges.iter().map(|c| c.wallet_credits.unwrap())).unwrap(),
+            expected
+        );
+        assert_eq!(detail.observation.cache_write_tokens, Some(19));
+        billing.settle(&metered, usage, None, None).await.unwrap();
+        let wallet = db
+            .collection::<BillingWallet>(crate::models::billing_wallet::COLLECTION_NAME)
+            .find_one(doc! {"owner_id":&owner})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(wallet.pending_lago_debits, expected);
+        assert_eq!(wallet.reserved_credits, Credits::ZERO);
+        let raw = db
+            .collection::<mongodb::bson::Document>(crate::models::llm_usage::COLLECTION_NAME)
+            .find_one(doc! {"_id":&primary.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            raw.get_array("charges").unwrap()[0]
+                .as_document()
+                .unwrap()
+                .get("wallet_credits"),
+            Some(mongodb::bson::Bson::Decimal128(_))
+        ));
         db.drop().await.unwrap();
     }
 

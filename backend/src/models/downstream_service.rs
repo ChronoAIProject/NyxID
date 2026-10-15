@@ -28,6 +28,9 @@ pub struct ServiceCapabilities {
     pub supports_websocket: bool,
     #[serde(default)]
     pub supports_streaming: bool,
+    /// Explicit support for OpenAI Chat stream_options.include_usage.
+    #[serde(default)]
+    pub supports_stream_usage: bool,
 }
 
 /// Admin-authored model-call protocol; availability is resolved per caller.

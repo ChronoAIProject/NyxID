@@ -36,6 +36,7 @@ export const toolCapabilitySchema = z.object({
   supports_authoring_via_nyx: z.boolean(),
   supports_websocket: z.boolean(),
   supports_streaming: z.boolean(),
+  supports_stream_usage: z.boolean().optional(),
 });
 export const toolEditableMetadataSchema = z.object({
   ...toolMetadataFields,

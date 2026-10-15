@@ -478,6 +478,7 @@ export const updateServiceSchema = z
     supports_authoring_via_nyx: z.boolean().optional(),
     supports_websocket: z.boolean().optional(),
     supports_streaming: z.boolean().optional(),
+    supports_stream_usage: z.boolean().optional(),
     host: optionalString,
     port: optionalString,
     ssh_auth_mode: sshAuthModeSchema.optional(),

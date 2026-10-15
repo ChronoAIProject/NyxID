@@ -434,19 +434,19 @@ pub fn decide_lago_push(
     }
 }
 
-async fn mark_lago_acked(db: &mongodb::Database, row_id: &str) -> AppResult<()> {
+pub(super) async fn mark_lago_acked(db: &mongodb::Database, row_id: &str) -> AppResult<()> {
     let now = Utc::now();
     let expires_at = now + Duration::days(ACKED_RETENTION_DAYS);
     db.collection::<UsageMeterRow>(USAGE_METER)
         .update_one(
             doc! { "_id": row_id, "lago_acked": false },
-            doc! {
+            vec![doc! {
                 "$set": {
                     "lago_acked": true,
                     "updated_at": bson::DateTime::from_chrono(now),
-                    "expires_at": bson::DateTime::from_chrono(expires_at),
+                    "expires_at": {"$cond":[{"$eq":["$llm_retention_hold",true]},"$$REMOVE",bson::DateTime::from_chrono(expires_at)]},
                 }
-            },
+            }],
         )
         .await?;
     Ok(())
@@ -725,6 +725,9 @@ mod tests {
             funding: None,
             quantity: Some(1),
             pending_resale_quantity: None,
+            llm_observation: None,
+            llm_context: None,
+            llm_detail_pending: false,
             pending_platform_usage: None,
             pool_attempt: None,
             status: UsageStatus::Finalized,

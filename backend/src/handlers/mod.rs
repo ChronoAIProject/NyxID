@@ -192,3 +192,5 @@ pub mod catalog_icons;
 
 #[cfg(test)]
 mod tools_manager_tests;
+
+pub mod llm_invocations;

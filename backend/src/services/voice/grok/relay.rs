@@ -539,11 +539,13 @@ impl Grok {
     pub async fn accept_input(&mut self, segment: &Segment) -> AppResult<bool> {
         let state = self.state.clone();
         let actor = self.call.user_id.clone();
+        let conversation = self.call.conversation_id.clone();
         self.accept_input_with(
             segment,
             &super::gate::OneShot {
                 state: &state,
                 actor: &actor,
+                conversation_id: &conversation,
             },
         )
         .await

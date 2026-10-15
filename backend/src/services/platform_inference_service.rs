@@ -600,6 +600,8 @@ async fn guide_text_inner(
     let operation = state.billing.http_operation(&ctx, "POST", path).await?;
     let ctx = ctx
         .with_operation(operation.as_deref())
+        .with_inference_capture(&service, path)
+        .with_native_provider_origin(&target.base_url)
         .with_request_body(Some(&body))
         .with_native_text_bound(
             request_len,
@@ -695,6 +697,12 @@ async fn guide_text_inner(
     .map_err(|_| denied())?;
     let status = response.status();
     let success = status.is_success();
+    if !success {
+        guard.usage = super::llm_observation::transport_outcome(
+            guard.usage.clone(),
+            crate::models::llm_usage::UsageOutcome::Failed,
+        );
+    }
     let mut stream = response.bytes_stream();
     let mut bytes = zeroize::Zeroizing::new(Vec::new());
     while let Some(chunk) = stream.next().await {
@@ -715,7 +723,10 @@ async fn guide_text_inner(
         400 | 401 | 403 | 404 | 405 | 406 | 415 | 422 | 429
     ) && !generated
     {
-        guard.usage = crate::models::service_billing::PlatformUsage::default();
+        guard.usage = super::llm_observation::transport_outcome(
+            crate::models::service_billing::PlatformUsage::default(),
+            crate::models::llm_usage::UsageOutcome::Failed,
+        );
         Box::pin(guard.finish()).await?;
         guard.armed = false;
         turn_guard.finish().await?;
@@ -2934,6 +2945,10 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
+        assert_eq!(
+            row.llm_observation.as_ref().unwrap().outcome,
+            crate::models::llm_usage::UsageOutcome::Failed
+        );
         assert_eq!(row.quantity, Some(0));
         assert_eq!(
             row.funding.unwrap().wallet_charge_credits,

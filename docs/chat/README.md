@@ -82,3 +82,9 @@ event accumulator, actor-state reducer, history decoders, and the typed actor's
 
 - [10 — Assistant uploads](10-uploads.md): owner document/image uploads, extraction, thread scope, image protocol compatibility and retention.
 - [11 — Realtime voice](11-voice.md): approved provider architecture, spoken confirmation, duration billing and rollout; Phase 2 implements the default-off foundations without media or voice UI.
+
+## Usage attribution
+
+See [LLM invocation metering](../LLM_USAGE_METERING.md) for the implemented measurement contract,
+trusted assistant attribution, 365-day retained detail APIs, and the separation
+between additive provider observations and existing customer charge quantities.

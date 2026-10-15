@@ -424,3 +424,22 @@ describe("service editor curation concurrency", () => {
     });
   });
 });
+it("preserves stream usage capability through unrelated service edits", () => {
+  const service = makeService({
+    capabilities: {
+      supports_streaming: true,
+      supports_websocket: false,
+      supports_proxy_read: true,
+      supports_proxy_write: false,
+      supports_proxy_binary_upload: false,
+      supports_direct_downstream_auth: false,
+      supports_authoring_via_nyx: false,
+      supports_stream_usage: true,
+    },
+  });
+  const values = serviceFormValues(service);
+  values.supports_streaming = false;
+  expect(serviceFormPatch(values, service).capabilities?.supports_stream_usage).toBe(
+    true,
+  );
+});

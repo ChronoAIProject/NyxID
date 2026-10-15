@@ -1655,6 +1655,11 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
 
     let billing_routes = Router::new()
         .route("/usage", get(handlers::billing::get_usage))
+        .route("/usage/invocations", get(handlers::llm_invocations::list))
+        .route(
+            "/usage/invocations/{id}",
+            get(handlers::llm_invocations::detail),
+        )
         .route(
             "/wallet",
             get(handlers::billing::get_wallet).post(handlers::billing::provision_wallet),

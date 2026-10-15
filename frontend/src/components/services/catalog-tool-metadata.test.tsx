@@ -26,6 +26,16 @@ it("submits safe capability and permission metadata without manager-forbidden sh
           name: "Vendor",
           offering_kind: "tool",
           required_permissions: ["read:api"],
+          capabilities: {
+            supports_stream_usage: true,
+            supports_streaming: false,
+            supports_websocket: false,
+            supports_proxy_read: true,
+            supports_proxy_write: false,
+            supports_proxy_binary_upload: false,
+            supports_direct_downstream_auth: false,
+            supports_authoring_via_nyx: false,
+          },
           slug: "vendor",
           description: null,
           base_url: "https://vendor.example/api",
@@ -64,7 +74,7 @@ it("submits safe capability and permission metadata without manager-forbidden sh
   expect(request).toMatchObject({
     serviceId: "own-tool",
     body: {
-      capabilities: { supports_streaming: true, supports_proxy_write: false },
+      capabilities: { supports_streaming: true, supports_proxy_write: false, supports_stream_usage: true },
       required_permissions: ["read:api", "write:data"],
     },
   });

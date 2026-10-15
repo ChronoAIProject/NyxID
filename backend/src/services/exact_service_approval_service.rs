@@ -33,6 +33,7 @@ pub const DELEGATED_CATALOG_SCOPE_REQUIRED: &str = "delegated_catalog_scope_requ
 
 #[derive(Clone, Debug)]
 pub struct ExactServiceApprovalCaller {
+    pub llm_context: crate::models::llm_usage::LlmInvocationContext,
     pub delegation_restrictions: Box<crate::crypto::jwt::TokenRestrictionClaims>,
     pub assistant_group_id: Option<String>,
     pub org_agent_access: Option<std::sync::Arc<super::org_agent_service::RequestAccess>>,
@@ -493,6 +494,7 @@ pub async fn redeem_request(
             }
         };
         let exec_ctx = mcp_service::McpExecContext {
+            llm_context: caller.llm_context.clone(),
             response_body_limit: None,
             actor_user_id: Some(&caller.actor_user_id),
             caller_token: None,
@@ -1888,6 +1890,7 @@ mod tests {
 
     fn caller() -> ExactServiceApprovalCaller {
         ExactServiceApprovalCaller {
+            llm_context: Default::default(),
             delegation_restrictions: Default::default(),
             assistant_group_id: None,
             agent_owner: None,

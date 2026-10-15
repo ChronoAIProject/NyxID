@@ -100,6 +100,9 @@ fn caller(auth_user: &AuthUser) -> AppResult<ExactServiceApprovalCaller> {
             AuthMethod::Session => ("session", actor_user_id.clone()),
         };
     Ok(ExactServiceApprovalCaller {
+        llm_context: crate::services::llm_observation::chat_context(
+            auth_user.assistant_chat.as_deref(),
+        ),
         delegation_restrictions: Box::new(
             crate::crypto::jwt::TokenRestrictionClaims::from_auth_user(auth_user),
         ),

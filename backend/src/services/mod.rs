@@ -341,3 +341,5 @@ pub mod assistant_access_policy;
 pub(crate) mod nyxbot_gateway_service;
 pub mod nyxbot_watch_service;
 pub mod tools_manager_service;
+
+pub mod llm_observation;

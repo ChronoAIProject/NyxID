@@ -2962,6 +2962,8 @@ async fn ensure_service_indexes(db: &Database) -> Result<(), mongodb::error::Err
         )
         .await?;
 
+    crate::services::billing::llm_invocations::ensure_indexes(db).await?;
+
     // ── usage_meter ──
     let usage_meter = db.collection::<Document>(crate::models::usage_meter::COLLECTION_NAME);
     usage_meter

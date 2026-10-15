@@ -536,3 +536,9 @@ Each charged value lists `metric`, optional `operation`, `lago_metric_code`, exa
 `pending` lists configured lane values that do not charge until they sync, all with source `free`. An unsynced primary lists its whole lane, because synced extras never revive it. Operation prices on a non-Requests lane are always pending.
 
 Resale applies only to NyxID platform-key traffic. It is reported with source `env` when `BILLING_RESALE_ENABLED` or `BILLING_ENABLED` turns it off. Per-owner billing rollout flags and wallet state are not part of this view.
+
+## Forward usage observations
+
+See [LLM invocation metering](LLM_USAGE_METERING.md) for the implemented measurement contract,
+trusted assistant attribution, 365-day retained detail APIs, and the separation
+between additive provider observations and existing customer charge quantities.

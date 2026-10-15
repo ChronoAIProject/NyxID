@@ -144,6 +144,8 @@
         crate::handlers::api_keys::reauthorize_durable_grants,
         // Billing
         crate::handlers::billing::get_usage,
+        crate::handlers::llm_invocations::list,
+        crate::handlers::llm_invocations::detail,
         crate::handlers::billing::get_wallet,
         crate::handlers::billing::provision_wallet,
         crate::handlers::billing::create_topup,
@@ -307,6 +309,10 @@
             crate::models::durable_operation_grant::DurableOperationPlan,
             // Billing
             crate::handlers::billing::BillingUsageResponse,
+            crate::handlers::llm_invocations::InvocationListResponse,
+            crate::handlers::llm_invocations::InvocationResponse,
+            crate::handlers::llm_invocations::ObservationResponse,
+            crate::handlers::llm_invocations::ChargeResponse,
             crate::handlers::billing::BillingUsageRow,
             crate::handlers::billing::BillingUsageTotals,
             crate::handlers::billing::BillingReadOnlyBlock,

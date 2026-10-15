@@ -546,6 +546,7 @@ fn catalog_entry_response_maps_rich_metadata() {
                 supports_authoring_via_nyx: false,
                 supports_websocket: false,
                 supports_streaming: true,
+                supports_stream_usage: true,
             },
         },
     );
