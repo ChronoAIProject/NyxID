@@ -520,7 +520,7 @@ async fn acknowledgements_deny_expire_and_reask_only_after_a_new_user_message() 
     let stale = service_gate(db, &f.chat, &service, "github", "GitHub", false).await;
     assert!(
         matches!(stale, Err(crate::errors::AppError::Conflict(_))),
-        "a chat authenticated for the previous turn cannot ask: {stale:?}"
+        "a chat authenticated for the previous turn cannot ask"
     );
     let event_chat = chat_for_row(
         &f.state,

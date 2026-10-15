@@ -1985,7 +1985,10 @@ async fn nyxbot_slack_image_payloads_bind_top_level_and_two_native_roots_across_
         let result = chats::post_current_turn(&f.state, &chat, &target.id, "Explicit", true)
             .await
             .unwrap();
-        assert_eq!(result["images"]["sent_now"], 2, "{result}");
+        assert_eq!(
+            result["images"]["sent_now"], 2,
+            "the explicit post sends both images"
+        );
         if root == Some("root-two") {
             root_two = Some(target);
         }
@@ -2116,7 +2119,10 @@ async fn nyxbot_telegram_reply_chain_replies_and_explicit_posts_share_the_chat_a
     let posted = chats::post_current_turn(&f.state, &chat, &target.id, "Posted", true)
         .await
         .unwrap();
-    assert_eq!(posted["images"]["sent_now"], 0, "{posted}");
+    assert_eq!(
+        posted["images"]["sent_now"], 0,
+        "a post after automatic delivery sends nothing new"
+    );
     assert_eq!(posted["images"]["previously_delivered"], 2);
     // The same chain answered automatically again resends nothing either.
     let again = send_plan(&f, attachments.clone(), None).await;
@@ -2159,7 +2165,7 @@ async fn nyxbot_telegram_reply_chain_replies_and_explicit_posts_share_the_chat_a
             .unwrap();
     assert_eq!(
         posted_in_topic["images"]["sent_now"], 0,
-        "{posted_in_topic}"
+        "a topic post after delivery sends nothing new"
     );
     assert_eq!(posted_in_topic["images"]["previously_delivered"], 2);
     // Provider payloads: two chat-level photos anchored on the reply chain

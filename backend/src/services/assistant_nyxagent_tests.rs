@@ -4649,13 +4649,17 @@ async fn turn_snapshot_is_decided_at_admission_and_copied_to_the_settled_reply()
     settle(&db, keys, &owner, &row, "done", None).await;
 
     // 7. A retry has no report snapshot, but preserves the compatibility
-    // marker because it continues an earlier owner request.
-    let row = begin_turn(&db, &owner, assigned("Fragile work"), keys)
+    // marker because it continues an earlier owner request (only owner
+    // turns can be retried).
+    let row = begin_turn(&db, &owner, &request(Some(&home.id), "Fragile work"), keys)
         .await
         .unwrap();
-    assert_eq!(row.report_to.as_deref(), Some(nb));
     settle(&db, keys, &owner, &row, "", Some("upstream")).await;
     let failed_turn = row.active_turn.as_ref().unwrap().turn_id.clone();
+    db.collection::<bson::Document>(CONVERSATIONS)
+        .update_one(doc! {"_id": &home.id}, doc! {"$set": {"report_to": nb}})
+        .await
+        .unwrap();
     let retried = begin_turn(
         &db,
         &owner,

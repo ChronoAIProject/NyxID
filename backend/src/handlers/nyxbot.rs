@@ -3893,7 +3893,9 @@ pub async fn deliver_to(
     text: &str,
     images: Option<&images::ImageSendPlan>,
 ) {
-    let result: AppResult<()> = async {
+    // Boxed: the image and platform sends make this future large, and it is
+    // awaited deep inside turn settlement.
+    let result: AppResult<()> = Box::pin(async {
         if origin.thread.is_some() {
             let image_turn = images.and_then(|plan| {
                 row.active_turn.as_ref().map(|turn| images::ImageTurn {
@@ -3928,7 +3930,6 @@ pub async fn deliver_to(
                                     && thread.owner_chat)),
                     },
                     deadline: None,
-
                     initiated: None,
                     fence: None,
                 },
@@ -3970,7 +3971,7 @@ pub async fn deliver_to(
             direct_reply(state, &channel, message_id, &reply, None).await?;
         }
         Ok(())
-    }
+    })
     .await;
     if let Err(error) = result {
         tracing::debug!(%error, "NyxBot channel update not delivered");
