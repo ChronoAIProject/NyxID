@@ -26,6 +26,7 @@ pub mod channel_connect_link;
 pub mod channel_conversation;
 pub mod channel_event_log;
 pub mod channel_message;
+pub mod channel_reply_delivery;
 pub mod channel_send_claim;
 pub mod channel_thread;
 pub mod channel_thread_follow;
@@ -80,7 +81,14 @@ pub mod org_role_scope;
 pub mod ownership_transfer;
 pub mod platform_binding;
 pub mod platform_bot_config;
+pub mod platform_bot_runtime_controls;
 pub mod platform_credential;
+pub mod platform_link_intent;
+pub mod platform_manager_ingress;
+pub mod platform_personal_binding;
+pub mod platform_public_budget;
+pub mod platform_public_session;
+pub mod platform_public_turn;
 pub mod platform_settings;
 pub mod platform_setup;
 pub mod provider_config;
@@ -174,3 +182,5 @@ pub mod async_service_operation;
 pub mod catalog_icon;
 
 pub mod platform_installation;
+
+pub mod platform_manager_delivery;

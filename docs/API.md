@@ -8557,6 +8557,22 @@ Tools updates distinguish omission from JSON `null` for `supplier` and `import_s
 
 CLI catalog creation requires `--endpoint-url` or `--twin-of` (otherwise the local error is `Catalog creation requires --endpoint-url or --twin-of`). Catalog updates support `--clear-supplier`, conflicting with `--supplier`. Tools table output formats prices as `Free` or `<credits> credits / <metric>`, limits as `<n>/s, burst <b>` or `none`, and topics as a comma-separated list. `tools show` prints rows for each operation (name, method, path, risk, data scope, cost class). JSON output remains the raw response.
 
+## Complete channel replies
+
+`POST /api/v1/channel-relay/reply` and `/thread-reply` accept one complete
+logical text reply in the existing request shape. NyxID splits it for the
+platform, preserves order and the bound destination, and consumes a reply
+token once for the entire request. HTTP 200 means every part has a valid
+platform acceptance receipt and persisted delivery metadata; the existing
+`message_id` and `platform_message_id` identify the last part. Partial or
+uncertain sends return an error and must not be automatically replayed.
+
+Text-only requests are limited to 2 MiB of serialized JSON before token
+consumption. Plans exceeding 64 platform parts are rejected before sending.
+Rich content, media, edits and proactive sends retain their separate contracts.
+See [Complete IM replies](CHANNEL_COMPLETE_REPLIES.md) for platform bounds,
+metadata retention, ingress configuration and CMAEG deadline coordination.
+
 ## Channel media delivery substitutions
 
 `POST /api/v1/channel-relay/reply`, `/thread-reply` and `/send` accept the existing

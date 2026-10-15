@@ -166,7 +166,7 @@ pub async fn reserve(
             let mut delivery = if let Some(parent) = event_id(&row) {
                 watches.find_one(doc!{"_id":parent,"user_id":&chat.user_id,"conversation_id":&row.id,"state":"queued"}).session(&mut *session).await?.ok_or(AppError::AssistantTurnRequired)?.delivery
             } else {
-                DeliveryBinding{origin:turn.origin,channel:turn.asked_from.clone().filter(|_|row.channel.is_some()).or_else(||row.channel.clone()),reply_channel:turn.asked_from.clone().filter(|_|row.channel.is_none()).or_else(||row.reply_channel.clone()),group_id:row.group_id.clone(),group_request_id:row.group_request_id.clone(),voice_request_id:turn.voice_request_id.clone(),trigger_run_id:turn.trigger_run_id.clone(),report_to:None,report_provenance:0}
+                DeliveryBinding{platform_reply:Some(platform_reply_routing(turn)),platform_origin:turn.platform_origin.clone(),origin:turn.origin,channel:turn.asked_from.clone().filter(|_|row.channel.is_some()).or_else(||row.channel.clone()),reply_channel:turn.asked_from.clone().filter(|_|row.channel.is_none()).or_else(||row.reply_channel.clone()),group_id:row.group_id.clone(),group_request_id:row.group_request_id.clone(),voice_request_id:turn.voice_request_id.clone(),trigger_run_id:turn.trigger_run_id.clone(),report_to:None,report_provenance:0}
             };
             // Never a parent operation's stored field wholesale.
             match super::assistant_nyxagent::live_turn(&row, Utc::now()).filter(|live| !live.stop_requested) {
@@ -390,10 +390,25 @@ pub fn apply_delivery(row: &mut AssistantConversation, w: &AsyncServiceOperation
     row.group_id = w.delivery.group_id.clone();
     row.group_request_id = w.delivery.group_request_id.clone();
     if let Some(turn) = row.active_turn.as_mut() {
+        turn.platform_reply = Some(
+            w.delivery
+                .platform_reply
+                .clone()
+                .unwrap_or(crate::models::assistant_conversation::PlatformReplyRouting::WebOnly),
+        );
         turn.voice_request_id = w.delivery.voice_request_id.clone();
         turn.trigger_run_id = w.delivery.trigger_run_id.clone();
         turn.also_deliver.clear();
     }
+}
+
+fn platform_reply_routing(
+    turn: &crate::models::assistant_conversation::ActiveTurn,
+) -> crate::models::assistant_conversation::PlatformReplyRouting {
+    use crate::models::assistant_conversation::PlatformReplyRouting;
+    turn.platform_reply
+        .clone()
+        .unwrap_or(PlatformReplyRouting::WebOnly)
 }
 pub async fn input_context(
     db: &Database,
@@ -481,6 +496,12 @@ pub async fn bind_in_session(
         .active_turn
         .as_mut()
         .ok_or(AppError::AssistantTurnRequired)?;
+    turn.platform_reply = Some(
+        w.delivery
+            .platform_reply
+            .clone()
+            .unwrap_or(crate::models::assistant_conversation::PlatformReplyRouting::WebOnly),
+    );
     turn.voice_request_id = w.delivery.voice_request_id.clone();
     turn.trigger_run_id = w.delivery.trigger_run_id.clone();
     // A bound event that disagrees with its carrier resolves to None.

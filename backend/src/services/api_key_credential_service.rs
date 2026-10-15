@@ -55,6 +55,7 @@ pub async fn issue(
     secret: &str,
     session: &mut ClientSession,
 ) -> AppResult<()> {
+    super::key_service::require_ordinary_purpose(parent.purpose)?;
     let secret_prefix = agent_key_display_prefix(secret)
         .ok_or_else(|| AppError::ValidationError("Invalid Agent Key credential prefix".into()))?;
     let expires_at = credential_expiry(parent.expires_at, expires_at)?;
@@ -159,7 +160,7 @@ pub async fn managed_key(
 ) -> AppResult<ApiKey> {
     let key = db
         .collection::<ApiKey>(API_KEYS)
-        .find_one(doc! {"_id": key_id})
+        .find_one(doc! {"_id": key_id, "purpose": {"$ne": "public_nyxbot"}})
         .await?
         .ok_or(AppError::AgentKeyCredentialNotFound)?;
     let access = org_service::resolve_owner_access(db, actor, &key.user_id).await?;

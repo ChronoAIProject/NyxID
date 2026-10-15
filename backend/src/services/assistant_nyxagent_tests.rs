@@ -264,6 +264,9 @@ fn insufficient_credits_is_a_stable_terminal_code() {
 fn recap_is_labeled_recent_and_bounded_without_splitting_unicode() {
     let messages: Vec<_> = (0..30)
         .map(|i| AssistantMessage {
+            platform_delivery_recovery_queued: false,
+            platform_reply: None,
+            platform_origin: None,
             author: None,
             activity_total: 0,
             report_to: None,
@@ -392,6 +395,9 @@ fn failure_matrix_maps_transport_failures_to_recoverable_classes() {
 fn recap_preserves_goal_head_and_tail_under_long_last_reply() {
     let rows = vec![
         AssistantMessage {
+            platform_delivery_recovery_queued: false,
+            platform_reply: None,
+            platform_origin: None,
             author: None,
             activity_total: 0,
             report_to: None,
@@ -421,6 +427,9 @@ fn recap_preserves_goal_head_and_tail_under_long_last_reply() {
             via: None,
         },
         AssistantMessage {
+            platform_delivery_recovery_queued: false,
+            platform_reply: None,
+            platform_origin: None,
             author: None,
             activity_total: 0,
             report_to: None,
@@ -461,6 +470,9 @@ fn recap_preserves_goal_head_and_tail_under_long_last_reply() {
 #[test]
 fn recap_caps_each_activity_list_and_reserves_bounded_total_budget() {
     let row = AssistantMessage {
+        platform_delivery_recovery_queued: false,
+        platform_reply: None,
+        platform_origin: None,
         author: None,
         activity_total: 0,
         report_to: None,
@@ -531,6 +543,9 @@ fn recap_caps_each_activity_list_and_reserves_bounded_total_budget() {
 #[test]
 fn recap_v2_keeps_action_status_and_attachment_checkpoint() {
     let row = AssistantMessage {
+        platform_delivery_recovery_queued: false,
+        platform_reply: None,
+        platform_origin: None,
         author: None,
         activity_total: 0,
         report_to: None,
@@ -587,6 +602,9 @@ fn recap_v2_keeps_action_status_and_attachment_checkpoint() {
 #[test]
 fn guest_recap_omits_owner_tool_metadata() {
     let row = AssistantMessage {
+        platform_delivery_recovery_queued: false,
+        platform_reply: None,
+        platform_origin: None,
         author: None,
         activity_total: 0,
         report_to: None,
@@ -643,6 +661,9 @@ fn guest_recap_omits_owner_tool_metadata() {
 #[test]
 fn retry_recap_lists_completed_activity_ids_for_no_duplicate_replay() {
     let row = AssistantMessage {
+        platform_delivery_recovery_queued: false,
+        platform_reply: None,
+        platform_origin: None,
         author: None,
         activity_total: 0,
         report_to: None,
@@ -897,6 +918,7 @@ fn live_turn_expires_at_the_exact_ttl_boundary() {
 
 fn stale_test_row(now: DateTime<Utc>) -> AssistantConversation {
     AssistantConversation {
+        platform_thread: None,
         machine_previews: false,
         platform_cleanup_pending: false,
         platform_cleanup_id: None,
@@ -915,6 +937,10 @@ fn stale_test_row(now: DateTime<Utc>) -> AssistantConversation {
         credential_api_key_id: "key".into(),
         message_count: 0,
         active_turn: Some(ActiveTurn {
+            platform_reply: None,
+            execution_started: false,
+            machine_scopes: Vec::new(),
+            platform_origin: None,
             activity_total: 0,
             retry_digests: Vec::new(),
             retry_of: None,
@@ -964,6 +990,394 @@ fn stale_test_row(now: DateTime<Utc>) -> AssistantConversation {
     }
 }
 
+fn platform_test_origin(
+    row: &AssistantConversation,
+) -> crate::models::assistant_conversation::PlatformTurnOrigin {
+    use crate::models::assistant_conversation::{
+        PlatformOriginSource, PlatformThread, PlatformTurnOrigin,
+    };
+    PlatformTurnOrigin {
+        thread: PlatformThread {
+            platform: "telegram".into(),
+            profile_id: "manager-profile".into(),
+            manager_bot_id: "manager".into(),
+            telegram_bot_id: 123,
+            binding_id: "personal-binding".into(),
+            binding_generation: 7,
+            user_id: row.user_id.clone(),
+            nyxbot_agent_id: row.agent_id.clone().unwrap_or_else(|| "agent".into()),
+        },
+        manager_authority_epoch: 3,
+        personal_control_revision: 11,
+        sender_id: 456,
+        chat_id: 789,
+        source: PlatformOriginSource::Ingress {
+            receipt_id: "receipt".into(),
+            claim_id: "claim".into(),
+        },
+    }
+}
+
+async fn seed_platform_execution(
+    db: &Database,
+    row: &AssistantConversation,
+    proof: &crate::models::assistant_conversation::PlatformTurnOrigin,
+) {
+    use crate::models::assistant_conversation::PlatformOriginSource;
+    let turn = row.active_turn.as_ref().unwrap();
+    let PlatformOriginSource::Ingress {
+        receipt_id,
+        claim_id,
+    } = &proof.source
+    else {
+        panic!("ingress fixture");
+    };
+    db.collection::<bson::Document>(crate::models::platform_personal_binding::COLLECTION_NAME).insert_one(doc! {
+        "_id":&proof.thread.binding_id, "user_id":&row.user_id, "generation":proof.thread.binding_generation,
+        "state":"revoked", "conversation_id":&row.id, "nyxbot_agent_id":&proof.thread.nyxbot_agent_id,
+        "active_turn":{"conversation_id":&row.id,"turn_id":&turn.turn_id},
+    }).await.unwrap();
+    db.collection::<bson::Document>(crate::models::platform_manager_ingress::COLLECTION_NAME).insert_one(doc! {
+        "_id":receipt_id, "claim_id":claim_id, "phase":"executing", "reply_id":bson::Bson::Null,"decision":bson::Bson::Null,
+        "profile_id":&proof.thread.profile_id,"manager_bot_id":&proof.thread.manager_bot_id,
+        "telegram_bot_id":proof.thread.telegram_bot_id,"manager_authority_epoch":proof.manager_authority_epoch,
+        "sender_id":proof.sender_id,"chat_id":proof.chat_id,
+        "audience":{"kind":"personal","user_id":&row.user_id,"binding_id":&proof.thread.binding_id,
+            "binding_generation":proof.thread.binding_generation,"personal_control_revision":proof.personal_control_revision},
+        "execution":{"conversation_id":&row.id,"turn_id":&turn.turn_id,"payer_user_id":&row.user_id},
+    }).await.unwrap();
+}
+
+async fn assert_platform_settled(
+    db: &Database,
+    proof: &crate::models::assistant_conversation::PlatformTurnOrigin,
+    reply_id: &str,
+) {
+    let binding = db
+        .collection::<bson::Document>(crate::models::platform_personal_binding::COLLECTION_NAME)
+        .find_one(doc! {"_id":&proof.thread.binding_id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(binding.get("active_turn"), Some(&bson::Bson::Null));
+    let receipt = db
+        .collection::<bson::Document>(crate::models::platform_manager_ingress::COLLECTION_NAME)
+        .find_one(doc! {"audience.binding_id":&proof.thread.binding_id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(receipt.get_str("phase").unwrap(), "settled");
+    assert_eq!(receipt.get_str("reply_id").unwrap(), reply_id);
+}
+
+#[test]
+fn platform_provenance_round_trips_and_legacy_rows_remain_origin_free() {
+    let mut row = stale_test_row(Utc::now());
+    let mut legacy = bson::to_document(&row).unwrap();
+    legacy.remove("platform_thread");
+    legacy
+        .get_document_mut("active_turn")
+        .unwrap()
+        .remove("platform_origin");
+    let restored: AssistantConversation = bson::from_document(legacy).unwrap();
+    assert!(restored.platform_thread.is_none());
+    assert!(restored.active_turn.unwrap().platform_origin.is_none());
+    let proof = platform_test_origin(&row);
+    row.platform_thread = Some(proof.thread.clone());
+    row.active_turn.as_mut().unwrap().platform_origin = Some(proof.clone());
+    let restored: AssistantConversation =
+        bson::from_document(bson::to_document(&row).unwrap()).unwrap();
+    assert_eq!(restored.platform_thread.as_ref(), Some(&proof.thread));
+    assert_eq!(
+        restored.active_turn.unwrap().platform_origin,
+        Some(proof.clone())
+    );
+    let debug = format!("{proof:?}");
+    for internal in ["receipt", "claim", "456", "789", "personal-binding"] {
+        assert!(!debug.contains(internal));
+    }
+}
+
+#[tokio::test]
+async fn platform_thread_is_excluded_from_home_validation_fallback_repair_and_web_adoption() {
+    let db = connect_transaction_test_database("nyxa_platform_home").await;
+    ensure_indexes(&db).await.unwrap();
+    let state = test_app_state(db.clone());
+    let owner = Uuid::new_v4().to_string();
+    db.collection(USERS)
+        .insert_one(test_user(&owner, UserType::Person))
+        .await
+        .unwrap();
+    let ordinary = begin_turn(
+        &db,
+        &owner,
+        &request(None, "ordinary"),
+        &state.encryption_keys,
+    )
+    .await
+    .unwrap();
+    let result = TurnResult {
+        text: "reply".into(),
+        session_id: None,
+        response_id: None,
+        error: None,
+    };
+    finish_turn(
+        &db,
+        &ordinary,
+        &ordinary.credential_api_key_id,
+        &Uuid::new_v4().to_string(),
+        &result,
+    )
+    .await
+    .unwrap();
+    let platform = begin_turn(
+        &db,
+        &owner,
+        &request(None, "personal"),
+        &state.encryption_keys,
+    )
+    .await
+    .unwrap();
+    finish_turn(
+        &db,
+        &platform,
+        &platform.credential_api_key_id,
+        &Uuid::new_v4().to_string(),
+        &result,
+    )
+    .await
+    .unwrap();
+    let proof = platform_test_origin(&platform);
+    db.collection::<bson::Document>(CONVERSATIONS)
+        .update_one(
+            doc! {"_id": &platform.id},
+            doc! {"$set": {"platform_thread": bson::to_bson(&proof.thread).unwrap()}},
+        )
+        .await
+        .unwrap();
+    let agents = db.collection::<bson::Document>(crate::models::assistant_agent::COLLECTION_NAME);
+    let agent_id = platform.agent_id.as_deref().unwrap();
+    agents
+        .update_one(
+            doc! {"_id": agent_id},
+            doc! {"$set": {"home_conversation_id": &platform.id}},
+        )
+        .await
+        .unwrap();
+    let team = crate::services::assistant_team_service::agent(&db, &owner, agent_id)
+        .await
+        .unwrap();
+    let home = crate::services::assistant_team_service::home_thread_for(
+        &db,
+        &state.encryption_keys,
+        &owner,
+        &team,
+    )
+    .await
+    .unwrap();
+    assert_eq!(home.id, ordinary.id);
+    agents
+        .update_one(
+            doc! {"_id": agent_id},
+            doc! {"$set": {"home_conversation_id": &platform.id}},
+        )
+        .await
+        .unwrap();
+    assert_eq!(repair_channel_homes(&db).await.unwrap(), 1);
+    let web = begin_turn(
+        &db,
+        &owner,
+        &request(Some(&platform.id), "web after unlink"),
+        &state.encryption_keys,
+    )
+    .await
+    .unwrap();
+    assert!(web.platform_thread.is_some());
+    assert!(web.active_turn.as_ref().unwrap().platform_origin.is_none());
+    let team = crate::services::assistant_team_service::agent(&db, &owner, agent_id)
+        .await
+        .unwrap();
+    assert!(team.home_conversation_id.is_none());
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn shared_owner_admission_commits_proof_input_and_key_together_without_home_adoption() {
+    let db = connect_transaction_test_database("nyxa_platform_admission").await;
+    ensure_indexes(&db).await.unwrap();
+    let state = test_app_state(db.clone());
+    let owner = Uuid::new_v4().to_string();
+    db.collection(USERS)
+        .insert_one(test_user(&owner, UserType::Person))
+        .await
+        .unwrap();
+    let agent = crate::services::assistant_team_service::ensure_nyxbot(&db, &owner)
+        .await
+        .unwrap();
+    let mut template = stale_test_row(Utc::now());
+    template.user_id = owner.clone();
+    template.agent_id = Some(agent.id.clone());
+    let proof = platform_test_origin(&template);
+    let ids = OwnerTurnIds {
+        conversation_id: template.id,
+        turn_id: Uuid::new_v4().to_string(),
+        message_id: Uuid::new_v4().to_string(),
+    };
+    let start = TurnStart::from(&request(None, "personal input"));
+    let mut session = db.client().start_session().await.unwrap();
+    session.start_transaction().await.unwrap();
+    let aborted = begin_owner_turn_in_session(
+        &db,
+        &mut session,
+        &state.encryption_keys,
+        &owner,
+        &start,
+        &ids,
+        &agent,
+        Some(99),
+        Some(&proof),
+        None,
+    )
+    .await
+    .unwrap()
+    .into_started()
+    .unwrap();
+    session.abort_transaction().await.unwrap();
+    assert!(get(&db, &owner, &ids.conversation_id).await.is_err());
+    assert!(
+        db.collection::<bson::Document>(crate::models::api_key::COLLECTION_NAME)
+            .find_one(doc! {"_id": &aborted.credential.api_key_id})
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        db.collection::<AssistantMessage>(MESSAGES)
+            .count_documents(doc! {"conversation_id": &ids.conversation_id})
+            .await
+            .unwrap(),
+        0
+    );
+    session.start_transaction().await.unwrap();
+    let committed = begin_owner_turn_in_session(
+        &db,
+        &mut session,
+        &state.encryption_keys,
+        &owner,
+        &start,
+        &ids,
+        &agent,
+        Some(99),
+        Some(&proof),
+        None,
+    )
+    .await
+    .unwrap()
+    .into_started()
+    .unwrap();
+    session.commit_transaction().await.unwrap();
+    let saved = get(&db, &owner, &ids.conversation_id).await.unwrap();
+    assert_eq!(saved.credential_api_key_id, committed.credential.api_key_id);
+    assert!(saved.learning_epoch.is_none());
+    assert_eq!(saved.platform_thread.as_ref(), Some(&proof.thread));
+    assert_eq!(
+        saved.active_turn.as_ref().unwrap().platform_origin.as_ref(),
+        Some(&proof)
+    );
+    let input = db
+        .collection::<AssistantMessage>(MESSAGES)
+        .find_one(doc! {"_id": &ids.message_id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(input.platform_origin.as_ref(), Some(&proof));
+    assert_eq!(input.turn_id, ids.turn_id);
+    assert!(
+        crate::services::assistant_team_service::agent(&db, &owner, &agent.id)
+            .await
+            .unwrap()
+            .home_conversation_id
+            .is_none()
+    );
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn settlement_retains_platform_origin_after_active_turn_is_cleared() {
+    let db = connect_transaction_test_database("nyxa_platform_settlement").await;
+    ensure_indexes(&db).await.unwrap();
+    let state = test_app_state(db.clone());
+    let owner = Uuid::new_v4().to_string();
+    db.collection(USERS)
+        .insert_one(test_user(&owner, UserType::Person))
+        .await
+        .unwrap();
+    let mut row = begin_turn(
+        &db,
+        &owner,
+        &request(None, "personal"),
+        &state.encryption_keys,
+    )
+    .await
+    .unwrap();
+    let proof = platform_test_origin(&row);
+    row.platform_thread = Some(proof.thread.clone());
+    row.active_turn.as_mut().unwrap().platform_origin = Some(proof.clone());
+    let destination = crate::models::assistant_conversation::PlatformReplyRouting::Captured {
+        origin: Box::new(proof.clone()),
+        turn_id: row.active_turn.as_ref().unwrap().turn_id.clone(),
+        expires_at: bson::DateTime::from_chrono(Utc::now() + chrono::Duration::minutes(30))
+            .to_chrono(),
+    };
+    row.active_turn.as_mut().unwrap().platform_reply = Some(destination.clone());
+    db.collection::<AssistantConversation>(CONVERSATIONS)
+        .replace_one(doc! {"_id": &row.id}, &row)
+        .await
+        .unwrap();
+    seed_platform_execution(&db, &row, &proof).await;
+    let message_id = Uuid::new_v4().to_string();
+    finish_turn(
+        &db,
+        &row,
+        &row.credential_api_key_id,
+        &message_id,
+        &TurnResult {
+            text: "personal reply".into(),
+            session_id: None,
+            response_id: None,
+            error: None,
+        },
+    )
+    .await
+    .unwrap();
+    assert!(
+        get(&db, &owner, &row.id)
+            .await
+            .unwrap()
+            .active_turn
+            .is_none()
+    );
+    let reply = db
+        .collection::<AssistantMessage>(MESSAGES)
+        .find_one(doc! {"_id": &message_id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_platform_settled(&db, &proof, &reply.id).await;
+    assert_eq!(reply.platform_origin, Some(proof));
+    assert_eq!(reply.platform_reply, Some(destination));
+    let mut legacy = bson::to_document(&reply).unwrap();
+    legacy.remove("platform_origin");
+    assert!(
+        bson::from_document::<AssistantMessage>(legacy)
+            .unwrap()
+            .platform_origin
+            .is_none()
+    );
+    db.drop().await.unwrap();
+}
+
 async fn expire_turn(db: &Database, row: &AssistantConversation) {
     db.collection::<AssistantConversation>(CONVERSATIONS)
         .update_one(
@@ -992,6 +1406,25 @@ async fn stale_fence_is_reclaimed_with_lost_reply_and_late_settlement_is_a_noop(
     )
     .await
     .unwrap();
+    let proof = platform_test_origin(&old);
+    let destination = crate::models::assistant_conversation::PlatformReplyRouting::Captured {
+        origin: Box::new(proof.clone()),
+        turn_id: old.active_turn.as_ref().unwrap().turn_id.clone(),
+        expires_at: bson::DateTime::from_chrono(Utc::now() + chrono::Duration::minutes(30))
+            .to_chrono(),
+    };
+    seed_platform_execution(&db, &old, &proof).await;
+    db.collection::<bson::Document>(CONVERSATIONS)
+        .update_one(
+            doc! {"_id": &old.id},
+            doc! {"$set": {
+                "platform_thread": bson::to_bson(&proof.thread).unwrap(),
+                "active_turn.platform_origin": bson::to_bson(&proof).unwrap(),
+                "active_turn.platform_reply": bson::to_bson(&destination).unwrap(),
+            }},
+        )
+        .await
+        .unwrap();
     db.collection::<AssistantConversation>(CONVERSATIONS)
         .update_one(
             doc! {"_id": &old.id},
@@ -1017,6 +1450,10 @@ async fn stale_fence_is_reclaimed_with_lost_reply_and_late_settlement_is_a_noop(
     let transcript = messages(&db, "owner", &old.id, 100, None).await.unwrap();
     assert_eq!(transcript.len(), 3);
     let lost = &transcript[1];
+    assert_eq!(lost.platform_origin.as_ref(), Some(&proof));
+    assert_eq!(lost.platform_reply.as_ref(), Some(&destination));
+    assert_platform_settled(&db, &proof, &lost.id).await;
+    assert!(next.active_turn.as_ref().unwrap().platform_origin.is_none());
     assert_eq!(lost.turn_id, old.active_turn.as_ref().unwrap().turn_id);
     assert_eq!(lost.role, "assistant");
     assert_eq!(lost.status, "failed");
@@ -2603,6 +3040,9 @@ async fn reset_context_is_fenced_and_drops_the_checkpoint() {
 #[test]
 fn recap_reserves_the_goal_before_long_recent_rows() {
     let row = |seq: i64, role: &str, text: String| AssistantMessage {
+        platform_delivery_recovery_queued: false,
+        platform_reply: None,
+        platform_origin: None,
         author: None,
         activity_total: 0,
         report_to: None,
@@ -3622,6 +4062,9 @@ fn production_recap_keeps_unrendered_tail_owners_in_requirements_and_omission_co
 #[test]
 fn recap_sections_keep_mid_history_owner_rules_tail_and_manifest_with_cjk() {
     let message = |i, text: String| AssistantMessage {
+        platform_delivery_recovery_queued: false,
+        platform_reply: None,
+        platform_origin: None,
         retry_claimed_by: None,
         activity_count: None,
         report_to: None,
@@ -3675,6 +4118,9 @@ fn recap_sections_keep_mid_history_owner_rules_tail_and_manifest_with_cjk() {
 #[test]
 fn recap_owner_overflow_points_to_history_tool() {
     let message = |i: i64| AssistantMessage {
+        platform_delivery_recovery_queued: false,
+        platform_reply: None,
+        platform_origin: None,
         retry_claimed_by: None,
         activity_count: None,
         report_to: None,
@@ -4358,6 +4804,400 @@ fn channel_tool_image_filter_honors_explicit_policy_and_narrow_legacy_shim() {
     attachment.origin = "tool".into();
     attachment.content_type = "application/pdf".into();
     assert!(!chat_tool_image(&attachment));
+}
+
+#[tokio::test]
+async fn platform_stop_capture_is_exact_transactional_and_keeps_independent_work() {
+    use crate::models::machine_job::{COLLECTION_NAME as JOBS, MachineJob};
+    use crate::services::{
+        platform_manager_contract as contract, platform_personal_turn_service as personal,
+    };
+    let db = connect_transaction_test_database("nyxa_exact_platform_stop").await;
+    let mut row = stale_test_row(Utc::now());
+    let proof = platform_test_origin(&row);
+    row.platform_thread = Some(proof.thread.clone());
+    row.active_turn.as_mut().unwrap().platform_origin = Some(proof.clone());
+    row.active_turn.as_mut().unwrap().stop_requested = false;
+    row.active_turn.as_mut().unwrap().machine_scopes.push(
+        crate::models::assistant_conversation::MachineTurnScope {
+            node_id: "node".into(),
+            runtime_id: "issue-time-runtime".into(),
+        },
+    );
+    let origin = personal::contract_origin(&proof).unwrap();
+    assert_eq!(personal::model_origin(&origin), proof);
+    let turn = contract::TurnRef {
+        conversation_id: row.id.clone(),
+        turn_id: row.active_turn.as_ref().unwrap().turn_id.clone(),
+    };
+    db.collection::<AssistantConversation>(CONVERSATIONS)
+        .insert_one(&row)
+        .await
+        .unwrap();
+    let job = |id: &str, issuing_turn: Option<String>| MachineJob {
+        id: id.into(),
+        user_id: row.user_id.clone(),
+        conversation_id: row.id.clone(),
+        issuing_turn_id: issuing_turn,
+        node_id: "node".into(),
+        runtime_id: "runtime".into(),
+        api_key_id: row.credential_api_key_id.clone(),
+        agent_id: proof.thread.nyxbot_agent_id.clone(),
+        state: "running".into(),
+        services: Vec::new(),
+        report_to: None,
+        report_provenance: 0,
+        created_at: Utc::now(),
+        expires_at: Utc::now() + chrono::Duration::hours(1),
+        finished_at: None,
+    };
+    db.collection::<MachineJob>(JOBS)
+        .insert_many([
+            job("exact-job", Some(turn.turn_id.clone())),
+            job("old-job", Some("older-turn".into())),
+            job("legacy-job", None),
+        ])
+        .await
+        .unwrap();
+    // Independent watches deliberately remain unchanged, including idle turns.
+    db.collection::<bson::Document>(crate::models::async_service_operation::COLLECTION_NAME)
+        .insert_one(
+            doc! {"_id":"watch","user_id":&row.user_id,"conversation_id":&row.id,"state":"waiting"},
+        )
+        .await
+        .unwrap();
+    let mut session = db.client().start_session().await.unwrap();
+    session.start_transaction().await.unwrap();
+    let mut wrong = origin.clone();
+    wrong.authority.binding_generation += 1;
+    assert!(matches!(
+        personal::capture_exact_stop_in_session(&db, &mut session, &wrong, &turn)
+            .await
+            .unwrap(),
+        contract::ExactStopOutcome::NoMatchingActiveTurn
+    ));
+    let captured = personal::capture_exact_stop_in_session(&db, &mut session, &origin, &turn)
+        .await
+        .unwrap();
+    let contract::ExactStopOutcome::Captured(captured) = captured else {
+        panic!("matching turn must be captured")
+    };
+    assert_eq!(captured.machine_scopes.len(), 1);
+    assert_eq!(captured.machine_scopes[0].runtime_id, "issue-time-runtime");
+    assert_eq!(captured.machine_jobs.len(), 1);
+    assert_eq!(captured.machine_jobs[0].job_id, "exact-job");
+    session.abort_transaction().await.unwrap();
+    assert!(
+        !get(&db, &row.user_id, &row.id)
+            .await
+            .unwrap()
+            .active_turn
+            .unwrap()
+            .stop_requested
+    );
+    session.start_transaction().await.unwrap();
+    personal::capture_exact_stop_in_session(&db, &mut session, &origin, &turn)
+        .await
+        .unwrap();
+    session.commit_transaction().await.unwrap();
+    assert!(
+        get(&db, &row.user_id, &row.id)
+            .await
+            .unwrap()
+            .active_turn
+            .unwrap()
+            .stop_requested
+    );
+    assert_eq!(
+        db.collection::<MachineJob>(JOBS)
+            .count_documents(doc! {"state":"running"})
+            .await
+            .unwrap(),
+        3
+    );
+    assert!(
+        db.collection::<bson::Document>(crate::models::async_service_operation::COLLECTION_NAME)
+            .find_one(doc! {"_id":"watch","state":"waiting"})
+            .await
+            .unwrap()
+            .is_some()
+    );
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn platform_thread_requires_live_turn_with_ordinary_rollout_disabled() {
+    use crate::services::assistant_acknowledgement_service::{
+        AssistantTurnFence, enforce_turn_gate,
+    };
+    let db = connect_transaction_test_database("nyxa_platform_gate_off").await;
+    let owner = Uuid::new_v4().to_string();
+    let mut fence = AssistantTurnFence {
+        conversation_id: Uuid::new_v4().to_string(),
+        turn_id: None,
+        turn_live: false,
+        turn_stopped: true,
+        platform_thread: false,
+        platform_origin: None,
+    };
+    // No rollout row: ordinary compatibility remains permissive.
+    enforce_turn_gate(&db, &fence, &owner, Some("key"), None, None, None, "test")
+        .await
+        .unwrap();
+    fence.platform_thread = true;
+    assert!(matches!(
+        enforce_turn_gate(&db, &fence, &owner, Some("key"), None, None, None, "test").await,
+        Err(AppError::AssistantTurnRequired)
+    ));
+    fence.turn_id = Some("turn".into());
+    fence.turn_live = true;
+    fence.turn_stopped = false;
+    // A fresh owner web turn carries no revoked transport authority.
+    enforce_turn_gate(&db, &fence, &owner, Some("key"), None, None, None, "test")
+        .await
+        .unwrap();
+    fence.turn_stopped = true;
+    assert!(matches!(
+        enforce_turn_gate(&db, &fence, &owner, Some("key"), None, None, None, "test").await,
+        Err(AppError::AssistantTurnRequired)
+    ));
+    db.drop().await.unwrap();
+}
+
+#[test]
+fn async_delivery_keeps_original_platform_proof_and_fresh_execution_origin_separate() {
+    use crate::models::async_service_operation::{AsyncServiceOperation, DeliveryBinding};
+    let mut row = stale_test_row(Utc::now());
+    let original = platform_test_origin(&row);
+    let mut fresh = original.clone();
+    fresh.source = crate::models::assistant_conversation::PlatformOriginSource::ThreadEvent {
+        admission_id: "fresh-event".into(),
+    };
+    row.platform_thread = Some(fresh.thread.clone());
+    row.active_turn.as_mut().unwrap().platform_origin = Some(fresh.clone());
+    let delivery = DeliveryBinding {
+        platform_reply: Some(
+            crate::models::assistant_conversation::PlatformReplyRouting::Captured {
+                origin: Box::new(original.clone()),
+                turn_id: "original-turn".into(),
+                expires_at: bson::DateTime::from_chrono(Utc::now() + chrono::Duration::minutes(30))
+                    .to_chrono(),
+            },
+        ),
+        platform_origin: Some(original.clone()),
+        origin: TurnOrigin::User,
+        channel: None,
+        reply_channel: None,
+        group_id: None,
+        group_request_id: None,
+        voice_request_id: None,
+        trigger_run_id: None,
+        report_to: Some("nyxa-original-report".into()),
+        report_provenance: crate::models::assistant_conversation::REPORT_PROVENANCE_V1,
+    };
+    let watch = AsyncServiceOperation {
+        id: "watch".into(),
+        user_id: row.user_id.clone(),
+        conversation_id: row.id.clone(),
+        agent_id: "agent".into(),
+        turn_id: "original-turn".into(),
+        api_key_id: "key".into(),
+        service_id: "service".into(),
+        submit_endpoint_id: "submit".into(),
+        contract: crate::models::async_service_operation::AsyncOperationContract {
+            status_operation: "status".into(),
+            result_operation: "result".into(),
+            cancel_operation: None,
+            id_field: "id".into(),
+            id_parameter: "id".into(),
+            status_field: "status".into(),
+            success_states: vec!["done".into()],
+            failure_states: vec!["failed".into()],
+            error_field: None,
+        },
+        delivery,
+        operation_id: Some("operation".into()),
+        state: "queued".into(),
+        reason: None,
+        attempts: 0,
+        lease_id: None,
+        lease_until: None,
+        created_at: Utc::now(),
+        deadline: Utc::now(),
+        poll_at: Utc::now(),
+        expires_at: Utc::now(),
+        result_encrypted: None,
+    };
+    crate::services::async_service_operation::apply_delivery(&mut row, &watch);
+    assert_eq!(
+        row.active_turn.as_ref().unwrap().platform_origin,
+        Some(fresh.clone())
+    );
+    assert_eq!(
+        row.active_turn.as_ref().unwrap().platform_reply,
+        watch.delivery.platform_reply
+    );
+    assert!(channel_note(&row).contains("private Telegram"));
+    let mut web_watch = watch.clone();
+    web_watch.delivery.platform_reply = None;
+    crate::services::async_service_operation::apply_delivery(&mut row, &web_watch);
+    assert_eq!(
+        row.active_turn.as_ref().unwrap().platform_origin,
+        Some(fresh)
+    );
+    assert_eq!(
+        row.active_turn.as_ref().unwrap().platform_reply,
+        Some(crate::models::assistant_conversation::PlatformReplyRouting::WebOnly)
+    );
+    assert!(!channel_note(&row).contains("private Telegram"));
+    assert_eq!(watch.delivery.platform_origin, Some(original));
+    assert_eq!(
+        crate::models::assistant_conversation::carried_report_to(
+            watch.delivery.report_to.as_deref(),
+            watch.delivery.report_provenance,
+        )
+        .as_deref(),
+        Some("nyxa-original-report"),
+    );
+    let mut legacy = bson::to_document(&watch.delivery).unwrap();
+    legacy.remove("platform_origin");
+    assert!(
+        bson::from_document::<DeliveryBinding>(legacy)
+            .unwrap()
+            .platform_origin
+            .is_none()
+    );
+    let mut legacy_report = bson::to_document(&watch.delivery).unwrap();
+    legacy_report.remove("report_provenance");
+    let legacy_report = bson::from_document::<DeliveryBinding>(legacy_report).unwrap();
+    assert_eq!(
+        legacy_report.platform_origin,
+        watch.delivery.platform_origin
+    );
+    assert!(
+        crate::models::assistant_conversation::carried_report_to(
+            legacy_report.report_to.as_deref(),
+            legacy_report.report_provenance,
+        )
+        .is_none()
+    );
+}
+
+#[tokio::test]
+async fn personal_settlement_receipt_mismatch_rolls_back_reply_and_pointer_clear() {
+    let db = connect_transaction_test_database("nyxa_personal_settle_abort").await;
+    ensure_indexes(&db).await.unwrap();
+    let state = test_app_state(db.clone());
+    let mut row = begin_turn(
+        &db,
+        "owner",
+        &request(None, "hello"),
+        &state.encryption_keys,
+    )
+    .await
+    .unwrap();
+    let proof = platform_test_origin(&row);
+    row.platform_thread = Some(proof.thread.clone());
+    row.active_turn.as_mut().unwrap().platform_origin = Some(proof.clone());
+    db.collection::<AssistantConversation>(CONVERSATIONS)
+        .replace_one(doc! {"_id":&row.id}, &row)
+        .await
+        .unwrap();
+    seed_platform_execution(&db, &row, &proof).await;
+    let receipts =
+        db.collection::<bson::Document>(crate::models::platform_manager_ingress::COLLECTION_NAME);
+    receipts
+        .update_one(doc! {}, doc! {"$set":{"claim_id":"different-claim"}})
+        .await
+        .unwrap();
+    let reply_id = Uuid::new_v4().to_string();
+    assert!(
+        finish_turn(
+            &db,
+            &row,
+            &row.credential_api_key_id,
+            &reply_id,
+            &TurnResult {
+                text: "uncommitted".into(),
+                session_id: None,
+                response_id: None,
+                error: None,
+            }
+        )
+        .await
+        .is_err()
+    );
+    assert!(
+        get(&db, "owner", &row.id)
+            .await
+            .unwrap()
+            .active_turn
+            .is_some()
+    );
+    assert!(
+        db.collection::<AssistantMessage>(MESSAGES)
+            .find_one(doc! {"_id":reply_id})
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let binding = db
+        .collection::<bson::Document>(crate::models::platform_personal_binding::COLLECTION_NAME)
+        .find_one(doc! {"_id":&proof.thread.binding_id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(binding.get_document("active_turn").is_ok());
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn deleting_personal_thread_interrupts_only_its_exact_claim_and_clears_reference() {
+    let db = connect_transaction_test_database("nyxa_personal_delete").await;
+    ensure_indexes(&db).await.unwrap();
+    let state = test_app_state(db.clone());
+    let mut row = begin_turn(
+        &db,
+        "owner",
+        &request(None, "hello"),
+        &state.encryption_keys,
+    )
+    .await
+    .unwrap();
+    let proof = platform_test_origin(&row);
+    row.platform_thread = Some(proof.thread.clone());
+    row.active_turn.as_mut().unwrap().platform_origin = Some(proof.clone());
+    db.collection::<AssistantConversation>(CONVERSATIONS)
+        .replace_one(doc! {"_id":&row.id}, &row)
+        .await
+        .unwrap();
+    seed_platform_execution(&db, &row, &proof).await;
+    delete(&db, "owner", &row.id).await.unwrap();
+    let binding = db
+        .collection::<bson::Document>(crate::models::platform_personal_binding::COLLECTION_NAME)
+        .find_one(doc! {"_id":&proof.thread.binding_id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(binding.get("conversation_id"), Some(&bson::Bson::Null));
+    assert_eq!(binding.get("active_turn"), Some(&bson::Bson::Null));
+    let receipt = db
+        .collection::<bson::Document>(crate::models::platform_manager_ingress::COLLECTION_NAME)
+        .find_one(doc! {})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(receipt.get_str("phase").unwrap(), "interrupted");
+    assert_eq!(
+        receipt.get_str("interrupted_reason").unwrap(),
+        "conversation_deleted"
+    );
+    assert_eq!(receipt.get("reply_id"), Some(&bson::Bson::Null));
+    assert!(matches!(
+        get(&db, "owner", &row.id).await,
+        Err(AppError::NotFound(_))
+    ));
+    db.drop().await.unwrap();
 }
 
 /// Plan v7 §2.2: the reducer never creates NyxBot involvement from

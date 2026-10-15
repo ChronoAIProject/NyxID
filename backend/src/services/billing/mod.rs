@@ -434,6 +434,12 @@ impl BillingService {
         ctx: &BillingRouteContext,
         required: bool,
     ) -> AppResult<MeteredProxyContext> {
+        let public = ctx.public_admission.is_some();
+        if public && (!required || !self.config.billing_enabled || ctx.pool_attempt.is_some()) {
+            return Err(crate::errors::AppError::BillingProviderUnavailable(
+                "Public funding requires enabled billing".into(),
+            ));
+        }
         if required && self.config.billing_enabled {
             ctx.require_platform_price()?;
             if self.lago.is_none() {
@@ -489,6 +495,11 @@ impl BillingService {
             } else {
                 false
             };
+            if public && (!rollout_enabled || !platform_billable) {
+                return Err(crate::errors::AppError::BillingProviderUnavailable(
+                    "Public sponsor funding is unavailable".into(),
+                ));
+            }
             let mut ctx = ctx.clone();
             if !rollout_enabled {
                 ctx.resale = None;
@@ -527,7 +538,7 @@ impl BillingService {
                 "Channel billing could not reserve funding".into(),
             ));
         }
-        if ctx.pool_attempt.is_some() && reservation.is_some() {
+        if (ctx.pool_attempt.is_some() || ctx.public_admission.is_some()) && reservation.is_some() {
             // Pool funding and meter rows committed together; cancellation at
             // any later await can recover from the durable attempt lease.
             return Ok(MeteredProxyContext::from_route(&ctx));

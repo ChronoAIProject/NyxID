@@ -11,6 +11,12 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { useAuthStore } from "@/stores/auth-store";
 import { NyxBotSettingsContent } from "./nyxbot-settings-content";
+import { loadPersonalBindings } from "@/lib/platform-personal";
+
+vi.mock("@/lib/platform-personal", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/platform-personal")>()),
+  loadPersonalBindings: vi.fn(),
+}));
 
 vi.mock("@/hooks/use-orgs", () => ({
   useOrgs: () => ({ data: [], isPending: false, error: null }),
@@ -72,6 +78,10 @@ let writes: { method: string; endpoint: string; body: unknown }[];
 let client: QueryClient;
 
 beforeEach(() => {
+  vi.mocked(loadPersonalBindings).mockReset().mockResolvedValue({
+    bindings: [],
+    next_before_id: null,
+  });
   useAuthStore.getState().setUser({
     id: "owner",
     email: "owner@example.com",
@@ -487,12 +497,17 @@ it("opens a bot's chats and saves who can talk and how it answers", async () => 
   );
 });
 
+function settingsSection(title: string) {
+  const heading = screen.getByRole("heading", { name: title });
+  return within(heading.parentElement!.parentElement!);
+}
+
 it("keeps Automations and Channel bots available while General loads", async () => {
   settingsRead = "pending";
   renderPage();
-  expect(await screen.findByRole("status")).toHaveTextContent(
-    "Loading settings...",
-  );
+  expect(
+    await settingsSection("General").findByRole("status"),
+  ).toHaveTextContent("Loading settings...");
   expect(screen.getByRole("heading", { name: "General" })).toBeVisible();
   expect(screen.getByRole("heading", { name: "Automations" })).toBeVisible();
   expect(
@@ -508,6 +523,9 @@ it("keeps Automations and Channel bots available while General loads", async () 
 
 it("shows General's load error with retry without hiding the other sections", async () => {
   settingsRead = "error";
+  vi.mocked(loadPersonalBindings).mockRejectedValue(
+    new Error("Links unavailable"),
+  );
   const user = renderPage();
   expect(
     await screen.findByText("Could not load settings. NyxBot is temporarily unavailable. Try again shortly."),
@@ -518,11 +536,26 @@ it("shows General's load error with retry without hiding the other sections", as
   expect(
     await screen.findByRole("list", { name: "Connected channel bots" }),
   ).toHaveTextContent("Home bot");
-  settingsRead = "ready";
-  await user.click(screen.getByRole("button", { name: "Retry" }));
+  const personalLinks = screen.getByRole("region", {
+    name: "Personal Telegram links",
+  });
   expect(
-    await screen.findByRole("form", { name: "NyxBot preferences" }),
+    await within(personalLinks).findByText(
+      "Personal Telegram links are unavailable.",
+    ),
   ).toBeVisible();
+  expect(within(personalLinks).getByRole("button", { name: "Retry" })).toBeVisible();
+  settingsRead = "ready";
+  await user.click(
+    settingsSection("General").getByRole("button", { name: "Retry" }),
+  );
+  expect(
+    await settingsSection("General").findByRole("form", {
+      name: "NyxBot preferences",
+    }),
+  ).toBeVisible();
+  expect(vi.mocked(loadPersonalBindings)).toHaveBeenCalledTimes(1);
+  expect(within(personalLinks).getByRole("button", { name: "Retry" })).toBeVisible();
 });
 
 it("keeps dirty values and reports a failed General save inline", async () => {

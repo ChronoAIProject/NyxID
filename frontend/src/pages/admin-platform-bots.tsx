@@ -1,4 +1,4 @@
-import { creditUnit } from "@/lib/platform-onboarding";
+import { ManagerRuntimeSettings } from "@/components/platform-manager-runtime";
 import { useState } from "react";
 import { z } from "zod";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -8,17 +8,13 @@ import {
   useGatewayCleanup,
   useGatewayCleanupAction,
   useAdminPlatformAction,
-  useAdminGuideMutation,
-  useAdminGuideServices,
   useAdminPlatformProfiles,
   useAdminPlatformTargets,
 } from "@/hooks/use-platform-onboarding";
 import {
-  guideConfigurationSchema,
   type PlatformProfile,
   type GatewayCleanupReview,
 } from "@/schemas/platform-onboarding";
-import { Input } from "@/components/ui/input";
 import {
   useAppForm,
   Form,
@@ -39,253 +35,6 @@ const convertSchema = z.object({
   channel_bot_id: z.uuid(),
   funding_owner_user_id: z.uuid(),
 });
-function GuideSettings({ profile }: { profile: PlatformProfile }) {
-  const mutation = useAdminGuideMutation();
-  const [after, setAfter] = useState<string>();
-  const catalog = useAdminGuideServices(profile, after);
-  const [models, setModels] = useState<string[]>([]);
-  const form = useAppForm({
-    resolver: zodResolver(guideConfigurationSchema),
-    defaultValues: profile.guide ?? {
-      model_service_id: "",
-      model_id: "",
-      limits: {
-        daily_credits: "1",
-        turns_per_hour: 10,
-        concurrent_turns: 1,
-        max_input_chars: 2048,
-        max_output_tokens: 512,
-      },
-      anonymous_daily_credits: "0.1",
-      platform_turns_per_hour: 100,
-      platform_concurrent_turns: 4,
-    },
-  });
-  return (
-    <Form {...form}>
-      <form
-        className="space-y-3 rounded-lg border p-3"
-        onSubmit={form.handleSubmit((guide) =>
-          mutation.mutate({
-            action: "configure",
-            profile,
-            guide,
-            enabled: false,
-          }),
-        )}
-      >
-        <p>
-          Guide inference uses the dedicated sponsor organization. Discovery and
-          readiness checks may consume sponsor credits. No personal service
-          connection is used.
-        </p>
-        {mutation.error && <ErrorBanner message={mutation.error.message} />}
-        {catalog.error && (
-          <ErrorBanner message="Could not load eligible sponsor-authorized platform inference services." />
-        )}
-        <FormField
-          control={form.control}
-          name="model_service_id"
-          render={({ field }) => (
-            <FormItem>
-              <FormLabel>Platform inference service</FormLabel>
-              <FormControl>
-                <select
-                  {...field}
-                  className="h-8 w-full rounded-lg border border-input bg-background px-3"
-                  onChange={(event) => {
-                    field.onChange(event.target.value);
-                    form.setValue("model_id", "");
-                    setModels([]);
-                  }}
-                >
-                  <option value="">Choose an eligible catalog service</option>
-                  {profile.guide &&
-                    !catalog.data?.services.some(
-                      (service) =>
-                        service.id === profile.guide!.model_service_id,
-                    ) && (
-                      <option value={profile.guide.model_service_id}>
-                        Current service (availability must be rechecked)
-                      </option>
-                    )}
-                  {catalog.data?.services.map((service) => (
-                    <option key={service.id} value={service.id}>
-                      {service.name}
-                    </option>
-                  ))}
-                </select>
-              </FormControl>
-              <FormMessage />
-            </FormItem>
-          )}
-        />
-        {catalog.data?.next_after_id && (
-          <Button
-            type="button"
-            onClick={() => setAfter(catalog.data!.next_after_id!)}
-          >
-            More eligible services
-          </Button>
-        )}
-        {after && (
-          <Button type="button" onClick={() => setAfter(undefined)}>
-            First service page
-          </Button>
-        )}
-        <FormField
-          control={form.control}
-          name="model_id"
-          render={({ field }) => (
-            <FormItem>
-              <FormLabel>Exact advertised model</FormLabel>
-              <FormControl>
-                <select
-                  {...field}
-                  className="h-8 w-full rounded-lg border border-input bg-background px-3"
-                >
-                  <option value="">Discover and select a model</option>
-                  {field.value && !models.includes(field.value) && (
-                    <option value={field.value}>
-                      Current model: {field.value} (readiness required)
-                    </option>
-                  )}
-                  {models.map((model) => (
-                    <option key={model} value={model}>
-                      {model}
-                    </option>
-                  ))}
-                </select>
-              </FormControl>
-              <FormMessage />
-            </FormItem>
-          )}
-        />
-
-        {(["anonymous_daily_credits"] as const).map((name) => (
-          <FormField
-            key={name}
-            control={form.control}
-            name={name}
-            render={({ field }) => (
-              <FormItem>
-                <FormLabel>Anonymous sender daily credits</FormLabel>
-                <FormControl>
-                  <Input {...field} />
-                </FormControl>
-                <FormMessage />
-              </FormItem>
-            )}
-          />
-        ))}
-        <FormField
-          control={form.control}
-          name="limits.daily_credits"
-          render={({ field }) => (
-            <FormItem>
-              <FormLabel>Bound sender daily credits</FormLabel>
-              <FormControl>
-                <Input {...field} />
-              </FormControl>
-              <FormMessage />
-            </FormItem>
-          )}
-        />
-        {(
-          [
-            ["limits.turns_per_hour", "Sender turns per hour"],
-            ["limits.concurrent_turns", "Sender concurrent turns"],
-            ["limits.max_input_chars", "Maximum input characters"],
-            ["limits.max_output_tokens", "Maximum output tokens"],
-            ["platform_turns_per_hour", "Platform turns per hour"],
-            ["platform_concurrent_turns", "Platform concurrent turns"],
-          ] as const
-        ).map(([name, label]) => (
-          <FormField
-            key={name}
-            control={form.control}
-            name={name}
-            render={({ field }) => (
-              <FormItem>
-                <FormLabel>{label}</FormLabel>
-                <FormControl>
-                  <Input
-                    {...field}
-                    type="number"
-                    onChange={(event) =>
-                      field.onChange(event.target.valueAsNumber)
-                    }
-                  />
-                </FormControl>
-                <FormMessage />
-              </FormItem>
-            )}
-          />
-        ))}
-        <p>
-          Sender daily cap: {form.watch("limits.daily_credits")}{" "}
-          {creditUnit(form.watch("limits.daily_credits"))}.{" "}
-          {form.watch("limits.turns_per_hour")} turns/hour. Global limit:{" "}
-          {form.watch("platform_turns_per_hour")} turns/hour,{" "}
-          {form.watch("platform_concurrent_turns")} concurrent.
-        </p>
-        <div className="flex flex-wrap gap-2">
-          <Button type="submit" disabled={mutation.isPending}>
-            Save paused configuration
-          </Button>
-          <Button
-            type="button"
-            disabled={
-              !z.uuid().safeParse(form.watch("model_service_id")).success ||
-              mutation.isPending
-            }
-            onClick={() =>
-              mutation.mutate(
-                {
-                  action: "discover",
-                  profile,
-                  model_service_id: form.getValues("model_service_id"),
-                },
-                {
-                  onSuccess: (result) => {
-                    if (
-                      "models" in result &&
-                      result.model_service_id ===
-                        form.getValues("model_service_id") &&
-                      result.generation === profile.generation
-                    )
-                      setModels(result.models);
-                  },
-                },
-              )
-            }
-          >
-            Discover sponsor-funded models
-          </Button>
-          <Button
-            type="button"
-            disabled={
-              !profile.guide || form.formState.isDirty || mutation.isPending
-            }
-            onClick={() => {
-              if (profile.guide)
-                mutation.mutate({
-                  action: "configure",
-                  profile,
-                  guide: profile.guide,
-                  enabled: true,
-                });
-            }}
-          >
-            Validate model and enable guide
-          </Button>
-        </div>
-        {models.length > 0 && <p>Advertised models: {models.join(", ")}</p>}
-      </form>
-    </Form>
-  );
-}
-
 export function GatewayCleanupControls({
   profile,
 }: {
@@ -570,7 +319,7 @@ function AdminProfiles() {
               or credentials. Repair retains the shared native creation webhook.
             </p>
             {!profile.deleted_at && (
-              <GuideSettings
+            <ManagerRuntimeSettings
                 key={`${profile.id}:${profile.generation}`}
                 profile={profile}
               />

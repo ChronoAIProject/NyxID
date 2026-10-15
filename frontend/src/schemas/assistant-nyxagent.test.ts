@@ -520,3 +520,15 @@ it("parses tool-image continuation events with the legacy required counter", () 
   };
   expect(nyxAgentEventSchema.parse(event)).toMatchObject({ event: "turn.continuing", continuation: 1 });
 });
+
+it("retains optional personal Telegram thread and turn provenance, including null for web turns", () => {
+  const thread = { platform: "telegram", manager_id: "profile-id", binding_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", binding_generation: 2 };
+  const origin = { binding_id: thread.binding_id, binding_generation: 2, manager_authority_epoch: 3, personal_control_revision: 4 };
+  const conversation = nyxAgentConversationSchema.parse({ ...legacyConversation, platform_thread: thread, active_turn: { turn_id: "turn", started_at: at, platform_origin: origin } });
+  expect(conversation.platform_thread).toEqual(thread);
+  expect(conversation.active_turn?.platform_origin).toEqual(origin);
+  const message = { id: "message", seq: 1, turn_id: "turn", role: "user", text: "Telegram work", status: "completed", error_code: null, created_at: at };
+  expect(nyxAgentMessageSchema.parse({ ...message, platform_origin: origin }).platform_origin).toEqual(origin);
+  expect(nyxAgentMessageSchema.parse({ ...message, platform_origin: null }).platform_origin).toBeNull();
+  expect(nyxAgentConversationSchema.parse(legacyConversation).platform_thread).toBeUndefined();
+});

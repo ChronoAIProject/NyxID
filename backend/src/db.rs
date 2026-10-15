@@ -245,6 +245,29 @@ async fn ensure_core_indexes(db: &Database) -> Result<(), mongodb::error::Error>
     crate::services::platform_bot_config_service::ensure_indexes(db).await?;
     crate::services::platform_setup_service::ensure_indexes(db).await?;
     crate::services::platform_binding_service::ensure_indexes(db).await?;
+    crate::services::platform_bot_runtime_control_service::ensure_indexes(db).await?;
+    crate::services::platform_link_intent_service::ensure_indexes(db).await?;
+    crate::services::platform_personal_binding_service::ensure_indexes(db).await?;
+    crate::services::platform_manager_ingress_service::ensure_indexes(db).await?;
+    crate::services::platform_manager_delivery::ensure_indexes(db).await?;
+    db.collection::<bson::Document>(crate::models::user::COLLECTION_NAME)
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"platform_personal_retirement_attempted_at":1,"_id":1})
+                .options(
+                    IndexOptions::builder()
+                        .name("personal_retirement_recovery".to_owned())
+                        .partial_filter_expression(
+                            doc! {"platform_personal_retirement_pending":true,"is_active":false},
+                        )
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+    crate::services::platform_public_agent_service::ensure_indexes(db).await?;
+    crate::services::platform_public_budget_service::ensure_indexes(db).await?;
+    crate::services::platform_public_credential_service::ensure_indexes(db).await?;
     crate::services::platform_provisioning_service::ensure_indexes(db).await?;
     crate::services::platform_inference_service::ensure_indexes(db).await?;
     crate::services::platform_native_receipt_service::ensure_indexes(db).await?;
@@ -2677,6 +2700,8 @@ async fn ensure_service_indexes(db: &Database) -> Result<(), mongodb::error::Err
                 .build(),
         )
         .await?;
+
+    crate::services::channel_reply_delivery::ensure_indexes(db).await?;
 
     // ── reply_token_uses ──
     let reply_token_uses = db.collection::<mongodb::bson::Document>("reply_token_uses");

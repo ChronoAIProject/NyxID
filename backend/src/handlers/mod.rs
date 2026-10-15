@@ -49,6 +49,7 @@ pub mod channel_managed;
 #[cfg(test)]
 mod channel_managed_tests;
 pub mod channel_relay;
+pub mod channel_relay_request;
 pub mod channel_webhooks;
 pub mod cli_pairings;
 pub mod codex_connection;
@@ -93,6 +94,8 @@ pub mod org_role_scopes;
 pub mod orgs;
 pub mod platform_binding;
 pub mod platform_bots;
+pub mod platform_personal_bindings;
+pub mod platform_public_model;
 pub mod platform_setups;
 pub mod providers;
 pub mod proxy;

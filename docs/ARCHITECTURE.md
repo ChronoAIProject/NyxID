@@ -2087,3 +2087,21 @@ Production requirements:
 - Managed MongoDB with TLS connections (MongoDB Atlas or self-hosted)
 - `ENVIRONMENT=production` to enforce strict startup validation
 - Separate `ENCRYPTION_KEY` from development (never reuse)
+
+## Complete channel reply delivery
+
+The reply handlers authorize one logical reply and use `channel_reply_plan`
+with `channel_text` to preflight platform-specific parts before dispatch.
+Ordinary and native thread delivery send the plan sequentially and use
+`channel_reply_delivery` to record each outcome. The synchronous success
+receipt covers the entire plan.
+
+`channel_reply_deliveries` stores logical reply UUIDs, bot/owner/inbound IDs,
+expected part counts, completion and part outcomes with platform/outbound IDs
+and numeric failure codes. It stores no message bodies or credentials, in
+accordance with ADR-013. A 30-day TTL bounds retention; bot/inbound and outbound
+indexes support receipt correlation. Each part is marked uncertain before a
+provider call, then accepted only after validation and outbound persistence.
+There is no persisted message queue or automatic replay. See
+[Complete IM replies](CHANNEL_COMPLETE_REPLIES.md) for the API and rollout
+contract.

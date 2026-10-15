@@ -617,6 +617,8 @@ async fn schedule_specialist_authority_threads_and_guest_refusal() {
     assert!(key.allowed_service_ids.is_empty());
     assert!(key.allowed_platform_service_ids.is_empty());
     let chat = ChatAuthority {
+        platform_thread: false,
+        platform_origin: None,
         report_to: None,
         with_nyxbot: false,
         org_agent_access: None,

@@ -1,3 +1,5 @@
+import "@/lib/platform-personal-handoff";
+import { PersonalLinkPage } from "@/pages/platform-personal-link";
 import { onboardingSearch } from "@/schemas/platform-onboarding";
 import { ToolsPage } from "@/pages/tools";
 import { AdminToolsPage } from "@/pages/admin-tools";
@@ -899,6 +901,7 @@ const apiKeyDetailRoute = createRoute({
 
 export const platformOnboardingRoute = createRoute({path: "/onboarding", getParentRoute: () => rootRoute, validateSearch: onboardingSearch, component: PlatformOnboardingPage});
 export const platformBindingReviewRoute = createRoute({path: "/onboarding/link", getParentRoute: () => rootRoute, validateSearch: onboardingSearch, component: PlatformBindingReviewPage});
+export const platformPersonalLinkRoute = createRoute({path: "/nyxbot/link", getParentRoute: () => rootRoute, validateSearch: () => ({}), component: PersonalLinkPage});
 export const platformSetupsRoute = createRoute({path: "/onboarding/setups", getParentRoute: () => dashboardLayout, validateSearch: onboardingSearch, component: PlatformSetupsPage});
 export const platformSetupDetailRoute = createRoute({path: "/onboarding/setups/$setupId", getParentRoute: () => dashboardLayout, component: PlatformSetupDetailPage});
 
@@ -1211,6 +1214,7 @@ const adminFeatureFlagsRoute = createRoute({
 const routeTree = rootRoute.addChildren([
   platformOnboardingRoute,
   platformBindingReviewRoute,
+  platformPersonalLinkRoute,
   landingRoute,
   nyxbotOnboardingRoute,
   authLayout.addChildren([loginRoute, registerRoute]),

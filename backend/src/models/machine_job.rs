@@ -13,6 +13,10 @@ pub struct MachineJob {
     #[serde(default)]
     pub runtime_id: String,
     pub conversation_id: String,
+    /// Exact assistant turn that issued this job. Legacy rows have no turn
+    /// authority and are never selected by transport-only cancellation.
+    #[serde(default)]
+    pub issuing_turn_id: Option<String>,
     pub api_key_id: String,
     pub agent_id: String,
     pub state: String,

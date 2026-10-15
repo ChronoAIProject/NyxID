@@ -556,6 +556,7 @@ async fn create_thread_with_kind(
 ) -> AppResult<AssistantConversation> {
     let now = Utc::now();
     let mut row = AssistantConversation {
+        platform_thread: None,
         machine_previews: false,
         platform_cleanup_pending: false,
         platform_cleanup_id: None,
@@ -623,7 +624,7 @@ async fn create_thread_with_kind(
         )
         .session(&mut *session)
         .await?;
-    if !automation_thread && actor == agent.user_id {
+    if !automation_thread && row.platform_thread.is_none() && actor == agent.user_id {
         db.collection::<AssistantAgent>(AGENTS)
             .update_one(
                 doc! {"_id": &agent.id, "home_conversation_id": bson::Bson::Null},
@@ -662,13 +663,15 @@ pub async fn home_thread_for(
         && let Some(row) = db
             .collection::<AssistantConversation>(CONVERSATIONS)
             .find_one(doc! {"_id": id, "user_id": actor,
-            "channel": bson::Bson::Null, "automation_thread": {"$ne": true}})
+            "channel": bson::Bson::Null, "platform_thread": bson::Bson::Null,
+            "automation_thread": {"$ne": true}})
             .await?
     {
         return Ok(row);
     }
     let mut own = thread_filter_for(actor, agent);
     own.insert("channel", bson::Bson::Null);
+    own.insert("platform_thread", bson::Bson::Null);
     own.insert("automation_thread", doc! {"$ne": true});
     let newest = db
         .collection::<AssistantConversation>(CONVERSATIONS)

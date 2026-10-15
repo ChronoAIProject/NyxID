@@ -8,10 +8,18 @@ use axum::{
 use futures::{SinkExt, StreamExt};
 use mongodb::bson::doc;
 use serde::{Deserialize, Serialize};
-use tokio_stream::wrappers::ReceiverStream;
 use utoipa::ToSchema;
 
 use crate::AppState;
+#[cfg(test)]
+use crate::services::proxy_http_response::{ALLOWED_RESPONSE_HEADERS, STREAMING_CONTENT_TYPES};
+use crate::services::proxy_http_response::{
+    ProxyExchangeDiagnostics, ProxyStreamDiagnostics, USAGE_CAPTURE_MAX_BYTES, elapsed_ms,
+    emit_preheader_diagnostics, forwardable_response_header, llm_platform_usage,
+    proxy_client_disconnected, resale_usage_from_optional_reported, settle_meter_async,
+    should_capture_llm_usage, should_stream_response,
+};
+
 use crate::downstream_disconnect::{
     CancelOnDropStream, request_cancellation, until_client_disconnect,
 };
@@ -32,7 +40,7 @@ use crate::services::{
     durable_operation_grant_service, identity_service, llm_usage_service, node_metrics_service,
     node_routing_service, node_service, notification_service, operation_descriptor,
     proxy_discovery_service, proxy_service, service_pool_health_service, service_pool_service,
-    sse_parser, ws_frame_injector,
+    ws_frame_injector,
 };
 use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
 
@@ -113,37 +121,6 @@ fn emit_proxy_error_telemetry(
     );
 }
 
-fn proxy_client_disconnected(service_id: &str) -> AppError {
-    tracing::debug!(
-        service_id,
-        "Cancelled upstream proxy work after downstream client disconnected"
-    );
-    // Deliberately not `Internal`: the client hanging up is not a server fault,
-    // and this response is never written anywhere. Reporting it as a 500 turns
-    // ordinary client cancellation into false error-rate signal.
-    AppError::ClientDisconnected
-}
-
-fn log_upstream_error(
-    service_id: &str,
-    status: StatusCode,
-    response_size: usize,
-    upstream_request_id: &str,
-) {
-    tracing::error!(
-        service_id = %service_id,
-        status = %status,
-        response_size,
-        upstream_request_id,
-        "Upstream returned error response"
-    );
-}
-
-/// Stable string label for the auth method that issued this proxy request.
-/// Pairs with `TelemetryEvent::ProxySuccess.auth_kind`. The values are part
-/// of the public PostHog property contract — if you rename one, update the
-/// HogQL queries in `.claude/skills/daily/SKILL.md` and the strategy doc
-/// before merging.
 fn auth_kind_label(method: &crate::mw::auth::AuthMethod) -> &'static str {
     use crate::mw::auth::AuthMethod::*;
     match method {
@@ -198,28 +175,6 @@ fn emit_proxy_success_telemetry(
 /// NOTE: CORS headers (access-control-*) are intentionally excluded — the NyxID
 /// CorsLayer handles CORS for all responses. Forwarding downstream CORS headers
 /// would cause duplicate headers and browser CORS failures.
-const ALLOWED_RESPONSE_HEADERS: &[&str] = &[
-    "content-type",
-    "content-length",
-    "content-encoding",
-    "content-language",
-    "content-disposition",
-    "cache-control",
-    "etag",
-    "last-modified",
-    "x-request-id",
-    "x-correlation-id",
-    "accept-ranges",
-    "content-range",
-    "content-profile",
-    "range-unit",
-    "retry-after",
-    "preference-applied",
-    "location",
-    "operation-location",
-    "content-location",
-];
-
 const ASYNC_LOCATION_HEADERS: &[&str] = &["location", "operation-location", "content-location"];
 
 #[derive(Clone, Debug)]
@@ -375,143 +330,6 @@ fn apply_proxy_request_id_header(response: &mut Response, request_id: &str) {
 
 #[derive(Clone, Copy)]
 pub(crate) struct ProxyExchangeStartedAt(pub(crate) std::time::Instant);
-
-#[derive(Clone)]
-struct ProxyExchangeDiagnostics {
-    started_at: std::time::Instant,
-    headers_at: std::time::Instant,
-    target_resolution_admission_ms: u64,
-    downstream_headers_ms: Option<u64>,
-    method: String,
-    status: u16,
-    response_mode: &'static str,
-    trace_id: String,
-    request_id: String,
-}
-
-impl ProxyExchangeDiagnostics {
-    #[allow(clippy::too_many_arguments)]
-    fn new(
-        started_at: std::time::Instant,
-        target_resolution_admission_ms: u64,
-        downstream_headers_ms: Option<u64>,
-        method: &Method,
-        status: StatusCode,
-        response_mode: &'static str,
-        headers: &axum::http::HeaderMap,
-    ) -> Self {
-        Self {
-            started_at,
-            headers_at: std::time::Instant::now(),
-            target_resolution_admission_ms,
-            downstream_headers_ms,
-            method: method.as_str().to_string(),
-            status: status.as_u16(),
-            response_mode,
-            trace_id: sanitized_trace_id(headers).unwrap_or_default(),
-            request_id: sanitized_request_id(headers).unwrap_or_default(),
-        }
-    }
-
-    fn emit(&self, termination: &'static str) {
-        let body_ms = elapsed_ms(self.headers_at);
-        let downstream_headers_available = self.downstream_headers_ms.is_some();
-        let downstream_headers_ms = self.downstream_headers_ms.unwrap_or(0);
-        tracing::info!(
-            target_resolution_admission_ms = self.target_resolution_admission_ms,
-            connect_send_ms = tracing::field::Empty,
-            downstream_headers_ms,
-            downstream_headers_available,
-            body_ms,
-            total_ms = elapsed_ms(self.started_at),
-            method = %self.method,
-            upstream_status = self.status,
-            response_mode = self.response_mode,
-            termination,
-            trace_id = %self.trace_id,
-            request_id = %self.request_id,
-            "Proxy exchange phase diagnostics"
-        );
-    }
-}
-
-struct ProxyStreamDiagnostics {
-    diagnostics: ProxyExchangeDiagnostics,
-    finished: bool,
-}
-
-impl ProxyStreamDiagnostics {
-    fn new(diagnostics: ProxyExchangeDiagnostics) -> Self {
-        Self {
-            diagnostics,
-            finished: false,
-        }
-    }
-
-    fn finish(&mut self, termination: &'static str) {
-        if !self.finished {
-            self.finished = true;
-            self.diagnostics.emit(termination);
-        }
-    }
-}
-
-impl Drop for ProxyStreamDiagnostics {
-    fn drop(&mut self) {
-        if !self.finished {
-            self.finished = true;
-            self.diagnostics.emit("client_disconnect");
-        }
-    }
-}
-
-fn elapsed_ms(started_at: std::time::Instant) -> u64 {
-    started_at.elapsed().as_millis().min(u64::MAX as u128) as u64
-}
-
-fn emit_preheader_diagnostics(
-    started_at: std::time::Instant,
-    target_resolution_admission_ms: u64,
-    method: &Method,
-    headers: &axum::http::HeaderMap,
-    termination: &'static str,
-) {
-    let trace_id = sanitized_trace_id(headers).unwrap_or_default();
-    let request_id = sanitized_request_id(headers).unwrap_or_default();
-    tracing::info!(
-        target_resolution_admission_ms,
-        connect_send_ms = tracing::field::Empty,
-        downstream_headers_ms = 0u64,
-        downstream_headers_available = false,
-        body_ms = 0u64,
-        total_ms = elapsed_ms(started_at),
-        method = %method,
-        upstream_status = 0u16,
-        response_mode = "buffered",
-        termination,
-        trace_id = %trace_id,
-        request_id = %request_id,
-        "Proxy exchange phase diagnostics"
-    );
-}
-
-fn sanitized_trace_id(headers: &axum::http::HeaderMap) -> Option<String> {
-    if !proxy_service::valid_traceparent_header(headers) {
-        return None;
-    }
-    let traceparent = headers.get("traceparent")?.to_str().ok()?;
-    Some(traceparent[3..35].to_string())
-}
-
-fn sanitized_request_id(headers: &axum::http::HeaderMap) -> Option<String> {
-    let value = headers.get("x-request-id")?.to_str().ok()?;
-    (value.len() <= 128
-        && !value.is_empty()
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'-')))
-    .then(|| value.to_string())
-}
 
 fn forwarded_response_header_value(
     name_lower: &str,
@@ -3206,6 +3024,9 @@ async fn assistant_model_call(
     auth_user: &AuthUser,
     catalog: Option<mongodb::bson::Document>,
 ) -> AppResult<bool> {
+    if auth_user.api_key_purpose == ApiKeyPurpose::PublicNyxbot {
+        return Ok(false);
+    }
     let (Some(key_id), Some(mut catalog)) = (auth_user.api_key_id.as_deref(), catalog) else {
         return Ok(false);
     };
@@ -3249,6 +3070,7 @@ async fn execute_proxy_inner(
     extra_outbound_headers: Vec<(String, String)>,
     resolved_slug: &mut String,
 ) -> AppResult<Response> {
+    crate::services::key_service::require_ordinary_purpose(auth_user.api_key_purpose)?;
     // Poll resolution and forwarding sequentially so their debug frames never
     // stack, including when a machine request is nested in pool dispatch.
     let (resolved, extra_outbound_headers) = resolve_proxy_execution(
@@ -4037,6 +3859,7 @@ async fn execute_resolved_proxy_inner(
             resolved_user_service_id.as_deref(),
             &operation_target_id,
         );
+    crate::services::key_service::require_ordinary_purpose(auth_user.api_key_purpose)?;
     let operation_scoped = crate::services::agent_operation_scope_service::is_scoped(
         &auth_user.assistant_operation_scopes,
         operation_scope_id,
@@ -6323,389 +6146,24 @@ async fn execute_resolved_proxy_inner(
         }
     }
 
-    let mut response = if should_stream {
-        // Stream responses without buffering, but use a forwarding task when
-        // we need to observe SSE usage so client disconnects are visible.
-        if let Some(stream_usage_context) = if is_sse { usage_context.clone() } else { None } {
-            let service_id_owned = service_id.to_string();
-            let idle_timeout =
-                std::time::Duration::from_secs(state.config.proxy_stream_idle_timeout_secs);
-            let idle_timeout_secs = state.config.proxy_stream_idle_timeout_secs;
-            let mut upstream_stream = downstream_response.bytes_stream();
-            let (tx, rx) = tokio::sync::mpsc::channel::<Result<bytes::Bytes, std::io::Error>>(32);
-            let stream_billing = state.billing.clone();
-            let stream_metered = metered.clone();
-            let request_len = request_body_len;
-            let resale_metric = billing_ctx.resale.as_ref().map(|spec| spec.metric);
-            let task_cancellation = downstream_cancellation.clone();
-
-            tokio::spawn(async move {
-                let mut exchange_diagnostics = ProxyStreamDiagnostics::new(exchange_diagnostics);
-                let mut sse_buffer = String::new();
-                let mut usage_accumulator =
-                    llm_usage_service::ReportedLlmUsageAccumulator::default();
-                let mut response_len: i64 = 0;
-
-                loop {
-                    let next = until_client_disconnect(
-                        &task_cancellation,
-                        tokio::time::timeout(idle_timeout, upstream_stream.next()),
-                    )
-                    .await;
-                    match next {
-                        Err(_) => {
-                            exchange_diagnostics.finish("client_disconnect");
-                            drop(upstream_stream);
-                            let usage = usage_accumulator.finalize();
-                            if let Some(usage) = usage.clone() {
-                                llm_usage_service::log_reported_usage_async(
-                                    stream_usage_context.clone(),
-                                    usage,
-                                );
-                            }
-                            let resale = resale_metric.and_then(|metric| {
-                                resale_usage_from_optional_reported(
-                                    metric,
-                                    usage.as_ref(),
-                                    request_len + response_len,
-                                )
-                            });
-                            settle_meter_async(
-                                stream_billing,
-                                stream_metered,
-                                llm_platform_usage(usage.as_ref(), request_len + response_len),
-                                resale,
-                                stream_usage_context.model.clone(),
-                            )
-                            .await;
-                            return;
-                        }
-                        Ok(Ok(Some(Ok(bytes)))) => {
-                            response_len += bytes.len() as i64;
-                            sse_buffer.push_str(&String::from_utf8_lossy(&bytes));
-                            while let Some(event) = parse_sse_event(&mut sse_buffer) {
-                                if let Some((mut usage, mode)) =
-                                    llm_usage_service::extract_reported_usage_from_sse_event(
-                                        event.event_type.as_deref(),
-                                        &event.data,
-                                    )
-                                {
-                                    if !status.is_success() {
-                                        usage.images = 0;
-                                    }
-                                    usage_accumulator.observe(usage, mode);
-                                }
-                            }
-
-                            if tx.send(Ok(bytes)).await.is_err() {
-                                exchange_diagnostics.finish("client_disconnect");
-                                drop(upstream_stream);
-                                let usage = usage_accumulator.finalize();
-                                if let Some(usage) = usage.clone() {
-                                    llm_usage_service::log_reported_usage_async(
-                                        stream_usage_context.clone(),
-                                        usage,
-                                    );
-                                }
-                                let resale = resale_metric.and_then(|metric| {
-                                    resale_usage_from_optional_reported(
-                                        metric,
-                                        usage.as_ref(),
-                                        request_len + response_len,
-                                    )
-                                });
-                                settle_meter_async(
-                                    stream_billing,
-                                    stream_metered,
-                                    llm_platform_usage(usage.as_ref(), request_len + response_len),
-                                    resale,
-                                    stream_usage_context.model.clone(),
-                                )
-                                .await;
-                                return;
-                            }
-                        }
-                        Ok(Ok(Some(Err(e)))) => {
-                            exchange_diagnostics.finish("body_error");
-                            tracing::error!(
-                                service_id = %service_id_owned,
-                                error = %e,
-                                error_debug = ?e,
-                                "Proxy stream error from upstream — connection dropped"
-                            );
-                            let usage = usage_accumulator.finalize();
-                            if let Some(usage) = usage.clone() {
-                                llm_usage_service::log_reported_usage_async(
-                                    stream_usage_context.clone(),
-                                    usage,
-                                );
-                            }
-                            let resale = resale_metric.and_then(|metric| {
-                                resale_usage_from_optional_reported(
-                                    metric,
-                                    usage.as_ref(),
-                                    request_len + response_len,
-                                )
-                            });
-                            settle_meter_async(
-                                stream_billing,
-                                stream_metered,
-                                llm_platform_usage(usage.as_ref(), request_len + response_len),
-                                resale,
-                                stream_usage_context.model.clone(),
-                            )
-                            .await;
-                            let _ = tx
-                                .send(Err(std::io::Error::other(format!(
-                                    "upstream stream error: {e}"
-                                ))))
-                                .await;
-                            return;
-                        }
-                        Ok(Ok(None)) => {
-                            exchange_diagnostics.finish("completed");
-                            let usage = usage_accumulator.finalize();
-                            if let Some(usage) = usage.clone() {
-                                llm_usage_service::log_reported_usage_async(
-                                    stream_usage_context.clone(),
-                                    usage,
-                                );
-                            }
-                            let resale = resale_metric.and_then(|metric| {
-                                resale_usage_from_optional_reported(
-                                    metric,
-                                    usage.as_ref(),
-                                    request_len + response_len,
-                                )
-                            });
-                            settle_meter_async(
-                                stream_billing,
-                                stream_metered,
-                                llm_platform_usage(usage.as_ref(), request_len + response_len),
-                                resale,
-                                stream_usage_context.model.clone(),
-                            )
-                            .await;
-                            return;
-                        }
-                        Ok(Err(_)) => {
-                            exchange_diagnostics.finish("upstream_error");
-                            tracing::warn!(
-                                service_id = %service_id_owned,
-                                idle_timeout_secs,
-                                "Proxy stream idle timeout reached"
-                            );
-                            let usage = usage_accumulator.finalize();
-                            if let Some(usage) = usage.clone() {
-                                llm_usage_service::log_reported_usage_async(
-                                    stream_usage_context.clone(),
-                                    usage,
-                                );
-                            }
-                            let resale = resale_metric.and_then(|metric| {
-                                resale_usage_from_optional_reported(
-                                    metric,
-                                    usage.as_ref(),
-                                    request_len + response_len,
-                                )
-                            });
-                            settle_meter_async(
-                                stream_billing,
-                                stream_metered,
-                                llm_platform_usage(usage.as_ref(), request_len + response_len),
-                                resale,
-                                stream_usage_context.model.clone(),
-                            )
-                            .await;
-                            return;
-                        }
-                    }
-                }
-            });
-
-            let body = Body::from_stream(CancelOnDropStream::new(
-                ReceiverStream::new(rx),
-                downstream_cancellation.clone(),
-            ));
-            response_builder
-                .body(body)
-                .map_err(|e| AppError::Internal(format!("Failed to build response: {e}")))?
-        } else {
-            let service_id_owned = service_id.to_string();
-            let idle_timeout =
-                std::time::Duration::from_secs(state.config.proxy_stream_idle_timeout_secs);
-            let idle_timeout_secs = state.config.proxy_stream_idle_timeout_secs;
-            let is_json_body = downstream_response
-                .headers()
-                .get("content-type")
-                .and_then(|v| v.to_str().ok())
-                .is_some_and(|ct| ct.to_ascii_lowercase().starts_with("application/json"));
-            let mut upstream_stream = downstream_response.bytes_stream();
-            let stream_billing = state.billing.clone();
-            let stream_metered = metered.clone();
-            let request_len = request_body_len;
-            // Chunked JSON bodies (no Content-Length) stream through this
-            // branch; capture a bounded copy so LLM services settle with the
-            // provider-reported token count instead of the byte estimate.
-            let stream_usage_context = if is_json_body {
-                usage_context.clone()
-            } else {
-                None
-            };
-            let stream_resale_metric = billing_ctx.resale.as_ref().map(|spec| spec.metric);
-            let mut exchange_diagnostics = ProxyStreamDiagnostics::new(exchange_diagnostics);
-            let stream = async_stream::stream! {
-                let mut response_len: i64 = 0;
-                let mut captured: Option<Vec<u8>> =
-                    stream_usage_context.as_ref().map(|_| Vec::new());
-                loop {
-                    match tokio::time::timeout(idle_timeout, upstream_stream.next()).await {
-                        Ok(Some(Ok(bytes))) => {
-                            response_len += bytes.len() as i64;
-                            if let Some(buf) = captured.as_mut() {
-                                if buf.len() + bytes.len() <= USAGE_CAPTURE_MAX_BYTES {
-                                    buf.extend_from_slice(&bytes);
-                                } else {
-                                    captured = None;
-                                }
-                            }
-                            yield Ok::<_, std::io::Error>(bytes);
-                        }
-                        Ok(Some(Err(e))) => {
-                            exchange_diagnostics.finish("body_error");
-                            tracing::error!(
-                                service_id = %service_id_owned,
-                                error = %e,
-                                error_debug = ?e,
-                                "Proxy stream error from upstream — connection dropped"
-                            );
-                            yield Err(std::io::Error::other(format!(
-                                "upstream stream error: {e}"
-                            )));
-                            break;
-                        }
-                        Ok(None) => {
-                            exchange_diagnostics.finish("completed");
-                            break;
-                        }
-                        Err(_) => {
-                            exchange_diagnostics.finish("upstream_error");
-                            tracing::warn!(
-                                service_id = %service_id_owned,
-                                idle_timeout_secs,
-                                "Proxy stream idle timeout reached"
-                            );
-                            break;
-                        }
-                    }
-                }
-                let mut reported_usage = None;
-                let mut model = None;
-                if let Some(ctx) = stream_usage_context
-                    && let Some(buf) = captured
-                    && let Ok(json) = serde_json::from_slice::<serde_json::Value>(&buf)
-                    && let Some(usage) = llm_usage_service::extract_reported_usage_for_path(&json, &ctx.path, status.is_success())
-                {
-                    model = ctx.model.clone();
-                    llm_usage_service::log_reported_usage_async(ctx, usage.clone());
-                    reported_usage = Some(usage);
-                }
-                let resale = stream_resale_metric.and_then(|metric| {
-                    resale_usage_from_optional_reported(
-                        metric,
-                        reported_usage.as_ref(),
-                        request_len + response_len,
-                    )
-                });
-                settle_meter_async(
-                    stream_billing,
-                    stream_metered,
-                    llm_platform_usage(reported_usage.as_ref(), request_len + response_len),
-                    resale,
-                    model,
-                )
-                .await;
-            };
-            let body = Body::from_stream(CancelOnDropStream::new(
-                stream,
-                downstream_cancellation.clone(),
-            ));
-            response_builder
-                .body(body)
-                .map_err(|e| AppError::Internal(format!("Failed to build response: {e}")))?
-        }
-    } else {
-        // Buffer small / error responses so we can log diagnostics.
-        let upstream_request_id = downstream_response
-            .headers()
-            .get("x-request-id")
-            .and_then(|value| value.to_str().ok())
-            .unwrap_or("unknown")
-            .to_string();
-        let response_body =
-            match until_client_disconnect(&downstream_cancellation, downstream_response.bytes())
-                .await
-            {
-                Err(_) => {
-                    exchange_diagnostics.emit("client_disconnect");
-                    return Err(proxy_client_disconnected(service_id));
-                }
-                Ok(Err(e)) => {
-                    exchange_diagnostics.emit("body_error");
-                    return Err(AppError::Internal(format!(
-                        "Failed to read downstream response: {e}"
-                    )));
-                }
-                Ok(Ok(body)) => body,
-            };
-        exchange_diagnostics.emit("completed");
-
-        if !status.is_success() {
-            log_upstream_error(
-                service_id,
-                status,
-                response_body.len(),
-                &upstream_request_id,
-            );
-        }
-
-        let mut reported_usage = None;
-        let mut model = None;
-        if let Some(nonstream_usage_context) = usage_context
-            && let Ok(json) = serde_json::from_slice::<serde_json::Value>(&response_body)
-            && let Some(usage) = llm_usage_service::extract_reported_usage_for_path(
-                &json,
-                &nonstream_usage_context.path,
-                status.is_success(),
-            )
-        {
-            model = nonstream_usage_context.model.clone();
-            llm_usage_service::log_reported_usage_async(nonstream_usage_context, usage.clone());
-            reported_usage = Some(usage);
-        }
-
-        let request_len = request_body_len;
-        let response_len = response_body.len() as i64;
-        let resale = billing_ctx.resale.as_ref().and_then(|spec| {
-            resale_usage_from_optional_reported(
-                spec.metric,
-                reported_usage.as_ref(),
-                request_len + response_len,
-            )
-        });
-        settle_meter_async(
-            state.billing.clone(),
+    let mut response = crate::services::proxy_http_response::relay_response(
+        state,
+        crate::services::proxy_http_response::HttpResponseContext {
+            service_id: service_id.to_string(),
+            response_builder,
+            status,
+            is_sse,
+            should_stream,
+            usage_context,
             metered,
-            llm_platform_usage(reported_usage.as_ref(), request_len + response_len),
-            resale,
-            model,
-        )
-        .await;
-
-        response_builder
-            .body(Body::from(response_body))
-            .map_err(|e| AppError::Internal(format!("Failed to build response: {e}")))?
-    };
+            request_body_len,
+            resale_metric: billing_ctx.resale.as_ref().map(|spec| spec.metric),
+            downstream_cancellation,
+            exchange_diagnostics,
+        },
+        downstream_response,
+    )
+    .await?;
 
     // Audit log the proxy request
     audit_service::log_for_user(
@@ -6844,47 +6302,6 @@ fn platform_metric_for_target(
     )
 }
 
-fn parse_sse_event(buffer: &mut String) -> Option<sse_parser::SseEvent> {
-    sse_parser::parse_next_event(buffer)
-}
-
-fn should_capture_llm_usage(
-    service: &crate::models::downstream_service::DownstreamService,
-    platform_metric: BillingMetric,
-) -> bool {
-    platform_metric.is_token_family()
-        || crate::services::billing::metric_resolution::captures_usage(service)
-}
-
-fn resale_usage_from_optional_reported(
-    metric: BillingMetric,
-    usage: Option<&llm_usage_service::ReportedLlmUsage>,
-    fallback_bytes: i64,
-) -> Option<ResaleUsage> {
-    match metric {
-        BillingMetric::Tokens => Some(ResaleUsage {
-            metric,
-            quantity: llm_usage_service::token_quantity_or_estimate(usage, fallback_bytes),
-        }),
-        BillingMetric::Requests => Some(ResaleUsage {
-            metric,
-            quantity: 1,
-        }),
-        BillingMetric::Bytes => Some(ResaleUsage {
-            metric,
-            quantity: fallback_bytes.max(0),
-        }),
-        _ => None,
-    }
-}
-
-pub(crate) fn llm_platform_usage(
-    usage: Option<&llm_usage_service::ReportedLlmUsage>,
-    fallback_bytes: i64,
-) -> PlatformUsage {
-    llm_usage_service::platform_usage(usage, fallback_bytes, true)
-}
-
 fn websocket_realtime_usage_enabled(
     catalog_service_slug: Option<&str>,
     metered: &crate::services::billing::MeteredProxyContext,
@@ -7012,61 +6429,6 @@ fn chatgpt_usage_callback(
     })
 }
 
-async fn settle_meter_async(
-    billing: std::sync::Arc<crate::services::billing::BillingService>,
-    metered: crate::services::billing::MeteredProxyContext,
-    platform: PlatformUsage,
-    resale: Option<ResaleUsage>,
-    model: Option<String>,
-) {
-    if !metered.is_enabled() {
-        return;
-    }
-
-    if billing
-        .settle_deferred(&metered, platform, resale, model)
-        .await
-        .is_err()
-    {
-        let billing_request_id = metered
-            .route
-            .as_ref()
-            .map(|route| route.billing_request_id.as_str())
-            .unwrap_or("unknown");
-        tracing::warn!(
-            billing_request_id,
-            "Failed to persist usage settlement intent"
-        );
-    }
-}
-
-/// Threshold below which non-error responses are buffered (so small API
-/// responses keep the existing diagnostic-logging path).
-const STREAM_SIZE_THRESHOLD: u64 = 256 * 1024;
-
-/// Cap on the bounded response copy kept for LLM usage extraction when a
-/// chunked JSON body streams through the passthrough branch. Bodies larger
-/// than this fall back to the byte-based token estimate.
-///
-/// This buffer is a second copy of the body, retained for the lifetime of the
-/// response and multiplied by in-flight LLM request concurrency, so the cap is
-/// what bounds the handler's worst-case footprint. 512 KiB of JSON is on the
-/// order of 100k output tokens in a single non-streaming completion — past what
-/// providers will return in one response — so real bodies stay under it. Going
-/// over is not a billing regression: the fallback byte estimate is what every
-/// one of these responses used before usage capture existed.
-const USAGE_CAPTURE_MAX_BYTES: usize = 512 * 1024;
-
-/// Content types that should always be streamed regardless of size.
-const STREAMING_CONTENT_TYPES: &[&str] = &[
-    "text/event-stream",
-    "video/",
-    "audio/",
-    "application/octet-stream",
-    "image/",
-    "application/pdf",
-];
-
 /// Whether a downstream response header may be forwarded to the client.
 ///
 /// SSE drops `content-length`: the length of a stream is unknown, and a
@@ -7078,17 +6440,6 @@ const STREAMING_CONTENT_TYPES: &[&str] = &[
 /// `mw::security_headers`), and forwarding an upstream copy would let an
 /// arbitrary proxied service dictate front-proxy buffering behavior for
 /// non-SSE responses too.
-fn forwardable_response_header(name_lower: &str, is_sse: bool) -> bool {
-    if is_sse && name_lower == "content-length" {
-        return false;
-    }
-    ALLOWED_RESPONSE_HEADERS.contains(&name_lower)
-}
-
-/// RFC 9110 safe methods may be replayed for transport failover. Every other
-/// method is treated as potentially state-changing, including extension
-/// methods, and may only fail over when the node transport proves dispatch
-/// never occurred.
 fn method_allows_automatic_failover(method: &Method) -> bool {
     matches!(
         *method,
@@ -7110,39 +6461,6 @@ fn should_retry_node_failure(method: &Method, dispatched: bool) -> bool {
 ///
 /// Buffers when the response is small and not a streaming content type,
 /// preserving the error-body diagnostic logging for typical API errors.
-fn should_stream_response(response: &reqwest::Response, status: StatusCode, is_sse: bool) -> bool {
-    // SSE always streams (existing behaviour)
-    if is_sse {
-        return true;
-    }
-
-    // 206 Partial Content always streams (range responses)
-    if status == StatusCode::PARTIAL_CONTENT {
-        return true;
-    }
-
-    // Check content type for media / binary types
-    if let Some(ct) = response
-        .headers()
-        .get("content-type")
-        .and_then(|v| v.to_str().ok())
-    {
-        let ct_lower = ct.to_lowercase();
-        if STREAMING_CONTENT_TYPES
-            .iter()
-            .any(|prefix| ct_lower.starts_with(prefix))
-        {
-            return true;
-        }
-    }
-
-    // Stream when content-length is absent (unknown size) or large
-    match response.content_length() {
-        None => true,
-        Some(len) => len > STREAM_SIZE_THRESHOLD,
-    }
-}
-
 /// Validate that a Range header doesn't contain too many ranges (DoS prevention).
 /// RFC 7233 recommends limiting multi-range requests.
 fn validate_range_header(headers: &axum::http::HeaderMap) -> AppResult<()> {

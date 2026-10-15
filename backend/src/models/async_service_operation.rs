@@ -22,6 +22,12 @@ pub struct AsyncOperationContract {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct DeliveryBinding {
+    #[serde(default)]
+    pub platform_reply: Option<super::assistant_conversation::PlatformReplyRouting>,
+    /// Original result destination; independent of a later event turn's fresh
+    /// execution authority. An absent field keeps legacy/web watches local.
+    #[serde(default)]
+    pub platform_origin: Option<super::assistant_conversation::PlatformTurnOrigin>,
     pub origin: TurnOrigin,
     pub channel: Option<ChannelOrigin>,
     pub reply_channel: Option<ChannelOrigin>,

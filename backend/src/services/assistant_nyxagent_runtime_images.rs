@@ -6,7 +6,7 @@ use std::collections::HashSet;
 const MAX_IMAGE_ROUNDS: u32 = 2;
 
 #[derive(Default)]
-pub(super) struct ToolImages {
+pub(crate) struct ToolImages {
     pub rounds: u32,
     seen: HashSet<String>,
     pub parts: Vec<Value>,
@@ -18,10 +18,12 @@ pub(super) struct ToolImages {
 }
 
 impl ToolImages {
+    #[allow(clippy::too_many_arguments)]
     pub async fn prepare(
         &mut self,
         state: &AppState,
-        auth: &AuthUser,
+        egress: &dyn contract::NyxAgentEgress,
+        authority: &contract::NyxAgentExecutionContext,
         row: &AssistantConversation,
         credential: &AssistantCredential,
         policy: Option<BillingRoutePolicy>,
@@ -60,7 +62,8 @@ impl ToolImages {
         if self.rounds >= MAX_IMAGE_ROUNDS {
             return Ok(false);
         }
-        let capabilities = steering::upstream_capabilities(state, auth, credential, policy).await;
+        let capabilities =
+            upstream_capabilities(state, egress, authority, credential, policy).await;
         let (parts, omitted) =
             uploads::tool_image_plan(&items, &capabilities, &state.config.base_url);
         if parts.is_empty() {
@@ -136,7 +139,7 @@ async fn mark(state: &AppState, row: &AssistantConversation, id: &str, status: &
     }
 }
 
-pub(super) async fn renew(
+pub(crate) async fn renew(
     state: &AppState,
     row: &AssistantConversation,
     binding: &str,
