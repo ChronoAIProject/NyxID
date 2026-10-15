@@ -10,7 +10,7 @@ use crate::models::user::{
     ServiceViewType, User,
 };
 use crate::mw::auth::AuthUser;
-use crate::services::{admin_user_service, audit_service, role_service, telemetry_erasure_service};
+use crate::services::{admin_user_service, audit_service, role_service};
 use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
 
 // --- Request / Response types ---
@@ -507,37 +507,17 @@ pub async fn delete_me(
         .get(admin_user_service::ACCOUNT_DELETION_POLICY_HEADER)
         .and_then(|value| value.to_str().ok())
         .unwrap_or("");
-    admin_user_service::validate_account_deletion_policy(deletion_policy)?;
     let user_id = auth_user.user_id.to_string();
+    admin_user_service::validate_account_deletion_request(&state.db, &user_id, deletion_policy)
+        .await?;
 
-    // GDPR erasure: when telemetry is on, enqueue the PostHog
-    // person-delete job BEFORE the user row is removed. Once the user
-    // row is gone we cannot re-enqueue on failure, and emitting a
-    // `user.deleted` event without a corresponding delete job would
-    // leave dangling telemetry we could never reconcile. So: if
-    // telemetry is enabled AND enqueue fails, we abort the whole
-    // delete with an internal error rather than create that dangling
-    // state. User retries the operation once the transient issue
-    // clears.
-    //
-    // The enqueue step is skipped entirely when telemetry is hard-off
-    // (no DSN configured), keeping the default-off path identical to
-    // the pre-telemetry delete flow.
-    let telemetry_on = state.telemetry.is_some();
-    if telemetry_on {
-        telemetry_erasure_service::enqueue(&state.db, &user_id)
-            .await
-            .map_err(|e| {
-                tracing::error!(
-                    user_id = %user_id,
-                    error = %e,
-                    "telemetry erasure enqueue failed; aborting delete to avoid dangling events"
-                );
-                e
-            })?;
-    }
-
-    admin_user_service::delete_current_user_cascade(&state.db, &user_id, deletion_policy).await?;
+    admin_user_service::delete_current_user_cascade(
+        &state.db,
+        &user_id,
+        deletion_policy,
+        state.telemetry.is_some(),
+    )
+    .await?;
 
     let deleted_at = chrono::Utc::now().to_rfc3339();
     audit_service::log_for_user(

@@ -327,6 +327,142 @@ impl Fixture {
 }
 
 #[tokio::test]
+async fn legacy_direct_account_delete_without_machines_needs_no_machine_policy() {
+    let f = Fixture::new("legacy_direct_account_delete").await;
+    f.state
+        .db
+        .collection::<Document>(MACHINES)
+        .delete_one(doc! {"_id": &f.machine})
+        .await
+        .unwrap();
+    let other_machine = Uuid::new_v4().to_string();
+    f.state
+        .db
+        .collection::<Document>(MACHINES)
+        .insert_one(doc! {
+            "_id": &other_machine, "owner_id": Uuid::new_v4().to_string(),
+        })
+        .await
+        .unwrap();
+    let response = f
+        .request(&f.human_token, false, "DELETE", DIRECT, None, None)
+        .await;
+    assert_eq!(
+        response.0,
+        StatusCode::OK,
+        "legacy owner delete: {response:?}"
+    );
+    assert!(
+        f.state
+            .db
+            .collection::<Document>(USERS)
+            .find_one(doc! {"_id": &f.owner})
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        f.state
+            .db
+            .collection::<Document>(MACHINES)
+            .find_one(doc! {"_id": &other_machine})
+            .await
+            .unwrap()
+            .is_some()
+    );
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn legacy_assistant_account_delete_without_machines_needs_no_machine_policy() {
+    let f = Fixture::new("legacy_assistant_account_delete").await;
+    f.state
+        .db
+        .collection::<Document>(MACHINES)
+        .delete_one(doc! {"_id": &f.machine})
+        .await
+        .unwrap();
+    let response = f
+        .request(
+            &f.human_token,
+            false,
+            "POST",
+            ASSISTANT,
+            None,
+            Some(f.assistant_body("legacy-owner-delete", None)),
+        )
+        .await;
+    assert_eq!(
+        response.0,
+        StatusCode::OK,
+        "legacy assistant delete: {response:?}"
+    );
+    assert!(
+        f.state
+            .db
+            .collection::<Document>(USERS)
+            .find_one(doc! {"_id": &f.owner})
+            .await
+            .unwrap()
+            .is_none()
+    );
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn explicit_stale_policy_without_machines_is_rejected_before_effects() {
+    let f = Fixture::new("no_machine_stale_policy").await;
+    f.state
+        .db
+        .collection::<Document>(MACHINES)
+        .delete_one(doc! {"_id": &f.machine})
+        .await
+        .unwrap();
+    let response = f
+        .request(
+            &f.human_token,
+            false,
+            "DELETE",
+            DIRECT,
+            Some("machine-data-v0"),
+            None,
+        )
+        .await;
+    assert_eq!(response.0, StatusCode::BAD_REQUEST);
+    let response = f
+        .request(
+            &f.human_token,
+            false,
+            "POST",
+            ASSISTANT,
+            None,
+            Some(f.assistant_body("stale-policy", Some("machine-data-v0"))),
+        )
+        .await;
+    assert_eq!(response.0, StatusCode::BAD_REQUEST);
+    let owner = f
+        .state
+        .db
+        .collection::<Document>(USERS)
+        .find_one(doc! {"_id": &f.owner})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(owner.get_bool("is_active"), Ok(true));
+    assert!(!owner.contains_key("deletion_requested_at"));
+    assert_eq!(
+        f.state
+            .db
+            .collection::<Document>(RECEIPTS)
+            .count_documents(doc! {"user_id": &f.owner})
+            .await
+            .unwrap(),
+        0
+    );
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
 async fn direct_account_delete_requires_current_disclosure_before_any_effect() {
     let f = Fixture::new("direct_account_policy_denial").await;
     f.assert_authenticated_read(&f.human_token, false).await;

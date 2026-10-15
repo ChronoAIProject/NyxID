@@ -1,7 +1,7 @@
 //! Background drain loop for the telemetry erasure queue.
 //!
-//! Account deletion enqueues `TelemetryErasureJob` rows BEFORE deleting
-//! the user record (see `handlers/users.rs`). This service polls the
+//! Account deletion enqueues `TelemetryErasureJob` rows in the transaction
+//! accepting deletion, before removing the user record. This service polls the
 //! queue every 30 seconds, claims up to 16 pending jobs atomically,
 //! and asks the vendor to delete the person. Failures revert the job
 //! to `pending` so it will be picked up on the next 30s tick. After
@@ -72,13 +72,20 @@ pub fn spawn_worker(db: DbHandle, telemetry: Option<Arc<TelemetryClient>>) {
     });
 }
 
-/// Enqueue one erasure job for `user_id`. Called from account-deletion
-/// handlers BEFORE the user row is removed.
-pub async fn enqueue(db: &Database, user_id: &str) -> AppResult<String> {
+/// Enqueue erasure in the account-deletion transaction, before removing the user.
+pub async fn enqueue(
+    db: &Database,
+    user_id: &str,
+    session: Option<&mut mongodb::ClientSession>,
+) -> AppResult<String> {
     let job = TelemetryErasureJob::new(user_id);
     let job_id = job.id.clone();
     let coll = db.collection::<TelemetryErasureJob>(COLLECTION_NAME);
-    coll.insert_one(&job).await.map_err(AppError::from)?;
+    let mut insert = coll.insert_one(&job);
+    if let Some(session) = session {
+        insert = insert.session(session);
+    }
+    insert.await.map_err(AppError::from)?;
     Ok(job_id)
 }
 
@@ -180,7 +187,7 @@ mod tests {
         };
 
         let user_id = "user-to-erase-1";
-        let job_id = enqueue(&db, user_id).await.unwrap();
+        let job_id = enqueue(&db, user_id, None).await.unwrap();
 
         // Verify the job was persisted
         let coll = db.collection::<TelemetryErasureJob>(COLLECTION_NAME);
@@ -204,8 +211,8 @@ mod tests {
         };
 
         let user_id = "user-to-erase-2";
-        let id1 = enqueue(&db, user_id).await.unwrap();
-        let id2 = enqueue(&db, user_id).await.unwrap();
+        let id1 = enqueue(&db, user_id, None).await.unwrap();
+        let id2 = enqueue(&db, user_id, None).await.unwrap();
 
         // Both should exist with distinct IDs
         assert_ne!(id1, id2);
@@ -227,8 +234,8 @@ mod tests {
             return;
         };
 
-        let id1 = enqueue(&db, "user-a").await.unwrap();
-        let id2 = enqueue(&db, "user-b").await.unwrap();
+        let id1 = enqueue(&db, "user-a", None).await.unwrap();
+        let id2 = enqueue(&db, "user-b", None).await.unwrap();
         assert_ne!(id1, id2);
         // Job IDs should be valid UUIDs (36 chars with hyphens)
         assert_eq!(id1.len(), 36);

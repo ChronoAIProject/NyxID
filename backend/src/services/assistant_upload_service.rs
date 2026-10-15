@@ -2217,6 +2217,7 @@ mod integration_tests {
             db,
             &user,
             crate::services::admin_user_service::ACCOUNT_DELETION_POLICY_VERSION,
+            false,
         )
         .await
         .unwrap();

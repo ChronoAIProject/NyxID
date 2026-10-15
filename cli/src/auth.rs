@@ -10,7 +10,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use chrono::{Duration, Utc};
 use serde::Deserialize;
 
-use crate::api::{CLI_USER_AGENT, build_cli_http_client, build_credential_http_client_for_url};
+use crate::api::{CLI_USER_AGENT, build_cli_http_client, build_credential_http_client};
 use crate::cli::{AuthArgs, LoginArgs};
 
 pub mod agent_key;
@@ -770,7 +770,7 @@ async fn refresh_saved_session(auth: &AuthArgs) -> SessionRefresh {
         ));
     }
 
-    let client = match build_credential_http_client_for_url(profile, &base_url) {
+    let client = match build_cli_http_client(profile) {
         Ok(c) => c,
         Err(e) => return SessionRefresh::Network(e),
     };
@@ -822,7 +822,7 @@ pub async fn force_refresh_session(auth: &AuthArgs) -> Result<RefreshReport> {
     }
     let base_url = auth.resolved_base_url()?;
     validate_profile_destination(profile, &base_url)?;
-    let client = build_credential_http_client_for_url(profile, &base_url)?;
+    let client = build_cli_http_client(profile)?;
     match exchange_refresh_token(&client, &base_url, &refresh_token).await {
         RefreshExchange::Renewed {
             access_token,
@@ -1086,10 +1086,10 @@ pub async fn run_logout(base_url: &str, profile: Option<&str>) -> Result<()> {
         )
     };
     let base_url = base_url.trim_end_matches('/');
-    // Remote revocation is best effort. An unsafe destination or client setup
-    // failure must never send the credential or prevent guarded local cleanup.
+    // Remote revocation is best effort and never follows redirects. Client
+    // setup failure must not prevent guarded local cleanup.
     let revoked = if let Some(token) = &token
-        && let Ok(client) = build_credential_http_client_for_url(profile, base_url)
+        && let Ok(client) = build_credential_http_client(profile)
     {
         let request = if restricted {
             client.delete(format!("{base_url}/api/v1/auth/agent-key/self"))
@@ -1444,7 +1444,7 @@ async fn run_password_login(
     email: Option<&str>,
     profile: Option<&str>,
 ) -> Result<()> {
-    let client = build_credential_http_client_for_url(profile, base_url)?;
+    let client = build_cli_http_client(profile)?;
     let email = match email {
         Some(email) => email.to_string(),
         None => {
@@ -1997,43 +1997,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn password_login_rejects_remote_cleartext_before_prompting() {
-        let error = super::run_password_login(
-            "http://cleartext-fixture.invalid",
-            Some("fixture@example.test"),
-            None,
-        )
-        .await
-        .expect_err("remote HTTP must fail before reading a password");
-        assert!(error.to_string().contains("requires HTTPS"));
-    }
-
-    #[tokio::test]
     #[allow(clippy::await_holding_lock)] // serializes temporary credential storage
-    async fn session_refresh_rejects_remote_cleartext_before_sending() {
-        let _home = PreflightHome::set();
-        let mut auth = preflight_auth_args();
-        auth.base_url = Some("http://cleartext-fixture.invalid".to_string());
-        let expired = build_jwt(&serde_json::json!({"exp": 1_000_000_000i64}));
-        let refresh = uuid::Uuid::new_v4().to_string();
-        super::save_tokens_for(auth.profile.as_deref(), &expired, Some(&refresh)).unwrap();
-        let error = super::ensure_session(&auth)
-            .await
-            .expect_err("preflight must reject HTTP");
-        assert!(error.to_string().contains("requires HTTPS"));
-        let error = super::force_refresh_session(&auth)
-            .await
-            .expect_err("explicit refresh must reject HTTP");
-        assert!(error.to_string().contains("requires HTTPS"));
-        assert!(
-            super::read_saved_refresh_token_for(auth.profile.as_deref()).as_deref()
-                == Some(refresh.as_str())
-        );
-    }
-
-    #[tokio::test]
-    #[allow(clippy::await_holding_lock)] // serializes temporary credential storage
-    async fn session_refresh_does_not_follow_body_preserving_redirects() {
+    async fn session_refresh_preserves_legacy_redirects() {
         use wiremock::{
             Mock, MockServer, ResponseTemplate,
             matchers::{method, path},
@@ -2057,14 +2022,14 @@ mod tests {
                 "access_token": uuid::Uuid::new_v4().to_string(),
                 "refresh_token": uuid::Uuid::new_v4().to_string(),
             })))
-            .expect(0)
+            .expect(2)
             .mount(&target)
             .await;
-        assert!(super::ensure_session(&auth).await.is_err());
-        assert!(super::force_refresh_session(&auth).await.is_err());
-        assert!(
-            super::read_saved_refresh_token_for(auth.profile.as_deref()).as_deref()
-                == Some(refresh.as_str())
+        super::ensure_session(&auth).await.unwrap();
+        super::force_refresh_session(&auth).await.unwrap();
+        assert_ne!(
+            super::read_saved_refresh_token_for(auth.profile.as_deref()).as_deref(),
+            Some(refresh.as_str())
         );
         origin.verify().await;
         target.verify().await;

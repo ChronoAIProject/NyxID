@@ -522,6 +522,7 @@ async fn deleted_owner_retains_paid_liability_until_native_stop_and_local_settle
         &f.db,
         &f.owner,
         crate::services::admin_user_service::ACCOUNT_DELETION_POLICY_VERSION,
+        false,
     )
     .await
     .unwrap();

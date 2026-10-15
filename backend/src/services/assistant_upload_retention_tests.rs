@@ -597,6 +597,7 @@ async fn pending_expiry_is_not_retained_and_owner_purge_removes_tombstones() {
         &state.db,
         &owner,
         crate::services::admin_user_service::ACCOUNT_DELETION_POLICY_VERSION,
+        false,
     )
     .await
     .unwrap();

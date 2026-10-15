@@ -138,7 +138,7 @@ The actual ordinary and external foreground/background executor regressions cove
 
 ## Owner deletion and recovery
 
-`DELETE /api/v1/users/me` requires the existing first-party human extractor and `X-NyxID-Account-Deletion-Policy: machine-data`. The current Settings, mobile confirmation and `nyxid profile delete` send this acceptance after the explicit disclosure; CLI `--yes` retains the disclosure and supplies the same policy. The Assistant action accepts `deletionPolicyVersion: "machine-data"` with its existing email confirmation and includes both in the canonical action fingerprint. Missing/stale policy and external credentials are rejected before deletion effects or action reservation.
+`DELETE /api/v1/users/me` requires the existing first-party human extractor. An owner with managed Machine records must supply `X-NyxID-Account-Deletion-Policy: machine-data`; an owner without managed Machines may omit it for compatibility with existing clients. An explicitly supplied stale policy is always rejected. The current Settings, mobile confirmation and `nyxid profile delete` send this acceptance after the explicit disclosure; CLI `--yes` retains the disclosure and supplies the same policy. The Assistant action accepts `deletionPolicyVersion: "machine-data"` with its existing email confirmation and includes both in the canonical action fingerprint; omission is allowed only without managed Machines and is never converted into consent. Both routes preflight validation before deletion effects or action reservation. After acquiring busy-email effect claims, the account-deletion transaction checks missing consent again while fencing the owner record shared with Machine creation and enqueues telemetry erasure atomically. Channel cleanup starts only after acceptance, so a concurrent creation cannot bypass consent or cause unrelated cleanup before a consent rejection. External credentials remain rejected.
 
 The separate single-Machine deletion confirmation explicitly discloses loss of the workspace and temporary runtime data, including HOME, `/tmp` and other temporary runtime files. It retains no-snapshot/no-recovery wording, pending stop/cleanup/accounting evidence, output denial, 30-day job metadata and 90-day terminal operation retention. Its existing acknowledgement, revision/idempotency checks and `remote-machine-data` acceptance are unchanged.
 
@@ -147,6 +147,34 @@ After a validated successful deletion response, the Assistant confirmation accep
 The existing account/source-fence transaction records the explicit owner policy on each retained ManagedMachine row before account removal. Administrative deletion does not create this basis. Missing owners and administrative removal stop/revoke execution and retain workspace data, including paused PVCs; they never supply consent or start a retention TTL. Explicit owner Machine deletion stores the existing accepted Machine data policy on that same lifecycle record.
 
 Manager delete effects, native resource cleanup and both allocated/unallocated finality recheck the durable basis. Current accepted owner deletion writes its basis transactionally before effects; retries preserve the original accepted_at. No audit-only reconstruction may invent consent for undeployed pre-basis records. A missing or invalid basis fails closed and preserves data. Native stop observations, Sandbox/Pod/PVC/PV cleanup progress and unsettled accounting remain distinct. Resources still present, finalizers, unknown ownership and Retain-policy leftovers stay pending; relevant quota is retained. A submitted DELETE or an absent Sandbox alone never means all data has been physically erased.
+
+## Compatibility and deployment sequence
+
+Ordinary CLI API calls, password login, session refresh and anonymous account
+requests retain their existing HTTP and redirect behavior. Existing credential
+transfer restrictions remain. Node credential management and injection explicitly
+select HTTPS (or exact loopback HTTP), no redirects, and direct loopback transport
+before any request or secret input; the injection session also enforces that
+policy itself. Hosted bootstrap and Kubernetes transport policies are unchanged.
+
+Account-deletion compatibility covers first-party web, mobile and CLI clients.
+The PR's first-party-only authentication boundary is retained: third-party OAuth
+clients cannot request account deletion, including for owners without Machines.
+
+The context index migration builds its replacement before retiring the old index
+and tolerates another replica already having removed it. It runs during backend
+startup regardless of the hosted feature flag.
+
+Before accepting external Machine execution or paid Machine activity, upgrade
+every backend replica and billing worker. External leases share the assistant
+lease collection, and the new `machine_running_seconds` billing metric enters
+shared billing records; older binaries cannot read these records. The hosted
+`experimental:remote-machines` flag does not gate external access to existing
+self-hosted nodes. Keep new external Machine grant/execution and paid-runtime
+admission unavailable until old processes are drained. If those surfaces cannot
+be held back during a rolling upgrade, first ship a separate compatible-reader
+release. Do not roll back to an old binary against these new records. These
+client-compatibility fixes do not change that database-format boundary.
 
 ## Operator inventory
 

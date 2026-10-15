@@ -70,10 +70,15 @@ pub async fn ensure_indexes(db: &Database) -> AppResult<()> {
     if existing
         .iter()
         .any(|i| i.options.as_ref().and_then(|o| o.name.as_deref()) == Some(old_index))
-    {
-        db.collection::<Document>(model::CONTEXTS)
+        && let Err(error) = db
+            .collection::<Document>(model::CONTEXTS)
             .drop_index(old_index)
-            .await?;
+            .await
+    {
+        match error.kind.as_ref() {
+            mongodb::error::ErrorKind::Command(command) if command.code == 27 => {}
+            _ => return Err(error.into()),
+        }
     }
     for (collection, keys) in [
         (
@@ -1431,4 +1436,50 @@ pub async fn definitions(
             })
         })
         .collect())
+}
+
+#[cfg(test)]
+mod index_compatibility_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn concurrent_index_migration_preserves_assistant_and_external_contexts() {
+        let db = crate::test_utils::connect_transaction_test_database("machine_index_compat").await;
+        let contexts = db.collection::<Document>(model::CONTEXTS);
+        contexts
+            .create_index(
+                IndexModel::builder()
+                    .keys(doc! {"node_id":1,"owner_id":1,"agent_id":1,"actor_id":1,"group_id":1})
+                    .options(
+                        mongodb::options::IndexOptions::builder()
+                            .unique(true)
+                            .build(),
+                    )
+                    .build(),
+            )
+            .await
+            .unwrap();
+        let assistant = doc! {"_id":"assistant","node_id":"node","owner_id":"owner",
+        "agent_id":"agent","actor_id":"owner","group_id":bson::Bson::Null};
+        contexts.insert_one(&assistant).await.unwrap();
+        for result in futures::future::join_all((0..4).map(|_| ensure_indexes(&db))).await {
+            result.expect("concurrent startup must tolerate index retirement");
+        }
+        ensure_indexes(&db).await.unwrap();
+        let mut duplicate = assistant.clone();
+        duplicate.insert("_id", "duplicate");
+        assert!(
+            contexts.insert_one(duplicate).await.is_err(),
+            "assistant identities remain unique"
+        );
+        for id in ["external-one", "external-two"] {
+            contexts
+                .insert_one(doc! {"_id":id,"kind":"external","node_id":"node",
+                "owner_id":"owner","grant_id":id,"mode":"shared_legacy"})
+                .await
+                .unwrap();
+        }
+        assert_eq!(contexts.count_documents(doc! {}).await.unwrap(), 3);
+        db.drop().await.unwrap();
+    }
 }

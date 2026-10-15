@@ -406,6 +406,7 @@ async fn apply_user_security_state(
         deleting,
         None,
         Some(expected_active),
+        false,
     )
     .await
 }
@@ -417,9 +418,12 @@ async fn apply_user_security_state_with_deletion_policy(
     deleting: bool,
     owner_deletion_policy: Option<&str>,
     expected_active: Option<bool>,
+    telemetry_erasure: bool,
 ) -> AppResult<()> {
     if let Some(policy) = owner_deletion_policy {
-        validate_account_deletion_policy(policy)?;
+        if !policy.is_empty() {
+            validate_account_deletion_policy(policy)?;
+        }
         if active || !deleting {
             return Err(AppError::ValidationError(
                 "Owner deletion policy requires account deletion".into(),
@@ -442,6 +446,21 @@ async fn apply_user_security_state_with_deletion_policy(
                     .session(&mut *session)
                     .await?
                     .ok_or_else(|| AppError::NotFound("User not found".into()))?;
+                // Creation also writes this owner row. If a Machine appears
+                // after preflight, the transaction retries and requires consent.
+                if owner_deletion_policy.as_deref() == Some("")
+                    && db
+                        .collection::<bson::Document>(
+                            crate::models::remote_machine::COLLECTION_NAME,
+                        )
+                        .find_one(doc! {"owner_id": &user_id})
+                        .projection(doc! {"_id": 1})
+                        .session(&mut *session)
+                        .await?
+                        .is_some()
+                {
+                    validate_account_deletion_policy("")?;
+                }
                 if active
                     && current
                         .get("deletion_requested_at")
@@ -486,7 +505,9 @@ async fn apply_user_security_state_with_deletion_policy(
                         "Account state changed; refresh before retrying".into(),
                     ));
                 }
-                if let Some(policy) = &owner_deletion_policy {
+                if let Some(policy) = &owner_deletion_policy
+                    && !policy.is_empty()
+                {
                     // Same transaction as the account/source fence. These
                     // retained lifecycle records outlive the user cascade;
                     // replay preserves the original consent and timestamp.
@@ -509,6 +530,10 @@ async fn apply_user_security_state_with_deletion_policy(
                             doc! {"$set":{"deletion_basis":basis}},
                         )
                         .session(&mut *session)
+                        .await?;
+                }
+                if telemetry_erasure {
+                    super::telemetry_erasure_service::enqueue(&db, &user_id, Some(&mut *session))
                         .await?;
                 }
                 if !active {
@@ -576,7 +601,7 @@ pub async fn delete_user_cascade(
         ));
     }
 
-    delete_user_cascade_internal(db, target_user_id, None).await
+    delete_user_cascade_internal(db, target_user_id, None, false).await
 }
 
 /// Delete the currently authenticated user and cascade-delete all related documents.
@@ -595,13 +620,40 @@ pub fn validate_account_deletion_policy(policy: &str) -> AppResult<()> {
     Ok(())
 }
 
+pub async fn validate_account_deletion_request(
+    db: &mongodb::Database,
+    user_id: &str,
+    policy: &str,
+) -> AppResult<()> {
+    if !policy.is_empty() {
+        return validate_account_deletion_policy(policy);
+    }
+    let owns_machines = db
+        .collection::<bson::Document>(crate::models::remote_machine::COLLECTION_NAME)
+        .find_one(doc! {"owner_id": user_id})
+        .projection(doc! {"_id": 1})
+        .await?
+        .is_some();
+    if owns_machines {
+        validate_account_deletion_policy(policy)?;
+    }
+    Ok(())
+}
+
 pub async fn delete_current_user_cascade(
     db: &mongodb::Database,
     user_id: &str,
     deletion_policy_version: &str,
+    telemetry_erasure: bool,
 ) -> AppResult<()> {
-    validate_account_deletion_policy(deletion_policy_version)?;
-    delete_user_cascade_internal(db, user_id, Some(deletion_policy_version)).await
+    validate_account_deletion_request(db, user_id, deletion_policy_version).await?;
+    delete_user_cascade_internal(
+        db,
+        user_id,
+        Some(deletion_policy_version),
+        telemetry_erasure,
+    )
+    .await
 }
 
 async fn release_nyxbot_org_links(db: &mongodb::Database, user_id: &str) -> AppResult<()> {
@@ -639,6 +691,7 @@ async fn delete_user_cascade_internal(
     db: &mongodb::Database,
     target_user_id: &str,
     owner_deletion_policy: Option<&str>,
+    telemetry_erasure: bool,
 ) -> AppResult<()> {
     let _target = db
         .collection::<User>(USERS)
@@ -646,18 +699,21 @@ async fn delete_user_cascade_internal(
         .await?
         .ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
 
-    // Busy email effects must leave the user able to authenticate and retry.
-    crate::services::channel_bot_service::delete_owner_aurinko_channels(db, target_user_id).await?;
-
-    // Only self-service owner confirmation grants Machine erasure authority.
-    // Admin removal fences execution but preserves indefinite workspace data.
-    apply_user_security_state_with_deletion_policy(
+    // Busy email effects leave the owner active. Once the claims are held,
+    // consent, the owner fence and telemetry erasure commit together before
+    // any channel data is removed.
+    crate::services::channel_bot_service::delete_owner_aurinko_channels(
         db,
         target_user_id,
-        false,
-        true,
-        owner_deletion_policy,
-        None,
+        apply_user_security_state_with_deletion_policy(
+            db,
+            target_user_id,
+            false,
+            true,
+            owner_deletion_policy,
+            None,
+            telemetry_erasure,
+        ),
     )
     .await?;
 
@@ -1224,6 +1280,148 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn machine_account_deletion_rechecks_consent_after_preflight() {
+        let db = connect_transaction_test_database("machine_delete_consent_recheck").await;
+        let user = Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_one(test_user(&user, crate::models::user::UserType::Person))
+            .await
+            .unwrap();
+        validate_account_deletion_request(&db, &user, "")
+            .await
+            .unwrap();
+
+        let machines = crate::models::remote_machine::COLLECTION_NAME;
+        let machine_id = Uuid::new_v4().to_string();
+        db.collection::<bson::Document>(machines)
+            .insert_one(doc! {"_id": &machine_id, "owner_id": &user})
+            .await
+            .unwrap();
+        let messages = crate::models::channel_message::COLLECTION_NAME;
+        db.collection::<bson::Document>(messages)
+            .insert_one(doc! {"_id":"retained-message","user_id":&user,"platform":"aurinko"})
+            .await
+            .unwrap();
+        // The preflight already succeeded. Exercise the entire effects path
+        // so a late consent failure cannot delete channels or enqueue erasure.
+        let result = delete_user_cascade_internal(&db, &user, Some(""), true).await;
+        assert!(matches!(result, Err(AppError::ValidationError(_))));
+        let owner = db
+            .collection::<bson::Document>(USERS)
+            .find_one(doc! {"_id": &user})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(owner.get_bool("is_active"), Ok(true));
+        assert!(!owner.contains_key("deletion_requested_at"));
+        let machine = db
+            .collection::<bson::Document>(machines)
+            .find_one(doc! {"_id": &machine_id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!machine.contains_key("deletion_basis"));
+        assert_eq!(
+            db.collection::<bson::Document>(messages)
+                .count_documents(doc! {"user_id": &user})
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            db.collection::<bson::Document>(crate::models::telemetry_erasure_job::COLLECTION_NAME)
+                .count_documents(doc! {"user_id": &user})
+                .await
+                .unwrap(),
+            0
+        );
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn machine_account_deletion_enqueues_erasure_only_when_accepted() {
+        use futures::TryStreamExt;
+
+        use crate::models::telemetry_erasure_job::{
+            COLLECTION_NAME as ERASURES, TelemetryErasureJob, TelemetryErasureStatus,
+        };
+        let db = connect_transaction_test_database("machine_delete_telemetry").await;
+        let user = Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_one(test_user(&user, crate::models::user::UserType::Person))
+            .await
+            .unwrap();
+        // A failed enqueue must roll back account admission and preserve data.
+        db.create_collection(ERASURES)
+            .validator(doc! {"user_id": {"$exists": false}})
+            .await
+            .unwrap();
+        let messages = crate::models::channel_message::COLLECTION_NAME;
+        db.collection::<bson::Document>(messages)
+            .insert_one(doc! {"_id":"retained-message","user_id":&user,"platform":"aurinko"})
+            .await
+            .unwrap();
+        assert!(
+            delete_current_user_cascade(&db, &user, "", true)
+                .await
+                .is_err()
+        );
+        let owner = db
+            .collection::<User>(USERS)
+            .find_one(doc! {"_id":&user})
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(owner.is_active);
+        assert_eq!(
+            db.collection::<bson::Document>(messages)
+                .count_documents(doc! {"user_id":&user})
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            db.collection::<TelemetryErasureJob>(ERASURES)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
+        );
+
+        db.run_command(doc! {"collMod":ERASURES,"validator":{}})
+            .await
+            .unwrap();
+        delete_current_user_cascade(&db, &user, "", true)
+            .await
+            .unwrap();
+        assert!(
+            db.collection::<User>(USERS)
+                .find_one(doc! {"_id":&user})
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let erasures: Vec<TelemetryErasureJob> = db
+            .collection::<TelemetryErasureJob>(ERASURES)
+            .find(doc! {"user_id":&user})
+            .await
+            .unwrap()
+            .try_collect()
+            .await
+            .unwrap();
+        assert_eq!(erasures.len(), 1);
+        assert_eq!(erasures[0].status, TelemetryErasureStatus::Pending);
+        assert_eq!(
+            db.collection::<bson::Document>(messages)
+                .count_documents(doc! {"user_id":&user})
+                .await
+                .unwrap(),
+            0
+        );
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn machine_source_hook_failure_aborts_account_deletion_marker() {
         let db = connect_transaction_test_database("machine_user_rollback").await;
         let user = Uuid::new_v4().to_string();
@@ -1249,6 +1447,7 @@ mod tests {
                 true,
                 Some(ACCOUNT_DELETION_POLICY_VERSION),
                 None,
+                false,
             )
             .await
             .is_err()
@@ -1313,6 +1512,7 @@ mod tests {
             true,
             Some(ACCOUNT_DELETION_POLICY_VERSION),
             None,
+            false,
         )
         .await
         .unwrap();
@@ -1367,6 +1567,7 @@ mod tests {
             true,
             Some(ACCOUNT_DELETION_POLICY_VERSION),
             None,
+            false,
         )
         .await
         .unwrap();

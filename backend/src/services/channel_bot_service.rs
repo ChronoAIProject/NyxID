@@ -2255,7 +2255,11 @@ pub async fn verify_serialized_bot(
 /// Acquire all Aurinko effect fences before changing owner or bot state.
 /// A busy request leaves the owner able to authenticate and retry deletion.
 /// Hard deletion removes credentials locally; upstream subscriptions become inert.
-pub async fn delete_owner_aurinko_channels(db: &mongodb::Database, owner: &str) -> AppResult<()> {
+pub async fn delete_owner_aurinko_channels(
+    db: &mongodb::Database,
+    owner: &str,
+    accept_deletion: impl std::future::Future<Output = AppResult<()>>,
+) -> AppResult<()> {
     use super::coordination_service::{EventDedupClaimResult, EventDedupStore};
     let bots: Vec<ChannelBot> = db
         .collection::<ChannelBot>(COLLECTION_NAME)
@@ -2283,6 +2287,7 @@ pub async fn delete_owner_aurinko_channels(db: &mongodb::Database, owner: &str) 
                 }
             }
         }
+        accept_deletion.await?;
         db.collection::<ChannelBot>(COLLECTION_NAME)
             .delete_many(doc! { "user_id": owner, "platform": "aurinko" })
             .await?;

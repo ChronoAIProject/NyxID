@@ -401,6 +401,7 @@ async fn machine_preview_consent_encryption_acl_expiry_and_late_result() {
             &f.state.db,
             &f.owner,
             crate::services::admin_user_service::ACCOUNT_DELETION_POLICY_VERSION,
+            false,
         ),
     )
     .await

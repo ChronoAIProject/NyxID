@@ -26,7 +26,7 @@ pub async fn run(command: NodeCredentialAdminCommands) -> Result<()> {
             label,
             auth,
         } => {
-            let mut api = ApiClient::from_auth_checked(&auth).await?;
+            let mut api = ApiClient::from_auth_with_credential_transport(&auth)?;
             let node_id = crate::commands::node::resolve_node_id(&mut api, &node).await?;
             let body = serde_json::json!({
                 "service_slug": slug,
@@ -103,7 +103,7 @@ pub async fn run(command: NodeCredentialAdminCommands) -> Result<()> {
                     "--pending reuses existing metadata; do not pass --slug, --injection-method, --field-name, --target-url, or --label"
                 );
             }
-            let mut api = ApiClient::from_auth_checked(&auth).await?;
+            let mut api = ApiClient::from_auth_with_credential_transport(&auth)?;
             let node_id = resolve_node_id_for_optional_org(&mut api, &node, org.as_deref()).await?;
             let metadata = match (slug, injection_method, field_name, target_url, label) {
                 (None, None, None, None, None) => None,
@@ -157,7 +157,7 @@ pub async fn run(command: NodeCredentialAdminCommands) -> Result<()> {
             Ok(())
         }
         NodeCredentialAdminCommands::List { node, auth } => {
-            let mut api = ApiClient::from_auth_checked(&auth).await?;
+            let mut api = ApiClient::from_auth_with_credential_transport(&auth)?;
             let node_id = crate::commands::node::resolve_node_id(&mut api, &node).await?;
             let response: Value = api
                 .get(&format!("/nodes/{node_id}/credentials/pending"))
@@ -206,7 +206,7 @@ pub async fn run(command: NodeCredentialAdminCommands) -> Result<()> {
             yes,
             auth,
         } => {
-            let mut api = ApiClient::from_auth_checked(&auth).await?;
+            let mut api = ApiClient::from_auth_with_credential_transport(&auth)?;
             let node_id = crate::commands::node::resolve_node_id(&mut api, &node).await?;
 
             if !yes {
@@ -391,6 +391,7 @@ impl<'a> RciInjectSession<'a> {
 
     async fn run(&mut self) -> Result<RciInjectOutcome> {
         self.validate()?;
+        self.api.require_credential_transport()?;
         let pending = self.init_or_create_pending().await?;
         match self.mode {
             RciInjectMode::Browser => self.run_browser(pending).await,
@@ -1181,6 +1182,22 @@ mod tests {
 
     fn test_api(server: &MockServer) -> ApiClient {
         ApiClient::new(&server.uri(), "test-access-token".to_string()).expect("api client")
+    }
+
+    #[tokio::test]
+    async fn inject_requires_secure_transport_before_requests_or_secret_input() {
+        let mut api = ApiClient::new("http://192.0.2.1:3001", "test-token".into()).unwrap();
+        let mut session = RciInjectSession::new(
+            &mut api,
+            node_id().to_string(),
+            None,
+            Some(inject_metadata()),
+            RciSecretSource::Prompt,
+            RciFingerprintPolicy::SkipWithYes,
+            RciInjectMode::Terminal,
+        );
+        let error = session.run().await.expect_err("injection requires HTTPS");
+        assert!(error.to_string().contains("requires HTTPS"));
     }
 
     async fn mount_new_inject_flow(

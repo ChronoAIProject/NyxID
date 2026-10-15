@@ -257,7 +257,7 @@ impl ApiClient {
         access_token: String,
         profile: Option<String>,
     ) -> Result<Self> {
-        let client = build_credential_http_client_for_url(profile.as_deref(), base_url)?;
+        let client = build_cli_http_client(profile.as_deref())?;
         let agent_key_auth = crate::auth::agent_key::is_agent_key_profile(profile.as_deref())
             && crate::auth::read_saved_token_for(profile.as_deref()).as_deref()
                 == Some(access_token.as_str());
@@ -278,7 +278,7 @@ impl ApiClient {
         if let Some(resolved) = crate::auth::resolve_access_token_override(auth) {
             let base_url = auth.resolved_base_url()?;
             return Ok(Self {
-                client: build_credential_http_client_for_url(auth.profile.as_deref(), &base_url)?,
+                client: build_cli_http_client(auth.profile.as_deref())?,
                 base_url: format!("{}/api/v1", base_url.trim_end_matches('/')),
                 access_token: resolved.token,
                 profile: auth.profile.clone(),
@@ -346,11 +346,12 @@ impl ApiClient {
     }
 
     pub fn for_credential_transfer(mut self) -> Result<Self> {
-        self.client =
-            credential_http_client_builder(self.profile.as_deref(), self.base_url_root())?
-                .timeout(std::time::Duration::from_secs(75))
-                .build()
-                .context("Failed to build credential transfer client")?;
+        self.client = crate::tls::client_builder()?
+            .redirect(reqwest::redirect::Policy::none())
+            .user_agent(CLI_USER_AGENT)
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .timeout(std::time::Duration::from_secs(75))
+            .build()?;
         self.refresh_disabled = true;
         Ok(self)
     }
@@ -862,7 +863,7 @@ pub async fn anonymous_post(
 ) -> Result<serde_json::Value> {
     let base = format!("{}/api/v1", base_url.trim_end_matches('/'));
     let url = format!("{base}{path}");
-    let client = build_credential_http_client_for_url(profile, &url)?;
+    let client = build_cli_http_client(profile)?;
 
     let resp = client
         .post(&url)
@@ -891,7 +892,7 @@ pub async fn anonymous_post_empty(
 ) -> Result<()> {
     let base = format!("{}/api/v1", base_url.trim_end_matches('/'));
     let url = format!("{base}{path}");
-    let client = build_credential_http_client_for_url(profile, &url)?;
+    let client = build_cli_http_client(profile)?;
 
     let resp = client
         .post(&url)
@@ -1004,6 +1005,46 @@ mod tests {
     }
 
     #[test]
+    fn legacy_api_accepts_remote_http_without_relaxing_credential_transport() {
+        let address = "http://192.0.2.1:3001";
+        let mut api = ApiClient::new(address, "test-token".into())
+            .expect("ordinary API clients retain existing HTTP support");
+        assert!(api.require_credential_transport().is_err());
+        assert!(api.for_credential_transfer().is_ok());
+
+        let mut auth = auth_args(address.into());
+        auth.access_token = Some("test-token".into());
+        assert!(ApiClient::from_auth(&auth).is_ok());
+        assert!(ApiClient::from_auth_with_credential_transport(&auth).is_err());
+    }
+
+    #[tokio::test]
+    async fn legacy_api_follows_existing_read_redirects() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/services"))
+            .respond_with(
+                ResponseTemplate::new(307)
+                    .insert_header("Location", format!("{}/api/v1/services/", server.uri())),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/services/"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let mut api = ApiClient::new(&server.uri(), "test-token".into()).unwrap();
+        assert_eq!(
+            api.get_value("/services").await.unwrap(),
+            serde_json::json!([])
+        );
+        server.verify().await;
+    }
+
+    #[test]
     fn credential_request_urls_allow_https_and_only_exact_loopback_http() {
         for address in [
             "https://service.example/api/v1/service-preferences/hidden",
@@ -1035,7 +1076,9 @@ mod tests {
         ] {
             assert!(super::credential_request_url(address).is_err(), "{address}");
             assert!(
-                ApiClient::new(address, uuid::Uuid::new_v4().to_string()).is_err(),
+                ApiClient::new(address, uuid::Uuid::new_v4().to_string())
+                    .and_then(|mut api| api.require_credential_transport())
+                    .is_err(),
                 "{address}"
             );
         }
@@ -1050,9 +1093,8 @@ mod tests {
         ] {
             let mut auth = auth_args(address.to_string());
             auth.access_token = Some(uuid::Uuid::new_v4().to_string());
-            assert!(ApiClient::from_auth(&auth).is_err(), "{address}");
             assert!(
-                ApiClient::from_auth_checked(&auth).await.is_err(),
+                ApiClient::from_auth_with_credential_transport(&auth).is_err(),
                 "{address}"
             );
         }
@@ -1092,7 +1134,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn api_and_credential_transfer_refuse_body_preserving_redirects() {
+    async fn strict_transport_and_credential_transfer_refuse_body_preserving_redirects() {
         let origin = MockServer::start().await;
         let target = MockServer::start().await;
         Mock::given(method("POST"))
@@ -1110,6 +1152,8 @@ mod tests {
             let mut api = ApiClient::new(&origin.uri(), uuid::Uuid::new_v4().to_string()).unwrap();
             if transfer {
                 api = api.for_credential_transfer().unwrap();
+            } else {
+                api.require_credential_transport().unwrap();
             }
             let error = api
                 .post::<serde_json::Value, _>(
@@ -1130,23 +1174,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn loopback_api_and_credential_transfer_bypass_environment_proxies() {
+    async fn loopback_credential_transport_bypasses_environment_proxies() {
         const CHILD_ORIGIN: &str = "NYXID_TEST_LOOPBACK_PROXY_ORIGIN";
         const TEST_NAME: &str =
-            "api::tests::loopback_api_and_credential_transfer_bypass_environment_proxies";
+            "api::tests::loopback_credential_transport_bypasses_environment_proxies";
 
         if let Some(address) = std::env::var_os(CHILD_ORIGIN) {
             let address = address.into_string().expect("child origin must be UTF-8");
-            for transfer in [false, true] {
-                let mut api = ApiClient::new(&address, uuid::Uuid::new_v4().to_string()).unwrap();
-                if transfer {
-                    api = api.for_credential_transfer().unwrap();
-                }
-                assert_eq!(
-                    api.get_value("/transport-fixture").await.unwrap(),
-                    serde_json::json!({"direct": true})
-                );
-            }
+            let mut api = ApiClient::new(&address, uuid::Uuid::new_v4().to_string()).unwrap();
+            api.require_credential_transport().unwrap();
+            assert_eq!(
+                api.get_value("/transport-fixture").await.unwrap(),
+                serde_json::json!({"direct": true})
+            );
             return;
         }
 
@@ -1157,7 +1197,7 @@ mod tests {
             .respond_with(
                 ResponseTemplate::new(200).set_body_json(serde_json::json!({"direct": true})),
             )
-            .expect(2)
+            .expect(1)
             .mount(&origin)
             .await;
         Mock::given(method("GET"))
@@ -1217,26 +1257,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn anonymous_auth_posts_reject_remote_cleartext_before_sending() {
+    async fn anonymous_auth_posts_preserve_legacy_redirects() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/auth/fixture"))
+            .respond_with(
+                ResponseTemplate::new(307)
+                    .insert_header("Location", format!("{}/auth/fixture/", server.uri())),
+            )
+            .expect(2)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/auth/fixture/"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .expect(2)
+            .mount(&server)
+            .await;
         let body = serde_json::json!({});
-        let error = super::anonymous_post(
-            "http://cleartext-fixture.invalid",
-            "/auth/register",
-            &body,
-            None,
-        )
-        .await
-        .expect_err("registration requires secure transport");
-        assert!(error.to_string().contains("requires HTTPS"));
-        let error = super::anonymous_post_empty(
-            "http://cleartext-fixture.invalid",
-            "/auth/reset-password",
-            &body,
-            None,
-        )
-        .await
-        .expect_err("password reset requires secure transport");
-        assert!(error.to_string().contains("requires HTTPS"));
+        super::anonymous_post(&server.uri(), "/auth/fixture", &body, None)
+            .await
+            .unwrap();
+        super::anonymous_post_empty(&server.uri(), "/auth/fixture", &body, None)
+            .await
+            .unwrap();
+        server.verify().await;
     }
 
     #[tokio::test]

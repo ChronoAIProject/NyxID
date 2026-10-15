@@ -1090,6 +1090,7 @@ async fn aurinko_owner_deletion_removes_bot_secrets_and_cannot_recreate_ingress_
         &f.state.db,
         &f.bot.user_id,
         crate::services::admin_user_service::ACCOUNT_DELETION_POLICY_VERSION,
+        false,
     )
     .await
     .unwrap();
@@ -1503,9 +1504,21 @@ async fn aurinko_owner_deletion_fences_delayed_ingress_and_reply() {
                     &f.state.db,
                     &f.bot.user_id,
                     crate::services::admin_user_service::ACCOUNT_DELETION_POLICY_VERSION,
+                    true,
                 )
                 .await
                 .is_err()
+            );
+            assert_eq!(
+                f.state
+                    .db
+                    .collection::<bson::Document>(
+                        crate::models::telemetry_erasure_job::COLLECTION_NAME,
+                    )
+                    .count_documents(doc! {"user_id":&f.bot.user_id})
+                    .await
+                    .unwrap(),
+                0
             );
             assert!(
                 f.state
@@ -1523,6 +1536,7 @@ async fn aurinko_owner_deletion_fences_delayed_ingress_and_reply() {
             &f.state.db,
             &f.bot.user_id,
             crate::services::admin_user_service::ACCOUNT_DELETION_POLICY_VERSION,
+            false,
         )
         .await
         .unwrap();

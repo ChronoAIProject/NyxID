@@ -615,6 +615,7 @@ async fn account_deletion_cascade_queues_cleanup_for_an_already_paused_workspace
         &db,
         &owner,
         crate::services::admin_user_service::ACCOUNT_DELETION_POLICY_VERSION,
+        false,
     )
     .await
     .unwrap();

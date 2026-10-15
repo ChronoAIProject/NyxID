@@ -580,6 +580,7 @@ struct ConfirmedAccountDeleteFingerprint<'a> {
     action: &'static str,
     user_id: &'a str,
     confirm_email: &'a str,
+    #[serde(skip_serializing_if = "str::is_empty")]
     deletion_policy_version: &'a str,
 }
 
@@ -937,11 +938,14 @@ async fn delete_account(
     Json(body): Json<DeleteAssistantAccountRequest>,
 ) -> AppResult<Json<AssistantAccountResponse>> {
     super::login_client_context::require_first_party_human(&auth_user)?;
-    crate::services::admin_user_service::validate_account_deletion_policy(
-        &body.deletion_policy_version,
-    )?;
-    let action_request_id = normalize_action_request_id(body.action_request_id)?;
     let user_id = auth_user.user_id.to_string();
+    crate::services::admin_user_service::validate_account_deletion_request(
+        &state.db,
+        &user_id,
+        &body.deletion_policy_version,
+    )
+    .await?;
+    let action_request_id = normalize_action_request_id(body.action_request_id)?;
     let user = require_user(&state, &user_id).await?;
 
     // Verify the confirmation BEFORE reserving, so a wrong or missing one
@@ -986,12 +990,14 @@ async fn delete_account(
         }
         ReceiptOutcome::Reserved(receipt) => {
             let mut headers = HeaderMap::new();
-            headers.insert(
-                crate::services::admin_user_service::ACCOUNT_DELETION_POLICY_HEADER,
-                axum::http::HeaderValue::from_static(
-                    crate::services::admin_user_service::ACCOUNT_DELETION_POLICY_VERSION,
-                ),
-            );
+            if !body.deletion_policy_version.is_empty() {
+                headers.insert(
+                    crate::services::admin_user_service::ACCOUNT_DELETION_POLICY_HEADER,
+                    axum::http::HeaderValue::from_static(
+                        crate::services::admin_user_service::ACCOUNT_DELETION_POLICY_VERSION,
+                    ),
+                );
+            }
             let _ = users::delete_me(State(state.clone()), auth_user, tele, headers).await?;
             mark_completed(&state.db, &receipt).await?;
             false
@@ -4557,6 +4563,32 @@ mod wave4_effect_tests {
         })
         .unwrap();
         assert_ne!(first, second);
+    }
+
+    #[test]
+    fn account_delete_without_machine_policy_preserves_legacy_fingerprint() {
+        #[derive(serde::Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct LegacyFingerprint<'a> {
+            action: &'static str,
+            user_id: &'a str,
+            confirm_email: &'a str,
+        }
+        let legacy = LegacyFingerprint {
+            action: ACCOUNT_DELETE_ACTION,
+            user_id: "user-1",
+            confirm_email: "owner@example.test",
+        };
+        let request = ConfirmedAccountDeleteFingerprint {
+            action: ACCOUNT_DELETE_ACTION,
+            user_id: "user-1",
+            confirm_email: "owner@example.test",
+            deletion_policy_version: "",
+        };
+        assert_eq!(
+            fingerprint_canonical(&request).unwrap(),
+            fingerprint_canonical(&legacy).unwrap()
+        );
     }
 
     #[test]
