@@ -4203,7 +4203,11 @@ async fn execute_resolved_proxy_inner(
                 .await
                 .inspect_err(|error| request_audit.admission_error(error))?
         };
-    let billing_ctx = billing_ctx.with_operation(priced_operation.as_deref());
+    let billing_ctx = billing_ctx
+        .with_operation(priced_operation.as_deref())
+        .with_inference_capture(&target.service, requested_path)
+        .with_native_provider_origin(&target.base_url)
+        .with_authenticated_usage(&auth_user);
 
     // === Request Decomposition ===
     // Extract method, query, headers BEFORE body consumption.
@@ -4337,7 +4341,7 @@ async fn execute_resolved_proxy_inner(
         // applied before dispatch, on a cheap reference-counted copy. A
         // streamed upload has no buffered body, so body limits refuse it.
         let outbound = force_stream_usage_for_service(
-            &target.service.slug,
+            &target.service,
             path,
             (!body_bytes.is_empty()).then(|| body_bytes.clone()),
         )
@@ -4659,7 +4663,7 @@ async fn execute_resolved_proxy_inner(
     } else {
         Some(body_bytes)
     };
-    let body = force_stream_usage_for_service(&target.service.slug, path, body);
+    let body = force_stream_usage_for_service(&target.service, path, body);
     let durable_authorization_body = body.clone().unwrap_or_default();
     let request_body_len = body.as_ref().map(|b| b.len() as i64).unwrap_or(0);
 
@@ -5345,197 +5349,163 @@ async fn execute_resolved_proxy_inner(
 
                     let response_result: AppResult<Response> = async {
                         let response = match proxy_response {
-                        ProxyResponseType::Complete(node_response) => {
-                            let response_len = node_response.body.len() as i64;
-                            let request_len = request_body_len;
-                            let usage = (node_response.body.len() <= USAGE_CAPTURE_MAX_BYTES && should_capture_llm_usage(&target.service, platform_metric))
-                                .then(|| llm_usage_service::usage_from_body(&node_response.body, path, (200..300).contains(&node_response.status))).flatten();
-                            settle_meter_async(
-                                state.billing.clone(),
-                                metered.clone(),
-                                llm_platform_usage(usage.as_ref(), request_len + response_len),
-                                None,
-                                None,
-                            )
-                            .await;
-                            let status = StatusCode::from_u16(node_response.status)
-                                .unwrap_or(StatusCode::BAD_GATEWAY);
-                            ProxyExchangeDiagnostics::new(
-                                exchange_started_at,
-                                target_admission_ms,
-                                None,
-                                &method,
-                                status,
-                                "buffered",
-                                &all_headers,
-                            )
-                            .emit("completed");
-                            let mut response_builder = Response::builder().status(status);
-                            for (name, value) in &node_response.headers {
-                                let name_lower = name.to_lowercase();
-                                if let Ok(hn) =
-                                    axum::http::header::HeaderName::from_bytes(name.as_bytes())
-                                    && let Some(hv) = forwarded_response_header_value(
-                                        &name_lower,
-                                        value.as_bytes(),
-                                        false,
-                                        node_location_context.as_ref(),
+                            ProxyResponseType::Complete(node_response) => {
+                                let response_len = node_response.body.len() as i64;
+                                let request_len = request_body_len;
+                                let usage = (node_response.body.len() <= USAGE_CAPTURE_MAX_BYTES
+                                    && should_capture_llm_usage(&target.service, platform_metric))
+                                .then(|| {
+                                    llm_usage_service::usage_from_body(
+                                        &node_response.body,
+                                        path,
+                                        (200..300).contains(&node_response.status),
                                     )
-                                {
-                                    response_builder = response_builder.header(hn, hv);
-                                }
-                            }
-                            response_builder
-                                .body(Body::from(node_response.body))
-                                .map_err(|e| {
-                                    AppError::Internal(format!("Failed to build response: {e}"))
-                                })?
-                        }
-                        ProxyResponseType::Streaming(mut rx) => {
-                            let idle_timeout_secs = state.config.proxy_stream_idle_timeout_secs;
-                            let idle_timeout = std::time::Duration::from_secs(idle_timeout_secs);
-
-                            // Wait for the Start chunk
-                            let first = tokio::time::timeout(idle_timeout, rx.recv())
-                                .await
-                                .map_err(|_| AppError::NodeProxyTimeout)?
-                                .ok_or_else(|| {
-                                    AppError::NodeOffline("Stream closed before start".to_string())
-                                })?;
-
-                            let (status, resp_headers) = match first {
-                                StreamChunk::Start { status, headers } => (status, headers),
-                                StreamChunk::Error(e) => {
-                                    return Err(AppError::Internal(format!("Stream error: {e}")));
-                                }
-                                _ => {
-                                    return Err(AppError::Internal(
-                                        "Expected stream start chunk".to_string(),
-                                    ));
-                                }
-                            };
-
-                            let http_status =
-                                StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY);
-                            let stream_diagnostics = ProxyExchangeDiagnostics::new(
-                                exchange_started_at,
-                                target_admission_ms,
-                                Some(elapsed_ms(downstream_started_at)),
-                                &method,
-                                http_status,
-                                if node_is_sse_headers(&resp_headers) {
-                                    "sse"
-                                } else {
-                                    "binary_stream"
-                                },
-                                &all_headers,
-                            );
-                            let mut response_builder = Response::builder().status(http_status);
-
-                            // Detect SSE so we can skip content-length (length unknown).
-                            // For non-SSE streaming (video, audio, large files), keep
-                            // content-length for client download progress / seeking.
-                            let node_is_sse = resp_headers.iter().any(|(k, v)| {
-                                k.eq_ignore_ascii_case("content-type")
-                                    && crate::mw::security_headers::is_sse_media_type(v)
-                            });
-
-                            for (name, value) in &resp_headers {
-                                let name_lower = name.to_lowercase();
-                                if let Ok(hn) =
-                                    axum::http::header::HeaderName::from_bytes(name.as_bytes())
-                                    && let Some(hv) = forwarded_response_header_value(
-                                        &name_lower,
-                                        value.as_bytes(),
-                                        node_is_sse,
-                                        node_location_context.as_ref(),
-                                    )
-                                {
-                                    response_builder = response_builder.header(hn, hv);
-                                }
-                            }
-
-                            // Same anti-buffering opt-out as the direct path:
-                            let service_id_owned = service_id.to_string();
-                            let node_id_owned = node_id.to_string();
-                            let stream_billing = state.billing.clone();
-                            let stream_metered = metered.clone();
-                            let request_len = request_body_len;
-                            let usage_path = path.to_string();
-                            let capture_usage = should_capture_llm_usage(&target.service, platform_metric);
-
-                            // Convert the mpsc receiver into a streaming body.
-                            let mut exchange_diagnostics =
-                                ProxyStreamDiagnostics::new(stream_diagnostics);
-                            let stream = async_stream::stream! {
-                                let mut response_len: i64 = 0;
-                                let mut captured = (capture_usage && !node_is_sse).then(Vec::new);
-                                let mut usage_events = llm_usage_service::BoundedUsageEvents::default();
-                                loop {
-                                    match tokio::time::timeout(idle_timeout, rx.recv()).await {
-                                        Ok(Some(StreamChunk::Data(bytes))) => {
-                                            response_len += bytes.len() as i64;
-                                            if capture_usage && node_is_sse { usage_events.push(&bytes); }
-                                            if let Some(buffer) = captured.as_mut() {
-                                                if buffer.len() + bytes.len() <= USAGE_CAPTURE_MAX_BYTES { buffer.extend_from_slice(&bytes); }
-                                                else { captured = None; }
-                                            }
-                                            yield Ok::<_, std::io::Error>(bytes::Bytes::from(bytes));
-                                        }
-                                        Ok(Some(StreamChunk::End)) => {
-                                            exchange_diagnostics.finish("completed");
-                                            break;
-                                        }
-                                        Ok(Some(StreamChunk::Error(e))) => {
-                                            tracing::error!(
-                                                service_id = %service_id_owned,
-                                                node_id = %node_id_owned,
-                                                error = %e,
-                                                "Stream error from node"
-                                            );
-                                            yield Err(std::io::Error::other(format!(
-                                                "node stream error: {e}"
-                                            )));
-                                            exchange_diagnostics.finish("body_error");
-                                            break;
-                                        }
-                                        Ok(Some(StreamChunk::Start { .. })) => {
-                                            // Duplicate start, ignore
-                                        }
-                                        Ok(None) => {
-                                            exchange_diagnostics.finish("upstream_error");
-                                            break;
-                                        }
-                                        Err(_) => {
-                                            tracing::warn!(
-                                                service_id = %service_id_owned,
-                                                node_id = %node_id_owned,
-                                                idle_timeout_secs,
-                                                "Node proxy stream idle timeout reached"
-                                            );
-                                            exchange_diagnostics.finish("upstream_error");
-                                            break;
-                                        }
-                                    }
-                                }
-                                let mut usage = if node_is_sse { usage_events.finalize_success((200..300).contains(&status)) } else { captured.as_deref().and_then(|b| llm_usage_service::usage_from_body(b, &usage_path, (200..300).contains(&status))) };
-                                if !(200..300).contains(&status) && let Some(usage) = usage.as_mut() { usage.images = 0; }
+                                })
+                                .flatten();
                                 settle_meter_async(
-                                    stream_billing,
-                                    stream_metered,
+                                    state.billing.clone(),
+                                    metered.clone(),
                                     llm_platform_usage(usage.as_ref(), request_len + response_len),
                                     None,
                                     None,
                                 )
                                 .await;
-                            };
+                                let status = StatusCode::from_u16(node_response.status)
+                                    .unwrap_or(StatusCode::BAD_GATEWAY);
+                                ProxyExchangeDiagnostics::new(
+                                    exchange_started_at,
+                                    target_admission_ms,
+                                    None,
+                                    &method,
+                                    status,
+                                    "buffered",
+                                    &all_headers,
+                                )
+                                .emit("completed");
+                                let mut response_builder = Response::builder().status(status);
+                                for (name, value) in &node_response.headers {
+                                    let name_lower = name.to_lowercase();
+                                    if let Ok(hn) =
+                                        axum::http::header::HeaderName::from_bytes(name.as_bytes())
+                                        && let Some(hv) = forwarded_response_header_value(
+                                            &name_lower,
+                                            value.as_bytes(),
+                                            false,
+                                            node_location_context.as_ref(),
+                                        )
+                                    {
+                                        response_builder = response_builder.header(hn, hv);
+                                    }
+                                }
+                                response_builder
+                                    .body(Body::from(node_response.body))
+                                    .map_err(|e| {
+                                        AppError::Internal(format!("Failed to build response: {e}"))
+                                    })?
+                            }
+                            ProxyResponseType::Streaming(mut rx) => {
+                                let idle_timeout_secs = state.config.proxy_stream_idle_timeout_secs;
+                                let idle_timeout =
+                                    std::time::Duration::from_secs(idle_timeout_secs);
 
-                            response_builder
-                                .body(Body::from_stream(stream))
-                                .map_err(|e| {
+                                // Wait for the Start chunk
+                                let first = tokio::time::timeout(idle_timeout, rx.recv())
+                                    .await
+                                    .map_err(|_| AppError::NodeProxyTimeout)?
+                                    .ok_or_else(|| {
+                                        AppError::NodeOffline(
+                                            "Stream closed before start".to_string(),
+                                        )
+                                    })?;
+
+                                let (status, resp_headers) = match first {
+                                    StreamChunk::Start { status, headers } => (status, headers),
+                                    StreamChunk::Error(e) => {
+                                        return Err(AppError::Internal(format!(
+                                            "Stream error: {e}"
+                                        )));
+                                    }
+                                    _ => {
+                                        return Err(AppError::Internal(
+                                            "Expected stream start chunk".to_string(),
+                                        ));
+                                    }
+                                };
+
+                                let http_status =
+                                    StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY);
+                                let stream_diagnostics = ProxyExchangeDiagnostics::new(
+                                    exchange_started_at,
+                                    target_admission_ms,
+                                    Some(elapsed_ms(downstream_started_at)),
+                                    &method,
+                                    http_status,
+                                    if node_is_sse_headers(&resp_headers) {
+                                        "sse"
+                                    } else {
+                                        "binary_stream"
+                                    },
+                                    &all_headers,
+                                );
+                                let mut response_builder = Response::builder().status(http_status);
+
+                                // Detect SSE so we can skip content-length (length unknown).
+                                // For non-SSE streaming (video, audio, large files), keep
+                                // content-length for client download progress / seeking.
+                                let node_is_sse = resp_headers.iter().any(|(k, v)| {
+                                    k.eq_ignore_ascii_case("content-type")
+                                        && crate::mw::security_headers::is_sse_media_type(v)
+                                });
+
+                                for (name, value) in &resp_headers {
+                                    let name_lower = name.to_lowercase();
+                                    if let Ok(hn) =
+                                        axum::http::header::HeaderName::from_bytes(name.as_bytes())
+                                        && let Some(hv) = forwarded_response_header_value(
+                                            &name_lower,
+                                            value.as_bytes(),
+                                            node_is_sse,
+                                            node_location_context.as_ref(),
+                                        )
+                                    {
+                                        response_builder = response_builder.header(hn, hv);
+                                    }
+                                }
+
+                                // Same anti-buffering opt-out as the direct path:
+                                let service_id_owned = service_id.to_string();
+                                let node_id_owned = node_id.to_string();
+                                let stream_billing = state.billing.clone();
+                                let stream_metered = metered.clone();
+                                let request_len = request_body_len;
+                                let usage_path = path.to_string();
+                                let capture_usage =
+                                    should_capture_llm_usage(&target.service, platform_metric);
+
+                                let observation_guard =
+                                    crate::services::billing::meter::UnsettledObservationGuard::new(
+                                        &state.db, &metered,
+                                    );
+                                let body = node_stream_body(
+                                    rx,
+                                    status,
+                                    node_is_sse,
+                                    idle_timeout,
+                                    service_id_owned,
+                                    node_id_owned,
+                                    stream_billing,
+                                    stream_metered,
+                                    request_len,
+                                    usage_path,
+                                    capture_usage,
+                                    observation_guard,
+                                    ProxyStreamDiagnostics::new(stream_diagnostics),
+                                );
+
+                                response_builder.body(body).map_err(|e| {
                                     AppError::Internal(format!("Failed to build response: {e}"))
                                 })?
-                        }
+                            }
                         };
                         Ok(response)
                     }
@@ -6300,6 +6270,11 @@ async fn execute_resolved_proxy_inner(
                 let mut usage_accumulator =
                     llm_usage_service::ReportedLlmUsageAccumulator::default();
                 let mut response_len: i64 = 0;
+                let interrupted_outcome = if status.is_success() {
+                    crate::models::llm_usage::UsageOutcome::Interrupted
+                } else {
+                    crate::models::llm_usage::UsageOutcome::Failed
+                };
 
                 loop {
                     let next = until_client_disconnect(
@@ -6311,7 +6286,7 @@ async fn execute_resolved_proxy_inner(
                         Err(_) => {
                             exchange_diagnostics.finish("client_disconnect");
                             drop(upstream_stream);
-                            let usage = usage_accumulator.finalize();
+                            let usage = usage_accumulator.finalize_outcome(interrupted_outcome);
                             if let Some(usage) = usage.clone() {
                                 llm_usage_service::log_reported_usage_async(
                                     stream_usage_context.clone(),
@@ -6347,6 +6322,11 @@ async fn execute_resolved_proxy_inner(
                                 {
                                     if !status.is_success() {
                                         usage.images = 0;
+                                        usage.observation =
+                                            Some(crate::services::llm_observation::with_outcome(
+                                                usage.observation.take(),
+                                                crate::models::llm_usage::UsageOutcome::Failed,
+                                            ));
                                     }
                                     usage_accumulator.observe(usage, mode);
                                 }
@@ -6355,7 +6335,7 @@ async fn execute_resolved_proxy_inner(
                             if tx.send(Ok(bytes)).await.is_err() {
                                 exchange_diagnostics.finish("client_disconnect");
                                 drop(upstream_stream);
-                                let usage = usage_accumulator.finalize();
+                                let usage = usage_accumulator.finalize_outcome(interrupted_outcome);
                                 if let Some(usage) = usage.clone() {
                                     llm_usage_service::log_reported_usage_async(
                                         stream_usage_context.clone(),
@@ -6388,7 +6368,8 @@ async fn execute_resolved_proxy_inner(
                                 error_debug = ?e,
                                 "Proxy stream error from upstream — connection dropped"
                             );
-                            let usage = usage_accumulator.finalize();
+                            let usage = usage_accumulator
+                                .finalize_outcome(crate::models::llm_usage::UsageOutcome::Failed);
                             if let Some(usage) = usage.clone() {
                                 llm_usage_service::log_reported_usage_async(
                                     stream_usage_context.clone(),
@@ -6419,7 +6400,13 @@ async fn execute_resolved_proxy_inner(
                         }
                         Ok(Ok(None)) => {
                             exchange_diagnostics.finish("completed");
-                            let usage = usage_accumulator.finalize();
+                            let usage = if status.is_success() {
+                                usage_accumulator.finalize()
+                            } else {
+                                usage_accumulator.finalize_outcome(
+                                    crate::models::llm_usage::UsageOutcome::Failed,
+                                )
+                            };
                             if let Some(usage) = usage.clone() {
                                 llm_usage_service::log_reported_usage_async(
                                     stream_usage_context.clone(),
@@ -6450,7 +6437,7 @@ async fn execute_resolved_proxy_inner(
                                 idle_timeout_secs,
                                 "Proxy stream idle timeout reached"
                             );
-                            let usage = usage_accumulator.finalize();
+                            let usage = usage_accumulator.finalize_outcome(interrupted_outcome);
                             if let Some(usage) = usage.clone() {
                                 llm_usage_service::log_reported_usage_async(
                                     stream_usage_context.clone(),
@@ -6906,15 +6893,12 @@ fn websocket_resale_usage(
 }
 
 fn force_stream_usage_for_service(
-    service_slug: &str,
+    service: &crate::models::downstream_service::DownstreamService,
     path: &str,
     body: Option<bytes::Bytes>,
 ) -> Option<bytes::Bytes> {
     let body_bytes = body?;
-    if body_bytes.is_empty()
-        || !llm_usage_service::service_supports_stream_options_include_usage(service_slug)
-        || !path.contains("chat/completions")
-    {
+    if body_bytes.is_empty() || !llm_usage_service::service_supports_chat_usage(service, path) {
         return Some(body_bytes);
     }
 
@@ -6954,6 +6938,110 @@ fn chatgpt_usage_callback(
             model.clone(),
         ))
     })
+}
+
+/// Own the node transport and observation guard before the first body poll.
+#[allow(clippy::too_many_arguments)]
+fn node_stream_body(
+    rx: impl Into<crate::services::node_ws_manager::NodeProxyStream>,
+    status: u16,
+    node_is_sse: bool,
+    idle_timeout: std::time::Duration,
+    service_id_owned: String,
+    node_id_owned: String,
+    stream_billing: std::sync::Arc<crate::services::billing::BillingService>,
+    stream_metered: crate::services::billing::meter::MeteredProxyContext,
+    request_len: i64,
+    usage_path: String,
+    capture_usage: bool,
+    mut observation_guard: crate::services::billing::meter::UnsettledObservationGuard,
+    mut exchange_diagnostics: ProxyStreamDiagnostics,
+) -> Body {
+    let mut rx = rx.into();
+    let idle_timeout_secs = idle_timeout.as_secs();
+    if !(200..300).contains(&status) {
+        observation_guard.outcome = crate::models::llm_usage::UsageOutcome::Failed;
+    }
+    let stream = async_stream::stream! {
+        // Keep the complete Drop guard in the body future, including
+        // before its first poll; field-only captures miss cancellation.
+        let mut observation_guard = observation_guard;
+        let mut response_len: i64 = 0;
+        let mut captured = (capture_usage && !node_is_sse).then(Vec::new);
+        let mut usage_events = llm_usage_service::BoundedUsageEvents::default();
+        let mut transport_outcome = crate::models::llm_usage::UsageOutcome::Succeeded;
+        loop {
+            match tokio::time::timeout(idle_timeout, rx.recv()).await {
+                Ok(Some(StreamChunk::Data(bytes))) => {
+                    response_len += bytes.len() as i64;
+                    if capture_usage && node_is_sse {
+                        usage_events.push(&bytes);
+                        observation_guard.observation = usage_events.observation();
+                    }
+                    if let Some(buffer) = captured.as_mut() {
+                        if buffer.len() + bytes.len() <= USAGE_CAPTURE_MAX_BYTES { buffer.extend_from_slice(&bytes); }
+                        else { captured = None; }
+                    }
+                    yield Ok::<_, std::io::Error>(bytes::Bytes::from(bytes));
+                }
+                Ok(Some(StreamChunk::End)) => {
+                    exchange_diagnostics.finish("completed");
+                    break;
+                }
+                Ok(Some(StreamChunk::Error(e))) => {
+                    transport_outcome = crate::models::llm_usage::UsageOutcome::Failed;
+                    observation_guard.outcome = transport_outcome;
+                    tracing::error!(
+                        service_id = %service_id_owned,
+                        node_id = %node_id_owned,
+                        error = %e,
+                        "Stream error from node"
+                    );
+                    yield Err(std::io::Error::other(format!(
+                        "node stream error: {e}"
+                    )));
+                    exchange_diagnostics.finish("body_error");
+                    break;
+                }
+                Ok(Some(StreamChunk::Start { .. })) => {
+                    // Duplicate start, ignore
+                }
+                Ok(None) => {
+                    transport_outcome = crate::models::llm_usage::UsageOutcome::Interrupted;
+                    exchange_diagnostics.finish("upstream_error");
+                    break;
+                }
+                Err(_) => {
+                    transport_outcome = crate::models::llm_usage::UsageOutcome::Interrupted;
+                    tracing::warn!(
+                        service_id = %service_id_owned,
+                        node_id = %node_id_owned,
+                        idle_timeout_secs,
+                        "Node proxy stream idle timeout reached"
+                    );
+                    exchange_diagnostics.finish("upstream_error");
+                    break;
+                }
+            }
+        }
+        let mut usage = if node_is_sse { usage_events.finalize_success((200..300).contains(&status)) } else { captured.as_deref().and_then(|b| llm_usage_service::usage_from_body(b, &usage_path, (200..300).contains(&status))) };
+        if !(200..300).contains(&status) && let Some(usage) = usage.as_mut() { usage.images = 0; }
+        if !(200..300).contains(&status) { transport_outcome = crate::models::llm_usage::UsageOutcome::Failed; }
+        let mut platform = llm_platform_usage(usage.as_ref(), request_len + response_len);
+        if transport_outcome != crate::models::llm_usage::UsageOutcome::Succeeded {
+            platform = crate::services::llm_observation::transport_outcome(platform, transport_outcome);
+        }
+        settle_meter_async(
+            stream_billing,
+            stream_metered,
+            platform,
+            None,
+            None,
+        )
+        .await;
+        observation_guard.armed = false;
+    };
+    Body::from_stream(stream)
 }
 
 async fn settle_meter_async(
@@ -8417,6 +8505,124 @@ async fn bridge_websockets_via_node(
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn node_stream_body_drop_retains_never_polled_and_partial_observations() {
+        use super::*;
+        use crate::models::llm_usage::{UsageOutcome, UsageSource};
+        use crate::models::usage_meter::{COLLECTION_NAME as METERS, UsageMeterRow};
+        use crate::services::billing::{BillingIngress, BillingRouteContext, NodeIntent, meter};
+        let db = crate::test_utils::connect_transaction_test_database("node_body_drop_usage").await;
+        let state = crate::test_utils::test_app_state(db.clone());
+        let owner = uuid::Uuid::new_v4().to_string();
+        for (status, partial) in [(200, false), (503, false), (200, true), (503, true)] {
+            let ctx = BillingRouteContext::new(
+                BillingIngress::Proxy,
+                uuid::Uuid::new_v4().to_string(),
+                owner.clone(),
+                owner.clone(),
+                None,
+                None,
+                None,
+                None,
+                NodeIntent::Direct,
+                "bearer".into(),
+                CredentialClass::UserOwned,
+                BillingMetric::Tokens,
+                None,
+                false,
+            )
+            .with_platform_metering(false);
+            let metered = meter::open(&db, &ctx, None).await.unwrap();
+            meter::mark_forwarded(&db, &metered).await.unwrap();
+            let (tx, rx) = tokio::sync::mpsc::channel(2);
+            let now = std::time::Instant::now();
+            let body = node_stream_body(
+                rx,
+                status,
+                true,
+                std::time::Duration::from_secs(30),
+                "fixture-service".into(),
+                "fixture-node".into(),
+                state.billing.clone(),
+                metered.clone(),
+                0,
+                "/v1/chat/completions".into(),
+                true,
+                meter::UnsettledObservationGuard::new(&db, &metered),
+                ProxyStreamDiagnostics::new(ProxyExchangeDiagnostics::new(
+                    now,
+                    0,
+                    None,
+                    &Method::POST,
+                    StatusCode::from_u16(status).unwrap(),
+                    "sse",
+                    &HeaderMap::new(),
+                )),
+            );
+            if partial {
+                tx.send(StreamChunk::Data(b"data: {\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":2},\"choices\":[{\"delta\":{}}]}\n\n".to_vec())).await.unwrap();
+                let mut stream = body.into_data_stream();
+                assert!(stream.next().await.unwrap().is_ok());
+                drop(stream);
+            } else {
+                // No body poll: the response future must already own the guard.
+                drop(body);
+            }
+            assert!(tx.is_closed(), "body drop must release the node receiver");
+            let expected = if status == 200 {
+                UsageOutcome::Interrupted
+            } else {
+                UsageOutcome::Failed
+            };
+            let row = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                loop {
+                    let row = db
+                        .collection::<UsageMeterRow>(METERS)
+                        .find_one(doc! {"billing_request_id":&ctx.billing_request_id})
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    if row
+                        .llm_observation
+                        .as_ref()
+                        .is_some_and(|o| o.outcome == expected)
+                    {
+                        break row;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            let observation = row.llm_observation.as_ref().unwrap();
+            assert_eq!(observation.reported_input_tokens, partial.then_some(10));
+            assert_eq!(
+                observation.source,
+                if partial {
+                    UsageSource::ProviderReported
+                } else {
+                    UsageSource::Unknown
+                }
+            );
+            assert_eq!(row.quantity, None);
+            assert!(!row.released);
+            assert!(row.funding.is_none());
+            crate::services::billing::llm_invocations::materialize(&db, &row)
+                .await
+                .unwrap();
+            let detail =
+                crate::services::billing::llm_invocations::detail(&db, &owner, None, &row.id)
+                    .await
+                    .unwrap();
+            assert_eq!(detail.observation.outcome, expected);
+            assert_eq!(
+                detail.observation.reported_input_tokens,
+                partial.then_some(10)
+            );
+        }
+        db.drop().await.unwrap();
+    }
+
     use super::{
         ALLOWED_RESPONSE_HEADERS, AsyncLocationContext, ConnectionUsageStats,
         add_websocket_usage_provenance, apply_agent_attribution_headers,

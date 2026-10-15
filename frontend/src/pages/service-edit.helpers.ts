@@ -77,6 +77,7 @@ export function serviceFormValues(
       service.capabilities?.supports_authoring_via_nyx ?? false,
     supports_websocket: service.capabilities?.supports_websocket ?? false,
     supports_streaming: service.capabilities?.supports_streaming ?? false,
+    supports_stream_usage: service.capabilities?.supports_stream_usage ?? false,
     host: service.ssh_config?.host ?? "",
     port: service.ssh_config ? String(service.ssh_config.port) : "22",
     ssh_auth_mode: inferSshAuthMode(
@@ -180,6 +181,7 @@ export function serviceFormPayload(
           supports_authoring_via_nyx: data.supports_authoring_via_nyx ?? false,
           supports_websocket: data.supports_websocket ?? false,
           supports_streaming: data.supports_streaming ?? false,
+          supports_stream_usage: data.supports_stream_usage ?? false,
         },
         // Preserve resale config; the toggle only controls the
         // platform-layer opt-in.

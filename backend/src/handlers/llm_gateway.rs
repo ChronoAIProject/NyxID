@@ -68,7 +68,7 @@ fn supports_stream_options_include_usage(provider_slug: &str) -> bool {
 
 fn should_force_stream_usage(provider_slug: &str, path: &str, body: &serde_json::Value) -> bool {
     supports_stream_options_include_usage(provider_slug)
-        && path.contains("chat/completions")
+        && llm_usage_service::is_chat_completions_path(path)
         && body.get("stream").and_then(|value| value.as_bool()) == Some(true)
 }
 
@@ -618,6 +618,9 @@ pub async fn llm_proxy_request(
                 .inspect_err(|error| request_audit.admission_error(error))?
         };
     let billing_ctx = billing_ctx
+        .with_authenticated_usage(&auth_user)
+        .with_native_provider_origin(&target.base_url)
+        .with_inference_path(&operation_path)
         .with_operation(priced_operation.as_deref())
         .with_request_body(Some(&body_bytes));
     let metered = state
@@ -689,7 +692,7 @@ pub async fn llm_proxy_request(
 
             // Path determines response format: chat/completions → Chat Completions,
             // responses → Responses API passthrough
-            let is_chat_completions_path = path.contains("chat/completions");
+            let is_chat_completions_path = llm_usage_service::is_chat_completions_path(&path);
 
             let translator = llm_gateway_service::get_translator(&provider_slug);
             let translated = translator.translate_request(&path, &body_json)?;
@@ -1239,6 +1242,9 @@ async fn gateway_provider_request(
                 .inspect_err(|error| request_audit.admission_error(error))?
         };
     let billing_ctx = billing_ctx
+        .with_authenticated_usage(&auth_user)
+        .with_native_provider_origin(&target.base_url)
+        .with_inference_path(&requested_path)
         .with_operation(priced_operation.as_deref())
         .with_request_body(Some(&body_bytes));
     let metered = state
@@ -1361,7 +1367,7 @@ async fn gateway_provider_request(
 
             // Path determines response format: chat/completions → translate back
             // to Chat Completions, responses → return Responses API as-is
-            let is_chat_completions_path = path.contains("chat/completions");
+            let is_chat_completions_path = llm_usage_service::is_chat_completions_path(&path);
             let usage_complete = chatgpt_usage_callback(
                 state.billing.clone(),
                 metered.clone(),
@@ -1678,6 +1684,7 @@ async fn build_filtered_response(
                 let mut stream = downstream_response.bytes_stream();
                 let mut accumulator = llm_usage_service::ReportedLlmUsageAccumulator::default();
                 let mut response_len: i64 = 0;
+                let mut outcome = None;
 
                 loop {
                     match tokio::time::timeout(idle_timeout, stream.next()).await {
@@ -1700,10 +1707,12 @@ async fn build_filtered_response(
                             }
 
                             if tx.send(Ok(bytes)).await.is_err() {
+                                outcome = Some(crate::models::llm_usage::UsageOutcome::Interrupted);
                                 break;
                             }
                         }
                         Ok(Some(Err(error))) => {
+                            outcome = Some(crate::models::llm_usage::UsageOutcome::Failed);
                             let _ = tx.send(Err(std::io::Error::other(error))).await;
                             break;
                         }
@@ -1713,12 +1722,19 @@ async fn build_filtered_response(
                                 idle_timeout_secs,
                                 "LLM gateway SSE stream idle timeout reached"
                             );
+                            outcome = Some(crate::models::llm_usage::UsageOutcome::Interrupted);
                             break;
                         }
                     }
                 }
 
-                let usage = accumulator.finalize();
+                let usage = match outcome {
+                    _ if !status.is_success() => {
+                        accumulator.finalize_outcome(crate::models::llm_usage::UsageOutcome::Failed)
+                    }
+                    Some(outcome) => accumulator.finalize_outcome(outcome),
+                    None => accumulator.finalize(),
+                };
                 if let Some(usage) = usage.clone() {
                     llm_usage_service::log_reported_usage_async(context.clone(), usage);
                 }
@@ -1977,6 +1993,7 @@ async fn build_translated_sse_response(
         let mut stream = downstream_response.bytes_stream();
         let mut accumulator = llm_usage_service::ReportedLlmUsageAccumulator::default();
         let mut response_len: i64 = 0;
+        let mut outcome = None;
 
         loop {
             match tokio::time::timeout(idle_timeout, stream.next()).await {
@@ -2005,7 +2022,9 @@ async fn build_translated_sse_response(
                             {
                                 llm_usage_service::log_reported_usage_async(context, usage);
                             }
-                            let usage = accumulator.clone().finalize();
+                            let usage = accumulator.clone().finalize_outcome(
+                                crate::models::llm_usage::UsageOutcome::Interrupted,
+                            );
                             let resale = resale_metric.and_then(|metric| {
                                 resale_usage_from_optional_reported(
                                     metric,
@@ -2031,6 +2050,20 @@ async fn build_translated_sse_response(
                     {
                         llm_usage_service::log_reported_usage_async(context, usage);
                     }
+                    let usage = accumulator
+                        .finalize_outcome(crate::models::llm_usage::UsageOutcome::Failed);
+                    if stream_billing
+                        .observe_unsettled(
+                            &stream_metered,
+                            &llm_platform_usage(usage.as_ref(), request_len + response_len),
+                        )
+                        .await
+                        .is_err()
+                    {
+                        tracing::warn!(
+                            "Translated stream outcome awaits recovery; dispatch observation remains durable"
+                        );
+                    }
                     let _ = tx.send(Err(std::io::Error::other(e))).await;
                     return;
                 }
@@ -2040,6 +2073,7 @@ async fn build_translated_sse_response(
                         idle_timeout_secs,
                         "LLM gateway translated SSE stream idle timeout reached"
                     );
+                    outcome = Some(crate::models::llm_usage::UsageOutcome::Interrupted);
                     break;
                 }
             }
@@ -2050,7 +2084,13 @@ async fn build_translated_sse_response(
         {
             llm_usage_service::log_reported_usage_async(context, usage);
         }
-        let usage = accumulator.finalize();
+        let usage = match outcome {
+            _ if !status.is_success() => {
+                accumulator.finalize_outcome(crate::models::llm_usage::UsageOutcome::Failed)
+            }
+            Some(outcome) => accumulator.finalize_outcome(outcome),
+            None => accumulator.finalize(),
+        };
         let resale = resale_metric.and_then(|metric| {
             resale_usage_from_optional_reported(metric, usage.as_ref(), request_len + response_len)
         });
@@ -2383,6 +2423,96 @@ mod tests {
         extract::{Path, State},
         http::Request,
     };
+
+    #[tokio::test]
+    async fn translated_stream_body_error_retains_observation_without_settling_quantity() {
+        use crate::models::{
+            llm_usage::UsageOutcome,
+            usage_meter::{COLLECTION_NAME as METERS, CredentialClass, UsageMeterRow},
+        };
+        use crate::services::billing::{BillingRouteContext, NodeIntent, meter};
+        use mongodb::bson::doc;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let db =
+            crate::test_utils::connect_transaction_test_database("translated_stream_observation")
+                .await;
+        let state = crate::test_utils::test_app_state(db.clone());
+        let owner = uuid::Uuid::new_v4().to_string();
+        let ctx = BillingRouteContext::new(
+            BillingIngress::LlmProvider,
+            uuid::Uuid::new_v4().to_string(),
+            owner.clone(),
+            owner.clone(),
+            None,
+            None,
+            None,
+            None,
+            NodeIntent::Direct,
+            "bearer".into(),
+            CredentialClass::UserOwned,
+            BillingMetric::Tokens,
+            None,
+            false,
+        )
+        .with_platform_metering(false);
+        let metered = meter::open(&db, &ctx, None).await.unwrap();
+        meter::mark_forwarded(&db, &metered).await.unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (close, closed) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0; 4096];
+            socket.read(&mut request).await.unwrap();
+            socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: 100000\r\nConnection: close\r\n\r\nevent: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_fixture\",\"type\":\"message\",\"model\":\"claude-fixture\",\"usage\":{\"input_tokens\":10,\"output_tokens\":0,\"cache_read_input_tokens\":0,\"cache_creation_input_tokens\":0}}}\n\n").await.unwrap();
+            let _ = closed.await;
+            socket.shutdown().await.unwrap();
+        });
+        let upstream = reqwest::Client::new()
+            .get(format!("http://{addr}/messages"))
+            .send()
+            .await
+            .unwrap();
+        let response = super::build_translated_sse_response(
+            upstream,
+            crate::services::llm_gateway_service::get_translator("anthropic"),
+            None,
+            5,
+            metered,
+            state.billing.clone(),
+            10,
+        )
+        .await
+        .unwrap();
+        let mut body = response.into_body().into_data_stream();
+        use futures::StreamExt;
+        assert!(body.next().await.unwrap().is_ok());
+        close.send(()).unwrap();
+        assert!(body.next().await.unwrap().is_err());
+        server.await.unwrap();
+        let row = db
+            .collection::<UsageMeterRow>(METERS)
+            .find_one(doc! {})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.quantity, None);
+        assert!(!row.released);
+        assert!(row.funding.is_none());
+        assert!(row.pending_platform_usage.is_none());
+        let observation = row.llm_observation.as_ref().unwrap();
+        assert_eq!(observation.reported_input_tokens, Some(10));
+        assert_eq!(observation.outcome, UsageOutcome::Failed);
+        crate::services::billing::llm_invocations::materialize(&db, &row)
+            .await
+            .unwrap();
+        let detail = crate::services::billing::llm_invocations::detail(&db, &owner, None, &row.id)
+            .await
+            .unwrap();
+        assert_eq!(detail.observation.outcome, UsageOutcome::Failed);
+        assert!(!detail.settlement_complete);
+        db.drop().await.unwrap();
+    }
 
     #[tokio::test]
     async fn gateway_provider_selection_batches_grants_and_reuses_primary_and_fallback_providers() {

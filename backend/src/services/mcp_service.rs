@@ -167,6 +167,7 @@ impl McpBillingRouteContextBuilder {
 /// node allow-list enforcement. OAuth and session callers pass `api_key_id:
 /// None` and `allow_all_nodes: true`, preserving their existing behavior.
 pub struct McpExecContext<'a> {
+    pub llm_context: crate::models::llm_usage::LlmInvocationContext,
     /// Background result readers may stop buffering after this many bytes.
     pub response_body_limit: Option<usize>,
     /// Acting person/SA when credential resolution runs as another owner.
@@ -4717,6 +4718,7 @@ fn node_dispatch_failure_disposition(dispatched: bool) -> NodeDispatchFailureDis
 async fn collect_node_stream_response(
     stream: impl Into<crate::services::node_ws_manager::NodeProxyStream>,
     limit: Option<usize>,
+    mut observation_guard: Option<&mut super::billing::meter::UnsettledObservationGuard>,
 ) -> AppResult<(u16, Vec<(String, String)>, Vec<u8>)> {
     let mut stream = stream.into();
     use crate::services::node_ws_manager::StreamChunk;
@@ -4724,6 +4726,7 @@ async fn collect_node_stream_response(
     let mut status = 200u16;
     let mut headers = Vec::new();
     let mut body = Vec::new();
+    let mut usage_events = super::llm_usage_service::BoundedUsageEvents::default();
     while let Some(chunk) = stream.recv().await {
         match chunk {
             StreamChunk::Start {
@@ -4732,8 +4735,17 @@ async fn collect_node_stream_response(
             } => {
                 status = stream_status;
                 headers = stream_headers;
+                if !(200..300).contains(&status)
+                    && let Some(guard) = observation_guard.as_deref_mut()
+                {
+                    guard.outcome = crate::models::llm_usage::UsageOutcome::Failed;
+                }
             }
             StreamChunk::Data(data) => {
+                if let Some(guard) = observation_guard.as_deref_mut() {
+                    usage_events.push(&data);
+                    guard.observation = usage_events.observation();
+                }
                 let take = limit.map_or(data.len(), |n| {
                     data.len().min((n + 1).saturating_sub(body.len()))
                 });
@@ -4744,6 +4756,9 @@ async fn collect_node_stream_response(
             }
             StreamChunk::End => return Ok((status, headers, body)),
             StreamChunk::Error(error) => {
+                if let Some(guard) = observation_guard.as_deref_mut() {
+                    guard.outcome = crate::models::llm_usage::UsageOutcome::Failed;
+                }
                 tracing::error!(%error, "Node stream failed after provider dispatch");
                 return Err(AppError::Internal(
                     "Node stream failed after provider dispatch".to_string(),
@@ -5155,7 +5170,13 @@ async fn execute_tool_resolved_inner(
             (!is_generic_proxy_endpoint).then_some(endpoint.name.as_str()),
         )
         .await?;
-    let billing_ctx = billing_ctx.with_request_body(body.as_deref());
+    let mut billing_ctx = billing_ctx
+        .with_inference_capture(&target.service, &path)
+        .with_native_provider_origin(&target.base_url)
+        .with_request_body(body.as_deref());
+    billing_ctx.llm_context.conversation_id = exec_ctx.llm_context.conversation_id.clone();
+    billing_ctx.llm_context.turn_id = exec_ctx.llm_context.turn_id.clone();
+    billing_ctx.llm_context.agent_id = exec_ctx.llm_context.agent_id.clone();
     let attribution = exec_ctx.attribution.clone().unwrap_or_else(|| {
         super::service_insights_activity::RequestAttribution {
             actor: super::audit_service::AuditActor {
@@ -5190,6 +5211,7 @@ async fn execute_tool_resolved_inner(
         .await
         .inspect_err(|error| request_audit.admission_error(error))?;
     let request_len = body.as_ref().map(|body| body.len() as i64).unwrap_or(0);
+    let mut observation_guard = super::billing::meter::UnsettledObservationGuard::new(db, &metered);
 
     // -------------------------------------------------------------------
     // Route through node when a node route exists (primary + fallbacks).
@@ -5292,6 +5314,7 @@ async fn execute_tool_resolved_inner(
                             None,
                         )
                         .await?;
+                    observation_guard.armed = false;
                     destination_audit.complete(resp.status);
                     request_audit.response(resp.status);
                     return Ok(McpToolExecutionOutcome::Response(tool_response(
@@ -5306,6 +5329,7 @@ async fn execute_tool_resolved_inner(
                     let (status, headers, body_buf) = match collect_node_stream_response(
                         rx,
                         exec_ctx.response_body_limit,
+                        Some(&mut observation_guard),
                     )
                     .await
                     {
@@ -5328,6 +5352,7 @@ async fn execute_tool_resolved_inner(
                             None,
                         )
                         .await?;
+                    observation_guard.armed = false;
                     destination_audit.complete(status);
                     request_audit.response(status);
                     return Ok(McpToolExecutionOutcome::Response(tool_response(
@@ -5424,6 +5449,9 @@ async fn execute_tool_resolved_inner(
     };
 
     let status = response.status().as_u16();
+    if !(200..300).contains(&status) {
+        observation_guard.outcome = crate::models::llm_usage::UsageOutcome::Failed;
+    }
     // Images are read as bytes; everything else keeps charset-aware decoding.
     let image_type = tool_image_type(
         response
@@ -5431,14 +5459,27 @@ async fn execute_tool_resolved_inner(
             .get(reqwest::header::CONTENT_TYPE)
             .and_then(|value| value.to_str().ok()),
     );
-    let read = if let Some(limit) = exec_ctx.response_body_limit {
+    let is_sse = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|h| h.to_str().ok())
+        .is_some_and(crate::mw::security_headers::is_sse_media_type);
+    let read = if exec_ctx.response_body_limit.is_some() || is_sse {
+        let limit = exec_ctx.response_body_limit;
         let mut response = response;
         let mut bytes = Vec::new();
+        let mut usage_events = super::llm_usage_service::BoundedUsageEvents::default();
         let result: Result<_, reqwest::Error> = async {
             while let Some(chunk) = response.chunk().await? {
-                let take = chunk.len().min((limit + 1).saturating_sub(bytes.len()));
+                if is_sse {
+                    usage_events.push(&chunk);
+                    observation_guard.observation = usage_events.observation();
+                }
+                let take = limit.map_or(chunk.len(), |n| {
+                    chunk.len().min((n + 1).saturating_sub(bytes.len()))
+                });
                 bytes.extend_from_slice(&chunk[..take]);
-                if bytes.len() > limit {
+                if limit.is_some_and(|n| bytes.len() > n) {
                     break;
                 }
             }
@@ -5458,6 +5499,14 @@ async fn execute_tool_resolved_inner(
     let (body_text, media) = match read {
         Ok(read) => read,
         Err(error) => {
+            observation_guard.outcome = if observation_guard.outcome
+                == crate::models::llm_usage::UsageOutcome::Failed
+                || !error.is_timeout()
+            {
+                crate::models::llm_usage::UsageOutcome::Failed
+            } else {
+                crate::models::llm_usage::UsageOutcome::Interrupted
+            };
             tracing::error!(
                 timeout = error.is_timeout(),
                 body = error.is_body(),
@@ -5483,6 +5532,7 @@ async fn execute_tool_resolved_inner(
             None,
         )
         .await?;
+    observation_guard.armed = false;
 
     destination_audit.complete(status);
     request_audit.response(status);
@@ -6542,6 +6592,7 @@ mod tests {
                     &state.token_exchange_cache,
                     &state.cloud_response_cache,
                     &McpExecContext {
+                        llm_context: Default::default(),
                         response_body_limit: None,
                         actor_user_id: None,
                         caller_token: None,
@@ -12895,7 +12946,7 @@ mod tests {
         tx.send(StreamChunk::End).await.unwrap();
         drop(tx);
 
-        let response = collect_node_stream_response(rx, None)
+        let response = collect_node_stream_response(rx, None, None)
             .await
             .expect("explicitly terminated stream");
         assert_eq!(response.0, 201);
@@ -12907,7 +12958,7 @@ mod tests {
             .unwrap();
         drop(tx);
         assert!(matches!(
-            collect_node_stream_response(rx, None).await,
+            collect_node_stream_response(rx, None, None).await,
             Err(AppError::Internal(message))
                 if message == "Node stream failed after provider dispatch"
         ));
@@ -12918,10 +12969,37 @@ mod tests {
             .unwrap();
         drop(tx);
         assert!(matches!(
-            collect_node_stream_response(rx, None).await,
+            collect_node_stream_response(rx, None, None).await,
             Err(AppError::Internal(message))
                 if message == "Node stream closed before its terminal frame"
         ));
+
+        // A known provider HTTP failure survives a later premature transport close.
+        let db = mongodb::Client::with_uri_str("mongodb://127.0.0.1:27941")
+            .await
+            .unwrap()
+            .database("mcp_guard_without_writes");
+        let mut guard = super::super::billing::meter::UnsettledObservationGuard::new(
+            &db,
+            &super::super::billing::meter::MeteredProxyContext::disabled(),
+        );
+        let (tx, rx) = tokio::sync::mpsc::channel(2);
+        tx.send(StreamChunk::Start {
+            status: 503,
+            headers: Vec::new(),
+        })
+        .await
+        .unwrap();
+        drop(tx);
+        assert!(
+            collect_node_stream_response(rx, None, Some(&mut guard))
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            guard.outcome,
+            crate::models::llm_usage::UsageOutcome::Failed
+        );
     }
 
     mod public_tools {

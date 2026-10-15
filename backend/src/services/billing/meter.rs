@@ -38,6 +38,58 @@ impl MeteredProxyContext {
     }
 }
 
+/// Refine the durable dispatch observation if a transport future is dropped.
+/// This never settles quantities or changes the existing unknown-money policy.
+pub(crate) struct UnsettledObservationGuard {
+    db: mongodb::Database,
+    metered: MeteredProxyContext,
+    pub observation: Option<crate::models::llm_usage::LlmUsageObservation>,
+    pub outcome: crate::models::llm_usage::UsageOutcome,
+    pub armed: bool,
+}
+
+impl UnsettledObservationGuard {
+    pub fn new(db: &mongodb::Database, metered: &MeteredProxyContext) -> Self {
+        Self {
+            db: db.clone(),
+            metered: metered.clone(),
+            observation: None,
+            outcome: crate::models::llm_usage::UsageOutcome::Interrupted,
+            armed: true,
+        }
+    }
+}
+
+impl Drop for UnsettledObservationGuard {
+    fn drop(&mut self) {
+        if !self.armed
+            || !self
+                .metered
+                .route
+                .as_ref()
+                .is_some_and(|ctx| ctx.capture_tokens && ctx.capture_observation)
+        {
+            return;
+        }
+        let db = self.db.clone();
+        let metered = self.metered.clone();
+        let usage = PlatformUsage {
+            llm_observation: Some(crate::services::llm_observation::with_outcome(
+                self.observation.take(),
+                self.outcome,
+            )),
+            ..Default::default()
+        };
+        tokio::spawn(async move {
+            if observe_unsettled(&db, &metered, &usage).await.is_err() {
+                tracing::warn!(
+                    "Transport outcome refinement deferred; dispatch observation remains durable"
+                );
+            }
+        });
+    }
+}
+
 pub(crate) async fn has_complete_meter(
     db: &mongodb::Database,
     ctx: &BillingRouteContext,
@@ -179,19 +231,36 @@ pub async fn mark_forwarded(
         return Ok(());
     };
 
+    let mut set = doc! {
+        "status": "forwarded", "forwarded": true,
+        "updated_at": bson::DateTime::from_chrono(Utc::now()),
+    };
+    if ctx.capture_tokens && ctx.capture_observation {
+        // The dispatch marker also durably records an invocation with unknown
+        // usage. Cancellation or process loss may bypass normal settlement.
+        // The first settlement intent replaces this provisional observation.
+        let primary = transaction_id(&ctx.billing_request_id, BillingLayer::Platform, None);
+        let observation = crate::services::llm_observation::missing(
+            crate::models::llm_usage::UsageOutcome::Unknown,
+        );
+        let observation = bson::to_bson(&observation)
+            .map_err(|_| AppError::Internal("LLM observation serialization failed".into()))?;
+        for (field, value) in [
+            ("llm_observation", observation),
+            ("llm_detail_pending", Bson::Boolean(true)),
+        ] {
+            set.insert(field, doc! {"$cond":[{"$eq":["$transaction_id",{"$literal":&primary}]},{"$literal":value},format!("${field}")]});
+        }
+        // Every money source survives until the retained snapshot is durable.
+        set.insert("llm_retention_hold", true);
+    }
     db.collection::<UsageMeterRow>(USAGE_METER)
         .update_many(
             doc! {
                 "billing_request_id": &ctx.billing_request_id,
                 "status": "reserved",
             },
-            doc! {
-                "$set": {
-                    "status": "forwarded",
-                    "forwarded": true,
-                    "updated_at": bson::DateTime::from_chrono(Utc::now()),
-                }
-            },
+            vec![doc! {"$set":set}],
         )
         .await?;
     Ok(())
@@ -208,10 +277,73 @@ pub async fn settle(
     settle_persisted(db, persisted).await
 }
 
+/// Preserve terminal transport severity in the same atomic write that claims
+/// quantities. Missing replays also cannot erase already captured measurements.
+fn observation_update_expression(
+    observation: &crate::models::llm_usage::LlmUsageObservation,
+) -> AppResult<bson::Document> {
+    use crate::models::llm_usage::{UsageOutcome, UsageSource};
+    let incoming = bson::to_bson(observation)
+        .map_err(|_| AppError::Internal("LLM observation serialization failed".into()))?;
+    let measured = if observation.source == UsageSource::ProviderReported {
+        doc! {"$literal":incoming}
+    } else {
+        doc! {"$ifNull":["$llm_observation",{"$literal":incoming}]}
+    };
+    let outcome = match observation.outcome {
+        UsageOutcome::Failed => doc! {"$literal":"failed"},
+        UsageOutcome::Interrupted => {
+            doc! {"$cond":[{"$eq":["$llm_observation.outcome","failed"]},"failed","interrupted"]}
+        }
+        UsageOutcome::Succeeded => {
+            doc! {"$cond":[{"$in":["$llm_observation.outcome",["failed","interrupted"]]},"$llm_observation.outcome","succeeded"]}
+        }
+        UsageOutcome::Unknown => doc! {"$ifNull":["$llm_observation.outcome","unknown"]},
+    };
+    Ok(
+        doc! {"$let":{"vars":{"measured":measured,"outcome":outcome},"in":{
+            "$mergeObjects":["$$measured",{"outcome":"$$outcome","completeness":{"$cond":[
+                {"$in":["$$outcome",["failed","interrupted"]]},
+                {"$cond":[{"$eq":["$$measured.source","provider_reported"]},"partial","missing"]},
+                "$$measured.completeness"
+            ]}}]
+        }}},
+    )
+}
+
+/// Unknown quantities retain measurements without changing funding-release policy.
+pub async fn observe_unsettled(
+    db: &mongodb::Database,
+    metered: &MeteredProxyContext,
+    usage: &PlatformUsage,
+) -> AppResult<()> {
+    let Some(ctx) = metered.route.as_ref().filter(|ctx| {
+        ctx.capture_tokens
+            && (ctx.capture_observation
+                || usage.llm_observation.as_ref().is_some_and(|o| {
+                    o.source == crate::models::llm_usage::UsageSource::ProviderReported
+                }))
+    }) else {
+        return Ok(());
+    };
+    let Some(mut observation) = usage.llm_observation.clone() else {
+        return Ok(());
+    };
+    crate::services::llm_observation::native_openai_semantics(
+        &mut observation,
+        ctx.native_openai_accounting,
+    );
+    db.collection::<UsageMeterRow>(USAGE_METER).update_one(
+        doc! {"transaction_id":transaction_id(&ctx.billing_request_id,BillingLayer::Platform,None),"status":"forwarded","quantity":Bson::Null,"pending_platform_usage":Bson::Null},
+        vec![doc! {"$set":{"llm_observation":observation_update_expression(&observation)?,"llm_detail_pending":true,"llm_retention_hold":true,"expires_at":"$$REMOVE"}}]
+    ).await?;
+    Ok(())
+}
+
 pub(super) async fn persist_settlement_intent(
     db: &mongodb::Database,
     metered: &MeteredProxyContext,
-    platform: PlatformUsage,
+    mut platform: PlatformUsage,
     resale: Option<ResaleUsage>,
     model: Option<String>,
 ) -> AppResult<Vec<UsageMeterRow>> {
@@ -219,15 +351,44 @@ pub(super) async fn persist_settlement_intent(
         return Ok(Vec::new());
     };
 
+    if !ctx.capture_tokens
+        || !ctx.capture_observation
+            && !platform.llm_observation.as_ref().is_some_and(|o| {
+                o.source == crate::models::llm_usage::UsageSource::ProviderReported
+            })
+    {
+        platform.llm_observation = None;
+    }
+    if let Some(observation) = platform.llm_observation.as_mut() {
+        crate::services::llm_observation::native_openai_semantics(
+            observation,
+            ctx.native_openai_accounting,
+        );
+    }
+    if ctx.capture_tokens && ctx.capture_observation && platform.llm_observation.is_none() {
+        platform.llm_observation = Some(crate::services::llm_observation::missing(
+            crate::models::llm_usage::UsageOutcome::Unknown,
+        ));
+    }
+
     if ctx.platform_metered() && !ctx.platform_components.is_empty() {
         let collection = db.collection::<UsageMeterRow>(USAGE_METER);
+        let mut set = doc! {
+            "pending_resale_quantity": {"$literal":resale.filter(|_|ctx.resale.is_some()).map(|r|r.quantity.max(0))},
+            "model":{"$literal":&model}, "updated_at":bson::DateTime::from_chrono(Utc::now())
+        };
+        if let Some(observation) = &platform.llm_observation {
+            set.insert(
+                "llm_observation",
+                observation_update_expression(observation)?,
+            );
+            set.insert("llm_detail_pending", true);
+            set.insert("llm_retention_hold", true);
+        }
+        let usage = bson::to_bson(&platform)
+            .map_err(|_| AppError::Internal("Usage intent serialization failed".into()))?;
         collection.update_one(doc! { "transaction_id": transaction_id(&ctx.billing_request_id, BillingLayer::Platform, None), "status": "forwarded", "pending_platform_usage": Bson::Null },
-            doc! { "$set": {
-                "pending_platform_usage": bson::to_bson(&platform).map_err(|e| AppError::Internal(e.to_string()))?,
-                "pending_resale_quantity": resale.filter(|_| ctx.resale.is_some()).map(|r| r.quantity.max(0)),
-                "model": &model,
-                "updated_at": bson::DateTime::from_chrono(Utc::now()),
-            } }).await?;
+            vec![doc! {"$set":set},doc! {"$set":{"pending_platform_usage":{"$mergeObjects":[{"$literal":usage},{"llm_observation":{"$ifNull":["$llm_observation",Bson::Null]}}]}}}]).await?;
         if let Some(coordinator) = collection.find_one(doc! { "transaction_id": transaction_id(&ctx.billing_request_id, BillingLayer::Platform, None) }).await? {
             return materialize_component_intent(db, &coordinator).await;
         }
@@ -375,6 +536,12 @@ async fn materialize_component_rows(
     if let Some(row) = materialize_pending_resale_intent(db, coordinator).await? {
         materialized.push(row);
     }
+    if super::llm_invocations::materialize(db, coordinator)
+        .await
+        .is_err()
+    {
+        tracing::warn!(invocation_id=%coordinator.id,"LLM invocation detail deferred; primary observation remains durable");
+    }
     collection
         .update_one(
             doc! { "_id": &coordinator.id },
@@ -484,6 +651,11 @@ pub(super) async fn settle_persisted(
     finalized_rows: Vec<UsageMeterRow>,
 ) -> AppResult<()> {
     let mut first_error = None;
+    let primaries: Vec<_> = finalized_rows
+        .iter()
+        .filter(|row| row.llm_observation.is_some())
+        .cloned()
+        .collect();
     for row in finalized_rows {
         if let Err(error) = reservation::claim_released_and_settle(db, &row).await {
             reservation::record_settlement_failure(db, &row, Utc::now()).await?;
@@ -492,10 +664,14 @@ pub(super) async fn settle_persisted(
             }
         }
     }
+    for row in primaries {
+        if super::llm_invocations::materialize(db, &row).await.is_err() {
+            tracing::warn!(invocation_id=%row.id,"LLM invocation detail deferred; primary observation remains durable");
+        }
+    }
     if let Some(error) = first_error {
         return Err(error);
     }
-
     Ok(())
 }
 
@@ -562,6 +738,9 @@ pub(super) fn reserved_row(
         && lago_metric_code == ctx.platform_lago_metric_code)
         .then(|| ctx.operation.clone())
         .flatten();
+    let primary_context = (layer == BillingLayer::Platform
+        && transaction_id == self::transaction_id(&ctx.billing_request_id, layer, flush_seq))
+    .then(|| ctx.llm_context.clone());
     UsageMeterRow {
         rollup_pending: true,
         id: Uuid::new_v4().to_string(),
@@ -591,6 +770,9 @@ pub(super) fn reserved_row(
         funding,
         quantity: None,
         pending_resale_quantity: None,
+        llm_observation: None,
+        llm_context: primary_context,
+        llm_detail_pending: false,
         pending_platform_usage: None,
         pool_attempt: ctx.pool_attempt.clone(),
         status: UsageStatus::Reserved,
@@ -667,6 +849,15 @@ async fn finalize_matching(
         "updated_at": bson::DateTime::from_chrono(finalized_at),
         "finalized_at": bson::DateTime::from_chrono(finalized_at),
     };
+    if let Some(observation) = request_usage.and_then(|usage| usage.llm_observation.as_ref()) {
+        set.insert(
+            "llm_observation",
+            bson::to_bson(observation)
+                .map_err(|_| AppError::Internal("LLM observation serialization failed".into()))?,
+        );
+        set.insert("llm_detail_pending", true);
+        set.insert("llm_retention_hold", true);
+    }
     if let Some(breakdown) = request_usage.and_then(|usage| usage.token_breakdown.as_ref())
         && let Ok(breakdown) = bson::to_bson(breakdown)
     {
@@ -691,6 +882,12 @@ async fn finalize_matching(
     let mut literal_set = bson::Document::new();
     for (key, value) in set {
         literal_set.insert(key, doc! {"$literal":value});
+    }
+    if let Some(observation) = request_usage.and_then(|usage| usage.llm_observation.as_ref()) {
+        literal_set.insert(
+            "llm_observation",
+            observation_update_expression(observation)?,
+        );
     }
     literal_set.insert(
         "pool_attempt",

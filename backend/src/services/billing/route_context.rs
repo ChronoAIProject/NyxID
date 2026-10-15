@@ -71,6 +71,10 @@ pub struct BillingRouteContext {
     /// Additional platform rows, each with independent funding and Lago identity.
     pub platform_components: Vec<ResaleSpec>,
     pub capture_tokens: bool,
+    pub requires_reported_quantity: bool,
+    pub capture_observation: bool,
+    pub native_openai_accounting: bool,
+    pub llm_context: crate::models::llm_usage::LlmInvocationContext,
     pub request_bytes: i64,
     /// Purpose-confined public text execution reserves its bounded full response.
     native_text_bound: Option<(i64, i64, i64)>,
@@ -166,6 +170,23 @@ impl BillingRouteContext {
         {
             service_platform_billable = false;
         }
+        let requires_reported_quantity = platform_metric.is_token_family()
+            || platform_metric == BillingMetric::Images
+            || service_billing.is_some_and(|billing| {
+                [
+                    billing.byok_pricing.as_ref(),
+                    billing.platform_key_pricing.as_ref(),
+                ]
+                .into_iter()
+                .flatten()
+                .any(|lane| {
+                    lane.metric.is_token_family()
+                        || lane.metric == BillingMetric::Images
+                        || lane.components.iter().any(|c| {
+                            c.metric.is_token_family() || c.metric == BillingMetric::Images
+                        })
+                })
+            });
         Self {
             ingress,
             pool_attempt: None,
@@ -185,23 +206,11 @@ impl BillingRouteContext {
             operation_prices,
             resale,
             platform_components,
-            capture_tokens: platform_metric.is_token_family()
-                || platform_metric == BillingMetric::Images
-                || service_billing.is_some_and(|billing| {
-                    [
-                        billing.byok_pricing.as_ref(),
-                        billing.platform_key_pricing.as_ref(),
-                    ]
-                    .into_iter()
-                    .flatten()
-                    .any(|lane| {
-                        lane.metric.is_token_family()
-                            || lane.metric == BillingMetric::Images
-                            || lane.components.iter().any(|c| {
-                                c.metric.is_token_family() || c.metric == BillingMetric::Images
-                            })
-                    })
-                }),
+            llm_context: Default::default(),
+            capture_observation: true,
+            native_openai_accounting: false,
+            capture_tokens: requires_reported_quantity,
+            requires_reported_quantity,
             request_bytes: 0,
             native_text_bound: None,
             requested_images: 1,
@@ -267,7 +276,57 @@ impl BillingRouteContext {
         )))
     }
 
+    /// Reuse the authenticated conversation snapshot, never caller headers.
+    pub fn with_authenticated_usage(mut self, auth: &crate::mw::auth::AuthUser) -> Self {
+        if let Some(chat) = auth.assistant_chat.as_ref() {
+            self.llm_context.conversation_id = Some(chat.conversation_id.clone());
+            self.llm_context.agent_id = Some(chat.agent_id.clone());
+            if chat.turn_live && !chat.turn_stopped {
+                self.llm_context.turn_id = chat.turn_id.clone();
+            }
+        }
+        self
+    }
+
+    pub fn with_inference_capture(
+        mut self,
+        service: &crate::models::downstream_service::DownstreamService,
+        path: &str,
+    ) -> Self {
+        self.capture_tokens |= super::metric_resolution::captures_usage(service);
+        self.capture_observation = self.capture_tokens
+            && !crate::services::llm_usage_service::is_inference_metadata_path(path);
+        self
+    }
+
+    /// The resolved upstream origin establishes native semantics. Catalog or
+    /// connection names and user-supplied model names cannot establish them.
+    pub fn with_native_provider_origin(mut self, origin: &str) -> Self {
+        self.native_openai_accounting = url::Url::parse(origin).ok().is_some_and(|url| {
+            url.scheme() == "https"
+                && url.host_str().is_some_and(|host| {
+                    host == "api.openai.com" || host.ends_with(".openai.azure.com")
+                })
+        });
+        self
+    }
+
+    pub fn with_inference_path(mut self, path: &str) -> Self {
+        self.capture_observation = self.capture_tokens
+            && !crate::services::llm_usage_service::is_inference_metadata_path(path);
+        self
+    }
+
     pub fn with_request_body(mut self, body: Option<&[u8]>) -> Self {
+        if self.capture_tokens
+            && let Some(value) =
+                body.and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok())
+        {
+            self.llm_context.requested_model =
+                crate::services::llm_observation::bounded_id(value.get("model"));
+            self.llm_context.requested_tier =
+                crate::services::llm_observation::bounded_id(value.get("service_tier"));
+        }
         self.request_bytes = body.map_or(0, |b| i64::try_from(b.len()).unwrap_or(i64::MAX));
         self.requested_images = if self
             .platform_specs()
@@ -401,6 +460,62 @@ mod tests {
             Some(&billing),
             true,
         )
+    }
+
+    #[test]
+    fn observation_uses_trusted_origin_and_authenticated_live_turn() {
+        use crate::models::assistant_conversation::AgentRole;
+        use crate::services::assistant_acknowledgement_service::ChatAuthority;
+        let context = || context_for(CredentialClass::UserOwned);
+        assert!(
+            context()
+                .with_native_provider_origin("https://api.openai.com/v1")
+                .native_openai_accounting
+        );
+        assert!(
+            context()
+                .with_native_provider_origin("https://deployment.openai.azure.com/openai")
+                .native_openai_accounting
+        );
+        for url in [
+            "http://api.openai.com",
+            "https://api.openai.com.evil.test",
+            "https://custom.test/openai",
+        ] {
+            assert!(
+                !context()
+                    .with_native_provider_origin(url)
+                    .native_openai_accounting
+            );
+        }
+        let mut auth = crate::test_utils::test_auth_user(&uuid::Uuid::new_v4().to_string());
+        auth.assistant_chat = Some(std::sync::Arc::new(ChatAuthority {
+            org_agent_access: None,
+            turn_id: Some("turn".into()),
+            turn_stopped: false,
+            turn_live: true,
+            machine_node_ids: vec![],
+            saved_login_ids: vec![],
+            conversation_id: "conversation".into(),
+            user_id: auth.user_id.to_string(),
+            api_key_id: "key".into(),
+            role: AgentRole::Orchestrator,
+            agent_id: "agent".into(),
+            agent_name: "Agent".into(),
+            guest: false,
+            confirmation_policy: None,
+        }));
+        let ctx = context().with_authenticated_usage(&auth);
+        assert_eq!(ctx.llm_context.turn_id.as_deref(), Some("turn"));
+        assert_eq!(ctx.llm_context.agent_id.as_deref(), Some("agent"));
+        std::sync::Arc::make_mut(auth.assistant_chat.as_mut().unwrap()).turn_stopped = true;
+        assert_eq!(
+            context()
+                .with_authenticated_usage(&auth)
+                .llm_context
+                .turn_id,
+            None
+        );
     }
 
     #[test]

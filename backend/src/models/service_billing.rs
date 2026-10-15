@@ -282,6 +282,8 @@ impl ImageTokens {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
 pub struct PlatformUsage {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub llm_observation: Option<crate::models::llm_usage::LlmUsageObservation>,
     pub requests: i64,
     pub bytes: i64,
     #[serde(default)]

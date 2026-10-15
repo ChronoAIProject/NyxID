@@ -107,7 +107,8 @@ async fn service_concurrency_rest_slug_uuid_mcp_and_stream_share_catalog_capacit
     )
     .unwrap();
     let ctx = mcp_service::McpExecContext {
-            response_body_limit: None,
+        llm_context: Default::default(),
+        response_body_limit: None,
         actor_user_id: None,
         caller_token: None,
         delegation_restrictions: Default::default(),

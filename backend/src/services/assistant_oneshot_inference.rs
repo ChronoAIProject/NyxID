@@ -172,12 +172,25 @@ pub(crate) struct TextLimits {
     pub timeout: Duration,
 }
 
+#[cfg(test)]
 pub(crate) async fn one_shot_text(
     state: &AppState,
     actor: &str,
     prompt: &str,
     input: &str,
     limits: TextLimits,
+) -> Option<String> {
+    one_shot_text_with_context(state, actor, prompt, input, limits, Default::default()).await
+}
+
+/// Context is supplied only by server code after its existing authority check.
+pub(crate) async fn one_shot_text_with_context(
+    state: &AppState,
+    actor: &str,
+    prompt: &str,
+    input: &str,
+    limits: TextLimits,
+    context: crate::models::llm_usage::LlmInvocationContext,
 ) -> Option<String> {
     if limits.timeout.is_zero()
         || limits.max_output_tokens == 0
@@ -189,7 +202,7 @@ pub(crate) async fn one_shot_text(
     }
     match tokio::time::timeout(
         limits.timeout.min(Duration::from_secs(15)),
-        Box::pin(infer(state, actor, prompt, input, limits)),
+        Box::pin(infer(state, actor, prompt, input, limits, &context)),
     )
     .await
     {
@@ -308,6 +321,7 @@ async fn infer(
     prompt: &str,
     input: &str,
     limits: TextLimits,
+    context: &crate::models::llm_usage::LlmInvocationContext,
 ) -> AppResult<Option<String>> {
     use crate::models::user::{User, UserType};
     let Some(person) = state
@@ -369,6 +383,7 @@ async fn infer(
                 input,
                 limits,
                 &mut attempts,
+                context,
             )
             .await
             .ok());
@@ -421,6 +436,7 @@ async fn infer(
             input,
             limits,
             &mut attempts,
+            context,
         )
         .await
         {
@@ -452,6 +468,7 @@ async fn infer_route(
     input: &str,
     limits: TextLimits,
     attempts: &mut usize,
+    context: &crate::models::llm_usage::LlmInvocationContext,
 ) -> Result<String, bool> {
     let mut attempt = Attempt {
         service: &service.slug,
@@ -492,7 +509,7 @@ async fn infer_route(
         let response = tokio::time::timeout(
             Duration::from_secs(3),
             Box::pin(request(
-                state, actor, client, service, route, "models", None, None,
+                state, actor, client, service, route, "models", None, None, context,
             )),
         )
         .await;
@@ -564,6 +581,7 @@ async fn infer_route(
             path,
             Some(body),
             Some(&model),
+            context,
         ))
         .await;
         let value = match result {
@@ -892,7 +910,10 @@ impl Drop for MeterGuard {
             billing: self.billing.clone(),
             metered: self.metered.clone(),
             forwarded: self.forwarded,
-            usage: self.usage.clone(),
+            usage: super::llm_observation::transport_outcome(
+                self.usage.clone(),
+                crate::models::llm_usage::UsageOutcome::Interrupted,
+            ),
             model: self.model.clone(),
             armed: false,
         };
@@ -912,6 +933,7 @@ async fn request(
     path: &str,
     body: Option<Value>,
     model: Option<&str>,
+    context: &crate::models::llm_usage::LlmInvocationContext,
 ) -> Result<Value, RequestFailure> {
     let lease =
         super::service_concurrency_service::acquire(&state.db, &route.target.service, actor)
@@ -925,7 +947,7 @@ async fn request(
                 })
             })?;
     let execution = Box::pin(request_inner(
-        state, actor, client, service, route, path, body, model,
+        state, actor, client, service, route, path, body, model, context,
     ));
     match lease {
         Some(lease) => tokio::select! {
@@ -947,6 +969,7 @@ async fn request_inner(
     path: &str,
     body: Option<Value>,
     model: Option<&str>,
+    context: &crate::models::llm_usage::LlmInvocationContext,
 ) -> Result<Value, RequestFailure> {
     let body = body
         .and_then(|body| serde_json::to_vec(&body).ok())
@@ -990,8 +1013,12 @@ async fn request_inner(
         .http_operation(&ctx, if body.is_some() { "POST" } else { "GET" }, path)
         .await
         .map_err(|_| RequestFailure::terminal("dispatch_unavailable"))?;
+    let mut ctx = ctx;
+    ctx.llm_context = context.clone();
     let ctx = ctx
         .with_operation(operation.as_deref())
+        .with_inference_capture(service, path)
+        .with_native_provider_origin(&route.target.base_url)
         .with_request_body(body.as_deref());
     let metered = Box::pin(state.billing.open(&ctx))
         .await
@@ -1066,6 +1093,12 @@ async fn request_inner(
     }
     let status = response.status();
     let success = status.is_success();
+    if !success {
+        guard.usage = super::llm_observation::transport_outcome(
+            guard.usage.clone(),
+            crate::models::llm_usage::UsageOutcome::Failed,
+        );
+    }
     let mut stream = response.bytes_stream();
     let mut bytes = Vec::new();
     while let Some(chunk) = stream.next().await {
@@ -1104,7 +1137,10 @@ async fn request_inner(
         // A definite pre-generation refusal settles every lane at zero through
         // the existing durable settlement path, releasing holds. `fail` only
         // releases unforwarded requests and must not be used after egress.
-        guard.usage = PlatformUsage::default();
+        guard.usage = super::llm_observation::transport_outcome(
+            PlatformUsage::default(),
+            crate::models::llm_usage::UsageOutcome::Failed,
+        );
         Box::pin(guard.finish())
             .await
             .map_err(|_| RequestFailure::terminal("dispatch_unavailable"))?;

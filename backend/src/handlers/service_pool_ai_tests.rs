@@ -1502,3 +1502,56 @@ async fn pool_ai_planning_serializes_only_the_active_attempt() {
     );
     fixture.state.db.drop().await.unwrap();
 }
+
+#[tokio::test]
+async fn pool_detail_store_failure_does_not_retry_provider_or_fail_success() {
+    let f = fixture(
+        "pool_llm_detail_fault",
+        ResponseTemplate::new(200).set_body_json(anthropic_text_response()),
+    )
+    .await;
+    let details = crate::models::llm_usage::COLLECTION_NAME;
+    f.state.db.run_command(doc!{"collMod":details,"validator":{"reject_detail":{"$exists":true}},"validationLevel":"strict"}).await.unwrap();
+    let response = call(&f, Entry::Slug, "chat/completions", basic_request())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&body).unwrap()["choices"][0]["message"]["content"],
+        "from backup"
+    );
+    assert_eq!(f.first.received_requests().await.unwrap().len(), 1);
+    assert_eq!(f.second.received_requests().await.unwrap().len(), 1);
+    let meters = f
+        .state
+        .db
+        .collection::<Document>(crate::models::usage_meter::COLLECTION_NAME);
+    assert_eq!(
+        meters
+            .count_documents(doc! {"llm_detail_pending":true})
+            .await
+            .unwrap(),
+        2
+    );
+    f.state
+        .db
+        .run_command(doc! {"collMod":details,"validator":{}})
+        .await
+        .unwrap();
+    crate::services::billing::llm_invocations::recover(&f.state.db)
+        .await
+        .unwrap();
+    assert_eq!(
+        f.state
+            .db
+            .collection::<Document>(details)
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        2
+    );
+    assert_eq!(f.first.received_requests().await.unwrap().len(), 1);
+    assert_eq!(f.second.received_requests().await.unwrap().len(), 1);
+    f.state.db.drop().await.unwrap();
+}

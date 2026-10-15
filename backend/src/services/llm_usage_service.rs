@@ -12,6 +12,7 @@ pub enum UsageAggregationMode {
 
 #[derive(Debug, Clone, Default, Serialize, PartialEq)]
 pub struct ReportedLlmUsage {
+    pub observation: Option<crate::models::llm_usage::LlmUsageObservation>,
     pub prompt_tokens: u64,
     pub completion_tokens: u64,
     pub total_tokens: u64,
@@ -33,6 +34,12 @@ pub struct ReportedLlmUsage {
 }
 
 impl ReportedLlmUsage {
+    pub fn has_legacy_usage(&self) -> bool {
+        let mut legacy = self.clone();
+        legacy.observation = None;
+        !legacy.is_empty()
+    }
+
     pub fn is_empty(&self) -> bool {
         self.prompt_tokens == 0
             && self.completion_tokens == 0
@@ -45,12 +52,14 @@ impl ReportedLlmUsage {
             && self.image_output_tokens == 0
             && self.reported_cost.is_none()
             && self.images == 0
+            && self.observation.is_none()
     }
 
     pub fn apply_to(
         &self,
         mut usage: crate::models::service_billing::PlatformUsage,
     ) -> crate::models::service_billing::PlatformUsage {
+        usage.llm_observation = self.observation.clone();
         let clamp = |value: u64| value.min(i64::MAX as u64) as i64;
         usage.input_tokens = clamp(if self.cached_tokens_included_in_prompt {
             self.prompt_tokens
@@ -92,6 +101,7 @@ impl ReportedLlmUsage {
 
 #[derive(Debug, Clone, Default)]
 pub struct ReportedLlmUsageAccumulator {
+    observation: Option<crate::models::llm_usage::LlmUsageObservation>,
     prompt_tokens: u64,
     completion_tokens: u64,
     total_tokens: u64,
@@ -146,11 +156,14 @@ pub struct RealtimeLlmUsageCollector {
     enabled: bool,
     seen_response_ids: HashSet<String>,
     reported_usage: ReportedLlmUsageAccumulator,
+    observation: Option<crate::models::llm_usage::LlmUsageObservation>,
     segment_bytes: i64,
     segment_has_response_activity: bool,
     uncovered_bytes: i64,
     reported_response_count: usize,
     estimated_response_count: usize,
+    observed_response_count: i64,
+    missing_response_count: i64,
 }
 
 impl RealtimeLlmUsageCollector {
@@ -159,11 +172,14 @@ impl RealtimeLlmUsageCollector {
             enabled,
             seen_response_ids: HashSet::new(),
             reported_usage: ReportedLlmUsageAccumulator::default(),
+            observation: None,
             segment_bytes: 0,
             segment_has_response_activity: false,
             uncovered_bytes: 0,
             reported_response_count: 0,
             estimated_response_count: 0,
+            observed_response_count: 0,
+            missing_response_count: 0,
         }
     }
 
@@ -214,7 +230,7 @@ impl RealtimeLlmUsageCollector {
         let Some(done) = extract_realtime_response_done(&value) else {
             return;
         };
-        if !self.seen_response_ids.insert(done.response_id) {
+        if !self.seen_response_ids.insert(done.response_id.clone()) {
             self.segment_bytes = self
                 .segment_bytes
                 .saturating_sub(i64::try_from(text.len()).unwrap_or(i64::MAX));
@@ -222,12 +238,28 @@ impl RealtimeLlmUsageCollector {
             return;
         }
 
+        let mut done = done;
+        let observation = done
+            .usage
+            .as_mut()
+            .and_then(|u| u.observation.take())
+            .unwrap_or_else(|| {
+                super::llm_observation::missing(crate::models::llm_usage::UsageOutcome::Unknown)
+            });
+        if observation.source == crate::models::llm_usage::UsageSource::ProviderReported {
+            self.observed_response_count = self.observed_response_count.saturating_add(1);
+        } else {
+            self.missing_response_count = self.missing_response_count.saturating_add(1);
+        }
+        super::llm_observation::aggregate_response(&mut self.observation, observation);
         match done.usage {
             Some(usage) if usage.total_tokens > 0 => {
                 self.reported_usage.observe_delta(usage);
                 self.reported_response_count = self.reported_response_count.saturating_add(1);
             }
             _ => {
+                // Preserve the established estimate-only money policy for a
+                // nonpositive total. The strict observation was retained above.
                 self.uncovered_bytes = self.uncovered_bytes.saturating_add(self.segment_bytes);
                 self.estimated_response_count = self.estimated_response_count.saturating_add(1);
             }
@@ -249,9 +281,33 @@ impl RealtimeLlmUsageCollector {
             self.estimated_response_count = self.estimated_response_count.saturating_add(1);
         }
 
+        if self.enabled && self.segment_has_response_activity {
+            self.missing_response_count = self.missing_response_count.saturating_add(1);
+            super::llm_observation::aggregate_response(
+                &mut self.observation,
+                super::llm_observation::missing(
+                    crate::models::llm_usage::UsageOutcome::Interrupted,
+                ),
+            );
+        }
+        let mut reported_usage = self.reported_usage.finalize();
+        if self.observation.is_some() {
+            reported_usage
+                .get_or_insert_with(ReportedLlmUsage::default)
+                .observation = self.observation;
+        }
+        if let Some(o) = reported_usage.as_mut().and_then(|u| u.observation.as_mut()) {
+            o.reported_response_count = Some(self.observed_response_count);
+            o.unreported_response_count = Some(self.missing_response_count);
+            o.aggregation_scope =
+                crate::models::llm_usage::UsageAggregationScope::RealtimeConnection;
+            if self.observed_response_count + self.missing_response_count != 1 {
+                o.provider_response_id = None;
+            }
+        }
         RealtimeLlmUsageSummary {
             collection_enabled: self.enabled,
-            reported_usage: self.reported_usage.finalize(),
+            reported_usage,
             uncovered_bytes: self.uncovered_bytes,
             reported_response_count: self.reported_response_count,
             estimated_response_count: self.estimated_response_count,
@@ -277,6 +333,9 @@ impl ReportedLlmUsageAccumulator {
             self.images = self.images.saturating_add(usage.images);
         } else {
             self.images = self.images.max(usage.images);
+        }
+        if let Some(o) = usage.observation.clone() {
+            super::llm_observation::merge(&mut self.observation, o, false);
         }
         self.prompt_tokens = self.prompt_tokens.max(usage.prompt_tokens);
         self.completion_tokens = self.completion_tokens.max(usage.completion_tokens);
@@ -306,6 +365,9 @@ impl ReportedLlmUsageAccumulator {
             self.images = self.images.saturating_add(usage.images);
         } else {
             self.images = self.images.max(usage.images);
+        }
+        if let Some(o) = usage.observation.clone() {
+            super::llm_observation::merge(&mut self.observation, o, true);
         }
         self.prompt_tokens = self.prompt_tokens.saturating_add(usage.prompt_tokens);
         self.completion_tokens = self
@@ -341,6 +403,18 @@ impl ReportedLlmUsageAccumulator {
         }
     }
 
+    pub fn finalize_outcome(
+        self,
+        outcome: crate::models::llm_usage::UsageOutcome,
+    ) -> Option<ReportedLlmUsage> {
+        let mut usage = self.finalize().unwrap_or_default();
+        usage.observation = Some(super::llm_observation::with_outcome(
+            usage.observation.take(),
+            outcome,
+        ));
+        Some(usage)
+    }
+
     pub fn finalize(self) -> Option<ReportedLlmUsage> {
         // Native streams may report input and output in separate snapshots.
         // Preserve larger explicit totals (e.g. reasoning tokens), but never
@@ -350,6 +424,13 @@ impl ReportedLlmUsageAccumulator {
             .max(self.prompt_tokens.saturating_add(self.completion_tokens));
 
         let usage = ReportedLlmUsage {
+            observation: self.observation.map(|mut o| {
+                if o.outcome == crate::models::llm_usage::UsageOutcome::Unknown {
+                    o.outcome = crate::models::llm_usage::UsageOutcome::Interrupted;
+                }
+                super::llm_observation::normalize(&mut o);
+                o
+            }),
             prompt_tokens: self.prompt_tokens,
             completion_tokens: self.completion_tokens,
             total_tokens,
@@ -388,6 +469,29 @@ pub fn service_supports_stream_options_include_usage(service_slug: &str) -> bool
         service_slug,
         "llm-openai" | "llm-deepseek" | "llm-xai" | "chrono-llm" | "chrono-llm-public"
     )
+}
+
+pub fn is_inference_metadata_path(path: &str) -> bool {
+    let path = path.split('?').next().unwrap_or(path).trim_matches('/');
+    let parts: Vec<_> = path.split('/').collect();
+    parts.last() == Some(&"models")
+        || parts.len() > 1
+            && parts[parts.len() - 2] == "models"
+            && !parts[parts.len() - 1].contains(':')
+}
+
+pub fn is_chat_completions_path(path: &str) -> bool {
+    let path = path.split('?').next().unwrap_or(path).trim_end_matches('/');
+    path == "chat/completions" || path.ends_with("/chat/completions")
+}
+
+pub fn service_supports_chat_usage(
+    service: &crate::models::downstream_service::DownstreamService,
+    path: &str,
+) -> bool {
+    is_chat_completions_path(path) && (service_supports_stream_options_include_usage(&service.slug)
+        || service.capabilities.as_ref().is_some_and(|c| c.supports_stream_usage)
+            && service.inference.as_ref().is_some_and(|i| i.wire_protocol == crate::models::downstream_service::InferenceWireProtocol::OpenaiCompletions))
 }
 
 pub fn force_stream_options_include_usage(body: &mut serde_json::Value) -> bool {
@@ -616,6 +720,7 @@ pub fn extract_reported_usage(value: &serde_json::Value) -> Option<ReportedLlmUs
     .find_map(|pointer| number_at(value, pointer));
 
     let usage = ReportedLlmUsage {
+        observation: super::llm_observation::extract(value),
         prompt_tokens,
         completion_tokens,
         total_tokens,
@@ -676,6 +781,36 @@ pub fn extract_reported_usage_for_path(
     successful: bool,
 ) -> Option<ReportedLlmUsage> {
     let mut usage = extract_reported_usage(value).unwrap_or_default();
+    // Native streamGenerateContent also delivers a JSON array when alt=sse
+    // is absent. Inspect only this protocol envelope on the bounded body;
+    // preserve its established legacy zero/byte-fallback quantities.
+    if path
+        .split('?')
+        .next()
+        .unwrap_or(path)
+        .trim_end_matches('/')
+        .ends_with(":streamGenerateContent")
+        && let Some(chunks) = value.as_array()
+    {
+        let mut snapshots = ReportedLlmUsageAccumulator::default();
+        for chunk in chunks {
+            if chunk.get("usageMetadata").is_some()
+                && let Some(observation) = super::llm_observation::stream_observation(None, chunk)
+            {
+                snapshots.observe_snapshot(ReportedLlmUsage {
+                    observation: Some(observation),
+                    ..Default::default()
+                });
+            }
+        }
+        usage.observation = snapshots.finalize().and_then(|usage| usage.observation);
+    }
+    if !successful {
+        usage.observation = Some(super::llm_observation::with_outcome(
+            usage.observation.take(),
+            crate::models::llm_usage::UsageOutcome::Failed,
+        ));
+    }
     if successful && is_image_generation_path(path) {
         // OpenAI Images output_tokens describes generated images, while
         // input_tokens may contain both text and image input.
@@ -696,6 +831,9 @@ pub struct BoundedUsageEvents {
     accumulator: ReportedLlmUsageAccumulator,
 }
 impl BoundedUsageEvents {
+    pub fn observation(&self) -> Option<crate::models::llm_usage::LlmUsageObservation> {
+        self.accumulator.observation.clone()
+    }
     pub fn push(&mut self, bytes: &[u8]) {
         for &byte in bytes {
             if let Some(Ok(event)) = self.decoder.push_byte(byte)
@@ -713,6 +851,10 @@ impl BoundedUsageEvents {
         self.finalize().map(|mut usage| {
             if !successful {
                 usage.images = 0;
+                if let Some(o) = usage.observation.as_mut() {
+                    o.outcome = crate::models::llm_usage::UsageOutcome::Failed;
+                    super::llm_observation::normalize(o);
+                }
             }
             usage
         })
@@ -732,6 +874,10 @@ pub fn usage_from_body(body: &[u8], path: &str, successful: bool) -> Option<Repo
         {
             if !successful {
                 usage.images = 0;
+                if let Some(o) = usage.observation.as_mut() {
+                    o.outcome = crate::models::llm_usage::UsageOutcome::Failed;
+                    super::llm_observation::normalize(o);
+                }
             }
             accumulator.observe(usage, mode);
         }
@@ -750,7 +896,13 @@ pub fn platform_usage(
         usage.map_or(0, |u| u.total_tokens.min(i64::MAX as u64) as i64)
     };
     let platform = crate::models::service_billing::PlatformUsage::llm_completion(bytes, tokens);
-    usage.map_or(platform.clone(), |u| u.apply_to(platform))
+    let mut platform = usage.map_or(platform.clone(), |u| u.apply_to(platform));
+    if platform.llm_observation.is_none() {
+        platform.llm_observation = Some(super::llm_observation::missing(
+            crate::models::llm_usage::UsageOutcome::Unknown,
+        ));
+    }
+    platform
 }
 
 pub fn extract_realtime_response_done(value: &serde_json::Value) -> Option<RealtimeResponseDone> {
@@ -769,7 +921,12 @@ pub fn extract_realtime_response_done(value: &serde_json::Value) -> Option<Realt
 
     Some(RealtimeResponseDone {
         response_id: response_id.to_string(),
-        usage: extract_reported_usage(response),
+        usage: {
+            let mut usage = extract_reported_usage(response).unwrap_or_default();
+            usage.observation =
+                super::llm_observation::stream_observation(Some("response.done"), value);
+            Some(usage)
+        },
     })
 }
 
@@ -810,19 +967,29 @@ pub fn extract_reported_usage_from_sse_event(
         );
         return Some((usage, UsageAggregationMode::Delta));
     }
-    let usage = extract_reported_usage(&value)?;
-
-    let mode = match event_type {
+    let observation = super::llm_observation::stream_observation(event_type, &value);
+    let legacy_mode = match event_type {
         Some("message_start")
         | Some("message_delta")
         | Some("response.completed")
         | Some("response.incomplete") => UsageAggregationMode::Snapshot,
         Some("usage.delta") | Some("response.usage.delta") => UsageAggregationMode::Delta,
         _ if has_explicit_total(&value) => UsageAggregationMode::Snapshot,
-        _ => return None,
+        _ => {
+            return observation.map(|o| {
+                (
+                    ReportedLlmUsage {
+                        observation: Some(o),
+                        ..Default::default()
+                    },
+                    UsageAggregationMode::Snapshot,
+                )
+            });
+        }
     };
-
-    Some((usage, mode))
+    let mut usage = extract_reported_usage(&value).unwrap_or_default();
+    usage.observation = observation;
+    (!usage.is_empty()).then_some((usage, legacy_mode))
 }
 
 pub fn log_reported_usage_async(context: UsageAuditContext, usage: ReportedLlmUsage) {
@@ -970,6 +1137,7 @@ mod tests {
         assert_eq!(
             usage,
             ReportedLlmUsage {
+                observation: crate::services::llm_observation::extract(&value),
                 prompt_tokens: 12,
                 completion_tokens: 7,
                 total_tokens: 19,
@@ -1338,13 +1506,17 @@ mod tests {
     }
 
     #[test]
-    fn ignores_ambiguous_sse_usage_without_total_or_known_event_type() {
+    fn ambiguous_sse_usage_is_observed_without_changing_legacy_charges() {
         let result = extract_reported_usage_from_sse_event(
             Some("unknown"),
             r#"{"usage":{"output_tokens":15}}"#,
         );
 
-        assert!(result.is_none());
+        let (usage, _) = result.expect("additive observation");
+        assert!(!usage.has_legacy_usage());
+        let observation = usage.observation.unwrap();
+        assert_eq!(observation.reported_input_tokens, None);
+        assert_eq!(observation.reported_output_tokens, Some(15));
     }
 
     #[test]

@@ -1246,7 +1246,7 @@ pub async fn process_with_state(state: &AppState, run: AssistantAgentLearningRun
         return Ok(());
     }
     let prompt = ANALYSIS_PROMPT;
-    let Some(output) = super::assistant_oneshot_inference::one_shot_text(
+    let Some(output) = super::assistant_oneshot_inference::one_shot_text_with_context(
         state,
         &run.actor_id,
         prompt,
@@ -1257,6 +1257,10 @@ pub async fn process_with_state(state: &AppState, run: AssistantAgentLearningRun
             max_output_chars: 8_000,
             max_output_tokens: 768,
             timeout: Duration::from_secs(15),
+        },
+        crate::models::llm_usage::LlmInvocationContext {
+            agent_id: Some(run.agent_id.clone()),
+            ..Default::default()
         },
     )
     .await

@@ -375,6 +375,7 @@ pub(super) async fn run(
         let classifier = confirmation::OneShotClassifier {
             state: &state,
             actor: &actor,
+            conversation_id: &lease.conversation_id,
         };
         let work = Box::pin(active(
             &state,

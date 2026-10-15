@@ -527,6 +527,7 @@ pub(crate) async fn mcp_call(
         &state.token_exchange_cache,
         &state.cloud_response_cache,
         &mcp_service::McpExecContext {
+            llm_context: Default::default(),
             response_body_limit: None,
             actor_user_id: None,
             caller_token: None,

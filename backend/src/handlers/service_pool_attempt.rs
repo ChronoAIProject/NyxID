@@ -365,18 +365,32 @@ impl Completion {
             };
             self.usage_extracted = true;
         }
-        let usage = self.extracted_usage.clone();
+        let mut usage = self.extracted_usage.clone();
+        let outcome = if !self.status.is_success() {
+            Some(crate::models::llm_usage::UsageOutcome::Failed)
+        } else if !complete_body {
+            Some(crate::models::llm_usage::UsageOutcome::Interrupted)
+        } else {
+            None
+        };
+        if let Some(outcome) = outcome {
+            let usage = usage.get_or_insert_with(Default::default);
+            usage.observation = Some(crate::services::llm_observation::with_outcome(
+                usage.observation.take(),
+                outcome,
+            ));
+        }
         crate::services::billing::pool_attempt::record_completion(
             &self.db,
             &self.context.request_id,
             cause,
         )
         .await?;
-        let quantity_is_known = usage.is_some()
+        let quantity_is_known = usage.as_ref().is_some_and(|u| u.has_legacy_usage())
             || (complete_body
                 && self.status.is_success()
                 && self.metered.route.as_ref().is_some_and(|route| {
-                    !route.capture_tokens
+                    !route.requires_reported_quantity
                         && route.resale.as_ref().is_none_or(|spec| {
                             matches!(spec.metric, BillingMetric::Requests | BillingMetric::Bytes)
                         })
@@ -396,6 +410,18 @@ impl Completion {
             // backup may need these exact same wallet/grant/allowance funds.
             Box::pin(self.billing.settle(&self.metered, platform, resale, None)).await?;
         } else {
+            let mut platform = llm_usage_service::platform_usage(
+                usage.as_ref(),
+                self.request_len.saturating_add(self.response_len),
+                false,
+            );
+            if platform.llm_observation.is_none() {
+                platform.llm_observation = Some(crate::services::llm_observation::missing(
+                    crate::models::llm_usage::UsageOutcome::Unknown,
+                ));
+            }
+            crate::services::billing::meter::observe_unsettled(&self.db, &self.metered, &platform)
+                .await?;
             Box::pin(crate::services::billing::pool_attempt::finish(
                 &self.db,
                 &self.context.request_id,

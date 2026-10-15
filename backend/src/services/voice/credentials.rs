@@ -200,7 +200,7 @@ pub async fn resolve(
         voice_billing,
         false,
     );
-    let token_billing = BillingRouteContext::new(
+    let mut token_billing = BillingRouteContext::new(
         BillingIngress::LlmProvider,
         uuid::Uuid::new_v4().to_string(),
         payer.owner_id,
@@ -219,6 +219,15 @@ pub async fn resolve(
         }),
         false,
     );
+    token_billing = token_billing.with_native_provider_origin(&target.base_url);
+    token_billing.llm_context = crate::models::llm_usage::LlmInvocationContext {
+        conversation_id: Some(thread.id.clone()),
+        agent_id: thread.agent_id.clone(),
+        requested_model: super::super::llm_observation::bounded_id(Some(
+            &serde_json::Value::String(p.model.clone()),
+        )),
+        ..Default::default()
+    };
     let identity = keyed_fingerprint(
         state,
         if protocol == VoiceProtocol::XaiRealtime {

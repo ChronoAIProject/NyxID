@@ -452,6 +452,7 @@ export interface ServiceCapabilities {
   readonly supports_authoring_via_nyx: boolean;
   readonly supports_websocket: boolean;
   readonly supports_streaming: boolean;
+  readonly supports_stream_usage?: boolean;
 }
 
 export interface ServiceBilling {

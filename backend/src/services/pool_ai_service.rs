@@ -164,7 +164,10 @@ pub fn plan(
         streaming: request.streaming,
         model: model.into(),
         codex,
-        include_usage: catalog_service_slug
+        include_usage: super::llm_usage_service::service_supports_chat_usage(
+            service,
+            "chat/completions",
+        ) || catalog_service_slug
             .is_some_and(super::llm_usage_service::service_supports_stream_options_include_usage),
     })
 }

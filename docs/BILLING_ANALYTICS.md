@@ -424,3 +424,9 @@ For mixed historical data, normalize each amount before summing (the backend's
 Exact keys take precedence, including explicit null. Numeric legacy `*_micros`
 values always use microcredits, including Decimal128 query mirrors.
 Rollup `legacy_grant_cost` replaces legacy integer `legacy_grant`.
+
+## Retained LLM invocation measurements
+
+See [LLM invocation metering](LLM_USAGE_METERING.md) for the implemented measurement contract,
+trusted assistant attribution, 365-day retained detail APIs, and the separation
+between additive provider observations and existing customer charge quantities.

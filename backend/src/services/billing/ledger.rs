@@ -1561,6 +1561,10 @@ mod tests {
             return;
         };
         crate::services::audit_service::init_audit_chain_hmac_key(Zeroizing::new(*AUDIT_TEST_KEY));
+        // Other fixtures may have initialized the process-wide OnceLock first.
+        // Verify with the same effective key that anchor_head uses to append.
+        let audit_key =
+            crate::services::audit_service::audit_chain_hmac_key().expect("initialized audit key");
 
         for reference in ["req-1", "req-2", "req-3"] {
             append_chained_entry(&db, entry(reference), TEST_KEY)
@@ -1572,7 +1576,7 @@ mod tests {
         // Re-anchoring an unchanged head is a no-op.
         assert_eq!(anchor_head(&db).await.expect("re-anchor"), None);
 
-        let check = check_head_anchor(&db, AUDIT_TEST_KEY)
+        let check = check_head_anchor(&db, audit_key)
             .await
             .expect("check anchored");
         assert_eq!(check.anchor_seq, Some(3));
@@ -1583,9 +1587,7 @@ mod tests {
         append_chained_entry(&db, entry("req-4"), TEST_KEY)
             .await
             .expect("append after anchor");
-        let check = check_head_anchor(&db, AUDIT_TEST_KEY)
-            .await
-            .expect("check lag");
+        let check = check_head_anchor(&db, audit_key).await.expect("check lag");
         assert!(check.break_info.is_none());
 
         // Truncating the tail past the anchor leaves a shorter chain that
@@ -1602,7 +1604,7 @@ mod tests {
             BillingLedgerStatus::Ok,
             "walk alone is blind"
         );
-        let check = check_head_anchor(&db, AUDIT_TEST_KEY)
+        let check = check_head_anchor(&db, audit_key)
             .await
             .expect("check truncated");
         let break_info = check.break_info.expect("truncation break");

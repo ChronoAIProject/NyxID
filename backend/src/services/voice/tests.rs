@@ -1022,6 +1022,19 @@ async fn voice_options_use_catalog_models_voices_and_supported_protocols_only() 
             assert_eq!(platform["available"], false);
             assert_eq!(platform["unavailable_reason"], "provider_rollout_pending");
         }
+        flags::set_platform_override(&state.db, flags::VOICE_OPENAI_PLATFORM_FLAG_KEY, &flags::FlagTarget::Global, true, &thread.user_id).await.unwrap();
+        rows.update_one(doc! {"_id":&service.id}, doc! {"$set":{"billing.platform_key_pricing":{
+            "metric":"voice_seconds","credits_per_unit":"0.01","lago_metric_code":"voice_fixture","sync_status":"synced","components":[]
+        }}}).await.unwrap();
+        let mut selected = preferences(); selected.service_id=service.id.clone(); selected.model="admin-added-live-model".into();
+        selected.voice=Some("admin-added-voice".into()); selected.key_source=VoiceKeySource::Platform; selected.connection_id=None;
+        let resolved = Box::pin(credentials::resolve(&state,&thread.user_id,&thread.id,&selected)).await.unwrap();
+        assert_eq!(resolved.token_billing.llm_context.conversation_id.as_deref(),Some(thread.id.as_str()));
+        assert_eq!(resolved.token_billing.llm_context.agent_id,thread.agent_id);
+        assert_eq!(resolved.token_billing.llm_context.requested_model.as_deref(),Some("admin-added-live-model"));
+        assert!(resolved.token_billing.llm_context.turn_id.is_none(),"A voice session is not the chat's live execution turn");
+        assert!(Box::pin(credentials::resolve(&state,&Uuid::new_v4().to_string(),&thread.id,&selected)).await.is_err());
+        flags::set_platform_override(&state.db, flags::VOICE_OPENAI_PLATFORM_FLAG_KEY, &flags::FlagTarget::Global, false, &thread.user_id).await.unwrap();
         rows.update_one(doc! {"_id": &service.id}, doc! {"$set":{"inference.voice.protocol":"xai_realtime", "inference.voice.usage_source":"server_measured"}}).await.unwrap();
         assert!(super::super::assistant_voice::options(&state.db, &state.encryption_keys, &thread).await.unwrap().is_empty());
         flags::set_platform_override(&state.db, flags::VOICE_GROK_FLAG_KEY, &flags::FlagTarget::Global, true, &thread.user_id).await.unwrap();

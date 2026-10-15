@@ -274,6 +274,13 @@ pub struct UsageMeterRow {
     /// Crash-recoverable final quantities for all platform components.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_platform_usage: Option<crate::models::service_billing::PlatformUsage>,
+    /// Independent primary-row copy survives old replicas clearing pending snapshots.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub llm_observation: Option<crate::models::llm_usage::LlmUsageObservation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub llm_context: Option<crate::models::llm_usage::LlmInvocationContext>,
+    #[serde(default)]
+    pub llm_detail_pending: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pool_attempt: Option<PoolAttemptAccounting>,
     pub status: UsageStatus,

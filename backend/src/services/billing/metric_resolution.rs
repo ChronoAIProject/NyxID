@@ -78,7 +78,8 @@ pub fn allowance_metric(
 /// Usage capture is independent of the chosen lane's sync state and slug.
 /// Preserve historical LLM capture and include both configured lanes and resale.
 pub fn captures_tokens(service: &DownstreamService) -> bool {
-    service.slug.starts_with("llm-")
+    service.inference.is_some()
+        || service.slug.starts_with("llm-")
         || resolve_platform_metric(service, false) == BillingMetric::Tokens
         || configured_lane_metrics(service)
             .iter()
