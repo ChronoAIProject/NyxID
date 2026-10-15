@@ -2678,38 +2678,16 @@ async fn reply_decision(
     conversation_id: &str,
     text: &str,
 ) -> AppResult<Option<(bool, bool)>> {
-    use crate::services::assistant_acknowledgement_service as acks;
-    if acks::parse_reply(text).is_none() {
-        return Ok(None);
-    }
-    // The owner's previous message: only cards raised after it are answered
-    // by a plain yes/no.
-    let since = engine::previous_user_message(&state.db, &row.user_id, conversation_id, None)
-        .await?
-        .map(|message| message.created_at);
-    let Some(decided) = acks::decide_reply(
+    let Some(decided) = crate::services::assistant_platform_reply_decision::decide_owner_reply(
         &state.db,
         &row.user_id,
-        &[conversation_id.to_owned()],
+        conversation_id,
         text,
-        since,
     )
     .await?
     else {
         return Ok(None);
     };
-    acks::audit_decision(
-        &state.db,
-        &crate::services::audit_service::AuditActor {
-            user_id: row.user_id.clone(),
-            ip_address: None,
-            user_agent: None,
-            api_key_id: None,
-            api_key_name: None,
-        },
-        &decided,
-    )
-    .await;
     Ok(Some((
         decided.status == "allowed",
         decided.trigger_run_id.is_some(),
