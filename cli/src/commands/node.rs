@@ -10,7 +10,7 @@ use crate::org_resolver::resolve_org_id;
 
 pub async fn run(command: NodeCommands) -> Result<()> {
     match command {
-        NodeCommands::ManagedPrepare(args) => crate::node::managed_runtime::prepare(args),
+        NodeCommands::ManagedPrepare(args) => crate::node::managed_runtime::prepare(args).await,
         NodeCommands::ManagedStart(args) => crate::node::managed_runtime::run(args).await,
         NodeCommands::Setup(args) => crate::node::machine::setup::run(args).await,
         NodeCommands::MachineBrowserInstall { port } => {

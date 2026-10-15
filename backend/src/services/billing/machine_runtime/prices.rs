@@ -35,10 +35,11 @@ impl BillingService {
             .max_time(std::time::Duration::from_secs(5))
             .await?;
         while let Some(candidate) = candidates.try_next().await? {
-            if let Ok(rate) = bson::from_document::<MachineRuntimeRate>(candidate) {
-                if validate_rate(&rate).is_ok() && rate.profile_version == profile_version {
-                    return Ok(Some(rate));
-                }
+            if let Ok(rate) = bson::from_document::<MachineRuntimeRate>(candidate)
+                && validate_rate(&rate).is_ok()
+                && rate.profile_version == profile_version
+            {
+                return Ok(Some(rate));
             }
         }
         Ok(None)

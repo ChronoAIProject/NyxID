@@ -3,7 +3,6 @@
 use super::{
     api_key_mutation_service,
     billing::{BillingService, machine_runtime::PreparedRuntimeWindow},
-    remote_machine_fence::VerifiedRuntimeEvidence,
     remote_machine_service as lifecycle,
 };
 use crate::{
@@ -159,28 +158,6 @@ pub fn funding_is_live(machine: &ManagedMachine, now: DateTime<Utc>) -> bool {
     machine.billing_state == BillingState::Ready
         && machine.runtime_run_id.is_some()
         && machine.funded_until.is_some_and(|deadline| deadline > now)
-}
-
-pub fn provider_target(
-    machine: &ManagedMachine,
-) -> AppResult<nyxid_machine::managed::RuntimeTarget> {
-    let target = nyxid_machine::managed::RuntimeTarget {
-        machine_id: machine.node_id.clone(),
-        owner_id: machine.owner_id.clone(),
-        sandbox_uid: machine
-            .sandbox_uid
-            .clone()
-            .ok_or(AppError::MachineNotAllowed)?,
-        pod_uid: machine.pod_uid.clone().ok_or(AppError::MachineNotAllowed)?,
-        pvc_uid: machine.pvc_uid.clone().ok_or(AppError::MachineNotAllowed)?,
-        runtime_generation: u64::try_from(machine.runtime_generation)
-            .map_err(|_| AppError::MachineNotAllowed)?,
-        credential_epoch: u64::try_from(machine.credential_epoch)
-            .map_err(|_| AppError::MachineNotAllowed)?,
-        writer_fence: machine.writer_fence.clone(),
-    };
-    target.validate().map_err(|_| AppError::MachineNotAllowed)?;
-    Ok(target)
 }
 
 /// A requested or funded extension is not execution authority. The current
@@ -443,190 +420,6 @@ pub async fn ensure_native_deadline(
         .map_err(api_key_mutation_service::map_transaction_error)
 }
 
-/// Queueing is atomic with money/security mutations when a session is passed.
-/// Initial installation is queued only after the controller's actual target is
-/// observed. That runtime remains behind the protected bootstrap gate.
-pub async fn queue_provider_deadline_in_session(
-    db: &Database,
-    session: &mut ClientSession,
-    machine: &ManagedMachine,
-    stop: bool,
-    now: DateTime<Utc>,
-) -> AppResult<bool> {
-    use crate::models::{
-        remote_machine::ProviderCoverage,
-        remote_machine_outbox::{
-            COLLECTION_NAME as OUTBOX, EffectKind, EffectState, MachineEffectOutbox,
-        },
-    };
-    use nyxid_machine::managed::{DEADLINE_PROTOCOL_VERSION, DeadlineAction, DeadlineControl};
-    let Ok(target) = provider_target(machine) else {
-        return Ok(false);
-    };
-    let prior = machine.provider_coverage.as_ref();
-    let current = prior.filter(|p| p.requested.target == target);
-    if !stop && current.is_some_and(|p| p.requested.action == DeadlineAction::ShortenStop) {
-        return Err(AppError::MachineNotAllowed);
-    }
-    let cutoff = if stop {
-        now
-    } else if machine.free_slot {
-        now + Duration::seconds(window_seconds())
-    } else {
-        machine.funded_until.ok_or(AppError::MachineNotAllowed)?
-    };
-    let cutoff_ms = cutoff.timestamp_millis();
-    if let Some(current) = current {
-        let requested = &current.requested;
-        if stop && requested.action == DeadlineAction::ShortenStop {
-            return Ok(false);
-        }
-        // Preserve the exact pending intent until its ACK is durable. In
-        // particular an undelivered initial Arm must never be superseded by
-        // Renew, which cannot reconstruct a missing provider journal.
-        if !stop
-            && current.installed.as_ref().is_none_or(|receipt| {
-                receipt.request_digest != requested.digest().unwrap_or_default()
-            })
-        {
-            if requested.run_not_after_ms <= now.timestamp_millis() {
-                return Err(AppError::MachineNotAllowed);
-            }
-            return Ok(false);
-        }
-        if !stop
-            && ((!machine.free_slot && requested.run_not_after_ms == cutoff_ms)
-                || (machine.free_slot
-                    && requested.run_not_after_ms
-                        > (now + Duration::seconds(renewal_margin_seconds())).timestamp_millis()))
-        {
-            return Ok(false);
-        }
-        // An expired installed generation cannot be revived by late funding or
-        // free-safety renewal. The owner must resume a newly fenced generation.
-        if !stop
-            && current
-                .installed
-                .as_ref()
-                .is_some_and(|receipt| receipt.installed_run_not_after_ms <= now.timestamp_millis())
-        {
-            return Err(AppError::MachineNotAllowed);
-        }
-    }
-    if !stop && cutoff <= now {
-        return Err(AppError::MachineNotAllowed);
-    }
-    let operation_id = machine
-        .active_operation_id
-        .clone()
-        .ok_or(AppError::MachineNotAllowed)?;
-    let revision = prior
-        .map_or(Some(1), |p| p.requested.control_revision.checked_add(1))
-        .ok_or(AppError::MachineNotAllowed)?;
-    let control = DeadlineControl {
-        version: DEADLINE_PROTOCOL_VERSION,
-        operation_id: operation_id.clone(),
-        control_revision: revision,
-        target,
-        action: if stop {
-            DeadlineAction::ShortenStop
-        } else if current.is_some() {
-            DeadlineAction::Renew
-        } else {
-            DeadlineAction::Arm
-        },
-        run_not_after_ms: if stop {
-            current.map_or(cutoff_ms, |p| cutoff_ms.min(p.requested.run_not_after_ms))
-        } else {
-            cutoff_ms
-        },
-    };
-    let digest = control.digest().map_err(|_| AppError::MachineNotAllowed)?;
-    let coverage = ProviderCoverage {
-        requested: control,
-        installed: prior.and_then(|p| p.installed.clone()),
-    };
-    let changed = db.collection::<Document>(MACHINES).update_one(doc!{"_id":&machine.node_id,"revision":machine.revision,"runtime_generation":machine.runtime_generation,"credential_epoch":machine.credential_epoch,"provider_coverage":bson::to_bson(&machine.provider_coverage).map_err(|_| AppError::MachineNotAllowed)?}, doc!{"$set":{"provider_coverage":bson::to_bson(&coverage).map_err(|_| AppError::MachineNotAllowed)?},"$inc":{"provider_control_fence":1_i64}}).session(&mut *session).await?;
-    if changed.matched_count != 1 {
-        return Err(AppError::Conflict("provider_deadline_request_raced".into()));
-    }
-    let effect = MachineEffectOutbox {
-        id: uuid::Uuid::new_v4().to_string(),
-        operation_id,
-        machine_id: machine.node_id.clone(),
-        owner_id: machine.owner_id.clone(),
-        kind: EffectKind::InstallProviderDeadline,
-        effect_digest: digest,
-        namespace: machine.sandbox_namespace.clone(),
-        sandbox_name: machine.sandbox_name.clone(),
-        desired_mode: if stop { "stopped" } else { "running" }.into(),
-        state: EffectState::Pending,
-        attempts: 0,
-        claim_id: None,
-        claimed_until: None,
-        last_error: None,
-        available_at: Some(now),
-        created_at: now,
-        updated_at: now,
-    };
-    db.collection::<MachineEffectOutbox>(OUTBOX)
-        .insert_one(effect)
-        .session(&mut *session)
-        .await?;
-    Ok(true)
-}
-pub async fn ensure_provider_deadline(
-    db: &Database,
-    machine: &ManagedMachine,
-    stop: bool,
-) -> AppResult<()> {
-    let db_owned = db.clone();
-    let machine = machine.clone();
-    db_owned.client().start_session().await?.start_transaction().write_concern(mongodb::options::WriteConcern::majority()).and_run2(async move |session| {
-        let result: AppResult<()> = async {
-            let current = db_owned.collection::<ManagedMachine>(MACHINES).find_one(doc!{"_id":&machine.node_id,"runtime_generation":machine.runtime_generation,"credential_epoch":machine.credential_epoch}).session(&mut *session).await?.ok_or(AppError::MachineNotAllowed)?;
-            let stopping = matches!(current.resource_state, ResourceState::Stopping | ResourceState::Deleting | ResourceState::Paused | ResourceState::Deleted | ResourceState::Failed);
-            if stop != stopping { return Err(AppError::MachineNotAllowed); }
-            if !stop { lifecycle::ensure_owner_eligible_in_session(&db_owned, session, &current.owner_id).await?; }
-            queue_provider_deadline_in_session(&db_owned, session, &current, stop, Utc::now()).await?;
-            Ok(())
-        }.await; api_key_mutation_service::transaction_result(result)
-    }).await.map_err(api_key_mutation_service::map_transaction_error)
-}
-
-pub async fn apply_installed_deadline(
-    db: &Database,
-    machine: &ManagedMachine,
-    control: &nyxid_machine::managed::DeadlineControl,
-    verified: &super::remote_machine_fence::VerifiedDeadlineReceipt,
-) -> AppResult<()> {
-    let receipt = verified.receipt();
-    receipt
-        .validate_for(control)
-        .map_err(|_| AppError::MachineNotAllowed)?;
-    if provider_target(machine)? != control.target {
-        return Err(AppError::MachineNotAllowed);
-    }
-    let allowed_states = if control.action == nyxid_machine::managed::DeadlineAction::ShortenStop {
-        vec!["stopping", "deleting", "paused", "deleted", "failed"]
-    } else {
-        vec![
-            "provisioning",
-            "ready",
-            "degraded",
-            "resuming",
-            "reconciling",
-        ]
-    };
-    let changed = db.collection::<Document>(MACHINES).update_one(doc!{"_id":&machine.node_id,"runtime_generation":machine.runtime_generation,"credential_epoch":machine.credential_epoch,"writer_fence":&machine.writer_fence,"resource_state":{"$in":allowed_states},"provider_coverage.requested":bson::to_bson(control).map_err(|_| AppError::MachineNotAllowed)?},doc!{"$set":{"provider_coverage.installed":bson::to_bson(receipt).map_err(|_| AppError::MachineNotAllowed)?},"$inc":{"provider_install_fence":1_i64}}).await?;
-    if changed.matched_count != 1 {
-        return Err(AppError::Conflict(
-            "provider_deadline_receipt_fenced".into(),
-        ));
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 pub(crate) async fn install_test_coverage(
     db: &Database,
@@ -702,6 +495,7 @@ fn execution_fence(machine: &ManagedMachine) -> AppResult<RuntimeFence> {
     })
 }
 /// No managed collection read for self-hosted Nodes.
+#[cfg(test)]
 pub async fn require_execution_cutoff(
     db: &Database,
     node: &Node,
@@ -794,6 +588,7 @@ pub async fn stop_in_session(
         )
         .await
 }
+#[cfg(test)]
 pub async fn require_accounting_final(db: &Database, machine: &ManagedMachine) -> AppResult<()> {
     if machine.free_slot {
         return Ok(());
@@ -831,27 +626,6 @@ pub async fn require_accounting_final_in_session(
     {
         return Err(AppError::Conflict(
             "runtime_accounting_finality_pending".into(),
-        ));
-    }
-    Ok(())
-}
-fn validate_proof(machine: &ManagedMachine, proof: &VerifiedRuntimeEvidence) -> AppResult<()> {
-    let b = proof.binding();
-    if machine.sandbox_uid.as_deref() != Some(&b.sandbox_uid)
-        || machine.pod_uid != b.pod_uid
-        || machine.runtime_generation != b.runtime_generation
-        || machine.credential_epoch != b.credential_epoch
-        || machine.writer_fence != b.writer_fence
-        || proof.evidence_ref().is_empty()
-        || proof
-            .stopped_at()
-            .is_some_and(|time| !proof.physically_stopped() || time > proof.observed_at())
-        || proof
-            .running_through()
-            .is_some_and(|time| proof.physically_stopped() || time > proof.observed_at())
-    {
-        return Err(AppError::Conflict(
-            "runtime_accounting_evidence_mismatch".into(),
         ));
     }
     Ok(())
@@ -1010,85 +784,6 @@ pub async fn native_observe_and_settle(
     Ok(())
 }
 
-/// Trusted provider observations never interpret missing heartbeat/CR as stop.
-/// Settlement is bounded and remains available even when new admission is off.
-pub async fn observe_and_settle(
-    db: &Database,
-    billing: Arc<BillingService>,
-    machine: &ManagedMachine,
-    proof: &VerifiedRuntimeEvidence,
-) -> AppResult<()> {
-    if machine.free_slot {
-        return Ok(());
-    }
-    validate_proof(machine, proof)?;
-    let run_id = machine
-        .runtime_run_id
-        .clone()
-        .ok_or_else(|| AppError::Conflict("runtime_contract_missing".into()))?;
-    let db_owned = db.clone();
-    let machine = machine.clone();
-    let run_owned = run_id.clone();
-    let generation = proof.binding().runtime_generation;
-    let observed = proof.observed_at();
-    let evidence = proof.evidence_ref().to_owned();
-    let stopped = proof.physically_stopped();
-    let stopped_at = proof.stopped_at();
-    let running_through = proof.running_through();
-    let billing_tx = billing.clone();
-    db_owned.client().start_session().await?.start_transaction().write_concern(mongodb::options::WriteConcern::majority()).and_run2(async move |session| {
-        let result: AppResult<()> = async {
-            let mut update=doc! {"$inc":{"billing_evidence_fence":1_i64}};
-            if stopped {update.insert("$set",doc! {"writer_admitted":false});}
-            let changed = db_owned.collection::<Document>(MACHINES).update_one(doc! {"_id": &machine.node_id, "runtime_generation": generation, "credential_epoch": machine.credential_epoch, "writer_fence": &machine.writer_fence}, update).session(&mut *session).await?;
-            if changed.matched_count != 1 { return Err(AppError::Conflict("runtime_evidence_raced".into())); }
-            let run = db_owned.collection::<MachineRuntimeRun>(RUN_COLLECTION).find_one(doc! {"_id": &run_owned}).session(&mut *session).await?.ok_or(AppError::MachineNotAllowed)?;
-            if run.state == MachineRuntimeRunState::Closed { return Ok(()); }
-            if stopped && run.stop_ns.is_none() {
-                if matches!(machine.resource_state,ResourceState::Ready|ResourceState::Degraded|ResourceState::Reconciling) {
-                    billing_tx.request_machine_runtime_stop_in_session(session,&run_owned,generation,true).await?;
-                }
-                if let Some(stopped_at) = stopped_at {
-                    billing_tx.prove_machine_stopped_in_session(session, &run_owned, generation, stopped_at, &evidence).await?;
-                } else {
-                    billing_tx.prove_machine_stop_observed_in_session(session, &run_owned, generation, observed, &evidence).await?;
-                }
-            } else if !stopped && let Some(through)=running_through
-                && run.ready_ns.is_some() && run.stop_ns.is_none()
-                && run.proven_until_ns.is_none_or(|prior| through.timestamp_nanos_opt().is_some_and(|now| now > prior)) {
-                billing_tx.prove_machine_running_in_session(session, &run_owned, generation, through, &evidence).await?;
-            }
-            for _ in 0..8 { if billing_tx.finalize_machine_interval_in_session(session, &run_owned).await?.is_none() { break; } }
-            Ok(())
-        }.await; api_key_mutation_service::transaction_result(result)
-    }).await.map_err(api_key_mutation_service::map_transaction_error)?;
-    billing.settle_machine_runtime(&run_id, 8).await?;
-    let run = db
-        .collection::<MachineRuntimeRun>(RUN_COLLECTION)
-        .find_one(doc! {"_id":&run_id})
-        .await?
-        .ok_or(AppError::MachineNotAllowed)?;
-    if stopped && !run.replacement_requested {
-        let db_owned = db.clone();
-        let billing_tx = billing.clone();
-        db_owned
-            .client()
-            .start_session()
-            .await?
-            .start_transaction()
-            .write_concern(mongodb::options::WriteConcern::majority())
-            .and_run2(async move |session| {
-                api_key_mutation_service::transaction_result(
-                    billing_tx
-                        .close_machine_runtime_in_session(session, &run_id)
-                        .await,
-                )
-            })
-            .await
-            .map_err(api_key_mutation_service::map_transaction_error)?;
-    }
-    Ok(())
-}
 /// Returns the committed cutoff. It never renews a stopped or accepted-but-not-ready run.
 pub async fn renew(
     db: &Database,
@@ -1157,15 +852,15 @@ pub async fn safety_pause(
             COLLECTION_NAME as OUTBOX, EffectKind, EffectState, MachineEffectOutbox,
         },
     };
-    if !matches!(
+    if !(matches!(
         machine.resource_state,
         ResourceState::Provisioning
             | ResourceState::Ready
             | ResourceState::Degraded
             | ResourceState::Resuming
             | ResourceState::Reconciling
-    ) && !(machine.resource_state == ResourceState::Stopping
-        && reason == "expansion_deadline_exceeded")
+    ) || (machine.resource_state == ResourceState::Stopping
+        && reason == "expansion_deadline_exceeded"))
     {
         return Ok(());
     }
@@ -1192,143 +887,6 @@ pub async fn safety_pause(
             db_owned.collection::<MachineEffectOutbox>(OUTBOX).insert_one(effect).session(&mut *session).await?;
             lifecycle::append_owner_audit(&db_owned,session,&machine.owner_id,"machine_runtime_safety_pause",&machine.node_id,&operation_id).await?;
             Ok(())
-        }.await;api_key_mutation_service::transaction_result(result)
-    }).await.map_err(api_key_mutation_service::map_transaction_error)
-}
-
-/// Automatic replacement and owner rekey retain the accepted continuous-run
-/// rate only after genuine predecessor stop and settlement. Funding and the new
-/// lifecycle generation commit together; an owner pause always wins the fence.
-pub async fn replace_stopped(
-    db: &Database,
-    billing: Arc<BillingService>,
-    machine: &ManagedMachine,
-    proof: &VerifiedRuntimeEvidence,
-    pod_uid: Option<&str>,
-) -> AppResult<ManagedMachine> {
-    use crate::models::{
-        remote_machine_operation::{
-            COLLECTION_NAME as OPERATIONS, CleanupState, LifecycleAction, MachineOperation,
-            OperationState,
-        },
-        remote_machine_outbox::{
-            COLLECTION_NAME as OUTBOX, EffectKind, EffectState, MachineEffectOutbox,
-        },
-    };
-    if machine.free_slot {
-        return lifecycle::advance_runtime_generation(
-            db,
-            &machine.node_id,
-            machine.revision,
-            machine.runtime_generation,
-            pod_uid,
-            None,
-            Some(proof),
-        )
-        .await;
-    }
-    validate_proof(machine, proof)?;
-    if !proof.physically_stopped() {
-        return Err(AppError::Conflict(
-            "replacement_requires_physical_stop".into(),
-        ));
-    }
-    let active = if let Some(id) = &machine.active_operation_id {
-        db.collection::<MachineOperation>(OPERATIONS)
-            .find_one(doc! {"_id":id})
-            .await?
-    } else {
-        None
-    };
-    let owner_rekey = active
-        .as_ref()
-        .is_some_and(|op| op.action == LifecycleAction::Rekey && op.terminal_at.is_none());
-    if !owner_rekey
-        && !matches!(
-            machine.resource_state,
-            ResourceState::Ready | ResourceState::Degraded | ResourceState::Reconciling
-        )
-    {
-        return Err(AppError::Conflict(
-            "runtime_replacement_not_authorized".into(),
-        ));
-    }
-    let db_owned = db.clone();
-    let snapshot = machine.clone();
-    let billing_tx = billing.clone();
-    db_owned
-        .client()
-        .start_session()
-        .await?
-        .start_transaction()
-        .write_concern(mongodb::options::WriteConcern::majority())
-        .and_run2(async move |session| {
-            let result: AppResult<()> = async {
-                lifecycle::ensure_owner_eligible_in_session(&db_owned, session, &snapshot.owner_id)
-                    .await?;
-                let changed = db_owned
-                    .collection::<Document>(MACHINES)
-                    .update_one(
-                        doc! {"_id":&snapshot.node_id,"revision":snapshot.revision},
-                        doc! {"$set":{"writer_admitted":false},"$inc":{"replacement_fence":1_i64}},
-                    )
-                    .session(&mut *session)
-                    .await?;
-                if changed.matched_count != 1 {
-                    return Err(AppError::Conflict("runtime_replacement_raced".into()));
-                }
-                stop_in_session(&db_owned, Some(&billing_tx), session, &snapshot, true).await?;
-                Ok(())
-            }
-            .await;
-            api_key_mutation_service::transaction_result(result)
-        })
-        .await
-        .map_err(api_key_mutation_service::map_transaction_error)?;
-    observe_and_settle(db, billing.clone(), machine, proof).await?;
-    let run_id = machine
-        .runtime_run_id
-        .as_deref()
-        .ok_or(AppError::MachineNotAllowed)?;
-    let now = DateTime::from_timestamp_millis(Utc::now().timestamp_millis() + 1)
-        .ok_or(AppError::MachineNotAllowed)?;
-    let prepared = billing
-        .prepare_machine_replacement(
-            &machine.owner_id,
-            run_id,
-            &uuid::Uuid::new_v4().to_string(),
-            now,
-            now + Duration::seconds(window_seconds()),
-        )
-        .await?;
-    let operation_id = if owner_rekey {
-        active.as_ref().unwrap().id.clone()
-    } else {
-        uuid::Uuid::new_v4().to_string()
-    };
-    let effect_id = uuid::Uuid::new_v4().to_string();
-    let db_owned = db.clone();
-    let machine = machine.clone();
-    let pod_uid = pod_uid.map(str::to_owned);
-    db_owned.client().start_session().await?.start_transaction().write_concern(mongodb::options::WriteConcern::majority()).and_run2(async move |session|{
-        let result:AppResult<ManagedMachine>=async{
-            lifecycle::ensure_owner_eligible_in_session(&db_owned,session,&machine.owner_id).await?;
-            let changed=db_owned.collection::<Document>(MACHINES).update_one(doc!{"_id":&machine.node_id,"revision":machine.revision,"runtime_generation":machine.runtime_generation},doc!{"$inc":{"revision":1_i64}}).session(&mut *session).await?;
-            if changed.matched_count!=1{return Err(AppError::Conflict("runtime_replacement_raced".into()));}
-            let funded=billing.reserve_machine_replacement_in_session(session,&prepared,machine.runtime_generation+1).await?;
-            let updated=db_owned.collection::<ManagedMachine>(MACHINES).find_one_and_update(doc!{"_id":&machine.node_id,"revision":machine.revision+1},doc!{"$set":{
-                "runtime_generation":machine.runtime_generation+1,"credential_epoch":machine.credential_epoch+1,"writer_fence":uuid::Uuid::new_v4().to_string(),"writer_admitted":false,
-                "resource_state":"resuming","stop_reason":bson::Bson::Null,"runtime_submission_started_at":bson::Bson::Null,"billing_state":"ready","active_operation_id":&operation_id,"pod_uid":&pod_uid,
-                "bootstrap_delivery_id":bson::Bson::Null,"bootstrap_digest":bson::Bson::Null,"funded_until":bson::DateTime::from_chrono(funded.covered_until),"updated_at":bson::DateTime::from_chrono(now)
-            }}).return_document(mongodb::options::ReturnDocument::After).session(&mut *session).await?.ok_or(AppError::MachineNotAllowed)?;
-            if !owner_rekey {
-                let op=MachineOperation{id:operation_id.clone(),owner_id:machine.owner_id.clone(),machine_id:Some(machine.node_id.clone()),action:LifecycleAction::Reconcile,idempotency_key_hash:format!("replacement:{}",machine.runtime_generation),request_digest:format!("replacement:{}",machine.runtime_generation),expected_revision:Some(machine.revision),desired_runtime_generation:Some(machine.runtime_generation+1),state:OperationState::Accepted,cleanup_state:CleanupState::NotRequired,effect_id:Some(effect_id.clone()),error_code:None,error_message:None,evidence_digest:None,retry_count:0,next_attempt_at:Some(now),deadline_at:Some(now+Duration::minutes(15)),created_at:now,updated_at:now,terminal_at:None};
-                let effect=MachineEffectOutbox{id:effect_id.clone(),operation_id:operation_id.clone(),machine_id:machine.node_id.clone(),owner_id:machine.owner_id.clone(),kind:EffectKind::ResumeSandbox,effect_digest:format!("replacement:{}",machine.runtime_generation),namespace:machine.sandbox_namespace.clone(),sandbox_name:machine.sandbox_name.clone(),desired_mode:"running".into(),state:EffectState::Pending,attempts:0,claim_id:None,claimed_until:None,last_error:None,available_at:Some(now),created_at:now,updated_at:now};
-                db_owned.collection::<MachineOperation>(OPERATIONS).insert_one(op).session(&mut *session).await?;
-                db_owned.collection::<MachineEffectOutbox>(OUTBOX).insert_one(effect).session(&mut *session).await?;
-                lifecycle::append_owner_audit(&db_owned,session,&machine.owner_id,"machine_controlled_replacement",&machine.node_id,&operation_id).await?;
-            }
-            Ok(updated)
         }.await;api_key_mutation_service::transaction_result(result)
     }).await.map_err(api_key_mutation_service::map_transaction_error)
 }
@@ -1375,7 +933,6 @@ pub async fn native_replace_stopped(
             machine.revision,
             machine.runtime_generation,
             pod_uid,
-            None,
             None,
         )
         .await;
@@ -1555,28 +1112,25 @@ pub async fn maintain_local_safety(db: &Database, billing: Arc<BillingService>) 
         if !machine.free_slot && machine.funded_until.is_none_or(|cutoff| cutoff <= now) {
             reason = Some("runtime_funding_expired");
         }
-        if let Some(id) = &machine.active_operation_id {
-            if let Some(operation) = db
+        if let Some(id) = &machine.active_operation_id
+            && let Some(operation) = db
                 .collection::<MachineOperation>(OPS)
                 .find_one(doc! {"_id":id})
                 .await?
-            {
-                if operation.terminal_at.is_none()
-                    && matches!(
-                        operation.action,
-                        LifecycleAction::Create
-                            | LifecycleAction::Resume
-                            | LifecycleAction::Rekey
-                            | LifecycleAction::Reconcile
-                    )
-                    && operation
-                        .deadline_at
-                        .unwrap_or(operation.created_at + Duration::minutes(15))
-                        <= now
-                {
-                    reason = Some("expansion_deadline_exceeded");
-                }
-            }
+            && operation.terminal_at.is_none()
+            && matches!(
+                operation.action,
+                LifecycleAction::Create
+                    | LifecycleAction::Resume
+                    | LifecycleAction::Rekey
+                    | LifecycleAction::Reconcile
+            )
+            && operation
+                .deadline_at
+                .unwrap_or(operation.created_at + Duration::minutes(15))
+                <= now
+        {
+            reason = Some("expansion_deadline_exceeded");
         }
         if let Some(reason) = reason {
             safety_pause(db, Some(billing.clone()), &machine, reason).await?;

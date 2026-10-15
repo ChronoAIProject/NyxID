@@ -491,14 +491,14 @@ async fn external_source_individual_child_revoke_is_precise_atomic_and_idempoten
     .unwrap()
     .unwrap();
     assert!(
-        revoked.source_invalidation.selector
+        revoked._source_invalidation.selector
             == SourceSelector::Child {
                 user_id: f.owner.clone(),
                 api_key_id: f.parent.clone(),
                 api_key_credential_id: first.clone(),
             }
     );
-    assert_eq!(revoked.source_invalidation.source_fence, 1);
+    assert_eq!(revoked._source_invalidation.source_fence, 1);
     assert_eq!(
         f.db.collection::<Document>(crate::models::machine_access::OUTBOX)
             .count_documents(doc! {"kind": "external"})
@@ -602,7 +602,7 @@ async fn external_source_child_admission_rejects_wrong_owner_parent_and_expiry_i
     let result = fence_child_in_session(&f.db, &f.owner, &f.parent, &active, &mut session)
         .await
         .unwrap();
-    assert_eq!(result.source_fence, 1);
+    assert_eq!(result._source_fence, 1);
     assert!(result.expires_at.is_some());
     session.commit_transaction().await.unwrap();
     f.db.drop().await.unwrap();

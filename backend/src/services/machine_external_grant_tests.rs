@@ -437,7 +437,8 @@ async fn approval_rejects_wrong_owner_restricted_purpose_and_dead_sources() {
         .insert_one(test_user(&other_user, UserType::Person))
         .await
         .unwrap();
-    let cases: Vec<(&str, Box<dyn Fn(&mut ApiKey)>)> = vec![
+    type KeyMutation = Box<dyn Fn(&mut ApiKey)>;
+    let cases: Vec<(&str, KeyMutation)> = vec![
         (
             "scheduled key",
             Box::new(|key| key.purpose = ApiKeyPurpose::ScheduledInvocation),

@@ -19,19 +19,6 @@ pub enum EffectKind {
 }
 
 impl EffectKind {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::CreateSandbox => "create_sandbox",
-            Self::SuspendSandbox => "suspend_sandbox",
-            Self::ResumeSandbox => "resume_sandbox",
-            Self::RekeySandbox => "rekey_sandbox",
-            Self::DeleteSandbox => "delete_sandbox",
-            Self::ReconcileSandbox => "reconcile_sandbox",
-            Self::InstallProviderDeadline => "install_provider_deadline",
-            Self::UpdateSandboxDeadline => "update_sandbox_deadline",
-        }
-    }
-
     pub fn for_action(action: super::remote_machine_operation::LifecycleAction) -> Self {
         match action {
             super::remote_machine_operation::LifecycleAction::Create => Self::CreateSandbox,

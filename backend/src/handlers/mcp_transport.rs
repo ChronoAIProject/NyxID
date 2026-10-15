@@ -1952,14 +1952,12 @@ async fn handle_tools_list(
         tool_defs.push(crate::services::assistant_nyxagent::conversation_history_definition());
     } else if auth.chat.is_none()
         && let Some(source) = auth.machine_source.as_ref()
-    {
-        if let Ok(tools) = Box::pin(crate::services::machine_external_service::definitions(
+        && let Ok(tools) = Box::pin(crate::services::machine_external_service::definitions(
             state, source,
         ))
         .await
-        {
-            tool_defs.extend(tools);
-        }
+    {
+        tool_defs.extend(tools);
     }
 
     let tools_json: Vec<serde_json::Value> = tool_defs
@@ -3668,27 +3666,27 @@ fn handle_machine_tool<'a>(
     request_id: Option<serde_json::Value>,
 ) -> futures::future::BoxFuture<'a, Response> {
     Box::pin(async move {
-        if auth.chat.is_none() {
-            if let Some(source) = auth.machine_source.as_ref() {
-                return match Box::pin(crate::services::machine_external_service::dispatch(
-                    state, source, tool_name, arguments,
-                ))
-                .await
-                {
-                    Ok(value) => tool_result(
-                        request_id,
-                        &value.to_string(),
-                        value.get("error").is_some() || value["isError"] == true,
-                    ),
-                    Err(error) => tool_result(
-                        request_id,
-                        &crate::services::assistant_account_tools::error_result(error)
-                            .value
-                            .to_string(),
-                        true,
-                    ),
-                };
-            }
+        if auth.chat.is_none()
+            && let Some(source) = auth.machine_source.as_ref()
+        {
+            return match Box::pin(crate::services::machine_external_service::dispatch(
+                state, source, tool_name, arguments,
+            ))
+            .await
+            {
+                Ok(value) => tool_result(
+                    request_id,
+                    &value.to_string(),
+                    value.get("error").is_some() || value["isError"] == true,
+                ),
+                Err(error) => tool_result(
+                    request_id,
+                    &crate::services::assistant_account_tools::error_result(error)
+                        .value
+                        .to_string(),
+                    true,
+                ),
+            };
         }
         let Some(chat) = auth.chat.as_ref().filter(|chat| !chat.guest) else {
             return tool_result(
@@ -4191,14 +4189,12 @@ async fn handle_meta_search(
         candidates.push(crate::services::assistant_upload_service::definition());
     } else if auth.chat.is_none()
         && let Some(source) = auth.machine_source.as_ref()
-    {
-        if let Ok(tools) = Box::pin(crate::services::machine_external_service::definitions(
+        && let Ok(tools) = Box::pin(crate::services::machine_external_service::definitions(
             state, source,
         ))
         .await
-        {
-            candidates.extend(tools);
-        }
+    {
+        candidates.extend(tools);
     }
     let results: Vec<_> = mcp_service::rank_search_candidates(candidates, query)
         .into_iter()

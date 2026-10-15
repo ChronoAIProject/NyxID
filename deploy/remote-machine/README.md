@@ -248,6 +248,27 @@ must complete fresh controlled bootstrap and execution admission; it cannot
 adopt old jobs. Pause preserves Machine identity and `/workspace`; resume
 starts a fresh generation without old processes, memory or task continuation.
 
+Managed credential delivery uses `nyxid_machine::bootstrap::Envelope` version 1,
+independent of the client credential-injection protocol. Recipients publish a
+canonical base64url-unpadded RSA-3072 SPKI public key (exponent 65537); the ticket
+binds SHA-256 of its DER bytes. RSA-OAEP-SHA256/MGF1-SHA256, with label
+`nyxid-machine-bootstrap-v1`, wraps a fresh AES-256-GCM key. The envelope carries
+`version`, `wrapped_key`, `nonce` and `ciphertext` (tag appended). Authenticated
+data is that domain, a NUL byte, the big-endian u32 version, and the complete
+ordered `Binding` JSON. All existing Pod, generation, epoch, delivery and
+writer-admission checks still apply. The replay row contains only ciphertext;
+protected recipient keys persist across lost responses and are never replaced
+merely because a request failed.
+
+This undeployed MVP wire change requires a coordinated backend and hosted-image
+upgrade. Old pending envelopes/recipient keys are incompatible and fail closed.
+Recreate disposable test state; retained activated identities require the existing
+controlled rekey/new-generation path. Do not delete an activated delivery or
+replace its recipient to retry the same epoch, and do not delete the original
+Machine/PVC to resolve a bootstrap error. Local tests cover replay, binding
+mismatch, obsolete pending-key preservation and independent Python/Rust wire
+interoperability; they do not establish real cluster workload authentication.
+
 No `NYXID_REMOTE_MACHINE_PROVIDER_*` variable is required for ordinary native
 create/run/pause/resume/delete. The pre-existing signed-provider library is
 future platform material, not an unsigned-success substitute or a native-flow

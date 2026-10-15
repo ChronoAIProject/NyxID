@@ -32,7 +32,7 @@ struct Claims {
     exp: i64,
     purpose: String,
     binding: Binding,
-    /// SHA-256 of the recipient's decoded 32-byte ephemeral public key. The
+    /// SHA-256 of the recipient's canonical RSA-3072 SPKI DER public key. The
     /// trusted platform signs this only after authenticating the target Pod
     /// and its protected preparation request; a bearer ticket cannot be
     /// redirected to another recipient on its first use.

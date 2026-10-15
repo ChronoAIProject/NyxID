@@ -9,10 +9,10 @@
 
 use anyhow::{Context, Result, ensure};
 use clap::Args;
+use nyxid_machine::bootstrap as sealed_bootstrap;
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 use std::{
     io::Read,
     path::{Path, PathBuf},
@@ -76,7 +76,7 @@ struct PendingDelivery {
 #[derive(Deserialize)]
 struct Response {
     binding: nyxid_machine::managed::Binding,
-    sealed: nyxid_crypto::CiphertextEnvelope,
+    sealed: sealed_bootstrap::Envelope,
     server_url: String,
     writer_admitted: bool,
 }
@@ -120,6 +120,7 @@ struct KubernetesBootstrapRequest<'a> {
     recipient_public_key: &'a str,
 }
 
+#[derive(Clone)]
 struct KubernetesSetup {
     node_id: String,
     pod_uid: String,
@@ -160,14 +161,15 @@ fn kubernetes_recipient(setup: &KubernetesSetup, directory: &Path) -> Result<Kub
             recipient.node_id == setup.node_id && recipient.pod_uid == setup.pod_uid,
             "pending Kubernetes recipient belongs to another workload"
         );
+        validate_recipient(&recipient.private_key, &recipient.public_key)?;
         return Ok(recipient);
     }
-    let pair = nyxid_crypto::generate_node_keypair();
+    let pair = sealed_bootstrap::generate_recipient()?;
     let recipient = KubernetesRecipient {
         node_id: setup.node_id.clone(),
         pod_uid: setup.pod_uid.clone(),
-        private_key: nyxid_crypto::encode_private_key_b64u(pair.private_key()),
-        public_key: pair.public_key_b64u(),
+        private_key: sealed_bootstrap::encode_private_key(&pair)?,
+        public_key: pair.public_key_b64u()?,
     };
     atomic_private_json(&path, &recipient)?;
     Ok(recipient)
@@ -220,11 +222,16 @@ async fn bootstrap_kubernetes_with_setup(
     budget: Duration,
 ) -> Result<PathBuf> {
     prepare_directory(directory)?;
-    let recipient = kubernetes_recipient(setup, directory)?;
-    let public =
-        nyxid_crypto::decode_b64u_array::<32>("recipient_public_key", &recipient.public_key)
-            .map_err(anyhow::Error::msg)?;
-    let digest = hex::encode(Sha256::digest(public));
+    let recipient_setup = setup.clone();
+    let recipient_directory = directory.to_owned();
+    let recipient = tokio::task::spawn_blocking(move || {
+        kubernetes_recipient(&recipient_setup, &recipient_directory)
+    })
+    .await
+    .context("prepare managed recipient")??;
+    let digest = hex::encode(sealed_bootstrap::recipient_key_digest(
+        &recipient.public_key,
+    )?);
     let client = crate::tls::client_builder()?
         .connect_timeout(Duration::from_secs(5))
         .timeout(Duration::from_secs(20))
@@ -345,7 +352,7 @@ pub fn require_self_hosted_mutation(directory: &Path) -> Result<()> {
     Ok(())
 }
 
-pub fn prepare(args: Prepare) -> Result<()> {
+pub async fn prepare(args: Prepare) -> Result<()> {
     let directory = config::resolve_config_dir(args.config.as_deref());
     prepare_directory(&directory)?;
     ensure!(
@@ -356,7 +363,12 @@ pub fn prepare(args: Prepare) -> Result<()> {
     let ticket: Ticket =
         serde_json::from_slice(&bytes).context("decode managed bootstrap ticket")?;
     ticket.binding.validate().map_err(anyhow::Error::msg)?;
-    let pending = prepare_delivery(&directory, &ticket.binding)?;
+    let recipient_directory = directory.clone();
+    let pending = tokio::task::spawn_blocking(move || {
+        prepare_delivery(&recipient_directory, &ticket.binding)
+    })
+    .await
+    .context("prepare managed delivery")??;
     println!("{}", serde_json::to_string(&recipient_request(&pending)?)?);
     Ok(())
 }
@@ -404,7 +416,13 @@ async fn bootstrap_config(args: &Start) -> Result<PathBuf> {
         return Ok(config_dir);
     }
     let bootstrap_url = validate_endpoint(&args.bootstrap_url, false)?;
-    let pending = prepare_delivery(&config_dir, &ticket.binding)?;
+    let recipient_directory = config_dir.clone();
+    let recipient_binding = ticket.binding.clone();
+    let pending = tokio::task::spawn_blocking(move || {
+        prepare_delivery(&recipient_directory, &recipient_binding)
+    })
+    .await
+    .context("prepare managed delivery")??;
     ensure!(
         ticket.token.as_ref().is_some_and(|token| !token.is_empty()),
         "managed provider ticket pending: sign the recipient-bound managed-bootstrap-request.json and refill the protected ticket file"
@@ -465,19 +483,10 @@ fn install_delivery(
         "managed bootstrap binding mismatch"
     );
     validate_endpoint(&response.server_url, true)?;
-    let private_key = nyxid_crypto::decode_private_key_b64u(&pending.private_key)
-        .map_err(|error| anyhow::anyhow!("managed bootstrap key invalid: {error}"))?;
-    let context = nyxid_crypto::RciContext::new(
-        pending.binding.node_id.clone(),
-        pending.binding.delivery_id.clone(),
-        "managed-machine-bootstrap",
-        "sealed",
-        pending.binding.context_field(),
-        None,
-        nyxid_crypto::VERSION_V1,
-    );
-    let plaintext = nyxid_crypto::decrypt(&response.sealed, &private_key, &context)
-        .map_err(|error| anyhow::anyhow!("managed bootstrap decryption failed: {error}"))?;
+    let private_key = sealed_bootstrap::decode_private_key(&pending.private_key)
+        .context("managed bootstrap recipient is incompatible; controlled rekey required")?;
+    let plaintext = sealed_bootstrap::open(&response.sealed, &private_key, &pending.binding)
+        .context("managed bootstrap decryption failed")?;
     let secrets: Secrets =
         serde_json::from_slice(&plaintext).context("decode managed bootstrap secrets")?;
     ensure!(
@@ -634,13 +643,22 @@ fn prepare_directory(path: &Path) -> Result<()> {
     Ok(())
 }
 
+fn validate_recipient(private_key: &str, public_key: &str) -> Result<()> {
+    let recipient = sealed_bootstrap::decode_private_key(private_key)
+        .context("managed bootstrap recipient is incompatible; controlled rekey required")?;
+    ensure!(
+        recipient.public_key_b64u()? == public_key,
+        "managed bootstrap recipient key mismatch; controlled rekey required"
+    );
+    Ok(())
+}
+
 fn recipient_request(pending: &PendingDelivery) -> Result<Value> {
-    let key = nyxid_crypto::decode_b64u_array::<32>("recipient_public_key", &pending.public_key)
-        .map_err(anyhow::Error::msg)?;
+    let digest = sealed_bootstrap::recipient_key_digest(&pending.public_key)?;
     Ok(serde_json::json!({
         "binding": pending.binding,
         "recipient_public_key": pending.public_key,
-        "recipient_key_digest": hex::encode(Sha256::digest(key)),
+        "recipient_key_digest": hex::encode(digest),
     }))
 }
 
@@ -656,13 +674,14 @@ fn prepare_delivery(
             &pending.binding == binding,
             "pending managed delivery binding changed"
         );
+        validate_recipient(&pending.private_key, &pending.public_key)?;
         pending
     } else {
-        let keypair = nyxid_crypto::generate_node_keypair();
+        let keypair = sealed_bootstrap::generate_recipient()?;
         let pending = PendingDelivery {
             binding: binding.clone(),
-            private_key: nyxid_crypto::encode_private_key_b64u(keypair.private_key()),
-            public_key: keypair.public_key_b64u(),
+            private_key: sealed_bootstrap::encode_private_key(&keypair)?,
+            public_key: keypair.public_key_b64u()?,
         };
         atomic_private_json(&path, &pending)?;
         pending
@@ -705,6 +724,21 @@ mod tests {
         }
     }
 
+    fn invalid_envelope() -> sealed_bootstrap::Envelope {
+        use base64::Engine;
+        use rand::RngCore;
+        let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        let mut nonce = [0; 12];
+        rand::rngs::OsRng.fill_bytes(&mut nonce);
+        serde_json::from_value(serde_json::json!({
+            "version": 1,
+            "wrapped_key": b64.encode([0; 384]),
+            "nonce": b64.encode(nonce),
+            "ciphertext": b64.encode([0; 16]),
+        }))
+        .unwrap()
+    }
+
     fn protected_token(path: &Path, token: &str) {
         use std::os::unix::fs::PermissionsExt;
         std::fs::write(path, token).unwrap();
@@ -738,15 +772,11 @@ mod tests {
                 let body: Value = serde_json::from_slice(&request.body).unwrap();
                 assert_eq!(body["node_id"], expected.node_id);
                 assert_eq!(body["pod_uid"], expected.pod_uid);
-                let key = nyxid_crypto::decode_b64u_array::<32>(
-                    "recipient_public_key",
+                let digest = sealed_bootstrap::recipient_key_digest(
                     body["recipient_public_key"].as_str().unwrap(),
                 )
                 .unwrap();
-                assert_eq!(
-                    body["ticket"]["recipient_key_digest"],
-                    hex::encode(Sha256::digest(key))
-                );
+                assert_eq!(body["ticket"]["recipient_key_digest"], hex::encode(digest));
                 if calls_for_prepare.fetch_add(1, Ordering::SeqCst) == 0 {
                     assert_eq!(body["ticket"]["token"], "projected-fixture-token-one");
                     protected_token(&token_for_prepare, "projected-fixture-token-two");
@@ -764,10 +794,9 @@ mod tests {
         Mock::given(method("POST")).and(path("/bootstrap")).respond_with(move |request: &wiremock::Request| {
             let body: Value = serde_json::from_slice(&request.body).unwrap();
             assert_eq!(body["ticket"]["token"], "projected-fixture-token-two");
-            let key = nyxid_crypto::decode_b64u_array::<32>("recipient_public_key", body["recipient_public_key"].as_str().unwrap()).unwrap();
-            let context = nyxid_crypto::RciContext::new(expected.node_id.clone(), expected.delivery_id.clone(), "managed-machine-bootstrap", "sealed", expected.context_field(), None, nyxid_crypto::VERSION_V1);
+            let public_key = body["recipient_public_key"].as_str().unwrap();
             let payload = serde_json::to_vec(&serde_json::json!({"auth_token":"nyx_nauth_kubernetes_fixture","signing_secret":"b".repeat(64)})).unwrap();
-            let sealed = nyxid_crypto::encrypt(&payload, key, &context).unwrap();
+            let sealed = sealed_bootstrap::seal(&payload, public_key, &expected).unwrap();
             ResponseTemplate::new(200).set_body_json(serde_json::json!({"binding":expected,"sealed":sealed,"server_url":"wss://example.test/api/v1/nodes/ws","writer_admitted":true}))
         }).expect(1).mount(&server).await;
         let setup = KubernetesSetup {
@@ -828,7 +857,7 @@ mod tests {
             )
             .mount(&server)
             .await;
-        Mock::given(method("POST")).and(path("/bootstrap")).respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"binding":next,"sealed":nyxid_crypto::CiphertextEnvelope::new("v1", [0;32], [0;24],vec![0;16]),"server_url":"wss://example.test/api/v1/nodes/ws","writer_admitted":true}))).mount(&server).await;
+        Mock::given(method("POST")).and(path("/bootstrap")).respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"binding":next,"sealed":invalid_envelope(),"server_url":"wss://example.test/api/v1/nodes/ws","writer_admitted":true}))).mount(&server).await;
         let setup = KubernetesSetup {
             node_id: previous.node_id,
             pod_uid: previous.pod_uid,
@@ -1027,7 +1056,7 @@ mod tests {
         let server = MockServer::start().await;
         // A correctly shaped but non-admitted response must be rejected before
         // decryption, credential persistence or command runtime startup.
-        let sealed = nyxid_crypto::CiphertextEnvelope::new("v1", [0; 32], [0; 24], vec![0; 16]);
+        let sealed = invalid_envelope();
         Mock::given(method("POST")).and(path("/bootstrap"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "binding":binding,"sealed":sealed,"server_url":"wss://example.test/api/v1/nodes/ws","writer_admitted":false
@@ -1164,13 +1193,8 @@ mod tests {
         assert_eq!(request, recipient_request(&pending).unwrap());
         assert_eq!(request["binding"], serde_json::to_value(&binding).unwrap());
         assert!(request.get("private_key").is_none());
-        let key =
-            nyxid_crypto::decode_b64u_array::<32>("recipient_public_key", &pending.public_key)
-                .unwrap();
-        assert_eq!(
-            request["recipient_key_digest"],
-            hex::encode(Sha256::digest(key))
-        );
+        let digest = sealed_bootstrap::recipient_key_digest(&pending.public_key).unwrap();
+        assert_eq!(request["recipient_key_digest"], hex::encode(digest));
     }
 
     #[tokio::test]
@@ -1210,6 +1234,55 @@ mod tests {
         .unwrap_err();
         assert!(error.to_string().contains("redirect rejected"));
         assert!(receiver.received_requests().await.unwrap().is_empty());
+    }
+
+    #[test]
+    fn incompatible_pending_recipients_are_preserved_and_require_controlled_rekey() {
+        let directory = tempfile::tempdir().unwrap();
+        prepare_directory(directory.path()).unwrap();
+        let binding = binding();
+        // Pre-MVP recipients used a raw 32-byte key. Never silently replace
+        // that key after a server may already have activated its delivery.
+        let obsolete_key = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+        let pending = PendingDelivery {
+            binding: binding.clone(),
+            private_key: Zeroizing::new(obsolete_key.into()),
+            public_key: obsolete_key.into(),
+        };
+        let path = directory.path().join("managed-bootstrap.json");
+        atomic_private_json(&path, &pending).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let error = prepare_delivery(directory.path(), &binding).err().unwrap();
+        assert!(error.to_string().contains("controlled rekey required"));
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert!(
+            !directory
+                .path()
+                .join("managed-bootstrap-request.json")
+                .exists()
+        );
+
+        let recipient = KubernetesRecipient {
+            node_id: binding.node_id.clone(),
+            pod_uid: binding.pod_uid.clone(),
+            private_key: Zeroizing::new(obsolete_key.into()),
+            public_key: obsolete_key.into(),
+        };
+        let path = directory.path().join("managed-kubernetes-recipient.json");
+        atomic_private_json(&path, &recipient).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let setup = KubernetesSetup {
+            node_id: binding.node_id,
+            pod_uid: binding.pod_uid,
+            token_file: directory.path().join("unused-token"),
+            prepare_url: Url::parse("https://example.test/prepare").unwrap(),
+            bootstrap_url: Url::parse("https://example.test/bootstrap").unwrap(),
+        };
+        let error = kubernetes_recipient(&setup, directory.path())
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("controlled rekey required"));
+        assert_eq!(std::fs::read(&path).unwrap(), before);
     }
 
     #[test]
@@ -1293,13 +1366,9 @@ mod tests {
             .respond_with(move |request: &wiremock::Request| {
                 let request: Value = serde_json::from_slice(&request.body).unwrap();
                 assert_eq!(request["binding"], serde_json::to_value(&expected_binding).unwrap());
-                let recipient = nyxid_crypto::decode_b64u_array::<32>("recipient_public_key", request["recipient_public_key"].as_str().unwrap()).unwrap();
-                let context = nyxid_crypto::RciContext::new(
-                    expected_binding.node_id.clone(), expected_binding.delivery_id.clone(),
-                    "managed-machine-bootstrap", "sealed", expected_binding.context_field(), None, nyxid_crypto::VERSION_V1,
-                );
+                let public_key = request["recipient_public_key"].as_str().unwrap();
                 let plaintext = serde_json::to_vec(&serde_json::json!({"auth_token":"nyx_nauth_fixture_only", "signing_secret":"a".repeat(64)})).unwrap();
-                let sealed = nyxid_crypto::encrypt(&plaintext, recipient, &context).unwrap();
+                let sealed = sealed_bootstrap::seal(&plaintext, public_key, &expected_binding).unwrap();
                 ResponseTemplate::new(200).set_body_json(serde_json::json!({
                     "binding":expected_binding, "sealed":sealed, "server_url":"wss://example.test/api/v1/nodes/ws", "writer_admitted":true,
                 }))

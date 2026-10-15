@@ -180,6 +180,14 @@ The single hosted form lives under `/assistant/machines/new`, the fourth option 
 
 The `remote-machine` profile describes the full Machine resource contract, not a capability grant. The separate immutable `capabilities` array drives bootstrap, Node configuration and exact live capability matching, including Browser-only and Browser/Computer configurations.
 
+Managed bootstrap uses its own versioned RSA-OAEP-SHA256/AES-256-GCM recipient
+envelope in `nyxid-machine`; it has no backend dependency on the client-only
+credential-injection crypto crate. The full ordered Binding is authenticated,
+and ciphertext-only replay, exact recipient digests and controlled rekey remain
+mandatory. Backend and hosted images must upgrade together; incompatible pending
+material fails closed without replacing the stable identity or original PVC.
+The deployment README specifies the wire format and pre-release upgrade boundary.
+
 The durable Machine and Node projection, sealed bootstrap config and live Node capability checks must agree. Specialist membership uses existing assignment and authorization services. The read model distinguishes no assignment, pending/failed assignment and permission configuration still required. Enabling local capabilities is not caller authorization: existing NyxBot/specialist policy, live grant revisions, owner-turn/control and confirmations remain authoritative; external OAuth/Agent Key MCP remains shell/files only.
 
 Hosted management uses the existing `MachineCapabilityForm`, with the live Node ceiling and observed policy revision. An unrelated Commands/Files edit preserves the owner's existing Browser, Computer, Developer browser and saved-login selections. The owner can explicitly change applicable permissions. Removing Browser clears its Computer and Developer browser dependencies; other grants remain intact. Existing owner, protocol, feature and revision checks continue to govern the same policy endpoint. This does not widen external OAuth/Agent Key tool access.

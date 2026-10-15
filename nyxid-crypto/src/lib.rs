@@ -290,15 +290,17 @@ mod tests {
     #[cfg(feature = "decrypt")]
     #[test]
     fn decrypt_rejects_oversized_ciphertext_before_crypto() {
+        let recipient = generate_node_keypair();
+        let mut nonce = [0_u8; 24];
+        OsRng.fill_bytes(&mut nonce);
         let envelope = CiphertextEnvelope::new(
             VERSION_V1,
-            [1; 32],
-            [2; 24],
+            *recipient.public_key(),
+            nonce,
             vec![0_u8; MAX_CIPHERTEXT_SIZE + 1],
         );
-        let private_key = Zeroizing::new([3_u8; 32]);
-        let error =
-            decrypt(&envelope, &private_key, &context()).expect_err("oversized decrypt input");
+        let error = decrypt(&envelope, recipient.private_key(), &context())
+            .expect_err("oversized decrypt input");
 
         assert!(matches!(
             error,

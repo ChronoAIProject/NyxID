@@ -24,7 +24,6 @@ use nyxid_machine::{
 
 pub const FLAG: &str = "assistant:machine-capabilities";
 pub const CONTEXT_FLAG: &str = "assistant:machine-contexts";
-pub use super::machine_external_service::enqueue_external_in_session;
 /// Leaves room for the maximum 64 local jobs plus concurrent short operations.
 pub(super) const MAX_NODE_LEASES: u64 = 128;
 const RENEW_INTERVAL_SECS: u64 = 10;

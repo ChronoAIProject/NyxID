@@ -1,14 +1,10 @@
 //! Provider evidence contract for managed runtime writer and stop fences.
 //!
-//! A Kubernetes `Ready` condition, a deleted WSS, or a missing Pod is not a
-//! physical stop proof.  The manager therefore accepts only evidence returned
-//! by a configured provider verifier.  The default verifier is deliberately
-//! unavailable, which keeps managed writer release and paid admission closed
-//! until the deployment supplies a real runtime/CSI/watchdog implementation.
+//! Test-only contracts for the deferred signed-provider integration. Native
+//! production lifecycle does not depend on these physical-stop capabilities.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct RawRuntimeEvidence {
@@ -146,32 +142,17 @@ pub fn verify_cleanup_evidence(
 }
 
 impl VerifiedCleanupEvidence {
-    pub(super) fn from_signed_provider(
-        binding: RuntimeBinding,
-        pvc_uid: Option<String>,
-        evidence_ref: String,
-        credentials_revoked: bool,
-        workspace_released: bool,
-        persistent_volume_released: bool,
-        accounting_closed: bool,
-        observed_at: DateTime<Utc>,
-    ) -> Self {
+    pub(super) fn from_signed_provider(raw: RawCleanupEvidence) -> Self {
         Self {
-            binding,
-            pvc_uid,
-            evidence_ref,
-            credentials_revoked,
-            workspace_released,
-            persistent_volume_released,
-            accounting_closed,
-            observed_at,
+            binding: raw.binding,
+            pvc_uid: raw.pvc_uid,
+            evidence_ref: raw.evidence_ref,
+            credentials_revoked: raw.credentials_revoked,
+            workspace_released: raw.workspace_released,
+            persistent_volume_released: raw.persistent_volume_released,
+            accounting_closed: raw.accounting_closed,
+            observed_at: raw.observed_at,
         }
-    }
-    pub fn binding(&self) -> &RuntimeBinding {
-        &self.binding
-    }
-    pub fn evidence_ref(&self) -> &str {
-        &self.evidence_ref
     }
     pub fn pvc_uid(&self) -> Option<&str> {
         self.pvc_uid.as_deref()
@@ -181,9 +162,6 @@ impl VerifiedCleanupEvidence {
         // Its legacy accounting_closed field is accepted for wire compatibility;
         // lifecycle's mandatory local Billing transaction is authoritative.
         self.credentials_revoked && self.workspace_released && self.persistent_volume_released
-    }
-    pub fn observed_at(&self) -> DateTime<Utc> {
-        self.observed_at
     }
 }
 
@@ -233,18 +211,6 @@ impl VerifiedRuntimeEvidence {
     pub fn physically_stopped(&self) -> bool {
         self.physically_stopped
     }
-
-    pub fn observed_at(&self) -> DateTime<Utc> {
-        self.observed_at
-    }
-
-    pub fn stopped_at(&self) -> Option<DateTime<Utc>> {
-        self.stopped_at
-    }
-
-    pub fn running_through(&self) -> Option<DateTime<Utc>> {
-        self.running_through
-    }
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -273,43 +239,6 @@ impl RuntimeEvidenceVerifier for UnavailableRuntimeEvidenceVerifier {
         _raw: &RawRuntimeEvidence,
     ) -> Result<VerifiedRuntimeEvidence, EvidenceError> {
         Err(EvidenceError::ProviderUnavailable)
-    }
-}
-
-pub type SharedRuntimeEvidenceVerifier = Arc<dyn RuntimeEvidenceVerifier>;
-
-#[cfg(test)]
-pub(crate) fn test_runtime_evidence(
-    binding: RuntimeBinding,
-    stopped: bool,
-) -> VerifiedRuntimeEvidence {
-    let now = Utc::now();
-    VerifiedRuntimeEvidence {
-        binding,
-        provider_id: "local-test-provider".into(),
-        evidence_ref: uuid::Uuid::new_v4().to_string(),
-        physically_stopped: stopped,
-        observed_at: now,
-        stopped_at: stopped.then_some(now),
-        running_through: (!stopped).then_some(now),
-    }
-}
-
-#[cfg(test)]
-pub(crate) fn test_cleanup_evidence(
-    binding: RuntimeBinding,
-    pvc_uid: Option<String>,
-    all_final: bool,
-) -> VerifiedCleanupEvidence {
-    VerifiedCleanupEvidence {
-        binding,
-        pvc_uid,
-        evidence_ref: uuid::Uuid::new_v4().to_string(),
-        credentials_revoked: all_final,
-        workspace_released: all_final,
-        persistent_volume_released: all_final,
-        accounting_closed: all_final,
-        observed_at: Utc::now(),
     }
 }
 

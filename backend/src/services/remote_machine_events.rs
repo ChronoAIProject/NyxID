@@ -66,19 +66,15 @@ pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
         .try_collect::<Vec<_>>()
         .await?;
     for index in old {
-        if index.keys == doc! {"namespace":1,"name":1,"sandbox_uid":1} {
-            if let Some(name) = index.options.and_then(|options| options.name) {
-                if let Err(error) = db
-                    .collection::<Document>(ORPHAN_INVENTORY)
-                    .drop_index(name)
-                    .await
-                {
-                    if !matches!(error.kind.as_ref(), mongodb::error::ErrorKind::Command(command) if command.code == 27)
-                    {
-                        return Err(error);
-                    }
-                }
-            }
+        if index.keys == doc! {"namespace":1,"name":1,"sandbox_uid":1}
+            && let Some(name) = index.options.and_then(|options| options.name)
+            && let Err(error) = db
+                .collection::<Document>(ORPHAN_INVENTORY)
+                .drop_index(name)
+                .await
+            && !matches!(error.kind.as_ref(), mongodb::error::ErrorKind::Command(command) if command.code == 27)
+        {
+            return Err(error);
         }
     }
     db.collection::<Document>(ORPHAN_INVENTORY)
@@ -227,6 +223,7 @@ pub struct EventPage {
     pub next_cursor: Option<String>,
 }
 
+#[cfg(test)]
 pub async fn list(
     db: &Database,
     owner_id: &str,

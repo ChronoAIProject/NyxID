@@ -597,7 +597,7 @@ P2 内部按依赖推进：先定义 `ExternalPrincipalRef`、grant/索引和授
 | J6 | 可用资金不足→停机→充值→手动恢复 | 无法预留下个窗口时拒绝新工作/续租并请求原生暂停、等待原生确认；不透支或重复消费已锁定资金，残余平台成本不追扣；充值不会自动恢复，owner 接受新报价后恢复 |
 | J7 | 删除并等待清理 | runtime/credential/Sandbox/PVC/PV 原生清理观测完整，按 CSI 实际语义处理；Node tombstone、资源与账务独立进度，存在/未知/Retain 遗留不释放相关配额 |
 | F1 | 并发免费创建、重复 request/CAS 冲突 | 至多一个免费占用；同键同意图单一资源，不同输入冲突，无静默付费 |
-| F2 | CR create 响应丢失、bootstrap 丢响应/私钥丢失 | 原 operation 回读同资源；密封交付或受控 rekey，无第二有效身份、明文重放或泄漏 |
+| F2 | CR create 响应丢失、bootstrap 丢响应/私钥丢失 | 原 operation 回读同资源；独立 managed bootstrap v1 接收方密封交付或受控 rekey，无第二有效身份、明文重放或泄漏；不得引入后端 RCI 依赖。覆盖完整 Binding 篡改、错误接收方、旧 pending key 保留并拒绝、重放事务和 Python/Rust 互通。协议变更须后端与镜像协调升级，不自动替换已激活交付。 |
 | F3 | 旧 Pod 延迟回连、非计划 Pod 重建、节点分区 | 旧 epoch/runtime 拒绝；旧运行原生状态不确定则不放行新 writer；force-delete+NotFound、节点失联和归属冲突保持 pending；新 Pod 必须受控 bootstrap |
 | F4 | controller/API/Manager/Node 断联、stop 响应丢失 | 现有 lease/原生 shutdownTime 生效范围如实记录，不承诺分区独立停止；未知进 reconciling/pending，有界重试与运维升级；客户仅承担已锁定且有运行证据的费用，不收两代重叠费，不从后续充值补扣平台残余成本 |
 | F5 | PVC finalizer/CSI/PV reclaim 异常 | 观察 Sandbox/Pod/PVC/PV 及所有权/回收策略；存在/finalizer/Retain 遗留/未知不提前释放槽；不声称云盘物理擦除 |

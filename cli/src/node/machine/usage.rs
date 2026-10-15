@@ -39,13 +39,18 @@ fn filesystem_usage(path: &Path) -> Result<UsageVolume> {
         return Err(std::io::Error::last_os_error().into());
     }
     let stat = unsafe { stat.assume_init() };
-    let unit = stat.f_frsize as u64;
+    // libc's statvfs field widths differ between Linux and macOS.
+    #[allow(clippy::unnecessary_cast)]
+    let (unit, blocks, free, available) = (
+        stat.f_frsize as u64,
+        stat.f_blocks as u64,
+        stat.f_bfree as u64,
+        stat.f_bavail as u64,
+    );
     Ok(UsageVolume {
-        capacity_bytes: Some((stat.f_blocks as u64).saturating_mul(unit)),
-        used_bytes: (stat.f_blocks as u64)
-            .saturating_sub(stat.f_bfree as u64)
-            .saturating_mul(unit),
-        available_bytes: Some((stat.f_bavail as u64).saturating_mul(unit)),
+        capacity_bytes: Some(blocks.saturating_mul(unit)),
+        used_bytes: blocks.saturating_sub(free).saturating_mul(unit),
+        available_bytes: Some(available.saturating_mul(unit)),
         measurement: "filesystem".into(),
         complete: true,
     })
@@ -158,6 +163,9 @@ fn temporary_usage_observed(
                 continue;
             }
             let metadata = unsafe { metadata.assume_init() };
+            // Match MetadataExt's u64 identity across libc platform typedefs.
+            #[allow(clippy::unnecessary_cast)]
+            let observed_identity = (metadata.st_dev as u64, metadata.st_ino as u64);
             if metadata.st_mode & libc::S_IFMT == libc::S_IFDIR {
                 // Descriptor/depth bounds keep a hostile tree from consuming
                 // unbounded resources. Skips preserve lower-bound semantics.
@@ -165,13 +173,12 @@ fn temporary_usage_observed(
                     observed_directory(name);
                     if let Ok(child) = open_directory_at(fd, name)
                         && let Ok(current) = child.metadata()
-                        && current.dev() == metadata.st_dev as u64
-                        && current.ino() == metadata.st_ino as u64
+                        && (current.dev(), current.ino()) == observed_identity
                     {
                         pending.push((child, depth + 1));
                     }
                 }
-            } else if seen.insert((metadata.st_dev as u64, metadata.st_ino as u64)) {
+            } else if seen.insert(observed_identity) {
                 bytes =
                     bytes.saturating_add((metadata.st_blocks.max(0) as u64).saturating_mul(512));
             }

@@ -2,6 +2,7 @@
 
 pub mod authority;
 pub mod binary;
+pub mod bootstrap;
 pub mod config;
 pub mod context;
 pub mod desktop;

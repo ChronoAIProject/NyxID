@@ -410,11 +410,12 @@ impl<S: DeadlineStore, C: Clock, A: RuntimeActuator> DeadlineEngine<S, C, A> {
             resolved.target == control.target,
             "resolved runtime mismatch"
         );
-        if let Some(record) = &prior {
-            if record.control.target == control.target && resolved != record.resolved {
-                self.stop_record(record, &now)?;
-                bail!("resolved runtime changed");
-            }
+        if let Some(record) = &prior
+            && record.control.target == control.target
+            && resolved != record.resolved
+        {
+            self.stop_record(record, &now)?;
+            bail!("resolved runtime changed");
         }
         if let Some(record) = &prior {
             if record.state != DeadlineState::Terminal

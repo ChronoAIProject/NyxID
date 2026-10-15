@@ -799,7 +799,7 @@ async fn flag_runtime_rate_writes_require_human_admin_and_personal_enable_while_
 async fn ready_fixture(f: &Fixture, id: &str) -> ManagedMachine {
     let created = current(f, id).await;
     let advanced =
-        lifecycle::advance_runtime_generation(&f.db, id, created.revision, 0, None, None, None)
+        lifecycle::advance_runtime_generation(&f.db, id, created.revision, 0, None, None)
             .await
             .unwrap();
     let bound = lifecycle::apply_runtime_observation(
@@ -811,7 +811,6 @@ async fn ready_fixture(f: &Fixture, id: &str) -> ManagedMachine {
             pvc_name: Some("fixture-workspace".into()),
             pvc_uid: Some(Uuid::new_v4().to_string()),
             ready: true,
-            suspended: false,
             physically_stopped: false,
             source: "local-native-api-fixture".into(),
             now: None,

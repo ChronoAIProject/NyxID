@@ -87,7 +87,7 @@ const BROKER_POLICY_REFRESH_INTERVAL_SECS: u64 = 5;
 #[derive(Clone)]
 pub struct AppState {
     #[cfg(test)]
-    pub local_machine_platform: Option<Arc<crate::test_utils::LocalMachinePlatform>>,
+    pub(crate) local_machine_platform: Option<Arc<crate::test_utils::LocalMachinePlatform>>,
     pub db: DbHandle,
     pub config: AppConfig,
     pub jwt_keys: JwtKeys,

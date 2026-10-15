@@ -1,19 +1,15 @@
 //! Signed provider attestation transport. Signature validation authenticates a
 //! reviewed provider's statement; it does not implement or certify its physical
-//! runtime/CSI fence. The production issuer and workload ticket delivery remain
-//! required P0 integrations, with no fallback to Kubernetes conditions.
-use async_trait::async_trait;
+//! runtime/CSI fence. These deferred provider contracts are retained only for
+//! regression tests; production lifecycle uses native Sandbox observations.
 use chrono::{DateTime, TimeZone, Utc};
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::{sync::Arc, time::Duration};
 
-use super::{
-    remote_machine_fence::{
-        RuntimeBinding, VerifiedCleanupEvidence, VerifiedDeadlineReceipt, VerifiedRuntimeEvidence,
-    },
-    remote_machine_manager::RuntimeProvider,
+use super::remote_machine_fence::{
+    RawCleanupEvidence, RuntimeBinding, VerifiedCleanupEvidence, VerifiedDeadlineReceipt,
+    VerifiedRuntimeEvidence,
 };
 use crate::{
     errors::{AppError, AppResult},
@@ -63,7 +59,6 @@ pub struct SignedProvider {
     endpoint: reqwest::Url,
     key: DecodingKey,
     issuer: String,
-    control_key_file: std::path::PathBuf,
 }
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -80,54 +75,6 @@ fn rejected() -> AppError {
 }
 
 impl SignedProvider {
-    pub fn from_environment() -> anyhow::Result<Option<Arc<dyn RuntimeProvider>>> {
-        let Ok(endpoint) = std::env::var("NYXID_REMOTE_MACHINE_PROVIDER_URL") else {
-            return Ok(None);
-        };
-        let endpoint: reqwest::Url = endpoint.parse()?;
-        anyhow::ensure!(
-            endpoint.scheme() == "https"
-                && endpoint.username().is_empty()
-                && endpoint.password().is_none()
-                && endpoint.query().is_none()
-                && endpoint.fragment().is_none(),
-            "provider requires dedicated HTTPS endpoint"
-        );
-        let key_path = std::env::var("NYXID_REMOTE_MACHINE_PROVIDER_PUBLIC_KEY_FILE")?;
-        let key = super::remote_machine_bootstrap_verifier::load_provider_public_key(
-            std::path::Path::new(&key_path),
-        )?;
-        let issuer = std::env::var("NYXID_REMOTE_MACHINE_PROVIDER_ISSUER")?;
-        super::remote_machine_bootstrap_verifier::validate_provider_issuer(&issuer)?;
-        let control_key_file = std::path::PathBuf::from(std::env::var(
-            "NYXID_REMOTE_MACHINE_PROVIDER_CONTROL_KEY_FILE",
-        )?);
-        let metadata = std::fs::symlink_metadata(&control_key_file)?;
-        anyhow::ensure!(
-            metadata.is_file() && !metadata.file_type().is_symlink() && metadata.len() <= 1024,
-            "provider control authentication key unavailable"
-        );
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            anyhow::ensure!(
-                metadata.permissions().mode() & 0o077 == 0,
-                "provider control key requires private permissions"
-            );
-        }
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(15))
-            .redirect(reqwest::redirect::Policy::none())
-            .build()?;
-        Ok(Some(Arc::new(Self {
-            client,
-            endpoint,
-            key,
-            issuer,
-            control_key_file,
-        })))
-    }
-
     fn verify_deadline(
         &self,
         token: &str,
@@ -263,96 +210,7 @@ impl SignedProvider {
     }
 }
 
-#[async_trait]
-impl RuntimeProvider for SignedProvider {
-    async fn install_deadline(
-        &self,
-        machine: &ManagedMachine,
-        control: &nyxid_machine::managed::DeadlineControl,
-    ) -> AppResult<Option<VerifiedDeadlineReceipt>> {
-        if super::remote_machine_runtime::provider_target(machine)? != control.target {
-            return Err(rejected());
-        }
-        // Rotate this credential through a protected file; it is separate from
-        // workload tokens and never persisted in a Machine, outbox, or log.
-        let key_path = self.control_key_file.clone();
-        let bytes =
-            tokio::task::spawn_blocking(move || -> AppResult<zeroize::Zeroizing<Vec<u8>>> {
-                use std::io::Read;
-                let mut options = std::fs::OpenOptions::new();
-                options.read(true);
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::OpenOptionsExt;
-                    options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
-                }
-                let mut file = options.open(&key_path).map_err(|_| rejected())?;
-                let metadata = file.metadata().map_err(|_| rejected())?;
-                if !metadata.is_file() || metadata.len() > 1024 {
-                    return Err(rejected());
-                }
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    if metadata.permissions().mode() & 0o077 != 0 {
-                        return Err(rejected());
-                    }
-                }
-                let mut bytes = zeroize::Zeroizing::new(Vec::new());
-                (&mut file)
-                    .take(1025)
-                    .read_to_end(&mut bytes)
-                    .map_err(|_| rejected())?;
-                Ok(bytes)
-            })
-            .await
-            .map_err(|_| rejected())??;
-        if bytes.len() > 1024 {
-            return Err(rejected());
-        }
-        let text = std::str::from_utf8(&bytes).map_err(|_| rejected())?.trim();
-        if text.len() != 64 {
-            return Err(rejected());
-        }
-        let key = zeroize::Zeroizing::new(hex::decode(text).map_err(|_| rejected())?);
-        let authenticated = nyxid_machine::managed::AuthenticatedDeadlineControl::sign(
-            control.clone(),
-            &key,
-            Utc::now().timestamp_millis(),
-        )
-        .map_err(|_| rejected())?;
-        let mut response = self
-            .client
-            .post(self.endpoint.clone())
-            .json(&json!({"purpose":"deadline_control","request":authenticated}))
-            .send()
-            .await
-            .map_err(|_| rejected())?;
-        if response.status() == reqwest::StatusCode::NO_CONTENT {
-            return Ok(None);
-        }
-        if !response.status().is_success()
-            || response
-                .content_length()
-                .is_some_and(|n| n > MAX_RESPONSE as u64)
-        {
-            return Err(rejected());
-        }
-        let mut bytes = Vec::new();
-        while let Some(chunk) = response.chunk().await.map_err(|_| rejected())? {
-            if bytes.len() + chunk.len() > MAX_RESPONSE {
-                return Err(rejected());
-            }
-            bytes.extend_from_slice(&chunk);
-        }
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct Response {
-            token: String,
-        }
-        let response: Response = serde_json::from_slice(&bytes).map_err(|_| rejected())?;
-        self.verify_deadline(&response.token, control).map(Some)
-    }
+impl SignedProvider {
     async fn runtime(
         &self,
         machine: &ManagedMachine,
@@ -399,16 +257,20 @@ impl RuntimeProvider for SignedProvider {
             return Err(rejected());
         }
         Ok(Some(VerifiedCleanupEvidence::from_signed_provider(
-            claims.binding,
-            claims.pvc_uid,
-            claims.evidence_ref,
-            claims.credentials_revoked,
-            claims.workspace_released,
-            claims.persistent_volume_released,
-            claims.accounting_closed,
-            Utc.timestamp_opt(claims.observed_at, 0)
-                .single()
-                .ok_or_else(rejected)?,
+            RawCleanupEvidence {
+                binding: claims.binding,
+                pvc_uid: claims.pvc_uid,
+                evidence_ref: claims.evidence_ref,
+                credentials_revoked: claims.credentials_revoked,
+                workspace_released: claims.workspace_released,
+                persistent_volume_released: claims.persistent_volume_released,
+                accounting_closed: claims.accounting_closed,
+                observed_at: Utc
+                    .timestamp_opt(claims.observed_at, 0)
+                    .single()
+                    .ok_or_else(rejected)?,
+                provider_id: claims.iss,
+            },
         )))
     }
 }
@@ -454,7 +316,6 @@ mod tests {
                 endpoint: "https://provider.invalid/attest".parse().unwrap(),
                 key: keys.decoding.clone(),
                 issuer: claims.iss.clone(),
-                control_key_file: std::path::PathBuf::from("/unconfigured-test-control-key"),
             },
             claims,
             keys.encoding.clone(),

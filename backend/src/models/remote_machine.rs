@@ -101,35 +101,12 @@ pub enum BillingState {
     Unavailable,
 }
 
-impl BillingState {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Free => "free",
-            Self::Pending => "pending",
-            Self::Ready => "ready",
-            Self::Suspended => "suspended",
-            Self::Closed => "closed",
-            Self::Unavailable => "unavailable",
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum AuthorizationState {
     Pending,
     Active,
     Revoked,
-}
-
-impl AuthorizationState {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Pending => "pending",
-            Self::Active => "active",
-            Self::Revoked => "revoked",
-        }
-    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]

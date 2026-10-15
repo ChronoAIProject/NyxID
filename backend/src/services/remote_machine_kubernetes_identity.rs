@@ -477,7 +477,6 @@ mod tests {
             http::HeaderMap,
             routing::{get, post},
         };
-        use sha2::{Digest, Sha256};
         let (db, keys, binding, recipient) = bootstrap::tests::fixture().await;
         let (_, _, mut review, mut pod) = fixture();
         review["status"]["user"]["extra"]["authentication.kubernetes.io/pod-uid"] =
@@ -558,10 +557,8 @@ mod tests {
             credentials: KubernetesCredentials::token_file(token_path.clone()).unwrap(),
             namespace: "nyxid-machine".into(),
         };
-        let public = recipient.public_key_b64u();
-        let digest = hex::encode(Sha256::digest(
-            nyxid_crypto::decode_b64u_array::<32>("recipient", &public).unwrap(),
-        ));
+        let public = recipient.public_key_b64u().unwrap();
+        let digest = hex::encode(nyxid_machine::bootstrap::recipient_key_digest(&public).unwrap());
         let ticket = json!({"token":token,"recipient_key_digest":digest});
         let prepared = bootstrap::prepare_workload(
             &db,
@@ -600,7 +597,7 @@ mod tests {
         .unwrap();
         assert!(replay.replayed);
         assert_eq!(result.sealed, replay.sealed);
-        let other = nyxid_crypto::generate_node_keypair();
+        let other = nyxid_machine::bootstrap::generate_recipient().unwrap();
         assert!(
             bootstrap::prepare_workload(
                 &db,
@@ -608,7 +605,7 @@ mod tests {
                 &binding.node_id,
                 &binding.pod_uid,
                 &ticket,
-                &other.public_key_b64u()
+                &other.public_key_b64u().unwrap()
             )
             .await
             .is_err()

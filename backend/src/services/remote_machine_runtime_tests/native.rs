@@ -187,7 +187,6 @@ async fn native_deadline_renewals_share_one_lifecycle_operation_without_index_co
         0,
         None,
         None,
-        None,
     )
     .await
     .unwrap();

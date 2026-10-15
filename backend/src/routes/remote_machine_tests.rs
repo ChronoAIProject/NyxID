@@ -173,7 +173,7 @@ async fn remote_machine_full_router_indexes_unconfigured_admission_replay_and_ow
         "/operations",
         "/billing/runs",
     ] {
-        let (status, value) = request(
+        let (status, _) = request(
             &app,
             "GET",
             &format!("/api/v1/remote-machines/{node}{suffix}"),
@@ -182,7 +182,7 @@ async fn remote_machine_full_router_indexes_unconfigured_admission_replay_and_ow
             None,
         )
         .await;
-        assert_eq!(status, StatusCode::OK, "{suffix}: {value}");
+        assert_eq!(status, StatusCode::OK, "owner Machine read must succeed");
     }
     let delegated = jwt::generate_delegated_access_token(
         &state.jwt_keys,
@@ -201,8 +201,12 @@ async fn remote_machine_full_router_indexes_unconfigured_admission_replay_and_ow
         "/api/v1/machine-confirmations".into(),
         format!("/api/v1/users/me/consents/{}/machine-grant", Uuid::new_v4()),
     ] {
-        let (status, value) = request(&app, "GET", &path, &delegated, Value::Null, None).await;
-        assert_eq!(status, StatusCode::FORBIDDEN, "{path}: {value}");
+        let (status, _) = request(&app, "GET", &path, &delegated, Value::Null, None).await;
+        assert_eq!(
+            status,
+            StatusCode::FORBIDDEN,
+            "delegated Machine read must be denied"
+        );
     }
     let key = crate::services::key_service::create_api_key(
         &db,

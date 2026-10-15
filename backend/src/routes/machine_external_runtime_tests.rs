@@ -114,17 +114,16 @@ async fn rpc(f: &Fixture, token: &str, method: &str, params: Value) -> (StatusCo
         request = request.header("mcp-session-id", session);
     }
     let response=tokio::time::timeout(std::time::Duration::from_secs(30),f.app.clone().oneshot(request.body(Body::from(json!({"jsonrpc":"2.0","id":Uuid::new_v4().to_string(),"method":method,"params":params}).to_string())).unwrap())).await.unwrap().unwrap();
-    if method == "initialize" {
-        if let Some(session) = response
+    if method == "initialize"
+        && let Some(session) = response
             .headers()
             .get("mcp-session-id")
             .and_then(|s| s.to_str().ok())
-        {
-            f.sessions
-                .lock()
-                .unwrap()
-                .insert(crate::crypto::token::hash_token(token), session.to_string());
-        }
+    {
+        f.sessions
+            .lock()
+            .unwrap()
+            .insert(crate::crypto::token::hash_token(token), session.to_string());
     }
     let status = response.status();
     let bytes = to_bytes(response.into_body(), 2 * 1024 * 1024)

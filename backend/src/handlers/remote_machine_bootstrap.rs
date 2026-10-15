@@ -27,7 +27,7 @@ pub struct BootstrapRequest {
 pub struct BootstrapResponse {
     binding: nyxid_machine::managed::Binding,
     writer_admitted: bool,
-    sealed: nyxid_crypto::CiphertextEnvelope,
+    sealed: nyxid_machine::bootstrap::Envelope,
     server_url: String,
 }
 
@@ -208,8 +208,8 @@ mod tests {
             operation_id: uuid::Uuid::new_v4().to_string(),
             delivery_id: uuid::Uuid::new_v4().to_string(),
         };
-        let key = nyxid_crypto::generate_node_keypair();
-        let body = serde_json::json!({"binding": binding, "ticket":{"verified":true}, "recipient_public_key":key.public_key_b64u()}).to_string();
+        let key = nyxid_machine::bootstrap::generate_recipient().unwrap();
+        let body = serde_json::json!({"binding": binding, "ticket":{"verified":true}, "recipient_public_key":key.public_key_b64u().unwrap()}).to_string();
         for (name, value) in [
             ("authorization", "Bearer delegated"),
             ("x-api-key", "nyxid_sk_key"),

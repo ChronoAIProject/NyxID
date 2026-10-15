@@ -192,31 +192,6 @@ pub async fn validate_issued(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub async fn approve(
-    db: &mongodb::Database,
-    user_id: &str,
-    client_id: &str,
-    snapshot: &IncrementalConsent,
-    selected_ids: &[String],
-    allow_all_services: bool,
-    binding_hash: Option<&str>,
-    external_subject: Option<&ExternalSubjectRef>,
-) -> AppResult<IncrementalConsent> {
-    approve_with_machine(
-        db,
-        user_id,
-        client_id,
-        snapshot,
-        selected_ids,
-        allow_all_services,
-        binding_hash,
-        external_subject,
-        None,
-    )
-    .await
-}
-
-#[allow(clippy::too_many_arguments)]
 pub async fn approve_with_machine(
     db: &mongodb::Database,
     user_id: &str,

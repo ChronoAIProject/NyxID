@@ -185,7 +185,6 @@ pub async fn get(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use axum::{
         body::{Body, to_bytes},
         http::{Request, StatusCode},

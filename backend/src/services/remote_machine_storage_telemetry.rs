@@ -87,8 +87,10 @@ fn target(machine: &ManagedMachine, runtime_id: String, pod: &Value) -> AppResul
         || !m["deletionTimestamp"].is_null()
         || labels["nyxid.dev/machine-id"] != machine.node_id
         || labels["nyxid.dev/managed"] != "true"
-        || labels["nyxid.dev/runtime-generation"] != machine.runtime_generation.to_string()
-        || labels["nyxid.dev/credential-epoch"] != machine.credential_epoch.to_string()
+        || labels["nyxid.dev/runtime-generation"].as_str()
+            != Some(machine.runtime_generation.to_string().as_str())
+        || labels["nyxid.dev/credential-epoch"].as_str()
+            != Some(machine.credential_epoch.to_string().as_str())
         || labels["nyxid.dev/writer-fence"] != machine.writer_fence
     {
         return Err(invalid());
@@ -665,6 +667,87 @@ mod tests {
         assert!(
             configured_endpoints(Some(r#"{"node-one":"http://kubelet.example:10250/"}"#)).is_err()
         );
+    }
+
+    #[test]
+    fn target_requires_canonical_string_generation_and_epoch_labels() {
+        use crate::services::remote_machine_service::CreateMachineInput;
+        use uuid::Uuid;
+
+        let now = Utc::now();
+        let mut machine = CreateMachineInput::fixed("owner", true, "sha256:image")
+            .preview(&Uuid::new_v4().to_string(), now);
+        machine.sandbox_uid = Some(Uuid::new_v4().to_string());
+        machine.pod_uid = Some(Uuid::new_v4().to_string());
+        machine.pvc_name = Some("workspace".into());
+        machine.runtime_generation = 3;
+        machine.credential_epoch = 8;
+        machine.active_operation_id = Some(Uuid::new_v4().to_string());
+        machine.bootstrap_delivery_id = Some(Uuid::new_v4().to_string());
+        let pod = json!({
+            "metadata": {
+                "uid": machine.pod_uid,
+                "namespace": machine.sandbox_namespace,
+                "name": "machine-runtime",
+                "labels": {
+                    "nyxid.dev/machine-id": machine.node_id,
+                    "nyxid.dev/managed": "true",
+                    "nyxid.dev/runtime-generation": "3",
+                    "nyxid.dev/credential-epoch": "8",
+                    "nyxid.dev/writer-fence": machine.writer_fence
+                },
+                "ownerReferences": [{
+                    "controller": true,
+                    "kind": "Sandbox",
+                    "apiVersion": "agents.x-k8s.io/v1beta1",
+                    "uid": machine.sandbox_uid
+                }]
+            },
+            "spec": {
+                "nodeName": "worker-one",
+                "containers": [{"name": "node"}],
+                "volumes": [{
+                    "name": "workspace",
+                    "persistentVolumeClaim": {"claimName": machine.pvc_name}
+                }]
+            },
+            "status": {"containerStatuses": [{
+                "name": "node",
+                "containerID": "containerd://current",
+                "state": {"running": {"startedAt": now.to_rfc3339()}}
+            }]}
+        });
+        assert!(target(&machine, "runtime".into(), &pod).is_ok());
+        for (label, value) in [
+            ("nyxid.dev/runtime-generation", machine.runtime_generation),
+            ("nyxid.dev/credential-epoch", machine.credential_epoch),
+        ] {
+            for invalid in [
+                json!(value),
+                json!(format!("0{value}")),
+                json!(format!("+{value}")),
+                json!(format!(" {value}")),
+                json!((value + 1).to_string()),
+                Value::Bool(false),
+                Value::Null,
+            ] {
+                let mut changed = pod.clone();
+                changed["metadata"]["labels"][label] = invalid;
+                assert!(matches!(
+                    target(&machine, "runtime".into(), &changed),
+                    Err(AppError::MachineAuthorityStale)
+                ));
+            }
+            let mut missing = pod.clone();
+            missing["metadata"]["labels"]
+                .as_object_mut()
+                .unwrap()
+                .remove(label);
+            assert!(matches!(
+                target(&machine, "runtime".into(), &missing),
+                Err(AppError::MachineAuthorityStale)
+            ));
+        }
     }
 
     #[test]

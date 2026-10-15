@@ -1191,7 +1191,7 @@ impl SandboxApi {
             "Sandbox apply failed ({})",
             response.status()
         );
-        Ok(SandboxObservation::from_object(&response.json().await?)?)
+        SandboxObservation::from_object(&response.json().await?)
     }
 
     /// Apply only when the live object still has the expected UID. This is the
@@ -1257,7 +1257,7 @@ impl SandboxApi {
             "UID-preconditioned Sandbox apply failed ({})",
             response.status()
         );
-        Ok(SandboxObservation::from_object(&response.json().await?)?)
+        SandboxObservation::from_object(&response.json().await?)
     }
 
     pub async fn delete(&self, namespace: &str, name: &str) -> Result<bool> {
@@ -1318,12 +1318,11 @@ impl SandboxApi {
         ));
         url.query_pairs_mut()
             .append_pair("labelSelector", "nyxid.dev/managed=true");
-        Ok(self
-            .list_objects(url)
+        self.list_objects(url)
             .await?
             .iter()
             .map(SandboxObservation::from_object)
-            .collect::<Result<Vec<_>>>()?)
+            .collect::<Result<Vec<_>>>()
     }
 
     /// List controlled Pod/PVC metadata without needing a live Sandbox UID.

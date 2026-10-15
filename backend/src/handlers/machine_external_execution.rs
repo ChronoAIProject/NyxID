@@ -88,24 +88,6 @@ pub async fn decide(
     ))
 }
 
-#[derive(serde::Serialize)]
-pub struct MachineGrantsResponse {
-    pub external_grants: Vec<super::machine_external_grant::GrantResponse>,
-}
-pub async fn grants(
-    State(state): State<AppState>,
-    auth: AuthUser,
-    Path(node): Path<String>,
-) -> AppResult<Json<MachineGrantsResponse>> {
-    super::login_client_context::require_first_party_human(&auth)?;
-    Ok(Json(MachineGrantsResponse {
-        external_grants: execution::owner_grants(&state.db, &auth.user_id.to_string(), &node)
-            .await?
-            .into_iter()
-            .map(Into::into)
-            .collect(),
-    }))
-}
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OutputQuery {
@@ -168,9 +150,11 @@ pub async fn decide_bound(
             &node,
             &id,
             body.approve,
-            body.expected_grant_revision,
-            body.expected_runtime_generation,
-            &body.parameters_digest,
+            execution::ExpectedConfirmation {
+                grant_revision: body.expected_grant_revision,
+                runtime_generation: body.expected_runtime_generation,
+                parameters_digest: &body.parameters_digest,
+            },
         )
         .await?,
     ))

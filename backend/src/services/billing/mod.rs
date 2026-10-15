@@ -2167,7 +2167,7 @@ mod tests {
         let first = crate::services::auth_service::register_user(
             &db,
             "cap-global@example.com",
-            "password123",
+            &uuid::Uuid::new_v4().to_string(),
             Some("Cap Global"),
             None,
             true,
@@ -2199,7 +2199,7 @@ mod tests {
         let second = crate::services::auth_service::register_user(
             &db,
             "cap-env@example.com",
-            "password123",
+            &uuid::Uuid::new_v4().to_string(),
             Some("Cap Env"),
             None,
             true,

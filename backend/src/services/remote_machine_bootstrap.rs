@@ -86,7 +86,8 @@ pub struct BootstrapInput {
 
 pub struct BootstrapResult {
     pub binding: Binding,
-    pub sealed: nyxid_crypto::CiphertextEnvelope,
+    pub sealed: nyxid_machine::bootstrap::Envelope,
+    #[cfg(test)]
     pub replayed: bool,
 }
 
@@ -150,18 +151,6 @@ fn validate_binding(machine: &ManagedMachine, binding: &Binding) -> AppResult<()
     Ok(())
 }
 
-fn context(binding: &Binding) -> nyxid_crypto::RciContext {
-    nyxid_crypto::RciContext::new(
-        &binding.node_id,
-        &binding.delivery_id,
-        "managed-machine-bootstrap",
-        "sealed",
-        binding.context_field(),
-        None,
-        nyxid_crypto::VERSION_V1,
-    )
-}
-
 /// Resolve the live target before a protected supervisor requests credential
 /// delivery. Kubernetes authenticates this exact Pod; recipient possession by
 /// itself never authorizes target selection. No credential or ticket is stored.
@@ -215,11 +204,9 @@ pub async fn prepare_workload(
             .unwrap_or_else(|| machine.writer_fence.clone()),
     };
     validate_binding(&machine, &binding)?;
-    let recipient =
-        nyxid_crypto::decode_b64u_array::<32>("recipient_public_key", recipient_public_key)
-            .map_err(|_| AppError::MachineNotAllowed)?;
+    let digest = nyxid_machine::bootstrap::recipient_key_digest(recipient_public_key)
+        .map_err(|_| AppError::MachineNotAllowed)?;
     let verified = verifier.verify(ticket, &binding).await?;
-    let digest: [u8; 32] = Sha256::digest(recipient).into();
     if verified.binding != binding
         || verified.recipient_key_digest != digest
         || verified.expires_at <= Utc::now()
@@ -229,7 +216,7 @@ pub async fn prepare_workload(
     Ok(binding)
 }
 
-fn digest_envelope(envelope: &nyxid_crypto::CiphertextEnvelope) -> AppResult<String> {
+fn digest_envelope(envelope: &nyxid_machine::bootstrap::Envelope) -> AppResult<String> {
     let encoded = serde_json::to_vec(envelope)
         .map_err(|_| AppError::Internal("bootstrap envelope serialization failed".into()))?;
     Ok(hex::encode(Sha256::digest(encoded)))
@@ -257,13 +244,11 @@ pub async fn bootstrap(
             "managed bootstrap ticket exceeds 65536 bytes".into(),
         ));
     }
-    let recipient =
-        nyxid_crypto::decode_b64u_array::<32>("recipient_public_key", &input.recipient_public_key)
-            .map_err(|_| {
-                AppError::ValidationError("invalid bootstrap recipient public key".into())
-            })?;
+    let recipient_key_digest = nyxid_machine::bootstrap::recipient_key_digest(
+        &input.recipient_public_key,
+    )
+    .map_err(|_| AppError::ValidationError("invalid bootstrap recipient public key".into()))?;
     let verified = verifier.verify(&input.ticket, &input.binding).await?;
-    let recipient_key_digest: [u8; 32] = Sha256::digest(recipient).into();
     let now = Utc::now();
     if verified.binding != input.binding
         || verified.recipient_key_digest != recipient_key_digest
@@ -299,9 +284,12 @@ pub async fn bootstrap(
         .map_err(|_| AppError::Internal("bootstrap payload serialization failed".into()))?,
     );
     let sealed =
-        nyxid_crypto::encrypt(&plaintext, recipient, &context(&input.binding)).map_err(|_| {
-            AppError::ValidationError("bootstrap recipient key cannot receive credentials".into())
-        })?;
+        nyxid_machine::bootstrap::seal(&plaintext, &input.recipient_public_key, &input.binding)
+            .map_err(|_| {
+                AppError::ValidationError(
+                    "bootstrap recipient key cannot receive credentials".into(),
+                )
+            })?;
     let recipient_digest = hex::encode(recipient_key_digest);
     let row = ManagedBootstrapDelivery {
         id: input.binding.delivery_id.clone(),
@@ -337,7 +325,7 @@ pub async fn bootstrap(
                     doc! {"$inc": {"revision": 1_i64}, "$set": {"updated_at": bson::DateTime::from_chrono(now)}})
                     .session(&mut *session).await?;
                 if updated.modified_count != 1 { return Err(rekey_required()); }
-                return Ok(BootstrapResult { binding: existing.binding, sealed: existing.sealed, replayed: true });
+                return Ok(BootstrapResult { binding: existing.binding, sealed: existing.sealed, #[cfg(test)] replayed: true });
             }
             if machine.bootstrap_delivery_id.is_some() { return Err(rekey_required()); }
             let updated = db.collection::<ManagedMachine>(MACHINES).update_one(
@@ -358,7 +346,7 @@ pub async fn bootstrap(
                     "operation_id":input.binding.operation_id,"runtime_generation":input.binding.runtime_generation,
                     "credential_epoch":input.binding.credential_epoch,
                 })).await?;
-            Ok(BootstrapResult { binding: row.binding.clone(), sealed: row.sealed.clone(), replayed: false })
+            Ok(BootstrapResult { binding: row.binding.clone(), sealed: row.sealed.clone(), #[cfg(test)] replayed: false })
         }.await;
         api_key_mutation_service::transaction_result(result)
     }).await.map_err(api_key_mutation_service::map_transaction_error)?;

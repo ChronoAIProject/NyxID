@@ -37,8 +37,9 @@ if generation > 1:
     case += "-retained"
 result_path = pathlib.Path("/smoke-results") / (case + ".json")
 if managed:
-    from nacl.bindings import crypto_scalarmult, crypto_scalarmult_base
-    from nacl.bindings import crypto_aead_xchacha20poly1305_ietf_encrypt
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import padding, rsa
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 observed = {}
 ready = threading.Event()
@@ -63,21 +64,24 @@ def compact(value):
 
 
 def seal(public):
-    # Fixture implementation of the published nyxid-crypto v1 envelope, using
-    # libsodium only from a disposable test mount. Production decrypts it.
-    public = base64.urlsafe_b64decode(public + "=" * (-len(public) % 4))
-    private = secrets.token_bytes(32)
-    shared = crypto_scalarmult(private, public)
-    def lp(*values):
-        return b"".join(struct.pack("!H", len(value.encode())) + value.encode() for value in values)
-    kdf = b"nyxid:rci:v1:kdf\0" + lp(node_id, binding["delivery_id"], "managed-machine-bootstrap", "v1")
-    prk = hmac.new(bytes(32), shared, hashlib.sha256).digest()
-    key = hmac.new(prk, kdf + b"\1", hashlib.sha256).digest()
-    aad = b"nyxid:rci:v1:aad\0" + lp(node_id, binding["delivery_id"], "managed-machine-bootstrap", "sealed", compact(binding).decode(), "", "v1")
-    nonce = secrets.token_bytes(24)
-    cipher = crypto_aead_xchacha20poly1305_ietf_encrypt(compact(dict(auth_token=auth, signing_secret=signing, capabilities=selected)), aad, nonce, key)
+    # Independent implementation of nyxid_machine::bootstrap's managed v1
+    # envelope. Test-only cryptography wheels are mounted read-only.
+    public_der = base64.urlsafe_b64decode(public + "=" * (-len(public) % 4))
+    recipient = serialization.load_der_public_key(public_der)
+    assert isinstance(recipient, rsa.RSAPublicKey) and recipient.key_size == 3072
+    assert recipient.public_numbers().e == 65537
+    assert recipient.public_bytes(serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo) == public_der
+    key = secrets.token_bytes(32)
+    nonce = secrets.token_bytes(12)
+    domain = b"nyxid-machine-bootstrap-v1"
+    aad = domain + b"\0" + struct.pack("!I", 1) + compact(binding)
+    plaintext = compact(dict(auth_token=auth, signing_secret=signing, capabilities=selected))
+    assert len(plaintext) <= 16 * 1024
+    cipher = AESGCM(key).encrypt(nonce, plaintext, aad)
+    wrapped_key = recipient.encrypt(key, padding.OAEP(
+        mgf=padding.MGF1(hashes.SHA256()), algorithm=hashes.SHA256(), label=domain))
     encode = lambda value: base64.urlsafe_b64encode(value).decode().rstrip("=")
-    return dict(version="v1", admin_pubkey=encode(crypto_scalarmult_base(private)), nonce=encode(nonce), ciphertext=encode(cipher))
+    return dict(version=1, wrapped_key=encode(wrapped_key), nonce=encode(nonce), ciphertext=encode(cipher))
 
 
 class LocalNodeServer(http.server.BaseHTTPRequestHandler):

@@ -12,7 +12,7 @@ pub struct ManagedBootstrapDelivery {
     pub binding: nyxid_machine::managed::Binding,
     pub recipient_key_digest: String,
     pub sealed_digest: String,
-    pub sealed: nyxid_crypto::CiphertextEnvelope,
+    pub sealed: nyxid_machine::bootstrap::Envelope,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]

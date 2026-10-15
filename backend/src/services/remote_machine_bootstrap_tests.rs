@@ -80,7 +80,12 @@ fn sample_machine() -> (ManagedMachine, Binding) {
     (machine, binding)
 }
 
-pub(crate) async fn fixture() -> (Database, EncryptionKeys, Binding, nyxid_crypto::NodeKeypair) {
+pub(crate) async fn fixture() -> (
+    Database,
+    EncryptionKeys,
+    Binding,
+    nyxid_machine::bootstrap::RecipientKey,
+) {
     let db = connect_transaction_test_database("managed_bootstrap").await;
     ensure_indexes(&db).await.unwrap();
     let (machine, binding) = sample_machine();
@@ -123,15 +128,15 @@ pub(crate) async fn fixture() -> (Database, EncryptionKeys, Binding, nyxid_crypt
         db,
         test_encryption_keys(),
         binding,
-        nyxid_crypto::generate_node_keypair(),
+        nyxid_machine::bootstrap::generate_recipient().unwrap(),
     )
 }
 
-fn request(binding: &Binding, keypair: &nyxid_crypto::NodeKeypair) -> BootstrapInput {
+fn request(binding: &Binding, keypair: &nyxid_machine::bootstrap::RecipientKey) -> BootstrapInput {
     BootstrapInput {
         binding: binding.clone(),
-        ticket: serde_json::json!({"test_workload_identity":"authenticated_fixture", "recipient_key_digest": hex::encode(Sha256::digest(nyxid_crypto::decode_b64u_array::<32>("key", &keypair.public_key_b64u()).unwrap()))}),
-        recipient_public_key: keypair.public_key_b64u(),
+        ticket: serde_json::json!({"test_workload_identity":"authenticated_fixture", "recipient_key_digest": hex::encode(nyxid_machine::bootstrap::recipient_key_digest(&keypair.public_key_b64u().unwrap()).unwrap())}),
+        recipient_public_key: keypair.public_key_b64u().unwrap(),
     }
 }
 
@@ -234,8 +239,7 @@ async fn lost_response_replays_one_sealed_delivery_and_stable_node_credentials()
     .unwrap();
     assert!(second.replayed);
     assert_eq!(first.sealed, second.sealed);
-    let plaintext =
-        nyxid_crypto::decrypt(&first.sealed, keypair.private_key(), &context(&binding)).unwrap();
+    let plaintext = nyxid_machine::bootstrap::open(&first.sealed, &keypair, &binding).unwrap();
     let secrets: Value = serde_json::from_slice(&plaintext).unwrap();
     let auth = secrets["auth_token"].as_str().unwrap();
     let signing = secrets["signing_secret"].as_str().unwrap();
@@ -291,10 +295,10 @@ async fn lost_response_replays_one_sealed_delivery_and_stable_node_credentials()
     let audit_text = audit.to_string();
     assert!(!audit_text.contains(auth));
     assert!(!audit_text.contains(signing));
-    assert!(!audit_text.contains(&keypair.public_key_b64u()));
-    let mut wrong_context = context(&binding);
-    wrong_context.field_name.push_str("changed");
-    assert!(nyxid_crypto::decrypt(&first.sealed, keypair.private_key(), &wrong_context).is_err());
+    assert!(!audit_text.contains(&keypair.public_key_b64u().unwrap()));
+    let mut wrong_binding = binding.clone();
+    wrong_binding.delivery_id = uuid::Uuid::new_v4().to_string();
+    assert!(nyxid_machine::bootstrap::open(&first.sealed, &keypair, &wrong_binding).is_err());
 }
 
 #[tokio::test]
@@ -338,7 +342,7 @@ async fn changed_recipient_delivery_generation_and_pause_cannot_replay_credentia
     )
     .await
     .unwrap();
-    let other = nyxid_crypto::generate_node_keypair();
+    let other = nyxid_machine::bootstrap::generate_recipient().unwrap();
     assert!(
         bootstrap(&db, &keys, &TestWorkloadIdentity, request(&binding, &other))
             .await
@@ -551,8 +555,8 @@ async fn owner_restriction_or_deactivation_blocks_new_and_replayed_bootstrap() {
 async fn workload_ticket_recipient_is_checked_before_first_activation() {
     let (db, keys, binding, keypair) = fixture().await;
     let mut input = request(&binding, &keypair);
-    let other = nyxid_crypto::generate_node_keypair();
-    input.recipient_public_key = other.public_key_b64u();
+    let other = nyxid_machine::bootstrap::generate_recipient().unwrap();
+    input.recipient_public_key = other.public_key_b64u().unwrap();
     assert!(matches!(
         bootstrap(&db, &keys, &TestWorkloadIdentity, input).await,
         Err(AppError::Unauthorized(_))
@@ -602,8 +606,7 @@ async fn sealed_bootstrap_carries_selected_browser_computer_capability_ceiling()
     )
     .await
     .unwrap();
-    let plaintext =
-        nyxid_crypto::decrypt(&result.sealed, keypair.private_key(), &context(&binding)).unwrap();
+    let plaintext = nyxid_machine::bootstrap::open(&result.sealed, &keypair, &binding).unwrap();
     let payload: Value = serde_json::from_slice(&plaintext).unwrap();
     assert_eq!(payload["capabilities"], serde_json::json!(capabilities));
     assert_eq!(result.binding, binding);

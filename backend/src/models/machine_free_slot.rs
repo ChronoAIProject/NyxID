@@ -14,17 +14,6 @@ pub enum FreeSlotState {
     Released,
 }
 
-impl FreeSlotState {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Reserved => "reserved",
-            Self::Active => "active",
-            Self::Releasing => "releasing",
-            Self::Released => "released",
-        }
-    }
-}
-
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct MachineFreeSlot {
     #[serde(rename = "_id")]

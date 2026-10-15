@@ -12,7 +12,6 @@ use axum::{
 };
 use futures::{SinkExt, StreamExt};
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 use tower::ServiceExt;
 use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
 use zeroize::Zeroizing;
@@ -111,7 +110,7 @@ struct Journey {
     _sandbox: MockServer,
     manager: Manager,
     kube: Arc<LocalKube>,
-    recipient: nyxid_crypto::NodeKeypair,
+    recipient: nyxid_machine::bootstrap::RecipientKey,
     nonce: String,
 }
 
@@ -182,14 +181,14 @@ async fn fixture_http(label: &str) -> Journey {
     config.base_url = format!("http://{address}");
     let mut state = crate::test_utils::test_app_state_with_config(f.db.clone(), config);
     state.billing = f.billing.clone();
-    let recipient = nyxid_crypto::generate_node_keypair();
+    let recipient = nyxid_machine::bootstrap::generate_recipient().unwrap();
     let nonce = Uuid::new_v4().to_string();
     state.managed_bootstrap_verifier = Arc::new(LocalIdentity {
         nonce: nonce.clone(),
-        recipient: Sha256::digest(
-            nyxid_crypto::decode_b64u_array::<32>("key", &recipient.public_key_b64u()).unwrap(),
+        recipient: nyxid_machine::bootstrap::recipient_key_digest(
+            &recipient.public_key_b64u().unwrap(),
         )
-        .into(),
+        .unwrap(),
     });
     let profile = lifecycle::fixed_profile(format!("registry.test/node@sha256:{}", "a".repeat(64)));
     state.local_machine_platform = Some(Arc::new(crate::test_utils::LocalMachinePlatform {
@@ -455,7 +454,7 @@ async fn activate(j: &Journey, id: &str) -> ManagedSocket {
         ResourceState::Ready,
         "Node WSS still establishes Ready"
     );
-    let public = j.recipient.public_key_b64u();
+    let public = j.recipient.public_key_b64u().unwrap();
     let ticket = json!({"local_workload_nonce":j.nonce});
     let (status, prepared) = http(
         j,
@@ -480,16 +479,7 @@ async fn activate(j: &Journey, id: &str) -> ManagedSocket {
     .await;
     assert_eq!(status, StatusCode::OK, "public sealed bootstrap");
     let envelope = serde_json::from_value(delivery["sealed"].clone()).unwrap();
-    let context = nyxid_crypto::RciContext::new(
-        &managed.node_id,
-        &managed.delivery_id,
-        "managed-machine-bootstrap",
-        "sealed",
-        managed.context_field(),
-        None,
-        nyxid_crypto::VERSION_V1,
-    );
-    let plaintext = nyxid_crypto::decrypt(&envelope, j.recipient.private_key(), &context).unwrap();
+    let plaintext = nyxid_machine::bootstrap::open(&envelope, &j.recipient, &managed).unwrap();
     let secrets: Value = serde_json::from_slice(&plaintext).unwrap();
     let (mut ws, _) = tokio_tungstenite::connect_async_with_config(
         format!("ws://{}/api/v1/nodes/ws", j.address),

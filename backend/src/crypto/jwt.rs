@@ -413,6 +413,7 @@ pub fn generate_access_token(
 /// Generate an access token bound to the registered OAuth client that
 /// completed the authorization-code flow.
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 pub fn generate_oauth_access_token(
     keys: &JwtKeys,
     config: &AppConfig,

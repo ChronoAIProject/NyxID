@@ -28,7 +28,6 @@ use mongodb::{
 };
 use nyxid_machine_updater::sandbox::{SandboxApi, SandboxObservation};
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 use std::sync::{Arc, Mutex};
 use uuid::Uuid;
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -252,13 +251,13 @@ impl Fixture {
         use crate::services::remote_machine_bootstrap as bootstrap;
         let machine = self.current().await;
         assert!(lifecycle::runtime_fence_allows_bootstrap(&machine));
-        let key = nyxid_crypto::generate_node_keypair();
+        let key = nyxid_machine::bootstrap::generate_recipient().unwrap();
         let verifier = LocalWorkloadIdentity {
             nonce: Uuid::new_v4().to_string(),
-            recipient_digest: Sha256::digest(
-                nyxid_crypto::decode_b64u_array::<32>("key", &key.public_key_b64u()).unwrap(),
+            recipient_digest: nyxid_machine::bootstrap::recipient_key_digest(
+                &key.public_key_b64u().unwrap(),
             )
-            .into(),
+            .unwrap(),
         };
         let ticket = json!({"local_workload_nonce":verifier.nonce});
         let binding = bootstrap::prepare_workload(
@@ -267,7 +266,7 @@ impl Fixture {
             &machine.node_id,
             machine.pod_uid.as_deref().unwrap(),
             &ticket,
-            &key.public_key_b64u(),
+            &key.public_key_b64u().unwrap(),
         )
         .await
         .unwrap();
@@ -278,7 +277,7 @@ impl Fixture {
             bootstrap::BootstrapInput {
                 binding: binding.clone(),
                 ticket,
-                recipient_public_key: key.public_key_b64u(),
+                recipient_public_key: key.public_key_b64u().unwrap(),
             },
         )
         .await
@@ -389,7 +388,6 @@ async fn fixture(label: &str) -> Fixture {
 #[tokio::test]
 async fn native_free_lifecycle_uses_applied_observations_same_pvc_and_fresh_bootstrap() {
     let mut f = fixture("native_free_lifecycle").await;
-    let original_template;
     let initial = f.start().await;
     assert!(initial.provider_coverage.is_none());
     assert!(initial.writer_admitted);
@@ -400,7 +398,7 @@ async fn native_free_lifecycle_uses_applied_observations_same_pvc_and_fresh_boot
             .get("runtimeClassName")
             .is_none()
     );
-    original_template =
+    let original_template =
         f.cluster.lock().unwrap().sandbox.as_ref().unwrap()["spec"]["volumeClaimTemplates"].clone();
     let pvc = initial.pvc_uid.clone();
     let pod = initial.pod_uid.clone();
@@ -605,7 +603,6 @@ async fn native_force_delete_then_notfound_never_unlocks_old_workspace() {
             &quarantined.node_id,
             quarantined.revision,
             quarantined.runtime_generation,
-            None,
             None,
             None
         )

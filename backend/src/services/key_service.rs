@@ -1875,17 +1875,14 @@ mod tests {
         let (prefix, full_key, hash) = generate_scoped_api_key();
         assert!(
             prefix.starts_with("nyxid_ag_"),
-            "prefix should start with nyxid_ag_, got: {prefix}"
+            "prefix should start with nyxid_ag_"
         );
         assert!(
             full_key.starts_with("nyxid_ag_"),
-            "full_key should start with nyxid_ag_, got: {full_key}"
+            "full_key should start with nyxid_ag_"
         );
         assert_eq!(hash.len(), 64, "hash should be 64 hex chars");
-        assert!(
-            hex::decode(&hash).is_ok(),
-            "hash should be valid hex: {hash}"
-        );
+        assert!(hex::decode(&hash).is_ok(), "hash should be valid hex");
     }
 
     #[test]

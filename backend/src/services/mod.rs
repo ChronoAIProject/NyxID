@@ -260,6 +260,8 @@ pub mod remote_machine_adapter;
 pub mod remote_machine_bootstrap;
 pub mod remote_machine_bootstrap_verifier;
 pub mod remote_machine_controller_health;
+// Deferred signed-provider contracts are exercised by fixtures only.
+#[cfg(test)]
 pub mod remote_machine_fence;
 mod remote_machine_kubernetes_auth;
 pub mod remote_machine_kubernetes_identity;
@@ -344,6 +346,7 @@ pub mod remote_machine_events;
 pub mod remote_machine_manager;
 pub mod remote_machine_native;
 
+#[cfg(test)]
 pub mod remote_machine_provider;
 
 pub mod remote_machine_quota;

@@ -1540,27 +1540,18 @@ async fn later_topup_cannot_retroactively_fund_an_expired_running_cutoff() {
             before_ns >= persisted_cutoff,
             "UTC cutoff precondition changed before reserve: now_ns={before_ns}, cutoff_ns={persisted_cutoff}"
         );
-        let prepared_interval_id = next.interval_id.clone();
         let result = tx!(
             &f,
             s,
             f.billing
                 .reserve_machine_next_window_in_session(&mut s, &next)
         );
-        let after_ns = ns(Utc::now()).unwrap();
         let after_count =
             f.db.collection::<Document>(INTERVAL_COLLECTION)
                 .count_documents(doc! {"run_id":&w.run_id})
                 .await
                 .unwrap();
-        eprintln!(
-            "funding_cutoff_probe now_before_ns={before_ns} now_after_ns={after_ns} original_cutoff_ns={} persisted_cutoff_ns={persisted_cutoff} prepared_interval_id={prepared_interval_id} interval_count_before={before_count} interval_count_after={after_count}",
-            ns(until).unwrap()
-        );
-        assert!(
-            result.is_err(),
-            "expired UTC reservation succeeded: before_ns={before_ns}, after_ns={after_ns}, cutoff_ns={persisted_cutoff}, interval={prepared_interval_id}, count={before_count}->{after_count}"
-        );
+        assert!(result.is_err(), "expired UTC reservation must be rejected");
         assert_eq!(after_count, before_count);
     }
     assert_eq!(

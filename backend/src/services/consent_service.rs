@@ -11,7 +11,7 @@ use crate::models::refresh_token::{COLLECTION_NAME as REFRESH_TOKENS, RefreshTok
 /// Upserts: if consent exists for (user_id, client_id), replaces scopes.
 ///
 /// Test-only convenience wrapper: production code uses
-/// [`grant_consent_with_services`]; the plain `grant_consent` is retained only
+/// [`grant_consent_with_machine`]; the plain `grant_consent` is retained only
 /// for existing tests, so it is scoped to test builds to avoid a bin dead-code error.
 #[cfg(test)]
 pub async fn grant_consent(
@@ -27,6 +27,7 @@ pub async fn grant_consent(
 ///
 /// `Some(ids)`, including an empty list, is an explicit per-service consent
 /// grant. `None` is an explicit unrestricted service grant.
+#[cfg(test)]
 pub async fn grant_consent_with_services(
     db: &mongodb::Database,
     user_id: &str,
@@ -47,6 +48,7 @@ pub async fn grant_consent_with_services(
     .await
 }
 
+#[cfg(test)]
 async fn grant_consent_internal(
     db: &mongodb::Database,
     user_id: &str,
@@ -284,6 +286,7 @@ pub fn fingerprint(consent: &Consent) -> AppResult<String> {
 
 /// Compare-and-swap only: a deleted/revoked grant must never be upserted by an
 /// old browser decision. Normal review writes use the same version fence.
+#[cfg(test)]
 pub async fn replace_incremental_consent(
     db: &mongodb::Database,
     existing: &Consent,

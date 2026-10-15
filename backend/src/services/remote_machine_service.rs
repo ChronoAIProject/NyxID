@@ -6,6 +6,8 @@
 
 use std::{collections::BTreeMap, sync::Arc};
 
+#[cfg(test)]
+use crate::models::remote_machine::RuntimeEvidence;
 use chrono::{DateTime, Utc};
 use futures::TryStreamExt;
 use mongodb::{
@@ -25,8 +27,7 @@ use crate::{
         machine_free_slot::{FreeSlotState, MachineFreeSlot},
         remote_machine::{
             AuthorizationState, BillingState, COLLECTION_NAME as MACHINES, MachineProfileSpec,
-            ManagedMachine, ResourceState, RuntimeEvidence, SafeMachineProfileView,
-            SafeManagedMachineView,
+            ManagedMachine, ResourceState, SafeMachineProfileView, SafeManagedMachineView,
         },
         remote_machine_operation::{
             COLLECTION_NAME as OPERATIONS, CleanupState, LifecycleAction, MachineOperation,
@@ -159,6 +160,7 @@ pub struct CreateMachineInput {
 }
 
 impl CreateMachineInput {
+    #[cfg(test)]
     pub fn fixed(owner_id: &str, free_slot: bool, image_digest: &str) -> Self {
         Self {
             owner_id: owner_id.into(),
@@ -255,11 +257,14 @@ pub struct LifecycleRequest {
 
 #[derive(Clone, Debug)]
 pub struct LifecycleResult {
+    #[cfg(test)]
     pub machine: ManagedMachine,
     pub operation: MachineOperation,
+    #[cfg(test)]
     pub replayed: bool,
 }
 
+#[cfg(test)]
 #[derive(Clone, Debug)]
 pub struct RuntimeObservationInput {
     pub machine_id: String,
@@ -268,7 +273,6 @@ pub struct RuntimeObservationInput {
     pub pvc_name: Option<String>,
     pub pvc_uid: Option<String>,
     pub ready: bool,
-    pub suspended: bool,
     pub physically_stopped: bool,
     pub source: String,
     pub now: Option<DateTime<Utc>>,
@@ -341,6 +345,7 @@ pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
 /// Canonical digest for an idempotent mutation. Object keys are sorted and the
 /// raw idempotency key is included, so the same key with a different body can
 /// be rejected rather than accidentally replaying another operation.
+#[cfg(test)]
 pub fn canonical_idempotency_digest(
     owner_id: &str,
     action: &str,
@@ -592,6 +597,7 @@ pub fn safe_operation_view(operation: &MachineOperation) -> SafeMachineOperation
     }
 }
 
+#[cfg(test)]
 pub async fn create_machine(
     db: &Database,
     input: CreateMachineInput,
@@ -956,12 +962,12 @@ pub fn resolve_profile(
 /// This value participates in the full durable intent digest.
 pub fn normalize_profile_request(body: &mut Value, expected: &str) -> AppResult<()> {
     controlled_profile(expected)?;
-    if let Some(value) = body.get("profile_version") {
-        if value.as_str() != Some(expected) {
-            return Err(AppError::ValidationError(
-                "Machine request profile does not match the accepted profile".into(),
-            ));
-        }
+    if let Some(value) = body.get("profile_version")
+        && value.as_str() != Some(expected)
+    {
+        return Err(AppError::ValidationError(
+            "Machine request profile does not match the accepted profile".into(),
+        ));
     }
     body.as_object_mut()
         .ok_or_else(|| AppError::ValidationError("Invalid Machine request".into()))?
@@ -1007,6 +1013,7 @@ pub fn fixed_profile(image_digest: impl Into<String>) -> MachineProfileSpec {
     profile
 }
 
+#[cfg(test)]
 pub async fn request_action(db: &Database, input: LifecycleRequest) -> AppResult<LifecycleResult> {
     request_action_inner(db, input, None).await
 }
@@ -1058,7 +1065,7 @@ async fn request_action_inner(
         }
         let machine = get_machine(db, &input.owner_id, &input.machine_id).await?.ok_or_else(|| AppError::NotFound("managed machine not found".into()))?;
         super::remote_machine_runtime::validate_saved_contract(db, &machine).await?;
-        return Ok(LifecycleResult { machine, operation: existing, replayed: true });
+        return Ok(LifecycleResult { #[cfg(test)] machine, operation: existing, #[cfg(test)] replayed: true });
     }
     let now = input.now.unwrap_or_else(Utc::now);
     let operation_id = Uuid::new_v4().to_string();
@@ -1101,10 +1108,10 @@ async fn request_action_inner(
                     .await?
                     .ok_or_else(|| AppError::NotFound("managed machine not found".into()))?;
                 validate_current_contract(&machine)?;
-                if let Some(expected) = input_owned.expected_revision {
-                    if machine.revision != expected {
-                        return Err(AppError::Conflict("managed_machine_revision_conflict".into()));
-                    }
+                if let Some(expected) = input_owned.expected_revision
+                    && machine.revision != expected
+                {
+                    return Err(AppError::Conflict("managed_machine_revision_conflict".into()));
                 }
                 if machine.resource_state == ResourceState::Deleted {
                     return Err(AppError::Conflict("managed_machine_is_deleted".into()));
@@ -1226,7 +1233,7 @@ async fn request_action_inner(
                     update.bootstrap_digest = None;
                 }
                 append_owner_audit(&db_owned, session, &input_owned.owner_id, &format!("machine_{}_accepted", input_owned.action.as_str()), &machine.node_id, &operation_id).await?;
-                Ok(LifecycleResult { machine: update, operation, replayed: false })
+                Ok(LifecycleResult { #[cfg(test)] machine: update, operation, #[cfg(test)] replayed: false })
             }.await;
             api_key_mutation_service::transaction_result(result)
         })
@@ -1257,6 +1264,7 @@ pub async fn get_machine(
         .await?)
 }
 
+#[cfg(test)]
 pub async fn list_machines(db: &Database, owner_id: &str) -> AppResult<Vec<ManagedMachine>> {
     Ok(db
         .collection::<ManagedMachine>(MACHINES)
@@ -1347,10 +1355,6 @@ pub async fn managed_machine_for_node(
         .await?)
 }
 
-pub async fn is_managed_node(db: &Database, node_id: &str) -> AppResult<bool> {
-    Ok(managed_machine_for_node(db, node_id).await?.is_some())
-}
-
 pub async fn guard_legacy_node_mutation(
     db: &Database,
     node_id: &str,
@@ -1390,21 +1394,22 @@ pub async fn guard_legacy_node_mutation(
     Ok(())
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct RuntimeIdentity<'a> {
+    pub generation: i64,
+    pub credential_epoch: i64,
+    pub writer_fence: &'a str,
+}
+
 pub fn can_write_runtime(
     state: ResourceState,
     authorization: AuthorizationState,
-    runtime_generation: i64,
-    credential_epoch: i64,
-    writer_fence: &str,
-    expected_generation: i64,
-    expected_epoch: i64,
-    expected_fence: &str,
+    current: RuntimeIdentity<'_>,
+    expected: RuntimeIdentity<'_>,
 ) -> bool {
     state == ResourceState::Ready
         && authorization == AuthorizationState::Active
-        && runtime_generation == expected_generation
-        && credential_epoch == expected_epoch
-        && writer_fence == expected_fence
+        && current == expected
 }
 
 pub async fn runtime_fence_allows_writer(
@@ -1421,12 +1426,16 @@ pub async fn runtime_fence_allows_writer(
             && can_write_runtime(
                 machine.resource_state,
                 machine.authorization_state,
-                machine.runtime_generation,
-                machine.credential_epoch,
-                &machine.writer_fence,
-                runtime_generation,
-                credential_epoch,
-                writer_fence,
+                RuntimeIdentity {
+                    generation: machine.runtime_generation,
+                    credential_epoch: machine.credential_epoch,
+                    writer_fence: &machine.writer_fence,
+                },
+                RuntimeIdentity {
+                    generation: runtime_generation,
+                    credential_epoch,
+                    writer_fence,
+                },
             )
     }))
 }
@@ -1463,7 +1472,6 @@ pub async fn advance_runtime_generation(
     expected_generation: i64,
     pod_uid: Option<&str>,
     now: Option<DateTime<Utc>>,
-    previous_stop: Option<&super::remote_machine_fence::VerifiedRuntimeEvidence>,
 ) -> AppResult<ManagedMachine> {
     let now = now.unwrap_or_else(Utc::now);
     let current = managed_machine_for_node(db, machine_id)
@@ -1482,7 +1490,6 @@ pub async fn advance_runtime_generation(
             "native_predecessor_stop_required".into(),
         ));
     }
-    let _ = previous_stop; // Legacy API argument confers no native authority.
     if !current.free_slot {
         // Paid create/resume fund the future generation in their acceptance
         // transaction; internal replacement uses the dedicated atomic path.
@@ -1504,6 +1511,7 @@ pub async fn advance_runtime_generation(
         .ok_or_else(|| AppError::Conflict("runtime_generation_or_revision_conflict".into()))
 }
 
+#[cfg(test)]
 pub async fn apply_runtime_observation(
     db: &Database,
     input: RuntimeObservationInput,
@@ -1512,12 +1520,12 @@ pub async fn apply_runtime_observation(
     let machine = managed_machine_for_node(db, &input.machine_id)
         .await?
         .ok_or_else(|| AppError::NotFound("managed machine not found".into()))?;
-    if let Some(existing) = machine.sandbox_uid.as_deref() {
-        if existing != input.sandbox_uid {
-            return Err(AppError::Conflict(
-                "sandbox_uid_mismatch_reconciling".into(),
-            ));
-        }
+    if let Some(existing) = machine.sandbox_uid.as_deref()
+        && existing != input.sandbox_uid
+    {
+        return Err(AppError::Conflict(
+            "sandbox_uid_mismatch_reconciling".into(),
+        ));
     }
     if input.pod_uid.is_some()
         && machine.pod_uid.is_some()
@@ -1581,189 +1589,6 @@ pub async fn apply_runtime_observation(
         .return_document(ReturnDocument::After)
         .await?
         .ok_or_else(|| AppError::Conflict("managed_machine_revision_conflict".into()))
-}
-
-/// Admit bootstrap only after the configured runtime/provider verifier returns
-/// evidence bound to the exact Sandbox, Pod, generation, epoch and writer fence.
-/// Application readiness is a later authenticated WSS transition; requiring it
-/// here would deadlock a fresh Node whose startup probe waits for its identity.
-pub async fn activate_ready_runtime(
-    db: &Database,
-    machine_id: &str,
-    evidence: &super::remote_machine_fence::VerifiedRuntimeEvidence,
-) -> AppResult<ManagedMachine> {
-    let binding = evidence.binding();
-    if binding.sandbox_uid.is_empty()
-        || evidence.physically_stopped()
-        || binding.runtime_generation <= 0
-        || binding.credential_epoch <= 0
-        || binding.pod_uid.as_deref().unwrap_or_default().is_empty()
-        || binding.writer_fence.is_empty()
-        || evidence.provider_id().is_empty()
-        || evidence.evidence_ref().is_empty()
-    {
-        return Err(AppError::Conflict(
-            "runtime_provider_evidence_unavailable".into(),
-        ));
-    }
-    let machine = managed_machine_for_node(db, machine_id)
-        .await?
-        .ok_or_else(|| AppError::NotFound("managed machine not found".into()))?;
-    if !super::remote_machine_runtime::execution_coverage_is_live(&machine, Utc::now()) {
-        return Err(AppError::Conflict("runtime_funding_unavailable".into()));
-    }
-    if machine.sandbox_uid.as_deref() != Some(binding.sandbox_uid.as_str())
-        || machine.pod_uid != binding.pod_uid
-        || machine.runtime_generation != binding.runtime_generation
-        || machine.credential_epoch != binding.credential_epoch
-        || machine.writer_fence != binding.writer_fence
-    {
-        return Err(AppError::Conflict("runtime_fence_evidence_mismatch".into()));
-    }
-    if !matches!(
-        machine.resource_state,
-        ResourceState::Provisioning
-            | ResourceState::Resuming
-            | ResourceState::Reconciling
-            | ResourceState::Ready
-    ) {
-        return Err(AppError::Conflict(
-            "runtime_state_not_ready_for_activation".into(),
-        ));
-    }
-    let runtime = RuntimeEvidence {
-        sandbox_uid: binding.sandbox_uid.clone(),
-        pod_uid: binding.pod_uid.clone(),
-        runtime_generation: binding.runtime_generation,
-        credential_epoch: binding.credential_epoch,
-        writer_fence: binding.writer_fence.clone(),
-        ready: true,
-        physically_stopped: false,
-        observed_at: evidence.observed_at(),
-        source: evidence.provider_id().to_string(),
-        provider_evidence_ref: Some(evidence.evidence_ref().to_string()),
-    };
-    db.collection::<ManagedMachine>(MACHINES)
-        .find_one_and_update(
-            doc! {"_id": machine_id, "revision": machine.revision, "runtime_generation": binding.runtime_generation, "credential_epoch": binding.credential_epoch, "writer_fence": &binding.writer_fence},
-            doc! {"$set": {"writer_admitted": true, "billing_state": if machine.free_slot { BillingState::Free.as_str() } else { BillingState::Ready.as_str() }, "authorization_state": AuthorizationState::Active.as_str(), "last_runtime_evidence": bson::to_bson(&runtime).map_err(|_| mongodb::error::Error::custom("evidence serialization"))?, "last_heartbeat_at": bson::DateTime::from_chrono(evidence.observed_at()), "updated_at": bson::DateTime::from_chrono(evidence.observed_at())}, "$inc": {"revision": 1}},
-        )
-        .return_document(ReturnDocument::After)
-        .await?
-        .ok_or_else(|| AppError::Conflict("runtime_activation_revision_conflict".into()))
-}
-
-/// Complete pause/delete only after a verified physical stop proof. Deletion
-/// additionally requires credential, workspace/PV and accounting finality;
-/// otherwise the machine and free slot remain occupied and reconciling.
-pub async fn finalize_stop(
-    db: &Database,
-    machine_id: &str,
-    evidence: &super::remote_machine_fence::VerifiedRuntimeEvidence,
-    cleanup: Option<&super::remote_machine_fence::VerifiedCleanupEvidence>,
-) -> AppResult<ManagedMachine> {
-    if !evidence.physically_stopped() {
-        return Err(AppError::Conflict(
-            "runtime_stop_evidence_unavailable".into(),
-        ));
-    }
-    let binding = evidence.binding();
-    let machine = managed_machine_for_node(db, machine_id)
-        .await?
-        .ok_or_else(|| AppError::NotFound("managed machine not found".into()))?;
-    if machine.sandbox_uid.as_deref() != Some(binding.sandbox_uid.as_str())
-        || machine.pod_uid != binding.pod_uid
-        || machine.runtime_generation != binding.runtime_generation
-        || machine.credential_epoch != binding.credential_epoch
-        || machine.writer_fence != binding.writer_fence
-    {
-        return Err(AppError::Conflict(
-            "runtime_stop_fence_evidence_mismatch".into(),
-        ));
-    }
-    if machine.resource_state == ResourceState::Deleting {
-        let Some(cleanup) = cleanup else {
-            return Err(AppError::Conflict("cleanup_finality_pending".into()));
-        };
-        // Cleanup finality is a provider-issued capability.  Even though the
-        // token has already passed provider verification, bind it again to
-        // the exact stop evidence and manager row before releasing the slot.
-        // This prevents a valid proof for another Sandbox/generation from
-        // being replayed against this machine.
-        if cleanup.binding() != binding
-            || cleanup.pvc_uid() != machine.pvc_uid.as_deref()
-            || !cleanup.all_final()
-            || cleanup.evidence_ref().is_empty()
-        {
-            return Err(AppError::Conflict("cleanup_finality_pending".into()));
-        }
-        let db_owned = db.clone();
-        let owner_id = machine.owner_id.clone();
-        let cleanup_ref = cleanup.evidence_ref().to_string();
-        let machine_id = machine_id.to_string();
-        let runtime_generation = binding.runtime_generation;
-        let credential_epoch = binding.credential_epoch;
-        let writer_fence = binding.writer_fence.clone();
-        let observed_at = cleanup.observed_at();
-        let revoked_auth_hash = hash_token(&Uuid::new_v4().to_string());
-        let revoked_signing_hash = hash_token(&Uuid::new_v4().to_string());
-        let updated = db_owned
-            .client()
-            .start_session()
-            .await?
-            .start_transaction()
-            .write_concern(mongodb::options::WriteConcern::majority())
-            .and_run2(async move |session| {
-                let result: AppResult<ManagedMachine> = async {
-                    if !deletion_authorized_in_session(&db_owned, session, &machine_id).await? {
-                        return Err(AppError::Conflict("machine_owner_deletion_basis_required".into()));
-                    }
-                    super::remote_machine_runtime::require_accounting_final_in_session(&db_owned, session, &machine).await?;
-                    let updated = db_owned
-                        .collection::<ManagedMachine>(MACHINES)
-                        .find_one_and_update(
-                            doc! {"_id": &machine_id, "revision": machine.revision, "resource_state": "deleting", "runtime_generation": runtime_generation, "credential_epoch": credential_epoch, "writer_fence": &writer_fence},
-                            doc! {"$set": {"resource_state": ResourceState::Deleted.as_str(), "writer_admitted": false, "billing_state": BillingState::Closed.as_str(), "authorization_state": AuthorizationState::Revoked.as_str(), "cleanup_state": CleanupState::Complete.as_str(), "cleanup_evidence_digest": &cleanup_ref, "updated_at": bson::DateTime::from_chrono(observed_at)}, "$inc": {"revision": 1}},
-                        )
-                        .return_document(ReturnDocument::After)
-                        .session(&mut *session)
-                        .await?
-                        .ok_or_else(|| {
-                            AppError::Conflict("cleanup_finality_revision_conflict".into())
-                        })?;
-                    let released = db_owned
-                        .collection::<MachineFreeSlot>(FREE_SLOTS)
-                        .update_one(
-                            doc! {"_id": &owner_id, "machine_id": &machine_id, "state": {"$in": ["reserved", "active", "releasing"]}},
-                            doc! {"$set": {"state": FreeSlotState::Released.as_str(), "release_evidence_digest": &cleanup_ref, "released_at": bson::DateTime::from_chrono(observed_at), "updated_at": bson::DateTime::from_chrono(observed_at)}, "$inc": {"revision": 1}},
-                        )
-                        .session(&mut *session)
-                        .await?;
-                    if machine.free_slot && released.matched_count != 1 {
-                        return Err(AppError::Conflict("free_slot_cleanup_binding_missing".into()));
-                    }
-                    db_owned.collection::<Document>(crate::models::node::COLLECTION_NAME)
-                        .update_one(doc! {"_id": &machine_id}, doc! {"$set": {"auth_token_hash": &revoked_auth_hash, "signing_secret_hash": &revoked_signing_hash, "signing_secret_encrypted": bson::Bson::Null, "is_active": false, "status": "offline", "connection_owner": bson::Bson::Null, "updated_at": bson::DateTime::from_chrono(observed_at)}, "$inc": {"machine_authority_admission_fence": 1}})
-                        .session(&mut *session).await?;
-                    Ok(updated)
-                }
-                .await;
-                api_key_mutation_service::transaction_result(result)
-            })
-            .await
-            .map_err(api_key_mutation_service::map_transaction_error)?;
-        Ok(updated)
-    } else {
-        super::remote_machine_runtime::require_accounting_final(db, &machine).await?;
-        db.collection::<ManagedMachine>(MACHINES)
-            .find_one_and_update(
-                doc! {"_id": machine_id, "revision": machine.revision, "resource_state": {"$in": ["stopping", "reconciling"]}, "runtime_generation": binding.runtime_generation, "credential_epoch": binding.credential_epoch, "writer_fence": &binding.writer_fence},
-                doc! {"$set": {"resource_state": ResourceState::Paused.as_str(), "writer_admitted": false, "billing_state": BillingState::Suspended.as_str(), "cleanup_state": CleanupState::NotRequired.as_str(), "updated_at": bson::DateTime::from_chrono(evidence.observed_at()), "last_runtime_evidence": {"sandbox_uid": &binding.sandbox_uid, "pod_uid": &binding.pod_uid, "runtime_generation": binding.runtime_generation, "credential_epoch": binding.credential_epoch, "writer_fence": &binding.writer_fence, "ready": false, "physically_stopped": true, "observed_at": bson::DateTime::from_chrono(evidence.observed_at()), "source": evidence.provider_id(), "provider_evidence_ref": evidence.evidence_ref()}}, "$inc": {"revision": 1}},
-            )
-            .return_document(ReturnDocument::After)
-            .await?
-            .ok_or_else(|| AppError::Conflict("pause_finality_revision_conflict".into()))
-    }
 }
 
 /// Finalize an intent that was never submitted to the Sandbox API. The
@@ -1927,6 +1752,7 @@ pub async fn entitlement(db: &Database, owner_id: &str) -> AppResult<MachineEnti
 /// authority and queues a physical pause. Only a durable, policy-bound owner
 /// deletion basis permits irreversible cleanup, including already paused disks.
 /// Funding/grant expiry alone never deletes storage or expires the free slot.
+#[cfg(test)]
 pub async fn suspend_ineligible(db: &Database) -> AppResult<u64> {
     suspend_ineligible_with_billing(db, None).await
 }
@@ -2119,6 +1945,7 @@ pub fn next_resource_state(action: LifecycleAction) -> ResourceState {
     }
 }
 
+#[cfg(test)]
 pub fn observation_state(current: ResourceState) -> ResourceState {
     match current {
         ResourceState::Deleting => ResourceState::Deleting,

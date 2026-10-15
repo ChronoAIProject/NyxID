@@ -98,6 +98,7 @@ pub fn resolve_authorize_scope_for_client(
 
 /// Create an authorization code for the OAuth authorization code flow.
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 pub async fn create_authorization_code(
     db: &mongodb::Database,
     client_id: &str,
@@ -133,6 +134,7 @@ pub async fn create_authorization_code(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 pub async fn create_authorization_code_with_incremental(
     db: &mongodb::Database,
     client_id: &str,

@@ -3,8 +3,8 @@ use serde_json::json;
 
 use crate::models::remote_machine::{AuthorizationState, BillingState, ResourceState};
 use crate::services::remote_machine_service::{
-    CreateMachineInput, can_write_runtime, canonical_idempotency_digest, observation_state,
-    safe_view,
+    CreateMachineInput, RuntimeIdentity, can_write_runtime, canonical_idempotency_digest,
+    observation_state, safe_view,
 };
 
 #[test]
@@ -57,35 +57,49 @@ fn observations_preserve_pending_lifecycle_states() {
 
 #[test]
 fn runtime_writer_requires_exact_generation_epoch_and_ready_state() {
+    let current = RuntimeIdentity {
+        generation: 3,
+        credential_epoch: 8,
+        writer_fence: "fence-a",
+    };
     assert!(can_write_runtime(
         ResourceState::Ready,
         AuthorizationState::Active,
-        3,
-        8,
-        "fence-a",
-        3,
-        8,
-        "fence-a",
+        current,
+        current,
     ));
-    assert!(!can_write_runtime(
-        ResourceState::Ready,
-        AuthorizationState::Active,
-        3,
-        8,
-        "fence-a",
-        2,
-        8,
-        "fence-a",
-    ));
+    for expected in [
+        RuntimeIdentity {
+            generation: 2,
+            ..current
+        },
+        RuntimeIdentity {
+            credential_epoch: 7,
+            ..current
+        },
+        RuntimeIdentity {
+            writer_fence: "fence-b",
+            ..current
+        },
+    ] {
+        assert!(!can_write_runtime(
+            ResourceState::Ready,
+            AuthorizationState::Active,
+            current,
+            expected,
+        ));
+    }
     assert!(!can_write_runtime(
         ResourceState::Stopping,
         AuthorizationState::Active,
-        3,
-        8,
-        "fence-a",
-        3,
-        8,
-        "fence-a",
+        current,
+        current,
+    ));
+    assert!(!can_write_runtime(
+        ResourceState::Ready,
+        AuthorizationState::Revoked,
+        current,
+        current,
     ));
 }
 
@@ -692,7 +706,6 @@ async fn remote_machine_native_observation_allows_bootstrap_before_ready_only() 
         0,
         Some(pod.as_str()),
         None,
-        None,
     )
     .await
     .unwrap();
@@ -950,7 +963,6 @@ async fn remote_machine_observation_preserves_identity_and_cannot_admit_writer()
         pvc_name: Some("workspace".into()),
         pvc_uid: Some("pvc-a".into()),
         ready: true,
-        suspended: false,
         physically_stopped: false,
         source: "sandbox".into(),
         now: None,
@@ -1028,17 +1040,10 @@ async fn remote_machine_bootstrap_replay_and_generation_are_fenced() {
         .await
         .unwrap()
         .unwrap();
-    let next = lifecycle::advance_runtime_generation(
-        &db,
-        id,
-        current.revision,
-        0,
-        Some("new-pod"),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
+    let next =
+        lifecycle::advance_runtime_generation(&db, id, current.revision, 0, Some("new-pod"), None)
+            .await
+            .unwrap();
     assert!(next.bootstrap_delivery_id.is_none());
     assert_eq!(
         lifecycle::accept_bootstrap_delivery(&db, id, 0, 0, "delivery-1", "digest-1")
@@ -1047,19 +1052,11 @@ async fn remote_machine_bootstrap_replay_and_generation_are_fenced() {
         lifecycle::BootstrapDeliveryResult::RekeyRequired
     );
     assert!(
-        lifecycle::advance_runtime_generation(
-            &db,
-            id,
-            next.revision,
-            1,
-            Some("another-pod"),
-            None,
-            None
-        )
-        .await
-        .unwrap_err()
-        .to_string()
-        .contains("native_predecessor_stop_required")
+        lifecycle::advance_runtime_generation(&db, id, next.revision, 1, Some("another-pod"), None)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("native_predecessor_stop_required")
     );
 }
 
@@ -1075,7 +1072,6 @@ async fn remote_machine_delete_requires_bound_complete_cleanup_and_releases_atom
         0,
         0,
         Some("pod"),
-        None,
         None,
     )
     .await
@@ -1168,7 +1164,6 @@ async fn remote_machine_pause_retains_workspace_slot_and_managed_mutation_guard(
         0,
         Some("pod"),
         None,
-        None,
     )
     .await
     .unwrap();
@@ -1217,7 +1212,6 @@ async fn remote_machine_rekey_is_idempotent_and_waits_for_old_writer_stop() {
         0,
         Some("pod"),
         None,
-        None,
     )
     .await
     .unwrap();
@@ -1252,7 +1246,6 @@ async fn remote_machine_rekey_is_idempotent_and_waits_for_old_writer_stop() {
             first.machine.revision,
             current.runtime_generation,
             Some("replacement-pod"),
-            None,
             None
         )
         .await
@@ -1265,7 +1258,6 @@ async fn remote_machine_rekey_is_idempotent_and_waits_for_old_writer_stop() {
         stopped.revision,
         current.runtime_generation,
         Some("replacement-pod"),
-        None,
         None,
     )
     .await
@@ -1330,7 +1322,6 @@ async fn remote_machine_never_submitted_delete_finalizes_without_provider_assump
             deleted.revision,
             0,
             None,
-            None,
             None
         )
         .await
@@ -1361,7 +1352,6 @@ async fn remote_machine_never_submitted_delete_finalizes_without_provider_assump
         0,
         0,
         Some("pod"),
-        None,
         None,
     )
     .await
@@ -1405,7 +1395,6 @@ async fn remote_machine_lost_ready_observation_closes_admission_but_keeps_identi
         0,
         Some(pod.as_str()),
         None,
-        None,
     )
     .await
     .unwrap();
@@ -1444,7 +1433,6 @@ async fn remote_machine_lost_ready_observation_closes_admission_but_keeps_identi
             pvc_name: None,
             pvc_uid: None,
             ready: false,
-            suspended: false,
             physically_stopped: false,
             source: "sandbox".into(),
             now: None,

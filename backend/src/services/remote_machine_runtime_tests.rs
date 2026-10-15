@@ -301,7 +301,6 @@ async fn start_ready_with_age(f: &Fixture, age_seconds: i64) -> ManagedMachine {
         0,
         None,
         None,
-        None,
     )
     .await
     .unwrap();
@@ -314,7 +313,6 @@ async fn start_ready_with_age(f: &Fixture, age_seconds: i64) -> ManagedMachine {
             pvc_name: Some("workspace".into()),
             pvc_uid: Some(Uuid::new_v4().to_string()),
             ready: true,
-            suspended: false,
             physically_stopped: false,
             source: "test-api".into(),
             now: None,
@@ -678,7 +676,6 @@ async fn paid_generation_cannot_advance_without_replacement_settlement() {
             machine.revision,
             machine.runtime_generation,
             Some("new-pod"),
-            None,
             None
         )
         .await
@@ -912,7 +909,6 @@ async fn submission_marker_prevents_false_local_stop_and_deadline_keeps_workspac
         0,
         None,
         None,
-        None,
     )
     .await
     .unwrap();
@@ -982,7 +978,6 @@ async fn unused_paid_generation_can_pause_then_require_a_fresh_manual_resume_quo
         &resume.node_id,
         resume.revision,
         resume.runtime_generation,
-        None,
         None,
         None,
     )

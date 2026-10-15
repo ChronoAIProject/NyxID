@@ -179,15 +179,15 @@ fn cli_http_client_builder(profile: Option<&str>) -> Result<reqwest::ClientBuild
     Ok(builder)
 }
 
-fn credential_delete_url(address: &str) -> Result<url::Url> {
+fn credential_request_url(address: &str) -> Result<url::Url> {
     let address =
-        url::Url::parse(address).map_err(|_| anyhow::anyhow!("Invalid credential DELETE URL"))?;
+        url::Url::parse(address).map_err(|_| anyhow::anyhow!("Invalid credential request URL"))?;
     if address.host().is_none()
         || !address.username().is_empty()
         || address.password().is_some()
         || address.fragment().is_some()
     {
-        bail!("Credential DELETE URL must have a host without userinfo or a fragment");
+        bail!("Credential request URL must have a host without userinfo or a fragment");
     }
     if address.scheme() != "https"
         && !(address.scheme() == "http"
@@ -197,13 +197,28 @@ fn credential_delete_url(address: &str) -> Result<url::Url> {
             ))
     {
         bail!(
-            "Credential DELETE requires HTTPS; HTTP is allowed only for localhost, 127.0.0.1, or [::1]"
+            "Credential request requires HTTPS; HTTP is allowed only for localhost, 127.0.0.1, or [::1]"
         );
     }
     Ok(address)
 }
 
-fn credential_delete_client(profile: Option<&str>, address: &url::Url) -> Result<Client> {
+/// Build a client for a credential-bearing API or authentication request.
+/// Remote destinations require HTTPS; local development bypasses proxies.
+pub(crate) fn build_credential_http_client_for_url(
+    profile: Option<&str>,
+    address: &str,
+) -> Result<Client> {
+    credential_http_client_builder(profile, address)?
+        .build()
+        .context("Failed to build credential request client")
+}
+
+fn credential_http_client_builder(
+    profile: Option<&str>,
+    address: &str,
+) -> Result<reqwest::ClientBuilder> {
+    let address = credential_request_url(address)?;
     let local_http = address.scheme() == "http";
     let mut builder = cli_http_client_builder(profile)?
         .https_only(!local_http)
@@ -215,9 +230,7 @@ fn credential_delete_client(profile: Option<&str>, address: &url::Url) -> Result
             .no_proxy()
             .resolve("localhost", std::net::SocketAddr::from(([127, 0, 0, 1], 0)));
     }
-    builder
-        .build()
-        .context("Failed to build credential DELETE client")
+    Ok(builder)
 }
 
 pub struct ApiClient {
@@ -244,7 +257,7 @@ impl ApiClient {
         access_token: String,
         profile: Option<String>,
     ) -> Result<Self> {
-        let client = build_cli_http_client(profile.as_deref())?;
+        let client = build_credential_http_client_for_url(profile.as_deref(), base_url)?;
         let agent_key_auth = crate::auth::agent_key::is_agent_key_profile(profile.as_deref())
             && crate::auth::read_saved_token_for(profile.as_deref()).as_deref()
                 == Some(access_token.as_str());
@@ -263,9 +276,10 @@ impl ApiClient {
 
     pub fn from_auth(auth: &crate::cli::AuthArgs) -> Result<Self> {
         if let Some(resolved) = crate::auth::resolve_access_token_override(auth) {
+            let base_url = auth.resolved_base_url()?;
             return Ok(Self {
-                client: build_cli_http_client(auth.profile.as_deref())?,
-                base_url: format!("{}/api/v1", auth.resolved_base_url()?.trim_end_matches('/')),
+                client: build_credential_http_client_for_url(auth.profile.as_deref(), &base_url)?,
+                base_url: format!("{}/api/v1", base_url.trim_end_matches('/')),
                 access_token: resolved.token,
                 profile: auth.profile.clone(),
                 refresh_disabled: true,
@@ -298,8 +312,8 @@ impl ApiClient {
     /// Install HTTPS/exact-loopback and no-redirect guarantees before reading
     /// or transmitting a caller-supplied downstream credential.
     pub fn require_credential_transport(&mut self) -> Result<()> {
-        let address = credential_delete_url(self.base_url_root())?;
-        self.client = credential_delete_client(self.profile.as_deref(), &address)?;
+        self.client =
+            build_credential_http_client_for_url(self.profile.as_deref(), self.base_url_root())?;
         Ok(())
     }
 
@@ -332,12 +346,11 @@ impl ApiClient {
     }
 
     pub fn for_credential_transfer(mut self) -> Result<Self> {
-        self.client = crate::tls::client_builder()?
-            .redirect(reqwest::redirect::Policy::none())
-            .user_agent(CLI_USER_AGENT)
-            .connect_timeout(std::time::Duration::from_secs(10))
-            .timeout(std::time::Duration::from_secs(75))
-            .build()?;
+        self.client =
+            credential_http_client_builder(self.profile.as_deref(), self.base_url_root())?
+                .timeout(std::time::Duration::from_secs(75))
+                .build()
+                .context("Failed to build credential transfer client")?;
         self.refresh_disabled = true;
         Ok(self)
     }
@@ -646,8 +659,8 @@ impl ApiClient {
         path: &str,
         body: &B,
     ) -> Result<T> {
-        let url = credential_delete_url(&format!("{}{path}", self.base_url))?;
-        let client = credential_delete_client(self.profile.as_deref(), &url)?;
+        let url = format!("{}{path}", self.base_url);
+        let client = build_credential_http_client_for_url(self.profile.as_deref(), &url)?;
         let resp = client
             .delete(url.clone())
             .bearer_auth(&self.access_token)
@@ -849,7 +862,7 @@ pub async fn anonymous_post(
 ) -> Result<serde_json::Value> {
     let base = format!("{}/api/v1", base_url.trim_end_matches('/'));
     let url = format!("{base}{path}");
-    let client = build_cli_http_client(profile)?;
+    let client = build_credential_http_client_for_url(profile, &url)?;
 
     let resp = client
         .post(&url)
@@ -878,7 +891,7 @@ pub async fn anonymous_post_empty(
 ) -> Result<()> {
     let base = format!("{}/api/v1", base_url.trim_end_matches('/'));
     let url = format!("{base}{path}");
-    let client = build_cli_http_client(profile)?;
+    let client = build_credential_http_client_for_url(profile, &url)?;
 
     let resp = client
         .post(&url)
@@ -991,14 +1004,18 @@ mod tests {
     }
 
     #[test]
-    fn credential_delete_urls_allow_https_and_only_exact_loopback_http() {
+    fn credential_request_urls_allow_https_and_only_exact_loopback_http() {
         for address in [
             "https://service.example/api/v1/service-preferences/hidden",
             "http://localhost:3001/api/v1/service-preferences/hidden",
             "http://127.0.0.1:3001/api/v1/service-preferences/hidden",
             "http://[::1]:3001/api/v1/service-preferences/hidden",
         ] {
-            assert!(super::credential_delete_url(address).is_ok(), "{address}");
+            assert!(super::credential_request_url(address).is_ok(), "{address}");
+            assert!(
+                ApiClient::new(address, uuid::Uuid::new_v4().to_string()).is_ok(),
+                "{address}"
+            );
         }
         for address in [
             "http://service.example/hidden",
@@ -1012,9 +1029,172 @@ mod tests {
             "https://service.example/hidden#fragment",
             "file:///hidden",
             "ftp://localhost/hidden",
+            "/api/v1/hidden",
+            "//service.example/hidden",
+            "service.example/hidden",
         ] {
-            assert!(super::credential_delete_url(address).is_err(), "{address}");
+            assert!(super::credential_request_url(address).is_err(), "{address}");
+            assert!(
+                ApiClient::new(address, uuid::Uuid::new_v4().to_string()).is_err(),
+                "{address}"
+            );
         }
+    }
+
+    #[tokio::test]
+    async fn explicit_credentials_cannot_bypass_transport_validation() {
+        for address in [
+            "http://service.example",
+            "http://127.0.0.2",
+            "https://user:dummy@service.example",
+        ] {
+            let mut auth = auth_args(address.to_string());
+            auth.access_token = Some(uuid::Uuid::new_v4().to_string());
+            assert!(ApiClient::from_auth(&auth).is_err(), "{address}");
+            assert!(
+                ApiClient::from_auth_checked(&auth).await.is_err(),
+                "{address}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn api_paths_cannot_override_the_validated_destination() {
+        let origin = MockServer::start().await;
+        let target = MockServer::start().await;
+        let paths = [
+            "/transport-fixture".to_string(),
+            "relative-fixture".to_string(),
+            format!("//{}/transport-fixture", target.address()),
+            format!("{}/transport-fixture", target.uri()),
+            format!("/../../..//{}/transport-fixture", target.address()),
+        ];
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .expect(paths.len() as u64)
+            .mount(&origin)
+            .await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .expect(0)
+            .mount(&target)
+            .await;
+        let mut api = ApiClient::new(
+            &format!("{}/prefix", origin.uri()),
+            uuid::Uuid::new_v4().to_string(),
+        )
+        .unwrap();
+        for route in paths {
+            api.get_value(&route).await.unwrap();
+        }
+        origin.verify().await;
+        target.verify().await;
+    }
+
+    #[tokio::test]
+    async fn api_and_credential_transfer_refuse_body_preserving_redirects() {
+        let origin = MockServer::start().await;
+        let target = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/transport-fixture"))
+            .respond_with(ResponseTemplate::new(307).insert_header("Location", target.uri()))
+            .expect(2)
+            .mount(&origin)
+            .await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .expect(0)
+            .mount(&target)
+            .await;
+        for transfer in [false, true] {
+            let mut api = ApiClient::new(&origin.uri(), uuid::Uuid::new_v4().to_string()).unwrap();
+            if transfer {
+                api = api.for_credential_transfer().unwrap();
+            }
+            let error = api
+                .post::<serde_json::Value, _>(
+                    "/transport-fixture",
+                    &serde_json::json!({
+                        "credential": uuid::Uuid::new_v4().to_string(),
+                    }),
+                )
+                .await
+                .expect_err("credential-bearing requests must not redirect");
+            assert_eq!(
+                error.downcast_ref::<ApiError>().unwrap().status(),
+                reqwest::StatusCode::TEMPORARY_REDIRECT
+            );
+        }
+        origin.verify().await;
+        target.verify().await;
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // serializes proxy environment mutations
+    async fn loopback_api_and_credential_transfer_bypass_environment_proxies() {
+        let _env_guard = env_lock().lock().unwrap_or_else(|err| err.into_inner());
+        let origin = MockServer::start().await;
+        let proxy = MockServer::start().await;
+        let proxy_url = proxy.uri();
+        let _env = EnvGuard::set(&[
+            ("HTTP_PROXY", Some(&proxy_url)),
+            ("http_proxy", Some(&proxy_url)),
+            ("HTTPS_PROXY", Some(&proxy_url)),
+            ("https_proxy", Some(&proxy_url)),
+            ("ALL_PROXY", Some(&proxy_url)),
+            ("all_proxy", Some(&proxy_url)),
+            ("NO_PROXY", Some("")),
+            ("no_proxy", Some("")),
+        ]);
+        Mock::given(method("GET"))
+            .and(path("/api/v1/transport-fixture"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"direct": true})),
+            )
+            .expect(2)
+            .mount(&origin)
+            .await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(502))
+            .expect(0)
+            .mount(&proxy)
+            .await;
+        let address = origin.uri().replace("127.0.0.1", "localhost");
+        for transfer in [false, true] {
+            let mut api = ApiClient::new(&address, uuid::Uuid::new_v4().to_string()).unwrap();
+            if transfer {
+                api = api.for_credential_transfer().unwrap();
+            }
+            assert_eq!(
+                api.get_value("/transport-fixture").await.unwrap(),
+                serde_json::json!({"direct": true})
+            );
+        }
+        origin.verify().await;
+        proxy.verify().await;
+    }
+
+    #[tokio::test]
+    async fn anonymous_auth_posts_reject_remote_cleartext_before_sending() {
+        let body = serde_json::json!({});
+        let error = super::anonymous_post(
+            "http://cleartext-fixture.invalid",
+            "/auth/register",
+            &body,
+            None,
+        )
+        .await
+        .expect_err("registration requires secure transport");
+        assert!(error.to_string().contains("requires HTTPS"));
+        let error = super::anonymous_post_empty(
+            "http://cleartext-fixture.invalid",
+            "/auth/reset-password",
+            &body,
+            None,
+        )
+        .await
+        .expect_err("password reset requires secure transport");
+        assert!(error.to_string().contains("requires HTTPS"));
     }
 
     #[tokio::test]

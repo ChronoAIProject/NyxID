@@ -231,10 +231,10 @@ impl Metadata {
             .await
             .map_err(|_| metadata_error())?;
         let now = Instant::now();
-        if let Some(cached) = &state.cached {
-            if now < cached.refresh_at {
-                return Ok(cached.token.clone());
-            }
+        if let Some(cached) = &state.cached
+            && now < cached.refresh_at
+        {
+            return Ok(cached.token.clone());
         }
         state.cached = None; // Never return stale credentials on refresh failure.
         if state.retry_after.is_some_and(|retry| now < retry) {

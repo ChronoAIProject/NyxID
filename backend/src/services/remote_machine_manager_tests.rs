@@ -177,7 +177,6 @@ async fn bind_runtime(f: &Fixture) -> ManagedMachine {
         0,
         None,
         None,
-        None,
     )
     .await
     .unwrap();
@@ -190,7 +189,6 @@ async fn bind_runtime(f: &Fixture) -> ManagedMachine {
             pvc_name: Some("workspace".into()),
             pvc_uid: Some(uuid::Uuid::new_v4().to_string()),
             ready: true,
-            suspended: false,
             physically_stopped: false,
             source: "local-http-fixture".into(),
             now: Some(Utc::now()),

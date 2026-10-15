@@ -1,8 +1,5 @@
 //! Durable Sandbox effect consumer and observation loop. No Pod/PVC mutations.
-use super::{
-    remote_machine_fence::{VerifiedCleanupEvidence, VerifiedRuntimeEvidence},
-    remote_machine_operation_service as operations, remote_machine_service as lifecycle,
-};
+use super::{remote_machine_operation_service as operations, remote_machine_service as lifecycle};
 use crate::{
     errors::{AppError, AppResult},
     models::{
@@ -11,7 +8,6 @@ use crate::{
         remote_machine_outbox::{EffectKind, MachineEffectOutbox},
     },
 };
-use async_trait::async_trait;
 use chrono::Utc;
 use futures::{StreamExt, TryStreamExt};
 use mongodb::{
@@ -140,35 +136,6 @@ pub async fn platform_readiness_for_provisioning(base_url: &str) -> PlatformRead
     readiness
 }
 
-/// Deployment-owned source of *verified* observations. It must bind the exact
-/// provider runtime and storage writer, not infer stopping from Kubernetes API
-/// absence. No production verifier is selected by a boolean/environment flag.
-#[async_trait]
-pub trait RuntimeProvider: Send + Sync {
-    async fn install_deadline(
-        &self,
-        _machine: &ManagedMachine,
-        _control: &nyxid_machine::managed::DeadlineControl,
-    ) -> AppResult<Option<super::remote_machine_fence::VerifiedDeadlineReceipt>> {
-        Ok(None)
-    }
-    async fn runtime(&self, machine: &ManagedMachine)
-    -> AppResult<Option<VerifiedRuntimeEvidence>>;
-    async fn cleanup(&self, machine: &ManagedMachine)
-    -> AppResult<Option<VerifiedCleanupEvidence>>;
-}
-
-pub struct UnavailableProvider;
-#[async_trait]
-impl RuntimeProvider for UnavailableProvider {
-    async fn runtime(&self, _: &ManagedMachine) -> AppResult<Option<VerifiedRuntimeEvidence>> {
-        Ok(None)
-    }
-    async fn cleanup(&self, _: &ManagedMachine) -> AppResult<Option<VerifiedCleanupEvidence>> {
-        Ok(None)
-    }
-}
-
 #[derive(Clone)]
 pub struct Manager {
     pub db: Database,
@@ -250,10 +217,9 @@ impl Manager {
                 if !matches!(
                     tokio::time::timeout(Duration::from_secs(45), manager.observe(&machine)).await,
                     Ok(Ok(()))
-                ) {
-                    if let Some(op) = &machine.active_operation_id {
-                        manager.progress(op, "runtime_evidence_pending").await?;
-                    }
+                ) && let Some(op) = &machine.active_operation_id
+                {
+                    manager.progress(op, "runtime_evidence_pending").await?;
                 }
                 if machine.specialist_assignment_state == "pending" {
                     // The durable pending choice survives a lost WSS response.
@@ -388,12 +354,12 @@ impl Manager {
             // never allowed to resurrect or remove its resource.
             return Ok(());
         }
-        if effect.kind == EffectKind::DeleteSandbox {
-            if !lifecycle::deletion_authorized(&self.db, &machine.node_id).await? {
-                return Err(AppError::Conflict(
-                    "machine_owner_deletion_basis_required".into(),
-                ));
-            }
+        if effect.kind == EffectKind::DeleteSandbox
+            && !lifecycle::deletion_authorized(&self.db, &machine.node_id).await?
+        {
+            return Err(AppError::Conflict(
+                "machine_owner_deletion_basis_required".into(),
+            ));
         }
         if effect.kind == EffectKind::DeleteSandbox
             && lifecycle::finalize_unallocated_delete(&self.db, &machine.node_id)
@@ -451,7 +417,6 @@ impl Manager {
                 0,
                 None,
                 None,
-                None,
             )
             .await?;
         }
@@ -467,7 +432,6 @@ impl Manager {
                     &machine.node_id,
                     machine.revision,
                     machine.runtime_generation,
-                    None,
                     None,
                     None,
                 )
@@ -728,18 +692,16 @@ impl Manager {
             .or(observed.tracked_pod_name.as_deref());
         if pod.is_none()
             && let Some(name) = tracked_name
-        {
-            if self
+            && self
                 .api
                 .resource(&machine.sandbox_namespace, "pods", name)
                 .await
                 .map_err(api_error)?
                 .is_some()
-            {
-                return self
-                    .uncertain(&machine, "predecessor_pod_identity_unknown")
-                    .await;
-            }
+        {
+            return self
+                .uncertain(&machine, "predecessor_pod_identity_unknown")
+                .await;
         }
         let node_name = pod
             .and_then(|p| p.node_name.as_deref())
@@ -774,33 +736,33 @@ impl Manager {
         // Capture the selected CSI's PV identity before deleting its PVC. Retain
         // policy never becomes complete merely because the claim disappeared.
         let mut bindings = Document::new();
-        if let Some(pvc) = pvc {
-            if let Some(name) = &pvc.volume_name {
-                let pv = self
-                    .api
-                    .persistent_volume(name)
-                    .await
-                    .map_err(api_error)?
-                    .ok_or_else(unavailable)?;
-                if pv.claim_uid != pvc.uid
-                    || pv.claim_namespace.as_deref() != Some(machine.sandbox_namespace.as_str())
-                    || pv.claim_name.as_deref() != Some(pvc.name.as_str())
-                    || pv.uid.is_none()
-                    || pv.deletion_timestamp.is_some()
-                    || pv.phase.as_deref() != Some("Bound")
-                    || machine
-                        .native_pv_uid
-                        .as_ref()
-                        .is_some_and(|id| pv.uid.as_ref() != Some(id))
-                {
-                    return self
-                        .uncertain(&machine, "pv_claim_ownership_conflict")
-                        .await;
-                }
-                bindings.insert("native_pv_name", name.clone());
-                bindings.insert("native_pv_uid", pv.uid);
-                bindings.insert("native_pv_reclaim_policy", pv.reclaim_policy);
+        if let Some(pvc) = pvc
+            && let Some(name) = &pvc.volume_name
+        {
+            let pv = self
+                .api
+                .persistent_volume(name)
+                .await
+                .map_err(api_error)?
+                .ok_or_else(unavailable)?;
+            if pv.claim_uid != pvc.uid
+                || pv.claim_namespace.as_deref() != Some(machine.sandbox_namespace.as_str())
+                || pv.claim_name.as_deref() != Some(pvc.name.as_str())
+                || pv.uid.is_none()
+                || pv.deletion_timestamp.is_some()
+                || pv.phase.as_deref() != Some("Bound")
+                || machine
+                    .native_pv_uid
+                    .as_ref()
+                    .is_some_and(|id| pv.uid.as_ref() != Some(id))
+            {
+                return self
+                    .uncertain(&machine, "pv_claim_ownership_conflict")
+                    .await;
             }
+            bindings.insert("native_pv_name", name.clone());
+            bindings.insert("native_pv_uid", pv.uid);
+            bindings.insert("native_pv_reclaim_policy", pv.reclaim_policy);
         }
         let running = !observed.desired_suspended
             && observed.deletion_timestamp.is_none()
@@ -1041,32 +1003,30 @@ impl Manager {
         {
             return self.complete_if_final(machine).await;
         }
-        if let Some(operation_id) = &current.active_operation_id {
-            if let Some(op) =
+        if let Some(operation_id) = &current.active_operation_id
+            && let Some(op) =
                 operations::get_operation(&self.db, &current.owner_id, operation_id).await?
-            {
-                if matches!(
-                    op.action,
-                    LifecycleAction::Create
-                        | LifecycleAction::Resume
-                        | LifecycleAction::Rekey
-                        | LifecycleAction::Reconcile
-                ) && op.terminal_at.is_none()
-                    && op
-                        .deadline_at
-                        .unwrap_or(op.created_at + chrono::Duration::minutes(15))
-                        <= Utc::now()
-                {
-                    super::remote_machine_runtime::safety_pause(
-                        &self.db,
-                        self.billing.clone(),
-                        &current,
-                        "expansion_deadline_exceeded",
-                    )
-                    .await?;
-                    return Err(unavailable());
-                }
-            }
+            && matches!(
+                op.action,
+                LifecycleAction::Create
+                    | LifecycleAction::Resume
+                    | LifecycleAction::Rekey
+                    | LifecycleAction::Reconcile
+            )
+            && op.terminal_at.is_none()
+            && op
+                .deadline_at
+                .unwrap_or(op.created_at + chrono::Duration::minutes(15))
+                <= Utc::now()
+        {
+            super::remote_machine_runtime::safety_pause(
+                &self.db,
+                self.billing.clone(),
+                &current,
+                "expansion_deadline_exceeded",
+            )
+            .await?;
+            return Err(unavailable());
         }
         if !current.free_slot
             && matches!(
@@ -1124,29 +1084,26 @@ impl Manager {
             .native_observation
             .as_ref()
             .ok_or_else(unavailable)?;
-        if !machine.free_slot {
-            if let Err(error) = super::remote_machine_runtime::native_observe_and_settle(
+        if !machine.free_slot
+            && let Err(error) = super::remote_machine_runtime::native_observe_and_settle(
                 &self.db,
                 self.billing.clone().ok_or_else(unavailable)?,
                 &machine,
                 observation,
             )
             .await
-            {
-                if observation.running && machine.resource_state == ResourceState::Ready {
-                    super::remote_machine_runtime::safety_pause(
-                        &self.db,
-                        self.billing.clone(),
-                        &machine,
-                        "native_running_observation_gap",
-                    )
-                    .await?;
-                }
-                if !(machine.resource_state == ResourceState::Deleting
-                    && observation.stop_confirmed)
-                {
-                    return Err(error);
-                }
+        {
+            if observation.running && machine.resource_state == ResourceState::Ready {
+                super::remote_machine_runtime::safety_pause(
+                    &self.db,
+                    self.billing.clone(),
+                    &machine,
+                    "native_running_observation_gap",
+                )
+                .await?;
+            }
+            if !(machine.resource_state == ResourceState::Deleting && observation.stop_confirmed) {
+                return Err(error);
             }
         }
         // Billing may change its state; use the latest lifecycle revision.
@@ -1177,7 +1134,6 @@ impl Manager {
                         &machine.node_id,
                         machine.revision,
                         machine.runtime_generation,
-                        None,
                         None,
                         None,
                     )
@@ -1286,16 +1242,15 @@ impl Manager {
                 return Err(unavailable());
             }
         }
-        if let Some(name) = &machine.native_pod_name {
-            if self
+        if let Some(name) = &machine.native_pod_name
+            && self
                 .api
                 .resource(&machine.sandbox_namespace, "pods", name)
                 .await
                 .map_err(api_error)?
                 .is_some()
-            {
-                return Err(unavailable());
-            }
+        {
+            return Err(unavailable());
         }
         if let Some(name) = &machine.pvc_name {
             if self
@@ -1793,6 +1748,7 @@ pub async fn accepts_node_profile(
 
 /// Native admission permits bootstrap; commercial readiness additionally
 /// requires this exact runtime's authenticated, leased WSS capability report.
+#[cfg(test)]
 pub async fn mark_runtime_online(
     db: &Database,
     node_id: &str,

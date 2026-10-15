@@ -618,12 +618,12 @@ async fn lifecycle_action(
                 .into(),
         ));
     }
-    if let Some(requested) = body.action {
-        if requested != action {
-            return Err(AppError::ValidationError(
-                "action does not match the requested lifecycle endpoint".into(),
-            ));
-        }
+    if let Some(requested) = body.action
+        && requested != action
+    {
+        return Err(AppError::ValidationError(
+            "action does not match the requested lifecycle endpoint".into(),
+        ));
     }
     let idempotency_key = require_idempotency_key(&headers)?;
     let mut request_body = json!({
@@ -859,8 +859,7 @@ mod tests {
             Json(body()),
         )
         .await
-        .err()
-        .expect("non-human rekey must be denied before database access");
+        .expect_err("non-human rekey must be denied before database access");
         assert_eq!(denied.into_response().status(), StatusCode::FORBIDDEN);
         auth.auth_method = AuthMethod::Session;
         let mut missing_revision = body();

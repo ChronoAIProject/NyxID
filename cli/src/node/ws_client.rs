@@ -343,17 +343,16 @@ pub async fn run_with_shutdown(
     credential_sender: Arc<SharedCredentialsSender>,
     backend: Arc<SecretBackend>,
 ) {
-    if let Some(binding) = &config.managed_runtime {
-        if super::managed_runtime::validate_existing_config(&config, binding).is_err()
+    if let Some(binding) = &config.managed_runtime
+        && (super::managed_runtime::validate_existing_config(&config, binding).is_err()
             || signing_secret
                 .as_ref()
-                .is_none_or(|secret| secret.is_empty())
-        {
-            tracing::error!(
-                "Managed node startup refused invalid profile, endpoint, or signing material"
-            );
-            return;
-        }
+                .is_none_or(|secret| secret.is_empty()))
+    {
+        tracing::error!(
+            "Managed node startup refused invalid profile, endpoint, or signing material"
+        );
+        return;
     }
     let in_flight = Arc::new(AtomicUsize::new(0));
     let in_flight_shutdown = in_flight.clone();

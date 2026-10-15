@@ -358,6 +358,45 @@ impl Authority {
 }
 
 #[cfg(test)]
+pub(crate) fn external_fixture() -> ExternalAuthority {
+    let id = || uuid::Uuid::new_v4().to_string();
+    let owner = id();
+    ExternalAuthority {
+        principal: ExternalPrincipal::ApiKey {
+            user_id: owner.clone(),
+            api_key_id: id(),
+            api_key_credential_id: None,
+        },
+        oauth_consent: None,
+        context_id: id(),
+        generation: 1,
+        mode: "shared_legacy".into(),
+        owner_id: owner.clone(),
+        actor_id: owner,
+        node_id: id(),
+        runtime_id: id(),
+        runtime_generation: None,
+        credential_epoch: None,
+        grant_id: id(),
+        grant_revision: 1,
+        assignment_revision: 1,
+        lease_id: id(),
+        job_id: None,
+        expires_at_ms: 1100,
+        auth_expires_at_ms: 2000,
+        job_expires_at_ms: 2000,
+        funding_expires_at_ms: None,
+        capabilities: Capabilities {
+            shell: true,
+            files: true,
+            ..Default::default()
+        },
+        file_roots: vec!["/workspace".into()],
+        services: vec![],
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -496,44 +535,5 @@ mod tests {
             &access.job_id,
             1_000
         ));
-    }
-}
-
-#[cfg(test)]
-pub(crate) fn external_fixture() -> ExternalAuthority {
-    let id = || uuid::Uuid::new_v4().to_string();
-    let owner = id();
-    ExternalAuthority {
-        principal: ExternalPrincipal::ApiKey {
-            user_id: owner.clone(),
-            api_key_id: id(),
-            api_key_credential_id: None,
-        },
-        oauth_consent: None,
-        context_id: id(),
-        generation: 1,
-        mode: "shared_legacy".into(),
-        owner_id: owner.clone(),
-        actor_id: owner,
-        node_id: id(),
-        runtime_id: id(),
-        runtime_generation: None,
-        credential_epoch: None,
-        grant_id: id(),
-        grant_revision: 1,
-        assignment_revision: 1,
-        lease_id: id(),
-        job_id: None,
-        expires_at_ms: 1100,
-        auth_expires_at_ms: 2000,
-        job_expires_at_ms: 2000,
-        funding_expires_at_ms: None,
-        capabilities: Capabilities {
-            shell: true,
-            files: true,
-            ..Default::default()
-        },
-        file_roots: vec!["/workspace".into()],
-        services: vec![],
     }
 }

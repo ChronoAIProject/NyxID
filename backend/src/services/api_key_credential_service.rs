@@ -110,7 +110,8 @@ pub async fn revoke(db: &Database, id: &str, reason: CredentialRevokedReason) ->
 /// both together. A child revocation never edits its parent or the parent grant.
 pub struct RevokedCredential {
     pub credential: ApiKeyCredential,
-    pub source_invalidation: SourceInvalidation,
+    // Retain the transaction receipt alongside the revoked credential.
+    pub _source_invalidation: SourceInvalidation,
 }
 
 pub async fn revoke_in_session(
@@ -136,7 +137,7 @@ pub async fn revoke_in_session(
         .map_err(|_| AppError::Internal("Invalid Agent Key credential source".into()))?;
     Ok(Some(RevokedCredential {
         credential,
-        source_invalidation,
+        _source_invalidation: source_invalidation,
     }))
 }
 

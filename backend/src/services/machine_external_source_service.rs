@@ -34,7 +34,8 @@ pub struct SourceInvalidation {
 /// Evidence returned after a live child read/write fence. The authenticated
 /// caller supplies these identifiers; request bodies are not an authority.
 pub struct ChildSourceFence {
-    pub source_fence: i64,
+    // Preserve the checked source revision even when only expiry is consumed.
+    pub _source_fence: i64,
     pub expires_at: Option<DateTime<Utc>>,
 }
 
@@ -244,7 +245,7 @@ pub async fn fence_child_in_session(
         _ => return Err(AppError::MachinePermissionRevoked),
     };
     Ok(ChildSourceFence {
-        source_fence: source_fence(&row)?,
+        _source_fence: source_fence(&row)?,
         expires_at,
     })
 }

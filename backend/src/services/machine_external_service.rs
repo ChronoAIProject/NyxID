@@ -247,17 +247,17 @@ async fn resolve_node(
     Ok(rows.into_iter().next().expect("one node"))
 }
 
-fn external_binding(
-    job: &MachineJob,
-) -> AppResult<(
-    &ExternalPrincipalRef,
-    &str,
+type ExternalJobBinding<'a> = (
+    &'a ExternalPrincipalRef,
+    &'a str,
     i64,
     i64,
     DateTime<Utc>,
-    &[String],
-    &str,
-)> {
+    &'a [String],
+    &'a str,
+);
+
+fn external_binding(job: &MachineJob) -> AppResult<ExternalJobBinding<'_>> {
     match job.binding.as_ref() {
         Some(MachineJobBinding::External {
             principal,
@@ -1329,6 +1329,7 @@ async fn cancel(
     )
 }
 
+#[cfg(test)]
 pub async fn owner_confirmations(
     db: &Database,
     owner: &str,
@@ -1716,6 +1717,7 @@ pub async fn maintenance(state: &AppState) -> AppResult<()> {
 #[path = "machine_external_execution_tests.rs"]
 mod tests;
 
+#[cfg(test)]
 pub async fn owner_grants(
     db: &Database,
     owner: &str,
@@ -1931,28 +1933,27 @@ pub async fn owner_cancel(
             doc!{"kind":"owner_job","job_id":id},
             doc!{"$setOnInsert":{"_id":Uuid::new_v4().to_string(),"kind":"owner_job","job_id":id,"node_id":node_id,"user_id":owner,"runtime_id":&job.runtime_id,"execution_deadline":bson::DateTime::from_chrono(job.expires_at),"pending":true,"claim_until":bson::DateTime::from_millis(0),"created_at":bson::DateTime::now()}}
         ).upsert(true).session(&mut session).await?;
-        if let Ok((_, _, _, _, _, _, lease_id)) = external_binding(&job) {
-            if let Some(lease) = state
+        if let Ok((_, _, _, _, _, _, lease_id)) = external_binding(&job)
+            && let Some(lease) = state
                 .db
                 .collection::<ExternalLease>(access::LEASES)
                 .find_one(doc! {"_id":lease_id,"kind":"external"})
                 .session(&mut session)
                 .await?
-            {
-                enqueue_lease_in_session(
-                    &state.db,
-                    &lease.external_authority,
-                    "owner_cancelled",
-                    &mut session,
-                )
+        {
+            enqueue_lease_in_session(
+                &state.db,
+                &lease.external_authority,
+                "owner_cancelled",
+                &mut session,
+            )
+            .await?;
+            state
+                .db
+                .collection::<Document>(access::LEASES)
+                .delete_one(doc! {"_id":lease_id})
+                .session(&mut session)
                 .await?;
-                state
-                    .db
-                    .collection::<Document>(access::LEASES)
-                    .delete_one(doc! {"_id":lease_id})
-                    .session(&mut session)
-                    .await?;
-            }
         }
     }
     session.commit_transaction().await?;
@@ -1975,19 +1976,23 @@ pub async fn owner_cancel(
     )
 }
 
+pub struct ExpectedConfirmation<'a> {
+    pub grant_revision: i64,
+    pub runtime_generation: u64,
+    pub parameters_digest: &'a str,
+}
+
 pub async fn owner_decide_bound(
     db: &Database,
     owner: &str,
     node_id: &str,
     id: &str,
     approve: bool,
-    grant_revision: i64,
-    runtime_generation: u64,
-    digest: &str,
+    expected: ExpectedConfirmation<'_>,
 ) -> AppResult<Value> {
-    let runtime_generation =
-        i64::try_from(runtime_generation).map_err(|_| invalid("Invalid runtime generation"))?;
-    let row=db.collection::<ExternalConfirmation>(execution::CONFIRMATIONS).find_one(doc!{"_id":id,"user_id":owner,"node_id":node_id,"grant_revision":grant_revision,"runtime_generation":runtime_generation,"parameters_digest":digest}).await?.ok_or(AppError::MachineConfirmationDeclined)?;
+    let runtime_generation = i64::try_from(expected.runtime_generation)
+        .map_err(|_| invalid("Invalid runtime generation"))?;
+    let row=db.collection::<ExternalConfirmation>(execution::CONFIRMATIONS).find_one(doc!{"_id":id,"user_id":owner,"node_id":node_id,"grant_revision":expected.grant_revision,"runtime_generation":runtime_generation,"parameters_digest":expected.parameters_digest}).await?.ok_or(AppError::MachineConfirmationDeclined)?;
     let result = owner_decide(db, owner, &row.id, approve).await?;
     Ok(json!({"confirmation":{
         "id":result["id"],"node_id":result["node_id"],"subject":result["principal"],"grant_id":result["grant_id"],"grant_revision":result["grant_revision"],"assignment_revision":result["assignment_revision"],"runtime_generation":result["runtime_generation"],"operation":result["operation"],"parameters_digest":result["parameters_digest"],"safe_parameters":result["safe_parameters"],"review_parameters_available":result["review_parameters_available"],"status":result["state"],"created_at":result["created_at"],"expires_at":result["expires_at"],"approved_at":if approve{result["decided_at"].clone()}else{Value::Null},"approved_until":if approve{result["expires_at"].clone()}else{Value::Null}

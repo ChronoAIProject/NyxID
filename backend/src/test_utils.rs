@@ -2881,6 +2881,13 @@ pub async fn scoped_specialist_auth(
         .unwrap()
 }
 
+/// Replaces unavailable local platform I/O configuration only. All owner auth,
+/// quote, funding, lifecycle, source fences and outbox code remains production.
+pub(crate) struct LocalMachinePlatform {
+    pub profile: crate::models::remote_machine::MachineProfileSpec,
+    pub readiness: crate::services::remote_machine_manager::PlatformReadiness,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3792,11 +3799,4 @@ mod tests {
             assert_eq!(options.direct_connection, expected);
         }
     }
-}
-
-/// Replaces unavailable local platform I/O configuration only. All owner auth,
-/// quote, funding, lifecycle, source fences and outbox code remains production.
-pub(crate) struct LocalMachinePlatform {
-    pub profile: crate::models::remote_machine::MachineProfileSpec,
-    pub readiness: crate::services::remote_machine_manager::PlatformReadiness,
 }

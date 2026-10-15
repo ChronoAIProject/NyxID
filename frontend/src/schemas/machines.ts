@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { creditsSchema } from "./credits";
+import { creditsSchema } from "./credits.ts";
 
 export const REMOTE_MACHINE_PROFILE = "remote-machine";
 export const REMOTE_MACHINE_POLICY = "remote-machine-mvp";

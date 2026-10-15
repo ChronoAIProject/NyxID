@@ -402,6 +402,7 @@ pub async fn validate_selection_in_session(
     Ok(())
 }
 
+#[cfg(test)]
 pub async fn validate_selection(
     db: &Database,
     user: &str,
@@ -516,7 +517,7 @@ fn build_grant(
         policy.assignments.insert(
             node.clone(),
             Assignment {
-                capabilities: choice.capabilities.clone(),
+                capabilities: choice.capabilities,
                 mode: "shared_legacy".into(),
                 revision: 1,
                 legacy: false,
@@ -940,7 +941,9 @@ pub async fn invalidate_user_in_session(
 /// mutation's inline batch. The source epoch/revision remains the authority;
 /// the cursor is only progress and can safely restart after a crash.
 pub struct SourceSweepBatch {
+    #[cfg(test)]
     pub examined: u64,
+    #[cfg(test)]
     pub invalidated: u64,
     /// Continue the same pass after this ID; None means restart on the next pass.
     pub next_after: Option<String>,
@@ -970,13 +973,13 @@ pub async fn sweep_invalid_sources(
                 .find(filter).sort(doc! {"_id":1}).limit(limit)
                 .session(&mut *session).await?;
             let grants: Vec<MachineExternalGrant> = cursor.stream(&mut *session).try_collect().await?;
-            let mut invalidated = 0;
+            let mut _invalidated = 0;
             for grant in &grants {
                 match validate_grant_source(&db, grant, session).await {
                     Ok(()) => {}
                     Err(AppError::MachinePermissionRevoked | AppError::MachineNotAllowed | AppError::MachineAuthorityStale) => {
                         let reason = if grant.expires_at <= Utc::now() {"grant_expired"} else {"source_invalid"};
-                        invalidated += invalidate(&db,
+                        _invalidated += invalidate(&db,
                             doc! {"_id":&grant.id,"user_id":&grant.user_id,"revision":grant.revision},
                             reason, session).await?;
                     }
@@ -984,8 +987,8 @@ pub async fn sweep_invalid_sources(
                 }
             }
             Ok(SourceSweepBatch {
-                examined: grants.len() as u64,
-                invalidated,
+                #[cfg(test)] examined: grants.len() as u64,
+                #[cfg(test)] invalidated: _invalidated,
                 next_after: if grants.len() == limit as usize {grants.last().map(|g|g.id.clone())} else {None},
             })
         }.await)
@@ -1372,6 +1375,7 @@ pub struct AdmittedGrant {
     pub assignment: Assignment,
     pub restrictions: MachineRestrictions,
     pub authentication_expires_at: DateTime<Utc>,
+    #[cfg(test)]
     pub api_key_credential_id: Option<String>,
 }
 
@@ -1453,7 +1457,7 @@ pub async fn admit_in_session(
         assignments: BTreeMap::from([(
             node.into(),
             GrantAssignment {
-                capabilities: assignment.capabilities.clone(),
+                capabilities: assignment.capabilities,
                 file_roots: restrictions.file_roots.clone(),
                 service_ids: Vec::new(),
             },
@@ -1462,7 +1466,7 @@ pub async fn admit_in_session(
     };
     validate_selection_in_session(db, &source.user_id, &selection, session).await?;
     let mut expires_at = source.expires_at.min(grant.expires_at);
-    let credential_id = match (&source.source, &grant.binding) {
+    let _credential_id = match (&source.source, &grant.binding) {
         (
             Source::OAuth { client_id, consent },
             ExternalGrantBinding::OAuth {
@@ -1568,7 +1572,8 @@ pub async fn admit_in_session(
         assignment,
         restrictions,
         authentication_expires_at: expires_at,
-        api_key_credential_id: credential_id,
+        #[cfg(test)]
+        api_key_credential_id: _credential_id,
     })
 }
 

@@ -128,7 +128,7 @@ impl ReplayGuard {
         secret: &[u8],
         now: i64,
     ) -> Result<(), Rejection> {
-        if !matches!(request.version, 1 | 2 | 3)
+        if !matches!(request.version, 1..=3)
             || (request.version == 1 && request.authority.is_some())
             || (request.version == 2 && request.authority.is_none())
             || (request.version != 3 && request.external_authority.is_some())

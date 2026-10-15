@@ -125,10 +125,10 @@ async fn reclaim_in_session(
         || machine.cleanup_state != "complete"
         || machine.authorization_state != AuthorizationState::Revoked
         || machine.writer_admitted
-        || !machine
+        || machine
             .cleanup_evidence_digest
             .as_deref()
-            .is_some_and(|s| !s.is_empty())
+            .is_none_or(|s| s.is_empty())
     {
         return Ok("resource_finality_pending");
     }

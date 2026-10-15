@@ -74,17 +74,13 @@ pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
         .await?
         .iter()
         .any(|i| i.options.as_ref().and_then(|o| o.name.as_deref()) == Some("operation_id_1"))
-    {
-        if let Err(error) = db
+        && let Err(error) = db
             .collection::<Document>(OUTBOX)
             .drop_index("operation_id_1")
             .await
-        {
-            if !matches!(error.kind.as_ref(), mongodb::error::ErrorKind::Command(command) if command.code == 27)
-            {
-                return Err(error);
-            }
-        }
+        && !matches!(error.kind.as_ref(), mongodb::error::ErrorKind::Command(command) if command.code == 27)
+    {
+        return Err(error);
     }
     db.collection::<Document>(OUTBOX)
         .create_index(
@@ -99,11 +95,13 @@ pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
 pub fn is_idempotent_replay(existing_digest: &str, incoming_digest: &str, state: &str) -> bool {
     existing_digest == incoming_digest
         && matches!(state, "accepted" | "applying" | "reconciling" | "succeeded")
 }
 
+#[cfg(test)]
 pub fn next_resource_state(
     action: crate::models::remote_machine_operation::LifecycleAction,
 ) -> crate::models::remote_machine::ResourceState {
@@ -158,15 +156,6 @@ pub async fn claim_effect(
     lease: std::time::Duration,
 ) -> AppResult<Option<MachineEffectOutbox>> {
     claim_effect_kind(db, now, lease, None).await
-}
-/// The existing funding worker drains deadline deliveries independently of
-/// slow resource observations, using the same claims and effect executor.
-pub async fn claim_provider_deadline(
-    db: &Database,
-    now: DateTime<Utc>,
-    lease: std::time::Duration,
-) -> AppResult<Option<MachineEffectOutbox>> {
-    claim_effect_kind(db, now, lease, Some("install_provider_deadline")).await
 }
 async fn claim_effect_kind(
     db: &Database,
@@ -236,31 +225,6 @@ pub async fn acknowledge_effect(
         db.collection::<MachineOperation>(OPERATIONS).update_one(doc! {"_id": &op.operation_id, "state": {"$in": ["accepted", "applying", "reconciling"]}}, doc! {"$set": {"state": OperationState::Applying.as_str(), "updated_at": mongodb::bson::DateTime::from_chrono(now)}}).await?;
     }
     Ok(true)
-}
-
-pub async fn mark_operation_terminal(
-    db: &Database,
-    operation_id: &str,
-    expected_state: OperationState,
-    state: OperationState,
-    cleanup: crate::models::remote_machine_operation::CleanupState,
-    error_code: Option<&str>,
-    error_message: Option<&str>,
-    now: DateTime<Utc>,
-) -> AppResult<bool> {
-    let result = db.collection::<MachineOperation>(OPERATIONS).update_one(doc! {"_id": operation_id, "state": expected_state.as_str()}, doc! {"$set": {"state": state.as_str(), "cleanup_state": cleanup.as_str(), "error_code": error_code, "error_message": error_message, "terminal_at": mongodb::bson::DateTime::from_chrono(now), "updated_at": mongodb::bson::DateTime::from_chrono(now)}}).await?;
-    Ok(result.modified_count == 1)
-}
-
-pub async fn retry_expired_claims(db: &Database, now: DateTime<Utc>) -> AppResult<u64> {
-    let result = db.collection::<MachineEffectOutbox>(OUTBOX).update_many(doc! {"state": "claimed", "claimed_until": {"$lte": mongodb::bson::DateTime::from_chrono(now)}}, doc! {"$set": {"state": "retry", "claim_id": Bson::Null, "claimed_until": Bson::Null, "available_at": mongodb::bson::DateTime::from_chrono(now), "updated_at": mongodb::bson::DateTime::from_chrono(now)}}).await?;
-    Ok(result.modified_count)
-}
-
-pub fn operation_effect_kind(
-    action: crate::models::remote_machine_operation::LifecycleAction,
-) -> crate::models::remote_machine_outbox::EffectKind {
-    crate::models::remote_machine_outbox::EffectKind::for_action(action)
 }
 
 /// Capped exponential backoff prevents tight provider retries; stop/cleanup keeps retrying durably.

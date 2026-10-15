@@ -15,7 +15,7 @@ esac
 python3 -m pip install --disable-pip-version-check --quiet --no-compile --timeout 15 --retries 1 \
     --only-binary=:all: --python-version 3.12 --implementation cp --abi cp312 --abi abi3 \
     --platform "manylinux_2_28_$wheel_arch" --platform "manylinux_2_17_$wheel_arch" --platform "manylinux2014_$wheel_arch" \
-    --target "$test_dir/deps" 'PyNaCl==1.6.2' 'cffi==2.0.0' 'pycparser==2.23'
+    --target "$test_dir/deps" 'cryptography==46.0.5' 'cffi==2.0.0' 'pycparser==2.23'
 python3 - "$image" "$script_dir" "$test_dir" "$repo" <<'PY'
 import atexit,datetime,json,pathlib,subprocess,sys,time,uuid
 image,script_dir,test_dir,repo=sys.argv[1:]

@@ -667,7 +667,7 @@ async fn external_sibling_shared_view_never_rebinds_or_renews_original_child() {
     .unwrap()
     .unwrap();
     assert!(
-        matches!(revoked.source_invalidation.selector,ExternalRevocationSelector::Child{ref api_key_credential_id,..} if api_key_credential_id==&a_id)
+        matches!(revoked._source_invalidation.selector,ExternalRevocationSelector::Child{ref api_key_credential_id,..} if api_key_credential_id==&a_id)
     );
     session.commit_transaction().await.unwrap();
     assert!(

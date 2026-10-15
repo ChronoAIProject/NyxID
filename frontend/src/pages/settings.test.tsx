@@ -1,5 +1,5 @@
 import { withAccountPanelSearch, validateSettingsSearch } from "@/lib/assistant/account-panel-search";
-import { act, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
@@ -35,10 +35,32 @@ vi.mock("@/components/auth/mfa-setup-dialog", () => ({
 }));
 
 const initialAuth = useAuthStore.getState();
-beforeEach(() => useAuthStore.setState({ user: { id: "owner", email: "reader@example.com" } as User }));
+const transport = vi.fn<typeof fetch>();
+const unexpectedRequests: string[] = [];
+beforeEach(() => {
+  useAuthStore.setState({ user: { id: "owner", email: "reader@example.com" } as User });
+  unexpectedRequests.length = 0;
+  transport.mockReset().mockImplementation(async (url, options) => {
+    const headers = { "Content-Type": "application/json" };
+    if (url === "/api/v1/onboarding/bindings" && options?.method === "GET") {
+      return new Response("[]", { headers });
+    }
+    if (url === "/api/v1/users/me" && options?.method === "DELETE") {
+      return new Response(JSON.stringify({
+        error: "validation_error", error_code: 1000, message: "Fixture denial after request capture",
+      }), { status: 400, headers });
+    }
+    const request = `${options?.method ?? "GET"} ${String(url)}`;
+    unexpectedRequests.push(request);
+    throw new Error(`Unexpected request: ${request}`);
+  });
+  vi.stubGlobal("fetch", transport);
+});
 afterEach(() => {
+  cleanup();
   vi.unstubAllGlobals();
   useAuthStore.setState(initialAuth);
+  expect(unexpectedRequests).toEqual([]);
 });
 
 async function open(
@@ -70,6 +92,7 @@ async function open(
   );
   await act(() => router.load());
   await screen.findByRole("tab", { name: "Profile" });
+  if (tab === "security") await screen.findByText(/No active onboarding bindings/);
   return { router, history };
 }
 
@@ -95,25 +118,31 @@ describe.each(["/settings", "/assistant"] as const)(
     });
 
     it("binds the displayed deletion policy only after the owner types the account email", async () => {
-      const transport = vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify({
-        error: "validation_error", error_code: 1000, message: "Fixture denial after request capture",
-      }), { status: 400, headers: { "Content-Type": "application/json" } }));
-      vi.stubGlobal("fetch", transport);
       await open(route, "security");
+      const bindingsRequest = ["/api/v1/onboarding/bindings", expect.objectContaining({ method: "GET" })];
       await userEvent.click(screen.getByRole("button", { name: "Delete My Account" }));
       const dialog = screen.getByRole("dialog", { name: "Delete Account" });
       const confirm = within(dialog).getByRole("button", { name: "Permanently Delete" });
+      expect(confirm).toBeDisabled();
+      expect(transport.mock.calls).toEqual([bindingsRequest]);
       await userEvent.type(within(dialog).getByLabelText("Email"), "wrong@example.com");
       expect(confirm).toBeDisabled();
       await userEvent.click(confirm);
-      expect(transport).not.toHaveBeenCalled();
+      expect(transport.mock.calls).toEqual([bindingsRequest]);
       await userEvent.clear(within(dialog).getByLabelText("Email"));
       await userEvent.type(within(dialog).getByLabelText("Email"), "reader@example.com");
+      expect(confirm).toBeEnabled();
+      expect(transport.mock.calls).toEqual([bindingsRequest]);
       await userEvent.click(confirm);
-      await waitFor(() => expect(transport).toHaveBeenCalledWith("/api/v1/users/me", expect.objectContaining({
-        method: "DELETE",
-        headers: expect.objectContaining({ "X-NyxID-Account-Deletion-Policy": "machine-data" }),
-      })));
+      await waitFor(() => expect(transport.mock.calls).toEqual([
+        bindingsRequest,
+        ["/api/v1/users/me", expect.objectContaining({
+          method: "DELETE",
+          credentials: "include",
+          headers: expect.objectContaining({ "X-NyxID-Account-Deletion-Policy": "machine-data" }),
+        })],
+      ]));
+      await waitFor(() => expect(confirm).toBeEnabled());
     });
 
     it("replaces tab state on the supplied route for every account tab", async () => {
@@ -128,6 +157,7 @@ describe.each(["/settings", "/assistant"] as const)(
         expect(router.state.location.search).toEqual(route === "/settings" ? { tab } : { c: "chat", mock: 1, panel: "settings", panelTab: tab });
         expect(trigger).toHaveAttribute("data-state", "active");
         expect(history.length).toBe(1);
+        if (tab === "security") await screen.findByText(/No active onboarding bindings/);
         if (tab === "sessions")
           expect(
             screen.getByRole("link", { name: "Generate terminal login code" }),

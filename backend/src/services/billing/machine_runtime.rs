@@ -38,7 +38,7 @@ const ADMISSION_PROOF_SECONDS: i64 = 30;
 mod evidence;
 mod preflight;
 mod prices;
-pub use evidence::{MachineRuntimeDetail, RuntimeFundsEstimate, RuntimeIntervalDetail};
+pub use evidence::{MachineRuntimeDetail, RuntimeFundsEstimate};
 pub use preflight::RuntimeQuotePreflight;
 pub(super) use prices::verify_usage_provider_rate;
 
