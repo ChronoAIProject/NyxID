@@ -1507,6 +1507,9 @@ async fn handle_public_rpc(
     authority: &crate::services::platform_public_tools::PublicMcpAuthority,
 ) -> Response {
     use crate::services::platform_public_tools as public;
+    if let Err(error) = authority.validate_callback_headers(headers) {
+        return app_error_to_rpc(request.id.clone(), &error);
+    }
     #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]
     struct Envelope {

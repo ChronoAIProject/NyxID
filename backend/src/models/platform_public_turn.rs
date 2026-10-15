@@ -23,6 +23,14 @@ pub struct PlatformPublicTurn {
     pub reply_id: Option<String>,
     pub outcome: Option<String>,
     pub max_output_bytes: u32,
+    /// Server-chosen outer NoAuth transport, frozen during preparation.
+    #[serde(default)]
+    pub nyxagent_service_id: String,
+    #[serde(default)]
+    pub nyxagent_catalog_digest: String,
+    /// Spent before outbound; a lost response never authorizes a replay.
+    #[serde(default)]
+    pub outer_dispatch_admitted: bool,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub expires_at: DateTime<Utc>,
 }

@@ -394,6 +394,8 @@ impl PublicRuntime {
         budget::seed_buckets(db, context).await?;
         let retained = db.collection::<PlatformPublicSession>(SESSIONS).find_one(doc! {"_id":&context.public_session_id,"credential_api_key_id":&credential.api_key_id}).await?.ok_or_else(denied)?;
         let upstream_session_id = retained_session_handle(&self.state, &retained).await?;
+        let outer = super::platform_public_proxy_service::load_outer_catalog(db).await?;
+        let outer_digest = super::platform_public_proxy_service::catalog_digest(&outer)?;
         let row = PlatformPublicTurn {
             id: context.turn.turn_id.clone(),
             public_session_id: context.public_session_id.clone(),
@@ -408,6 +410,9 @@ impl PublicRuntime {
             reply_id: None,
             outcome: None,
             max_output_bytes: context.limits.max_output_bytes,
+            nyxagent_service_id: outer.id,
+            nyxagent_catalog_digest: outer_digest,
+            outer_dispatch_admitted: false,
             expires_at: retained.expires_at,
         };
         let mut session = db.client().start_session().await?;
@@ -583,8 +588,9 @@ impl PublicNyxAgentRuntime for PublicRuntime {
                     reply.clone(),
                     cipher,
                     text_bytes,
+                    result.error.is_some(),
                 ),
-                |session, (db, context, reply, cipher, text_bytes)| {
+                |session, (db, context, reply, cipher, text_bytes, failed)| {
                     Box::pin(async move {
                         let result: AppResult<_> = async {
                             settle_reply_in_session(
@@ -596,6 +602,18 @@ impl PublicNyxAgentRuntime for PublicRuntime {
                                 *text_bytes,
                             )
                             .await?;
+                            if *failed {
+                                // Shorten the disposable session after an ambiguous
+                                // upstream failure. Never extend/reuse its bearer.
+                                if db.collection::<PlatformPublicSession>(SESSIONS).update_one(
+                                    doc! {"_id":&context.public_session_id,"upstream_may_exist":true},
+                                    vec![doc! {"$set":{"expires_at":"$$NOW"}}],
+                                ).session(&mut *session).await?.matched_count==1 {
+                                    super::platform_public_agent_service::revoke_in_session(db,session,
+                                        &PublicRevocationScope::Session {public_session_id:context.public_session_id.clone()},
+                                        PublicRevocationReason::SessionExpired).await?;
+                                }
+                            }
                             Ok(())
                         }
                         .await;
@@ -990,12 +1008,12 @@ pub(crate) async fn recover_expired_turn(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::models::platform_manager_ingress::{
         IngressAudience, IngressExecution, IngressPhase,
     };
-    fn fixture() -> (PlatformPublicSession, ApiKey, PublicExecutionContext) {
+    pub(crate) fn fixture() -> (PlatformPublicSession, ApiKey, PublicExecutionContext) {
         let now = Utc::now();
         let expires = now + Duration::hours(24);
         let (key, _) = new_key("sponsor", expires, None);
@@ -1233,6 +1251,9 @@ mod tests {
             reply_id: None,
             outcome: None,
             max_output_bytes: 5,
+            nyxagent_service_id: "outer".into(),
+            nyxagent_catalog_digest: "outer-digest".into(),
+            outer_dispatch_admitted: false,
             expires_at: row.expires_at,
         };
         let receipt = PlatformManagerIngress {

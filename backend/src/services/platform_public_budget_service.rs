@@ -63,6 +63,7 @@ pub(crate) fn route_digest(ctx: &BillingRouteContext) -> AppResult<String> {
     )))
 }
 
+#[derive(Clone)]
 pub(crate) struct CallQuote {
     route: BillingRouteContext,
     maximum: Credits,
@@ -70,6 +71,9 @@ pub(crate) struct CallQuote {
     output: i64,
 }
 impl CallQuote {
+    pub(crate) fn route(&self) -> &BillingRouteContext {
+        &self.route
+    }
     pub(crate) fn maximum(&self) -> Credits {
         self.maximum
     }
@@ -93,7 +97,7 @@ pub(crate) async fn quote_operation(
         .await?
         .ok_or_else(denied)?;
     let metric = billing::metric_resolution::platform_metric_for_request(&service, false);
-    let route = BillingRouteContext::new(
+    let mut route = BillingRouteContext::new(
         billing::BillingIngress::Proxy,
         call_id.into(),
         context.sponsor_owner_user_id.clone(),
@@ -110,6 +114,9 @@ pub(crate) async fn quote_operation(
         state.billing.resale_enabled(),
     )
     .with_operation(Some(&operation.operation));
+    // Reserve the complete byte upper bound; settlement still records actual
+    // bytes. Preparation and callbacks therefore quote the same worst case.
+    route.request_bytes = i64::from(operation.max_input_bytes);
     quote_dispatch(state, proof, context, key_id, route, operation, call_id).await
 }
 
@@ -492,6 +499,24 @@ pub(crate) async fn fund_call(
     quote: &CallQuote,
 ) -> AppResult<MeteredProxyContext> {
     state.billing.open_required(&quote.route).await
+}
+
+/// Cancellation competes with final admission on the same call row. It never
+/// releases a call whose dispatch may have committed.
+pub(crate) async fn cancel_unforwarded_call(db: &Database, id: &str) -> AppResult<()> {
+    if db
+        .collection::<PublicCallReservation>(CALLS)
+        .update_one(
+            doc! {"_id":id,"state":{"$in":["prepared","funded"]}},
+            vec![doc! {"$set":{"state":"cancelling","expires_at":"$$NOW"}}],
+        )
+        .await?
+        .matched_count
+        == 1
+    {
+        reconcile_call(db, id).await?;
+    }
+    Ok(())
 }
 
 pub(crate) async fn admit_tool_call_in_session(
@@ -1217,6 +1242,56 @@ mod tests {
         );
     }
     #[tokio::test]
+    async fn failed_funding_releases_only_prepared_allocation_once() {
+        let db =
+            crate::test_utils::connect_transaction_test_database("public_cancel_prepared").await;
+        ensure_indexes(&db).await.unwrap();
+        let (ctx, key) = context(&db, 5, None).await;
+        let loop_row = reserve(
+            db.clone(),
+            ctx.clone(),
+            key.clone(),
+            Credits::from_pico(10).unwrap(),
+        )
+        .await
+        .unwrap();
+        let quote = quote(&ctx, &key, Credits::from_pico(6).unwrap());
+        let mut session = db.client().start_session().await.unwrap();
+        session.start_transaction().await.unwrap();
+        let call = prepare_call_in_session(&db, &mut session, &ctx, &loop_row.id, &quote)
+            .await
+            .unwrap();
+        session.commit_transaction().await.unwrap();
+        cancel_unforwarded_call(&db, &call.id).await.unwrap();
+        cancel_unforwarded_call(&db, &call.id).await.unwrap();
+        let saved = db
+            .collection::<PublicBudgetLoop>(LOOPS)
+            .find_one(doc! {"_id":&loop_row.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(saved.allocated, Credits::ZERO);
+        assert_eq!(saved.spent, Credits::ZERO);
+        assert_eq!(saved.held, Credits::from_pico(10).unwrap());
+        assert_eq!(
+            db.collection::<PublicCallReservation>(CALLS)
+                .find_one(doc! {"_id":&call.id})
+                .await
+                .unwrap()
+                .unwrap()
+                .state,
+            PublicCallState::Released
+        );
+        assert_eq!(
+            db.collection::<Document>(METERS)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
+        );
+        db.drop().await.unwrap();
+    }
+    #[tokio::test]
     async fn dispatch_is_once_only_and_crash_cap_charge_refunds_only_known_exact_difference() {
         crash_cap_case(3).await;
     }
@@ -1289,6 +1364,17 @@ mod tests {
             .await
             .unwrap();
         session.commit_transaction().await.unwrap();
+        // A known no-dispatch cancellation cannot release an admitted call.
+        cancel_unforwarded_call(&db, &call.id).await.unwrap();
+        assert_eq!(
+            db.collection::<PublicCallReservation>(CALLS)
+                .find_one(doc! {"_id":&call.id})
+                .await
+                .unwrap()
+                .unwrap()
+                .state,
+            PublicCallState::DispatchAdmitted
+        );
         session.start_transaction().await.unwrap();
         assert!(
             admit_dispatch_in_session(&db, &mut session, &ctx, &call.id)

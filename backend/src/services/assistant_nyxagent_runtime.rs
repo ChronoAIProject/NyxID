@@ -70,9 +70,15 @@ impl contract::NyxAgentExecutionProducer for ExecutionProducer {
         // limiter or agent lookup. A public context never enters the owner loop.
         let (user_id, turn, origin) = match context {
             contract::NyxAgentExecutionContext::Public(context) => {
-                let _prepared = self.public_runtime.prepare(db, &context, input).await?;
-                // The bounded public loop still requires accepted runtime proof.
-                return Err(super::platform_public_policy::unavailable());
+                return super::platform_public_execution::execute(
+                    db,
+                    self.public_runtime.clone(),
+                    self.egress.clone(),
+                    context,
+                    input,
+                    events,
+                )
+                .await;
             }
             contract::NyxAgentExecutionContext::Owner {
                 user_id,

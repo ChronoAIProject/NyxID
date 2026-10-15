@@ -31,6 +31,54 @@ pub(crate) struct PublicMcpAuthority {
     _proof: policy::VerifiedPublicContract,
 }
 
+impl PublicMcpAuthority {
+    pub(crate) fn context(&self) -> &PublicExecutionContext {
+        &self.context
+    }
+    pub(crate) fn key_id(&self) -> &str {
+        &self.key_id
+    }
+    pub(crate) fn validate_callback_headers(&self, headers: &http::HeaderMap) -> AppResult<()> {
+        for (name, expected) in [
+            (
+                "x-nyx-public-session-id",
+                self.context.public_session_id.as_str(),
+            ),
+            ("x-nyx-public-turn-id", self.context.turn.turn_id.as_str()),
+            (
+                "x-nyx-public-receipt-id",
+                self.context.ingress.ingress.receipt_id.as_str(),
+            ),
+            (
+                "x-nyx-public-claim-id",
+                self.context.ingress.ingress.claim_id.as_str(),
+            ),
+        ] {
+            if headers.get_all(name).iter().count() != 1
+                || headers.get(name).and_then(|v| v.to_str().ok()) != Some(expected)
+            {
+                return Err(denied());
+            }
+        }
+        Ok(())
+    }
+}
+
+pub(crate) async fn fence_callback_in_session(
+    db: &Database,
+    session: &mut mongodb::ClientSession,
+    context: &PublicExecutionContext,
+    key: &str,
+) -> AppResult<()> {
+    if db.collection::<mongodb::bson::Document>(crate::models::platform_public_turn::COLLECTION_NAME)
+        .update_one(doc! {"_id":&context.turn.turn_id,"public_session_id":&context.public_session_id,
+            "receipt_id":&context.ingress.ingress.receipt_id,"claim_id":&context.ingress.ingress.claim_id,
+            "credential_api_key_id":key,"policy_digest":&context.policy_digest,"outer_dispatch_admitted":true,
+            "reply_id":mongodb::bson::Bson::Null},doc! {"$inc":{"callback_fence":1_i64}})
+        .session(session).await?.matched_count!=1 {return Err(denied());}
+    Ok(())
+}
+
 pub(crate) async fn authenticate(
     db: &Database,
     key: &ApiKey,
@@ -259,6 +307,7 @@ pub(crate) async fn execute(
             |session, (db, context, key, call, hmac_key)| {
                 Box::pin(async move {
                     let result: AppResult<_> = async {
+                        fence_callback_in_session(db, session, context, key).await?;
                         budget::admit_tool_call_in_session(db, session, context, key).await?;
                         match call {
                             PublicToolCall::Signup => {
@@ -316,6 +365,51 @@ fn signup_result(status: super::platform_manager_delivery::PublicSignupDeliveryO
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn public_callbacks_require_the_exact_turn_claim_even_when_session_key_is_reused() {
+        let (_, key, context) = super::super::platform_public_credential_service::tests::fixture();
+        let authority = PublicMcpAuthority {
+            _proof: policy::VerifiedPublicContract::for_local_tests(context.policy_digest.clone()),
+            context,
+            key_id: key.id,
+        };
+        let mut headers = http::HeaderMap::new();
+        for (name, value) in [
+            (
+                "x-nyx-public-session-id",
+                authority.context.public_session_id.as_str(),
+            ),
+            (
+                "x-nyx-public-turn-id",
+                authority.context.turn.turn_id.as_str(),
+            ),
+            (
+                "x-nyx-public-receipt-id",
+                authority.context.ingress.ingress.receipt_id.as_str(),
+            ),
+            (
+                "x-nyx-public-claim-id",
+                authority.context.ingress.ingress.claim_id.as_str(),
+            ),
+        ] {
+            headers.insert(name, http::HeaderValue::from_str(value).unwrap());
+        }
+        assert!(authority.validate_callback_headers(&headers).is_ok());
+        let mut stale = headers.clone();
+        stale.insert(
+            "x-nyx-public-turn-id",
+            http::HeaderValue::from_static("old"),
+        );
+        assert!(authority.validate_callback_headers(&stale).is_err());
+        let mut stale = headers.clone();
+        stale.append(
+            "x-nyx-public-claim-id",
+            http::HeaderValue::from_static("other"),
+        );
+        assert!(authority.validate_callback_headers(&stale).is_err());
+        headers.remove("x-nyx-public-session-id");
+        assert!(authority.validate_callback_headers(&headers).is_err());
+    }
     #[test]
     fn signup_results_are_status_only_and_do_not_claim_consent_or_retry() {
         use super::super::platform_manager_delivery::PublicSignupDeliveryOutcome::*;

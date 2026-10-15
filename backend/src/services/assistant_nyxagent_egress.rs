@@ -5,9 +5,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use axum::{
-    Json,
-    http::{HeaderMap, Method, StatusCode},
-    response::{IntoResponse, Response},
+    http::{HeaderMap, Method},
+    response::Response,
 };
 use chrono::Utc;
 use mongodb::bson::doc;
@@ -97,19 +96,22 @@ impl NyxAgentEgress for Egress {
         credential: &RuntimeCredential,
         request: NyxAgentRequest,
     ) -> AppResult<Response> {
-        // This branch precedes credential lookup, owner preparation, target
-        // resolution and billing. Source inspection is not runtime proof.
-        let NyxAgentExecutionContext::Owner {
-            user_id,
-            turn,
-            platform_origin,
-        } = authority
-        else {
-            return Ok((
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(serde_json::json!({"error": "public_not_ready"})),
-            )
-                .into_response());
+        // Public authority never enters owner resolution or ordinary approvals.
+        let (user_id, turn, platform_origin) = match authority {
+            NyxAgentExecutionContext::Public(context) => {
+                return super::platform_public_proxy_service::dispatch_nyxagent(
+                    &self.state,
+                    context,
+                    credential,
+                    request,
+                )
+                .await;
+            }
+            NyxAgentExecutionContext::Owner {
+                user_id,
+                turn,
+                platform_origin,
+            } => (user_id, turn, platform_origin),
         };
         let Some(platform_origin) = platform_origin.as_ref() else {
             return Err(AppError::Forbidden(
