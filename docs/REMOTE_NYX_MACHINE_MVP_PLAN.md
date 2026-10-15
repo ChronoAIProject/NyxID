@@ -61,7 +61,7 @@ Flag denial uses the existing `forbidden` error (HTTP 403, numeric code 1002), w
 
 Admission is checked narrowly at HTTP boundaries using one service helper. Do not gate the whole Remote Machine router, shared owner eligibility, or background services. Open create/resume dialogs must close or become ineligible when the flag, authenticated actor or auth readiness changes; quote/create/resume/rekey dispatch checks current eligibility and the actor against the captured intent owner. There is no hosted rekey button today; the existing rekey mutation hook enforces this gate.
 
-Local acceptance requires real mounted API tests with signed authentication, persisted flags and a new disposable transaction-capable MongoDB 8 replica set. Positive fixtures explicitly opt in; no registry test-default-on and no generic 4xx substitute for exact denial/profile validation. Cover absent/OFF/ON ordinary/admin users, personal isolation, rate-write role/auth boundaries, zero effects/provider calls on denial, successful free/paid admission, and OFF-after-establishment ongoing safety. Frontend component/hook and browser tests use disclosed HTTP doubles and do not establish backend enforcement. See `REMOTE_NYX_MACHINE_FEATURE_FLAG_VERIFICATION_20261015.md` for current-task evidence. No commit, push, deployment, live rollout/data/service mutation, image build or selected-cluster/runtime/CSI claim belongs to this task.
+Local acceptance requires real mounted API tests with signed authentication, persisted flags and a new disposable transaction-capable MongoDB 8 replica set. Positive fixtures explicitly opt in; no registry test-default-on and no generic 4xx substitute for exact denial/profile validation. Cover absent/OFF/ON ordinary/admin users, personal isolation, rate-write role/auth boundaries, zero effects/provider calls on denial, successful free/paid admission, and OFF-after-establishment ongoing safety. Frontend component/hook and browser tests use disclosed HTTP doubles and do not establish backend enforcement. Local validation coverage and pending environment acceptance are summarized in [本地验证与环境验收](#本地验证与环境验收).
 
 状态：2026-10-15 规格与费率绑定实现及定向本地验证完成（0e 为当前优先合同；独立评审与真实集群验收待完成）。此前可选 StorageClass 与 hosted 镜像整理已完成本轮本地验证（0d 为本轮优先合同，保留 0c 单一当前实现）；本文及当前 read/deployment 合同先于源码修订。当前源码 arm64 镜像及验收结果见 [HOSTED_STORAGE_VERIFICATION_20261015](REMOTE_NYX_MACHINE_HOSTED_STORAGE_VERIFICATION_20261015.md)；此前证据保留各自阶段范围，真实集群验收待完成。
 
@@ -87,7 +87,30 @@ Local acceptance requires real mounted API tests with signed authentication, per
 
 本节优先于 0c 中过宽的“不保留历史…兼容”描述：仅保留必需的财务记录可读性。源码 `bde170f0` 的 stage 构造只能生成原固定规格的费率，故缺失字段可映射历史字面量，绝不映射可变默认规格；不假定线上无记录，不进行 live inventory、数据重置、迁移、重新扣费或账本重写。多副本全部后端及后台任务完成按规格读取/选价升级之前，不可启用其他规格的有效费率。
 
-P1–P6 已通过本轮定向本地验证：304 项后端、38 项共享 Machine、39 项 Sandbox、232 项前端及 12 条浏览器旅程，共 625 项自动化测试，另有 262 项真实 CEL 验证；所选测试无失败或跳过。完整命令、替身边界、warnings、历史文档哈希和一次性 Mongo 清理见 [PROFILE_RATE_VERIFICATION_20261015](REMOTE_NYX_MACHINE_PROFILE_RATE_VERIFICATION_20261015.md)。文档/验收先行里程碑已记录。保持 19 份预存历史 Markdown 原字节。原生生命周期、授权/撤销、原子精确资金、免费权益、同意/有效期、数据保留、可选 Runtime/StorageClass 和平台延期不变。无 commit/push/deploy/在用服务或数据操作；独立评审由 caller 完成。镜像和 Node 源码不变时无需重建。真实 Kubernetes/runtime/CSI、独立物理 cutoff/强 writer 隔离继续待验收/延期。
+P1–P6 的本地验证已完成；验证范围和环境验收边界统一记录如下。原生生命周期、授权/撤销、原子精确资金、免费权益、同意/有效期、数据保留、可选 RuntimeClass/StorageClass 和平台延期规则保持不变。
+
+### 本地验证与环境验收
+
+- **整合提交前验证（2026-10-15）**：361 项后端、47 项 Kubernetes 凭据/Sandbox、269 项前端测试通过，所选测试无失败或忽略；TypeScript、定向 Rust 格式及 Git 差异检查通过。后端编译有 35 条既有警告，前端 lint 有 33 条既有警告、无错误。这是定向测试结果，不代表完整仓库或真实集群验收。
+- **此前专项验证**：14 条前端浏览器旅程和 262 项 CEL admission 用例曾通过；这两组未在上述提交前复跑，不与上述数量合并。需求覆盖包括按规格选价、历史费率快照、资金预留/结算、幂等创建、原规格/原 PVC 恢复、个人功能开关、授权撤销及 Kubernetes 认证。
+- **真实组件**：Rust/Axum 路由和服务、一次性 MongoDB 8 副本集及事务、精确 Credits/Billing、共享凭据缓存、TLS 客户端、Sandbox 资源模板，以及 React 表单、状态和请求逻辑。此前浏览器及准入专项使用 Vite/Chrome 和实际 CEL 表达式。
+- **测试替身**：Lago、Kubernetes/Agent Sandbox 和 metadata HTTP/TLS 响应、部分 Node/bootstrap/WSS 对端及前端 HTTP API。替身结果不证明真实 Google 身份、GKE 授权、物理停机或存储写入隔离。
+- **真实环境待验收**：实际 Google principal 与 metadata 获取/刷新、Kubernetes 权限及 API/CA/主机名连通性、Agent Sandbox 生命周期、原 PVC 保留与回收、实际 runtime/CSI 和资源限制。独立停机上界、强旧写入方隔离及平台相关底层清理证明仍按既定边界延期。
+
+后端测试必须使用专用、可丢弃的 MongoDB 8 副本集，并显式设置 `NYXID_TEST_DATABASE_URL`，配置方法见 [贡献指南](../CONTRIBUTING.md#running-tests)。以下命令从仓库根目录运行；无需依赖某次构建的二进制名称、固定临时端口或本机日志目录：
+
+```sh
+CARGO_INCREMENTAL=0 cargo test --locked -p nyxid --bin nyxid-server \
+  --config 'profile.test.package.nyxid.debug=0' -- \
+  remote_machine services::billing::machine_runtime:: runtime_profile_admin_routes \
+  services::billing::reconcile::tests::machine_ services::feature_flag_service::tests \
+  services::machine_external services::url_validation::tests \
+  transaction_test_database_supports_atomic_writes --test-threads=2
+CARGO_INCREMENTAL=0 cargo test --locked -p nyxid-machine-updater --lib -- \
+  kubernetes_credentials::tests sandbox::tests --test-threads=2
+npm --prefix frontend test -- --run remote-machine use-machines machines.test.ts \
+  machine-setup.test.tsx machine-grants use-feature-flag
+```
 
 ## 0d. 可选 StorageClass 与独立 hosted Dockerfile（2026-10-15，本轮优先合同）
 
