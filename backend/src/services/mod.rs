@@ -165,6 +165,7 @@ pub mod platform_public_agent_service;
 pub mod platform_public_budget_service;
 pub mod platform_public_credential_service;
 pub mod platform_public_policy;
+pub mod platform_public_tools;
 pub mod platform_settings_service;
 pub(crate) mod platform_setup_service;
 pub mod pool_failover;

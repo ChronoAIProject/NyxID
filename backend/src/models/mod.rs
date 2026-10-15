@@ -87,6 +87,7 @@ pub mod platform_manager_ingress;
 pub mod platform_personal_binding;
 pub mod platform_public_budget;
 pub mod platform_public_session;
+pub mod platform_public_turn;
 pub mod platform_settings;
 pub mod platform_setup;
 pub mod provider_config;
