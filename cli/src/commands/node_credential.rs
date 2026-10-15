@@ -490,8 +490,10 @@ impl<'a> RciInjectSession<'a> {
         let pubkey = self.poll_pubkey(&pending.id).await?;
         validate_pubkey_response_matches_pending(&pending, &pubkey)?;
         self.verify_fingerprint(&pubkey)?;
-        let secret = self.read_secret()?;
-        let body = encrypt_pending_secret_for_node(&pending, &pubkey, &secret)?;
+        let body = {
+            let secret = read_secret(&self.secret_source, &mut self.prompt_secret_override)?;
+            encrypt_pending_secret_for_node(&pending, &pubkey, &secret)?
+        };
         let response: PendingCredentialCiphertextResponseCli = self
             .api
             .post(
@@ -618,26 +620,41 @@ impl<'a> RciInjectSession<'a> {
         }
         Ok(())
     }
+}
 
-    fn read_secret(&mut self) -> Result<Zeroizing<String>> {
-        match &self.secret_source {
-            RciSecretSource::Prompt => {
-                if let Some(secret) = self.prompt_secret_override.take() {
-                    return ensure_non_empty_secret(secret);
-                }
-                let value = rpassword::prompt_password("Enter secret value: ")
-                    .context("Failed to read secret value")?;
-                ensure_non_empty_secret(Zeroizing::new(value))
+// Reading a value cannot mutate API or pending-operation metadata. Error kinds
+// carry no input bytes: VarError::NotUnicode can otherwise retain the raw value.
+#[derive(Debug, thiserror::Error)]
+enum RciSecretReadError {
+    #[error("Failed to read secret value")]
+    PromptUnavailable,
+    #[error("Secret environment variable is not set or is not valid Unicode")]
+    EnvironmentUnavailable,
+    #[error("Secret value must not be empty")]
+    Empty,
+    #[error("internal error: browser mode must not read a terminal secret")]
+    BrowserOnly,
+}
+
+fn read_secret(
+    source: &RciSecretSource,
+    prompt_override: &mut Option<Zeroizing<String>>,
+) -> Result<Zeroizing<String>, RciSecretReadError> {
+    match source {
+        RciSecretSource::Prompt => {
+            if let Some(secret) = prompt_override.take() {
+                return ensure_non_empty_secret(secret);
             }
-            RciSecretSource::Env(name) => {
-                let value = std::env::var(name)
-                    .with_context(|| format!("Environment variable '{name}' is not set"))?;
-                ensure_non_empty_secret(Zeroizing::new(value))
-            }
-            RciSecretSource::BrowserOnly => {
-                bail!("internal error: browser mode must not read a terminal secret")
-            }
+            let value = rpassword::prompt_password("Enter secret value: ")
+                .map_err(|_| RciSecretReadError::PromptUnavailable)?;
+            ensure_non_empty_secret(Zeroizing::new(value))
         }
+        RciSecretSource::Env(name) => {
+            let value =
+                std::env::var(name).map_err(|_| RciSecretReadError::EnvironmentUnavailable)?;
+            ensure_non_empty_secret(Zeroizing::new(value))
+        }
+        RciSecretSource::BrowserOnly => Err(RciSecretReadError::BrowserOnly),
     }
 }
 
@@ -713,9 +730,11 @@ fn validate_pubkey_response_matches_pending(
     Ok(())
 }
 
-fn ensure_non_empty_secret(secret: Zeroizing<String>) -> Result<Zeroizing<String>> {
+fn ensure_non_empty_secret(
+    secret: Zeroizing<String>,
+) -> Result<Zeroizing<String>, RciSecretReadError> {
     if secret.is_empty() {
-        bail!("Secret value must not be empty");
+        return Err(RciSecretReadError::Empty);
     }
     Ok(secret)
 }
@@ -1484,6 +1503,7 @@ mod tests {
         assert_eq!(body["version"], "v1");
         assert_eq!(body["integrity_verification"]["mode"], "org_policy_opt_out");
         assert!(!body.to_string().contains("sk-rci"));
+        assert!(!serde_json::to_string(&outcome).unwrap().contains("sk-rci"));
         assert_no_request_body_contains(&server, "sk-rci").await;
         let received = server.received_requests().await.expect("requests");
         let push: serde_json::Value = received
@@ -1526,6 +1546,31 @@ mod tests {
         unsafe {
             std::env::remove_var("NYXID_RCI_TEST_SECRET");
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn secret_environment_read_error_never_displays_the_value() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let _guard = crate::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        let name = format!(
+            "NYXID_RCI_INVALID_UTF8_TEST_{}",
+            uuid::Uuid::new_v4().simple()
+        );
+        let marker = "rci-private-value-must-not-appear";
+        let mut bytes = marker.as_bytes().to_vec();
+        bytes.push(0xff);
+        // SAFETY: this test owns the unique variable and holds env_lock.
+        unsafe { std::env::set_var(&name, std::ffi::OsString::from_vec(bytes)) };
+        let result = super::read_secret(&RciSecretSource::Env(name.clone()), &mut None);
+        // SAFETY: remove this test's variable before assertions, under env_lock.
+        unsafe { std::env::remove_var(&name) };
+        let error = result.expect_err("invalid Unicode input must be rejected");
+        assert!(!format!("{error:#}").contains(marker));
+        assert!(!format!("{error:?}").contains(marker));
     }
 
     #[tokio::test]
