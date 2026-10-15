@@ -8,29 +8,34 @@ or the external portion of A1/A15.
 
 Current checkpoint: identity, personal execution/settlement/Stop, ingress,
 Telegram transport, account lifecycle recovery and frontend slices are integrated
-through `5c9dcec9b` on [draft PR #1901](https://github.com/ChronoAIProject/NyxID/pull/1901).
+through `9c1a1c3df` on [draft PR #1901](https://github.com/ChronoAIProject/NyxID/pull/1901).
 Seven integrated journey/regression tests are written, including real local
 consent and personal execution against mocked upstream/Telegram HTTP. They have
 not yet run. Public execution remains unavailable; exact budget/funding,
 restricted FAQ/signup tools, encrypted public turn/reply storage and transport
-consumers are integrated. The execution/model-callback bridge and upstream
-proof remain incomplete. Fresh personal event admission, the durable saved-reply after-turn
+consumers and the execution/model-callback bridge are integrated. Public
+activation remains blocked by the unavailable deployed-contract verifier. Fresh personal event admission, the durable saved-reply after-turn
 hook, card continuation scheduling and retained original result destinations
 are integrated. The final Telegram delivery/card rendering and recovery
 consumers are also integrated, with six further regression tests written.
 
 CI [38728299188](https://github.com/ChronoAIProject/NyxID/actions/runs/38728299188)
-is running on `5c9dcec9b`. The preceding run on `61b202ca6` passed frontend and
-formatting, but AWS feature compilation failed on 43 unused-code diagnostics
-before public dispatcher wiring. Backend test compilation found one missing
-settlement-hook fixture argument, fixed in `db11d3ec0`. Clippy found two large
-enum variants; both payloads are now boxed without changing serialized shapes.
-Remaining unused public paths must be connected or superseded seams removed;
-no blanket lint suppression or fabricated readiness is acceptable. The failed
-superseded CI and CodeQL runs were cancelled so the current revision can run.
-The earlier `457783115` run passed frontend tests/coverage, CLI tests/coverage,
-formatting and wizard freshness. All four CodeQL language checks passed on
-`f8f623a42`.
+on `5c9dcec9b` passed frontend tests/coverage, formatting, CLI tests/coverage and
+wizard freshness. Backend production/test-target compilation failed on one
+missing `platform_delivery_recovery_queued` initializer in the compact voice
+transcript path; `0e444ddb5` corrects it. The assembled production backend then
+passed `CARGO_BUILD_JOBS=1 CARGO_INCREMENTAL=0 cargo +1.98.1 check -p nyxid
+--bin nyxid-server` locally in 2m08s, with five unused-code warning groups. This
+is a type-check result, not a runtime test pass. Log:
+`/tmp/nyxbot-manager-check-bridge.log`.
+
+`9c1a1c3df` removes superseded outcome/revocation variants and connects actual
+public quota and sponsor funding refusals to fixed transport responses. Four
+precise lint expectations document intentionally unavailable verifier inputs
+and the production Ready constructor; the verifier still refuses all activation.
+There is no blanket lint suppression or fabricated readiness. Fresh strict lint
+and integrated CI validation remain pending. Earlier CodeQL completed all four
+language checks on `f8f623a42`.
 
 Earlier missing webhook arguments, transaction callback `Send` diagnostics and
 four merge-related test-target errors have been corrected. Main `828009878` was
@@ -63,8 +68,12 @@ preparation could retain an active session until the 24-hour session expiry;
 that correction without finding a remaining blocker. Its final transport review
 at `5c9dcec9b` found no confirmed blocker in original destination checks,
 event/reply deduplication, recovery, card rendering or public dispatch consumers.
-None of these reviews ran tests or endorsed merging. The public execution bridge
-still needs review after integration. Captured delayed-result
+Astra reviewed the public execution bridge and initially reported a timeout
+recovery gap, then explicitly withdrew it after checking the concrete settlement
+wrapper, which already revokes and schedules cleanup in the same transaction.
+A focused actual-settlement regression and protection against a stale failure
+revoking a successor turn are being added. None of these reviews ran tests or
+endorsed merging. Captured delayed-result
 destinations currently expire with the original 2,100-second turn lease; later
 results remain in web history. A source regression now exercises that limit,
 but runtime execution is still pending.
