@@ -144,6 +144,10 @@ pub(crate) async fn decide_personal_reply_in_session(
             .session(&mut *session).await?.is_none() {
         return Ok(contract::PlatformDecisionOutcome::NoPendingDecision);
     }
+    let ordinary_continuation = ack.voice_request_id.is_none() && ack.trigger_run_id.is_none();
+    if ordinary_continuation && row.pending_events.len() >= engine::MAX_PENDING_EVENTS {
+        return Err(AppError::Conflict("Assistant event queue is full".into()));
+    }
     let mut decision = contract::PlatformCardDecision {
         acknowledgement_id: ack.id.clone(),
         requested_turn: contract::TurnRef {
@@ -170,6 +174,37 @@ pub(crate) async fn decide_personal_reply_in_session(
         None,
     )
     .await?;
+    if ordinary_continuation {
+        let mut event = crate::models::assistant_acknowledgement::bind_continuation(
+            ack.routing.as_ref(),
+            super::assistant_team_service::event(
+                "owner_action_decided",
+                format!(
+                    "The owner {} acknowledgement {}. {} {}",
+                    if allowed { "allowed" } else { "denied" },
+                    engine::identifier(&ack.id),
+                    if allowed {
+                        "Continue the task using this exact approved acknowledgement_id when required."
+                    } else {
+                        "Do not execute or retry the denied action; explain what was skipped."
+                    },
+                    acks::DECISION_NARRATION
+                ),
+                None,
+            ),
+        );
+        event.id = ack.id.clone();
+        let queued = db.collection::<AssistantConversation>(crate::models::assistant_conversation::COLLECTION_NAME)
+            .update_one(doc! {"_id":conversation_id,"user_id":&authority.user_id,
+                "platform_thread.binding_id":&authority.binding_id,"platform_thread.binding_generation":authority.binding_generation,
+                "pending_events.id":{"$ne":&event.id}},
+                doc! {"$push":{"pending_events":mongodb::bson::to_bson(&event)
+                    .map_err(|_| AppError::Internal("Assistant event serialization failed".into()))?}})
+            .session(&mut *session).await?;
+        if queued.matched_count != 1 {
+            return Err(AppError::AssistantTurnRequired);
+        }
+    }
     decision.continuation_receipt_id = ack.continuation_receipt_id;
     ingress
         .settle_personal_decision(db, session, &admitted.ingress, &decision)

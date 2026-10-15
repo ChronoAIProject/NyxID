@@ -907,3 +907,346 @@ async fn fresh_event_read_cannot_commit_after_concurrent_revocation() {
     assert_eq!(saved.pending_events.len(), 1);
     state.db.drop().await.unwrap();
 }
+
+async fn admitted_command(
+    state: &AppState,
+    authority: &contract::PersonalBindingAuthority,
+    text: String,
+) -> (
+    contract::AdmittedPersonalUpdate,
+    contract::OriginalManagerCommand,
+) {
+    let profile = state
+        .db
+        .collection::<crate::models::platform_bot_config::PlatformBotConfig>(
+            crate::models::platform_bot_config::COLLECTION_NAME,
+        )
+        .find_one(doc! {"_id":&authority.manager.profile_id})
+        .await
+        .unwrap()
+        .unwrap();
+    let update = contract::VerifiedManagerUpdate {
+        profile_id: authority.manager.profile_id.clone(),
+        manager_bot_id: authority.manager.manager_bot_id.clone(),
+        telegram_bot_id: authority.manager.telegram_bot_id,
+        observation_id: profile.observation_id,
+        sender_id: authority.sender_id,
+        chat_id: authority.chat_id,
+        chat_kind: contract::ManagerChatKind::Private,
+        update_id: 100,
+        message_id: 100,
+        command_eligibility: contract::ManagerCommandEligibility::OriginalPrivateMessage,
+    };
+    let contract::IngressAdmission::Claimed {
+        audience: contract::ManagerAudience::Personal(admitted),
+        ..
+    } = super::super::platform_manager_dispatch_service::admit_manager_update(
+        &state.db,
+        &super::super::platform_personal_binding_service::IdentityProducer,
+        &update,
+    )
+    .await
+    .unwrap()
+    else {
+        panic!("original private command must be personally admitted");
+    };
+    let command =
+        contract::OriginalManagerCommand::from_verified(update, contract::TurnInput { text })
+            .unwrap();
+    (admitted, command)
+}
+
+#[tokio::test]
+async fn personal_card_decision_queues_one_durable_continuation_that_survives_unlink() {
+    use super::super::assistant_acknowledgement_service as acks;
+    for allowed in [true, false] {
+        let (state, admitted) = fixture("personal_card_continuation").await;
+        let initial = claimed_input(&state, &admitted).await;
+        let row = &initial.conversation;
+        let chat = acks::for_key(
+            &state.db,
+            &row.user_id,
+            Some(&initial.credential.api_key_id),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let args = serde_json::json!({"target":"test"});
+        let card = acks::request(
+            &state.db,
+            &chat,
+            acks::Request {
+                kind: "action",
+                service: None,
+                tool: Some("nyxid__test_action"),
+                arguments: Some(&args),
+                summary: "Perform the owner-requested test action",
+                platform: false,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            card.requested_turn_id.as_ref(),
+            row.active_turn.as_ref().map(|turn| &turn.turn_id)
+        );
+        finish_claim(&state, &initial).await;
+        let phrase = format!(
+            "{} {}",
+            if allowed { "yes" } else { "no" },
+            acks::confirm_code(&card.id)
+        );
+        let (decision_admission, command) =
+            admitted_command(&state, &admitted.authority, phrase).await;
+        let service = personal(state.clone());
+        let result = service
+            .decide_platform_reply(&state.db, &decision_admission, &row.id, command.clone())
+            .await
+            .unwrap();
+        assert!(
+            matches!(result, contract::PlatformDecisionOutcome::Decided(ref decision)
+            if decision.acknowledgement_id == card.id && decision.allowed == allowed)
+        );
+        let saved = engine::get(&state.db, &row.user_id, &row.id).await.unwrap();
+        assert_eq!(saved.pending_events.len(), 1);
+        let event = &saved.pending_events[0];
+        assert_eq!(event.id, card.id);
+        assert_eq!(event.kind, "owner_action_decided");
+        assert!(event.bound);
+        assert!(event.report_to.is_none());
+        assert!(matches!(
+            service
+                .decide_platform_reply(&state.db, &decision_admission, &row.id, command)
+                .await
+                .unwrap(),
+            contract::PlatformDecisionOutcome::NoPendingDecision
+        ));
+        assert_eq!(
+            engine::get(&state.db, &row.user_id, &row.id)
+                .await
+                .unwrap()
+                .pending_events
+                .len(),
+            1
+        );
+        let receipt = state
+            .db
+            .collection::<PlatformManagerIngress>(RECEIPTS)
+            .find_one(doc! {"_id":&decision_admission.ingress.receipt_id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(receipt.phase == IngressPhase::Settled);
+        assert!(receipt.execution.is_none());
+        assert!(receipt.decision.is_some());
+        state
+            .db
+            .collection::<bson::Document>(BINDINGS)
+            .update_one(
+                doc! {"_id":&admitted.authority.binding_id},
+                doc! {"$set":{"state":"revoked"}},
+            )
+            .await
+            .unwrap();
+        let continued = engine::begin_turn(
+            &state.db,
+            &row.user_id,
+            event_start(&row.id),
+            &state.encryption_keys,
+        )
+        .await
+        .unwrap();
+        let turn = continued.active_turn.as_ref().unwrap();
+        assert!(turn.platform_origin.is_none());
+        assert!(turn.platform_reply.is_none());
+        assert_eq!(turn.events.len(), 1);
+        assert_eq!(turn.events[0].id, card.id);
+        let saved_card = state
+            .db
+            .collection::<crate::models::assistant_acknowledgement::AssistantAcknowledgement>(
+                crate::models::assistant_acknowledgement::COLLECTION_NAME,
+            )
+            .find_one(doc! {"_id":&card.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            saved_card.status,
+            if allowed { "allowed" } else { "denied" }
+        );
+        assert!(acks::decisions_note(&[saved_card]).contains(if allowed {
+            "Retry an allowed action"
+        } else {
+            "Do not request denied items"
+        }));
+        state.db.drop().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn async_result_settlement_retains_original_destination_across_new_revision_and_unlink() {
+    use crate::models::async_service_operation::{
+        AsyncOperationContract, AsyncServiceOperation, DeliveryBinding,
+    };
+    let (state, admitted) = fixture("personal_async_destination").await;
+    let initial = claimed_input(&state, &admitted).await;
+    let row = &initial.conversation;
+    let original = row.active_turn.as_ref().unwrap().platform_reply.clone();
+    let proof = row.active_turn.as_ref().unwrap().platform_origin.clone();
+    finish_claim(&state, &initial).await;
+    state
+        .db
+        .collection::<bson::Document>(crate::models::platform_bot_runtime_controls::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id":&admitted.authority.manager.profile_id},
+            doc! {"$set":{"personal_control_revision":2_i64}},
+        )
+        .await
+        .unwrap();
+    for (linked, destination) in [
+        (true, original.clone()),
+        (true, None),
+        (false, original.clone()),
+    ] {
+        if !linked {
+            state
+                .db
+                .collection::<bson::Document>(BINDINGS)
+                .update_one(
+                    doc! {"_id":&admitted.authority.binding_id},
+                    doc! {"$set":{"state":"revoked"}},
+                )
+                .await
+                .unwrap();
+        }
+        let now = chrono::Utc::now();
+        let watch = AsyncServiceOperation {
+            id: uuid::Uuid::new_v4().to_string(),
+            user_id: row.user_id.clone(),
+            conversation_id: row.id.clone(),
+            agent_id: row.agent_id.clone().unwrap(),
+            turn_id: row.active_turn.as_ref().unwrap().turn_id.clone(),
+            api_key_id: row.credential_api_key_id.clone(),
+            service_id: "test-service".into(),
+            submit_endpoint_id: "submit".into(),
+            contract: AsyncOperationContract {
+                status_operation: "status".into(),
+                result_operation: "result".into(),
+                cancel_operation: None,
+                id_field: "id".into(),
+                id_parameter: "id".into(),
+                status_field: "status".into(),
+                success_states: vec!["done".into()],
+                failure_states: vec!["failed".into()],
+                error_field: None,
+            },
+            delivery: DeliveryBinding {
+                platform_reply: destination.clone(),
+                platform_origin: proof.clone(),
+                origin: model::TurnOrigin::User,
+                channel: None,
+                reply_channel: None,
+                group_id: None,
+                group_request_id: None,
+                voice_request_id: None,
+                trigger_run_id: None,
+                report_to: None,
+                report_provenance: model::REPORT_PROVENANCE_V1,
+            },
+            operation_id: Some("operation".into()),
+            state: "queued".into(),
+            reason: Some("done".into()),
+            attempts: 0,
+            lease_id: None,
+            lease_until: None,
+            created_at: now,
+            deadline: now,
+            poll_at: now,
+            expires_at: now + chrono::Duration::hours(1),
+            result_encrypted: None,
+        };
+        state
+            .db
+            .collection::<AsyncServiceOperation>(
+                crate::models::async_service_operation::COLLECTION_NAME,
+            )
+            .insert_one(&watch)
+            .await
+            .unwrap();
+        let mut event = super::super::assistant_team_service::event(
+            super::super::async_service_operation::EVENT_KIND,
+            "The previously authorized operation finished".into(),
+            None,
+        )
+        .bound_to(None);
+        event.id = watch.id.clone();
+        engine::push_events(&state.db, &row.user_id, &row.id, vec![event])
+            .await
+            .unwrap();
+        let continued = engine::begin_turn(
+            &state.db,
+            &row.user_id,
+            event_start(&row.id),
+            &state.encryption_keys,
+        )
+        .await
+        .unwrap();
+        let turn = continued.active_turn.as_ref().unwrap();
+        if linked {
+            assert_eq!(
+                turn.platform_origin
+                    .as_ref()
+                    .unwrap()
+                    .personal_control_revision,
+                2
+            );
+        } else {
+            assert!(turn.platform_origin.is_none());
+        }
+        let expected = destination.unwrap_or(model::PlatformReplyRouting::WebOnly);
+        assert_eq!(turn.platform_reply.as_ref(), Some(&expected));
+        let credential = super::super::assistant_agent_credential_service::load_for_conversation(
+            &state.db,
+            &state.encryption_keys,
+            &row.user_id,
+            &row.id,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let reply = finish_claim(
+            &state,
+            &engine::OwnerTurnClaim {
+                conversation: continued.clone(),
+                credential,
+            },
+        )
+        .await;
+        let saved = state
+            .db
+            .collection::<crate::models::assistant_message::AssistantMessage>(
+                crate::models::assistant_message::COLLECTION_NAME,
+            )
+            .find_one(doc! {"_id":reply})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(saved.platform_reply, Some(expected));
+        assert_eq!(saved.platform_origin, turn.platform_origin);
+        let original_watch = state
+            .db
+            .collection::<AsyncServiceOperation>(
+                crate::models::async_service_operation::COLLECTION_NAME,
+            )
+            .find_one(doc! {"_id":watch.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            original_watch.delivery.platform_reply,
+            watch.delivery.platform_reply
+        );
+        assert_eq!(original_watch.state, "delivered");
+    }
+    state.db.drop().await.unwrap();
+}
