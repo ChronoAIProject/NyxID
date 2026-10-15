@@ -364,3 +364,377 @@ pub(crate) async fn clear_thread_in_session(
         )
         .await
 }
+
+use super::{api_key_mutation_service as transactions, assistant_nyxagent_runtime as runtime};
+use crate::AppState;
+use std::{collections::BTreeMap, sync::Arc, time::Duration};
+
+pub fn producer(
+    state: AppState,
+    identity: Arc<dyn contract::ManagerIdentityProducer>,
+    ingress: Arc<dyn contract::ManagerIngressTurnStore>,
+    egress: Arc<dyn contract::NyxAgentEgress>,
+) -> Arc<dyn contract::PersonalTurnProducer> {
+    Arc::new(PersonalTurns {
+        state,
+        identity,
+        ingress,
+        egress,
+    })
+}
+
+struct PersonalTurns {
+    state: AppState,
+    identity: Arc<dyn contract::ManagerIdentityProducer>,
+    ingress: Arc<dyn contract::ManagerIngressTurnStore>,
+    egress: Arc<dyn contract::NyxAgentEgress>,
+}
+
+#[async_trait::async_trait]
+impl contract::PersonalTurnProducer for PersonalTurns {
+    async fn start_personal_turn(
+        &self,
+        db: &Database,
+        admitted: &contract::AdmittedPersonalUpdate,
+        input: contract::TurnInput,
+        events: tokio::sync::mpsc::Sender<contract::ExecutionEvent>,
+    ) -> AppResult<contract::PersonalTurnStart> {
+        engine::require_enabled(db, &admitted.authority.user_id).await?;
+        let request = engine::parse_turn(
+            &serde_json::to_vec(&serde_json::json!({"text":input.text}))
+                .map_err(|_| AppError::BadRequest("Invalid assistant input".into()))?,
+        )?;
+        let Some(permit) = self
+            .state
+            .direct_chat_limiter
+            .try_acquire_pool("assistant_channel", &admitted.authority.user_id, 2)
+            .await?
+        else {
+            return Ok(contract::PersonalTurnStart::Unavailable(
+                contract::UnavailableReason::CapacityLimited,
+            ));
+        };
+        let agent =
+            super::assistant_team_service::ensure_nyxbot(db, &admitted.authority.user_id).await?;
+        let mut start = engine::TurnStart::from(&request);
+        start.model = Some(agent.model.clone());
+        let ids = engine::OwnerTurnIds {
+            conversation_id: format!("nyxa-{}", uuid::Uuid::new_v4().simple()),
+            turn_id: uuid::Uuid::new_v4().to_string(),
+            message_id: uuid::Uuid::new_v4().to_string(),
+        };
+        let mut session = db.client().start_session().await?;
+        let claim = session
+            .start_transaction()
+            .and_run2(async |session| {
+                let result = Box::pin(claim_personal_turn_in_session(
+                    db,
+                    session,
+                    &self.state.encryption_keys,
+                    self.identity.as_ref(),
+                    self.ingress.as_ref(),
+                    admitted,
+                    &start,
+                    &ids,
+                    &agent,
+                ))
+                .await;
+                transactions::transaction_result(result)
+            })
+            .await
+            .map_err(transactions::map_transaction_error)?;
+        super::assistant_agent_credential_service::audit_provision(
+            db,
+            &admitted.authority.user_id,
+            &claim.conversation.id,
+            &claim.credential,
+            false,
+        )
+        .await;
+        let origin = claim
+            .conversation
+            .active_turn
+            .as_ref()
+            .and_then(|turn| turn.platform_origin.as_ref())
+            .ok_or(AppError::AssistantTurnRequired)?;
+        let origin = contract_origin(origin)?;
+        let turn = contract::TurnRef {
+            conversation_id: claim.conversation.id.clone(),
+            turn_id: ids.turn_id,
+        };
+        let destination = contract::ReplyDestination {
+            manager: origin.authority.manager.clone(),
+            sender_id: origin.authority.sender_id,
+            chat_id: origin.authority.chat_id,
+            authority: contract::ReplyAuthority::Personal {
+                origin,
+                turn: turn.clone(),
+            },
+            expires_at: chrono::Utc::now()
+                + chrono::Duration::seconds(engine::ACTIVE_TURN_TTL_SECS),
+        };
+        let state = self.state.clone();
+        let egress = self.egress.clone();
+        let running = turn.clone();
+        // The bounded receiver belongs to the caller before the worker starts.
+        tokio::spawn(async move {
+            let row = claim.conversation;
+            let text = engine::turn_input(&row, &start);
+            let (sender, _) = tokio::sync::broadcast::channel(256);
+            let settled = runtime::run_owner_turn(
+                state.clone(),
+                egress,
+                row.clone(),
+                text,
+                claim.credential,
+                Some(
+                    super::billing::route_inventory::BillingRoutePolicy::Metered(
+                        super::billing::route_inventory::BillingIngress::Proxy,
+                    ),
+                ),
+                permit,
+                runtime::Events {
+                    sender,
+                    cursor: 0,
+                    reset_notified: false,
+                },
+            )
+            .await;
+            if let Some(settled) = settled {
+                let _ = tokio::time::timeout(
+                    Duration::from_secs(2),
+                    events.send(contract::ExecutionEvent::ReplyReady(contract::ReplyRef {
+                        turn: running.clone(),
+                        reply_id: settled.message_id,
+                    })),
+                )
+                .await;
+                if settled.error.is_none()
+                    && row.message_count == 1
+                    && super::assistant_title_service::eligible(&row)
+                {
+                    super::assistant_title_service::spawn(state, row.user_id, row.id);
+                }
+                let _ = tokio::time::timeout(
+                    Duration::from_secs(2),
+                    events.send(contract::ExecutionEvent::Settled { turn: running }),
+                )
+                .await;
+            }
+        });
+        Ok(contract::PersonalTurnStart::Started { turn, destination })
+    }
+
+    async fn stop_exact_platform_turn(
+        &self,
+        db: &Database,
+        session: &mut ClientSession,
+        origin: &contract::PlatformTurnOrigin,
+        turn: &contract::TurnRef,
+    ) -> AppResult<contract::ExactStopOutcome> {
+        capture_exact_stop_in_session(db, session, origin, turn).await
+    }
+
+    async fn apply_exact_platform_stop(
+        &self,
+        effects: &contract::CapturedPlatformStop,
+    ) -> AppResult<contract::ExactStopProgress> {
+        apply_exact_stop(&self.state, effects).await
+    }
+
+    async fn fence_platform_execution_in_session(
+        &self,
+        db: &Database,
+        session: &mut ClientSession,
+        user_id: &str,
+        key_id: &str,
+        turn: &contract::TurnRef,
+        origin: &contract::PlatformTurnOrigin,
+    ) -> AppResult<contract::FenceOutcome> {
+        fence_execution_in_session(
+            db,
+            session,
+            self.identity.as_ref(),
+            user_id,
+            key_id,
+            turn,
+            origin,
+        )
+        .await
+    }
+
+    async fn decide_platform_reply(
+        &self,
+        db: &Database,
+        admitted: &contract::AdmittedPersonalUpdate,
+        conversation_id: &str,
+        command: contract::OriginalManagerCommand,
+    ) -> AppResult<contract::PlatformDecisionOutcome> {
+        let mut session = db.client().start_session().await?;
+        session
+            .start_transaction()
+            .and_run2(async |session| {
+                let result = Box::pin(
+                    super::assistant_platform_reply_decision::decide_personal_reply_in_session(
+                        db,
+                        session,
+                        self.identity.as_ref(),
+                        self.ingress.as_ref(),
+                        admitted,
+                        conversation_id,
+                        &command,
+                    ),
+                )
+                .await;
+                transactions::transaction_result(result)
+            })
+            .await
+            .map_err(transactions::map_transaction_error)
+    }
+
+    async fn clear_binding_thread(
+        &self,
+        db: &Database,
+        session: &mut ClientSession,
+        user_id: &str,
+        binding_id: &str,
+        generation: i64,
+        conversation_id: &str,
+    ) -> AppResult<bool> {
+        self.identity
+            .clear_binding_thread_reference(
+                db,
+                session,
+                user_id,
+                binding_id,
+                generation,
+                conversation_id,
+            )
+            .await
+    }
+}
+
+async fn apply_exact_stop(
+    state: &AppState,
+    effects: &contract::CapturedPlatformStop,
+) -> AppResult<contract::ExactStopProgress> {
+    use contract::{ExactMachineCancelOutcome as Outcome, ExactStopSettlement as Settlement};
+    if !engine::valid_id(&effects.turn.conversation_id)
+        || uuid::Uuid::parse_str(&effects.turn.turn_id).is_err()
+    {
+        return Err(AppError::AssistantTurnRequired);
+    }
+    let expected = model_origin(&effects.origin);
+    let db = &state.db;
+    let collection = db.collection::<AssistantConversation>(CONVERSATIONS);
+    let current = collection
+        .find_one(
+            doc! {"_id":&effects.turn.conversation_id,"user_id":&effects.origin.authority.user_id},
+        )
+        .await?;
+    let settlement = match current {
+        None => Settlement::ConversationDeleted,
+        Some(row)
+            if row.active_turn.as_ref().is_some_and(|turn| {
+                turn.turn_id == effects.turn.turn_id
+                    && turn.platform_origin.as_ref() == Some(&expected)
+                    && turn.stop_requested
+            }) =>
+        {
+            match tokio::time::timeout(
+                Duration::from_secs(5),
+                engine::force_stop(db, &row.user_id, &row.id, &effects.turn.turn_id),
+            )
+            .await
+            {
+                Ok(Ok(true)) => Settlement::Settled,
+                Ok(Ok(false)) => Settlement::AlreadySettled,
+                Ok(Err(AppError::NotFound(_))) => Settlement::AlreadySettled,
+                Ok(Err(_)) | Err(_) => Settlement::Pending,
+            }
+        }
+        Some(row)
+            if row
+                .active_turn
+                .as_ref()
+                .is_some_and(|turn| turn.turn_id == effects.turn.turn_id) =>
+        {
+            Settlement::Pending
+        }
+        Some(_) => Settlement::AlreadySettled,
+    };
+    // Each node/runtime is contacted once; job IDs supplement the exact turn
+    // scope. Empty IDs still cancel browser/files/computer work of this turn.
+    let mut groups: BTreeMap<(String, String), Vec<String>> = BTreeMap::new();
+    for scope in &effects.machine_scopes {
+        groups
+            .entry((scope.node_id.clone(), scope.runtime_id.clone()))
+            .or_default();
+    }
+    for job in &effects.machine_jobs {
+        groups
+            .entry((job.node_id.clone(), job.runtime_id.clone()))
+            .or_default()
+            .push(job.job_id.clone());
+    }
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    use futures::StreamExt;
+    let outcomes:Vec<_>=futures::stream::iter(groups).map(|((node_id,runtime_id),ids)|async move {
+        let work=async {
+            let nodes=db.collection::<crate::models::node::Node>(crate::models::node::COLLECTION_NAME);
+            let Some(node)=nodes.find_one(doc! {"_id":&node_id}).await? else {return AppResult::Ok(Outcome::NodeUnavailable);};
+            if node.machine.as_ref().is_none_or(|profile|profile.runtime_id!=runtime_id) {return Ok(Outcome::RuntimeChanged);}
+            let result=super::machine_service::dispatch(state,&node,nyxid_machine::Operation::CancelExact,
+                serde_json::json!({"conversation_id":effects.turn.conversation_id,"turn_id":effects.turn.turn_id,"job_ids":ids,"runtime_id":runtime_id})).await;
+            let Some(latest)=nodes.find_one(doc! {"_id":&node_id}).await? else {return Ok(Outcome::NodeUnavailable);};
+            if latest.machine.as_ref().is_none_or(|profile|profile.runtime_id!=runtime_id) {return Ok(Outcome::RuntimeChanged);}
+            Ok(match result {
+                Ok(value) if value.get("stopped").and_then(serde_json::Value::as_bool)==Some(true)=>Outcome::Cancelled,
+                Ok(_)=>Outcome::Unsupported,
+                Err(AppError::MachineAuthorityUnsupported)=>Outcome::Unsupported,
+                Err(_)=>Outcome::NodeUnavailable,
+            })
+        };
+        let outcome=match tokio::time::timeout_at(deadline,work).await {Ok(Ok(outcome))=>outcome,_=>Outcome::NodeUnavailable};
+        ((node_id,runtime_id),outcome)
+    }).buffer_unordered(8).collect().await;
+    let outcomes: BTreeMap<_, _> = outcomes.into_iter().collect();
+    let mut machine_jobs = Vec::new();
+    for job in &effects.machine_jobs {
+        let mut outcome = *outcomes
+            .get(&(job.node_id.clone(), job.runtime_id.clone()))
+            .unwrap_or(&Outcome::NodeUnavailable);
+        if matches!(outcome, Outcome::Cancelled | Outcome::RuntimeChanged) {
+            let result=db.collection::<MachineJob>(JOBS).update_one(doc! {
+                "_id":&job.job_id,"user_id":&effects.origin.authority.user_id,"node_id":&job.node_id,"runtime_id":&job.runtime_id,
+                "conversation_id":&effects.turn.conversation_id,"issuing_turn_id":&effects.turn.turn_id,"state":"running",
+            },doc! {"$set":{"state":"finished","finished_at":bson::DateTime::now()}}).await?;
+            if result.matched_count == 0 {
+                outcome = Outcome::AlreadyFinished;
+            }
+        }
+        machine_jobs.push(contract::ExactMachineJobProgress {
+            job: job.clone(),
+            outcome,
+        });
+    }
+    let machine_scopes = effects
+        .machine_scopes
+        .iter()
+        .map(|scope| contract::ExactMachineScopeProgress {
+            scope: scope.clone(),
+            outcome: *outcomes
+                .get(&(scope.node_id.clone(), scope.runtime_id.clone()))
+                .unwrap_or(&Outcome::NodeUnavailable),
+        })
+        .collect();
+    Ok(contract::ExactStopProgress {
+        settlement,
+        machine_jobs,
+        machine_scopes,
+    })
+}
+
+#[cfg(test)]
+#[path = "platform_personal_turn_tests.rs"]
+mod tests;
