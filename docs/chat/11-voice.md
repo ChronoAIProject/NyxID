@@ -6,6 +6,9 @@ provider fixtures; no paid provider session has been run. Latencies below are en
 not measurements. Provider documentation is evidence of a contract, not proof of
 account entitlement or browser acoustic performance.
 
+Specialist authorization fix: [diagnosis and acceptance criteria](../SPECIALIST_BOT_VOICE_PLAN.md)
+and [review and verification evidence](../SPECIALIST_BOT_VOICE_REVIEW.md).
+
 ## 1. Decision
 
 Voice is another surface of the person's existing NyxAgent thread. The voice
@@ -78,7 +81,7 @@ Read alongside [08][engine], [09][nyxbot], [10][uploads], [organization agents][
 | `services/assistant_nyxagent.rs::begin_turn`, `handlers/assistant_nyxagent.rs::start_turn` | Transactional user-message/key/active-turn admission, detached worker, durable settlement, same upstream session and exact credential. Extract reusable orchestration into the service layer where necessary; a voice service must not depend on HTTP handlers. |
 | `handlers/assistant_team.rs::start_server_turn`, `after_turn`, `services/assistant_nyxagent.rs::push_events` | Reuse owner identity, pool accounting, event wakeups and specialist reports. Existing `pending_events` is bounded and channel-aware, not a generic browser FIFO: `/turns` currently returns `turn_active`. Voice needs durable request admission and an explicit atomic bridge to `begin_turn`. |
 | `assistant_conversations`, `assistant_messages` | Conversation-scoped sequence allocation, persisted history, active-turn Stop fencing. `via` is already an optional string: add `voice`, not a new channel credential. Add voice provenance and references without changing existing roles. |
-| `services/assistant_agent_credential_service.rs` | Exact encrypted thread key, replacement/rotation and authority convergence. Never create a voice-specific all-powerful key. Voice alone need not provision a thread key until delegation; first work uses normal provisioning. |
+| `services/assistant_agent_credential_service.rs` | Exact encrypted thread key, replacement/rotation and authority convergence. The ordinary draft flow provisions the conversation key before the first turn, so voice can authenticate that draft without an active turn. Never create a voice-specific all-powerful key. |
 | `services/org_agent_service.rs`, key auth and proxy/MCP authorization | Live membership, `can_proxy()`, person-private conversations, grant/scope intersection. No personal-resource fallback for org work. Recheck long-lived voice explicitly, not only at the initial upgrade. |
 | `assistant_acknowledgement_service`, frontend `use-assistant-nyxagent.ts` | Same action digest, current credential, expiry and one-use consumption. Today some owner-card continuations are browser-owned; voice needs server-owned, deduplicated continuations without also triggering the browser copy. |
 | `services/assistant_live.rs` | Metadata-only change stream and owner SSE, invalidation/resync and sweep recovery. Do not put transcripts on its existing owner-wide channel. A session-specific stream carries captions; the task view uses authoritative history. |
@@ -925,6 +928,15 @@ no across-request grant cache. Distinguish catalog metadata, usable binding,
 model entitlement and temporary provider health. A custom service marked
 realtime does not automatically become an OpenAI/xAI transport.
 
+Options load the exact bound conversation authority once per request and reuse
+it for source-specific grant and operation checks. Each selected own connection
+also passes the shared read-only proxy authority snapshot, including its effective
+official origin and usable server credential. Compute eligibility before expanding
+models; discovery never decrypts, refreshes or provisions credentials. Discovery
+matches start's authorization, origin and credential eligibility at that moment;
+`available` does not promise wallet funds, concurrency capacity, unchanged state or
+provider entitlement at start. Startup remains authoritative for those checks.
+
 
 `ServiceInference.voice` is additive and serde-defaulted: `protocol` (`openai_live`
 or `xai_realtime`, with unknown future protocols ineligible for execution), `models`
@@ -969,7 +981,21 @@ retains the stored own key exactly as existing rules require. Remember the
 chosen connection/source in assistant settings, then validate again next call.
 
 The voice-provider model transport uses the narrowly bounded assistant
-inference access policy; it cannot open service tools. Apply any configured B1
+inference access policy; it cannot open service tools. Billed platform voice
+requires no OpenAI tool grant or per-specialist OpenAI connection. Its authority
+must bind the live conversation credential to this private thread's acting user,
+conversation ID, agent ID and API key ID. Fresh drafts work without an active
+turn; ordinary/unbound/rebound keys and guest threads do not receive this
+exception. Authentication and live revalidation retain revoked/expired-key,
+destroyed-agent and organization-access fences. Platform ACLs, rollout flags,
+duration tariffs and billing admission still apply, with platform use charged to
+the acting person.
+
+BYOK requires the selected `UserService` connection's grant by its own ID; a
+catalog service ID cannot substitute for that grant. An explicitly granted own
+connection keeps its independent operation identity, so a restriction on a
+different granted connection does not constrain it. The platform catalog alias
+retains the existing conservative catalog-linked scope checks. Apply any configured B1
 scope to the canonical provider control operations too. B1 currently denies
 WebSocket execution on a scoped service, including inference: a restricted
 Grok service must therefore be reported unavailable rather than bypassed via

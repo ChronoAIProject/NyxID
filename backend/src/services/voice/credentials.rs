@@ -112,34 +112,14 @@ pub async fn resolve(
                 .connection_id
                 .as_deref()
                 .ok_or(AppError::VoiceProviderUnavailable)?;
-            let connection = state
-                .db
-                .collection::<UserService>(CONNECTIONS)
-                .find_one(doc! {"_id":id,"user_id":resource_owner,
-                "catalog_service_id":&service.id,"deleted_at":mongodb::bson::Bson::Null})
-                .await?
-                .ok_or(AppError::VoiceProviderUnavailable)?;
-            if connection.node_id.is_some()
-                || connection.credential_binding.as_deref() == Some("platform")
-                || connection.api_key_id.is_none()
-            {
-                return Err(AppError::VoiceProviderUnavailable);
-            }
-            let snapshot = Box::pin(proxy::read_proxy_authority_snapshot_by_user_service_id(
+            Box::pin(own_snapshot(
                 &state.db,
                 &state.encryption_keys,
-                user,
+                &thread,
+                &service,
                 id,
-                None,
             ))
-            .await?
-            .ok_or(AppError::VoiceProviderUnavailable)?;
-            if snapshot.node_id.is_some()
-                || snapshot.master_credential
-                || !official_provider_origin(&snapshot.target.base_url, &protocol)
-            {
-                return Err(AppError::VoiceProviderUnavailable);
-            }
+            .await?;
             let resolved = Box::pin(proxy::resolve_proxy_target_by_user_service_id(
                 &state.db,
                 &state.encryption_keys,
@@ -247,6 +227,73 @@ pub async fn resolve(
     })
 }
 
+/// Shared read-only BYOK eligibility for discovery and start. Never decrypts,
+/// refreshes, provisions or touches a credential, and preserves snapshot errors.
+pub(crate) async fn own_snapshot(
+    db: &mongodb::Database,
+    keys: &crate::crypto::aes::EncryptionKeys,
+    thread: &crate::models::assistant_conversation::AssistantConversation,
+    service: &DownstreamService,
+    id: &str,
+) -> AppResult<proxy::UserServiceResolution> {
+    let owner = thread.agent_owner_id.as_deref().unwrap_or(&thread.user_id);
+    let connection = db
+        .collection::<UserService>(CONNECTIONS)
+        .find_one(doc! {"_id":id,"user_id":owner,"is_active":true,
+        "catalog_service_id":&service.id,"deleted_at":mongodb::bson::Bson::Null})
+        .await?
+        .ok_or(AppError::VoiceProviderUnavailable)?;
+    if connection.node_id.is_some()
+        || connection.credential_binding.as_deref() == Some("platform")
+        || connection.api_key_id.is_none()
+        || connection.auth_method != "bearer"
+    {
+        return Err(AppError::VoiceProviderUnavailable);
+    }
+    let snapshot = Box::pin(proxy::read_proxy_authority_snapshot_by_user_service_id(
+        db,
+        keys,
+        &thread.user_id,
+        id,
+        None,
+    ))
+    .await?
+    .ok_or(AppError::VoiceProviderUnavailable)?;
+    let protocol = &service
+        .inference
+        .as_ref()
+        .and_then(|i| i.voice.as_ref())
+        .ok_or(AppError::VoiceProviderUnavailable)?
+        .protocol;
+    if snapshot.node_id.is_some()
+        || snapshot.master_credential
+        || !snapshot.has_server_credential
+        || snapshot.target.auth_method != "bearer"
+        || !official_provider_origin(&snapshot.target.base_url, protocol)
+    {
+        return Err(AppError::VoiceProviderUnavailable);
+    }
+    Ok(snapshot)
+}
+
+/// Only expected authority/credential refusals hide an option. Infrastructure
+/// and data-integrity errors must remain errors, never eligible discoveries.
+pub(crate) fn discovery_result<T>(result: AppResult<T>) -> AppResult<Option<T>> {
+    match result {
+        Ok(value) => Ok(Some(value)),
+        Err(
+            AppError::Forbidden(_)
+            | AppError::Unauthorized(_)
+            | AppError::NotFound(_)
+            | AppError::ApiKeyScopeForbidden(_)
+            | AppError::OrgRoleInsufficient(_)
+            | AppError::CredentialUnavailable(_)
+            | AppError::VoiceProviderUnavailable,
+        ) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
 /// Keyed, domain-separated fingerprint for change detection. Never a password
 /// hash: inputs may include credential ciphertext, so an unkeyed digest is not used.
 fn keyed_fingerprint(state: &AppState, domain: &[u8], material: &[u8]) -> String {
@@ -291,15 +338,61 @@ pub(crate) async fn authorize_inference(
     service: &DownstreamService,
     connection: Option<&str>,
 ) -> AppResult<()> {
+    let authority = inference_authority(db, thread).await?;
+    authorize_with_authority(db, &authority, service, connection).await
+}
+
+/// A request-local, exact private-thread authentication result. Only the loader
+/// can construct it; reuse in discovery never persists beyond that request.
+pub(crate) struct InferenceAuthority(crate::mw::auth::AuthUser);
+
+pub(crate) async fn inference_authority(
+    db: &mongodb::Database,
+    thread: &crate::models::assistant_conversation::AssistantConversation,
+) -> AppResult<InferenceAuthority> {
+    super::super::assistant_voice::private_thread(thread)?;
     let key =
         super::super::key_service::get_api_key(db, &thread.user_id, &thread.credential_api_key_id)
             .await?;
     let auth = crate::mw::auth::api_key_auth_user(db, &key, None, None, None).await?;
     auth.ensure_llm_proxy_access()?;
-    if auth
-        .api_key_service_scope()
-        .is_some_and(|ids| !ids.contains(&service.id))
+    // Model transport uses the normal assistant inference exception, bounded
+    // here to this exact private thread and its live durable credential. A draft
+    // needs no active turn. Ordinary/unbound/rebound keys cannot use this path.
+    let chat = auth.assistant_chat.as_ref().ok_or_else(|| {
+        AppError::Forbidden("Voice requires the thread's live conversation credential".into())
+    })?;
+    if chat.guest
+        || chat.user_id != thread.user_id
+        || chat.conversation_id != thread.id
+        || chat.api_key_id != thread.credential_api_key_id
+        || match thread.agent_id.as_deref() {
+            Some(id) => chat.agent_id != id,
+            // Legacy threads belong to the person's NyxBot; auth resolves that
+            // same thread's agent before constructing this authority.
+            None => chat.role != crate::models::assistant_conversation::AgentRole::Orchestrator,
+        }
     {
+        return Err(AppError::Forbidden(
+            "Voice conversation credential does not match this thread".into(),
+        ));
+    }
+    Ok(InferenceAuthority(auth))
+}
+
+pub(crate) async fn authorize_with_authority(
+    db: &mongodb::Database,
+    authority: &InferenceAuthority,
+    service: &DownstreamService,
+    connection: Option<&str>,
+) -> AppResult<()> {
+    let auth = &authority.0;
+    // Platform audio is inference, independent of tool grants. BYOK must hold
+    // the selected UserService grant, never a catalog-ID substitute.
+    if connection.is_some_and(|id| {
+        auth.api_key_service_scope()
+            .is_some_and(|ids| !ids.iter().any(|allowed| allowed == id))
+    }) {
         return Err(AppError::Forbidden(
             "This agent cannot use the selected voice service".into(),
         ));
@@ -320,7 +413,7 @@ pub(crate) async fn authorize_inference(
     // saved on that connection applies; catalog-only intersects every scope
     // bound to the catalog.
     let (scope_id, catalog_id) = super::super::agent_operation_scope_service::execution_identity(
-        &auth,
+        auth,
         connection,
         &service.id,
     );
@@ -337,7 +430,7 @@ pub(crate) async fn authorize_inference(
         method,
         &path,
         false,
-        grok,
+        true, // Both adapters open a WebSocket (OpenAI attaches a sideband).
     )?;
     // Voice sessions send no caller query or body; any input limit refuses them.
     super::super::agent_operation_scope_service::check_inputs(
@@ -354,7 +447,7 @@ pub(crate) async fn authorize_inference(
     Box::pin(
         super::super::agent_operation_scope_service::check_non_mcp_context(
             db,
-            &auth,
+            auth,
             scoped,
             scope_id,
             catalog_id,
