@@ -381,4 +381,401 @@ mod tests {
         session.abort_transaction().await.unwrap();
         db.drop().await.unwrap();
     }
+
+    async fn mark_pending(db: &Database, owner: &str, deleting: bool) {
+        db.collection::<Document>(crate::models::user::COLLECTION_NAME)
+            .update_one(
+                doc! {"_id": owner},
+                doc! {"$set": {
+                "is_active": false, "platform_personal_retirement_pending": true,
+                "platform_personal_deleting": deleting},
+                "$inc": {"platform_personal_effect_revision": 1_i64}},
+            )
+            .await
+            .unwrap();
+    }
+
+    async fn owner_row(db: &Database, owner: &str) -> Document {
+        db.collection::<Document>(crate::models::user::COLLECTION_NAME)
+            .find_one(doc! {"_id": owner})
+            .await
+            .unwrap()
+            .unwrap()
+    }
+
+    async fn insert_running_binding(
+        db: &Database,
+        update: &VerifiedManagerUpdate,
+        owner: &str,
+    ) -> PlatformPersonalBinding {
+        use crate::models::platform_personal_binding::{PersonalOriginSource, PersonalTurnProof};
+        let mut binding = bindings::tests::binding(update, owner);
+        let conversation = format!("nyxa-{}", uuid::Uuid::new_v4().simple());
+        let turn = uuid::Uuid::new_v4().to_string();
+        let agent = uuid::Uuid::new_v4().to_string();
+        let proof = PersonalTurnProof {
+            platform_config_id: update.profile_id.clone(),
+            manager_bot_id: update.manager_bot_id.clone(),
+            telegram_bot_id: update.telegram_bot_id,
+            manager_authority_epoch: 1,
+            telegram_sender_id: update.sender_id,
+            telegram_chat_id: update.chat_id,
+            binding_id: binding.id.clone(),
+            binding_generation: 1,
+            personal_control_revision: 1,
+            user_id: owner.into(),
+            nyxbot_agent_id: agent.clone(),
+            source: PersonalOriginSource::ThreadEvent {
+                admission_id: uuid::Uuid::new_v4().to_string(),
+            },
+        };
+        let model = super::super::platform_personal_turn_service::model_origin(
+            &bindings::service_origin(&proof),
+        );
+        let document = doc! {
+            "_id": &conversation, "user_id": owner, "title": "Personal conversation",
+            "model": "test-model", "credential_api_key_id": "retirement-key", "message_count": 1_i64,
+            "platform_thread": bson::to_bson(&model.thread).unwrap(),
+            "created_at": bson::DateTime::now(), "updated_at": bson::DateTime::now(),
+            "active_turn": {"turn_id": &turn, "started_at": bson::DateTime::now(),
+                "platform_origin": bson::to_bson(&model).unwrap(),
+                "machine_scopes": [{"node_id": "retirement-node", "runtime_id": "issue-time-runtime"}]},
+        };
+        let row: crate::models::assistant_conversation::AssistantConversation =
+            bson::from_document(document).unwrap();
+        db.collection::<crate::models::assistant_conversation::AssistantConversation>(
+            crate::models::assistant_conversation::COLLECTION_NAME,
+        )
+        .insert_one(row)
+        .await
+        .unwrap();
+        binding.nyxbot_agent_id = Some(agent);
+        binding.conversation_id = Some(conversation.clone());
+        binding.active_turn = Some(PersonalActiveTurn {
+            conversation_id: conversation,
+            turn_id: turn,
+            origin: proof,
+        });
+        db.collection::<PlatformPersonalBinding>(
+            crate::models::platform_personal_binding::COLLECTION_NAME,
+        )
+        .insert_one(&binding)
+        .await
+        .unwrap();
+        binding
+    }
+
+    #[tokio::test]
+    async fn crash_recovery_is_bounded_and_keeps_account_inactive_until_all_batches_finish() {
+        let (db, update, owner) = bindings::tests::fixture("personal_retirement_batches").await;
+        let rows = db.collection::<PlatformPersonalBinding>(
+            crate::models::platform_personal_binding::COLLECTION_NAME,
+        );
+        let mut batch = Vec::new();
+        for sender in 1000..1051 {
+            let mut sender_update = update.clone();
+            sender_update.sender_id = sender;
+            sender_update.chat_id = sender;
+            batch.push(bindings::tests::binding(&sender_update, &owner));
+        }
+        rows.insert_many(batch).await.unwrap();
+        db.collection::<Document>(crate::models::platform_link_intent::COLLECTION_NAME)
+            .insert_one(
+                doc! {"_id": "retirement-intent", "claimant_user_id": &owner, "state": "pending"},
+            )
+            .await
+            .unwrap();
+        db.collection::<Document>(crate::models::platform_link_intent::CHALLENGES)
+            .insert_one(doc! {"_id": "retirement-challenge", "reviewed_user_id": &owner, "state": "awaiting_chat_confirmation"}).await.unwrap();
+        mark_pending(&db, &owner, false).await;
+        assert_eq!(recover_pending(&db, 0).await.unwrap(), 0);
+        assert_eq!(
+            rows.count_documents(doc! {"state": "active"})
+                .await
+                .unwrap(),
+            51
+        );
+        assert_eq!(recover_pending(&db, 1).await.unwrap(), 1);
+        assert_eq!(
+            rows.count_documents(doc! {"state": "active"})
+                .await
+                .unwrap(),
+            1
+        );
+        assert!(
+            owner_row(&db, &owner)
+                .await
+                .get_bool("platform_personal_retirement_pending")
+                .unwrap()
+        );
+        for collection in [
+            crate::models::platform_link_intent::COLLECTION_NAME,
+            crate::models::platform_link_intent::CHALLENGES,
+        ] {
+            let proof = db
+                .collection::<Document>(collection)
+                .find_one(doc! {})
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(proof.get_str("state").unwrap(), "cancelled");
+        }
+        assert_eq!(recover_pending(&db, 1).await.unwrap(), 1);
+        assert_eq!(
+            rows.count_documents(doc! {"state": "active"})
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(recover_pending(&db, 1).await.unwrap(), 1);
+        let user = owner_row(&db, &owner).await;
+        assert!(
+            !user
+                .get_bool("platform_personal_retirement_pending")
+                .unwrap()
+        );
+        assert!(!user.get_bool("is_active").unwrap());
+        assert_eq!(recover_pending(&db, 1).await.unwrap(), 0);
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn failed_retirement_rolls_back_stop_and_consent_and_refuses_reactivation() {
+        use crate::models::platform_bot_runtime_controls::{
+            PlatformPersonalStopEffect, STOP_EFFECTS,
+        };
+        let (db, update, owner) = bindings::tests::fixture("personal_retirement_rollback").await;
+        let binding = insert_running_binding(&db, &update, &owner).await;
+        for collection in [
+            crate::models::session::COLLECTION_NAME,
+            crate::models::refresh_token::COLLECTION_NAME,
+        ] {
+            db.collection::<Document>(collection)
+                .insert_one(doc! {
+                "_id": "old-session", "user_id": &owner, "revoked": false})
+                .await
+                .unwrap();
+        }
+        db.collection::<Document>(crate::models::api_key::COLLECTION_NAME)
+            .insert_one(doc! {
+            "_id": "old-key", "user_id": &owner, "is_active": true,
+            "state_version": 1_i64, "updated_at": bson::DateTime::now()})
+            .await
+            .unwrap();
+        // A malformed legacy credential makes local cleanup fail after capture.
+        let credentials =
+            db.collection::<Document>(crate::models::assistant_agent_credential::COLLECTION_NAME);
+        credentials
+            .insert_one(doc! {"_id": "broken-credential", "user_id": &owner})
+            .await
+            .unwrap();
+        mark_pending(&db, &owner, false).await;
+        assert!(retire_batch(&db, &owner, false).await.is_err());
+        let saved = db
+            .collection::<PlatformPersonalBinding>(
+                crate::models::platform_personal_binding::COLLECTION_NAME,
+            )
+            .find_one(doc! {"_id": &binding.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            saved.state,
+            crate::models::platform_personal_binding::PersonalBindingState::Active
+        );
+        assert_eq!(
+            db.collection::<Document>(STOP_EFFECTS)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
+        );
+        let turn = db
+            .collection::<Document>(crate::models::assistant_conversation::COLLECTION_NAME)
+            .find_one(doc! {"_id": binding.conversation_id.as_deref().unwrap()})
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            !turn
+                .get_document("active_turn")
+                .unwrap()
+                .get_bool("stop_requested")
+                .unwrap_or(false)
+        );
+        for collection in [
+            crate::models::session::COLLECTION_NAME,
+            crate::models::refresh_token::COLLECTION_NAME,
+        ] {
+            let session = db
+                .collection::<Document>(collection)
+                .find_one(doc! {"_id": "old-session"})
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(!session.get_bool("revoked").unwrap());
+        }
+        let key = db
+            .collection::<Document>(crate::models::api_key::COLLECTION_NAME)
+            .find_one(doc! {"_id": "old-key"})
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(key.get_bool("is_active").unwrap());
+        assert_eq!(key.get_i64("state_version").unwrap(), 1);
+        let admin = uuid::Uuid::new_v4().to_string();
+        assert!(
+            super::super::admin_user_service::set_user_active(&db, &admin, &owner, true)
+                .await
+                .is_err()
+        );
+        assert!(!owner_row(&db, &owner).await.get_bool("is_active").unwrap());
+        credentials
+            .delete_one(doc! {"_id": "broken-credential"})
+            .await
+            .unwrap();
+        super::super::admin_user_service::set_user_active(&db, &admin, &owner, true)
+            .await
+            .unwrap();
+        let stop = db
+            .collection::<PlatformPersonalStopEffect>(STOP_EFFECTS)
+            .find_one(doc! {})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stop.active_turn, binding.active_turn.unwrap());
+        assert_eq!(stop.machine_scopes.len(), 1);
+        assert_eq!(stop.machine_scopes[0].runtime_id, "issue-time-runtime");
+        assert!(!stop.completed);
+        assert!(owner_row(&db, &owner).await.get_bool("is_active").unwrap());
+        for collection in [
+            crate::models::session::COLLECTION_NAME,
+            crate::models::refresh_token::COLLECTION_NAME,
+        ] {
+            let session = db
+                .collection::<Document>(collection)
+                .find_one(doc! {"_id": "old-session"})
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(session.get_bool("revoked").unwrap());
+        }
+        let key = db
+            .collection::<Document>(crate::models::api_key::COLLECTION_NAME)
+            .find_one(doc! {"_id": "old-key"})
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!key.get_bool("is_active").unwrap());
+        assert_eq!(key.get_i64("state_version").unwrap(), 2);
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn stale_personal_snapshot_cannot_commit_after_disable_and_reenable() {
+        let (db, update, owner) = bindings::tests::fixture("personal_retirement_snapshot").await;
+        let binding = bindings::tests::binding(&update, &owner);
+        db.collection::<PlatformPersonalBinding>(
+            crate::models::platform_personal_binding::COLLECTION_NAME,
+        )
+        .insert_one(&binding)
+        .await
+        .unwrap();
+        let mut stale = db.client().start_session().await.unwrap();
+        stale.start_transaction().await.unwrap();
+        db.collection::<Document>(crate::models::user::COLLECTION_NAME)
+            .find_one(doc! {"_id": &owner})
+            .session(&mut stale)
+            .await
+            .unwrap()
+            .unwrap();
+        let admin = uuid::Uuid::new_v4().to_string();
+        super::super::admin_user_service::set_user_active(&db, &admin, &owner, false)
+            .await
+            .unwrap();
+        super::super::admin_user_service::set_user_active(&db, &admin, &owner, true)
+            .await
+            .unwrap();
+        assert!(
+            bindings::fence_binding_in_session(&db, &mut stale, &binding, 1)
+                .await
+                .is_err()
+        );
+        let _ = stale.abort_transaction().await;
+        // A late recovery snapshot must not revoke newly issued credentials.
+        db.collection::<Document>(crate::models::session::COLLECTION_NAME)
+            .insert_one(doc! {"_id": "new-session", "user_id": &owner, "revoked": false})
+            .await
+            .unwrap();
+        assert_eq!(recover_pending(&db, 32).await.unwrap(), 0);
+        assert!(retire_batch(&db, &owner, false).await.unwrap());
+        let session = db
+            .collection::<Document>(crate::models::session::COLLECTION_NAME)
+            .find_one(doc! {"_id": "new-session"})
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!session.get_bool("revoked").unwrap());
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn deletion_recovery_keeps_marker_and_stop_scopes_survive_cascade() {
+        use crate::models::platform_bot_runtime_controls::{
+            PlatformPersonalStopEffect, STOP_EFFECTS,
+        };
+        let (db, update, owner) = bindings::tests::fixture("personal_retirement_delete").await;
+        let binding = insert_running_binding(&db, &update, &owner).await;
+        mark_pending(&db, &owner, true).await;
+        assert_eq!(recover_pending(&db, 1).await.unwrap(), 1);
+        assert_eq!(recover_pending(&db, 1).await.unwrap(), 1);
+        let user = owner_row(&db, &owner).await;
+        assert!(user.get_bool("platform_personal_deleting").unwrap());
+        assert!(!user.get_bool("is_active").unwrap());
+        let admin = uuid::Uuid::new_v4().to_string();
+        assert!(matches!(
+            super::super::admin_user_service::set_user_active(&db, &admin, &owner, true).await,
+            Err(AppError::Conflict(_))
+        ));
+        let retired = db
+            .collection::<PlatformPersonalBinding>(
+                crate::models::platform_personal_binding::COLLECTION_NAME,
+            )
+            .find_one(doc! {"_id": &binding.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            retired.revocation_reason,
+            Some(crate::models::platform_personal_binding::PersonalRevocationReason::OwnerDeleted)
+        );
+        super::super::admin_user_service::delete_current_user_cascade(&db, &owner)
+            .await
+            .unwrap();
+        assert!(
+            db.collection::<Document>(crate::models::user::COLLECTION_NAME)
+                .find_one(doc! {"_id": &owner})
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            db.collection::<Document>(crate::models::assistant_conversation::COLLECTION_NAME)
+                .find_one(doc! {"_id": binding.conversation_id.as_deref().unwrap()})
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let stop = db
+            .collection::<PlatformPersonalStopEffect>(STOP_EFFECTS)
+            .find_one(doc! {})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stop.active_turn, binding.active_turn.unwrap());
+        assert_eq!(stop.machine_scopes.len(), 1);
+        assert_eq!(stop.machine_scopes[0].runtime_id, "issue-time-runtime");
+        assert!(!stop.completed);
+        db.drop().await.unwrap();
+    }
 }
