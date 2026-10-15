@@ -498,12 +498,9 @@ pub struct PublicReadinessEvidence {
 #[derive(Clone, Debug)]
 #[allow(clippy::large_enum_variant)] // Readiness carries one bounded proof across the producer boundary.
 pub enum PublicReadiness {
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "Public activation awaits deployed-contract verification; see docs/plans/2026-10-15-public-personal-nyxbot-upstream-evidence.md"
-        )
+    #[expect(
+        dead_code,
+        reason = "Public activation awaits deployed-contract verification; see docs/plans/2026-10-15-public-personal-nyxbot-upstream-evidence.md"
     )]
     Ready(PublicReadinessEvidence),
     Unavailable(UnavailableReason),
