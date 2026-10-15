@@ -1,12 +1,13 @@
 //! Personal proofs: 24-hour bearer intents followed by fresh 10-minute reviews.
 use super::{
     api_key_mutation_service::{map_transaction_error, transaction_result},
-    platform_manager_contract::{ManagerChatKind, VerifiedManagerUpdate},
+    platform_manager_contract::{ManagerChatKind, PublicExecutionContext, VerifiedManagerUpdate},
     platform_personal_binding_service as bindings,
 };
 use crate::{
     errors::{AppError, AppResult},
     models::{
+        platform_bot_runtime_controls::PlatformBotRuntimeControls,
         platform_link_intent::*,
         platform_personal_binding::{
             PersonalBindingState, PersonalRevocationReason, PlatformPersonalBinding,
@@ -197,15 +198,142 @@ pub async fn begin_in_session(
     )
     .await?
     .ok_or_else(bindings::unavailable)?;
-    if controls.retired || controls.emergency_stopped {
+    mint_intent_in_session(
+        db,
+        session,
+        key,
+        IntentMint {
+            controls: &controls,
+            sender_id: update.sender_id,
+            chat_id: update.chat_id,
+            reference: initiation_ref,
+        },
+    )
+    .await
+}
+
+/// Public input can request a bearer intent, never approve personal consent.
+/// The caller owns commit; an error requires aborting all accompanying effects.
+pub(crate) async fn begin_public_in_session(
+    db: &Database,
+    session: &mut ClientSession,
+    key: &[u8],
+    context: &PublicExecutionContext,
+) -> AppResult<IntentIssued> {
+    use crate::models::{
+        platform_manager_ingress::{COLLECTION_NAME as RECEIPTS, PlatformManagerIngress},
+        platform_public_session::COLLECTION_NAME as PUBLIC_SESSIONS,
+    };
+    let ingress = &context.ingress;
+    let manager = &ingress.manager;
+    // A Public receipt was admitted only from a verified private Telegram chat.
+    // Match its own identity too: the budget fence checks execution linkage but
+    // deliberately is not a constructor of private-message provenance.
+    let receipt = db.collection::<PlatformManagerIngress>(RECEIPTS).find_one(doc! {
+        "_id": &ingress.ingress.receipt_id, "claim_id": &ingress.ingress.claim_id,
+        "profile_id": &manager.profile_id, "manager_bot_id": &manager.manager_bot_id,
+        "telegram_bot_id": manager.telegram_bot_id, "manager_authority_epoch": manager.manager_authority_epoch,
+        "sender_id": ingress.sender_id, "chat_id": ingress.chat_id,
+        "audience.kind": "public", "audience.public_policy_revision": ingress.public_policy_revision,
+        "phase": "executing", "settled_at": bson::Bson::Null,
+        "execution.public_session_id": &context.public_session_id,
+        "execution.conversation_id": &context.turn.conversation_id, "execution.turn_id": &context.turn.turn_id,
+        "execution.payer_user_id": &context.sponsor_owner_user_id,
+        "execution.public_policy_digest": &context.policy_digest,
+    }).session(&mut *session).await?.ok_or_else(bindings::unavailable)?;
+    if receipt.sender_id <= 0
+        || receipt.chat_id != receipt.sender_id
+        || receipt.observation_id.is_empty()
+    {
+        return Err(bindings::unavailable());
+    }
+    let stored = db.collection::<Document>(PUBLIC_SESSIONS).find_one(doc! {
+        "_id": &context.public_session_id,
+        "active_turn.receipt_id": &receipt.id, "active_turn.claim_id": &receipt.claim_id,
+        "active_turn.conversation_id": &context.turn.conversation_id, "active_turn.turn_id": &context.turn.turn_id,
+        "$expr": {"$and": [
+            {"$gt": [bson::DateTime::from_chrono(context.expires_at), "$$NOW"]},
+            {"$lte": [bson::DateTime::from_chrono(context.expires_at), "$expires_at"]},
+            {"$lte": [bson::DateTime::from_chrono(context.expires_at), "$active_turn.expires_at"]},
+        ]},
+    }).projection(doc! {"credential_api_key_id": 1}).session(&mut *session).await?.ok_or_else(bindings::unavailable)?;
+    let key_id = stored
+        .get_str("credential_api_key_id")
+        .map_err(|_| bindings::unavailable())?;
+    // Includes current controls, sponsor, exact key, revocation scopes and
+    // receipt write fences; it joins this transaction without any network work.
+    super::platform_public_budget_service::fence_context(db, session, context, key_id).await?;
+    let controls = super::platform_bot_runtime_control_service::fence_manager_in_session(
+        db,
+        session,
+        &receipt.profile_id,
+        &receipt.manager_bot_id,
+        receipt.telegram_bot_id,
+        Some(&receipt.observation_id),
+    )
+    .await?
+    .ok_or_else(bindings::unavailable)?;
+    if controls.manager_authority_epoch != receipt.manager_authority_epoch {
+        return Err(bindings::unavailable());
+    }
+    let reference = format!(
+        "public:{}",
+        hash(
+            key,
+            "platform-personal-public-initiation:v1",
+            &[
+                &receipt.id,
+                &receipt.claim_id,
+                &context.public_session_id,
+                &context.turn.conversation_id,
+                &context.turn.turn_id,
+            ]
+        )
+    );
+    mint_intent_in_session(
+        db,
+        session,
+        key,
+        IntentMint {
+            controls: &controls,
+            sender_id: receipt.sender_id,
+            chat_id: receipt.chat_id,
+            reference: &reference,
+        },
+    )
+    .await
+}
+
+struct IntentMint<'a> {
+    controls: &'a PlatformBotRuntimeControls,
+    sender_id: i64,
+    chat_id: i64,
+    reference: &'a str,
+}
+
+async fn mint_intent_in_session(
+    db: &Database,
+    session: &mut ClientSession,
+    key: &[u8],
+    subject: IntentMint<'_>,
+) -> AppResult<IntentIssued> {
+    let controls = subject.controls;
+    let initiation_ref = subject.reference;
+    if subject.sender_id <= 0
+        || subject.chat_id != subject.sender_id
+        || initiation_ref.is_empty()
+        || initiation_ref.len() > 128
+        || controls.retired
+        || controls.emergency_stopped
+    {
         return Err(bindings::unavailable());
     }
     let rows = db.collection::<PlatformLinkIntent>(COLLECTION_NAME);
-    if let Some(row)=rows.find_one(doc! {"platform_config_id":&update.profile_id,"manager_authority_epoch":controls.manager_authority_epoch,"telegram_sender_id":update.sender_id,"initiation_ref":initiation_ref}).session(&mut *session).await? {return Ok(IntentIssued {intent:row,token:None});}
+    if let Some(row)=rows.find_one(doc! {"platform_config_id":&controls.platform_config_id,"manager_authority_epoch":controls.manager_authority_epoch,"telegram_sender_id":subject.sender_id,"initiation_ref":initiation_ref}).session(&mut *session).await? {return Ok(IntentIssued {intent:row,token:None});}
     if !super::coordination_service::RateWindowStore::admit_in_session(
         db,
         "personal_intent_sender",
-        &format!("{}:{}", update.profile_id, update.sender_id),
+        &format!("{}:{}", controls.platform_config_id, subject.sender_id),
         10,
         std::time::Duration::from_secs(3600),
         session,
@@ -221,12 +349,12 @@ pub async fn begin_in_session(
     let mut row = PlatformLinkIntent {
         id: uuid::Uuid::new_v4().to_string(),
         purpose: PURPOSE.into(),
-        platform_config_id: update.profile_id.clone(),
-        manager_bot_id: update.manager_bot_id.clone(),
-        telegram_bot_id: update.telegram_bot_id,
+        platform_config_id: controls.platform_config_id.clone(),
+        manager_bot_id: controls.manager_bot_id.clone(),
+        telegram_bot_id: controls.telegram_bot_id,
         manager_authority_epoch: controls.manager_authority_epoch,
-        telegram_sender_id: update.sender_id,
-        telegram_chat_id: update.chat_id,
+        telegram_sender_id: subject.sender_id,
+        telegram_chat_id: subject.chat_id,
         initiation_ref: initiation_ref.into(),
         token_lookup_hmac: token_lookup(key, &token)?,
         token_hmac: String::new(),
@@ -999,6 +1127,478 @@ mod tests {
             rows.count_documents(doc! {"state":"active"}).await.unwrap(),
             1
         );
+        db.drop().await.unwrap();
+    }
+
+    async fn public_fixture(
+        name: &str,
+    ) -> (Database, VerifiedManagerUpdate, PublicExecutionContext) {
+        use crate::models::{
+            credits::Credits,
+            platform_bot_runtime_controls::PublicRuntimePolicy,
+            platform_manager_ingress::{COLLECTION_NAME as RECEIPTS, IngressExecution},
+            platform_public_session::{COLLECTION_NAME as PUBLIC_SESSIONS, PlatformPublicSession},
+        };
+        use crate::services::platform_manager_contract::*;
+        let (db, mut update, _) = fixture(name).await;
+        update.command_eligibility = ManagerCommandEligibility::Ineligible;
+        super::super::platform_public_agent_service::ensure_indexes(&db)
+            .await
+            .unwrap();
+        super::super::platform_manager_ingress_service::ensure_indexes(&db)
+            .await
+            .unwrap();
+        let mut public = super::super::platform_public_agent_service::tests::fixture(
+            &db,
+            update.sender_id,
+            false,
+        )
+        .await;
+        public.profile_id = update.profile_id.clone();
+        public.manager_bot_id = update.manager_bot_id.clone();
+        public.telegram_bot_id = update.telegram_bot_id;
+        public.manager_authority_epoch = 1;
+        db.collection::<PlatformPublicSession>(PUBLIC_SESSIONS)
+            .replace_one(doc! {"_id": &public.id}, &public)
+            .await
+            .unwrap();
+        db.collection::<Document>(crate::models::user::COLLECTION_NAME)
+            .insert_one(
+                doc! {"_id": &public.sponsor_owner_user_id, "user_type": "org", "is_active": true},
+            )
+            .await
+            .unwrap();
+        db.collection::<Document>(crate::models::platform_bot_runtime_controls::COLLECTION_NAME)
+            .update_one(
+                doc! {"platform_config_id": &update.profile_id},
+                doc! {"$set": {
+                "public_enabled": true, "personal_enabled": false,
+                "public_policy": bson::to_bson(&PublicRuntimePolicy {
+                    sponsor_owner_user_id: public.sponsor_owner_user_id.clone(),
+                    nyxagent_profile: public.nyxagent_profile.clone(),
+                    total_daily_credits: Credits::from_pico(10).unwrap(),
+                    sender_daily_credits: Credits::from_pico(10).unwrap(),
+                }).unwrap()}},
+            )
+            .await
+            .unwrap();
+        let turn = public.active_turn.as_ref().unwrap();
+        let context = PublicExecutionContext {
+            ingress: PublicIngress {
+                ingress: IngressClaim {
+                    receipt_id: turn.receipt_id.clone(),
+                    claim_id: turn.claim_id.clone(),
+                },
+                manager: ManagerAuthority {
+                    profile_id: public.profile_id.clone(),
+                    manager_bot_id: public.manager_bot_id.clone(),
+                    telegram_bot_id: public.telegram_bot_id,
+                    manager_authority_epoch: public.manager_authority_epoch,
+                },
+                sender_id: public.sender_id,
+                chat_id: public.chat_id,
+                public_policy_revision: public.public_policy_revision,
+            },
+            public_session_id: public.id.clone(),
+            turn: TurnRef {
+                conversation_id: turn.conversation_id.clone(),
+                turn_id: turn.turn_id.clone(),
+            },
+            sponsor_owner_user_id: public.sponsor_owner_user_id.clone(),
+            policy_digest: public.policy_digest.clone(),
+            nyxagent_profile: public.nyxagent_profile.clone(),
+            model_operations: vec![],
+            limits: PublicExecutionLimits {
+                max_duration_secs: 60,
+                max_model_calls: 2,
+                max_tool_calls: 3,
+                max_continuations: 0,
+                max_input_tokens: 20,
+                max_output_tokens: 10,
+                max_input_bytes: 100,
+                max_context_bytes: 100,
+                max_output_bytes: 100,
+            },
+            expires_at: turn.expires_at,
+        };
+        let mut session = db.client().start_session().await.unwrap();
+        session.start_transaction().await.unwrap();
+        super::super::platform_manager_ingress_service::record_admission_in_session(
+            &db,
+            &mut session,
+            &update,
+            &context.ingress.manager,
+            &context.ingress.ingress,
+            &ManagerAudience::Public(context.ingress.clone()),
+        )
+        .await
+        .unwrap();
+        db.collection::<Document>(RECEIPTS).update_one(doc! {"_id": &turn.receipt_id}, doc! {"$set": {
+            "phase": "executing", "execution": bson::to_bson(&IngressExecution {
+                conversation_id: turn.conversation_id.clone(), turn_id: turn.turn_id.clone(),
+                public_session_id: Some(public.id.clone()), payer_user_id: public.sponsor_owner_user_id.clone(),
+                public_policy_digest: Some(public.policy_digest.clone()),
+            }).unwrap()}}).session(&mut session).await.unwrap();
+        session.commit_transaction().await.unwrap();
+        (db, update, context)
+    }
+
+    async fn issue_public(db: &Database, context: &PublicExecutionContext) -> IntentIssued {
+        let mut session = db.client().start_session().await.unwrap();
+        session.start_transaction().await.unwrap();
+        let issued = begin_public_in_session(db, &mut session, KEY, context)
+            .await
+            .unwrap();
+        session.commit_transaction().await.unwrap();
+        issued
+    }
+
+    async fn refused_public(db: &Database, context: &PublicExecutionContext) {
+        let mut session = db.client().start_session().await.unwrap();
+        session.start_transaction().await.unwrap();
+        assert!(
+            begin_public_in_session(db, &mut session, KEY, context)
+                .await
+                .is_err()
+        );
+        session.abort_transaction().await.unwrap();
+        assert_eq!(
+            db.collection::<Document>(COLLECTION_NAME)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn public_forwarded_signup_issues_only_an_intent_and_preserves_command_provenance() {
+        let (db, update, context) = public_fixture("public_signup_forwarded").await;
+        let issued = issue_public(&db, &context).await;
+        let token = issued.token.as_ref().unwrap();
+        assert_eq!(issued.intent.telegram_sender_id, update.sender_id);
+        assert_eq!(issued.intent.telegram_chat_id, update.chat_id);
+        assert_eq!(
+            issued.intent.manager_authority_epoch,
+            context.ingress.manager.manager_authority_epoch
+        );
+        assert_eq!(
+            issued.intent.expires_at - issued.intent.created_at,
+            Duration::hours(24)
+        );
+        assert_eq!(issued.intent.state, IntentState::Pending);
+        assert!(issued.intent.claimant_user_id.is_none());
+        assert!(issued.intent.completion.is_none());
+        assert!(issued.intent.current_challenge_id.is_none());
+        let stored = db
+            .collection::<Document>(COLLECTION_NAME)
+            .find_one(doc! {"_id": &issued.intent.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!format!("{stored:?}").contains(token.as_str()));
+        let receipt = db
+            .collection::<Document>(crate::models::platform_manager_ingress::COLLECTION_NAME)
+            .find_one(doc! {"_id": &context.ingress.ingress.receipt_id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!receipt.get_bool("original_private_command").unwrap());
+        assert_eq!(
+            receipt
+                .get_document("audience")
+                .unwrap()
+                .get_str("kind")
+                .unwrap(),
+            "public"
+        );
+        for collection in [
+            CHALLENGES,
+            crate::models::platform_personal_binding::COLLECTION_NAME,
+        ] {
+            assert_eq!(
+                db.collection::<Document>(collection)
+                    .count_documents(doc! {})
+                    .await
+                    .unwrap(),
+                0
+            );
+        }
+        let mut session = db.client().start_session().await.unwrap();
+        session.start_transaction().await.unwrap();
+        // Neither the public path nor the presence of a valid intent upgrades a forwarded update.
+        assert!(matches!(
+            begin_in_session(&db, &mut session, KEY, &update, false, "original-ref").await,
+            Err(AppError::Forbidden(_))
+        ));
+        assert!(matches!(
+            confirm_in_session(
+                &db,
+                &mut session,
+                KEY,
+                KEY,
+                &update,
+                false,
+                "P-1234-5678",
+                &LocalEffects
+            )
+            .await,
+            Err(AppError::Forbidden(_))
+        ));
+        let mut original = update.clone();
+        original.command_eligibility = super::super::platform_manager_contract::ManagerCommandEligibility::OriginalPrivateMessage;
+        assert!(matches!(
+            begin_in_session(&db, &mut session, KEY, &original, true, "forwarded-ref").await,
+            Err(AppError::Forbidden(_))
+        ));
+        session.abort_transaction().await.unwrap();
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn public_intent_and_sender_rate_rollback_with_caller_and_duplicate_returns_no_token() {
+        let (db, _, context) = public_fixture("public_signup_transaction").await;
+        let rates =
+            db.collection::<Document>(crate::models::coordination::RATE_WINDOW_COLLECTION_NAME);
+        let mut session = db.client().start_session().await.unwrap();
+        session.start_transaction().await.unwrap();
+        let rolled_back = begin_public_in_session(&db, &mut session, KEY, &context)
+            .await
+            .unwrap();
+        let old_token = rolled_back.token.unwrap();
+        session.abort_transaction().await.unwrap();
+        assert_eq!(
+            db.collection::<Document>(COLLECTION_NAME)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            rates
+                .count_documents(doc! {"namespace": "personal_intent_sender"})
+                .await
+                .unwrap(),
+            0
+        );
+        assert!(preview(&db, KEY, &old_token).await.is_err());
+        let issued = issue_public(&db, &context).await;
+        assert_ne!(issued.intent.id, rolled_back.intent.id);
+        let duplicate = issue_public(&db, &context).await;
+        assert_eq!(duplicate.intent.id, issued.intent.id);
+        assert!(duplicate.token.is_none());
+        assert_eq!(
+            db.collection::<Document>(COLLECTION_NAME)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            rates
+                .find_one(doc! {"namespace": "personal_intent_sender"})
+                .await
+                .unwrap()
+                .unwrap()
+                .get_i64("count")
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            preview(&db, KEY, issued.token.as_ref().unwrap())
+                .await
+                .unwrap()
+                .id,
+            issued.intent.id
+        );
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn public_intent_rejects_substituted_context_and_receipt_identity() {
+        let (db, _, context) = public_fixture("public_signup_identity").await;
+        let mut cases = Vec::new();
+        let mut changed = context.clone();
+        changed.ingress.ingress.claim_id = "wrong-claim".into();
+        cases.push(changed);
+        let mut changed = context.clone();
+        changed.ingress.ingress.receipt_id = "wrong-receipt".into();
+        cases.push(changed);
+        let mut changed = context.clone();
+        changed.public_session_id = "wrong-session".into();
+        cases.push(changed);
+        let mut changed = context.clone();
+        changed.turn.turn_id = "wrong-turn".into();
+        cases.push(changed);
+        let mut changed = context.clone();
+        changed.turn.conversation_id = "wrong-conversation".into();
+        cases.push(changed);
+        let mut changed = context.clone();
+        changed.ingress.sender_id += 1;
+        changed.ingress.chat_id += 1;
+        cases.push(changed);
+        let mut changed = context.clone();
+        changed.ingress.manager.profile_id = "wrong-profile".into();
+        cases.push(changed);
+        let mut changed = context.clone();
+        changed.expires_at = Utc::now() - Duration::seconds(1);
+        cases.push(changed);
+        let mut changed = context.clone();
+        changed.expires_at += Duration::days(1);
+        cases.push(changed);
+        for changed in cases {
+            refused_public(&db, &changed).await;
+        }
+        let receipts =
+            db.collection::<Document>(crate::models::platform_manager_ingress::COLLECTION_NAME);
+        let filter = doc! {"_id": &context.ingress.ingress.receipt_id};
+        let original = receipts.find_one(filter.clone()).await.unwrap().unwrap();
+        for changes in [
+            doc! {"sender_id": context.ingress.sender_id + 1},
+            doc! {"chat_id": -123_i64},
+            doc! {"manager_bot_id": "different-manager"},
+            doc! {"telegram_bot_id": context.ingress.manager.telegram_bot_id + 1},
+            doc! {"manager_authority_epoch": context.ingress.manager.manager_authority_epoch + 1},
+            doc! {"audience.kind": "control"},
+            doc! {"phase": "settled"},
+            doc! {"audience.public_policy_revision": context.ingress.public_policy_revision + 1},
+            doc! {"execution.public_session_id": "different-session"},
+            doc! {"execution.payer_user_id": "different-sponsor"},
+            doc! {"observation_id": "stale-observation"},
+        ] {
+            receipts
+                .update_one(filter.clone(), doc! {"$set": changes})
+                .await
+                .unwrap();
+            refused_public(&db, &context).await;
+            receipts
+                .replace_one(filter.clone(), &original)
+                .await
+                .unwrap();
+        }
+        // Even mutually matching forged zero sender IDs cannot establish a private sender.
+        receipts
+            .update_one(
+                filter.clone(),
+                doc! {"$set": {"sender_id": 0_i64, "chat_id": 0_i64}},
+            )
+            .await
+            .unwrap();
+        let mut zero = context.clone();
+        zero.ingress.sender_id = 0;
+        zero.ingress.chat_id = 0;
+        refused_public(&db, &zero).await;
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn public_intent_obeys_live_session_controls_sponsor_key_and_revocation_scopes() {
+        use crate::models::{
+            platform_bot_runtime_controls::COLLECTION_NAME as CONTROLS,
+            platform_public_session::COLLECTION_NAME as PUBLIC_SESSIONS,
+        };
+        use crate::services::platform_manager_contract::{
+            PublicRevocationReason, PublicRevocationScope,
+        };
+        let (db, _, context) = public_fixture("public_signup_fences").await;
+        let sessions = db.collection::<Document>(PUBLIC_SESSIONS);
+        let session_filter = doc! {"_id": &context.public_session_id};
+        let original = sessions
+            .find_one(session_filter.clone())
+            .await
+            .unwrap()
+            .unwrap();
+        let key_id = original.get_str("credential_api_key_id").unwrap();
+        for (collection, filter, changes) in [
+            (
+                PUBLIC_SESSIONS,
+                session_filter.clone(),
+                doc! {"expires_at": bson::DateTime::from_millis(0)},
+            ),
+            (
+                PUBLIC_SESSIONS,
+                session_filter.clone(),
+                doc! {"revoked_at": bson::DateTime::now()},
+            ),
+            (
+                PUBLIC_SESSIONS,
+                session_filter.clone(),
+                doc! {"active_turn.stop_requested": true},
+            ),
+            (
+                PUBLIC_SESSIONS,
+                session_filter.clone(),
+                doc! {"active_turn.expires_at": bson::DateTime::from_millis(0)},
+            ),
+            (
+                PUBLIC_SESSIONS,
+                session_filter.clone(),
+                doc! {"sender_id": context.ingress.sender_id + 1},
+            ),
+            (
+                PUBLIC_SESSIONS,
+                session_filter.clone(),
+                doc! {"active_turn.claim_id": "different-claim"},
+            ),
+            (
+                CONTROLS,
+                doc! {"platform_config_id": &context.ingress.manager.profile_id},
+                doc! {"public_enabled": false},
+            ),
+            (
+                CONTROLS,
+                doc! {"platform_config_id": &context.ingress.manager.profile_id},
+                doc! {"emergency_stopped": true},
+            ),
+            (
+                CONTROLS,
+                doc! {"platform_config_id": &context.ingress.manager.profile_id},
+                doc! {"manager_authority_epoch": 2_i64},
+            ),
+            (
+                crate::models::user::COLLECTION_NAME,
+                doc! {"_id": &context.sponsor_owner_user_id},
+                doc! {"is_active": false},
+            ),
+            (
+                crate::models::api_key::COLLECTION_NAME,
+                doc! {"_id": key_id},
+                doc! {"is_active": false},
+            ),
+        ] {
+            let rows = db.collection::<Document>(collection);
+            let before = rows.find_one(filter.clone()).await.unwrap().unwrap();
+            rows.update_one(filter.clone(), doc! {"$set": changes})
+                .await
+                .unwrap();
+            refused_public(&db, &context).await;
+            rows.replace_one(filter, &before).await.unwrap();
+        }
+        let mut session = db.client().start_session().await.unwrap();
+        session.start_transaction().await.unwrap();
+        super::super::platform_public_agent_service::revoke_in_session(
+            &db,
+            &mut session,
+            &PublicRevocationScope::Sender {
+                manager: context.ingress.manager.clone(),
+                sender_id: context.ingress.sender_id,
+                chat_id: context.ingress.chat_id,
+            },
+            PublicRevocationReason::SenderUnlinked,
+        )
+        .await
+        .unwrap();
+        session.commit_transaction().await.unwrap();
+        // Simulate an old row awaiting drain: the durable scope alone must deny it.
+        sessions
+            .replace_one(session_filter, &original)
+            .await
+            .unwrap();
+        db.collection::<Document>(crate::models::api_key::COLLECTION_NAME)
+            .update_one(doc! {"_id": key_id}, doc! {"$set": {"is_active": true}})
+            .await
+            .unwrap();
+        refused_public(&db, &context).await;
         db.drop().await.unwrap();
     }
 }
