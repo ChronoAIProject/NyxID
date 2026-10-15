@@ -22,6 +22,7 @@ use std::{
     time::{Duration, Instant},
 };
 use tokio::sync::{Mutex, broadcast};
+use tracing::Instrument;
 use uuid::Uuid;
 
 #[cfg(test)]
@@ -1572,20 +1573,23 @@ pub(crate) async fn start_turn_with_voice(
             .await?
             .ok_or_else(|| AppError::NotFound("Assistant credential not found".into()))?;
     let (sender, receiver) = broadcast::channel(256);
-    tokio::spawn(run_turn(
-        state.clone(),
-        auth,
-        row.clone(),
-        text,
-        credential,
-        policy,
-        permit,
-        Events {
-            sender,
-            cursor: 0,
-            reset_notified: false,
-        },
-    ));
+    tokio::spawn(
+        run_turn(
+            state.clone(),
+            auth,
+            row.clone(),
+            text,
+            credential,
+            policy,
+            permit,
+            Events {
+                sender,
+                cursor: 0,
+                reset_notified: false,
+            },
+        )
+        .in_current_span(),
+    );
     Ok((row, receiver))
 }
 

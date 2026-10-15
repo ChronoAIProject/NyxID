@@ -690,6 +690,7 @@ pub(crate) async fn run_owner_turn(
         .clone();
     let message_id = Uuid::new_v4().to_string();
     let block_id = format!("{message_id}-text");
+    tracing::info!(turn_id = %turn_id, "Assistant turn started");
     let (heartbeat_stop, mut heartbeat_stop_rx) = oneshot::channel();
     let heartbeat_db = state.db.clone();
     let heartbeat_user = row.user_id.clone();

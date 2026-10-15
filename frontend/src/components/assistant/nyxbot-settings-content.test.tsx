@@ -528,7 +528,7 @@ it("shows General's load error with retry without hiding the other sections", as
   );
   const user = renderPage();
   expect(
-    await screen.findByText("Could not load settings. Settings unavailable"),
+    await screen.findByText("Could not load settings. NyxBot is temporarily unavailable. Try again shortly."),
   ).toBeVisible();
   expect(
     screen.getByRole("button", { name: "Timezone and automation budgets" }),
@@ -568,7 +568,7 @@ it("keeps dirty values and reports a failed General save inline", async () => {
   await user.type(live, "12");
   await user.click(screen.getByRole("button", { name: "Save settings" }));
   expect(await screen.findByRole("alert")).toHaveTextContent(
-    "Save unavailable",
+    "NyxBot is temporarily unavailable. Try again shortly.",
   );
   expect(live).toHaveValue(12);
   expect(screen.getByRole("button", { name: "Save settings" })).toBeEnabled();

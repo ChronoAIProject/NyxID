@@ -61,7 +61,7 @@ it("shows stop failure without removing the active follow", async () => {
   failStop = true; const user = userEvent.setup(); mount();
   await user.click(screen.getByRole("button", { name: "Followed threads (1)" }));
   await user.click(await screen.findByRole("button", { name: "Stop following" }));
-  expect(await screen.findByRole("alert")).toHaveTextContent("Please retry.");
+  expect(await screen.findByRole("alert")).toHaveTextContent("NyxBot is temporarily unavailable. Try again shortly.");
   expect(screen.getByText("Following")).toBeInTheDocument();
 });
 

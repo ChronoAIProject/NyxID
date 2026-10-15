@@ -823,7 +823,7 @@ describe("NyxAgent server-backed transport", () => {
       const transport = new NyxAgentTransport();
       const pending = transport.send(id, "Question", vi.fn());
       const rejected = expect(pending).rejects.toThrow(
-        "connection was interrupted",
+        "live reply was interrupted",
       );
       await vi.advanceTimersByTimeAsync(135_001);
       await rejected;
@@ -1666,7 +1666,7 @@ describe("send admission", () => {
       "the 12 MiB response limit",
       () => chunked(sseBytes(runningStatus), new Uint8Array(12 * 1024 * 1024 + 1)),
       "message",
-      "Assistant response exceeded its limit.",
+      "The live reply was interrupted. NyxBot may still be working; check the chat before sending again.",
     ],
     ["an SSE payload that is not JSON", () => chunked(new TextEncoder().encode("data: broken\n\n")), "name", "SyntaxError"],
     ["a body that is not UTF-8", () => chunked(new Uint8Array([0xff, 0xfe, 0x0a])), "name", "TypeError"],
@@ -1674,15 +1674,15 @@ describe("send admission", () => {
       "a turn for another conversation",
       () => chunked(sseBytes({ ...runningStatus, conversation_id: other })),
       "message",
-      "Assistant conversation mismatch.",
+      "The live reply was interrupted. NyxBot may still be working; check the chat before sending again.",
     ],
     [
       "a stream that ends without a terminal event",
       () => chunked(sseBytes(runningStatus)),
       "message",
-      "The connection was interrupted. The assistant may still be working.",
+      "The live reply was interrupted. NyxBot may still be working; check the chat before sending again.",
     ],
-    ["a 2xx without a body", () => new Response(null), "message", "The assistant returned no stream."],
+    ["a 2xx without a body", () => new Response(null), "message", "The live reply was interrupted. NyxBot may still be working; check the chat before sending again."],
   ] as const)("marks %s after a 2xx as admitted", async (_label, turns, field, expected) => {
     const error = await sendFailure(turns);
     expect(error).toBeInstanceOf(Error);
@@ -1698,11 +1698,31 @@ describe("send admission", () => {
       );
       await vi.advanceTimersByTimeAsync(135_001);
       const error = await pending;
-      expect((error as Error).message).toBe("The connection was interrupted. The assistant may still be working.");
+      expect((error as Error).message).toBe("The live reply was interrupted. NyxBot may still be working; check the chat before sending again.");
       expect(isAdmittedSendError(error)).toBe(true);
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("keeps the server trace when the accepted stream breaks", async () => {
+    const error = await sendFailure(() => new Response(new ReadableStream({
+      start(controller) { controller.error(new TypeError("network error")); },
+    }), { headers: { "X-NyxID-Trace-Id": "9ad6d0fa-bb8f-489e-8fdd-f8e34960921b" } }));
+    expect((error as Error).message).toBe(
+      "The live reply was interrupted. NyxBot may still be working; check the chat before sending again.\nTrace ID: 9ad6d0fa-bb8f-489e-8fdd-f8e34960921b",
+    );
+    expect(isAdmittedSendError(error)).toBe(true);
+  });
+
+  it("preserves admission when a browser exception has a read-only message", async () => {
+    const browserError = new Error("network error");
+    Object.defineProperty(browserError, "message", { writable: false });
+    const error = await sendFailure(() => new Response(new ReadableStream({
+      start(controller) { controller.error(browserError); },
+    })));
+    expect((error as Error).message).toContain("NyxBot may still be working");
+    expect(isAdmittedSendError(error)).toBe(true);
   });
 
   it("does not mark a refused POST as admitted", async () => {
@@ -1717,7 +1737,7 @@ describe("send admission", () => {
     const error = await sendFailure(() => {
       throw new TypeError("Failed to fetch");
     });
-    expect((error as Error).message).toBe("Failed to fetch");
+    expect((error as Error).message).toContain("your message may have arrived");
     expect(isAdmittedSendError(error)).toBe(false);
   });
 });
