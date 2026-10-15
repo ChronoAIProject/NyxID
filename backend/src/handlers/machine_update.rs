@@ -187,7 +187,7 @@ pub async fn begin(
                 "Open the machine link and paste its pinned Replace updater command. It keeps the machine container and update volume.",
                 "Wait for the companion to report its version; this thread resumes automatically."
             ],
-            "note": "Updater predates self-update. Replace it once. End your turn now; NyxID watches companion metadata and expiry. If the owner identifies another granted native machine on the same Docker host, offer to run the replacement there after Docker inspection and an owner card. Never guess a host or run inside the target container."
+            "note": "Updater predates self-update. Replace it once. End your turn now; NyxID watches companion metadata and expiry. If the owner identifies another granted native machine on the same Docker host, offer to run the replacement there after Docker inspection, applying the governing permission mode. Never guess a host or run inside the target container."
         }));
     }
     if manual {
@@ -195,7 +195,7 @@ pub async fn begin(
             json!({"status":"manual_step","updater":companion_status(node),"machine":node.id,"target_version":updates::TARGET,
             "url":AssistantPage::MachineSettings{node:&node.id}.url(&state.config.frontend_url),
             "steps":["Open a terminal on the computer running Docker (or the native machine).","Open the machine link and paste its prefilled update command into that terminal.","Wait for the machine to reconnect; this thread resumes automatically."],
-            "note":"End your turn now. NyxID watches reconnection and expiry. If the owner identifies a different granted machine on the Docker host, offer to run the migration there after Docker inspection and an owner card. Never guess a host or run inside the container being updated."}),
+            "note":"End your turn now. NyxID watches reconnection and expiry. If the owner identifies a different granted machine on the Docker host, offer to run the migration there after Docker inspection, applying the governing permission mode. Never guess a host or run inside the container being updated."}),
         );
     }
     let result = super::machine_tools::dispatch(
@@ -340,9 +340,37 @@ pub async fn tool(
             canonical["companion_id"] = json!(companion_id);
         }
     }
-    if let Some(id) = args["acknowledgement_id"].as_str()
-        && acks::consume_action(&state.db, chat, id, "nyxid__machine_update", &canonical).await?
-    {
+    let summary = if legacy {
+        format!(
+            "Replace the legacy updater for machine {} with the attested updater for {}. {} Keep the machine container and update volume. Docker socket access gives the updater host-root authority.",
+            node.name,
+            updates::TARGET,
+            host.map(|h| format!(
+                "Run on owner-identified host machine {} after its successful Docker inspection.",
+                h.name
+            ))
+            .unwrap_or_else(|| "Guide the one-time pinned host command.".into())
+        )
+    } else {
+        format!("Update machine {} from {} to {}. {} This restarts the target and interrupts its work. Docker socket access gives the updater host-root authority; it installs only attested official images.",node.name,updates::current(node),updates::TARGET,host.map(|h|format!("Run the migration on owner-identified host machine {} after its successful Docker inspection.",h.name)).unwrap_or_else(||"Guide the one-time host command if no updater is installed.".into()))
+    };
+    let gate = acks::confirmation_needed(
+        &state.db,
+        chat,
+        acks::ActionFacts::of(acks::OwnerActionClass::Sensitive),
+        false,
+    )
+    .await?;
+    let automatic = gate.auto_allowed();
+    let confirmed = if automatic.is_some() {
+        true
+    } else if let Some(id) = args["acknowledgement_id"].as_str() {
+        acks::consume_action(&state.db, chat, id, "nyxid__machine_update", &canonical).await?
+    } else {
+        false
+    };
+    if confirmed {
+        let receipt_arguments = canonical.clone();
         if let Some(host) = host {
             let row = Box::pin(updates::begin(
                 &state.db,
@@ -362,37 +390,47 @@ pub async fn tool(
             if result["accepted"] != true {
                 updates::finish(&state.db, &row, "failed", Some("host_migration_failed")).await?;
             }
+            if result["accepted"] == true
+                && let Some(auto) = automatic
+            {
+                acks::record_auto_allowed(
+                    &state.db,
+                    chat,
+                    "nyxid__machine_update",
+                    &receipt_arguments,
+                    &auto,
+                    &summary,
+                )
+                .await;
+            }
             return Ok((
                 json!({"status":if result["accepted"]==true {"migrating"}else{"failed"},"updater":companion_status(node),"note":if legacy {"End your turn; companion version metadata or expiry resumes this thread. The machine and its volumes are retained."} else {"End your turn; the target machine reconnect or expiry watch resumes this thread. Verify version, AX and browser health before continuing."}}),
                 false,
             ));
         }
-        return Ok((
-            Box::pin(begin(
-                state,
-                node,
-                &chat.user_id,
-                Some(&chat.conversation_id),
-                false,
-            ))
-            .await?,
+        let result = Box::pin(begin(
+            state,
+            node,
+            &chat.user_id,
+            Some(&chat.conversation_id),
             false,
-        ));
+        ))
+        .await?;
+        if result["status"] != "failed"
+            && let Some(auto) = automatic
+        {
+            acks::record_auto_allowed(
+                &state.db,
+                chat,
+                "nyxid__machine_update",
+                &receipt_arguments,
+                &auto,
+                &summary,
+            )
+            .await;
+        }
+        return Ok((result, false));
     }
-    let summary = if legacy {
-        format!(
-            "Replace the legacy updater for machine {} with the attested updater for {}. {} Keep the machine container and update volume. Docker socket access gives the updater host-root authority.",
-            node.name,
-            updates::TARGET,
-            host.map(|h| format!(
-                "Run on owner-identified host machine {} after its successful Docker inspection.",
-                h.name
-            ))
-            .unwrap_or_else(|| "Guide the one-time pinned host command.".into())
-        )
-    } else {
-        format!("Update machine {} from {} to {}. {} This restarts the target and interrupts its work. Docker socket access gives the updater host-root authority; it installs only attested official images.",node.name,updates::current(node),updates::TARGET,host.map(|h|format!("Run the migration on owner-identified host machine {} after its successful Docker inspection.",h.name)).unwrap_or_else(||"Guide the one-time host command if no updater is installed.".into()))
-    };
     // The owner-card transaction is large in debug builds and this tool also
     // runs beneath universal MCP dispatch on the default thread stack.
     let card = Box::pin(acks::request(
@@ -528,6 +566,62 @@ mod tests {
         assistant_authority_tests::{fixture, orchestrator_fixture},
         machine_integration_tests::{node, peer},
     };
+
+    #[tokio::test]
+    async fn full_access_machine_update_dispatches_with_receipt_while_auto_asks() {
+        use crate::models::assistant_settings::AccessMode;
+        for (mode, asks) in [(AccessMode::Autopilot, false), (AccessMode::Nyxmode, true)] {
+            let f = orchestrator_fixture("mode_machine_update").await;
+            crate::services::assistant_settings_service::update(
+                &f.state.db,
+                &f.owner,
+                crate::services::assistant_settings_service::Update {
+                    access_mode: Some(mode),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+            let mut machine = node(&f, &f.owner).await;
+            machine.machine.as_mut().unwrap().updater_ready = true;
+            machine.machine.as_mut().unwrap().installation =
+                Some(nyxid_machine::update::Installation::Native);
+            f.state
+                .db
+                .collection::<Node>(crate::models::node::COLLECTION_NAME)
+                .replace_one(doc! {"_id":&machine.id}, &machine)
+                .await
+                .unwrap();
+            let (task, mut requests) = peer(&f, &machine, json!({"accepted":true})).await;
+            let (result, error) = tool(&f.state, &f.chat, &json!({"machine":machine.id}))
+                .await
+                .unwrap();
+            let rows = acks::history(&f.state.db, &f.owner, &f.row.id)
+                .await
+                .unwrap();
+            assert_eq!(rows.len(), 1);
+            if asks {
+                assert!(error);
+                assert_eq!(result["error"], "acknowledgement_required");
+                assert_eq!(rows[0].status, "pending");
+                assert!(requests.try_recv().is_err());
+            } else {
+                assert!(!error, "machine_update was refused in Full access");
+                assert_eq!(requests.recv().await.unwrap().operation, Operation::Upgrade);
+                assert_eq!(
+                    updates::get(&f.state.db, &machine).await.unwrap().phase,
+                    "queued"
+                );
+                assert_eq!(rows[0].status, "allowed");
+                assert_eq!(rows[0].decided_by.as_deref(), Some("access_mode"));
+                assert_eq!(rows[0].confirmation.as_ref().unwrap().reason, "access_mode");
+                assert!(rows[0].summary.contains(updates::TARGET));
+                assert!(rows[0].summary.contains("attested"));
+            }
+            task.abort();
+            f.state.db.drop().await.unwrap();
+        }
+    }
 
     #[tokio::test]
     async fn legacy_detection_requires_reporting_node_and_live_container_companion() {

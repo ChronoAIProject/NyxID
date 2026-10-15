@@ -14,13 +14,14 @@ type ExtensibleString<T extends string> = T | (string & Record<never, never>);
 
 export type ChatMessageRole = ExtensibleString<"user" | "assistant">;
 export type ChatMessageStatus = ExtensibleString<
-  "complete" | "streaming" | "error"
+  "complete" | "streaming" | "error" | "stopped"
 >;
 export type StoredChatMessageStatus = ExtensibleString<"complete" | "error">;
 
 export interface ChatMessage {
   readonly recovery?: import("@/schemas/assistant-nyxagent").NyxAgentHistory["messages"][number]["recovery"];
   readonly feedback?: { readonly vote: "up" | "down"; readonly comment?: string | null } | null;
+  readonly continuation_of?: string | null;
   readonly steering?: import("@/schemas/assistant-nyxagent").NyxAgentSteering | null;
   readonly artifacts?: ArtifactContentBlock[];
   readonly id: string;
@@ -45,6 +46,8 @@ export interface ChatMessage {
   readonly images?: readonly ChatImage[];
   /** A user message written in a chat app: its platform. */
   readonly via?: string | null;
+  readonly activityTotal?: number;
+  readonly turnStatus?: import("./turn-status").TurnStatus | null;
 }
 
 export interface ChatImage {

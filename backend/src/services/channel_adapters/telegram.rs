@@ -579,6 +579,66 @@ impl PlatformAdapter for TelegramAdapter {
         .await
     }
 
+    async fn send_reply_outcome(
+        &self,
+        http: &reqwest::Client,
+        credentials: &crate::services::channel_platform::BotCredentials<'_>,
+        conversation_id: &str,
+        reply: &OutboundReply,
+    ) -> AppResult<crate::services::channel_platform::SendOutcome> {
+        use crate::services::channel_platform::SendOutcome;
+        if reply.attachments.is_empty() {
+            return self
+                .send_reply(http, credentials, conversation_id, reply)
+                .await
+                .map(SendOutcome::legacy);
+        }
+        if reply.text.as_deref().is_some_and(|text| !text.is_empty()) {
+            let mut text = reply.clone();
+            text.attachments.clear();
+            self.send_reply(http, credentials, conversation_id, &text)
+                .await?;
+        }
+        let (sent, error) = self
+            .send_attachments(http, credentials, conversation_id, reply)
+            .await;
+        if sent.is_empty()
+            && let Some(error) = error
+        {
+            return Err(error);
+        }
+        Ok(SendOutcome {
+            final_id: sent.last().map(|(_, id)| id.clone()),
+            delivered_kinds: Some(sent.iter().map(|(kind, _)| *kind).collect()),
+            observation: None,
+            error,
+        })
+    }
+
+    async fn send_bound_reply_outcome(
+        &self,
+        _db: &mongodb::Database,
+        http: &reqwest::Client,
+        bot: &ChannelBot,
+        original: &crate::models::channel_message::ChannelMessage,
+        credentials: &crate::services::channel_platform::BotCredentials<'_>,
+        conversation_id: &str,
+        reply: &OutboundReply,
+        thread_target: Option<&crate::services::channel_thread_service::ThreadReplyTarget>,
+    ) -> AppResult<crate::services::channel_platform::SendOutcome> {
+        if let Some(target) = thread_target {
+            if self.platform_id() != bot.platform || !target.matches(bot, original, conversation_id)
+            {
+                return Err(crate::services::channel_thread_service::unavailable());
+            }
+            return self
+                .thread_reply_outcome(http, credentials, target, reply)
+                .await;
+        }
+        self.send_reply_outcome(http, credentials, conversation_id, reply)
+            .await
+    }
+
     async fn send_reply(
         &self,
         http: &reqwest::Client,
@@ -593,42 +653,13 @@ impl PlatformAdapter for TelegramAdapter {
                 self.send_reply(http, credentials, conversation_id, &text)
                     .await?;
             }
-            let context = build_message_body(conversation_id, reply);
-            let mut last = None;
-            for attachment in &reply.attachments {
-                let (method, field) = match attachment.kind {
-                    MediaKind::Image => ("sendPhoto", "photo"),
-                    MediaKind::File => ("sendDocument", "document"),
-                    MediaKind::Audio => ("sendAudio", "audio"),
-                    MediaKind::Video => ("sendVideo", "video"),
-                };
-                let mut form = reqwest::multipart::Form::new()
-                    .text("chat_id", conversation_id.to_string())
-                    .part(field, media::multipart_part(attachment)?);
-                if let Some(caption) = &attachment.caption {
-                    form = form.text("caption", caption.clone());
-                }
-                for key in ["reply_to_message_id", "message_thread_id"] {
-                    if let Some(value) = context.get(key) {
-                        form = form.text(key, value.to_string());
-                    }
-                }
-                let response = media::response_json(
-                    http.post(format!("{}{}/{}", self.base_url, credentials.token, method))
-                        .multipart(form),
-                )
-                .await?;
-                if response["ok"] != true {
-                    return Err(media::upload_failed());
-                }
-                last = Some(
-                    response["result"]["message_id"]
-                        .as_i64()
-                        .ok_or_else(media::upload_failed)?
-                        .to_string(),
-                );
+            let (sent, error) = self
+                .send_attachments(http, credentials, conversation_id, reply)
+                .await;
+            if let Some(error) = error {
+                return Err(error);
             }
-            return Ok(last);
+            return Ok(sent.last().map(|(_, id)| id.clone()));
         }
         let bot_token = credentials.token;
         let body = build_message_body(conversation_id, reply);
@@ -855,6 +886,155 @@ impl PlatformAdapter for TelegramAdapter {
         // Telegram does not use a webhook challenge mechanism.
         None
     }
+}
+
+impl TelegramAdapter {
+    pub(super) async fn thread_reply_outcome(
+        &self,
+        http: &reqwest::Client,
+        credentials: &crate::services::channel_platform::BotCredentials<'_>,
+        target: &crate::services::channel_thread_service::ThreadReplyTarget,
+        reply: &OutboundReply,
+    ) -> AppResult<crate::services::channel_platform::SendOutcome> {
+        if reply.attachments.is_empty() {
+            return self
+                .reply_in_thread(http, credentials, target, reply)
+                .await
+                .map(crate::services::channel_platform::SendOutcome::legacy);
+        }
+        let facts = self
+            .resolve_native_thread(target.facts(), &[])
+            .ok_or_else(crate::services::channel_thread_service::unavailable)?;
+        let mut reply = reply.clone();
+        reply.metadata = Some(serde_json::json!({"message_thread_id": facts.native_thread_id}));
+        reply.reply_to_platform_message_id = Some(facts.message_id);
+        self.send_reply_outcome(http, credentials, &facts.chat_id, &reply)
+            .await
+    }
+
+    async fn send_attachments(
+        &self,
+        http: &reqwest::Client,
+        credentials: &crate::services::channel_platform::BotCredentials<'_>,
+        conversation: &str,
+        reply: &OutboundReply,
+    ) -> (Vec<(MediaKind, String)>, Option<AppError>) {
+        let context = build_message_body(conversation, reply);
+        let mut sent = Vec::new();
+        for attachment in &reply.attachments {
+            let result: AppResult<(MediaKind, String)> = async {
+                let (method, field) = match attachment.kind {
+                    MediaKind::Image => ("sendPhoto", "photo"),
+                    MediaKind::File => ("sendDocument", "document"),
+                    MediaKind::Audio => ("sendAudio", "audio"),
+                    MediaKind::Video => ("sendVideo", "video"),
+                };
+                let form = |field| -> AppResult<reqwest::multipart::Form> {
+                    let mut form = reqwest::multipart::Form::new()
+                        .text("chat_id", conversation.to_owned())
+                        .part(field, media::multipart_part(attachment)?);
+                    if let Some(caption) = &attachment.caption {
+                        form = form.text("caption", caption.clone());
+                    }
+                    for key in ["reply_to_message_id", "message_thread_id"] {
+                        if let Some(value) = context.get(key) {
+                            form = form.text(key, value.to_string());
+                        }
+                    }
+                    Ok(form)
+                };
+                let (status, response) = media::platform_json_value(
+                    http.post(format!("{}{}/{method}", self.base_url, credentials.token))
+                        .multipart(form(field)?),
+                )
+                .await?;
+                let fallback = attachment.kind == MediaKind::Image
+                    && (status.is_success() || status == reqwest::StatusCode::BAD_REQUEST)
+                    && response["ok"] == false
+                    && response["error_code"].as_i64() == Some(400)
+                    && photo_document_fallback(
+                        response["description"].as_str().unwrap_or_default(),
+                    );
+                let (kind, response) = if fallback {
+                    (
+                        MediaKind::File,
+                        media::platform_json(
+                            http.post(format!(
+                                "{}{}/sendDocument",
+                                self.base_url, credentials.token
+                            ))
+                            .multipart(form("document")?),
+                            "Telegram",
+                            UNREACHABLE_TARGET_MARKERS,
+                        )
+                        .await?,
+                    )
+                } else {
+                    (
+                        attachment.kind,
+                        media::platform_response(
+                            status,
+                            response,
+                            "Telegram",
+                            UNREACHABLE_TARGET_MARKERS,
+                        )?,
+                    )
+                };
+                match response["ok"].as_bool() {
+                    Some(false) => {
+                        return Err(
+                            crate::services::channel_platform::classify_upstream_refusal(
+                                "Telegram",
+                                response["description"]
+                                    .as_str()
+                                    .unwrap_or("provider refusal"),
+                                UNREACHABLE_TARGET_MARKERS,
+                            ),
+                        );
+                    }
+                    Some(true) => {}
+                    None => return Err(media::upload_failed()),
+                }
+                let id = response["result"]["message_id"]
+                    .as_i64()
+                    .ok_or_else(media::upload_failed)?;
+                Ok((kind, id.to_string()))
+            }
+            .await;
+            match result {
+                Ok(receipt) => sent.push(receipt),
+                Err(error) => return (sent, Some(error)),
+            }
+        }
+        (sent, None)
+    }
+}
+
+fn photo_document_fallback(description: &str) -> bool {
+    let text = description.to_ascii_lowercase();
+    if [
+        "chat not found",
+        "message thread not found",
+        "replied message not found",
+        "bot was blocked",
+        "topic_closed",
+        "not enough rights",
+        "have no rights to send photos",
+    ]
+    .iter()
+    .any(|marker| text.contains(marker))
+    {
+        return false;
+    }
+    [
+        "photo_invalid_dimensions",
+        "photo_save_file_invalid",
+        "photo_ext_invalid",
+        "photo_crop_size_small",
+        "image_process_failed",
+    ]
+    .iter()
+    .any(|marker| text.contains(marker))
 }
 
 // ---------------------------------------------------------------------------
@@ -1506,6 +1686,41 @@ mod tests {
             let expected: String = description.chars().take(200).collect();
             assert!(matches!(error, AppError::ChannelPlatformError(detail)
                 if detail == format!("telegram send failed: {expected}")));
+        }
+    }
+
+    #[test]
+    fn photo_document_fallback_accepts_only_photo_processing_markers() {
+        for marker in [
+            "PHOTO_INVALID_DIMENSIONS",
+            "PHOTO_SAVE_FILE_INVALID",
+            "PHOTO_EXT_INVALID",
+            "PHOTO_CROP_SIZE_SMALL",
+            "IMAGE_PROCESS_FAILED",
+        ] {
+            assert!(photo_document_fallback(marker), "{marker}");
+        }
+    }
+
+    #[test]
+    fn photo_document_fallback_rejects_non_photo_refusals() {
+        for marker in [
+            "wrong file identifier",
+            "wrong type of the web page content",
+            "failed to get HTTP URL content",
+            "file must be non-empty",
+            "wrong padding in the data",
+            "chat not found",
+            "message thread not found",
+            "replied message not found",
+            "bot was blocked by the user",
+            "TOPIC_CLOSED",
+            "not enough rights",
+            "have no rights to send photos",
+            "can't parse entities",
+            "PHOTO_INVALID_DIMENSIONS; chat not found",
+        ] {
+            assert!(!photo_document_fallback(marker), "{marker}");
         }
     }
 }

@@ -228,9 +228,10 @@ it("polls pending acknowledgements after settlement, throttles decisions, and re
     // Allow resumes the assistant with a visible continuation turn.
     expect(send).toHaveBeenCalledExactlyOnceWith(
       id,
-      "Approved: account management for this chat. Continue.",
+      "Approved: account management for this chat. Continue. Then tell the user in one or two plain sentences what you did and the result.",
       expect.any(Function),
       expect.any(Function),
+      expect.objectContaining({ acknowledgementId: "12345678-1234-4123-8123-123456789012" }),
     );
     expect(requests.some((r) => r.startsWith("POST"))).toBe(false);
   }, 8000,
@@ -277,10 +278,11 @@ it("sends one continuation after a turn settles for cards allowed while it ran, 
     await waitFor(() => expect(send).toHaveBeenCalledOnce());
     expect(send).toHaveBeenCalledWith(
       id,
-      "Approved: this chat may use GitHub. Continue.\n" +
-        "Approved: account management for this chat. Continue.",
+      "Approved: this chat may use GitHub. Continue. Then tell the user in one or two plain sentences what you did and the result.\n" +
+        "Approved: account management for this chat. Continue. Then tell the user in one or two plain sentences what you did and the result.",
       expect.any(Function),
       expect.any(Function),
+      expect.objectContaining({ acknowledgementId: "12345678-1234-4123-8123-123456789011" }),
     );
     rerender();
     expect(send).toHaveBeenCalledOnce();
@@ -563,19 +565,24 @@ it("phrases continuation turns per acknowledgement kind", () => {
   };
   expect(
     continuationText({ ...base, kind: "service", service_slug: "github", service_name: "GitHub" }),
-  ).toBe("Approved: this chat may use GitHub. Continue.");
+  ).toBe("Approved: this chat may use GitHub. Continue. Then tell the user in one or two plain sentences what you did and the result.");
   expect(continuationText({ ...base, kind: "service", service_slug: "github" })).toBe(
-    "Approved: this chat may use github. Continue.",
+    "Approved: this chat may use github. Continue. Then tell the user in one or two plain sentences what you did and the result.",
   );
   expect(continuationText({ ...base, kind: "account" })).toBe(
-    "Approved: account management for this chat. Continue.",
+    "Approved: account management for this chat. Continue. Then tell the user in one or two plain sentences what you did and the result.",
   );
   expect(continuationForAll([{ ...base, kind: "account" }])).toBe(
-    "Approved: account management for this chat. Continue.",
+    "Approved: account management for this chat. Continue. Then tell the user in one or two plain sentences what you did and the result.",
   );
   expect(continuationText({ ...base, kind: "action", tool_name: "delete_agent_key" })).toBe(
-    `Confirmed: Delete agent key ci-bot (acknowledgement_id ${base.id}). Retry it now.`,
+    `Confirmed: Delete agent key ci-bot (acknowledgement_id ${base.id}). Retry it now. Then tell the user in one or two plain sentences what you did and the result.`,
   );
+  for (const kind of ["machine", "saved_login"] as const) {
+    expect(continuationText({ ...base, kind })).toBe(
+      "Approved: Delete agent key ci-bot Continue within the updated machine and saved-login grants. Then tell the user in one or two plain sentences what you did and the result.",
+    );
+  }
 });
 
 function failedReply(turnId: string, code: string, seq = 2) {

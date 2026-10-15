@@ -3,6 +3,8 @@ import { api } from "@/lib/api-client";
 import { FEATURE_FLAG } from "@/lib/feature-flags";
 import type {
   AdminFeatureFlagListResponse,
+  CreateFeatureFlagRequest,
+  FeatureFlagTarget,
   AdminFeatureFlag,
   AdminFeatureFlagTargetKind,
   SetAdminFeatureFlagRequest,
@@ -192,5 +194,43 @@ export function useClearAdminFeatureFlag() {
       if (flagKey === FEATURE_FLAG.INVITATION_CODE)
         void queryClient.invalidateQueries({ queryKey: ["public-config"] });
     },
+  });
+}
+
+export function useCreateFeatureFlag() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (body: CreateFeatureFlagRequest) =>
+      api.post("/admin/feature-flags", body),
+    onSuccess: async () => {
+      await client.cancelQueries({ queryKey: QUERY_KEY });
+      await client.invalidateQueries({ queryKey: QUERY_KEY });
+      await client.invalidateQueries({ queryKey: ["user", "me"] });
+    },
+  });
+}
+
+export function useFeatureFlagTargets(
+  flagKey: string,
+  kind: "person" | "org",
+  search?: string,
+  limit = 20,
+  enabled = true,
+) {
+  return useQuery({
+    queryKey: [...QUERY_KEY, "targets", flagKey, kind, search, limit],
+    queryFn: async () => {
+      const params = new URLSearchParams({
+        flag_key: flagKey,
+        kind,
+        limit: String(limit),
+      });
+      if (search) params.set("search", search);
+      const users = await api.get<FeatureFlagTarget[]>(
+        `/admin/feature-flag-targets?${params}`,
+      );
+      return { users, total: users.length };
+    },
+    enabled,
   });
 }

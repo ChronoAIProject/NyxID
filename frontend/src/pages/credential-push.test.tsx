@@ -95,6 +95,7 @@ vi.mock("@/hooks/use-ownership-transfers", () => ({
 
 vi.mock("@/hooks/use-providers", () => ({
   useMyProviderTokens: () => ({ data: [] }),
+  useProvider: () => ({ data: undefined }),
 }));
 
 vi.mock("@/hooks/use-developer-apps", () => ({

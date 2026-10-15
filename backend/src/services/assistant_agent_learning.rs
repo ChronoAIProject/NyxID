@@ -629,6 +629,12 @@ fn build_input(
     (input, evidence)
 }
 
+pub(crate) fn validate_generation_contract(bytes: &[u8]) -> AppResult<()> {
+    let invalid = || AppError::ValidationError("Learning proposal failed validation".into());
+    let proposal = serde_json::from_slice(bytes).map_err(|_| invalid())?;
+    super::assistant_skill_authoring::validation::ornn_rules(&proposal).map_err(|_| invalid())
+}
+
 /// Diagnostics name the field and rule only, never the offending text.
 fn learned_text(field: &str, value: &str, maximum: usize, required: bool) -> AppResult<()> {
     let count = value.chars().count();
@@ -1294,6 +1300,7 @@ pub async fn process_with_state(state: &AppState, run: AssistantAgentLearningRun
         finish_run(&state.db, &run, "succeeded", None, None).await?;
         return Ok(());
     };
+    validate_generation_contract(&body)?;
     let fingerprint = fingerprint_sensitive_material(&format!(
         "{}:{}:{}",
         run.agent_id,
@@ -1327,6 +1334,9 @@ pub async fn process_with_state(state: &AppState, run: AssistantAgentLearningRun
         model_contract: MODEL_CONTRACT.into(),
         publication: None,
         failure_code: None,
+        failure_rules: Vec::new(),
+        scope_encrypted: None,
+        scope_digest: None,
         evidence: run.evidence.clone(),
         body_bytes: body.len() as i64,
         body_encrypted: state.encryption_keys.encrypt(&body).await?,
@@ -1473,6 +1483,23 @@ mod tests {
         assert!(validate_generated(&value.to_string()).is_err());
         let value = serde_json::json!({"schema_version":1,"kind":"new","name":"x","description":"","skill_md":"x","rationale":"x".repeat(1_001)});
         assert!(validate_generated(&value.to_string()).is_err());
+    }
+
+    #[test]
+    fn generation_contract_refuses_invalid_fields_without_breaking_legacy_decode() {
+        let value = serde_json::json!({"schema_version":1,"kind":"new","name":"safe","description":"Unsafe <description>","skill_md":"# Guidance","files":[{"path":"legacy.md","content":"Safe guidance"}]});
+        let bytes = validate_generated(&value.to_string()).unwrap().unwrap();
+        assert!(
+            matches!(validate_generation_contract(&bytes), Err(AppError::ValidationError(message)) if message == "Learning proposal failed validation")
+        );
+        let mut valid = value;
+        valid["description"] = "Safe description".into();
+        assert_eq!(
+            super::super::assistant_learning_publication::package_path("legacy.md"),
+            "references/legacy.md"
+        );
+        validate_generation_contract(&validate_generated(&valid.to_string()).unwrap().unwrap())
+            .unwrap();
     }
 
     #[tokio::test]

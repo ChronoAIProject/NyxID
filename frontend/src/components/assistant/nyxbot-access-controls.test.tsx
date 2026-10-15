@@ -134,20 +134,20 @@ it("shows the server's actionable refusal of a model", async () => {
 
 it("shows and switches the workspace access mode from a thread", async () => {
   const user = renderWith(<AccessModeSwitcher />);
-  const select = await screen.findByRole("combobox", { name: "Access mode" });
-  expect(select).toHaveTextContent("NyxMode");
+  const select = await screen.findByRole("combobox", { name: "Permission mode" });
+  expect(select).toHaveTextContent("Auto");
   await user.click(select);
-  await user.click(await screen.findByRole("option", { name: "Ask Every Time" }));
+  await user.click(await screen.findByRole("option", { name: /^Ask every time/ }));
   await waitFor(() =>
     expect(writes).toEqual([
       { method: "PUT", endpoint: "/assistant/nyxagent/settings", body: { access_mode: "ask_every_time" } },
     ]),
   );
-  await waitFor(() => expect(select).toHaveTextContent("Ask Every Time"));
+  await waitFor(() => expect(select).toHaveTextContent("Ask every time"));
 });
 
 it("shows an agent's own access mode instead of the switcher", async () => {
   renderWith(<AccessModeSwitcher agentOverride="autopilot" />);
-  expect(await screen.findByLabelText("Access mode: Autopilot (this agent)")).toBeVisible();
-  expect(screen.queryByRole("combobox", { name: "Access mode" })).not.toBeInTheDocument();
+  expect(await screen.findByLabelText("Access mode: Full access (this agent)")).toBeVisible();
+  expect(screen.queryByRole("combobox", { name: "Permission mode" })).not.toBeInTheDocument();
 });

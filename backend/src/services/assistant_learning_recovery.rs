@@ -47,7 +47,7 @@ pub async fn reprepare<R: OrnnReader>(
         crate::services::assistant_skill_authoring::card_authority(&state.db, actor, &card).await?;
     let view = load_for_card(state, actor, &card).await?;
     if view.actions.contains(AuthoredAction::ShowUpdatedDraft) {
-        return announce(state, &view.agent, &view.row, &chat).await;
+        return announce(state, &view.agent, &view.row, &chat, reader).await;
     }
     if !view.actions.contains(AuthoredAction::Reprepare) {
         return Err(not_rebuildable());
@@ -67,12 +67,12 @@ pub async fn reprepare<R: OrnnReader>(
         // A concurrent rebuild of the same draft may have won the swap.
         let (agent, row) = load(&state.db, actor, agent_id, proposal_id).await?;
         if matches!(error, AppError::Conflict(_)) && rebuilt(&row) {
-            return announce(state, &agent, &row, &chat).await;
+            return announce(state, &agent, &row, &chat, reader).await;
         }
         return Err(error);
     }
     let (agent, row) = load(&state.db, actor, agent_id, proposal_id).await?;
-    match announce(state, &agent, &row, &chat).await {
+    match announce(state, &agent, &row, &chat, reader).await {
         Ok(result) => Ok(result),
         // The rebuild committed; only its card is missing. Older cards offer
         // Show updated draft until it exists.
@@ -313,12 +313,22 @@ async fn announce(
     agent: &AssistantAgent,
     row: &AssistantAgentLearningProposal,
     chat: &ChatAuthority,
+    reader: &impl OrnnReader,
 ) -> AppResult<Value> {
     if !rebuilt(row) || row.owner_id != chat.user_id || agent.user_id != chat.user_id {
         return Err(not_rebuildable());
     }
     let p = row.publication.as_ref().ok_or_else(conflict)?;
     let binding = publication::binding(row, p, agent.skills_revision);
+    if !chat.guest
+        && acks::effective_access_mode(&state.db, chat).await?
+            == crate::models::assistant_settings::AccessMode::Autopilot
+    {
+        return crate::services::assistant_skill_authoring::publish_automatically(
+            state, chat, agent, &row.id, &binding, reader,
+        )
+        .await;
+    }
     let existing = state
         .db
         .collection::<AssistantAcknowledgement>(ACKNOWLEDGEMENTS_COLLECTION_NAME)

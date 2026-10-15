@@ -61,6 +61,11 @@ authenticated pages, use an authorized machine browser instead of forwarding
 cookies, headers, or page contents to a public extractor. The active NyxAgent
 prompt gives NyxBot and specialists this workflow within their existing grants.
 
+NyxBot's current priority is reliable, cost-effective execution of NyxID services,
+connections, and tools. Native GPT image search is deferred for later discussion;
+this integration does not enable it. Image generation belongs to a dedicated
+NyxID-connected service and follows the existing authorization and usage paths.
+
 For a new API, use Add tool → New service, or CLI `service add --catalog-admin --slug … --endpoint-url … --auth-method … --service-category internal --offering-kind tool --openapi-spec-url …`. Configure a master credential/platform grant and pricing in Service settings. Run `catalog discover` to populate draft operations from the spec, then review and publish selected operations.
 
 ## Manifest CLI and wizard

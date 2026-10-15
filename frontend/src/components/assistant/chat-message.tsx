@@ -34,6 +34,7 @@ import { steeringNotice } from "@/lib/assistant/nyxagent-steering";
 import type { RuntimeToolCallInfo } from "@/lib/assistant/runtime-event-semantics";
 import { describeToolActivity } from "@/lib/assistant/tool-activity-text";
 import { MachineToolCard } from "./machine-tool-card";
+import { MessageTime } from "./message-time";
 import { useAssistantFeedback } from "@/hooks/use-assistant-feedback";
 import { capture } from "@/lib/telemetry";
 
@@ -59,7 +60,7 @@ function PulseDot({ className }: { readonly className?: string }) {
     <span
       aria-hidden
       className={cn(
-        "inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-nyx-secondary-400",
+        "inline-block h-1.5 w-1.5 motion-safe:animate-pulse rounded-full bg-nyx-secondary-400",
         className,
       )}
     />
@@ -99,6 +100,79 @@ function ThinkingBlock({
   );
 }
 
+function toolFailureCopy(
+  failure: { kind: string; status?: number } | null | undefined,
+): string {
+  switch (failure?.kind) {
+    case "service_status":
+      return failure.status == null
+        ? "The service returned an error. No HTTP status is available."
+        : `The service responded with HTTP ${failure.status}.`;
+    case "refused":
+      return "NyxID refused this call.";
+    case "internal":
+      return "NyxID could not complete this call.";
+    case "tool_error":
+      return "The tool reported an error.";
+    default:
+      return "This step did not complete. No additional error details are available.";
+  }
+}
+
+function formatElapsed(seconds: number): string {
+  if (seconds < 60) return `${seconds}s`;
+  return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
+}
+
+function ToolElapsed({ startedAt }: { readonly startedAt: string }) {
+  const [now, setNow] = useState(Date.now);
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, []);
+  const seconds = Math.max(0, Math.floor((now - Date.parse(startedAt)) / 1000));
+  if (seconds < 3) return null;
+  return <span aria-hidden> · {formatElapsed(seconds)}</span>;
+}
+
+function StatusLabel({ label, interrupted }: {
+  readonly label: string;
+  readonly interrupted?: boolean;
+}) {
+  return (
+    <span role="status" aria-live="polite">
+      {label}
+      {interrupted ? (
+        <span> Connection interrupted; checking every few seconds</span>
+      ) : null}
+    </span>
+  );
+}
+
+function ActivitySummaryIcon({ status }: { readonly status: ChatMessage["status"] }) {
+  if (status === "streaming") return <PulseDot />;
+  if (status === "error") {
+    return <X className="h-3 w-3 text-destructive" aria-label="Turn failed" />;
+  }
+  if (status === "stopped") {
+    return <CircleAlert className="h-3 w-3 text-muted-foreground" aria-label="Stopped" />;
+  }
+  return <Check className="h-3 w-3 text-success" aria-label="Completed" />;
+}
+
+function activitySummary(message: ChatMessage): string {
+  switch (message.status) {
+    case "streaming":
+      return message.turnStatus?.label ?? "Working…";
+    case "error":
+      return "Turn failed";
+    case "stopped":
+      return "Stopped";
+    default:
+      return "Completed";
+  }
+}
+
 function ToolStatusIcon({
   status,
 }: {
@@ -119,14 +193,12 @@ function ActivityBlock({ message }: { readonly message: ChatMessage }) {
   const steps = message.steps ?? [];
   const tools = (message.toolCalls ?? []).filter((tool) => !tool.machine);
   const count = steps.length + tools.length;
+  const total = Math.max(count, message.activityTotal ?? 0);
   const [open, setOpen] = useState(false);
   if (!count) return null;
-  const running =
-    steps.some((step) => step.status === "running") ||
-    tools.some((tool) => tool.status === "running");
-  const failed =
-    steps.filter((step) => step.status === "error").length +
-    tools.filter((tool) => tool.status === "error").length;
+  const failed = steps.filter((step) => step.status === "error").length
+    + tools.filter((tool) => tool.status === "error").length;
+  const summary = activitySummary(message);
   return (
     <div className="mb-2 overflow-hidden rounded-lg border border-hairline bg-overlay/35">
       <button
@@ -138,19 +210,14 @@ function ActivityBlock({ message }: { readonly message: ChatMessage }) {
         <ChevronRight
           className={cn("h-3 w-3 transition-transform", open && "rotate-90")}
         />
-        {running ? (
-          <PulseDot />
-        ) : failed ? (
-          <X className="h-3 w-3 text-destructive" />
-        ) : (
-          <Check className="h-3 w-3 text-success" />
-        )}
+        <ActivitySummaryIcon status={message.status} />
         <span>
-          {count} {count === 1 ? "action" : "actions"}
+          {summary} · {total} {total === 1 ? "action" : "actions"}
+          {message.activityTotal && message.activityTotal > count ? (
+            <span className="ml-1">· latest {count} of {message.activityTotal} shown</span>
+          ) : null}
+          {failed ? <span className="ml-1 text-warning">· {failed} failed</span> : null}
         </span>
-        {failed ? (
-          <span className="text-destructive">· {failed} failed</span>
-        ) : null}
       </button>
       {open ? (
         <div className="space-y-1 border-t border-hairline px-2.5 py-2">
@@ -166,6 +233,11 @@ function ActivityBlock({ message }: { readonly message: ChatMessage }) {
               <span className="min-w-0 flex-1 break-words text-muted-foreground">
                 {step.name || "Processing"}
               </span>
+              {step.status === "error" ? (
+                <span className="text-text-tertiary">
+                  Step failed. The assistant can continue after a failed step.
+                </span>
+              ) : null}
               {step.stepType ? (
                 <span className="shrink-0 font-mono text-9 text-text-tertiary">
                   {step.stepType}
@@ -191,6 +263,12 @@ function ActivityBlock({ message }: { readonly message: ChatMessage }) {
                 <span className="max-w-[45%] shrink-0 truncate font-mono text-10 text-text-tertiary">
                   {tool.name || tool.id}
                 </span>
+                {tool.status === "error" ? (
+                  <span className="text-text-tertiary">
+                    {toolFailureCopy(tool.failure)} The assistant can continue
+                    after a failed step.
+                  </span>
+                ) : null}
               </summary>
               {tool.result ? (
                 <pre className="ml-5 mt-1 max-h-32 overflow-auto whitespace-pre-wrap rounded-md bg-overlay px-2 py-1.5 font-mono text-10 text-text-tertiary">
@@ -269,43 +347,25 @@ function ErrorDetails({ detail }: { readonly detail: ErrorDetail }) {
  * model can think for many seconds before its first word, which must not read
  * as a frozen page. Ticks only itself, never the transcript.
  */
-function WaitingStatus({
-  running,
-  last,
-}: {
-  /** The running tool, described. */
-  readonly running?: string;
-  /** Otherwise the last tool's outcome, described. */
-  readonly last?: string;
+function WaitingStatus({ label, interrupted }: {
+  readonly label?: string;
+  readonly interrupted?: boolean;
 }) {
   const [seconds, setSeconds] = useState(0);
   useEffect(() => {
     const started = Date.now();
-    const timer = setInterval(() => setSeconds(Math.floor((Date.now() - started) / 1000)), 1000);
+    const timer = setInterval(
+      () => setSeconds(Math.floor((Date.now() - started) / 1000)),
+      1000,
+    );
     return () => clearInterval(timer);
   }, []);
-  const elapsed = seconds >= 3 ? ` · ${String(seconds)}s` : "";
-  if (running) {
-    return (
-      <span data-running-tool className="ml-1.5 truncate text-11 text-muted-foreground">
-        {running}
-        {elapsed}
-      </span>
-    );
-  }
-  if (last) {
-    return (
-      <span data-last-tool className="ml-1.5 truncate text-11 text-text-tertiary">
-        {last}
-        {elapsed}
-      </span>
-    );
-  }
-  return elapsed ? (
-    <span data-waiting-status className="ml-1.5 text-11 text-muted-foreground">
-      Thinking{elapsed}
+  return (
+    <span data-waiting-status={!label && seconds >= 3 ? true : undefined}>
+      <StatusLabel label={label ?? "Thinking"} interrupted={interrupted} />
+      {seconds >= 3 ? <span aria-hidden> · {formatElapsed(seconds)}</span> : null}
     </span>
-  ) : null;
+  );
 }
 
 export function ChatMessageBubble({
@@ -376,28 +436,34 @@ export function ChatMessageBubble({
         props: { message_id: message.id, vote: selected },
       });
   };
+  if (message.continuation_of) {
+    return <p role="status" className="px-[7px] text-11 text-muted-foreground">Continuing after your decision</p>;
+  }
   if (message.role === "user") {
     return (
-      <div className="ml-auto max-w-[78%] rounded-lg bg-overlay-strong px-3 py-2 text-12 leading-relaxed text-foreground whitespace-pre-wrap">
-        {message.steering && (
-          <p className="mb-1 text-11 text-muted-foreground" role="note">
-            Steering ·{" "}
-            {steeringNotice(message.steering.code, message.steering.outcome)}
-          </p>
-        )}
-        {message.images?.length ? (
-          <div className={cn("flex flex-wrap gap-2", content && "mb-2")}>
-            {message.images.map((image) => (
-              <ToolImage key={image.id} image={image} />
-            ))}
-          </div>
-        ) : null}
-        {content}
-        {feedbackError ? (
-          <p role="alert" className="mt-1 text-11 text-destructive">
-            Unable to save feedback. Try again.
-          </p>
-        ) : null}
+      <div className="group/message ml-auto flex max-w-[78%] flex-col items-end gap-1">
+        <div className="rounded-lg bg-overlay-strong px-3 py-2 text-12 leading-relaxed text-foreground whitespace-pre-wrap">
+          {message.steering && (
+            <p className="mb-1 text-11 text-muted-foreground" role="note">
+              Steering ·{" "}
+              {steeringNotice(message.steering.code, message.steering.outcome)}
+            </p>
+          )}
+          {message.images?.length ? (
+            <div className={cn("flex flex-wrap gap-2", content && "mb-2")}>
+              {message.images.map((image) => (
+                <ToolImage key={image.id} image={image} />
+              ))}
+            </div>
+          ) : null}
+          {content}
+          {feedbackError ? (
+            <p role="alert" className="mt-1 text-11 text-destructive">
+              Unable to save feedback. Try again.
+            </p>
+          ) : null}
+        </div>
+        <MessageTime value={message.timestamp} reveal />
       </div>
     );
   }
@@ -418,11 +484,31 @@ export function ChatMessageBubble({
     ? message.toolCalls?.filter((tool) => tool.status === "running").at(-1)
     : undefined;
   const lastTool = streaming ? message.toolCalls?.at(-1) : undefined;
+  let statusLabel: string | undefined;
+  if (message.turnStatus && message.turnStatus.phase !== "tool") {
+    statusLabel = message.turnStatus.label;
+  } else if (runningTool) {
+    statusLabel = `${describeToolActivity(runningTool.name, "running")}…`;
+  } else if (lastTool) {
+    statusLabel = describeToolActivity(lastTool.name, lastTool.status);
+  } else {
+    statusLabel = message.turnStatus?.label;
+  }
+  const toolStartedAt = message.turnStatus?.phase === "tool"
+    ? message.turnStatus.toolStartedAt
+    : undefined;
+  const showFeedback = Boolean(
+    feedbackEnabled &&
+    conversationId &&
+    message.status === "complete" &&
+    !message.errorCode &&
+    message.id,
+  );
   return (
     <article
       role={thinking ? "status" : undefined}
       aria-label={thinking ? "Assistant is thinking" : undefined}
-      className="flex items-start gap-2.5"
+      className="group/message flex items-start gap-2.5"
     >
       <span
         {...(thinking ? { "data-assistant-halo": "" } : {})}
@@ -543,21 +629,39 @@ export function ChatMessageBubble({
             <ArtifactBlock block={artifact} />
           </div>
         ))}
-        {streaming && !content ? (
+        {streaming ? (
           <div
-            data-streaming-dots
-            role="status"
-            aria-label="Assistant is answering"
-            className="flex h-5 items-center gap-1"
+            data-turn-status
+            className="flex min-h-5 items-center gap-1 text-11 text-muted-foreground"
           >
-            <PulseDot />
-            <PulseDot className="[animation-delay:120ms]" />
-            <PulseDot className="[animation-delay:240ms]" />
-            <WaitingStatus
-              running={runningTool ? `${describeToolActivity(runningTool.name, "running")}…` : undefined}
-              last={!runningTool && lastTool ? describeToolActivity(lastTool.name, lastTool.status) : undefined}
-            />
+            {!content ? <span data-streaming-dots><PulseDot /></span> : null}
+            <span
+              {...(!content && runningTool ? { "data-running-tool": runningTool.name } : {})}
+              {...(!runningTool && lastTool ? { "data-last-tool": true } : {})}
+            >
+              {toolStartedAt ? (
+                <>
+                  <StatusLabel
+                    label={statusLabel ?? "Thinking"}
+                    interrupted={message.turnStatus?.interrupted}
+                  />
+                  <ToolElapsed startedAt={toolStartedAt} />
+                </>
+              ) : (
+                <WaitingStatus label={statusLabel} interrupted={message.turnStatus?.interrupted} />
+              )}
+            </span>
           </div>
+        ) : null}
+        {message.status === "stopped" ? (
+          <p
+            role="status"
+            aria-label="Turn stopped"
+            className="flex min-h-5 items-center gap-1 text-11 text-muted-foreground"
+          >
+            <CircleAlert aria-hidden="true" className="h-3 w-3" />
+            Stopped
+          </p>
         ) : null}
         {message.status === "error" && message.error ? (
           <div className="mt-2 flex items-start gap-2 rounded-lg border border-destructive/25 bg-destructive/[0.05] px-3 py-2 text-11 text-destructive">
@@ -565,53 +669,59 @@ export function ChatMessageBubble({
             <span>{message.error}</span>
           </div>
         ) : null}
-        {feedbackEnabled &&
-        conversationId &&
-        !streaming &&
-        message.status === "complete" &&
-        !message.errorCode &&
-        message.id ? (
-          <div
-            role="group"
-            className="mt-2 flex items-center gap-1"
-            aria-label="Reply feedback"
-          >
-            <button
-              type="button"
-              aria-label="Helpful"
-              aria-pressed={vote === "up"}
-              disabled={feedback.isPending}
-              onClick={() => void setFeedback("up")}
-              className={cn(
-                "rounded p-1 text-text-tertiary hover:bg-overlay",
-                vote === "up" && "text-success",
-              )}
-            >
-              <ThumbsUp className="h-3.5 w-3.5" />
-            </button>
-            <button
-              type="button"
-              aria-label="Not helpful"
-              aria-pressed={vote === "down"}
-              disabled={feedback.isPending}
-              onClick={() => void setFeedback("down")}
-              className={cn(
-                "rounded p-1 text-text-tertiary hover:bg-overlay",
-                vote === "down" && "text-destructive",
-              )}
-            >
-              <ThumbsDown className="h-3.5 w-3.5" />
-            </button>
-            <button
-              type="button"
-              aria-label="Add feedback comment"
-              onClick={() => setCommentOpen((open) => !open)}
-              className="ml-1 rounded px-2 py-1 text-10 text-text-tertiary hover:bg-overlay"
-            >
-              Comment
-            </button>
+        {/* The time joins the feedback line once the reply settles; a
+            streaming reply has no settled instant yet. */}
+        {streaming ? null : (
+          <div className="mt-2 flex flex-wrap items-center gap-1 empty:hidden">
+            {showFeedback ? (
+              <div
+                role="group"
+                className="flex items-center gap-1"
+                aria-label="Reply feedback"
+              >
+                <button
+                  type="button"
+                  aria-label="Helpful"
+                  aria-pressed={vote === "up"}
+                  disabled={feedback.isPending}
+                  onClick={() => void setFeedback("up")}
+                  className={cn(
+                    "rounded p-1 text-text-tertiary hover:bg-overlay",
+                    vote === "up" && "text-success",
+                  )}
+                >
+                  <ThumbsUp className="h-3.5 w-3.5" />
+                </button>
+                <button
+                  type="button"
+                  aria-label="Not helpful"
+                  aria-pressed={vote === "down"}
+                  disabled={feedback.isPending}
+                  onClick={() => void setFeedback("down")}
+                  className={cn(
+                    "rounded p-1 text-text-tertiary hover:bg-overlay",
+                    vote === "down" && "text-destructive",
+                  )}
+                >
+                  <ThumbsDown className="h-3.5 w-3.5" />
+                </button>
+                <button
+                  type="button"
+                  aria-label="Add feedback comment"
+                  onClick={() => setCommentOpen((open) => !open)}
+                  className="ml-1 rounded px-2 py-1 text-10 text-text-tertiary hover:bg-overlay"
+                >
+                  Comment
+                </button>
+              </div>
+            ) : null}
+            <MessageTime
+              value={message.timestamp}
+              reveal
+              className={showFeedback ? "ml-1" : undefined}
+            />
           </div>
-        ) : null}
+        )}
         {feedbackEnabled && conversationId && commentOpen && !streaming ? (
           <div className="mt-2 flex max-w-sm gap-2 rounded-lg border border-border bg-overlay p-2">
             <textarea
@@ -928,21 +1038,20 @@ export function ChatMessageList({
   const terminalAssistant = messages.at(-1);
   const emptyTerminal = Boolean(
     session &&
-    session.status !== "streaming" &&
-    session.status !== "draft" &&
-    session.status !== "stopped" &&
-    terminalAssistant?.role === "assistant" &&
-    !terminalAssistant.content.trim() &&
-    !terminalAssistant.error &&
-    !(
-      terminalAssistant.steps?.length ||
-      terminalAssistant.toolCalls?.length ||
-      terminalAssistant.images?.length
-    ) &&
-    !(
-      terminalAssistant.artifacts?.length ||
-      terminalAssistant.authorizationBlockers?.length
-    ),
+      session.status !== "streaming" &&
+      session.status !== "draft" &&
+      session.status !== "stopped" &&
+      terminalAssistant?.role === "assistant" &&
+      terminalAssistant.status !== "stopped" &&
+      !terminalAssistant.content.trim() &&
+      !terminalAssistant.error &&
+      !(
+        terminalAssistant.steps?.length ||
+        terminalAssistant.toolCalls?.length ||
+        terminalAssistant.images?.length
+      ) &&
+      !(terminalAssistant.artifacts?.length ||
+        terminalAssistant.authorizationBlockers?.length),
   );
   useEffect(() => {
     if (!emptyTerminal) return;

@@ -106,6 +106,8 @@ pub struct ActivityResponse {
     status: String,
     started_at: DateTime<Utc>,
     ended_at: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    failure: Option<crate::models::assistant_conversation::ToolFailure>,
 }
 impl From<crate::models::assistant_conversation::TurnActivity> for ActivityResponse {
     fn from(row: crate::models::assistant_conversation::TurnActivity) -> Self {
@@ -116,6 +118,7 @@ impl From<crate::models::assistant_conversation::TurnActivity> for ActivityRespo
             status: row.status,
             started_at: row.started_at,
             ended_at: row.ended_at,
+            failure: row.failure,
         }
     }
 }
@@ -167,6 +170,7 @@ pub struct ActiveTurnResponse {
     steering_allowed: bool,
     stop_requested: bool,
     continuations: u32,
+    activity_total: i64,
     turn_id: String,
     started_at: DateTime<Utc>,
     activities: Vec<ActivityResponse>,
@@ -269,6 +273,7 @@ impl From<AssistantConversation> for ConversationResponse {
             ),
             stop_requested: turn.stop_requested,
             continuations: turn.continuations,
+            activity_total: turn.activity_total,
             turn_id: turn.turn_id.clone(),
             started_at: turn.started_at,
             activities: turn
@@ -373,6 +378,7 @@ pub struct MessageResponse {
     steering: Option<steering::SteeringResponse>,
     voice: Option<VoiceTranscriptResponse>,
     execution_pending: bool,
+    continuation_of: Option<String>,
     id: String,
     seq: i64,
     turn_id: String,
@@ -387,6 +393,7 @@ pub struct MessageResponse {
     attachments: Vec<AttachmentResponse>,
     /// A user message written in a chat app: its platform.
     via: Option<String>,
+    activity_total: i64,
 }
 impl From<AssistantMessage> for MessageResponse {
     fn from(row: AssistantMessage) -> Self {
@@ -399,6 +406,7 @@ impl From<AssistantMessage> for MessageResponse {
                 .map(steering::SteeringResponse::from),
             voice: row.voice.map(VoiceTranscriptResponse::from),
             execution_pending: row.execution_pending,
+            continuation_of: row.continuation_of,
             id: row.id,
             seq: row.seq,
             turn_id: row.turn_id,
@@ -420,6 +428,7 @@ impl From<AssistantMessage> for MessageResponse {
                 .map(AttachmentResponse::from)
                 .collect(),
             via: row.via,
+            activity_total: row.activity_total,
         }
     }
 }
@@ -587,7 +596,13 @@ pub async fn history(
         rows.remove(0);
     }
     let before_seq = more.then(|| rows[0].seq);
-    let mut acknowledgements = acknowledgements::history(&state.db, &user_id, &id).await?;
+    let mut acknowledgements = acknowledgements::history_for_messages(
+        &state.db,
+        &user_id,
+        &id,
+        rows.first().map(|message| message.created_at),
+    )
+    .await?;
     if let Some(card) = query.card {
         acknowledgements::include_card(
             &state.db,
@@ -854,6 +869,8 @@ pub struct AcknowledgementResponse {
     kind: String,
     status: String,
     summary: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    link: Option<String>,
     /// `user` or `orchestrator` (a subagent's request its orchestrator decides).
     decider: String,
     decided_by: Option<String>,
@@ -880,6 +897,7 @@ impl From<crate::models::assistant_acknowledgement::AssistantAcknowledgement>
             kind: row.kind,
             status: row.status,
             summary: row.summary,
+            link: row.link,
             trigger_run_id: row.trigger_run_id,
             decider: row.decider,
             decided_by: row.decided_by,
@@ -904,6 +922,8 @@ pub enum Decision {
 #[serde(deny_unknown_fields)]
 pub struct AcknowledgementDecision {
     decision: Decision,
+    #[serde(default)]
+    accept_reduced_scope: bool,
 }
 
 pub async fn decide_acknowledgement(
@@ -917,7 +937,7 @@ pub async fn decide_acknowledgement(
     if let Some(card) = state.db.collection::<crate::models::assistant_acknowledgement::AssistantAcknowledgement>(crate::models::assistant_acknowledgement::COLLECTION_NAME)
         .find_one(doc! {"_id":&ack_id,"user_id":&user,"conversation_id":&id,"authored_skill":{"$ne":bson::Bson::Null}}).await? {
         super::login_client_context::require_first_party_human(&auth)?;
-        let card = Box::pin(super::assistant_agent_learning::decide_authored(&state, &auth, card, matches!(body.decision, Decision::Allow))).await?;
+        let card = Box::pin(super::assistant_agent_learning::decide_authored_with_scope(&state, &auth, card, matches!(body.decision, Decision::Allow), body.accept_reduced_scope)).await?;
         return Ok(Json(card.into()));
     }
     let row = acknowledgements::decide(
@@ -938,6 +958,12 @@ pub async fn decide_acknowledgement(
     if row.decider == "orchestrator" {
         super::assistant_team::permission_decided(&state, &user, &row).await;
     }
+    if matches!(body.decision, Decision::Deny) {
+        Box::pin(super::assistant_team::owner_denial_decided(
+            &state, &user, &row,
+        ))
+        .await;
+    }
     if matches!(body.decision, Decision::Allow)
         && let Some(action) = row.machine_context.as_ref()
     {
@@ -946,7 +972,7 @@ pub async fn decide_acknowledgement(
     Ok(Json(row.into()))
 }
 
-/// Retired: every chat runs with Full access. Kept so older clients get a
+/// Retired conversation consent mode. Kept so older clients get a
 /// stable, explicit answer instead of a 404.
 pub async fn change_access_mode(
     State(state): State<AppState>,
@@ -958,7 +984,7 @@ pub async fn change_access_mode(
         StatusCode::GONE,
         Json(json!({
             "error": "access_mode_retired",
-            "message": "Every NyxBot chat runs with Full access; the Ask/Full choice was removed.",
+            "message": "Conversation consent modes were retired. Change the permission mode in NyxBot settings or the composer.",
         })),
     )
         .into_response())
@@ -2054,7 +2080,12 @@ async fn execute_turn_inner(
     if recap {
         events.notice();
     }
-    let mut prompt = context.instructions(&history, recap);
+    let saved_recap = tokio::sync::OnceCell::new();
+    let load_recap = || engine::recap(&state.db, row, &history, turn_id);
+    let mut prompt = context
+        .session_instructions(recap, &saved_recap, load_recap)
+        .await
+        .map_err(|_| TurnError::new("assistant_unavailable"))?;
     let mut attachments = crate::services::assistant_upload_service::turn_attachments(
         &state.db,
         &row.user_id,
@@ -2339,6 +2370,10 @@ async fn execute_turn_inner(
             }
             match recovery.decide(status, code, binding.is_some()) {
                 RecoveryAction::Rebind => {
+                    events.emit(
+                        "turn.notice",
+                        json!({"code": "retrying", "message": "Retrying…"}),
+                    );
                     engine::clear_binding(
                         &state.db,
                         &row.user_id,
@@ -2350,10 +2385,17 @@ async fn execute_turn_inner(
                     .map_err(|_| TurnError::internal("assistant_unavailable", "recovery"))?;
                     binding = None;
                     context.fresh_session();
-                    prompt = context.instructions(&history, true);
+                    prompt = context
+                        .session_instructions(true, &saved_recap, load_recap)
+                        .await
+                        .map_err(|_| TurnError::new("assistant_unavailable"))?;
                     events.notice();
                 }
                 RecoveryAction::ReplaceCredential => {
+                    events.emit(
+                        "turn.notice",
+                        json!({"code": "retrying", "message": "Retrying…"}),
+                    );
                     *credential = credentials::replace(
                         &state.db,
                         &state.encryption_keys,
@@ -2365,10 +2407,17 @@ async fn execute_turn_inner(
                     .map_err(|_| TurnError::internal("agent_key_required", "recovery"))?;
                     binding = None;
                     context.fresh_session();
-                    prompt = context.instructions(&history, true);
+                    prompt = context
+                        .session_instructions(true, &saved_recap, load_recap)
+                        .await
+                        .map_err(|_| TurnError::new("assistant_unavailable"))?;
                     events.notice();
                 }
                 RecoveryAction::Backoff => {
+                    events.emit(
+                        "turn.notice",
+                        json!({"code": "retrying", "message": "Retrying…"}),
+                    );
                     let jitter = u64::from(rand::random::<u16>() % 500);
                     tokio::time::sleep(Duration::from_millis(
                         (1 << recovery.retries) * 1000 + jitter,
@@ -2470,14 +2519,14 @@ async fn execute_turn_inner(
                 if decoder.terminal.is_some() {
                     break;
                 }
-                // Hold a key-length suffix so a reflected key split across deltas
-                // cannot leak before the next fragment reveals the full match.
-                let mut safe_end = partial
-                    .len()
-                    .saturating_sub(credential.raw_key.len().max(context.reflection_window()));
-                while !partial.is_char_boundary(safe_end) {
-                    safe_end -= 1;
-                }
+                let held = engine::secret_prefix_suffix(
+                    partial,
+                    &[
+                        credential.raw_key.as_str(),
+                        context.binding.marker.as_deref().unwrap_or(""),
+                    ],
+                );
+                let safe_end = partial.len() - held.len();
                 emit_text_suffix(events, block_id, &mut emitted, &partial[..safe_end]);
             }
             Ok(())

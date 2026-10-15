@@ -626,3 +626,141 @@ async fn gateway_negotiation_requires_advertisement_and_echo_and_backs_off_legac
         &load_channel(&f.state, OWNER, &f.row.id).await.unwrap()
     ));
 }
+
+#[tokio::test]
+async fn nyxbot_followed_thread_images_use_native_components_before_direct_or_gateway_text() {
+    use crate::models::{
+        assistant_attachment::AssistantAttachment, assistant_conversation::TurnAttachment,
+    };
+    for gateway in [false, true] {
+        let f = Box::pin(Fixture::new("nyxbot_follow_images")).await;
+        let (body, id) = f.input("start", ThreadAddress::Mention, false, true).await;
+        assert!(f.send(&body, &id).await.contains("Here is your answer"));
+        let child = f.children().await.remove(0);
+        let mut row = engine::get(
+            &f.state.db,
+            OWNER,
+            child.conversation_id.as_deref().unwrap(),
+        )
+        .await
+        .unwrap();
+        let origin = row.channel.clone().unwrap();
+        let turn_id = Uuid::new_v4().to_string();
+        row.active_turn=Some(bson::from_document(doc! {"turn_id":&turn_id,"origin":"event","started_at":bson::DateTime::now(),"stop_requested":false}).unwrap());
+        if !gateway {
+            f.state
+                .db
+                .collection::<bson::Document>(CHANNELS)
+                .update_one(doc! {"_id":&f.row.id}, doc! {"$set":{"transport":"direct"}})
+                .await
+                .unwrap();
+        }
+        let mut attachments = Vec::new();
+        for _ in 0..2 {
+            let attachment = AssistantAttachment {
+                id: Uuid::new_v4().to_string(),
+                origin: "tool".into(),
+                user_id: OWNER.into(),
+                conversation_id: row.id.clone(),
+                turn_id: turn_id.clone(),
+                content_type: "image/png".into(),
+                size: 6,
+                data_encrypted: f.state.encryption_keys.encrypt(b"pixels").await.unwrap(),
+                created_at: Utc::now(),
+            };
+            f.state
+                .db
+                .collection::<AssistantAttachment>(
+                    crate::models::assistant_attachment::COLLECTION_NAME,
+                )
+                .insert_one(&attachment)
+                .await
+                .unwrap();
+            attachments.push(TurnAttachment {
+                id: attachment.id,
+                label: "private label".into(),
+                content_type: "image/png".into(),
+                size: 6,
+                origin: "tool".into(),
+                pages: None,
+                chat_delivery: None,
+                image_input: None,
+            });
+        }
+        Mock::given(path("/open-apis/im/v1/images"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"code":0,"data":{"image_key":"image"}})),
+            )
+            .expect(2)
+            .mount(&f.platform)
+            .await;
+        let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let seen = count.clone();
+        Mock::given(path("/open-apis/im/v1/messages/om_root/reply")).and(body_partial_json(json!({"reply_in_thread":true})))
+            .respond_with(move |r:&wiremock::Request| {
+                let body:Value=r.body_json().unwrap();
+                if body["msg_type"]=="image" {seen.fetch_add(1,std::sync::atomic::Ordering::SeqCst);}else{assert_eq!(seen.load(std::sync::atomic::Ordering::SeqCst),2);}
+                assert!(!body.to_string().contains("private label"));
+                ResponseTemplate::new(200).set_body_json(json!({"code":0,"data":{"message_id":format!("om_sent_{}",Uuid::new_v4().simple())}}))
+            }).expect(if gateway{2}else{3}).mount(&f.platform).await;
+        let seen = count.clone();
+        Mock::given(path("/events/cmaeg1.ev.sealed-reference/replies"))
+            .respond_with(move |r: &wiremock::Request| {
+                assert_eq!(seen.load(std::sync::atomic::Ordering::SeqCst), 2);
+                let body: Value = r.body_json().unwrap();
+                assert_eq!(body["thread_reply"], true);
+                assert_eq!(body["text"], "event result");
+                ResponseTemplate::new(200).set_body_json(json!({"ok":true}))
+            })
+            .expect(u64::from(gateway))
+            .mount(&f.gateway)
+            .await;
+        deliver_to(
+            &f.state,
+            &row,
+            &origin,
+            "event result",
+            Some(&images::ImageSendPlan { attachments }),
+        )
+        .await;
+        assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 2);
+        let requests = f.platform.received_requests().await.unwrap();
+        let replies: Vec<_> = requests
+            .iter()
+            .filter(|request| request.url.path().ends_with("/reply"))
+            .collect();
+        for request in replies {
+            assert_eq!(
+                request.url.path(),
+                "/open-apis/im/v1/messages/om_root/reply"
+            );
+            let body: Value = request.body_json().unwrap();
+            assert_eq!(body["reply_in_thread"], true);
+            if body["msg_type"] == "image" {
+                let content: Value =
+                    serde_json::from_str(body["content"].as_str().unwrap()).unwrap();
+                assert_eq!(content["image_key"], "image");
+            }
+        }
+        assert!(
+            !requests
+                .iter()
+                .any(|request| request.url.path() == "/open-apis/im/v1/messages")
+        );
+        f.platform.verify().await;
+        f.gateway.verify().await;
+        let claims = f
+            .state
+            .db
+            .collection::<crate::models::nyxbot_image_delivery::NyxbotImageDelivery>(
+                crate::models::nyxbot_image_delivery::COLLECTION_NAME,
+            )
+            .find_one(doc! {"turn_id":&turn_id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(claims.items.iter().all(|i| i.state == "sent"));
+        f.state.db.drop().await.unwrap();
+    }
+}

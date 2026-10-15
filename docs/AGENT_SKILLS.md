@@ -51,16 +51,18 @@ Owner UI provides Ornn search, version preview (description and byte size),
 explicit attach/re-pin, removal and an available-update indication. Every
 write carries the observed revision; stale writes conflict without rebasing.
 NyxBot's `nyxid__set_agent_skills` removes immediately. Additions and re-pins
-require a one-use owner action card bound to the target agent, revision and
-exact complete pins, including dependency hashes. Skip-destructive never
-bypasses this card. Pinning rechecks Ornn access and package integrity.
+require a one-use owner action card in Auto and Ask every time, bound to the
+target agent, revision and exact complete pins, including dependency hashes.
+Full access attaches immediately with a non-consumable automatic receipt.
+Pinning rechecks Ornn access and package integrity in every mode.
 
-Specialists cannot mutate skills. Their existing permission-request flow asks
+Specialists cannot directly change their skill selection. Their existing
+permission-request flow asks
 NyxBot to review a skill name/GUID with an optional version, or complete pins.
 Specialists need no Ornn grant to request guidance; NyxBot resolves and previews
 unknown pins with the managing person's visibility. Approval of that request is advisory:
-NyxBot must apply it through `set_agent_skills`, which still requires the owner
-card for external additions or re-pins. No permission decision alone attaches
+NyxBot must apply it through `set_agent_skills`, which uses the effective
+permission mode for external additions or re-pins. No permission decision alone attaches
 external content. Owner UI writes are explicit owner actions.
 
 After the owner allows a specialist's request, NyxID wakes the assigning NyxBot
@@ -71,7 +73,8 @@ consumes its event. The assistant sweep retries after restart, routing failure,
 or bounded event-queue eviction; concurrent retries reuse the same event. NyxBot previews
 each root with `preview_agent_skill` to obtain complete pins and calls
 `set_agent_skills` at the current revision; the owner then receives
-a separate attachment card. Trigger-run skill requests also wake NyxBot; their
+a separate attachment card in Auto and Ask every time, or an automatic receipt
+in Full access. Trigger-run skill requests also wake NyxBot; their
 specialist resumes through the existing trigger flow. The specialist continues
 without the skill and may
 check `get_agent_skills` later; it must never re-request after an allow. An
@@ -111,7 +114,8 @@ bypass. Human UI reads retain ordinary browser-session behavior.
 ## Owner-requested authoring
 
 Reuse comes first: `search_agent_skills` → `preview_agent_skill` →
-`set_agent_skills` with an owner card. Personal NyxBot (for any agent it
+`set_agent_skills` with an owner card in Auto and Ask every time, or an automatic
+receipt in Full access. Personal NyxBot (for any agent it
 maintains) and specialists (for their own agent) gain `draft_agent_skill` only
 under the existing default-off `assistant:agent-learning` flag. Ornn validates
 the exact package before the owner card is raised; refusals return
@@ -121,13 +125,15 @@ drafts share L1's encrypted review store and publisher; they do not enroll the
 agent in automatic learning. Description is role/scope; persona is tone/style;
 skills contain repeatable procedures, references, checklists and templates.
 
-Draft results and authored-card refusals include an absolute `review_url` to
+In Auto and Ask every time, draft results and authored-card refusals include an absolute `review_url` to
 `/assistant?c={conversation_id}&card={acknowledgement_id}`. Send that full URL in
 chat apps or groups, or whenever the owner cannot find the card. The app loads
 and highlights the exact card, including hidden group member threads. Group
 pending actions expose **Review draft**, never a chat confirmation or Allow/Deny.
 Only the owner can review all files and approve on the full card; a chat reply
-such as "allow" never approves publication.
+such as "allow" never approves publication. Full access publishes and pins
+immediately through the same core and fences, with a linked receipt instead of
+a review card. That receipt permits inspecting and discarding the proposal.
 
 Identical pending, never-dispatched drafts reuse their original proposal/card
 across turns and concurrent threads while the original owner's conversation and
@@ -140,7 +146,8 @@ status/list/run tools accept NyxBot's immutable UUID with the same maintain ACL;
 proposal listings include the latest card ID, status, expiry and exact review URL.
 Authoring pilot recipients can list their drafts without enabling automatic learning.
 
-The card displays every text file and the generated publication frontmatter.
+In the reviewed modes, the card displays every text file and the generated
+publication frontmatter.
 One approval packages server-side, privately publishes with the approving
 person's signed identity and pins the verified exact version/hash. Revising an
 owned private attached base uses PUT with the next version. No Playground,
@@ -213,9 +220,59 @@ Legacy recovery (`assistant_learning_recovery.rs`) sits above this boundary: it
 decides eligibility, fences and audits, and calls only the publication module
 for registry reads. No registry response detail reaches an admin.
 
+### Ornn package contract
+
+Authored drafts and L1 learned proposals are checked against Ornn's package wire
+contract after their respective NyxID content and credential validators.
+Supporting files already below `references/`, `scripts/` or `assets/` keep their
+paths. Other supporting paths, including root README files, move under
+`references/`; authored cards show those relocated paths. Only text files are
+accepted, so an allowed `scripts/` directory does not enable executable scripts.
+The shared field-rule function rejects angle brackets in descriptions and reserved
+Claude/Anthropic name terms for new authored drafts and learned generation/edits.
+Stored learned proposals remain readable without applying these new field rules.
+
+Authored creation performs exactly one read-only Ornn `preflight` before raising
+a card. Its `ornn_format_rejected` diagnostic preserves the released bounded
+`ornn_rules` sanitizer for the model; a format refusal consumes one of the three
+per-turn repair attempts. Ordinary size, credential, scope and base errors do not
+consume that budget. Review binding does not repeat the preflight. Publication
+validates the exact approved package again before mutation.
+
+One adapter-private extractor reads rule identifiers from both the 2xx
+`data.violations[].rule` verdict and 4xx `errors[].code/path` refusal. The model
+projection keeps the existing sanitizer/cap. Persisted `failure_rules` and owner
+copy use the fixed `OrnnValidationRule` allowlist (unknown identifiers become
+`other`, never echoed), alongside `failure_stage`; clearing a failure or editing
+a revision clears its diagnostics. Raw messages, filenames, values and response
+bodies never enter persisted diagnostics or audit. Missing format diagnostics
+are explicitly reported as unavailable.
+
+Agent-submitted scope declarations are encrypted and bind request identity and owner approval. Owner-started improve drafts and legacy rows have no declaration; their cards show no scope section, and scope-less fingerprints keep the original format.
+In Auto and Ask every time, reduced scope shows each omission as plain text and
+needs separate owner consent for that revision and digest. Full access publishes
+immediately without a request to proceed, including for reduced scope; its
+automatic receipt records only the omission count and that separate consent was
+bypassed. Its proposal link shows the decrypted omissions to the owner; omission
+text remains encrypted at rest and never enters receipt summaries, audit or events. The scope remains encrypted and bound to the proposal; this automatic
+path never writes a `ScopeAcceptance` implying human review. The card shows bounded observations of reads in
+the drafting conversation, including coverage since reset; coverage does not
+certify completeness. The target agent's name identifies where the skill will
+be attached, not who drafted it or read the sources.
+
+A publication failure requiring a corrected authored package queues one
+`skill_publication` repair event inside its fenced transaction and wakes the drafting conversation
+after commit. Reviewed pinning queues one corresponding completion event, with
+plain-language narration guidance. Full-access success is narrated in the live
+tool result and its linked automatic receipt; it does not queue a second wake.
+These proposal transitions are distinct from the durable skill-request outbox:
+that outbox delivers owner-allowed `kind: skills` requests as
+`skill_request_allowed`, with admission consumed transactionally by a NyxBot
+turn. The publication event does not duplicate that request notification.
+
 ## Editable pin controls and routes
 
-Agent pin references include `disabled` (default `false`, omitted while false); disabled pins are excluded from `skill_read` and prompt injection. Writing one requires the default-off `assistant:skill-pin-disable` flag; deploy every backend replica, then the frontend, then enable the flag. Re-enabling a pin through NyxBot needs the owner's card. Under `/assistant/nyxagent/agents/{id}`: `GET skills/{skill_id}/preview` tests an attached pin (exact version check plus a SKILL.md read through the agent's reader; `readable: false` while disabled); `POST skills/{skill_id}/improve` starts an authored improve draft from the exact package; `GET skills/history` lists the agent's newest 50 pin changes (with each pin's disabled state) and learning/authoring events to anyone who can read the agent; `POST learning/proposals/{proposal_id}/validate` with `{draft}` dry-runs the proposal's own validator. Proposal edits use `{revision, draft}` with the top-level revision canonical. Draft refusals carry field diagnostics `{rule, field, line?, limit?, actual?, unit?}`. All NyxAgent routes enforce the engine flag and first-party human sessions; writes require maintain access to the agent.
+Agent pin references include `disabled` (default `false`, omitted while false); disabled pins are excluded from `skill_read` and prompt injection. Writing one requires the default-off `assistant:skill-pin-disable` flag; deploy every backend replica, then the frontend, then enable the flag. Re-enabling a pin through NyxBot follows its effective permission mode. Under `/assistant/nyxagent/agents/{id}`: `GET skills/{skill_id}/preview` tests an attached pin (exact version check plus a SKILL.md read through the agent's reader; `readable: false` while disabled); `POST skills/{skill_id}/improve` starts an authored improve draft from the exact package; `GET skills/history` lists the agent's newest 50 pin changes (with each pin's disabled state) and learning/authoring events to anyone who can read the agent; `POST learning/proposals/{proposal_id}/validate` with `{draft}` dry-runs the proposal's own validator. Proposal edits use `{revision, draft}` with the top-level revision canonical. Draft refusals carry field diagnostics `{rule, field, line?, limit?, actual?, unit?}`. All NyxAgent routes enforce the engine flag and first-party human sessions; writes require maintain access to the agent.
 
 The durable skill-approval outbox and authored-draft generation claims require
 all backend replicas and assistant workers to run this version before enabling
@@ -242,8 +299,8 @@ An older binary leaves undelivered skill-notification markers untouched and
 cannot deliver them; retain those rows and upgrade again to recover delivery.
 Do not run old and new workers simultaneously. A marker records notification
 admission to a NyxBot turn, not successful attachment: upstream turn failure can
-still require the owner to resume NyxBot, and attachment always requires its
-separate owner review card.
+still require the owner to resume NyxBot. Attachment uses a separate owner
+review card in Auto and Ask every time, or an automatic receipt in Full access.
 
 When source or persisted destination authority is temporarily unavailable,
 keep the owner decision and defer notification retries for 60 seconds, doubling

@@ -106,6 +106,23 @@ impl skills::OrnnReader for Reader<'_> {
     async fn classified(&self, method: http::Method, path: &str, body: Vec<u8>) -> OrnnOutcome {
         self.classified_request(method, path, body).await
     }
+
+    async fn classified_as_owner(
+        &self,
+        method: http::Method,
+        path: &str,
+        body: Vec<u8>,
+    ) -> OrnnOutcome {
+        Reader {
+            state: self.state,
+            person: self.person,
+            thread_key: None,
+            scopes: None,
+            chat: None,
+        }
+        .classified_request(method, path, body)
+        .await
+    }
 }
 
 impl Reader<'_> {
@@ -232,17 +249,26 @@ async fn fetch_ornn_classified(request: OrnnFetch<'_>) -> OrnnOutcome {
         let status = response.status().as_u16();
         // The status is complete once headers arrive. The problem body is
         // bounded in size and time; a slow or oversized body yields `Unknown`.
-        let code = tokio::time::timeout(
+        let body = tokio::time::timeout(
             std::time::Duration::from_secs(2),
             to_bytes(response.into_body(), 16 * 1024),
         )
         .await
         .ok()
-        .and_then(Result::ok)
-        .map_or(OrnnCode::Unknown, |bytes| {
-            OrnnCode::from_problem_body(&bytes)
-        });
-        return OrnnOutcome::Response { status, code };
+        .and_then(Result::ok);
+        let (code, rules) = body
+            .as_deref()
+            .map_or((OrnnCode::Unknown, Vec::new()), |bytes| {
+                (
+                    OrnnCode::from_problem_body(bytes),
+                    skills::parse_validation_rules(bytes),
+                )
+            });
+        return OrnnOutcome::Response {
+            status,
+            code,
+            rules,
+        };
     }
     match to_bytes(response.into_body(), skills::MAX_ARCHIVE).await {
         Ok(bytes) => OrnnOutcome::Ok(bytes.to_vec()),
@@ -549,7 +575,7 @@ pub(crate) async fn dispatch(
         ));
     }
     if name == "draft_agent_skill" {
-        let input = crate::services::assistant_skill_authoring::parse_input(args)?;
+        use crate::services::assistant_skill_authoring as authoring;
         let reader = Reader {
             state,
             person: &chat.user_id,
@@ -557,15 +583,12 @@ pub(crate) async fn dispatch(
             scopes: None,
             chat: Some(std::sync::Arc::new(chat.clone())),
         };
+        let input = authoring::parse_input(args)?;
         // The pre-review format check is the agent's own Ornn request, so it
         // keeps the thread key's approval policy, turn fence and attribution.
-        return Ok((
-            Box::pin(crate::services::assistant_skill_authoring::create(
-                state, chat, input, &reader, &reader,
-            ))
-            .await?,
-            true,
-        ));
+        let result = Box::pin(authoring::create(state, chat, input, &reader, &reader)).await?;
+        let asks = result["error"] == "acknowledgement_required";
+        return Ok((result, asks));
     }
     // Ornn reads run as the thread key, so they keep its agent's operation scopes.
     let thread_scopes = team::agent(&state.db, &chat.user_id, &chat.agent_id)
@@ -690,7 +713,7 @@ pub(crate) async fn dispatch(
                     return Ok((result, false));
                 }
                 let summary = format!(
-                    "Skill {} version {} for agent {}. NyxBot must resolve and preview exact pins before requesting the owner's attachment card.",
+                    "Skill {} version {} for agent {}. NyxBot must resolve and preview exact pins before attaching under the governing permission mode.",
                     arg(args, "skill"),
                     args["version"]
                         .as_str()
@@ -780,38 +803,14 @@ pub(crate) async fn dispatch(
                 }
                 return Ok((acks::refusal(&card), true));
             }
-            let confirmed = if let Some(id) = args["acknowledgement_id"].as_str() {
-                if !acks::consume_action(db, chat, id, "nyxid__set_agent_skills", args).await? {
-                    return Ok((json!({"error":"acknowledgement_invalid"}), true));
-                }
-                true
-            } else {
-                false
-            };
-            if !confirmed
-                && (skills::needs_confirmation(&agent, &selection)
-                    || acks::webhook_confirmation_required(chat, false, false))
+            match Box::pin(skills::set_for_chat(
+                db, &reader, chat, &agent, &selection, args, &summary,
+            ))
+            .await?
             {
-                return super::assistant_team::operation_owner_card(
-                    db,
-                    chat,
-                    "nyxid__set_agent_skills",
-                    args,
-                    &summary,
-                )
-                .await;
+                Ok(updated) => json!(updated),
+                Err(refusal) => return Ok((refusal, true)),
             }
-            json!(
-                Box::pin(skills::set(
-                    db,
-                    &reader,
-                    &chat.user_id,
-                    &agent.id,
-                    &selection,
-                    confirmed
-                ))
-                .await?
-            )
         }
     };
     Ok((value, false))
@@ -1095,7 +1094,8 @@ mod tests {
                 reader.classified(http::Method::GET, version, vec![]).await,
                 OrnnOutcome::Response {
                     status: 400 | 500,
-                    code: OrnnCode::Unknown
+                    code: OrnnCode::Unknown,
+                    ..
                 }
             ));
             assert!(not_visible(reader.get(version).await));

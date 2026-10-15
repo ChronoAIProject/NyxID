@@ -1017,6 +1017,17 @@ async fn task_updates(
         {
             continue;
         }
+        if !request.pending_acknowledgement_ids.is_empty() {
+            crate::services::assistant_acknowledgement_service::history(
+                &state.db,
+                &call.user_id,
+                request
+                    .task_conversation_id
+                    .as_deref()
+                    .unwrap_or(&call.conversation_id),
+            )
+            .await?;
+        }
         for id in &request.pending_acknowledgement_ids {
             if c.readback.is_some() {
                 break;

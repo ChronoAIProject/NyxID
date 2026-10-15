@@ -45,7 +45,14 @@ function isGenericPasteName(name: string): boolean {
 
 /** Keeps the clipboard's own format: a JPEG stays `.jpg`, a GIF `.gif`. */
 function pastedExtension(type: string): string {
-  return PASTED_EXTENSIONS[type] ?? (type.split("/")[1]?.split("+")[0]?.replace(/[^a-z0-9]/gi, "") || "png");
+  return (
+    PASTED_EXTENSIONS[type] ??
+    (type
+      .split("/")[1]
+      ?.split("+")[0]
+      ?.replace(/[^a-z0-9]/gi, "") ||
+      "png")
+  );
 }
 
 type ScrollEdges = {
@@ -117,7 +124,12 @@ export function ChatComposer({
 }
 
 type MentionOption =
-  | { readonly type: "agent"; readonly id: string; readonly name: string; readonly agent: ComposerMention }
+  | {
+      readonly type: "agent";
+      readonly id: string;
+      readonly name: string;
+      readonly agent: ComposerMention;
+    }
   | {
       readonly type: "attachment";
       readonly id: string;
@@ -154,6 +166,7 @@ interface ChatComposerProps {
    */
   readonly focusRequest?: number;
   readonly controls?: ReactNode;
+  readonly toolbar?: ReactNode;
   readonly attachmentButton?: ReactNode;
   readonly attachments?: ReactNode;
   readonly recipients?: ReactNode;
@@ -204,6 +217,7 @@ function DraftedChatComposer({
   draftKey,
   focusRequest = 0,
   controls,
+  toolbar,
   attachmentButton,
   attachments,
   recipients,
@@ -326,32 +340,37 @@ function DraftedChatComposer({
     onContentChange?.(nextContent);
   }
 
-  const syncComposerLayout = useCallback((draft?: string) => {
-    const composer = composerRef.current;
-    const controls = controlsRef.current;
-    const textMeasure = textMeasureRef.current;
-    if (!composer || !controls || !textMeasure) return;
+  const syncComposerLayout = useCallback(
+    (draft?: string) => {
+      const composer = composerRef.current;
+      const controls = controlsRef.current;
+      const textMeasure = textMeasureRef.current;
+      if (!composer || !controls || !textMeasure) return;
 
-    const measuredDraft = draft ?? textMeasure.textContent ?? "";
-    const styles = getComputedStyle(composer);
-    const contentWidth =
-      composer.clientWidth -
-      cssPixels(styles.paddingLeft) -
-      cssPixels(styles.paddingRight);
-    const availableInlineWidth =
-      contentWidth -
-      controls.getBoundingClientRect().width -
-      cssPixels(styles.columnGap);
-    const textWidth = textMeasure.getBoundingClientRect().width;
-    const shouldUseMultiline =
-      measuredDraft.includes("\n") ||
-      (availableInlineWidth > 0 &&
-        textWidth >= availableInlineWidth * MULTILINE_THRESHOLD);
+      const measuredDraft = draft ?? textMeasure.textContent ?? "";
+      const styles = getComputedStyle(composer);
+      const contentWidth =
+        composer.clientWidth -
+        cssPixels(styles.paddingLeft) -
+        cssPixels(styles.paddingRight);
+      const availableInlineWidth =
+        contentWidth -
+        (toolbar
+          ? 0
+          : controls.getBoundingClientRect().width +
+            cssPixels(styles.columnGap));
+      const textWidth = textMeasure.getBoundingClientRect().width;
+      const shouldUseMultiline =
+        measuredDraft.includes("\n") ||
+        (availableInlineWidth > 0 &&
+          textWidth >= availableInlineWidth * MULTILINE_THRESHOLD);
 
-    setMultiline((current) =>
-      current === shouldUseMultiline ? current : shouldUseMultiline,
-    );
-  }, []);
+      setMultiline((current) =>
+        current === shouldUseMultiline ? current : shouldUseMultiline,
+      );
+    },
+    [toolbar],
+  );
 
   const cancelScheduledSave = useCallback(() => {
     if (draftTimerRef.current !== null) {
@@ -613,7 +632,9 @@ function DraftedChatComposer({
   }, [draftKey, focusRequest, locked]);
 
   // A removed attachment takes its `@handle` references with it.
-  const attachmentHandles = (attachmentMentions ?? []).map((item) => item.handle).join(" ");
+  const attachmentHandles = (attachmentMentions ?? [])
+    .map((item) => item.handle)
+    .join(" ");
   const previousHandlesRef = useRef(attachmentHandles);
   useEffect(() => {
     const previous = previousHandlesRef.current.split(" ").filter(Boolean);
@@ -643,8 +664,11 @@ function DraftedChatComposer({
     if (!mentions?.length && !attachmentMentions?.length) return;
     const caret = element.selectionStart;
     const next =
-      caret === element.selectionEnd ? activeMention(element.value, caret) : undefined;
-    if (next?.start === mention?.start && next?.query === mention?.query) return;
+      caret === element.selectionEnd
+        ? activeMention(element.value, caret)
+        : undefined;
+    if (next?.start === mention?.start && next?.query === mention?.query)
+      return;
     setMention(next);
     setMentionIndex(0);
   }
@@ -677,7 +701,14 @@ function DraftedChatComposer({
 
   async function submit() {
     const message = content.trim();
-    if ((!message && !hasAttachments) || uploadBlocked || locked || disabled || sending) return;
+    if (
+      (!message && !hasAttachments) ||
+      uploadBlocked ||
+      locked ||
+      disabled ||
+      sending
+    )
+      return;
     cancelScheduledSave();
     const userId = ownerUserIdRef.current;
     const key = draftKeyRef.current;
@@ -710,7 +741,9 @@ function DraftedChatComposer({
         const step = event.key === "ArrowDown" ? 1 : -1;
         setMentionIndex(
           (index) =>
-            (Math.min(index, mentionOptions.length - 1) + step + mentionOptions.length) %
+            (Math.min(index, mentionOptions.length - 1) +
+              step +
+              mentionOptions.length) %
             mentionOptions.length,
         );
         return;
@@ -736,6 +769,77 @@ function DraftedChatComposer({
     setScrollEdges(getScrollEdges(event.currentTarget));
   }
 
+  const buttonControls = (
+    <div
+      ref={controlsRef}
+      className={`flex shrink-0 items-center gap-1.5 ${multiline ? "self-end" : ""}`}
+    >
+      {active && allowActiveInput && (
+        <Button
+          type="button"
+          variant="outline"
+          size="icon"
+          onClick={() => void onStop()}
+          disabled={stopDisabled}
+          aria-label="Stop assistant turn"
+          title="Stop this reply"
+        >
+          <Square className="fill-current" />
+        </Button>
+      )}
+      {locked ? (
+        <Button
+          type="button"
+          variant="outline"
+          size="icon"
+          onClick={() => void onStop()}
+          disabled={stopDisabled}
+          aria-label="Stop assistant turn"
+        >
+          <Square className="fill-current" />
+        </Button>
+      ) : onVoice &&
+        !active &&
+        !content.trim() &&
+        !hasAttachments &&
+        !uploadBlocked ? (
+        <Button
+          type="button"
+          variant="primary"
+          size="icon"
+          disabled={sending || disabled}
+          onClick={onVoice}
+          aria-label="Open voice call"
+        >
+          <Mic />
+        </Button>
+      ) : (
+        <Button
+          type="button"
+          variant="primary"
+          // While a reply runs, sending steers it: say so on the button.
+          size={active && allowActiveInput ? "default" : "icon"}
+          className={active && allowActiveInput ? "gap-1.5" : undefined}
+          title={active && allowActiveInput ? "Steer this reply" : undefined}
+          disabled={
+            (!content.trim() && !hasAttachments) ||
+            uploadBlocked ||
+            sending ||
+            disabled
+          }
+          onClick={() => void submit()}
+          aria-label={
+            sendLabel ??
+            (allowActiveInput ? "Send steering instruction" : "Send message")
+          }
+        >
+          <Send />
+          {active && allowActiveInput ? "Steer" : null}
+        </Button>
+      )}
+    </div>
+  );
+
   return (
     <div
       // Opaque: the transcript scrolls underneath the composer, so its band
@@ -757,7 +861,10 @@ function DraftedChatComposer({
       >
         {controls}
         {active && allowActiveInput ? (
-          <p data-steering-hint className="mb-1.5 text-11 text-muted-foreground sm:ml-[30px]">
+          <p
+            data-steering-hint
+            className="mb-1.5 text-11 text-muted-foreground sm:ml-[30px]"
+          >
             Still replying. What you send now steers this reply; Stop ends it.
           </p>
         ) : null}
@@ -777,7 +884,8 @@ function DraftedChatComposer({
           onDragOver={(event) => {
             if (onFiles && event.dataTransfer.types.includes("Files")) {
               event.preventDefault();
-              event.dataTransfer.dropEffect = locked || disabled || sending ? "none" : "copy";
+              event.dataTransfer.dropEffect =
+                locked || disabled || sending ? "none" : "copy";
             }
           }}
           onDrop={(event) => {
@@ -785,7 +893,8 @@ function DraftedChatComposer({
             setDragging(false);
             if (onFiles && event.dataTransfer.files.length) {
               event.preventDefault();
-              if (!locked && !disabled && !sending) onFiles(Array.from(event.dataTransfer.files));
+              if (!locked && !disabled && !sending)
+                onFiles(Array.from(event.dataTransfer.files));
             }
           }}
           onPaste={(event) => {
@@ -795,9 +904,17 @@ function DraftedChatComposer({
                   .map((item) => item.getAsFile())
                   .filter((file): file is File => Boolean(file));
             // A wall of text is attached as a file and referenced at the caret.
-            if (onLongText && !files.length && !locked && !disabled && !sending) {
+            if (
+              onLongText &&
+              !files.length &&
+              !locked &&
+              !disabled &&
+              !sending
+            ) {
               const pastedText = event.clipboardData.getData("text/plain");
-              const handle = isLongPaste(pastedText) ? onLongText(pastedText) : undefined;
+              const handle = isLongPaste(pastedText)
+                ? onLongText(pastedText)
+                : undefined;
               if (handle) {
                 event.preventDefault();
                 insertAtCaret(`@${handle} `);
@@ -807,197 +924,197 @@ function DraftedChatComposer({
             if (onFiles && files.length) {
               event.preventDefault();
               if (!locked && !disabled && !sending) {
-                onFiles(files.map((file) => {
-                  if (!isGenericPasteName(file.name)) return file;
-                  pastedImages.current += 1;
-                  const type = file.type || "image/png";
-                  return new File([file], `pasted-image-${pastedImages.current}.${pastedExtension(type)}`, { type });
-                }));
+                onFiles(
+                  files.map((file) => {
+                    if (!isGenericPasteName(file.name)) return file;
+                    pastedImages.current += 1;
+                    const type = file.type || "image/png";
+                    return new File(
+                      [file],
+                      `pasted-image-${pastedImages.current}.${pastedExtension(type)}`,
+                      { type },
+                    );
+                  }),
+                );
               }
             }
           }}
-          className={cn("relative sm:ml-[30px] rounded-xl border bg-card px-3 py-2 transition-colors focus-within:border-hairline-strong", dragging ? "border-primary ring-1 ring-primary" : "border-hairline")}
+          className={cn(
+            "relative sm:ml-[30px] rounded-xl border bg-card px-3 py-2 transition-colors focus-within:border-hairline-strong",
+            dragging ? "border-primary ring-1 ring-primary" : "border-hairline",
+          )}
         >
-          {dragging && <div role="status" className="pointer-events-none absolute inset-0 z-30 flex items-center justify-center rounded-xl bg-card/95 text-12 font-medium">Drop files to attach</div>}
+          {dragging && (
+            <div
+              role="status"
+              className="pointer-events-none absolute inset-0 z-30 flex items-center justify-center rounded-xl bg-card/95 text-12 font-medium"
+            >
+              Drop files to attach
+            </div>
+          )}
           {attachments}
           {recipients}
           <div className="flex items-start gap-1.5">
-          {attachmentButton}
-          <div
-          ref={composerRef}
-          className={`relative flex min-w-0 flex-1 gap-1.5 ${
-            multiline ? "flex-col items-stretch" : "items-start"
-          }`}
-        >
-          {mentionOpen ? (
-            <ul
-              id={mentionListId}
-              role="listbox"
-              aria-label={attachmentMentions?.length ? "Mention an agent or attachment" : "Mention an agent"}
-              className="absolute bottom-full left-0 z-20 mb-2 w-64 max-w-full space-y-0.5 rounded-xl border border-border bg-popover p-1.5 shadow-lg shadow-primary/5"
+            {attachmentButton}
+            <div
+              ref={composerRef}
+              className={`relative flex min-w-0 flex-1 gap-1.5 ${
+                toolbar || multiline ? "flex-col items-stretch" : "items-start"
+              }`}
             >
-              {mentionOptions.map((option) => {
-                const selected = option.id === selectedMention?.id;
-                return (
-                  <li
-                    key={option.id}
-                    id={`${mentionListId}-${option.id}`}
-                    role="option"
-                    aria-selected={selected}
-                    // Keep focus (and the caret) in the textarea.
-                    onMouseDown={(event) => event.preventDefault()}
-                    onClick={() => chooseMention(option.name)}
-                    className={cn(
-                      "flex cursor-pointer items-center gap-2 rounded-md px-2.5 py-1.5 text-12 text-foreground",
-                      selected ? "bg-overlay-strong" : "hover:bg-overlay",
-                    )}
-                  >
-                    {option.type === "agent" ? (
-                      <>
-                        <AgentAvatar agent={option.agent} size="sm" />
-                        <span className="min-w-0 flex-1 truncate">
-                          {option.agent.display_name?.trim() || option.name}
-                          {option.agent.display_name?.trim() ? (
-                            <span className="ml-1.5 text-11 text-text-tertiary">@{option.name}</span>
-                          ) : null}
-                        </span>
-                        <span className="shrink-0 text-10 text-text-tertiary">
-                          {option.agent.kind === "nyxbot" ? "Personal agent" : "Specialist"}
-                        </span>
-                      </>
-                    ) : (
-                      <>
-                        {option.attachment.kind === "image" ? (
-                          <ImageIcon aria-hidden className="h-4 w-4 shrink-0 text-muted-foreground" />
-                        ) : (
-                          <FileText aria-hidden className="h-4 w-4 shrink-0 text-muted-foreground" />
-                        )}
-                        <span className="min-w-0 flex-1 truncate">
-                          <span className="font-mono">@{option.name}</span>
-                          <span className="ml-1.5 text-11 text-text-tertiary">{option.attachment.label}</span>
-                        </span>
-                      </>
-                    )}
-                  </li>
-                );
-              })}
-            </ul>
-          ) : null}
-          <span
-            ref={textMeasureRef}
-            data-composer-text-measure
-            aria-hidden
-            className="pointer-events-none absolute invisible inline-block w-max whitespace-pre text-base sm:text-13 leading-relaxed"
-          >
-            {content}
-          </span>
-          <div className="relative min-w-0 flex-1">
-            <textarea
-              ref={textareaRef}
-              value={content}
-              {...(mentions
-                ? {
-                    role: "combobox",
-                    "aria-autocomplete": "list" as const,
-                    "aria-expanded": mentionOpen,
-                    "aria-controls": mentionListId,
-                    "aria-activedescendant": selectedMention
-                      ? `${mentionListId}-${selectedMention.id}`
-                      : undefined,
-                    "aria-label": placeholder ?? "Message",
+              {mentionOpen ? (
+                <ul
+                  id={mentionListId}
+                  role="listbox"
+                  aria-label={
+                    attachmentMentions?.length
+                      ? "Mention an agent or attachment"
+                      : "Mention an agent"
                   }
-                : {})}
-              onChange={(event) => {
-                updateContent(event.target.value);
-                syncMention(event.target);
-                if (!composingRef.current) scheduleDraftSave();
-              }}
-              onSelect={(event) => syncMention(event.currentTarget)}
-              onBlur={() => setMention(undefined)}
-              onKeyDown={handleKeyDown}
-              onCompositionStart={() => {
-                composingRef.current = true;
-                cancelScheduledSave();
-              }}
-              onCompositionEnd={(event) => {
-                composingRef.current = false;
-                updateContent(event.currentTarget.value);
-                scheduleDraftSave();
-              }}
-              onScroll={handleScroll}
-              disabled={locked || disabled}
-              rows={1}
-              maxLength={32_768}
-              placeholder={
-                locked
-                  ? "Assistant is working..."
-                  : disabled
-                    ? "This conversation is read-only."
-                    : allowActiveInput
-                     ? (activePlaceholder ?? "Steer active task...")
-                     : (placeholder ?? "Message NyxID Assistant...")
-              }
-              className="assistant-scrollbar block min-h-8 w-full resize-none overflow-hidden overscroll-contain bg-transparent px-0 py-1 text-base sm:text-13 leading-relaxed text-foreground outline-none transition-[height] duration-150 ease-out placeholder:text-text-tertiary disabled:cursor-not-allowed disabled:opacity-50 motion-reduce:transition-none"
-            />
-            <div
-              aria-hidden
-              className={`pointer-events-none absolute inset-x-0 top-0 h-3 bg-gradient-to-b from-card to-transparent transition-opacity duration-150 motion-reduce:transition-none ${
-                scrollEdges.top ? "opacity-100" : "opacity-0"
-              }`}
-            />
-            <div
-              aria-hidden
-              className={`pointer-events-none absolute inset-x-0 bottom-0 h-3 bg-gradient-to-t from-card to-transparent transition-opacity duration-150 motion-reduce:transition-none ${
-                scrollEdges.bottom ? "opacity-100" : "opacity-0"
-              }`}
-            />
-          </div>
-          <div
-            ref={controlsRef}
-            className={`flex shrink-0 items-center gap-1.5 ${multiline ? "self-end" : ""}`}
-          >
-            {active && allowActiveInput && (
-              <Button type="button" variant="outline" size="icon" onClick={() => void onStop()}
-                disabled={stopDisabled} aria-label="Stop assistant turn" title="Stop this reply">
-                <Square className="fill-current" />
-              </Button>
-            )}
-            {locked ? (
-              <Button
-                type="button"
-                variant="outline"
-                size="icon"
-                onClick={() => void onStop()}
-                disabled={stopDisabled}
-                aria-label="Stop assistant turn"
+                  className="absolute bottom-full left-0 z-20 mb-2 w-64 max-w-full space-y-0.5 rounded-xl border border-border bg-popover p-1.5 shadow-lg shadow-primary/5"
+                >
+                  {mentionOptions.map((option) => {
+                    const selected = option.id === selectedMention?.id;
+                    return (
+                      <li
+                        key={option.id}
+                        id={`${mentionListId}-${option.id}`}
+                        role="option"
+                        aria-selected={selected}
+                        // Keep focus (and the caret) in the textarea.
+                        onMouseDown={(event) => event.preventDefault()}
+                        onClick={() => chooseMention(option.name)}
+                        className={cn(
+                          "flex cursor-pointer items-center gap-2 rounded-md px-2.5 py-1.5 text-12 text-foreground",
+                          selected ? "bg-overlay-strong" : "hover:bg-overlay",
+                        )}
+                      >
+                        {option.type === "agent" ? (
+                          <>
+                            <AgentAvatar agent={option.agent} size="sm" />
+                            <span className="min-w-0 flex-1 truncate">
+                              {option.agent.display_name?.trim() || option.name}
+                              {option.agent.display_name?.trim() ? (
+                                <span className="ml-1.5 text-11 text-text-tertiary">
+                                  @{option.name}
+                                </span>
+                              ) : null}
+                            </span>
+                            <span className="shrink-0 text-10 text-text-tertiary">
+                              {option.agent.kind === "nyxbot"
+                                ? "Personal agent"
+                                : "Specialist"}
+                            </span>
+                          </>
+                        ) : (
+                          <>
+                            {option.attachment.kind === "image" ? (
+                              <ImageIcon
+                                aria-hidden
+                                className="h-4 w-4 shrink-0 text-muted-foreground"
+                              />
+                            ) : (
+                              <FileText
+                                aria-hidden
+                                className="h-4 w-4 shrink-0 text-muted-foreground"
+                              />
+                            )}
+                            <span className="min-w-0 flex-1 truncate">
+                              <span className="font-mono">@{option.name}</span>
+                              <span className="ml-1.5 text-11 text-text-tertiary">
+                                {option.attachment.label}
+                              </span>
+                            </span>
+                          </>
+                        )}
+                      </li>
+                    );
+                  })}
+                </ul>
+              ) : null}
+              <span
+                ref={textMeasureRef}
+                data-composer-text-measure
+                aria-hidden
+                className="pointer-events-none absolute invisible inline-block w-max whitespace-pre text-base sm:text-13 leading-relaxed"
               >
-                <Square className="fill-current" />
-              </Button>
-            ) : onVoice && !active && !content.trim() && !hasAttachments && !uploadBlocked ? (
-              <Button type="button" variant="primary" size="icon" disabled={sending || disabled}
-                onClick={onVoice} aria-label="Open voice call"><Mic /></Button>
-            ) : (
-              <Button
-                type="button"
-                variant="primary"
-                // While a reply runs, sending steers it: say so on the button.
-                size={active && allowActiveInput ? "default" : "icon"}
-                className={active && allowActiveInput ? "gap-1.5" : undefined}
-                title={active && allowActiveInput ? "Steer this reply" : undefined}
-                disabled={(!content.trim() && !hasAttachments) || uploadBlocked || sending || disabled}
-                onClick={() => void submit()}
-                aria-label={
-                  sendLabel ?? (allowActiveInput
-                    ? "Send steering instruction"
-                    : "Send message")
-                }
-              >
-                <Send />
-                {active && allowActiveInput ? "Steer" : null}
-              </Button>
-            )}
-          </div>
-        </div>
+                {content}
+              </span>
+              <div className="relative min-w-0 flex-1">
+                <textarea
+                  ref={textareaRef}
+                  value={content}
+                  {...(mentions
+                    ? {
+                        role: "combobox",
+                        "aria-autocomplete": "list" as const,
+                        "aria-expanded": mentionOpen,
+                        "aria-controls": mentionListId,
+                        "aria-activedescendant": selectedMention
+                          ? `${mentionListId}-${selectedMention.id}`
+                          : undefined,
+                        "aria-label": placeholder ?? "Message",
+                      }
+                    : {})}
+                  onChange={(event) => {
+                    updateContent(event.target.value);
+                    syncMention(event.target);
+                    if (!composingRef.current) scheduleDraftSave();
+                  }}
+                  onSelect={(event) => syncMention(event.currentTarget)}
+                  onBlur={() => setMention(undefined)}
+                  onKeyDown={handleKeyDown}
+                  onCompositionStart={() => {
+                    composingRef.current = true;
+                    cancelScheduledSave();
+                  }}
+                  onCompositionEnd={(event) => {
+                    composingRef.current = false;
+                    updateContent(event.currentTarget.value);
+                    scheduleDraftSave();
+                  }}
+                  onScroll={handleScroll}
+                  disabled={locked || disabled}
+                  rows={1}
+                  maxLength={32_768}
+                  placeholder={
+                    locked
+                      ? "Assistant is working..."
+                      : disabled
+                        ? "This conversation is read-only."
+                        : allowActiveInput
+                          ? (activePlaceholder ?? "Steer active task...")
+                          : (placeholder ?? "Message NyxID Assistant...")
+                  }
+                  className="assistant-scrollbar block min-h-8 w-full resize-none overflow-hidden overscroll-contain bg-transparent px-0 py-1 text-base sm:text-13 leading-relaxed text-foreground outline-none transition-[height] duration-150 ease-out placeholder:text-text-tertiary disabled:cursor-not-allowed disabled:opacity-50 motion-reduce:transition-none"
+                />
+                <div
+                  aria-hidden
+                  className={`pointer-events-none absolute inset-x-0 top-0 h-3 bg-gradient-to-b from-card to-transparent transition-opacity duration-150 motion-reduce:transition-none ${
+                    scrollEdges.top ? "opacity-100" : "opacity-0"
+                  }`}
+                />
+                <div
+                  aria-hidden
+                  className={`pointer-events-none absolute inset-x-0 bottom-0 h-3 bg-gradient-to-t from-card to-transparent transition-opacity duration-150 motion-reduce:transition-none ${
+                    scrollEdges.bottom ? "opacity-100" : "opacity-0"
+                  }`}
+                />
+              </div>
+              {toolbar ? (
+                <div
+                  data-composer-toolbar
+                  className="flex min-w-0 flex-wrap items-center justify-between gap-1.5"
+                >
+                  <div className="flex min-w-0 flex-1 flex-wrap items-center gap-1.5">
+                    {toolbar}
+                  </div>
+                  {buttonControls}
+                </div>
+              ) : (
+                buttonControls
+              )}
+            </div>
           </div>
         </div>
       </div>

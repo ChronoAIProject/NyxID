@@ -1,38 +1,10 @@
 //! Feature flags (platform-admin managed).
 //!
-//! Flags are **declared in code** (the [`FEATURE_FLAGS`] registry is the single
-//! source of truth) and **toggled at runtime** via override rows stored in
-//! `feature_flag_overrides`. All writes go through the platform-admin API
-//! (`handlers::admin_feature_flags`): global rollout, staff-selected org
-//! cohorts, and per-user overrides. There is no org self-serve surface — org
-//! rows are staff rollout targeting, not customer policy (removed because the
-//! only shipped flags gate personal surfaces, which org admins have no
-//! authority over; reintroduce an org surface only for genuinely org-scoped
-//! features).
-//!
-//! Precedence, least-specific first: `code default` → `global` → `org` → `user`.
-//! Role- and user-scoped org rows are legacy (the removed self-serve surface
-//! wrote them); startup migration drops them, but resolution still applies
-//! them after org overrides and before platform user overrides.
-//!
-//! Personal (non-org) surfaces resolve the same specificity chain as org
-//! surfaces. The platform baseline (`global` → default) is followed by the
-//! most-specific matching scope from the user's active org memberships
-//! (`org` → `role` → org-scoped `user`), and a platform personal `user`
-//! override is the final per-person allow/deny. When a user belongs to more
-//! than one org and multiple rows at the same scope apply, an explicit disable
-//! wins that same-scope tie so an org kill switch cannot be bypassed by another
-//! membership.
-//!
-//! Adding a new flag = add a [`FeatureFlagDef`] entry here (ships with a deploy)
-//! and consume its key on the frontend. Toggling an existing flag globally /
-//! per org / per user is a runtime write, no deploy. Mirror new keys in
-//! `frontend/src/lib/feature-flags.ts`.
-//!
-//! Each definition ships a code-declared `description`. Platform admins can
-//! replace that text and record an owner at runtime (`feature_flag_metadata`,
-//! see [`set_metadata`]) so a growing flag list stays legible without a deploy;
-//! the registry still owns which flags exist and what they default to.
+//! Code-declared flags and runtime-created flags share rollout resolution:
+//! code default -> global -> org -> legacy role -> org user -> platform user.
+//! An explicit disable wins ties between matching org memberships.
+//! Feature flag operators manage their own runtime definitions; feature flag
+//! admins manage every flag. Creator identity is separate from editable metadata.
 
 use std::collections::{HashMap, HashSet};
 
@@ -43,6 +15,9 @@ use mongodb::options::{FindOneAndUpdateOptions, ReturnDocument};
 use uuid::Uuid;
 
 use crate::errors::{AppError, AppResult};
+use crate::models::feature_flag_definition::{
+    COLLECTION_NAME as DEFINITIONS, FeatureFlagDefinition,
+};
 use crate::models::feature_flag_metadata::{
     COLLECTION_NAME as METADATA_COLLECTION, FeatureFlagMetadata,
 };
@@ -337,6 +312,117 @@ pub fn find_flag(key: &str) -> Option<&'static FeatureFlagDef> {
     FEATURE_FLAGS.iter().find(|f| f.key == key)
 }
 
+/// A resolved definition. Built-in definitions have no runtime creator.
+#[derive(Clone, Debug)]
+pub struct FlagDefinition {
+    pub id: Option<String>,
+    pub key: String,
+    pub description: String,
+    pub default_enabled: bool,
+    pub created_by: Option<String>,
+}
+
+impl From<&FeatureFlagDef> for FlagDefinition {
+    fn from(def: &FeatureFlagDef) -> Self {
+        Self {
+            id: None,
+            key: def.key.to_owned(),
+            description: def.description.to_owned(),
+            default_enabled: def.default_enabled,
+            created_by: None,
+        }
+    }
+}
+
+impl From<FeatureFlagDefinition> for FlagDefinition {
+    fn from(def: FeatureFlagDefinition) -> Self {
+        Self {
+            id: Some(def.id),
+            key: def.flag_key,
+            description: def.description,
+            default_enabled: def.default_enabled,
+            created_by: Some(def.created_by),
+        }
+    }
+}
+
+pub async fn list_definitions(db: &mongodb::Database) -> AppResult<Vec<FlagDefinition>> {
+    let rows: Vec<FeatureFlagDefinition> = db
+        .collection::<FeatureFlagDefinition>(DEFINITIONS)
+        .find(doc! {})
+        .await?
+        .try_collect()
+        .await?;
+    let mut definitions: Vec<FlagDefinition> = FEATURE_FLAGS.iter().map(Into::into).collect();
+    definitions.extend(
+        rows.into_iter()
+            .filter(|row| find_flag(&row.flag_key).is_none())
+            .map(Into::into),
+    );
+    definitions.sort_by(|a, b| a.key.cmp(&b.key));
+    Ok(definitions)
+}
+
+pub async fn get_definition(db: &mongodb::Database, key: &str) -> AppResult<FlagDefinition> {
+    if let Some(def) = find_flag(key) {
+        return Ok(def.into());
+    }
+    db.collection::<FeatureFlagDefinition>(DEFINITIONS)
+        .find_one(doc! { "flag_key": key })
+        .await?
+        .map(Into::into)
+        .ok_or_else(|| AppError::BadRequest(format!("unknown feature flag '{key}'")))
+}
+
+pub fn validate_flag_key(key: &str) -> AppResult<()> {
+    if key.is_empty()
+        || key.len() > 128
+        || !key.as_bytes()[0].is_ascii_lowercase() && !key.as_bytes()[0].is_ascii_digit()
+        || !key
+            .bytes()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || b":_-".contains(&c))
+    {
+        return Err(AppError::BadRequest("flag key must be 1-128 lowercase letters, digits, colons, underscores or hyphens, starting with a letter or digit".into()));
+    }
+    Ok(())
+}
+
+pub async fn create_definition(
+    db: &mongodb::Database,
+    key: &str,
+    description: &str,
+    default_enabled: bool,
+    actor: &str,
+) -> AppResult<FlagDefinition> {
+    validate_flag_key(key)?;
+    if find_flag(key).is_some() {
+        return Err(AppError::Conflict("Feature flag already exists".into()));
+    }
+    let description =
+        normalize_metadata_field(Some(description), MAX_FLAG_DESCRIPTION_LEN, "description")?
+            .ok_or_else(|| AppError::BadRequest("description is required".into()))?;
+    let row = FeatureFlagDefinition {
+        id: Uuid::new_v4().to_string(),
+        flag_key: key.to_owned(),
+        description,
+        default_enabled,
+        created_by: actor.to_owned(),
+        created_at: Utc::now(),
+    };
+    if let Err(error) = db
+        .collection::<FeatureFlagDefinition>(DEFINITIONS)
+        .insert_one(&row)
+        .await
+    {
+        if matches!(error.kind.as_ref(), mongodb::error::ErrorKind::Write(mongodb::error::WriteFailure::WriteError(write)) if write.code == 11000)
+        {
+            return Err(AppError::Conflict("Feature flag already exists".into()));
+        }
+        return Err(error.into());
+    }
+    Ok(row.into())
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Target
 // ─────────────────────────────────────────────────────────────────────────────
@@ -423,10 +509,16 @@ fn pick_override(
     flag_key: &str,
     kind: FlagTargetKind,
     key: Option<&str>,
+    definition_id: Option<&str>,
 ) -> Option<bool> {
     overrides
         .iter()
-        .find(|o| o.flag_key == flag_key && o.target_kind == kind && o.target_key.as_deref() == key)
+        .find(|o| {
+            o.flag_key == flag_key
+                && o.definition_id.as_deref() == definition_id
+                && o.target_kind == kind
+                && o.target_key.as_deref() == key
+        })
         .map(|o| o.enabled)
 }
 
@@ -441,31 +533,62 @@ pub fn resolve_from_overrides(
     member_user_id: &str,
     role: OrgRole,
 ) -> Vec<String> {
+    resolve_definitions_from_overrides(
+        FEATURE_FLAGS
+            .iter()
+            .map(|d| (d.key, d.default_enabled, None)),
+        platform,
+        org,
+        member_user_id,
+        role,
+    )
+}
+
+fn resolve_definitions_from_overrides<'a>(
+    definitions: impl IntoIterator<Item = (&'a str, bool, Option<&'a str>)>,
+    platform: &[FeatureFlagOverride],
+    org: &[FeatureFlagOverride],
+    member_user_id: &str,
+    role: OrgRole,
+) -> Vec<String> {
     let mut enabled_keys = Vec::new();
-    for def in FEATURE_FLAGS {
-        let mut enabled = def.default_enabled;
-        if let Some(v) = pick_override(platform, def.key, FlagTargetKind::Global, None) {
+    for (key, default_enabled, definition_id) in definitions {
+        let mut enabled = default_enabled;
+        if let Some(v) = pick_override(platform, key, FlagTargetKind::Global, None, definition_id) {
             enabled = v;
         }
-        if let Some(v) = pick_override(org, def.key, FlagTargetKind::Org, None) {
+        if let Some(v) = pick_override(org, key, FlagTargetKind::Org, None, definition_id) {
             enabled = v;
         }
-        if let Some(v) = pick_override(org, def.key, FlagTargetKind::Role, Some(role.as_str())) {
+        if let Some(v) = pick_override(
+            org,
+            key,
+            FlagTargetKind::Role,
+            Some(role.as_str()),
+            definition_id,
+        ) {
             enabled = v;
         }
-        if let Some(v) = pick_override(org, def.key, FlagTargetKind::User, Some(member_user_id)) {
+        if let Some(v) = pick_override(
+            org,
+            key,
+            FlagTargetKind::User,
+            Some(member_user_id),
+            definition_id,
+        ) {
             enabled = v;
         }
         if let Some(v) = pick_override(
             platform,
-            def.key,
+            key,
             FlagTargetKind::User,
             Some(member_user_id),
+            definition_id,
         ) {
             enabled = v;
         }
         if enabled {
-            enabled_keys.push(def.key.to_string());
+            enabled_keys.push(key.to_string());
         }
     }
     enabled_keys
@@ -479,11 +602,13 @@ fn pick_org_override(
     flag_key: &str,
     kind: FlagTargetKind,
     key: Option<&str>,
+    definition_id: Option<&str>,
 ) -> Option<bool> {
     overrides
         .iter()
         .find(|o| {
             o.org_user_id.as_deref() == Some(org_user_id)
+                && o.definition_id.as_deref() == definition_id
                 && o.flag_key == flag_key
                 && o.target_kind == kind
                 && o.target_key.as_deref() == key
@@ -502,6 +627,7 @@ fn resolve_org_membership_override(
     flag_key: &str,
     memberships: &[(String, OrgRole)],
     user_id: &str,
+    definition_id: Option<&str>,
 ) -> Option<bool> {
     for kind in [
         FlagTargetKind::User,
@@ -518,7 +644,9 @@ fn resolve_org_membership_override(
                 FlagTargetKind::Org => None,
                 FlagTargetKind::Global => None,
             };
-            if let Some(value) = pick_org_override(org_rows, org_id, flag_key, kind, key) {
+            if let Some(value) =
+                pick_org_override(org_rows, org_id, flag_key, kind, key, definition_id)
+            {
                 found = true;
                 enabled |= value;
                 if !value {
@@ -544,28 +672,51 @@ fn resolve_org_membership_override(
 /// `(org_user_id, role)`; `org_rows` are override rows across those orgs.
 ///
 /// Pure and DB-free so the precedence matrix is unit-testable.
+#[cfg(test)]
 pub fn resolve_personal_from_overrides(
     platform: &[FeatureFlagOverride],
     org_rows: &[FeatureFlagOverride],
     memberships: &[(String, OrgRole)],
     user_id: &str,
 ) -> Vec<String> {
+    resolve_personal_definitions(
+        FEATURE_FLAGS
+            .iter()
+            .map(|d| (d.key, d.default_enabled, None)),
+        platform,
+        org_rows,
+        memberships,
+        user_id,
+    )
+}
+
+fn resolve_personal_definitions<'a>(
+    definitions: impl IntoIterator<Item = (&'a str, bool, Option<&'a str>)>,
+    platform: &[FeatureFlagOverride],
+    org_rows: &[FeatureFlagOverride],
+    memberships: &[(String, OrgRole)],
+    user_id: &str,
+) -> Vec<String> {
     let mut enabled_keys = Vec::new();
-    for def in FEATURE_FLAGS {
-        let mut enabled = pick_override(platform, def.key, FlagTargetKind::Global, None)
-            .unwrap_or(def.default_enabled);
+    for (key, default_enabled, definition_id) in definitions {
+        let mut enabled = pick_override(platform, key, FlagTargetKind::Global, None, definition_id)
+            .unwrap_or(default_enabled);
         if let Some(org_value) =
-            resolve_org_membership_override(org_rows, def.key, memberships, user_id)
+            resolve_org_membership_override(org_rows, key, memberships, user_id, definition_id)
         {
             enabled = org_value;
         }
-        if let Some(personal_value) =
-            pick_override(platform, def.key, FlagTargetKind::User, Some(user_id))
-        {
+        if let Some(personal_value) = pick_override(
+            platform,
+            key,
+            FlagTargetKind::User,
+            Some(user_id),
+            definition_id,
+        ) {
             enabled = personal_value;
         }
         if enabled {
-            enabled_keys.push(def.key.to_string());
+            enabled_keys.push(key.to_string());
         }
     }
     enabled_keys
@@ -581,7 +732,16 @@ pub async fn resolve_enabled_features(
 ) -> AppResult<Vec<String>> {
     let org = list_overrides(db, org_user_id).await?;
     let global = list_platform_overrides(db).await?;
-    Ok(resolve_from_overrides(&global, &org, member_user_id, role))
+    let definitions = list_definitions(db).await?;
+    Ok(resolve_definitions_from_overrides(
+        definitions
+            .iter()
+            .map(|d| (d.key.as_str(), d.default_enabled, d.id.as_deref())),
+        &global,
+        &org,
+        member_user_id,
+        role,
+    ))
 }
 
 /// Resolve enabled-flag keys for a user in the personal (non-org) context.
@@ -617,7 +777,11 @@ pub async fn resolve_personal_features(
         .map(|m| (m.org_user_id, m.role))
         .collect();
 
-    Ok(resolve_personal_from_overrides(
+    let definitions = list_definitions(db).await?;
+    Ok(resolve_personal_definitions(
+        definitions
+            .iter()
+            .map(|d| (d.key.as_str(), d.default_enabled, d.id.as_deref())),
         &platform,
         &org_rows,
         &membership_roles,
@@ -632,6 +796,7 @@ pub async fn invitation_code_required(db: &mongodb::Database) -> AppResult<bool>
         .find_one(doc! {
             "org_user_id": bson::Bson::Null,
             "flag_key": INVITATION_CODE_FLAG_KEY,
+            "definition_id": null,
             "target_kind": FlagTargetKind::Global.as_str(),
             "target_key": bson::Bson::Null,
         })
@@ -719,12 +884,13 @@ pub async fn flag_enabled_people(
     db: &mongodb::Database,
     flag_key: &str,
 ) -> AppResult<Option<Vec<String>>> {
-    if find_flag(flag_key).is_some_and(|flag| flag.default_enabled) {
+    let definition = get_definition(db, flag_key).await?;
+    if definition.default_enabled {
         return Ok(None);
     }
     let rows: Vec<FeatureFlagOverride> = db
         .collection::<FeatureFlagOverride>(COLLECTION_NAME)
-        .find(doc! { "flag_key": flag_key, "enabled": true })
+        .find(doc! { "flag_key": flag_key, "definition_id": definition.id, "enabled": true })
         .await?
         .try_collect()
         .await?;
@@ -822,6 +988,63 @@ pub async fn fetch_platform_override_users(
         .collect())
 }
 
+pub struct RolloutTargetDisplay {
+    pub id: String,
+    pub email: String,
+    pub display_name: Option<String>,
+    pub slug: Option<String>,
+}
+
+pub async fn search_rollout_targets(
+    db: &mongodb::Database,
+    kind: &str,
+    search: Option<&str>,
+    limit: u32,
+) -> AppResult<Vec<RolloutTargetDisplay>> {
+    let mut filter = match kind {
+        "person" => doc! { "user_type": { "$ne": "org" } },
+        "org" => doc! { "user_type": "org" },
+        _ => return Err(AppError::BadRequest("kind must be person or org".into())),
+    };
+    filter.insert("is_active", true);
+    if let Some(search) = search.map(str::trim).filter(|value| !value.is_empty()) {
+        if search.len() > 128 {
+            return Err(AppError::BadRequest("search is too long".into()));
+        }
+        let pattern = regex::escape(search);
+        filter.insert(
+            "$or",
+            vec![
+                doc! { "email": { "$regex": &pattern, "$options": "i" } },
+                doc! { "display_name": { "$regex": &pattern, "$options": "i" } },
+                doc! { "slug": { "$regex": &pattern, "$options": "i" } },
+            ],
+        );
+    }
+    let rows: Vec<bson::Document> = db
+        .collection::<bson::Document>(USERS)
+        .find(filter)
+        .projection(doc! { "_id": 1, "email": 1, "display_name": 1, "slug": 1 })
+        .sort(doc! { "_id": 1 })
+        .limit(i64::from(limit.clamp(1, 20)))
+        .await?
+        .try_collect()
+        .await?;
+    rows.into_iter()
+        .map(|row| {
+            Ok(RolloutTargetDisplay {
+                id: row
+                    .get_str("_id")
+                    .map_err(|_| AppError::Internal("Invalid rollout target id".into()))?
+                    .to_owned(),
+                email: row.get_str("email").unwrap_or_default().to_owned(),
+                display_name: row.get_str("display_name").ok().map(str::to_owned),
+                slug: row.get_str("slug").ok().map(str::to_owned),
+            })
+        })
+        .collect()
+}
+
 /// The org-row upsert behind [`set_platform_org_override`]. Gates live on the
 /// caller.
 async fn upsert_override_row(
@@ -832,6 +1055,7 @@ async fn upsert_override_row(
     enabled: bool,
     actor_id: &str,
 ) -> AppResult<FeatureFlagOverride> {
+    let definition = get_definition(db, flag_key).await?;
     let now = bson::DateTime::from_chrono(Utc::now());
     let target_key = match target.key() {
         Some(k) => bson::Bson::String(k),
@@ -844,6 +1068,7 @@ async fn upsert_override_row(
             doc! {
                 "org_user_id": org_user_id,
                 "flag_key": flag_key,
+                "definition_id": definition.id.clone(),
                 "target_kind": target.kind().as_str(),
                 "target_key": target_key.clone(),
             },
@@ -857,6 +1082,7 @@ async fn upsert_override_row(
                     "_id": Uuid::new_v4().to_string(),
                     "org_user_id": org_user_id,
                     "flag_key": flag_key,
+                    "definition_id": definition.id.clone(),
                     "target_kind": target.kind().as_str(),
                     "target_key": target_key,
                     "created_at": now,
@@ -887,8 +1113,7 @@ pub async fn set_platform_override(
     enabled: bool,
     actor_id: &str,
 ) -> AppResult<FeatureFlagOverride> {
-    find_flag(flag_key)
-        .ok_or_else(|| AppError::BadRequest(format!("unknown feature flag '{flag_key}'")))?;
+    let definition = get_definition(db, flag_key).await?;
     if flag_key == INVITATION_CODE_FLAG_KEY && !matches!(target, FlagTarget::Global) {
         return Err(AppError::BadRequest(
             "invitation code flag supports only a global override".to_string(),
@@ -922,6 +1147,7 @@ pub async fn set_platform_override(
             doc! {
                 "org_user_id": bson::Bson::Null,
                 "flag_key": flag_key,
+                "definition_id": definition.id.clone(),
                 "target_kind": target.kind().as_str(),
                 "target_key": target_key.clone(),
             },
@@ -934,6 +1160,7 @@ pub async fn set_platform_override(
                 "$setOnInsert": {
                     "_id": Uuid::new_v4().to_string(),
                     "flag_key": flag_key,
+                    "definition_id": definition.id.clone(),
                     "target_kind": target.kind().as_str(),
                     "target_key": target_key,
                     "created_at": now,
@@ -961,6 +1188,7 @@ pub async fn clear_platform_override(
     flag_key: &str,
     target: &FlagTarget,
 ) -> AppResult<Option<FeatureFlagOverride>> {
+    let definition = get_definition(db, flag_key).await?;
     let target_key = match target.key() {
         Some(k) => bson::Bson::String(k),
         None => bson::Bson::Null,
@@ -970,6 +1198,7 @@ pub async fn clear_platform_override(
         .find_one_and_delete(doc! {
             "org_user_id": bson::Bson::Null,
             "flag_key": flag_key,
+            "definition_id": definition.id.clone(),
             "target_kind": target.kind().as_str(),
             "target_key": target_key,
         })
@@ -987,8 +1216,7 @@ pub async fn set_platform_org_override(
     enabled: bool,
     actor_id: &str,
 ) -> AppResult<FeatureFlagOverride> {
-    find_flag(flag_key)
-        .ok_or_else(|| AppError::BadRequest(format!("unknown feature flag '{flag_key}'")))?;
+    get_definition(db, flag_key).await?;
     if flag_key == INVITATION_CODE_FLAG_KEY {
         return Err(AppError::BadRequest(
             "invitation code flag supports only a global override".to_string(),
@@ -1013,11 +1241,13 @@ pub async fn clear_platform_org_override(
     org_user_id: &str,
     flag_key: &str,
 ) -> AppResult<Option<FeatureFlagOverride>> {
+    let definition = get_definition(db, flag_key).await?;
     let row = db
         .collection::<FeatureFlagOverride>(COLLECTION_NAME)
         .find_one_and_delete(doc! {
             "org_user_id": org_user_id,
             "flag_key": flag_key,
+                "definition_id": definition.id.clone(),
             "target_kind": FlagTargetKind::Org.as_str(),
             "target_key": bson::Bson::Null,
         })
@@ -1145,10 +1375,17 @@ pub async fn list_metadata(
         .await?
         .try_collect()
         .await?;
+    let keys: HashMap<String, Option<String>> = list_definitions(db)
+        .await?
+        .into_iter()
+        .map(|def| (def.key, def.id))
+        .collect();
     Ok(rows
         .into_iter()
         .filter(|row| {
-            find_flag(&row.flag_key).is_some() && (row.description.is_some() || row.owner.is_some())
+            keys.get(&row.flag_key)
+                .is_some_and(|id| id == &row.definition_id)
+                && (row.description.is_some() || row.owner.is_some())
         })
         .map(|row| (row.flag_key.clone(), row))
         .collect())
@@ -1167,8 +1404,7 @@ pub async fn set_metadata(
     owner: Option<&str>,
     actor_id: &str,
 ) -> AppResult<Option<FeatureFlagMetadata>> {
-    find_flag(flag_key)
-        .ok_or_else(|| AppError::BadRequest(format!("unknown feature flag '{flag_key}'")))?;
+    let definition = get_definition(db, flag_key).await?;
     let description =
         normalize_metadata_field(description, MAX_FLAG_DESCRIPTION_LEN, "description")?;
     let owner = normalize_metadata_field(owner, MAX_FLAG_OWNER_LEN, "owner")?;
@@ -1176,7 +1412,9 @@ pub async fn set_metadata(
     let collection = db.collection::<FeatureFlagMetadata>(METADATA_COLLECTION);
     if description.is_none() && owner.is_none() {
         collection
-            .find_one_and_delete(doc! { "flag_key": flag_key })
+            .find_one_and_delete(
+                doc! { "flag_key": flag_key, "definition_id": definition.id.clone() },
+            )
             .await?;
         return Ok(None);
     }
@@ -1184,7 +1422,7 @@ pub async fn set_metadata(
     let now = bson::DateTime::from_chrono(Utc::now());
     let row = collection
         .find_one_and_update(
-            doc! { "flag_key": flag_key },
+            doc! { "flag_key": flag_key, "definition_id": definition.id.clone() },
             doc! {
                 "$set": {
                     "description": description.clone().map(bson::Bson::String).unwrap_or(bson::Bson::Null),
@@ -1195,6 +1433,7 @@ pub async fn set_metadata(
                 "$setOnInsert": {
                     "_id": Uuid::new_v4().to_string(),
                     "flag_key": flag_key,
+                    "definition_id": definition.id.clone(),
                     "created_at": now,
                 },
             },
@@ -1221,8 +1460,7 @@ pub async fn patch_metadata(
     owner: Option<Option<&str>>,
     actor_id: &str,
 ) -> AppResult<Option<FeatureFlagMetadata>> {
-    find_flag(flag_key)
-        .ok_or_else(|| AppError::BadRequest(format!("unknown feature flag '{flag_key}'")))?;
+    let definition = get_definition(db, flag_key).await?;
     let collection = db.collection::<FeatureFlagMetadata>(METADATA_COLLECTION);
     let mut set = doc! {};
     for (field, value, limit) in [
@@ -1238,11 +1476,15 @@ pub async fn patch_metadata(
         }
     }
     let row = if set.is_empty() {
-        collection.find_one(doc! { "flag_key": flag_key }).await?
+        collection
+            .find_one(doc! { "flag_key": flag_key, "definition_id": definition.id.clone() })
+            .await?
     } else {
         let now = bson::DateTime::from_chrono(Utc::now());
-        let mut insert =
-            doc! { "_id": Uuid::new_v4().to_string(), "flag_key": flag_key, "created_at": now };
+        let mut insert = doc! {
+            "_id": Uuid::new_v4().to_string(), "flag_key": flag_key,
+            "definition_id": definition.id.clone(), "created_at": now
+        };
         for field in ["description", "owner"] {
             if !set.contains_key(field) {
                 insert.insert(field, bson::Bson::Null);
@@ -1252,7 +1494,7 @@ pub async fn patch_metadata(
         set.insert("updated_by", actor_id);
         collection
             .find_one_and_update(
-                doc! { "flag_key": flag_key },
+                doc! { "flag_key": flag_key, "definition_id": definition.id.clone() },
                 doc! { "$set": set, "$setOnInsert": insert },
             )
             .upsert(true)
@@ -1284,6 +1526,7 @@ mod tests {
         enabled: bool,
     ) -> FeatureFlagOverride {
         FeatureFlagOverride {
+            definition_id: None,
             id: Uuid::new_v4().to_string(),
             org_user_id: org.map(str::to_string),
             flag_key: flag.to_string(),
@@ -1812,6 +2055,340 @@ mod tests {
     }
 
     #[test]
+    fn runtime_flag_keys_are_bounded_and_path_safe() {
+        for key in ["team:new-feature", "my_flag", "1-test", "x"] {
+            validate_flag_key(key).unwrap();
+        }
+        for key in ["", ":oops", "two words", "a/b", "CAPS", "x?y", "x%2Fy", "é"] {
+            assert!(validate_flag_key(key).is_err(), "{key}");
+        }
+        assert!(validate_flag_key(&"a".repeat(129)).is_err());
+    }
+
+    #[test]
+    fn feature_flag_settings_never_cross_definition_identities() {
+        let user = "member";
+        let memberships = vec![("org".to_owned(), OrgRole::Member)];
+        for (current, stale) in [
+            (None, Some("runtime-id")),
+            (Some("runtime-id"), None),
+            (Some("runtime-id"), Some("older-runtime-id")),
+        ] {
+            for (org, kind, key) in [
+                (None, FlagTargetKind::Global, None),
+                (Some("org"), FlagTargetKind::Org, None),
+                (Some("org"), FlagTargetKind::Role, Some("member")),
+                (Some("org"), FlagTargetKind::User, Some(user)),
+                (None, FlagTargetKind::User, Some(user)),
+            ] {
+                let mut row = override_row(org, "example_ui", kind, key, true);
+                row.definition_id = stale.map(str::to_owned);
+                let (platform, org_rows) = if org.is_some() {
+                    (vec![], vec![row])
+                } else {
+                    (vec![row], vec![])
+                };
+                assert!(
+                    resolve_definitions_from_overrides(
+                        [("example_ui", false, current)],
+                        &platform,
+                        &org_rows,
+                        user,
+                        OrgRole::Member,
+                    )
+                    .is_empty(),
+                    "stale {stale:?} must not enable {current:?} in {kind:?}"
+                );
+                assert!(
+                    resolve_personal_definitions(
+                        [("example_ui", false, current)],
+                        &platform,
+                        &org_rows,
+                        &memberships,
+                        user,
+                    )
+                    .is_empty()
+                );
+
+                let mut platform = platform;
+                let mut org_rows = org_rows;
+                let matching = platform
+                    .first_mut()
+                    .or_else(|| org_rows.first_mut())
+                    .unwrap();
+                matching.definition_id = current.map(str::to_owned);
+                assert_eq!(
+                    resolve_definitions_from_overrides(
+                        [("example_ui", false, current)],
+                        &platform,
+                        &org_rows,
+                        user,
+                        OrgRole::Member,
+                    ),
+                    vec!["example_ui"]
+                );
+                assert_eq!(
+                    resolve_personal_definitions(
+                        [("example_ui", false, current)],
+                        &platform,
+                        &org_rows,
+                        &memberships,
+                        user,
+                    ),
+                    vec!["example_ui"]
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn feature_flag_runtime_and_builtin_settings_stay_separate_after_key_reuse() {
+        let db = connect_test_database("flag_definition_identity")
+            .await
+            .expect("test database");
+        let definitions = db.collection::<FeatureFlagDefinition>(DEFINITIONS);
+        let overrides = db.collection::<FeatureFlagOverride>(COLLECTION_NAME);
+        let metadata = db.collection::<FeatureFlagMetadata>(METADATA_COLLECTION);
+        let actor = Uuid::new_v4().to_string();
+        db.collection(USERS)
+            .insert_one(test_user(&actor, UserType::Person))
+            .await
+            .unwrap();
+
+        // Simulate a deployment introducing a built-in key previously created at runtime.
+        let runtime_id = Uuid::new_v4().to_string();
+        definitions
+            .insert_one(FeatureFlagDefinition {
+                id: runtime_id.clone(),
+                flag_key: "example_ui".into(),
+                description: "Runtime description".into(),
+                default_enabled: true,
+                created_by: actor.clone(),
+                created_at: Utc::now(),
+            })
+            .await
+            .unwrap();
+        let mut stale = override_row(None, "example_ui", FlagTargetKind::Global, None, true);
+        stale.definition_id = Some(runtime_id.clone());
+        overrides.insert_one(stale).await.unwrap();
+        metadata
+            .insert_one(FeatureFlagMetadata {
+                id: Uuid::new_v4().to_string(),
+                flag_key: "example_ui".into(),
+                definition_id: Some(runtime_id.clone()),
+                description: Some("Runtime metadata".into()),
+                owner: Some(actor.clone()),
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+                updated_by: actor.clone(),
+            })
+            .await
+            .unwrap();
+        assert!(
+            get_definition(&db, "example_ui")
+                .await
+                .unwrap()
+                .id
+                .is_none()
+        );
+        assert!(
+            !resolve_personal_features(&db, &actor)
+                .await
+                .unwrap()
+                .contains(&"example_ui".into())
+        );
+        assert!(!list_metadata(&db).await.unwrap().contains_key("example_ui"));
+        let row = set_platform_override(&db, "example_ui", &FlagTarget::Global, true, &actor)
+            .await
+            .unwrap();
+        assert!(row.definition_id.is_none());
+        let row = patch_metadata(
+            &db,
+            "example_ui",
+            Some(Some("Built-in metadata")),
+            None,
+            &actor,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(row.definition_id.is_none());
+        assert_eq!(
+            list_metadata(&db).await.unwrap()["example_ui"]
+                .description
+                .as_deref(),
+            Some("Built-in metadata")
+        );
+        clear_platform_override(&db, "example_ui", &FlagTarget::Global)
+            .await
+            .unwrap();
+        set_metadata(&db, "example_ui", None, None, &actor)
+            .await
+            .unwrap();
+        assert_eq!(
+            overrides
+                .count_documents(doc! { "flag_key": "example_ui" })
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            metadata
+                .count_documents(doc! { "flag_key": "example_ui" })
+                .await
+                .unwrap(),
+            1
+        );
+
+        // A new runtime flag must ignore settings left behind by a retired built-in.
+        let key = "retired:reused";
+        overrides
+            .insert_one(override_row(None, key, FlagTargetKind::Global, None, true))
+            .await
+            .unwrap();
+        metadata
+            .insert_one(FeatureFlagMetadata {
+                id: Uuid::new_v4().to_string(),
+                flag_key: key.into(),
+                definition_id: None,
+                description: Some("Retired metadata".into()),
+                owner: Some("Former owner".into()),
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+                updated_by: actor.clone(),
+            })
+            .await
+            .unwrap();
+        let fresh = create_definition(&db, key, "Fresh description", false, &actor)
+            .await
+            .unwrap();
+        assert!(
+            !resolve_personal_features(&db, &actor)
+                .await
+                .unwrap()
+                .contains(&key.into())
+        );
+        assert!(!list_metadata(&db).await.unwrap().contains_key(key));
+        let row = set_platform_override(&db, key, &FlagTarget::Global, true, &actor)
+            .await
+            .unwrap();
+        assert_eq!(row.definition_id, fresh.id);
+        assert!(
+            resolve_personal_features(&db, &actor)
+                .await
+                .unwrap()
+                .contains(&key.into())
+        );
+        let row = set_metadata(&db, key, Some("Fresh metadata"), None, &actor)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.definition_id, fresh.id);
+        clear_platform_override(&db, key, &FlagTarget::Global)
+            .await
+            .unwrap();
+        set_metadata(&db, key, None, None, &actor).await.unwrap();
+        assert_eq!(
+            overrides
+                .count_documents(doc! { "flag_key": key })
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            metadata
+                .count_documents(doc! { "flag_key": key })
+                .await
+                .unwrap(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn runtime_flags_resolve_defaults_and_scoped_overrides() {
+        let db = connect_test_database("runtime_flag_resolution")
+            .await
+            .expect("MongoDB required");
+        let user_id = Uuid::new_v4().to_string();
+        let org_id = Uuid::new_v4().to_string();
+        db.collection(USERS)
+            .insert_many([
+                crate::test_utils::test_user(&user_id, crate::models::user::UserType::Person),
+                crate::test_utils::test_user(&org_id, crate::models::user::UserType::Org),
+            ])
+            .await
+            .unwrap();
+        create_definition(&db, "runtime:test", "Runtime default", true, &user_id)
+            .await
+            .unwrap();
+        assert!(
+            resolve_personal_features(&db, &user_id)
+                .await
+                .unwrap()
+                .contains(&"runtime:test".into())
+        );
+        set_platform_override(&db, "runtime:test", &FlagTarget::Global, false, &user_id)
+            .await
+            .unwrap();
+        assert!(
+            !resolve_personal_features(&db, &user_id)
+                .await
+                .unwrap()
+                .contains(&"runtime:test".into())
+        );
+        set_platform_org_override(&db, &org_id, "runtime:test", true, &user_id)
+            .await
+            .unwrap();
+        assert!(
+            resolve_enabled_features(&db, &org_id, &user_id, OrgRole::Member)
+                .await
+                .unwrap()
+                .contains(&"runtime:test".into())
+        );
+        set_platform_override(
+            &db,
+            "runtime:test",
+            &FlagTarget::User(user_id.clone()),
+            false,
+            &user_id,
+        )
+        .await
+        .unwrap();
+        assert!(
+            !resolve_enabled_features(&db, &org_id, &user_id, OrgRole::Member)
+                .await
+                .unwrap()
+                .contains(&"runtime:test".into())
+        );
+        patch_metadata(
+            &db,
+            "runtime:test",
+            Some(Some("Edited")),
+            Some(Some("Team")),
+            &user_id,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            list_metadata(&db).await.unwrap()["runtime:test"]
+                .description
+                .as_deref(),
+            Some("Edited")
+        );
+        set_metadata(&db, "runtime:test", None, None, &user_id)
+            .await
+            .unwrap();
+        assert_eq!(
+            get_definition(&db, "runtime:test")
+                .await
+                .unwrap()
+                .created_by
+                .as_deref(),
+            Some(user_id.as_str())
+        );
+    }
+
+    #[test]
     fn find_flag_resolves_registry_keys() {
         assert!(find_flag("does-not-exist").is_none());
         assert!(find_flag("experimental:ai-assistant").is_some());
@@ -2245,6 +2822,7 @@ mod tests {
         // registry must never surface as if the flag still existed.
         db.collection::<FeatureFlagMetadata>(METADATA_COLLECTION)
             .insert_one(FeatureFlagMetadata {
+                definition_id: None,
                 id: Uuid::new_v4().to_string(),
                 flag_key: "retired_flag".to_string(),
                 description: Some("Long gone.".to_string()),

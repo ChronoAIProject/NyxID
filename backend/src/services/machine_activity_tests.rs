@@ -129,6 +129,7 @@ async fn machine_receipt_jobs_finish_cancel_and_do_not_resurrect_late_outcomes()
         digest: None,
         label: "nyx__machine_exec".into(),
         status: "completed".into(),
+        failure: None,
         started_at: Utc::now(),
         ended_at: Some(Utc::now()),
         machine: Some(Box::new(receipt(
@@ -154,10 +155,11 @@ async fn machine_receipt_jobs_finish_cancel_and_do_not_resurrect_late_outcomes()
     settle_activity(&mut activity, None);
     assert_eq!(activity.machine.as_ref().unwrap().status, "error");
 
-    let activity_id = super::super::assistant_nyxagent::activity_started(
+    let activity_id = super::super::assistant_nyxagent::activity_started_for_turn(
         &f.state.db,
         &f.owner,
         &f.row.id,
+        f.chat.turn_id.as_deref().unwrap(),
         "nyx__machine_browser",
     )
     .await
@@ -173,12 +175,14 @@ async fn machine_receipt_jobs_finish_cancel_and_do_not_resurrect_late_outcomes()
             )
             .await
             .unwrap();
-        super::super::assistant_nyxagent::activity_finished(
+        super::super::assistant_nyxagent::activity_finished_for_turn(
             &f.state.db,
             &f.owner,
             &f.row.id,
+            f.chat.turn_id.as_deref().unwrap(),
             &activity_id,
             false,
+            None,
         )
         .await
         .unwrap();
@@ -203,10 +207,11 @@ async fn machine_preview_consent_encryption_acl_expiry_and_late_result() {
         "machine_preview_acl",
     ))
     .await;
-    let activity = super::super::assistant_nyxagent::activity_started(
+    let activity = super::super::assistant_nyxagent::activity_started_for_turn(
         &f.state.db,
         &f.owner,
         &f.row.id,
+        f.chat.turn_id.as_deref().unwrap(),
         "nyx__machine_exec",
     )
     .await
@@ -669,6 +674,7 @@ async fn machine_group_receipts_strip_private_refs_and_refuse_preview_consent() 
             digest: None,
             label: "nyx__machine_exec".into(),
             status: "completed".into(),
+            failure: None,
             started_at: Utc::now(),
             ended_at: Some(Utc::now()),
         },
@@ -819,10 +825,11 @@ async fn machine_names_batch_respects_node_read_acl_and_enriches_transcript_dtos
     assert_eq!(dtos[0].machine_name.as_deref(), Some("Renamed computer"));
     assert!(dtos[3].machine_name.is_none());
     // The real history response resolves old receipts too, without persisting names.
-    let activity = super::super::assistant_nyxagent::activity_started(
+    let activity = super::super::assistant_nyxagent::activity_started_for_turn(
         &f.state.db,
         &f.owner,
         &f.row.id,
+        f.chat.turn_id.as_deref().unwrap(),
         "nyx__machine_browser",
     )
     .await

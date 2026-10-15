@@ -543,7 +543,7 @@ pub async fn llm_proxy_request(
 
     // Check approval against the owner selected by credential resolution.
     // Legacy credentials are personal, so `None` retains the actor fallback.
-    check_llm_approval(
+    let approval_auto = check_llm_approval(
         &state,
         &auth_user,
         &service_id,
@@ -808,6 +808,19 @@ pub async fn llm_proxy_request(
         })),
     );
 
+    if response.status().is_success() {
+        let operation =
+            operation_descriptor::build_llm_descriptor(&request_method_str, &path, None);
+        approval_service::record_chat_approval(
+            &state.db,
+            auth_user.assistant_chat.as_deref(),
+            approval_auto,
+            &service_id,
+            &service.name,
+            &operation,
+        )
+        .await;
+    }
     request_audit.response(response.status().as_u16());
     Ok(response)
 }
@@ -1164,7 +1177,7 @@ async fn gateway_provider_request(
 
     // Check approval if user has it enabled (uses cascade if the service
     // turned out to be org-owned).
-    check_llm_approval(
+    let approval_auto = check_llm_approval(
         &state,
         &auth_user,
         &service_id,
@@ -1468,6 +1481,18 @@ async fn gateway_provider_request(
         })),
     );
 
+    if response.status().is_success() {
+        let operation = operation_descriptor::build_llm_descriptor("POST", &path, None);
+        approval_service::record_chat_approval(
+            &state.db,
+            auth_user.assistant_chat.as_deref(),
+            approval_auto,
+            &service_id,
+            &service.name,
+            &operation,
+        )
+        .await;
+    }
     request_audit.response(response.status().as_u16());
     Ok(response)
 }
@@ -2142,11 +2167,11 @@ async fn check_llm_approval(
     service_owner_user_id: Option<&str>,
     is_auto_connected: bool,
     operation_guest: bool,
-) -> AppResult<()> {
+) -> AppResult<Option<crate::services::assistant_acknowledgement_service::AutoAllowed>> {
     let approval_owner_user_id = auth_user.effective_approval_owner_user_id();
     let owner_for_resolution = service_owner_user_id.unwrap_or(&approval_owner_user_id);
     let operation = operation_descriptor::build_llm_descriptor(method_str, path, body);
-    let approval_outcome = approval_service::evaluate_and_check(
+    let (approval_outcome, automatic) = approval_service::evaluate_for_chat(
         &state.db,
         &approval_owner_user_id,
         owner_for_resolution,
@@ -2156,6 +2181,7 @@ async fn check_llm_approval(
         &auth_user.approval_requester_id(),
         auth_user.auth_method == crate::mw::auth::AuthMethod::Session,
         is_auto_connected,
+        auth_user.assistant_chat.as_deref(),
     )
     .await?;
 
@@ -2164,7 +2190,7 @@ async fn check_llm_approval(
         &approval_outcome,
     )?;
     let pending = match approval_outcome {
-        approval_service::ApprovalOutcome::Allowed { .. } => return Ok(()),
+        approval_service::ApprovalOutcome::Allowed { .. } => return Ok(automatic),
         approval_service::ApprovalOutcome::Denied => {
             return Err(AppError::Forbidden(
                 "Operation denied by approval policy".to_string(),
@@ -2228,7 +2254,8 @@ async fn check_llm_approval(
                 &req_id,
                 &state.config.frontend_url,
             )
-        })
+        })?;
+    Ok(None)
 }
 
 #[cfg(test)]

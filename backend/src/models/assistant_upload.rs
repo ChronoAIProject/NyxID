@@ -17,6 +17,8 @@ pub struct AssistantUpload {
     pub content_type: String,
     pub size: i64,
     pub pages: usize,
+    #[serde(default)]
+    pub extracted_chars: Option<i64>,
     pub chunks: usize,
     #[serde(with = "super::bson_bytes::required")]
     pub text_encrypted: Vec<u8>,
@@ -27,4 +29,17 @@ pub struct AssistantUpload {
     pub expires_at: Option<DateTime<Utc>>,
     #[serde(default, with = "super::bson_datetime::optional")]
     pub bound_at: Option<DateTime<Utc>>,
+    /// Bounded observational read coverage for owner review cards.
+    #[serde(default)]
+    pub reads: i64,
+    #[serde(default)]
+    pub coverage: Vec<ReadInterval>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct ReadInterval {
+    pub start: i64,
+    pub end: i64,
+    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+    pub at: DateTime<Utc>,
 }

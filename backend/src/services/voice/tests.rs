@@ -73,6 +73,7 @@ fn preferences() -> VoicePreferences {
 }
 fn turn(id: Option<&str>, text: &str) -> engine::TurnRequest {
     engine::TurnRequest {
+        acknowledgement_id: None,
         retry_of: None,
         attachment_ids: vec![],
         conversation_id: id.map(str::to_string),
@@ -487,11 +488,13 @@ async fn completed_hidden_voice_results_publish_after_call_close() {
             crate::models::assistant_message::COLLECTION_NAME,
         )
         .insert_one(crate::models::assistant_message::AssistantMessage {
+            continuation_of: None,
             retry_of: None,
             retry_claimed_by: None,
             activity_count: None,
             specialist_id: None,
             steering: None,
+            author: None,
             id: Uuid::new_v4().to_string(),
             conversation_id: task_id,
             user_id: call.user_id.clone(),
@@ -505,6 +508,7 @@ async fn completed_hidden_voice_results_publish_after_call_close() {
             error_detail: None,
             created_at: chrono::Utc::now(),
             activities: Vec::new(),
+            activity_total: 0,
             attachments: Vec::new(),
             origin: None,
             via: None,
@@ -579,11 +583,13 @@ async fn published_result_notes_select_newest_results_after_previous_turn() {
                 crate::models::assistant_message::COLLECTION_NAME,
             )
             .insert_one(crate::models::assistant_message::AssistantMessage {
+                continuation_of: None,
                 retry_of: None,
                 retry_claimed_by: None,
                 activity_count: None,
                 specialist_id: None,
                 steering: None,
+                author: None,
                 id: result_id.clone(),
                 conversation_id: thread.id.clone(),
                 user_id: call.user_id.clone(),
@@ -597,6 +603,7 @@ async fn published_result_notes_select_newest_results_after_previous_turn() {
                 error_detail: None,
                 created_at: result_created_at,
                 activities: Vec::new(),
+                activity_total: 0,
                 attachments: Vec::new(),
                 origin: None,
                 via: Some("voice".into()),

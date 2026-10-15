@@ -70,6 +70,7 @@ import ApiTwilioIcon from "./api-twilio";
 import ApiAurinkoIcon from "./api-aurinko";
 import ApiIftttIcon from "./api-ifttt";
 import ApiIftttMcpIcon from "./api-ifttt-mcp";
+import ApiZohoMailIcon from "./api-zoho-mail";
 
 import ApiAirtableIcon from "./api-airtable";
 import ApiAsanaIcon from "./api-asana";
@@ -206,6 +207,7 @@ export const SPEC_CATALOG_SLUGS = [
 
 type Slug = (typeof SPEC_CATALOG_SLUGS)[number];
 export const CUSTOM_SERVICE_SLUGS = [
+  "api-zoho-mail",
   "aevatar",
   "cma",
   "cmaeg",
@@ -220,7 +222,7 @@ export const CUSTOM_SERVICE_SLUGS = [
 ] as const;
 type CustomSlug = (typeof CUSTOM_SERVICE_SLUGS)[number];
 
-export const SERVICE_ICONS: Readonly<Record<string, IconComponent>> = {
+const CATALOG_ICONS = {
   "llm-xai": LlmXaiIcon,
   "llm-openai": LlmOpenaiIcon,
   "llm-openai-codex": LlmOpenaiCodexIcon,
@@ -283,6 +285,7 @@ export const SERVICE_ICONS: Readonly<Record<string, IconComponent>> = {
   aurinko: ApiAurinkoIcon,
   "api-ifttt": ApiIftttIcon,
   "api-ifttt-mcp": ApiIftttMcpIcon,
+  "api-zoho-mail": ApiZohoMailIcon,
 
   "api-airtable": ApiAirtableIcon,
   "api-asana": ApiAsanaIcon,
@@ -338,6 +341,19 @@ export const SERVICE_ICONS: Readonly<Record<string, IconComponent>> = {
     IconComponent
   >
 >;
+
+// Provider slugs omit the catalog's api-/llm- prefix. Share the same glyph
+// across both surfaces, while preserving explicitly registered aliases.
+export const SERVICE_ICONS: Readonly<Record<string, IconComponent>> = {
+  ...Object.fromEntries(
+    Object.entries(CATALOG_ICONS)
+      .filter(([slug]) => slug.startsWith("api-") || slug.startsWith("llm-"))
+      .map(([slug, Icon]) => [slug.replace(/^(api|llm)-/, ""), Icon]),
+  ),
+  ...CATALOG_ICONS,
+  "tools-elevenlabs": ApiElevenLabsIcon,
+  "tools-firecrawl": ApiFirecrawlIcon,
+};
 
 // `data-fallback="true"` lets the test hook recognize fallbacks when an
 // unknown slug is rendered.

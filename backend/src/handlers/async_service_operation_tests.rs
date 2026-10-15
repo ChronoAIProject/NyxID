@@ -210,6 +210,7 @@ async fn async_submit_mcp_polls_once_across_replicas_and_quotes_encrypted_result
     .await
     .unwrap();
     let mut start = engine::TurnStart::from(&engine::TurnRequest {
+        acknowledgement_id: None,
         retry_of: None,
         attachment_ids: vec![],
         conversation_id: Some(row.id.clone()),
@@ -616,6 +617,7 @@ async fn admit_event(
     a: &AsyncFixture,
 ) -> crate::models::assistant_conversation::AssistantConversation {
     let mut start = engine::TurnStart::from(&engine::TurnRequest {
+        acknowledgement_id: None,
         retry_of: None,
         attachment_ids: vec![],
         conversation_id: Some(a.f.row.id.clone()),
