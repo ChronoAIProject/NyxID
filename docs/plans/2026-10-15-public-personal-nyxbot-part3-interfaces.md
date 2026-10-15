@@ -99,6 +99,41 @@ Internal proof-gap diagnostics project to shared
 Other known denials use the candidate's relevant unavailable reason. No expanded
 public error DTO is required to retain detailed internal proof diagnostics.
 
+### Delta acknowledging Part 2 commit `338d92f5b`
+
+Reviewed Part 2's committed interface proposal. Acknowledge its service-owned
+`NyxAgentRuntime` and manager-facing `NyxAgentExecutionProducer` on an already
+durably claimed turn. Moving the loop alone does not remove its current
+`execute_admin_proxy(&AuthUser, ...)` dependency. Part 3 must provide the typed
+`NyxAgentEgress::request(authority, credential, request)` adapter through the
+existing proxy/billing core, preserving ordinary actor/audit/payer semantics.
+Neither runner fabricates owner/session `AuthUser` or calls an HTTP handler.
+
+Acknowledge the proposed Part 3 `PublicNyxAgentRuntime::{prepare,
+replace_credential, settle}` dependencies. Public preparation selects only
+public prompt/context and restricted credentials before owner lookups; recovery
+uses public replacement, and settlement returns a confirmed durable outcome.
+Each response, capability/discovery request, retry and continuation requires
+the same live public policy and exact-money admission. Private, non-serialized
+`RuntimeCredential` and `NyxAgentRequest` stay inside the execution/egress seam;
+credentials zeroize and redact, and requests cannot supply caller URLs/headers.
+Cleanup remains a separate capability. Public work never reaches owner
+credential convergence/load/replacement, memory/history, model fallback or hooks.
+
+Use Part 2's concrete `fence_platform_execution_in_session(db, session,
+user_id, api_key_id, turn, expected_origin)` as the implementation target for
+the earlier origin-validator sketch. Obtain its expected origin from loaded
+authenticated `ChatAuthority`, never request arguments. Platform-thread keys
+require a live non-stopped turn even with the ordinary gate off; a live later
+web turn has no platform origin and retains owner authority. The exact callback
+joins the caller transaction and Part 1's live binding/control/account fences.
+
+Part 2's requested `services/assistant_nyxagent_egress.rs` is a proposed Part 3
+file allocation requiring Part 5 confirmation. Part 2 owns the single common
+loop and narrow encrypted-key primitives; Part 3 owns public lifecycle/egress.
+The exact upstream-session persistence callback remains required for cleanup.
+These acknowledgements add no runtime proof; public readiness stays unavailable.
+
 ## Source trace and hook positions
 
 Paths in source references are relative to the repository root. Line numbers
