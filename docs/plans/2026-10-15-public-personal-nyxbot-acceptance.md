@@ -6,8 +6,11 @@ different evidence states. Record the tested commit and actual commands/results
 before changing any row to verified. Mocked upstream calls cannot satisfy A13
 or the external portion of A1/A15.
 
-Current checkpoint: producer proposals complete and implementation started;
-no feature implementation tests run.
+Current checkpoint: identity, personal engine and ingress slices are integrated;
+public runtime, frontend and transport integration remain in progress. The first
+combined production-bin Clippy run failed with 14 import/async-lifetime errors;
+fixes are integrated and a second run is underway. No feature runtime tests or
+acceptance gates have passed.
 
 | Gate | Owners | Required evidence | Status |
 | --- | --- | --- | --- |

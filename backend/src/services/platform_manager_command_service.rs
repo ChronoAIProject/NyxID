@@ -28,8 +28,8 @@ pub fn personal_command(text: &str, username: &str) -> Option<PersonalCommandKin
         return None;
     }
     match command.split('@').next()? {
-        "/link" if words.next().is_none() => Some(PersonalCommandKind::Link),
-        "/unlink" if words.next().is_none() => Some(PersonalCommandKind::Unlink),
+        "/link" => Some(PersonalCommandKind::Link),
+        "/unlink" => Some(PersonalCommandKind::Unlink),
         "/confirm"
             if words
                 .next()
@@ -65,6 +65,24 @@ pub async fn execute(
     kind: PersonalCommandKind,
     lifecycle: &LifecycleProducer,
 ) -> AppResult<Option<CommittedCommand>> {
+    let mut words = command.text().split_whitespace();
+    let verb = words.next().and_then(|word| word.split('@').next());
+    let valid = match kind {
+        PersonalCommandKind::Link => verb == Some("/link") && words.next().is_none(),
+        PersonalCommandKind::Unlink => verb == Some("/unlink") && words.next().is_none(),
+        PersonalCommandKind::Confirm => {
+            verb == Some("/confirm")
+                && words
+                    .next()
+                    .is_some_and(|code| code.to_ascii_uppercase().starts_with("P-"))
+                && words.next().is_none()
+        }
+    };
+    if !valid {
+        return Err(AppError::ValidationError(
+            "Invalid personal linking command".into(),
+        ));
+    }
     let claim = IngressClaim {
         receipt_id: uuid::Uuid::new_v4().to_string(),
         claim_id: uuid::Uuid::new_v4().to_string(),
