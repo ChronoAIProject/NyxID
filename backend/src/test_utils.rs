@@ -217,6 +217,9 @@ pub(crate) async fn connect_test_database(prefix: &str) -> Option<mongodb::Datab
     db.collection::<mongodb::bson::Document>("billing_migrations").insert_one(
         mongodb::bson::doc! { "_id": "exact-v2", "completed_at": mongodb::bson::DateTime::now() },
     ).await.expect("initialize fresh test billing readiness");
+    crate::services::assistant_access_policy::ensure_cutover(&db)
+        .await
+        .expect("initialize fresh test assistant cutover");
     Some(db)
 }
 
@@ -243,6 +246,9 @@ pub(crate) async fn connect_test_database_with_command_handler(
     db.collection::<mongodb::bson::Document>("billing_migrations").insert_one(
         mongodb::bson::doc! { "_id": "exact-v2", "completed_at": mongodb::bson::DateTime::now() },
     ).await.expect("initialize fresh test billing readiness");
+    crate::services::assistant_access_policy::ensure_cutover(&db)
+        .await
+        .expect("initialize fresh test assistant cutover");
     Some(db)
 }
 

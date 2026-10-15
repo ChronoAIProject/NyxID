@@ -4665,6 +4665,14 @@ async fn interrupted_prepared_draft_recovers_same_proposal_and_original_turn_ide
     assert_eq!(recovered.requested_turn_id, card.requested_turn_id);
     assert_eq!(recovered.trigger_run_id, card.trigger_run_id);
     assert_eq!(recovered.voice_request_id, card.voice_request_id);
+    // The original turn's routing, never the replaced turn's. The drafting
+    // chat is NyxBot's own thread, so the card never involved a specialist's
+    // assignment: `NotInvolved`, preserved as stored.
+    assert_eq!(recovered.routing, card.routing);
+    assert_eq!(
+        card.routing,
+        Some(crate::models::assistant_acknowledgement::CardRouting::NotInvolved)
+    );
     assert_eq!(
         stored(&f, &proposal.id)
             .await
@@ -5332,6 +5340,8 @@ async fn specialist_drafts_and_owner_approval_publishes_its_own_skill() {
         .iter()
         .find(|e| e.kind == "skill_publication")
         .unwrap();
+    assert!(event.bound);
+    assert_eq!(event.report_to.as_deref(), Some(f.nyxbot_thread.as_str()));
     assert!(
         event
             .text
@@ -6671,6 +6681,19 @@ async fn automatic_format_failure_repairs_original_drafting_conversation_without
         pending_skill_event_count(&f.state.db, &f.row.id, &row.id).await,
         1
     );
+    let thread = crate::services::assistant_nyxagent::get(&f.state.db, &f.owner, &f.row.id)
+        .await
+        .unwrap();
+    let event = thread
+        .pending_events
+        .iter()
+        .find(|event| event.kind == "skill_publication")
+        .unwrap();
+    assert!(
+        event.bound,
+        "the repair uses the drafting claim's routing even without a card"
+    );
+    assert!(event.report_to.is_none());
     assert!(
         !server
             .received_requests()
@@ -6680,6 +6703,139 @@ async fn automatic_format_failure_repairs_original_drafting_conversation_without
             .any(|request| {
                 request.method.as_str() == "POST" && request.url.path() == "/api/v1/skills"
             })
+    );
+    f.state.db.drop().await.unwrap();
+}
+
+/// Issue #1883: a specialist's authored draft keeps the routing of the turn
+/// that drafted it. After a crash between preparation and the card, the
+/// assigned turn settling and a direct owner turn in the same thread (no
+/// NyxBot involvement), the recovered card is still `Assigned` to the same
+/// NyxBot thread with the original `requested_turn_id`.
+#[tokio::test]
+async fn specialist_draft_recovery_preserves_assigned_routing_across_a_direct_turn() {
+    use crate::models::assistant_acknowledgement::CardRouting;
+    use crate::services::assistant_nyxagent as engine;
+    let f =
+        crate::services::assistant_authority_tests::fixture("authoring_specialist_recovery").await;
+    assert!(!f.chat.is_orchestrator() && f.chat.involved());
+    assert_eq!(f.chat.report_to.as_deref(), Some(f.nyxbot_thread.as_str()));
+    f.state
+        .db
+        .collection::<bson::Document>(crate::models::assistant_settings::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id":&f.owner},
+            doc! {"$set":{"specialist_access_requests":"denied"}},
+        )
+        .await
+        .unwrap();
+    review::migrate_publication_targets(&f.state, false)
+        .await
+        .unwrap();
+    feature_flag_service::set_platform_override(
+        &f.state.db,
+        learning::FLAG_KEY,
+        &FlagTarget::User(f.owner.clone()),
+        true,
+        &f.owner,
+    )
+    .await
+    .unwrap();
+    let server = setup_ornn(&f).await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/skill-format/validate"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"data":{"valid":true,"violations":[]}})),
+        )
+        .mount(&server)
+        .await;
+    let (proposal, card) = make(&f, input(&f.chat.agent_id)).await;
+    let assigned = Some(CardRouting::Assigned {
+        report_to: f.nyxbot_thread.clone(),
+    });
+    assert_eq!(card.routing, assigned);
+    assert_eq!(card.conversation_id, f.row.id);
+    let original_turn = card
+        .requested_turn_id
+        .clone()
+        .expect("the drafting turn is recorded");
+    let cards = f
+        .state
+        .db
+        .collection::<AssistantAcknowledgement>(ACKNOWLEDGEMENTS_COLLECTION_NAME);
+    // Crash after preparation, before the card was durable.
+    cards.delete_one(doc! {"_id":&card.id}).await.unwrap();
+    // The assigned turn settles; the owner then talks to the specialist
+    // directly, which involves nobody.
+    engine::finish_turn(
+        &f.state.db,
+        &f.row,
+        &f.chat.api_key_id,
+        &Uuid::new_v4().to_string(),
+        &engine::TurnResult {
+            text: "Draft prepared".into(),
+            session_id: None,
+            response_id: None,
+            error: None,
+        },
+    )
+    .await
+    .unwrap();
+    let direct = engine::begin_turn(
+        &f.state.db,
+        &f.owner,
+        &engine::TurnRequest {
+            acknowledgement_id: None,
+            retry_of: None,
+            attachment_ids: Vec::new(),
+            agent_id: None,
+            conversation_id: Some(f.row.id.clone()),
+            text: "Something else, directly".into(),
+            model: None,
+            access_mode: None,
+        },
+        &f.state.encryption_keys,
+    )
+    .await
+    .unwrap();
+    let direct_turn = direct.active_turn.as_ref().unwrap().turn_id.clone();
+    assert_ne!(direct_turn, original_turn);
+    let direct_chat = acks::for_key(&f.state.db, &f.owner, Some(&direct.credential_api_key_id))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!direct_chat.involved() && direct_chat.report_to.is_none());
+    // The retry from another chat recovers the same proposal and re-raises
+    // the card with the drafting turn's routing and identity, not the live
+    // direct turn's.
+    let other = another_authoring_chat(&f).await;
+    let recovered = draft_in_chat(&f, &other).await.unwrap();
+    assert_eq!(recovered["proposal_id"], proposal.id);
+    let recovered = cards
+        .find_one(doc! {"_id":recovered["acknowledgement_id"].as_str().unwrap()})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_ne!(recovered.id, card.id);
+    assert_eq!(recovered.conversation_id, f.row.id);
+    assert_eq!(recovered.routing, assigned);
+    assert_eq!(
+        recovered.requested_turn_id.as_deref(),
+        Some(original_turn.as_str())
+    );
+    assert_ne!(
+        recovered.requested_turn_id.as_deref(),
+        Some(direct_turn.as_str())
+    );
+    assert_eq!(recovered.trigger_run_id, card.trigger_run_id);
+    assert_eq!(recovered.voice_request_id, card.voice_request_id);
+    assert_eq!(
+        cards
+            .count_documents(doc! {"authored_skill.proposal_id":&proposal.id})
+            .await
+            .unwrap(),
+        1
     );
     f.state.db.drop().await.unwrap();
 }

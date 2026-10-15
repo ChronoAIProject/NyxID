@@ -349,6 +349,16 @@ pub(crate) fn image_note(
             }
         }
     };
+    if !guest
+        && matches!(
+            destination,
+            ImageNoteDestination::App
+                | ImageNoteDestination::Group { .. }
+                | ImageNoteDestination::AppViaTrigger
+        )
+    {
+        note.push_str(" If the owner asked you to post to a chat, use nyxid__post_to_chat with include_images:true to include this turn's tool images in that post.");
+    }
     note.push_str(TAIL);
     if guest && matches!(destination, ImageNoteDestination::Chat { .. }) {
         note.push_str(" This turn answers a chat member who is not the owner; the image goes only to that chat and never to anyone else.");
@@ -3091,10 +3101,18 @@ async fn chat_service_gate(
             if let Some(request) = request {
                 super::assistant_team::permission_requested(state, chat, &request).await;
             }
+            let value = crate::services::assistant_access_policy::with_frontend(
+                value,
+                &state.config.frontend_url,
+            );
             Some(tool_result(request_id, &value.to_string(), true))
         }
         Err(error) => {
-            let result = crate::services::assistant_account_tools::error_result(error);
+            let result = crate::services::assistant_account_tools::error_result_for(
+                error,
+                Some(chat),
+                &state.config.frontend_url,
+            );
             Some(tool_result(request_id, &result.value.to_string(), true))
         }
     }
@@ -3394,7 +3412,11 @@ async fn handle_account_tool(
     if let Err(error) =
         crate::services::service_history::context::authenticated(&state.db, &user).await
     {
-        let result = crate::services::assistant_account_tools::error_result(error);
+        let result = crate::services::assistant_account_tools::error_result_for(
+            error,
+            auth.chat.as_ref(),
+            &state.config.frontend_url,
+        );
         return tool_result(request_id, &result.value.to_string(), true);
     }
     if crate::services::assistant_team_tools::is_team_tool(name) {
@@ -3507,14 +3529,22 @@ async fn handle_attachment_read(
     {
         Ok(value) => tool_result(
             id,
-            &value.to_string(),
+            &crate::services::assistant_access_policy::with_frontend(
+                value.clone(),
+                &state.config.frontend_url,
+            )
+            .to_string(),
             value.get("error").is_some() || value["isError"] == true,
         ),
         Err(error) => tool_result(
             id,
-            &crate::services::assistant_account_tools::error_result(error)
-                .value
-                .to_string(),
+            &crate::services::assistant_account_tools::error_result_for(
+                error,
+                Some(chat),
+                &state.config.frontend_url,
+            )
+            .value
+            .to_string(),
             true,
         ),
     }
@@ -3543,14 +3573,22 @@ async fn handle_machine_tool(
     {
         Ok(value) => tool_result(
             request_id,
-            &value.to_string(),
+            &crate::services::assistant_access_policy::with_frontend(
+                value.clone(),
+                &state.config.frontend_url,
+            )
+            .to_string(),
             value.get("error").is_some() || value["isError"] == true,
         ),
         Err(error) => tool_result(
             request_id,
-            &crate::services::assistant_account_tools::error_result(error)
-                .value
-                .to_string(),
+            &crate::services::assistant_account_tools::error_result_for(
+                error,
+                Some(chat),
+                &state.config.frontend_url,
+            )
+            .value
+            .to_string(),
             true,
         ),
     }
@@ -4218,23 +4256,36 @@ async fn handle_meta_connect(
     if let Some(chat) = auth.chat.as_ref()
         && !chat.access_request_allowed()
     {
-        crate::services::assistant_acknowledgement_service::audit_access_request_denied(
-            &state.db,
-            chat,
-            // Model-supplied text never enters the audit row: only a UUID.
-            arguments
-                .get("service_id")
-                .and_then(|v| v.as_str())
-                .filter(|id| uuid::Uuid::parse_str(id).is_ok()),
-            "connect_service",
-        )
-        .await;
-        return tool_result(
-            request_id,
-            &crate::services::assistant_acknowledgement_service::access_request_denied()
-                .to_string(),
-            true,
-        );
+        let target = arguments
+            .get("service_id")
+            .and_then(|v| v.as_str())
+            .filter(|id| uuid::Uuid::parse_str(id).is_ok());
+        if chat.involved() || chat.guest {
+            crate::services::assistant_acknowledgement_service::audit_access_request_denied(
+                &state.db,
+                chat,
+                target,
+                "connect_service",
+            )
+            .await;
+        } else {
+            crate::services::assistant_acknowledgement_service::audit_missing_access(
+                &state.db,
+                chat,
+                target,
+                "connect_service",
+            )
+            .await;
+        }
+        let refusal = if chat.guest {
+            crate::services::assistant_acknowledgement_service::access_request_denied()
+        } else {
+            crate::services::assistant_access_policy::with_frontend(
+                crate::services::assistant_access_policy::connect_refusal(chat),
+                &state.config.frontend_url,
+            )
+        };
+        return tool_result(request_id, &refusal.to_string(), true);
     }
     if auth.chat.is_some() && arguments.get("credential").is_some() {
         return tool_result(
@@ -4330,6 +4381,7 @@ async fn handle_meta_connect(
                         &chat.user_id,
                         &chat.conversation_id,
                         &link_id,
+                        crate::services::nyxbot_watch_service::ReportProvenance::from_chat(chat),
                     )
                     .await
                     {
@@ -7870,6 +7922,8 @@ mod skill_authoring_discovery_tests {
         auth.is_api_key = true;
         auth.api_key_id = Some("chat-key".into());
         auth.chat = Some(ChatAuthority {
+            report_to: None,
+            with_nyxbot: false,
             org_agent_access: None,
             turn_id: Some("turn".into()),
             turn_stopped: false,
@@ -8043,6 +8097,9 @@ mod image_note_tests {
                 group_id: "group".into(),
             },
             ImageNoteDestination::AppViaTrigger,
+            ImageNoteDestination::Trigger {
+                run_id: "run".into(),
+            },
             ImageNoteDestination::Chat {
                 platform: "telegram-new".into(),
                 threads: 2,
@@ -8060,6 +8117,16 @@ mod image_note_tests {
                     let note = image_note(&destination, guest, supported, 2);
                     assert!(!note.contains("Delivered"));
                     assert!(!note.contains("shown below"));
+                    assert_eq!(
+                        note.contains("include_images"),
+                        !guest
+                            && matches!(
+                                &destination,
+                                ImageNoteDestination::App
+                                    | ImageNoteDestination::Group { .. }
+                                    | ImageNoteDestination::AppViaTrigger
+                            )
+                    );
                     assert!(note.contains("do not describe its contents before you have seen it"));
                     match &destination {
                         ImageNoteDestination::Chat { platform, .. } => {

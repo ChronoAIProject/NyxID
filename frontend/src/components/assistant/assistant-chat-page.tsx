@@ -575,7 +575,11 @@ function NyxAgentThreadPage() {
   // The open thread's agent, else the agent in the URL, else NyxBot.
   const threadAgent = nyxAgentTransport.getConversation(selectedId)?.agent ?? undefined;
   const selectedAgent = selectedAgentOf(agents.data?.agents, threadAgent?.id, search.agent);
-  const openDetailsAgentId = detailsAgentId ?? (search.proposal ? selectedAgent?.id : undefined);
+  // Names the exact linked agent even when it is not in the list.
+  const linkedDetails = Boolean(search.details || search.proposal);
+  const openDetailsAgentId =
+    detailsAgentId ??
+    (linkedDetails ? (search.agent ?? threadAgent?.id ?? selectedAgent?.id) : undefined);
 
   const draftAgent: NyxAgentConversationAgent | undefined = selectedAgent
     ? {
@@ -629,18 +633,28 @@ function NyxAgentThreadPage() {
     }
     void navigate({
       to: "/assistant",
-      search: (previous) => ({ ...parseAccountPanelSearch(previous), c: latestThreadId, ...(search.mock ? { mock: 1 as const } : {}) }),
+      search: (previous) => ({
+        ...parseAccountPanelSearch(previous),
+        c: latestThreadId,
+        ...(linkedDetails ? { agent: search.agent } : {}),
+        ...(search.details ? { details: search.details } : {}),
+        ...(search.proposal ? { proposal: search.proposal } : {}),
+        ...(search.mock ? { mock: 1 as const } : {}),
+      }),
       replace: true,
     });
   }, [
     chat.threadsLoaded,
     latestThreadId,
+    linkedDetails,
     navigate,
     onChatRoute,
     search.agent,
     search.c,
+    search.details,
     search.draft,
     search.mock,
+    search.proposal,
   ]);
 
   function navigateTo(next: { c?: string; draft?: true; agent?: string; g?: string }) {
@@ -731,11 +745,14 @@ function NyxAgentThreadPage() {
           agentId={openDetailsAgentId}
           agents={agents.data?.agents ?? []}
           proposalId={search.proposal}
+          tab={search.details}
           open={openDetailsAgentId !== undefined}
           onOpenChange={(open) => {
             if (!open) {
               setDetailsAgentId(undefined);
-              if (search.proposal) navigateTo({ c: search.c, agent: search.agent, draft: search.draft ? true : undefined });
+              // Closing a linked sheet drops its URL state (push, like the
+              // account panels, so Back after an explicit close reopens it).
+              if (linkedDetails) navigateTo({ c: search.c, agent: search.agent, draft: search.draft ? true : undefined });
             }
           }}
           onDeleted={() => {
@@ -871,7 +888,7 @@ function NyxAgentThreadPage() {
               focusMessageId={search.card ? `nyxagent-acknowledgement:${search.card}` : undefined}
               emptyDescription={
                 headerAgent?.kind === "specialist"
-                  ? `Talk to ${agentName} directly. It remembers across its threads and asks NyxBot for anything outside its grants.`
+                  ? `Talk to ${agentName} directly. It handles your request itself, remembers across its threads, and tells you if it needs access you have not granted.`
                   : "See your connected services, connect a new one, " +
                     "set up a channel bot, or check approvals."
               }

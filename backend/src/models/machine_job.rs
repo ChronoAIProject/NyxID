@@ -19,6 +19,10 @@ pub struct MachineJob {
     /// Immutable issue-time service identities. Legacy jobs receive no services.
     #[serde(default)]
     pub services: Vec<DeclaredService>,
+    #[serde(default)]
+    pub report_to: Option<String>,
+    #[serde(default)]
+    pub report_provenance: u8,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]

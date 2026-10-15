@@ -260,8 +260,8 @@ function SettingsForm({ settings }: { readonly settings: NyxAgentSettings }) {
             <FormItem className="space-y-2 rounded-lg border border-border p-4">
               <FormLabel>Specialist access requests</FormLabel>
               <FormDescription className="text-12">
-                Only NyxBot and you can grant access; specialists cannot grant themselves or
-                each other anything.
+                Only you, and NyxBot for work it assigned or a group it is in, can grant access; specialists
+                cannot grant themselves or each other anything.
               </FormDescription>
               <Select value={field.value} onValueChange={field.onChange}>
                 <FormControl>
@@ -276,8 +276,8 @@ function SettingsForm({ settings }: { readonly settings: NyxAgentSettings }) {
               </Select>
               <p className="text-12 text-muted-foreground">
                 {field.value === "denied"
-                  ? "A specialist that needs more access tells NyxBot in its reply; you can still grant it in the specialist's details."
-                  : "A specialist's request goes to NyxBot, which approves or denies it; you can decide it on its card instead."}
+                  ? "A specialist you talk to directly tells you what it is missing and continues; you grant it in the specialist's details. Only work NyxBot assigned, or work in a group NyxBot is in, reports to NyxBot instead."
+                  : "For work NyxBot assigned, or in a group with NyxBot, a specialist's request goes to NyxBot, which approves or denies it; you can decide it on its card instead. A specialist you talk to directly still tells you what it is missing."}
               </p>
             </FormItem>
           )}

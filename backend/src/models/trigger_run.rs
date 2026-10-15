@@ -60,6 +60,10 @@ pub struct TriggerRun {
     #[serde(default)]
     pub result_claimed: bool,
     #[serde(default)]
+    pub image_refs: Vec<RunImageRef>,
+    #[serde(default)]
+    pub image_refs_truncated: u32,
+    #[serde(default)]
     pub agent_id: Option<String>,
     #[serde(default)]
     pub deliver_to: crate::models::trigger_schedule::DeliverTo,
@@ -70,6 +74,13 @@ pub struct TriggerRun {
     pub lease_until: DateTime<Utc>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub expires_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RunImageRef {
+    pub conversation_id: String,
+    pub turn_id: String,
+    pub attachment: crate::models::assistant_conversation::TurnAttachment,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

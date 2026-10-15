@@ -7,12 +7,12 @@ use crate::{
     models::{
         assistant_conversation::{ChannelOrigin, TurnAttachment},
         nyxbot_channel::{NyxbotChannel, NyxbotThread},
-        nyxbot_image_delivery::NyxbotImageDelivery,
+        nyxbot_image_delivery::{ImageDeliveryState, NyxbotImageDelivery},
     },
     services::{
-        assistant_nyxagent as engine, channel_media_service as media,
+        assistant_nyxagent as engine, channel_image_delivery as claims,
+        channel_media_service as media,
         channel_platform::{MaterializedAttachment, MediaKind, OutboundReply},
-        channel_turn_delivery as claims,
     },
 };
 use axum::http::HeaderMap;
@@ -48,6 +48,8 @@ pub enum ImageOutcome {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ImageReport {
+    pub outcomes: Vec<ImageItemResult>,
+    pub claimed: u32,
     pub attempted: u32,
     pub sent: u32,
     pub failed: u32,
@@ -56,6 +58,13 @@ pub struct ImageReport {
     pub unsupported: bool,
     pub app_visible: bool,
     pub automation: bool,
+}
+
+#[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
+pub struct ImageItemResult {
+    pub attachment_id: String,
+    pub status: String,
+    pub code: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -72,8 +81,8 @@ pub struct ImageSendContext<'a> {
     pub anchor: ImageAnchor,
     pub audience: ImageAudience,
     pub deadline: Option<Instant>,
-    pub claim_key: &'a str,
     pub initiated: Option<&'a super::chats::PostTarget>,
+    pub fence: Option<&'a crate::services::assistant_acknowledgement_service::ChatAuthority>,
 }
 impl std::fmt::Debug for ImageSendContext<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -128,27 +137,147 @@ impl ImageReport {
     }
 }
 
-fn existing_report(row: &NyxbotImageDelivery, mut report: ImageReport) -> ImageReport {
-    for item in &row.items {
-        let outcome = match item.state.as_str() {
-            "sent" => ImageOutcome::Sent,
-            "failed" => {
-                report.unsupported |= item.code.as_deref() == Some("unsupported");
-                ImageOutcome::Failed("previous_refusal")
-            }
-            "skipped" | "pending" => ImageOutcome::Skipped("previous_attempt"),
-            _ => ImageOutcome::Unknown,
-        };
-        report.record(outcome);
-    }
-    report
+pub(super) fn existing_item(row: &NyxbotImageDelivery) -> ImageItemResult {
+    existing_outcome(&row.attachment_id, row.state, row.code.clone())
 }
 
-/// Byte ownership survives reqwest clones and zeroizes when the last body drops.
+pub(super) fn legacy_item(
+    attachment: &str,
+    outcome: claims::LegacyImageOutcome,
+) -> ImageItemResult {
+    existing_outcome(attachment, outcome.state, outcome.code)
+}
+
+fn existing_outcome(
+    attachment: &str,
+    state: ImageDeliveryState,
+    code: Option<String>,
+) -> ImageItemResult {
+    let status = match state {
+        ImageDeliveryState::Sent => "previously_delivered",
+        ImageDeliveryState::Failed => "failed",
+        ImageDeliveryState::Skipped => "skipped",
+        ImageDeliveryState::Unknown => "unknown",
+        ImageDeliveryState::Sending | ImageDeliveryState::Pending => "in_progress_or_unknown",
+    };
+    ImageItemResult {
+        attachment_id: attachment.into(),
+        status: status.into(),
+        code,
+    }
+}
+
 struct ImageBytes(zeroize::Zeroizing<Vec<u8>>);
 impl AsRef<[u8]> for ImageBytes {
     fn as_ref(&self) -> &[u8] {
         self.0.as_slice()
+    }
+}
+
+pub fn image_result(report: &ImageReport) -> serde_json::Value {
+    let mut result = serde_json::Map::new();
+    for status in [
+        "sent_now",
+        "previously_delivered",
+        "failed",
+        "skipped",
+        "unknown",
+        "in_progress_or_unknown",
+        "cancelled",
+    ] {
+        result.insert(
+            status.into(),
+            serde_json::json!(
+                report
+                    .outcomes
+                    .iter()
+                    .filter(|item| item.status == status)
+                    .count()
+            ),
+        );
+    }
+    result.insert("items".into(), serde_json::json!(report.outcomes));
+    serde_json::Value::Object(result)
+}
+
+async fn audience_key(state: &AppState, ctx: &ImageSendContext<'_>) -> AppResult<String> {
+    match &ctx.anchor {
+        ImageAnchor::Inbound { message_id } => {
+            let auth = super::route_key_auth(state, ctx.channel).await?;
+            let body = crate::handlers::channel_relay::AsyncReplyRequest {
+                message_id: message_id.clone(),
+                thread_reply: false,
+                reply: crate::handlers::channel_relay::AsyncReplyBody {
+                    text: None,
+                    metadata: None,
+                    attachments: Vec::new(),
+                },
+            };
+            let context = crate::handlers::channel_relay::resolve_reply_request_context(
+                state,
+                &HeaderMap::new(),
+                Some(&auth),
+                &body,
+            )
+            .await?;
+            let adapter = crate::handlers::channel_relay::reply_adapter(state, &context)?;
+            crate::handlers::channel_relay::image_reply_audience(&context, adapter.as_ref())
+        }
+        ImageAnchor::Thread { origin } => {
+            super::thread_follow::bound_image_audience(
+                state,
+                ctx.channel,
+                ctx.owner,
+                origin,
+                ctx.conversation_id,
+            )
+            .await
+        }
+        ImageAnchor::Initiated { .. } => {
+            let target = ctx
+                .initiated
+                .ok_or_else(|| AppError::NotFound("Image post target unavailable".into()))?;
+            let mut reply = OutboundReply {
+                text: None,
+                metadata: None,
+                attachments: Vec::new(),
+                reply_to_platform_message_id: None,
+            };
+            target.adapter.reply_context(
+                crate::services::channel_image_audience::chat_thread(&target.thread),
+                target.thread.created_at,
+                &mut reply.metadata,
+            );
+            Ok(crate::services::channel_image_audience::resolve(
+                &target.bot.id,
+                &target.bot.platform,
+                &target.conversation.platform_conversation_id,
+                &reply,
+            ))
+        }
+        ImageAnchor::NoAnchor => {
+            let reply = OutboundReply {
+                text: None,
+                metadata: None,
+                attachments: Vec::new(),
+                reply_to_platform_message_id: None,
+            };
+            Ok(crate::services::channel_image_audience::resolve(
+                &ctx.channel.channel_bot_id,
+                &ctx.channel.platform,
+                ctx.thread.platform_chat_id.as_deref().unwrap_or_default(),
+                &reply,
+            ))
+        }
+    }
+}
+
+async fn live(state: &AppState, ctx: &ImageSendContext<'_>) -> AppResult<bool> {
+    match ctx.fence {
+        Some(chat) => Ok(super::chats::post_turn_is_live(state, chat)
+            .await
+            .unwrap_or(false)),
+        None => Ok(true),
     }
 }
 
@@ -157,21 +286,34 @@ pub async fn send_turn_images(
     ctx: ImageSendContext<'_>,
     plan: &ImageSendPlan,
 ) -> AppResult<ImageReport> {
+    Box::pin(send_turn_images_with_stop(state, ctx, plan, None)).await
+}
+
+pub(super) async fn send_turn_images_with_stop(
+    state: &AppState,
+    ctx: ImageSendContext<'_>,
+    plan: &ImageSendPlan,
+    initial_stop: Option<&'static str>,
+) -> AppResult<ImageReport> {
     let mut report = ImageReport {
         app_visible: ctx.audience.owner_private,
         automation: matches!(ctx.anchor, ImageAnchor::Initiated { .. }),
         ..Default::default()
     };
+    let mut seen = std::collections::HashSet::new();
     let attachments: Vec<_> = plan
         .attachments
         .iter()
-        .filter(|attachment| engine::chat_tool_image(attachment))
+        .filter(|attachment| {
+            engine::chat_tool_image(attachment) && seen.insert(attachment.id.as_str())
+        })
         .take(engine::MAX_TURN_ATTACHMENTS)
         .cloned()
         .collect();
     if attachments.is_empty() {
         return Ok(report);
     }
+    let key = audience_key(state, &ctx).await?;
     let started = Instant::now();
     let budget = ctx.deadline.map_or(Duration::from_secs(120), |deadline| {
         deadline
@@ -180,33 +322,6 @@ pub async fn send_turn_images(
             .min(Duration::from_secs(120))
     });
     let end = started + budget;
-    let ids: Vec<_> = attachments
-        .iter()
-        .map(|attachment| attachment.id.clone())
-        .collect();
-    let Some(claim) = claims::claim_images(
-        &state.db,
-        ctx.owner,
-        ctx.conversation_id,
-        ctx.turn_id,
-        &ctx.channel.id,
-        ctx.claim_key,
-        &ids,
-    )
-    .await?
-    else {
-        return Ok(
-            match claims::read_images(&state.db, ctx.conversation_id, ctx.turn_id, ctx.claim_key)
-                .await?
-            {
-                Some(row) => existing_report(&row, report),
-                None => {
-                    report.skipped = ids.len() as u32;
-                    report
-                }
-            },
-        );
-    };
     let supported = crate::services::channel_adapters::outbound_capabilities(
         &ctx.channel.platform,
         &state.token_exchange_cache,
@@ -220,38 +335,77 @@ pub async fn send_turn_images(
                 .platform_chat_id
                 .as_deref()
                 .is_some_and(crate::services::channel_adapters::x::is_public_conversation));
-    let loaded = if supported && !matches!(ctx.anchor, ImageAnchor::NoAnchor) {
-        engine::turn_tool_images(
-            &state.db,
-            &state.encryption_keys,
-            ctx.owner,
-            ctx.conversation_id,
-            ctx.turn_id,
-            &attachments,
-        )
-        .await?
-    } else {
-        // Claim outcomes still record every item, without loading private bytes
-        // for a destination that cannot send them.
-        attachments
-            .into_iter()
-            .map(|attachment| (attachment, Err("unavailable")))
-            .collect()
-    };
     let paced = matches!(ctx.channel.platform.as_str(), "telegram" | "telegram-new")
         && ctx.thread.kind.as_deref() != Some("private");
     let mut last_send: Option<Instant> = None;
-    let mut stop = None;
-    for (index, (attachment, bytes)) in loaded.into_iter().enumerate() {
-        let claimed =
-            claims::claim_image_item(&state.db, &claim.id, &claim.claim_id, &attachment.id).await;
-        if !matches!(claimed, Ok(true)) {
-            report.record(stop.map_or(ImageOutcome::Unknown, ImageOutcome::Skipped));
-            stop = Some("after_unknown");
+    let mut stop = initial_stop;
+    let mut cancelled = false;
+    for (index, attachment) in attachments.into_iter().enumerate() {
+        if cancelled || !live(state, &ctx).await? {
+            cancelled = true;
+            report.outcomes.push(ImageItemResult {
+                attachment_id: attachment.id,
+                status: "cancelled".into(),
+                code: None,
+            });
             continue;
         }
+        let (id, attempt) = match claims::claim_for_turn(
+            &state.db,
+            ctx.owner,
+            ctx.conversation_id,
+            ctx.turn_id,
+            &ctx.channel.id,
+            &attachment.id,
+            &key,
+        )
+        .await
+        .unwrap_or(claims::ImageClaim::Unknown)
+        {
+            claims::ImageClaim::Dispatch { id, attempt } => (id, attempt),
+            claims::ImageClaim::Existing(row) => {
+                report.outcomes.push(existing_item(&row));
+                continue;
+            }
+            claims::ImageClaim::Legacy(outcome) => {
+                report.outcomes.push(legacy_item(&attachment.id, outcome));
+                continue;
+            }
+            claims::ImageClaim::Unknown => {
+                report.record(ImageOutcome::Unknown);
+                report.outcomes.push(ImageItemResult {
+                    attachment_id: attachment.id,
+                    status: "unknown".into(),
+                    code: None,
+                });
+                stop = Some("after_unknown");
+                continue;
+            }
+        };
+        report.claimed += 1;
+        let source_exists = claims::source_exists(
+            &state.db,
+            ctx.owner,
+            ctx.conversation_id,
+            ctx.turn_id,
+            &attachment.id,
+        )
+        .await;
+        if matches!(source_exists, Ok(false)) {
+            let _ = claims::remove(&state.db, &id).await;
+            report.record(ImageOutcome::Failed("unavailable"));
+            report.outcomes.push(ImageItemResult {
+                attachment_id: attachment.id,
+                status: "failed".into(),
+                code: Some("unavailable".into()),
+            });
+            continue;
+        }
+        let progress = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let mut code = None;
-        let mut outcome = if let Some(reason) = stop {
+        let mut outcome = if source_exists.is_err() {
+            ImageOutcome::Unknown
+        } else if let Some(reason) = stop {
             ImageOutcome::Skipped(reason)
         } else if !supported {
             ImageOutcome::Failed("unsupported")
@@ -259,77 +413,118 @@ pub async fn send_turn_images(
             ImageOutcome::Failed("no_anchor")
         } else if end.saturating_duration_since(Instant::now()) < MIN_SEND_WINDOW {
             ImageOutcome::Skipped("deadline")
-        } else if let Ok(bytes) = bytes {
-            if paced && let Some(last) = last_send {
-                tokio::time::sleep(
-                    (last + Duration::from_secs(1))
-                        .saturating_duration_since(Instant::now())
-                        .min(end.saturating_duration_since(Instant::now())),
-                )
-                .await;
-            }
-            if end.saturating_duration_since(Instant::now()) < MIN_SEND_WINDOW {
-                ImageOutcome::Skipped("deadline")
-            } else {
-                let ext = match attachment.content_type.as_str() {
-                    "image/jpeg" => "jpg",
-                    "image/png" => "png",
-                    "image/gif" => "gif",
-                    "image/webp" => "webp",
-                    _ => "img",
-                };
-                let materialized = MaterializedAttachment {
-                    kind: MediaKind::Image,
-                    bytes: bytes::Bytes::from_owner(ImageBytes(bytes)),
-                    filename: Some(format!("image-{}.{ext}", index + 1)),
-                    mime_type: Some(attachment.content_type),
-                    caption: None,
-                };
-                let timeout =
-                    Duration::from_secs(35).min(end.saturating_duration_since(Instant::now()));
-                last_send = Some(Instant::now());
-                match tokio::time::timeout(timeout, send_one(state, &ctx, materialized)).await {
-                    Ok(Ok(sent_code)) => {
-                        code = sent_code;
-                        ImageOutcome::Sent
-                    }
-                    Ok(Err(error)) => {
-                        if ctx.channel.platform == "whatsapp"
+        } else {
+            let loaded = engine::turn_tool_images(
+                &state.db,
+                &state.encryption_keys,
+                ctx.owner,
+                ctx.conversation_id,
+                ctx.turn_id,
+                std::slice::from_ref(&attachment),
+            )
+            .await;
+            if let Err(error) = loaded {
+                classify_outcome(&error)
+            } else if let Some((_, Ok(bytes))) = loaded.unwrap().into_iter().next() {
+                if paced && let Some(last) = last_send {
+                    tokio::time::sleep(
+                        (last + Duration::from_secs(1))
+                            .saturating_duration_since(Instant::now())
+                            .min(end.saturating_duration_since(Instant::now())),
+                    )
+                    .await;
+                }
+                if !live(state, &ctx).await? {
+                    cancelled = true;
+                    ImageOutcome::Skipped("cancelled")
+                } else if end.saturating_duration_since(Instant::now()) < MIN_SEND_WINDOW {
+                    ImageOutcome::Skipped("deadline")
+                } else {
+                    let ext = match attachment.content_type.as_str() {
+                        "image/jpeg" => "jpg",
+                        "image/png" => "png",
+                        "image/gif" => "gif",
+                        "image/webp" => "webp",
+                        _ => "img",
+                    };
+                    let materialized = MaterializedAttachment {
+                        kind: MediaKind::Image,
+                        bytes: bytes::Bytes::from_owner(ImageBytes(bytes)),
+                        filename: Some(format!("image-{}.{ext}", index + 1)),
+                        mime_type: Some(attachment.content_type.clone()),
+                        caption: None,
+                    };
+                    last_send = Some(Instant::now());
+                    match tokio::time::timeout(
+                        Duration::from_secs(35).min(end.saturating_duration_since(Instant::now())),
+                        crate::services::channel_platform::track_provider_attempt(
+                            progress.clone(),
+                            send_one(state, &ctx, materialized),
+                        ),
+                    )
+                    .await
+                    {
+                        Ok(Ok(sent_code)) => {
+                            code = sent_code;
+                            ImageOutcome::Sent
+                        }
+                        Ok(Err(AppError::AssistantTurnRequired)) => {
+                            cancelled = true;
+                            ImageOutcome::Skipped("cancelled")
+                        }
+                        Ok(Err(error)) => if ctx.channel.platform == "whatsapp"
                             && crate::services::channel_adapters::whatsapp::image_delivery_uncertain(
                                 &error,
-                            )
-                        {
+                            ) {
                             ImageOutcome::Unknown
                         } else {
                             classify_outcome(&error)
-                        }
+                        },
+                        Err(_) => ImageOutcome::Unknown,
                     }
-                    Err(_) => ImageOutcome::Unknown,
                 }
+            } else {
+                ImageOutcome::Failed("unavailable")
             }
+        };
+        let (durable_state, item_code, status) = match outcome {
+            ImageOutcome::Sent => (ImageDeliveryState::Sent, code, "sent_now"),
+            ImageOutcome::Failed(reason) => (ImageDeliveryState::Failed, Some(reason), "failed"),
+            ImageOutcome::Unknown => (ImageDeliveryState::Unknown, None, "unknown"),
+            ImageOutcome::Skipped("cancelled") => {
+                (ImageDeliveryState::Skipped, Some("cancelled"), "cancelled")
+            }
+            ImageOutcome::Skipped(reason) => (ImageDeliveryState::Skipped, Some(reason), "skipped"),
+        };
+        let permanent = matches!(
+            outcome,
+            ImageOutcome::Sent | ImageOutcome::Failed("unsupported" | "no_anchor" | "unavailable")
+        );
+        let completion = if !permanent && !progress.load(std::sync::atomic::Ordering::Relaxed) {
+            claims::release(&state.db, &id, &attempt).await
         } else {
-            ImageOutcome::Failed("unavailable")
+            claims::finish(&state.db, &id, &attempt, durable_state, item_code).await
         };
-        let (item_state, item_code) = match outcome {
-            ImageOutcome::Sent => ("sent", code),
-            ImageOutcome::Failed(reason) => ("failed", Some(reason)),
-            ImageOutcome::Unknown => ("unknown", None),
-            ImageOutcome::Skipped(reason) => ("skipped", Some(reason)),
-        };
-        if claims::finish_image_item(
-            &state.db,
-            &claim.id,
-            &claim.claim_id,
-            &attachment.id,
-            item_state,
-            item_code,
-        )
-        .await
-        .is_err()
-        {
-            outcome = ImageOutcome::Unknown;
+        match completion.unwrap_or(claims::ImageCompletion::Unknown) {
+            claims::ImageCompletion::Recorded => {
+                report.record(outcome);
+                report.outcomes.push(ImageItemResult {
+                    attachment_id: attachment.id,
+                    status: status.into(),
+                    code: item_code.map(str::to_owned),
+                });
+            }
+            claims::ImageCompletion::Existing(row) => report.outcomes.push(existing_item(&row)),
+            claims::ImageCompletion::Unknown => {
+                outcome = ImageOutcome::Unknown;
+                report.record(outcome);
+                report.outcomes.push(ImageItemResult {
+                    attachment_id: attachment.id,
+                    status: "unknown".into(),
+                    code: None,
+                });
+            }
         }
-        report.record(outcome);
         match outcome {
             ImageOutcome::Unknown => stop = Some("after_unknown"),
             ImageOutcome::Failed("billing") => stop = Some("billing"),
@@ -337,19 +532,23 @@ pub async fn send_turn_images(
             _ => {}
         }
     }
-    // Failure leaves the non-reclaimable sending row as the crash barrier.
-    let _ = claims::finish_images(&state.db, &claim.id, &claim.claim_id).await;
-    let destination_kind = match ctx.anchor {
-        ImageAnchor::Inbound { .. } | ImageAnchor::NoAnchor => "inbound",
-        ImageAnchor::Thread { .. } => "thread",
-        ImageAnchor::Initiated { .. } => "initiated",
-    };
-    super::audit(state, ctx.owner, "nyxbot_channel_image_delivery", serde_json::json!({
-        "conversation_id": ctx.conversation_id, "turn_id": ctx.turn_id, "channel_agent_id":ctx.channel.id,
-        "destination_kind":destination_kind, "transport":ctx.channel.transport,
-        "attempted":report.attempted, "sent":report.sent, "failed":report.failed,
-        "unknown":report.unknown, "skipped":report.skipped,
-    })).await;
+    super::audit(
+        state,
+        ctx.owner,
+        "nyxbot_channel_image_delivery",
+        serde_json::json!({
+            "conversation_id": ctx.conversation_id,
+            "turn_id": ctx.turn_id,
+            "channel_agent_id": ctx.channel.id,
+            "transport": ctx.channel.transport,
+            "attempted": report.attempted,
+            "sent": report.sent,
+            "failed": report.failed,
+            "unknown": report.unknown,
+            "skipped": report.skipped,
+        }),
+    )
+    .await;
     Ok(report)
 }
 
@@ -426,7 +625,8 @@ async fn send_one(
                 .initiated
                 .filter(|target| target.thread.id == *chat_id)
                 .ok_or_else(|| AppError::Conflict("Image post target unavailable".into()))?;
-            let response = super::chats::send_post(state, target, outbound).await?;
+            let response =
+                super::chats::send_post_with_fence(state, target, outbound, ctx.fence).await?;
             response
                 .platform_message_id
                 .ok_or_else(media::upload_failed)?;
@@ -495,6 +695,7 @@ mod tests {
                             unsupported,
                             app_visible,
                             automation,
+                            ..Default::default()
                         };
                         let note = failure_note(&report);
                         assert_eq!(note.contains("NyxID app"), app_visible);
@@ -603,24 +804,56 @@ pub async fn report_or_failure(
     ctx: ImageSendContext<'_>,
     plan: &ImageSendPlan,
 ) -> ImageReport {
+    report_or_failure_with_stop(state, ctx, plan, None).await
+}
+
+pub(super) async fn report_or_failure_with_stop(
+    state: &AppState,
+    ctx: ImageSendContext<'_>,
+    plan: &ImageSendPlan,
+    stop: Option<&'static str>,
+) -> ImageReport {
     let app_visible = ctx.audience.owner_private;
     let automation = matches!(ctx.anchor, ImageAnchor::Initiated { .. });
-    match send_turn_images(state, ctx, plan).await {
+    let result = match stop {
+        None => send_turn_images(state, ctx, plan).await,
+        Some(reason) => Box::pin(send_turn_images_with_stop(state, ctx, plan, Some(reason))).await,
+    };
+    match result {
         Ok(report) => report,
         Err(error) => {
             tracing::warn!(
                 code = error.error_code(),
                 "Tool image delivery preparation failed"
             );
-            let count = plan
+            let mut seen = std::collections::HashSet::new();
+            let outcome = classify_outcome(&error);
+            let (status, code) = match outcome {
+                ImageOutcome::Unknown => ("unknown", None),
+                ImageOutcome::Failed(code) | ImageOutcome::Skipped(code) => {
+                    ("failed", Some(code.to_owned()))
+                }
+                ImageOutcome::Sent => unreachable!(),
+            };
+            let outcomes: Vec<_> = plan
                 .attachments
                 .iter()
-                .filter(|attachment| engine::chat_tool_image(attachment))
+                .filter(|attachment| {
+                    engine::chat_tool_image(attachment) && seen.insert(attachment.id.as_str())
+                })
                 .take(engine::MAX_TURN_ATTACHMENTS)
-                .count() as u32;
+                .map(|attachment| ImageItemResult {
+                    attachment_id: attachment.id.clone(),
+                    status: status.into(),
+                    code: code.clone(),
+                })
+                .collect();
+            let count = outcomes.len() as u32;
             ImageReport {
+                outcomes,
                 attempted: count,
-                failed: count,
+                failed: if status == "failed" { count } else { 0 },
+                unknown: if status == "unknown" { count } else { 0 },
                 app_visible,
                 automation,
                 ..Default::default()

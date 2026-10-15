@@ -685,7 +685,7 @@ pub(crate) async fn dispatch(
             };
             if !chat.is_orchestrator() && (agent.id != chat.agent_id || name == "set_agent_skills")
             {
-                return Err(AppError::Forbidden("Specialists may read or request only their own skills; only NyxBot manages skills".into()));
+                return Err(AppError::Forbidden("Specialists may read or request only their own skills; skills are managed for them".into()));
             }
             if name == "get_agent_skills" {
                 return Ok((json!(skills::SkillsResponse::from(agent)), false));
@@ -703,17 +703,23 @@ pub(crate) async fn dispatch(
                     "NyxBot manages skills with set_agent_skills".into(),
                 ));
             }
+            if name == "request_agent_skills"
+                && args.get("skill").is_some()
+                && args.get("selection").is_some()
+            {
+                return Err(AppError::ValidationError(
+                    "Request a skill or a pinned selection, not both".into(),
+                ));
+            }
+            if name == "request_agent_skills" && !chat.involved() {
+                return missing_skill(db, chat, &agent, args).await;
+            }
             if name == "request_agent_skills" && args.get("skill").is_some() {
-                if args.get("selection").is_some() {
-                    return Err(AppError::ValidationError(
-                        "Request a skill or a pinned selection, not both".into(),
-                    ));
-                }
                 if let Some(result) = acks::allowed_skill_request(db, chat, args).await? {
                     return Ok((result, false));
                 }
                 let summary = format!(
-                    "Skill {} version {} for agent {}. NyxBot must resolve and preview exact pins before attaching under the governing permission mode.",
+                    "Skill {} version {} for agent {}. Exact pins are resolved and previewed before attaching under the governing permission mode.",
                     arg(args, "skill"),
                     args["version"]
                         .as_str()
@@ -816,6 +822,70 @@ pub(crate) async fn dispatch(
     Ok((value, false))
 }
 
+async fn missing_skill(
+    db: &mongodb::Database,
+    chat: &ChatAuthority,
+    agent: &crate::models::assistant_agent::AssistantAgent,
+    args: &Value,
+) -> AppResult<(Value, bool)> {
+    use crate::services::assistant_access_policy as policy;
+    let (label, attached) = if let Some(skill) = args["skill"].as_str() {
+        let version = args["version"].as_str();
+        let attached = agent.skills.iter().any(|pin| {
+            (pin.skill_id == skill || pin.name == skill)
+                && version.is_none_or(|version| pin.version == version)
+        });
+        (skill.to_owned(), attached)
+    } else {
+        let selection: Result<skills::Selection, _> =
+            serde_json::from_value(args["selection"].clone());
+        match selection {
+            Ok(selection) => {
+                let attached = !selection.skills.is_empty()
+                    && selection.skills.iter().all(|wanted| {
+                        agent.skills.iter().any(|pin| {
+                            pin.skill_id == wanted.skill_id && pin.version == wanted.version
+                        })
+                    });
+                let label = selection
+                    .skills
+                    .iter()
+                    .map(|pin| pin.name.clone())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                (label, attached)
+            }
+            Err(_) => {
+                return Err(AppError::ValidationError("Invalid skill selection".into()));
+            }
+        }
+    };
+    if attached {
+        return Ok((
+            json!({
+                "status": "already_attached",
+                "skill": label,
+                "request_created": false,
+                "instructions": format!(
+                    "The skill {} is already attached to you: read it with nyxid__skill_read and use it. No request was created.",
+                    crate::services::assistant_nyxagent::identifier(&label)
+                ),
+            }),
+            false,
+        ));
+    }
+    acks::audit_missing_access(db, chat, None, policy::AccessArea::Skills.scope()).await;
+    Ok((
+        policy::missing_access(
+            policy::AccessArea::Skills,
+            Some(&label),
+            &agent.id,
+            Some("not_attached"),
+        ),
+        true,
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -863,6 +933,8 @@ mod tests {
         guest: bool,
     ) -> ChatAuthority {
         ChatAuthority {
+            report_to: None,
+            with_nyxbot: false,
             org_agent_access: None,
             turn_id: None,
             turn_stopped: false,

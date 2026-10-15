@@ -118,6 +118,7 @@ pub async fn reserve(
                 retry_claimed_by: None,
                 activity_count: None,
                 author: Some(crate::models::assistant_message::MessageAuthor::Owner),
+                report_to: None,
                 continuation_of: None,
                 specialist_id: None,
                 steering: Some(Box::new(Steering {

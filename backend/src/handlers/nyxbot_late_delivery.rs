@@ -336,14 +336,6 @@ async fn event_images(
         return ImageReport::default();
     }
     let anchor = event_anchor(event, delivery);
-    let claim_key = if let Some(binding) = delivery.origin.thread.as_ref() {
-        format!("thread:{}", binding.child_id)
-    } else {
-        format!(
-            "inbound:{}",
-            event.relay_message_id.as_deref().unwrap_or(&event.event_id)
-        )
-    };
     report_or_failure(
         state,
         ImageSendContext {
@@ -359,8 +351,9 @@ async fn event_images(
                         || (thread.kind.as_deref() == Some("private") && thread.owner_chat)),
             },
             deadline,
-            claim_key: &claim_key,
+
             initiated: None,
+            fence: None,
         },
         &ImageSendPlan {
             attachments: message.attachments.clone(),

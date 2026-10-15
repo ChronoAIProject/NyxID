@@ -26,6 +26,9 @@ pub struct AuthoredDraftClaim {
     pub requested_turn_id: Option<String>,
     pub voice_request_id: Option<String>,
     pub trigger_run_id: Option<String>,
+    /// Absent on claims written before the snapshot existed: unproven.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routing: Option<super::assistant_acknowledgement::CardRouting>,
 }
 
 pub const DEFAULT_THRESHOLD: i64 = 15;

@@ -754,6 +754,8 @@ fn approval_refuses_non_owner_guest_and_non_orchestrator() {
         agent_name: "NyxBot".into(),
         guest: false,
         confirmation_policy: None,
+        report_to: None,
+        with_nyxbot: false,
     };
     let agent = crate::models::assistant_agent::AssistantAgent {
         id: "agent".into(),
@@ -1489,6 +1491,7 @@ async fn seed_learned_proposal(name: &str) -> SeededLearned {
                 attachments: Vec::new(),
                 origin: Some(crate::models::assistant_conversation::TurnOrigin::User),
                 via: None,
+                report_to: None,
             })
             .await
             .unwrap();
@@ -1713,6 +1716,7 @@ async fn started_learned_publication(name: &str) -> StartedLearned {
             confirmation: None,
             authored_skill: None,
             machine_context: None,
+            routing: None,
             id: card.clone(),
             conversation_id: fixture.chat.conversation_id.clone(),
             user_id: fixture.owner.clone(),
@@ -2091,6 +2095,7 @@ async fn approval_card_is_consumed_once_and_replay_cannot_consume_again() {
             confirmation: None,
             authored_skill: None,
             machine_context: None,
+            routing: None,
             id: card.clone(),
             conversation_id: fixture.chat.conversation_id.clone(),
             user_id: fixture.owner.clone(),

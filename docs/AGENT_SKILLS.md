@@ -56,17 +56,20 @@ target agent, revision and exact complete pins, including dependency hashes.
 Full access attaches immediately with a non-consumable automatic receipt.
 Pinning rechecks Ornn access and package integrity in every mode.
 
-Specialists cannot directly change their skill selection. Their existing
-permission-request flow asks
-NyxBot to review a skill name/GUID with an optional version, or complete pins.
+Specialists cannot directly change their skill selection. For work NyxBot assigned, their existing
+permission-request flow asks NyxBot to review a skill name/GUID with an optional
+version, or complete pins; a specialist you talk to directly gets
+`missing_access` with a link to its Skills editor instead (an already attached
+skill is simply usable) and raises no card.
 Specialists need no Ornn grant to request guidance; NyxBot resolves and previews
 unknown pins with the managing person's visibility. Approval of that request is advisory:
 NyxBot must apply it through `set_agent_skills`, which uses the effective
 permission mode for external additions or re-pins. No permission decision alone attaches
 external content. Owner UI writes are explicit owner actions.
 
-After the owner allows a specialist's request, NyxID wakes the assigning NyxBot
-thread (or its home thread) with `skill_request_allowed`, including the immutable
+After the owner allows an involved specialist's request, NyxID wakes the card's
+assigned NyxBot thread (or NyxBot's home thread for a group-with-NyxBot card,
+after a live membership recheck) with `skill_request_allowed`, including the immutable
 agent ID, request ID and a bounded summary of the requested roots. The saved
 owner decision retains a durable notification marker until a NyxBot turn
 consumes its event. The assistant sweep retries after restart, routing failure,

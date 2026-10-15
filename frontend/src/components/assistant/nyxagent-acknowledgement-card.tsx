@@ -83,9 +83,21 @@ export function NyxAgentAcknowledgementCard({
           {confirmationReason(acknowledgement.confirmation)}
         </p>
       ) : null}
+      {/*
+        Help is selected by kind first and by `routed` (NyxBot decides) after.
+        The `skills` and `operations` kinds exist only for a specialist's
+        routed request: a specialist you talk to directly raises no card and
+        gets a plain missing-access result instead, so naming NyxBot on a routed
+        card is accurate. A `skills` card without that routing (an unrouted row
+        from an older replica) must not promise that NyxBot resolves it:
+        allowing it attaches nothing and wakes nobody. Orchestrator-card help
+        (the `routed` branch) is unchanged.
+      */}
       <p className="text-12 text-muted-foreground">
         {acknowledgement.kind === "skills"
-          ? "Allowing this proposal asks NyxBot to resolve the exact version. Adding or re-pinning the skill follows NyxBot's permission mode."
+          ? routed
+            ? "Allowing this proposal asks NyxBot to resolve the exact version. Adding or re-pinning the skill follows NyxBot's permission mode."
+            : "Allowing records your decision only; it attaches nothing by itself. Add the skill in the agent's Skills editor."
           : acknowledgement.kind === "operations"
           ? "This changes the specialist's operations on every thread. Widening follows NyxBot's permission mode."
           : routed

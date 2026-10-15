@@ -945,6 +945,118 @@ Each X DM image is a separately billed request using the ordinary channel
 billing context. A billing refusal suspends the channel through the existing
 path and skips the remaining images; X public replies do not support images.
 
+### Per-image delivery claims, audiences and topics (P15)
+
+Property P15: **one send per source image and resolved audience, for the
+image's whole lifetime, across every NyxBot path** (automatic replies on
+direct and gateway transports, followed threads, event and duplicate-question
+chats, chat-delivered automations and explicit `nyxid__post_to_chat
+include_images` posts). Uncertain or in-progress sends are never retried and
+never reported as delivered.
+
+Release 0.71.0 includes #1889 and its v1 image claims. Before any v2 claim,
+new replicas read `nyxbot_image_deliveries` for the same owner, conversation,
+turn and NyxBot channel, across every destination alias (`inbound:`, `thread:`,
+`chat:`, `initiated:`). A sent item reports `previously_delivered`; sending,
+unknown, or a pending item in a sending batch reports `in_progress_or_unknown`.
+Failures and unrecognized skips retain their old outcome. Only a pending batch
+or a skip code v1 set before dispatch (`deadline`, `after_unknown`, `billing`)
+permits a new v2 attempt. No new code rewrites the v1 rows; their existing
+seven-day `expires_at` TTL stays. Existing conversation/user deletion still
+purges their metadata.
+
+This guard is deliberately conservative across all audiences of the same bot
+for that turn: it can suppress a second chat's image during the seven-day
+window. It covers old-replica sends completed before the new replica reads.
+An old 0.71.0 replica and a new replica can still race between the read and
+claim during rolling deployment; concurrent duplicates remain a rollout risk.
+There is no mixed-fleet guarantee and no data repair is needed. Rollback to
+0.71.0 restores its old behavior and ignores v2 claims, so it does not preserve
+the new delivery invariant. Remove the v1 read path and collection/index one
+release after this change ships, at least seven days after deployment; track
+that sunset in the PR description.
+
+**Claim (v2).** `nyxbot_image_deliveries_v2` holds one document per (source
+image, audience): `_id = sha256("v2\0{owner}\0{attachment_id}\0{audience_key}")`
+plus plain `user_id`, `conversation_id`, `attachment_id`, `audience_key`,
+`state`, `attempt`, `code` and `created_at`, with cleanup indexes on
+`attachment_id` and `(user_id, conversation_id)` and **no TTL**
+(`services/channel_image_delivery.rs`, `models/nyxbot_image_delivery.rs`).
+States move `pending` -> `sending{attempt}` -> `sent | failed{code} |
+skipped{code} | unknown` through compare-and-set on the attempt token. Only the
+winner of the `pending -> sending` race dispatches; success is reported only
+after an acknowledged matching completion write, an ambiguous write settles
+locally as `unknown`, and a claim found `sending` reports
+`in_progress_or_unknown`. A later caller reports an existing claim's durable
+state (`previously_delivered`, the same failure or skip code, in progress or
+unknown) without resending and without repeating another path's failure line.
+A definite refusal before any provider request (cancelled, deadline,
+after-unknown, billing preflight or another pre-dispatch error) releases its
+own `sending{attempt}` back to `pending` with an attempt-token CAS, clearing
+attempt and code. This call reports the skip or failure; a later post or
+automation may acquire the pending image. Unsupported audiences, missing
+anchors and unavailable sources remain permanent refusals. Once provider I/O
+begins, even a timeout or failed settlement retains the durable barrier and
+never releases it for retry.
+Claims live as long as their source image: they are deleted in the same
+transactions that delete `assistant_attachments` (retention, conversation and
+group deletion, user purge), a sender that finds its source gone after claiming
+deletes the claim and reports `unavailable`, and a bounded orphan sweep on the
+assistant upload-retention cadence removes only claims whose source attachment
+no longer exists. Claims hold identifiers, states and codes only.
+
+**Audience.** The audience is the outbound target actually sent to, resolved
+by `services/channel_image_audience.rs` after the adapter's own normalization
+and fallback, and serialized as
+`"{channel_bot_id}\u{1f}{platform_chat_id}\u{1f}{native_thread_or_empty}"`
+with the real `ChannelBot.id` (never a gateway partition or `NyxbotChannel`
+id). Per adapter:
+
+| Platform | Chat | Audience boundary | Not a boundary |
+| --- | --- | --- | --- |
+| Telegram, telegram-new | chat id | forum topic `message_thread_id` (normalized to a decimal string) | reply chains (`reply_to_message_id`) |
+| Slack | channel id | a root thread (`thread_ts`, else the replied-to message, as the adapter posts it) is distinct from the top-level channel | — |
+| Discord | channel id (threads are channels) | — | — |
+| Lark, Feishu | chat id | — | thread replies share the chat audience |
+| WhatsApp | normalized `wa_id` digits | — | — |
+| X | DM conversation id | — | public replies carry no images |
+| Aurinko, device, OpenClaw and other adapters | chat id or no image delivery, per the adapter's declared capability | — | — |
+
+The Telegram and Slack adapters build their outbound `message_thread_id` /
+`thread_ts` from the same `native_thread` function the audience uses, so the
+key and the provider payload cannot drift.
+
+Inbound Telegram thread keys and follow-scope classification remain unchanged.
+Native `message_thread_id` and gateway `conversation.thread_id` continue to
+select existing conversations, including reply chains. Separate additive
+`telegram_topic` evidence selects the outbound target and image audience:
+native messages require `is_topic_message: true`; gateway version 1 facts
+must declare a topic and positive decimal native ID. Explicit reply-chain
+evidence sends at chat level without changing its inbound partition. Legacy
+anchors without evidence retain their old outbound target. Old replicas ignore
+the additive field and reuse the same conversation keys; there is no migration.
+The image guarantee applies only after every replica is upgraded.
+
+**Topics.** Agent-initiated posts (`nyxid__post_to_chat` and chat-delivered
+automation results) keep the thread's native topic
+(the separate Telegram topic evidence, falling back to legacy
+`platform_thread_id`, or a Slack root thread) for text and images through the adapter's `reply_context`; a topic is
+therefore its own audience, and the parent chat is another.
+
+**Explicit posts and automations.** `include_images` (default false) sends the
+calling turn's own tool images (trusted `TurnAttachment` metadata of the exact
+live turn, `chat_tool_image` only, deduplicated, at most 8) before the text,
+each behind a turn-fence recheck and its claim; the text follows a final fence
+recheck and nothing further is sent after Stop or replacement. Multi-turn
+automation runs keep `TriggerRun.image_refs` (at most 16, oldest terminal
+evicted against the run's configured audience, else `image_refs_truncated`)
+and deliver first sends for refs whose claim is absent or `pending`, newest
+first and at most eight, reporting the other claim states without consuming
+that budget; an omitted-images line names the count. Unavailable image
+metadata never blocks the final text: the text is sent and the image counts as
+failed. The text/stream delivery barrier (`channel_turn_delivery.rs`) is
+separate and unchanged.
+
 ### ADR-013 metadata boundary
 
 Inbound `ChannelMessage.attachments` stores only `StoredAttachment { content_type, provider_ref, platform_message_id, file_key, image_key, filename, mime_type, size_bytes }`. Provider references are routing metadata needed to fetch an attachment; they are not its bytes. Old rows without the field deserialize as an empty list. The legacy cleanup retains new provider-reference metadata while removing historical content fields. Outbound rows store only the first attachment's `content_type` and an empty attachment list, never sources, bytes, captions or filenames. Audits contain only attachment kinds/count plus existing routing identifiers; idempotency rows store a fingerprint, never source content. No media is put in token claims and no new telemetry events are introduced.

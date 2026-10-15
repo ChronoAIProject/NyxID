@@ -21,6 +21,9 @@ impl Drop for AsyncFixture {
 }
 impl AsyncFixture {
     async fn new() -> Self {
+        Self::build(false).await
+    }
+    async fn build(distinct_operations: bool) -> Self {
         let f = orchestrator_fixture("async_service").await;
         let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
         let captured = calls.clone();
@@ -40,15 +43,31 @@ impl AsyncFixture {
                 let result_body = result_body.lock().unwrap().clone();
                 let status_phase = status_phase.lock().unwrap().clone();
                 async move {
-                    let _permit = if uri.path() == "/executions/op-1" {
+                    let _permit = if uri
+                        .path()
+                        .strip_prefix("/executions/")
+                        .is_some_and(|id| !id.contains('/'))
+                    {
                         Some(gate.acquire().await.unwrap())
                     } else {
                         None
                     };
                     Json(match uri.path() {
-                        "/executions" => json!({"operation_id":"op-1","status":"queued"}),
-                        "/executions/op-1" => json!({"status":status_phase}),
-                        "/executions/op-1/result" => result_body,
+                        "/executions" => json!({
+                            "operation_id": if distinct_operations {
+                                format!("op-{}", uuid::Uuid::new_v4())
+                            } else {
+                                "op-1".to_owned()
+                            },
+                            "status":"queued",
+                        }),
+                        path if path.ends_with("/result") => result_body,
+                        path if path
+                            .strip_prefix("/executions/")
+                            .is_some_and(|id| !id.contains('/')) =>
+                        {
+                            json!({"status":status_phase})
+                        }
                         _ => json!({"status":"cancelled"}),
                     })
                 }
@@ -952,7 +971,27 @@ async fn async_automation_rebinds_run_to_result_turn_and_preserves_confirmation(
     a.due().await;
     Box::pin(async_operations::sweep(&a.f.state)).await.unwrap();
     finish(&a, &a.f.row, "submitted").await;
+    // A stale legacy marker never gives the automation's result turn a target.
+    a.f.state
+        .db
+        .collection::<bson::Document>(CONVERSATIONS)
+        .update_one(
+            doc! {"_id": &a.f.row.id},
+            doc! {"$set": {"report_to": "nyxa-stale"}},
+        )
+        .await
+        .unwrap();
     let row = admit_event(&a).await;
+    let result_turn = row.active_turn.as_ref().unwrap();
+    assert_eq!(result_turn.trigger_run_id.as_deref(), Some(id.as_str()));
+    assert_eq!(result_turn.report_to, None);
+    assert!(!result_turn.with_nyxbot);
+    assert!(
+        result_turn
+            .events
+            .iter()
+            .all(|event| event.bound && event.report_to.is_none())
+    );
     let run =
         a.f.state
             .db
@@ -1145,4 +1184,275 @@ async fn async_channel_event_validates_original_source_after_newer_message() {
     let watch = watches::bound(db, &row).await.unwrap().unwrap();
     watches::apply_delivery(&mut row, &watch);
     assert_eq!(row.channel, Some(original));
+}
+
+/// Finish the conversation's live turn with a completed reply.
+async fn finish_live(
+    a: &AsyncFixture,
+    row: &crate::models::assistant_conversation::AssistantConversation,
+) {
+    engine::finish_turn(
+        &a.f.state.db,
+        row,
+        &row.credential_api_key_id,
+        &uuid::Uuid::new_v4().to_string(),
+        &engine::TurnResult {
+            text: "done".into(),
+            session_id: None,
+            response_id: None,
+            error: None,
+        },
+    )
+    .await
+    .unwrap();
+}
+
+fn user_start(id: &str, text: &str) -> engine::TurnStart {
+    engine::TurnStart::from(&engine::TurnRequest {
+        acknowledgement_id: None,
+        retry_of: None,
+        attachment_ids: vec![],
+        conversation_id: Some(id.to_owned()),
+        text: text.into(),
+        agent_id: None,
+        model: None,
+        access_mode: None,
+    })
+}
+
+/// Terminal watches are swept by TTL in production; the upstream stand-in
+/// answers every submission with the same operation id, so clear them first.
+async fn clear_terminal_watches(a: &AsyncFixture) {
+    a.f.state
+        .db
+        .collection::<bson::Document>(WATCHES)
+        .delete_many(doc! {"state": {"$in": ["delivered", "cancelled"]}})
+        .await
+        .unwrap();
+}
+
+/// Submit from the live turn `turn_id` and return its watch.
+async fn submit_from(a: &AsyncFixture, turn_id: &str) -> AsyncServiceOperation {
+    clear_terminal_watches(a).await;
+    a.submit().await;
+    a.f.state
+        .db
+        .collection::<AsyncServiceOperation>(WATCHES)
+        .find_one(doc! {"turn_id": turn_id})
+        .await
+        .unwrap()
+        .expect("the submitted watch")
+}
+
+/// Poll the upstream to completion and queue the result event.
+async fn complete(a: &AsyncFixture) -> crate::models::assistant_conversation::AgentEvent {
+    a.due().await;
+    Box::pin(async_operations::sweep(&a.f.state)).await.unwrap();
+    engine::get(&a.f.state.db, &a.f.owner, &a.f.row.id)
+        .await
+        .unwrap()
+        .pending_events
+        .into_iter()
+        .find(|e| e.kind == watches::EVENT_KIND)
+        .expect("the queued result event")
+}
+
+/// Admit the queued result as an event turn.
+async fn event_turn(
+    a: &AsyncFixture,
+) -> crate::models::assistant_conversation::AssistantConversation {
+    let mut start = user_start(&a.f.row.id, "");
+    start.origin = TurnOrigin::Event;
+    engine::begin_turn(
+        &a.f.state.db,
+        &a.f.owner,
+        &start,
+        &a.f.state.encryption_keys,
+    )
+    .await
+    .unwrap()
+}
+
+fn snapshot(row: &crate::models::assistant_conversation::AssistantConversation) -> Option<String> {
+    row.active_turn.as_ref().unwrap().report_to.clone()
+}
+
+/// Plan v7 §2.2 / §2.7 lifecycle (R4-10): an async carrier proves its report
+/// target from the admitted live turn's snapshot only, with validated
+/// provenance; legacy, unknown-version or disagreeing carriers, and the
+/// conversation's stale marker, never create NyxBot involvement.
+#[tokio::test]
+async fn async_carriers_prove_report_targets_from_the_live_turn_snapshot_only() {
+    use crate::models::assistant_conversation::REPORT_PROVENANCE_V1;
+    let a = AsyncFixture::build(true).await;
+    // Admission is exercised explicitly below; park automatic wake-ups so the
+    // sweep cannot consume the result event before its provenance is checked.
+    let limit = crate::handlers::assistant_team::team_pool_limit(&a.f.state, &a.f.owner).await + 1;
+    let mut permits = Vec::new();
+    for _ in 0..limit {
+        permits.push(
+            a.f.state
+                .direct_chat_limiter
+                .try_acquire_pool("assistant_team", &a.f.owner, limit)
+                .await
+                .unwrap()
+                .unwrap(),
+        );
+    }
+    let db = a.f.state.db.clone();
+    let owner = a.f.owner.clone();
+    let id = a.f.row.id.clone();
+    let keys = a.f.state.encryption_keys.clone();
+    let nb = "nyxa-0123456789abcdef0123456789abcdef";
+    let live_turn = a.f.row.active_turn.as_ref().unwrap().turn_id.clone();
+
+    // (a) A direct turn's operation carries a validated None: its result never
+    // involves NyxBot, even beside a stale legacy marker on the conversation.
+    let w = submit_from(&a, &live_turn).await;
+    assert_eq!(w.delivery.report_provenance, REPORT_PROVENANCE_V1);
+    assert_eq!(w.delivery.report_to, None);
+    db.collection::<bson::Document>(CONVERSATIONS)
+        .update_one(doc! {"_id": &id}, doc! {"$set": {"report_to": nb}})
+        .await
+        .unwrap();
+    finish_live(&a, &a.f.row).await;
+    let event = complete(&a).await;
+    assert!(event.bound && event.report_to.is_none());
+    let claimed = event_turn(&a).await;
+    assert_eq!(snapshot(&claimed), None);
+    // apply_delivery restores transport context only, never the target.
+    let mut tampered = w.clone();
+    tampered.delivery.report_to = Some(nb.into());
+    let mut restored = claimed.clone();
+    restored.report_to = None;
+    watches::apply_delivery(&mut restored, &tampered);
+    assert_eq!(snapshot(&restored), None);
+    assert_eq!(restored.report_to, None);
+    finish_live(&a, &claimed).await;
+    assert_eq!(
+        engine::messages(&db, &owner, &id, 100, None)
+            .await
+            .unwrap()
+            .into_iter()
+            .rev()
+            .find(|m| m.role == "assistant")
+            .unwrap()
+            .report_to,
+        None
+    );
+
+    // (b) A proven assigned operation keeps its target through intervening
+    // direct work; a child submitted from its continuation derives the target
+    // from the admitted live turn, not from the parent's stored field.
+    let row = engine::begin_turn(&db, &owner, &user_start(&id, "assigned"), &keys)
+        .await
+        .unwrap();
+    let turn_id = row.active_turn.as_ref().unwrap().turn_id.clone();
+    db.collection::<bson::Document>(CONVERSATIONS)
+        .update_one(
+            doc! {"_id": &id, "active_turn.turn_id": &turn_id},
+            doc! {"$set": {"active_turn.report_to": nb}},
+        )
+        .await
+        .unwrap();
+    let assigned = submit_from(&a, &turn_id).await;
+    assert_eq!(assigned.delivery.report_to.as_deref(), Some(nb));
+    assert_eq!(assigned.delivery.report_provenance, REPORT_PROVENANCE_V1);
+    finish_live(&a, &row).await;
+    let direct = engine::begin_turn(&db, &owner, &user_start(&id, "unrelated"), &keys)
+        .await
+        .unwrap();
+    assert_eq!(snapshot(&direct), None);
+    assert_eq!(direct.report_to, None);
+    finish_live(&a, &direct).await;
+    let event = complete(&a).await;
+    assert!(event.bound && event.report_to.as_deref() == Some(nb));
+    let claimed = event_turn(&a).await;
+    assert_eq!(snapshot(&claimed).as_deref(), Some(nb));
+    // The parent's stored field is not what a child inherits.
+    db.collection::<bson::Document>(WATCHES)
+        .update_one(
+            doc! {"_id": &assigned.id},
+            doc! {"$set": {"delivery.report_to": "nyxa-other"}},
+        )
+        .await
+        .unwrap();
+    let child = submit_from(&a, &claimed.active_turn.as_ref().unwrap().turn_id).await;
+    assert_eq!(child.delivery.report_to.as_deref(), Some(nb));
+    assert_eq!(child.delivery.report_provenance, REPORT_PROVENANCE_V1);
+    assert_eq!(child.delivery.origin, assigned.delivery.origin);
+    finish_live(&a, &claimed).await;
+    assert_eq!(
+        engine::messages(&db, &owner, &id, 100, None)
+            .await
+            .unwrap()
+            .into_iter()
+            .rev()
+            .find(|m| m.role == "assistant")
+            .unwrap()
+            .report_to
+            .as_deref(),
+        Some(nb)
+    );
+    watches::cancel(&db, &owner, &id).await.unwrap();
+    db.collection::<bson::Document>(WATCHES)
+        .delete_many(doc! {"_id": &child.id})
+        .await
+        .unwrap();
+
+    // (c) Legacy and unknown-version carriers prove nothing; a bound event
+    // whose carrier disagrees resolves to None; an old legacy parent gives a
+    // new child nothing either.
+    for provenance in [0_i32, 7] {
+        let row = engine::begin_turn(&db, &owner, &user_start(&id, "legacy"), &keys)
+            .await
+            .unwrap();
+        let w = submit_from(&a, &row.active_turn.as_ref().unwrap().turn_id).await;
+        db.collection::<bson::Document>(WATCHES)
+            .update_one(
+                doc! {"_id": &w.id},
+                doc! {"$set": {"delivery.report_to": nb, "delivery.report_provenance": provenance}},
+            )
+            .await
+            .unwrap();
+        finish_live(&a, &row).await;
+        let event = complete(&a).await;
+        assert!(!event.bound && event.report_to.is_none(), "{provenance}");
+        let claimed = event_turn(&a).await;
+        assert_eq!(snapshot(&claimed), None, "{provenance}");
+        let child = submit_from(&a, &claimed.active_turn.as_ref().unwrap().turn_id).await;
+        assert_eq!(child.delivery.report_to, None);
+        assert_eq!(child.delivery.report_provenance, REPORT_PROVENANCE_V1);
+        finish_live(&a, &claimed).await;
+        watches::cancel(&db, &owner, &id).await.unwrap();
+        db.collection::<bson::Document>(WATCHES)
+            .delete_many(doc! {"_id": &child.id})
+            .await
+            .unwrap();
+    }
+    let row = engine::begin_turn(&db, &owner, &user_start(&id, "assigned again"), &keys)
+        .await
+        .unwrap();
+    let turn_id = row.active_turn.as_ref().unwrap().turn_id.clone();
+    db.collection::<bson::Document>(CONVERSATIONS)
+        .update_one(
+            doc! {"_id": &id, "active_turn.turn_id": &turn_id},
+            doc! {"$set": {"active_turn.report_to": nb}},
+        )
+        .await
+        .unwrap();
+    let w = submit_from(&a, &turn_id).await;
+    finish_live(&a, &row).await;
+    let event = complete(&a).await;
+    assert!(event.bound && event.report_to.as_deref() == Some(nb));
+    db.collection::<bson::Document>(WATCHES)
+        .update_one(
+            doc! {"_id": &w.id},
+            doc! {"$set": {"delivery.report_to": "nyxa-other"}},
+        )
+        .await
+        .unwrap();
+    let claimed = event_turn(&a).await;
+    assert_eq!(snapshot(&claimed), None);
+    finish_live(&a, &claimed).await;
 }

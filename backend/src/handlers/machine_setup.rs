@@ -52,7 +52,14 @@ pub async fn create(
     super::login_client_context::require_first_party_human(&auth)?;
     let owner = auth.user_id.to_string();
     rate_owner(&state, &owner).await?;
-    let row = setup::create_link(&state.db, &owner, None, choices).await?;
+    let row = setup::create_link(
+        &state.db,
+        &owner,
+        None,
+        choices,
+        &crate::services::nyxbot_watch_service::ReportProvenance::LEGACY,
+    )
+    .await?;
     Ok(Json(SetupInfo::new(row, None)))
 }
 
@@ -254,6 +261,7 @@ pub async fn decide(
         body.approve,
         None,
         body.automatic_updates,
+        &crate::services::nyxbot_watch_service::ReportProvenance::LEGACY,
     )
     .await?;
     crate::services::audit_service::log_for_user(
@@ -301,6 +309,7 @@ pub async fn link_tool(
         &chat.user_id,
         Some(&chat.conversation_id),
         choices,
+        &crate::services::nyxbot_watch_service::ReportProvenance::from_chat(chat),
     )
     .await?;
     Ok((
@@ -359,6 +368,7 @@ pub async fn pair_tool(
             true,
             Some(&chat.conversation_id),
             Some(true),
+            &crate::services::nyxbot_watch_service::ReportProvenance::from_chat(chat),
         )
         .await?;
         if let Some(auto) = automatic {
@@ -397,6 +407,7 @@ pub async fn pair_tool(
         &chat.conversation_id,
         &row.id,
         row.expires_at,
+        &crate::services::nyxbot_watch_service::ReportProvenance::from_chat(chat),
     )
     .await?;
     state

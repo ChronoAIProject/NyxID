@@ -99,9 +99,13 @@ async fn start(
     start.group_attachments = groups::request_attachments(&f.state.db, access, request)
         .await
         .unwrap();
-    engine::begin_turn(&f.state.db, &access.actor, start, &f.state.encryption_keys)
+    let admitted = engine::begin_turn(&f.state.db, &access.actor, start, &f.state.encryption_keys)
         .await
-        .unwrap()
+        .unwrap();
+    let turn = admitted.active_turn.as_ref().unwrap();
+    assert_eq!(turn.report_to, None);
+    assert!(!turn.with_nyxbot);
+    admitted
 }
 async fn key(f: &Fixture, row: &AssistantConversation) -> ApiKey {
     f.state
