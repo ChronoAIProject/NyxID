@@ -34,6 +34,16 @@ pub async fn resolve(
     conversation: &str,
     p: &VoicePreferences,
 ) -> AppResult<Resolved> {
+    resolve_audio(state, user, conversation, p, false).await
+}
+
+pub(crate) async fn resolve_audio(
+    state: &AppState,
+    user: &str,
+    conversation: &str,
+    p: &VoicePreferences,
+    dictation: bool,
+) -> AppResult<Resolved> {
     super::super::assistant_voice::validate_preferences(p)?;
     let thread = super::super::assistant_voice::thread(&state.db, user, conversation)
         .await
@@ -74,7 +84,15 @@ pub async fn resolve(
     let selected_connection = (p.key_source == VoiceKeySource::Own)
         .then_some(p.connection_id.as_deref())
         .flatten();
-    authorize_inference(&state.db, &thread, &service, selected_connection).await?;
+    let authority = inference_authority(&state.db, &thread).await?;
+    authorize_operation(
+        &state.db,
+        &authority,
+        &service,
+        selected_connection,
+        dictation,
+    )
+    .await?;
     let resource_owner = thread.agent_owner_id.as_deref().unwrap_or(user);
     let (mut target, class, owner, key_id, revision) = match p.key_source {
         VoiceKeySource::Platform => {
@@ -332,16 +350,6 @@ pub fn official_provider_origin(base: &str, protocol: &VoiceProtocol) -> bool {
     })
 }
 
-pub(crate) async fn authorize_inference(
-    db: &mongodb::Database,
-    thread: &crate::models::assistant_conversation::AssistantConversation,
-    service: &DownstreamService,
-    connection: Option<&str>,
-) -> AppResult<()> {
-    let authority = inference_authority(db, thread).await?;
-    authorize_with_authority(db, &authority, service, connection).await
-}
-
 /// A request-local, exact private-thread authentication result. Only the loader
 /// can construct it; reuse in discovery never persists beyond that request.
 pub(crate) struct InferenceAuthority(crate::mw::auth::AuthUser);
@@ -386,6 +394,25 @@ pub(crate) async fn authorize_with_authority(
     service: &DownstreamService,
     connection: Option<&str>,
 ) -> AppResult<()> {
+    authorize_operation(db, authority, service, connection, false).await
+}
+
+pub(crate) async fn authorize_dictation(
+    db: &mongodb::Database,
+    authority: &InferenceAuthority,
+    service: &DownstreamService,
+    connection: Option<&str>,
+) -> AppResult<()> {
+    authorize_operation(db, authority, service, connection, true).await
+}
+
+async fn authorize_operation(
+    db: &mongodb::Database,
+    authority: &InferenceAuthority,
+    service: &DownstreamService,
+    connection: Option<&str>,
+    dictation: bool,
+) -> AppResult<()> {
     let auth = &authority.0;
     // Platform audio is inference, independent of tool grants. BYOK must hold
     // the selected UserService grant, never a catalog-ID substitute.
@@ -402,12 +429,13 @@ pub(crate) async fn authorize_with_authority(
         .as_ref()
         .and_then(|i| i.voice.as_ref())
         .is_some_and(|v| v.protocol == VoiceProtocol::XaiRealtime);
-    let method = if grok { "GET" } else { "POST" };
-    let path = super::super::proxy_authorization::CanonicalPath::from_mcp_literal(if grok {
-        "/realtime"
-    } else {
-        "/live/sessions"
-    })?;
+    let method = if grok || dictation { "GET" } else { "POST" };
+    let path =
+        super::super::proxy_authorization::CanonicalPath::from_mcp_literal(if grok || dictation {
+            "/realtime"
+        } else {
+            "/live/sessions"
+        })?;
     super::super::proxy_authorization::authorize_proxy_operation(service, method, &path)?;
     // Resolve the selected connection's identity like proxy/LLM do, so a scope
     // saved on that connection applies; catalog-only intersects every scope

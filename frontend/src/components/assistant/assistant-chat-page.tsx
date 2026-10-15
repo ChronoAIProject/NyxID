@@ -19,6 +19,12 @@ import { AgentDetailsSheet } from "./nyxbot-agent-details";
 import { NewAgentDialog } from "./nyxbot-agent-forms";
 import { NewGroupDialog } from "./nyxbot-group-forms";
 import { NyxAgentGroupPage } from "./nyxbot-group-view";
+import { VoiceCaptionText } from "./voice-captions";
+import {
+  mergeVoiceCaptions,
+  voiceDeliveryRevision,
+  type VoiceView,
+} from "./voice-caption-state";
 import { LazyVoicePanel as VoicePanel } from "./lazy-voice-panel";
 import { useFeature } from "@/hooks/use-feature-flag";
 import { useNyxBotSettings } from "@/hooks/use-nyxbot-agents";
@@ -539,7 +545,43 @@ export function NyxAgentAssistantChatPage() {
 function NyxAgentThreadPage() {
   const voiceEnabled = useFeature("assistant:voice");
   const nyxBotSettings = useNyxBotSettings();
-  const [voiceThread, setVoiceThread] = useState<string>();
+  const [voiceBinding, setVoiceBinding] = useState<{
+    threadId: string;
+    actorId?: string;
+    token: string;
+  } | null>(null);
+  const voiceBindingRef = useRef(voiceBinding);
+  const voicePanelRef = useRef<HTMLDivElement>(null);
+  function setVoiceThread(id?: string) {
+    const existing = voiceBindingRef.current;
+    if (id && existing?.threadId === id && existing.actorId === user?.id) {
+      voicePanelRef.current
+        ?.querySelector<HTMLButtonElement>("button")
+        ?.focus();
+      return;
+    }
+    const binding = id
+      ? { threadId: id, actorId: user?.id, token: crypto.randomUUID() }
+      : null;
+    voiceBindingRef.current = binding;
+    setVoiceBinding(binding);
+    if (!binding)
+      setVoiceView((view) =>
+        view
+          ? {
+              ...view,
+              active: false,
+              activity: {
+                ...view.activity,
+                input: 0,
+                output: 0,
+                bands: Array<number>(24).fill(0),
+              },
+            }
+          : null,
+      );
+  }
+  const [voiceView, setVoiceView] = useState<VoiceView | null>(null);
   const navigate = useNavigate();
   const user = useAuthStore((state) => state.user);
   const search = useRouterState({
@@ -564,6 +606,31 @@ function NyxAgentThreadPage() {
   useLayoutEffect(() => {
     selection.current = selectedId;
   }, [selectedId]);
+  const receiveVoiceView = useCallback((view: VoiceView) => {
+    if (voiceBindingRef.current?.token === view.panelId) setVoiceView(view);
+  }, []);
+  const voiceThread =
+    voiceBinding?.actorId === user?.id ? voiceBinding?.threadId : undefined;
+  const previousVoiceThread = useRef(selectedId);
+  useEffect(() => {
+    setVoiceView((view) =>
+      view && (view.threadId !== selectedId || view.actorId !== user?.id)
+        ? null
+        : view,
+    );
+    const binding = voiceBindingRef.current;
+    if (
+      binding &&
+      (binding.actorId !== user?.id ||
+        (previousVoiceThread.current === binding.threadId &&
+          selectedId !== binding.threadId) ||
+        !onChatRoute)
+    ) {
+      voiceBindingRef.current = null;
+      setVoiceBinding(null);
+    }
+    previousVoiceThread.current = selectedId;
+  }, [selectedId, user?.id, onChatRoute]);
   const adopt = useCallback((id: string) => {
     if (selection.current !== selectedId) return;
     if (pendingSend.current) pendingSend.current.scope = `${user?.id}:${id}`;
@@ -697,39 +764,93 @@ function NyxAgentThreadPage() {
   const agentName = headerNamed ? agentTitle(headerNamed) : "NyxBot";
   const destroyed = Boolean(headerAgent?.destroyed) || selectedAgent?.can_use === false;
   const channelPlatform = selectedId ? (conversation?.channel?.platform ?? null) : null;
+  useEffect(() => {
+    if (!voiceEnabled || destroyed || channelPlatform) {
+      voiceBindingRef.current = null;
+      setVoiceBinding(null);
+      setVoiceView(null);
+    }
+  }, [voiceEnabled, destroyed, channelPlatform]);
   // The home stays until the first message of its new NyxBot thread shows.
   const showHome = home && !chat.isStreaming && !chat.session.messages.length;
-  const agentOverride = agents.data?.agents.find((row) => row.id === headerAgent?.id)?.access_mode_override;
-  const accessMode = effectiveAccessMode(nyxBotSettings.data?.access_mode, agentOverride);
-  const lastReply = chat.isStreaming ? undefined : [...chat.session.messages].reverse().find((message) => message.role === "assistant" || message.role === "user");
-  const turnError = lastReply?.status === "error"
-    ? withAssistantTrace(lastReply.error ?? "NyxBot could not complete this turn. Check which actions completed before trying again.", lastReply.turnId ?? null)
-    : undefined;
-  const threadPanels = headerAgent && !showHome ? (
-    <div className="shrink-0 px-4 pt-3 sm:px-6">
-      <div className="mx-auto w-full max-w-[758px] space-y-2">
-        <ThreadHeader
-          name={agentName}
-          handle={headerNamed ? agentHandle(headerNamed) : undefined}
-          kind={headerAgent.kind}
-          agentId={headerAgent.id}
-          destroyed={destroyed}
-          channelPlatform={channelPlatform}
-          onOpenDetails={() => setDetailsAgentId(headerAgent.id)}
-        />
-        {headerAgent.kind === "nyxbot" ? (
-          <TeamStrip agents={agents.data?.agents ?? []} onOpenConversation={go} />
-        ) : null}
-        {conversation && !chat.isStreaming ? (
-          <PendingEventsNote count={conversation.pending_events} agentName={agentName} />
-        ) : null}
-        {selectedId && !chat.isStreaming ? (
-          <WaitingNote items={chat.waiting} agentName={agentName} />
-        ) : null}
-        {selectedId ? <WorkingContextPanel conversationId={selectedId} onManageMemory={setDetailsAgentId} onReset={() => void chat.refreshHistory()} /> : null}
+  const agentOverride = agents.data?.agents.find(
+    (row) => row.id === headerAgent?.id,
+  )?.access_mode_override;
+  const accessMode = effectiveAccessMode(
+    nyxBotSettings.data?.access_mode,
+    agentOverride,
+  );
+  const currentVoice =
+    voiceView &&
+    voiceView.threadId === selectedId &&
+    voiceView.actorId === user?.id
+      ? voiceView
+      : null;
+  const voiceMounted = Boolean(
+    voiceEnabled &&
+    voiceThread === selectedId &&
+    voiceBinding?.token === currentVoice?.panelId &&
+    !destroyed &&
+    !channelPlatform,
+  );
+  const liveCaptions = currentVoice?.snapshot?.captions ?? [];
+  const voiceSession = {
+    ...chat.session,
+    messages: mergeVoiceCaptions(chat.session.messages, liveCaptions),
+  };
+  const lastReply = chat.isStreaming
+    ? undefined
+    : [...chat.session.messages]
+        .reverse()
+        .find(
+          (message) => message.role === "assistant" || message.role === "user",
+        );
+  const turnError =
+    lastReply?.status === "error"
+      ? withAssistantTrace(
+          lastReply.error ??
+            "NyxBot could not complete this turn. Check which actions completed before trying again.",
+          lastReply.turnId ?? null,
+        )
+      : undefined;
+  const threadPanels =
+    headerAgent && !showHome ? (
+      <div className="shrink-0 px-4 pt-3 sm:px-6">
+        <div className="mx-auto w-full max-w-[758px] space-y-2">
+          <ThreadHeader
+            name={agentName}
+            handle={headerNamed ? agentHandle(headerNamed) : undefined}
+            kind={headerAgent.kind}
+            agentId={headerAgent.id}
+            destroyed={destroyed}
+            channelPlatform={channelPlatform}
+            onOpenDetails={() => setDetailsAgentId(headerAgent.id)}
+          />
+          {headerAgent.kind === "nyxbot" ? (
+            <TeamStrip
+              agents={agents.data?.agents ?? []}
+              onOpenConversation={go}
+            />
+          ) : null}
+          {conversation && !chat.isStreaming ? (
+            <PendingEventsNote
+              count={conversation.pending_events}
+              agentName={agentName}
+            />
+          ) : null}
+          {selectedId && !chat.isStreaming ? (
+            <WaitingNote items={chat.waiting} agentName={agentName} />
+          ) : null}
+          {selectedId ? (
+            <WorkingContextPanel
+              conversationId={selectedId}
+              onManageMemory={setDetailsAgentId}
+              onReset={() => void chat.refreshHistory()}
+            />
+          ) : null}
+        </div>
       </div>
-    </div>
-  ) : null;
+    ) : null;
 
   return (
     <AssistantShell
@@ -823,8 +944,18 @@ function NyxAgentThreadPage() {
           <AssistantLinkModalHost>
             {chat.session.conversationId ? <ConversationMachineDesktops conversationId={chat.session.conversationId} turnActive={chat.isStreaming} /> : null}
             <NyxAgentThreadMessageList
-              session={chat.session}
+              session={voiceSession}
               renderMessage={(message) => {
+                const caption = liveCaptions.find(
+                  (item) => item.id === message.id,
+                );
+                if (caption)
+                  return (
+                    <VoiceCaptionText
+                      caption={caption}
+                      playbackMs={currentVoice?.activity?.playbackMs ?? 0}
+                    />
+                  );
                 if (message.continuation_of) return <p role="status" className="ml-[30px] px-[7px] text-11 text-muted-foreground">Continuing after your decision</p>;
                 if (message.role === "event") return <NyxBotEventNotice message={message} />;
                 if (message.role === "orchestrator") {
@@ -894,6 +1025,7 @@ function NyxAgentThreadPage() {
                 `deciding:${chat.decidingAcknowledgement ?? ""}`,
                 `channel:${channelPlatform ?? ""}`,
                 `mode:${accessMode}`,
+                `voice:${voiceDeliveryRevision(liveCaptions, currentVoice?.activity.playbackMs ?? 0)}`,
                 ...chat.acknowledgements.map((row) => `${row.id}:${row.status}`),
                 ...chat.approvals.map((row) => `approval:${row.id}`),
               ].join(",")}
@@ -909,15 +1041,33 @@ function NyxAgentThreadPage() {
             />
           </AssistantLinkModalHost>
         )}
-        {voiceEnabled && voiceThread && voiceThread === selectedId && !destroyed && !channelPlatform && (
-          <div className="absolute inset-x-0 top-3 z-20 mx-auto w-full max-w-[758px] px-4">
-            <VoicePanel key={`${user?.id}:${voiceThread}`} threadId={voiceThread} savedPreferences={nyxBotSettings.data?.voice}
-              onClose={() => { setVoiceThread(undefined); setFocusRequest((n) => n + 1); }} />
-          </div>
-        )}
         <div ref={composerRef} className="absolute inset-x-0 bottom-0 z-10">
+          {voiceEnabled &&
+            voiceThread &&
+            voiceThread === selectedId &&
+            !destroyed &&
+            !channelPlatform && (
+              <div
+                ref={voicePanelRef}
+                className="mx-auto mb-2 w-full max-w-[758px] px-4 sm:pl-[46px]"
+              >
+                <VoicePanel
+                  key={voiceBinding!.token}
+                  panelId={voiceBinding!.token}
+                  threadId={voiceThread}
+                  savedPreferences={nyxBotSettings.data?.voice}
+                  onViewChange={receiveVoiceView}
+                  onClose={() => {
+                    setVoiceThread(undefined);
+                    setFocusRequest((n) => n + 1);
+                  }}
+                />
+              </div>
+            )}
           <NyxAgentComposer
             conversation={chat.conversation}
+            voiceActive={voiceMounted && currentVoice?.active}
+            voiceActivity={voiceMounted ? currentVoice?.activity : undefined}
             key={`${user?.id}:${selectedId ?? headerAgent?.id ?? "draft"}`}
             onVoice={voiceEnabled && !destroyed && !channelPlatform ? async (id) => {
               if (selection.current !== selectedId) return;

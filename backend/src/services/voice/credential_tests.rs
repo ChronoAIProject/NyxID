@@ -22,7 +22,7 @@ use serde_json::{Value, json};
 use std::sync::Arc;
 use uuid::Uuid;
 
-async fn fixture(name: &str) -> (Fixture, DownstreamService) {
+pub(super) async fn fixture(name: &str) -> (Fixture, DownstreamService) {
     let mut f = direct_fixture(name).await;
     let service = configure(&mut f.state, &f.owner).await;
     (f, service)
@@ -97,7 +97,7 @@ async fn configure(state: &mut crate::AppState, owner: &str) -> DownstreamServic
     service
 }
 
-fn platform(service: &DownstreamService) -> VoicePreferences {
+pub(super) fn platform(service: &DownstreamService) -> VoicePreferences {
     VoicePreferences {
         service_id: service.id.clone(),
         connection_id: None,
@@ -555,7 +555,7 @@ async fn specialist_platform_voice_keeps_draft_binding_key_and_agent_fences() {
         // The captured thread and the credential's live thread must also agree
         // on agent identity (discovery can receive an earlier thread snapshot).
         assert!(
-            credentials::authorize_inference(&f.state.db, &draft, &service, None)
+            credentials::inference_authority(&f.state.db, &draft)
                 .await
                 .is_err()
         );

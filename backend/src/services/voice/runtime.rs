@@ -1153,6 +1153,12 @@ pub(super) async fn retry_provider_close(
 pub async fn recover(state: &AppState) -> AppResult<()> {
     for mut call in session::claim_orphans(&state.db, &state.replica_identity.generation_id).await?
     {
+        if call.dictation {
+            // A transcription relay is process-local. Never replay audio or reattach
+            // it as a conversational Live session. Durable confirmed usage survives.
+            super::dictation::finish(state, &call, false).await?;
+            continue;
+        }
         if call.final_usage_confirmed {
             settle_windows(state, &call, false).await?;
             call = session::write(&state.db, &call, doc! {"billing_finalized":true}).await?;

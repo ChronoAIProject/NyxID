@@ -2561,6 +2561,7 @@ mod tests {
             "/api/v1/assistant/nyxagent/voice/options",
             "/api/v1/assistant/nyxagent/conversations/id/voice-requests/rid",
             "/api/v1/assistant/nyxagent/conversations/id/voice-sessions/sid/stream",
+            "/api/v1/assistant/nyxagent/conversations/id/dictation",
         ] {
             assert!(delegated_read_denied_path(path));
         }

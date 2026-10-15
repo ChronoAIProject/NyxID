@@ -988,3 +988,55 @@ html.theme-dark .assistant-halo--visible {
   color: var(--color-text-tertiary);
   pointer-events: none;
 }
+
+/* Audio decoration has no animation clock: amplitude is measured from live streams. */
+.composer-audio-surface {
+  isolation: isolate;
+}
+.composer-audio-surface::before {
+  content: "";
+  pointer-events: none;
+  position: absolute;
+  z-index: -1;
+  inset: -0.5rem;
+  border-radius: 1.25rem;
+  background:
+    radial-gradient(ellipse at 25% 15%, var(--color-primary), transparent 65%),
+    radial-gradient(ellipse at 80% 20%, var(--color-warning), transparent 65%);
+  filter: blur(18px);
+  opacity: calc(var(--composer-audio-level, 0) * 0.65);
+  transform: scaleY(calc(1 + var(--composer-audio-level, 0) * 0.25));
+  transition:
+    opacity 120ms linear,
+    transform 120ms linear;
+}
+@media (max-width: 540px) {
+  [data-composer-editor].composer-compact {
+    flex-wrap: wrap;
+  }
+  .composer-compact .composer-text-region {
+    order: -1;
+    flex-basis: 100%;
+    min-width: 0;
+  }
+  .composer-compact [data-composer-footer] {
+    flex: 1;
+    min-width: 0;
+    justify-content: flex-end;
+  }
+  .composer-compact [data-composer-settings] {
+    margin-right: auto;
+  }
+  .composer-compact > [data-composer-settings] {
+    margin-left: auto;
+  }
+  .dictation-waveform {
+    gap: 2px;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .composer-audio-surface::before {
+    transform: none;
+    transition: none;
+  }
+}

@@ -1150,6 +1150,23 @@ pub async fn options(
     keys: &crate::crypto::aes::EncryptionKeys,
     thread: &AssistantConversation,
 ) -> AppResult<Vec<VoiceOption>> {
+    audio_options(db, keys, thread, false).await
+}
+
+pub async fn dictation_options(
+    db: &Database,
+    keys: &crate::crypto::aes::EncryptionKeys,
+    thread: &AssistantConversation,
+) -> AppResult<Vec<VoiceOption>> {
+    audio_options(db, keys, thread, true).await
+}
+
+async fn audio_options(
+    db: &Database,
+    keys: &crate::crypto::aes::EncryptionKeys,
+    thread: &AssistantConversation,
+    dictation: bool,
+) -> AppResult<Vec<VoiceOption>> {
     // Authenticate this exact thread once; source checks reuse only this
     // request's live key/org/agent authority, never a cross-request cache.
     let Some(authority) = super::voice::credentials::discovery_result(
@@ -1185,6 +1202,11 @@ pub async fn options(
         else {
             continue;
         };
+        if dictation
+            && voice.protocol != crate::models::downstream_service::VoiceProtocol::OpenaiLive
+        {
+            continue;
+        }
         if !super::voice::credentials::official_provider_origin(&service.base_url, &voice.protocol)
         {
             continue;
@@ -1202,15 +1224,18 @@ pub async fn options(
         // Compute source/connection eligibility once, before expanding models.
         // Discovery reserves no funds and cannot promise later start capacity.
         let platform_authorized = entry.platform_key.available
-            && super::voice::credentials::discovery_result(
+            && super::voice::credentials::discovery_result(if dictation {
+                super::voice::credentials::authorize_dictation(db, &authority, service, None).await
+            } else {
                 super::voice::credentials::authorize_with_authority(db, &authority, service, None)
-                    .await,
-            )?
+                    .await
+            })?
             .is_some();
         let resource_owner = thread.agent_owner_id.as_deref().unwrap_or(&thread.user_id);
         let mut own_connections = Vec::new();
         for connection in connections.iter().filter(|c| {
-            c.service.user_id == resource_owner
+            !dictation
+                && c.service.user_id == resource_owner
                 && !matches!(
                     c.source,
                     super::user_service_service::CredentialSource::Org { allowed: false, .. }
@@ -1256,14 +1281,22 @@ pub async fn options(
             super::voice::credentials::platform_flag(&voice.protocol),
         )
         .await?;
-        for model in &voice.models {
+        for model in voice
+            .models
+            .iter()
+            .take(if dictation { 1 } else { usize::MAX })
+        {
             if platform_authorized {
                 options.push(VoiceOption {
                     service_id: service.id.clone(),
                     connection_id: None,
                     key_source: "platform",
                     model: model.id.clone(),
-                    model_label: model.label.clone(),
+                    model_label: if dictation {
+                        "OpenAI · gpt-live-transcribe".into()
+                    } else {
+                        model.label.clone()
+                    },
                     default_model: model.default,
                     voice: voice.clone(),
                     available: platform_enabled && platform_priced,
@@ -1291,7 +1324,11 @@ pub async fn options(
                     connection_id: Some(connection.service.id.clone()),
                     key_source: "own",
                     model: model.id.clone(),
-                    model_label: model.label.clone(),
+                    model_label: if dictation {
+                        "OpenAI · gpt-live-transcribe".into()
+                    } else {
+                        model.label.clone()
+                    },
                     default_model: model.default,
                     voice: voice.clone(),
                     available: own_billing.is_ok(),

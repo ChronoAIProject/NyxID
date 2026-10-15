@@ -191,6 +191,8 @@ it("starts with a catalog-added model and voice and discloses the payer and tari
         model: "catalog-new-model",
         voice: "catalog-new-voice",
       }),
+      undefined,
+      expect.any(Function),
     ),
   );
 });
@@ -232,6 +234,8 @@ it("allows lane-less own-key voice and discloses metering-only pricing", async (
         key_source: "own",
         connection_id: "connection",
       }),
+      undefined,
+      expect.any(Function),
     ),
   );
 });
@@ -281,6 +285,7 @@ it("labels Grok PTT, gates automatic mode, and discloses tokens when seconds are
         input_mode: "push_to_talk",
       }),
       "xai_realtime",
+      expect.any(Function),
     ),
   );
 });
@@ -322,4 +327,27 @@ it("discloses configured Grok token prices even when catalog summary omits token
   expect(screen.getByText(/0.02 credits per second/)).toHaveTextContent(
     "0.0001",
   );
+});
+
+it("integrated active call is compact with accessible details and all media controls", () => {
+  const close = vi.fn();
+  render(
+    <VoicePanel
+      threadId="thread"
+      panelId="panel"
+      onClose={close}
+      onViewChange={vi.fn()}
+    />,
+  );
+  expect(
+    screen.queryByRole("button", { name: "Minimize voice call" }),
+  ).not.toBeInTheDocument();
+  expect(
+    screen.getByText("Call details").closest("details"),
+  ).not.toHaveAttribute("open");
+  fireEvent.click(screen.getByRole("button", { name: "Mute speaker" }));
+  expect(mock.speaker).toHaveBeenCalledWith(true);
+  fireEvent.click(screen.getByRole("button", { name: "End call" }));
+  expect(mock.end).toHaveBeenCalledOnce();
+  expect(close).toHaveBeenCalledOnce();
 });

@@ -2555,6 +2555,14 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             get(handlers::machine_activity::list),
         )
         .route(
+            "/assistant/nyxagent/dictation/options",
+            get(handlers::assistant_voice::dictation_options),
+        )
+        .route(
+            "/assistant/nyxagent/conversations/{id}/dictation",
+            get(handlers::assistant_voice::dictation_stream),
+        )
+        .route(
             "/assistant/nyxagent/voice/options",
             get(handlers::assistant_voice::options),
         )

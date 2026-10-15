@@ -240,7 +240,7 @@ for (const width of [1280, 320]) {
     await input.fill("Hi");
     await expect(editor).not.toHaveClass(/flex-col/);
     await expect(send).toBeEnabled();
-    await expect(voice).toHaveCount(0);
+    await expect(voice).toBeVisible();
     await input.fill(
       "Review these changes and explain what needs to be done next. ".repeat(4),
     );

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { silentActivity } from "@/lib/microphone-capture";
 import { AssistantVoiceClient } from "@/lib/assistant-voice-client";
 import { api } from "@/lib/api-client";
 import { useAuthStore } from "@/stores/auth-store";
@@ -12,6 +13,7 @@ export function useAssistantVoice(thread: string) {
   const actor = useAuthStore((s) => s.user?.id);
   const client = useRef<AssistantVoiceClient | null>(null);
   const generation = useRef(0);
+  const [activity, setActivity] = useState(silentActivity);
   const [holding, setHolding] = useState(false);
   const [connected, setConnected] = useState(false);
   const [snapshot, setSnapshot] = useState<VoiceSnapshot | null>(null);
@@ -33,6 +35,7 @@ export function useAssistantVoice(thread: string) {
     async (
       preferences: VoicePreferences,
       protocol?: "openai_live" | "xai_realtime",
+      beforeProvider?: () => Promise<void>,
     ) => {
       if (client.current) return;
       const ticket = ++generation.current;
@@ -67,9 +70,12 @@ export function useAssistantVoice(thread: string) {
         (session) => {
           if (generation.current === ticket) setConflictSession(session);
         },
+        (value) => {
+          if (generation.current === ticket) setActivity(value);
+        },
       );
       client.current = next;
-      await next.start(preferences, protocol);
+      await next.start(preferences, protocol, beforeProvider);
       if (generation.current === ticket) {
         if (protocol !== "xai_realtime" || next.isClosed) setStarting(false);
         if (next.isClosed) client.current = null;
@@ -85,6 +91,10 @@ export function useAssistantVoice(thread: string) {
     setStarting(false);
     setConnected(false);
     setSnapshot(null);
+    setActivity((previous) => ({
+      ...silentActivity(),
+      playbackMs: previous.playbackMs,
+    }));
     if (previous) await previous.end();
     else if (conflictSession) {
       try {
@@ -136,6 +146,7 @@ export function useAssistantVoice(thread: string) {
     next.rejoin(conflictSession);
   }, [conflictSession, thread]);
   return {
+    activity,
     holding,
     connected,
     snapshot,

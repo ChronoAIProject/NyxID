@@ -284,8 +284,14 @@ it("Grok refuses automatic mode before creating a provider session", async () =>
 });
 
 it.each([
-  ["NotAllowedError", "Microphone permission was denied"],
-  ["NotFoundError", "No microphone found"],
+  [
+    "NotAllowedError",
+    "Microphone access was denied. Allow it in your browser settings, then try again.",
+  ],
+  [
+    "NotFoundError",
+    "No microphone was found. Connect a microphone and try again.",
+  ],
 ])("explains %s before contacting the server", async (name, message) => {
   microphone.mockRejectedValue(
     new DOMException("private device information", name),
@@ -414,4 +420,21 @@ it("bounds ICE gathering and cancels without creating a session", async () => {
   expect(error).toHaveBeenCalledWith("WebRTC negotiation failed");
   expect(mocks.create).not.toHaveBeenCalled();
   expect(track.stop).toHaveBeenCalled();
+});
+
+it("acquires microphone before saving preferences and identifies settings failure without contacting provider", async () => {
+  const error = vi.fn();
+  const save = vi.fn(async () => {
+    expect(microphone).toHaveBeenCalledOnce();
+    throw new Error("private detail");
+  });
+  const client = new AssistantVoiceClient("thread", vi.fn(), error);
+  const started = client.start(preferences, "openai_live", save);
+  expect(microphone).toHaveBeenCalledOnce();
+  await started;
+  expect(error).toHaveBeenCalledWith(
+    "Voice preferences could not be saved. Please try again.",
+  );
+  expect(mocks.create).not.toHaveBeenCalled();
+  expect(track.stop).toHaveBeenCalledOnce();
 });

@@ -28,6 +28,9 @@ pub struct VoiceSession {
     /// Absent on Phase 3 rows; provider identity cannot change during recovery.
     #[serde(default)]
     pub protocol: Option<super::downstream_service::VoiceProtocol>,
+    /// Audio-only composer transcription; never reattach or admit assistant work.
+    #[serde(default)]
+    pub dictation: bool,
     #[serde(default)]
     pub measured_ms: i64,
     pub state: SessionState,

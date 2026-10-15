@@ -752,6 +752,7 @@ async fn pending_card(
         .unwrap();
     }
     let segment = transcript::Segment {
+        fragments: Vec::new(),
         id: Uuid::new_v4().to_string(),
         speaker: transcript::Speaker::User,
         text: "Delete the selected object".into(),

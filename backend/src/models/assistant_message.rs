@@ -99,7 +99,16 @@ impl std::fmt::Debug for AssistantMessage {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
+pub struct VoiceFragment {
+    pub text: String,
+    pub start_ms: i64,
+    pub end_ms: i64,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
 pub struct VoiceTranscript {
+    #[serde(default)]
+    pub fragments: Vec<VoiceFragment>,
     pub session_id: String,
     pub segment_id: String,
     pub start_ms: i64,

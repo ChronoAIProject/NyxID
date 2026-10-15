@@ -936,20 +936,56 @@ describe("ChatComposer @mentions (group chats)", () => {
   });
 });
 
-it("offers voice only for an empty eligible composer and keeps Stop reachable", () => {
-  useAssistantDraftStore.setState({ownerUserId:null,drafts:{}});
-  const onVoice=vi.fn();
-  const {rerender}=render(<ChatComposer {...baseProps} draftKey={null} onVoice={onVoice} />);
-  expect(screen.queryByRole("button", { name: "Send message" })).not.toBeInTheDocument();
-  fireEvent.click(screen.getByRole("button",{name:"Open voice call"}));expect(onVoice).toHaveBeenCalledTimes(1);
-  fireEvent.change(screen.getByRole("textbox"),{target:{value:"An unsent draft"}});
-  expect(screen.queryByRole("button",{name:"Open voice call"})).not.toBeInTheDocument();
-  expect(screen.getByRole("button",{name:"Send message"})).toBeEnabled();
-  fireEvent.change(screen.getByRole("textbox"),{target:{value:""}});
-  rerender(<ChatComposer {...baseProps} draftKey={null} onVoice={onVoice} uploadBlocked />);
-  expect(screen.queryByRole("button",{name:"Open voice call"})).not.toBeInTheDocument();
-  rerender(<ChatComposer {...baseProps} draftKey={null} onVoice={onVoice} hasAttachments />);
-  expect(screen.getByRole("button",{name:"Send message"})).toBeEnabled();
-  rerender(<ChatComposer {...baseProps} draftKey={null} onVoice={onVoice} active />);
-  expect(screen.getByRole("button",{name:"Stop assistant turn"})).toBeEnabled();
+it("offers voice beside a draft and retains the active call control beside Stop", () => {
+  useAssistantDraftStore.setState({ ownerUserId: null, drafts: {} });
+  const onVoice = vi.fn();
+  const { rerender } = render(
+    <ChatComposer {...baseProps} draftKey={null} onVoice={onVoice} />,
+  );
+  expect(
+    screen.queryByRole("button", { name: "Send message" }),
+  ).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Open voice call" }));
+  expect(onVoice).toHaveBeenCalledTimes(1);
+  fireEvent.change(screen.getByRole("textbox"), {
+    target: { value: "An unsent draft" },
+  });
+  expect(screen.getByRole("button", { name: "Open voice call" })).toBeEnabled();
+  expect(screen.getByRole("button", { name: "Send message" })).toBeEnabled();
+  fireEvent.change(screen.getByRole("textbox"), { target: { value: "" } });
+  rerender(
+    <ChatComposer
+      {...baseProps}
+      draftKey={null}
+      onVoice={onVoice}
+      uploadBlocked
+    />,
+  );
+  expect(
+    screen.queryByRole("button", { name: "Open voice call" }),
+  ).not.toBeInTheDocument();
+  rerender(
+    <ChatComposer
+      {...baseProps}
+      draftKey={null}
+      onVoice={onVoice}
+      hasAttachments
+    />,
+  );
+  expect(screen.getByRole("button", { name: "Send message" })).toBeEnabled();
+  rerender(
+    <ChatComposer
+      {...baseProps}
+      draftKey={null}
+      onVoice={onVoice}
+      active
+      voiceActive
+    />,
+  );
+  expect(
+    screen.getByRole("button", { name: "Stop assistant turn" }),
+  ).toBeEnabled();
+  expect(
+    screen.getByRole("button", { name: "Open voice call" }),
+  ).toHaveAttribute("aria-pressed", "true");
 });

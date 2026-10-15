@@ -17,14 +17,17 @@ export class GrokAudio {
   private audio: HTMLAudioElement;
   private pcm: (bytes: ArrayBuffer) => void;
   private failed: () => void;
+  private outputStream?: (stream: MediaStream) => void;
   constructor(
     audio: HTMLAudioElement,
     pcm: (bytes: ArrayBuffer) => void,
     failed: () => void,
+    outputStream?: (stream: MediaStream) => void,
   ) {
     this.audio = audio;
     this.pcm = pcm;
     this.failed = failed;
+    this.outputStream = outputStream;
   }
   async start(media: MediaStream) {
     const context = new AudioContext();
@@ -63,6 +66,7 @@ export class GrokAudio {
     receiver.ontrack = ({ track, streams }) => {
       if (this.closed) return;
       this.audio.srcObject = streams[0] ?? new MediaStream([track]);
+      this.outputStream?.(this.audio.srcObject as MediaStream);
       this.baseline = this.audio.currentTime - context.currentTime;
       void this.audio.play().catch(() => {
         /* Resume audio is exposed in the panel. */
@@ -141,7 +145,7 @@ export class GrokAudio {
     this.sender?.getSenders().forEach((s) => s.track?.stop());
     this.sender?.close();
     this.receiver?.close();
-    void this.context?.close();
+    void this.context?.close().catch(() => {});
     this.marks = [];
   }
 }

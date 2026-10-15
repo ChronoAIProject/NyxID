@@ -2,6 +2,7 @@ import { voiceStartDetailsSchema } from "@/schemas/assistant-voice";
 import { ApiError } from "./api-client";
 
 export type VoiceStartStep =
+  | "settings"
   | "microphone"
   | "webrtc"
   | "server"
@@ -42,6 +43,8 @@ export function voiceStartError(error: unknown, step: VoiceStartStep): string {
             : error.message;
     return `${message} (code ${error.errorCode})`;
   }
+  if (step === "settings")
+    return "Voice preferences could not be saved. Please try again.";
   if (step === "microphone") {
     const name =
       error instanceof Error || error instanceof DOMException ? error.name : "";

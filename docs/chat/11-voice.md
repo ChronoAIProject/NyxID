@@ -485,9 +485,12 @@ fragment updates its own unsealed segment; it never rewrites an executed request
 
 Generated speech is not necessarily heard. Store an output delivery marker
 (`generated`, `played`, `interrupted`, `unknown`) and a best-effort playback
-watermark. An interrupted transcript is labelled; do not treat unplayed output
-as information the user agreed to. Browser playback reports are UI telemetry,
-never authorization or the billing clock.
+watermark. In the composer, `played` means the media playback timeline has passed
+an exact provider fragment's end; it is not proof of audible delivery. Captions
+continue to progress during local speaker mute, while output audio activity is
+zero. Paused/closed media preserve the final timestamp. An interrupted transcript
+is labelled; do not treat output as information the user agreed to. Browser
+playback reports are UI telemetry, never authorization or the billing clock.
 
 **Required engine adjustment:** background speech/backchannels must not change
 the initiating-user-message identity used for acknowledgement dedupe, denial
@@ -1467,6 +1470,138 @@ Remaining provider verification gates (not requests to reopen approved policy):
 - Grok manual transcription during output and browser loopback AEC quality.
 - Deployment/account provider retention terms before enabling paid voice.
 
+## 19. Implemented composer voice and dictation
+
+The composer offers separate **Dictate a message** (microphone) and **Voice mode**
+(AudioLines) actions. Typed drafts may coexist with voice controls; an active
+voice action stays available while attachments or delegated text work change.
+Opening the same actor/thread voice control reveals the existing panel/session;
+it does not restart the call. The active panel is a compact composer control bar
+with status, microphone mute, speaker mute and End. Settings, source/pricing,
+tasks, resume, conflict/rejoin and Grok Hold to talk remain accessible. Setup
+continues to disclose source, payer and applicable prices before provider start.
+
+Microphone capture begins only from an intentional activation, including a
+keyboard or touch press. Hovering configuration or reading options never requests
+permission. Permission denial, absent/busy devices and unsupported browsers use
+sanitized actionable messages. A pending grant can be cancelled: a late stream is
+stopped immediately and cannot open a provider session. Voice and dictation
+share one ephemeral capture owner. Account/thread navigation, disabled features,
+destroyed conversations, track revocation and component teardown fence late
+callbacks and close media. Audio contexts for capture/encoding are created and
+resumed during activation; autoplay rejection offers an explicit resume path.
+
+### Dictation review and draft integrity
+
+Configuration is available by hovering the microphone or activating its adjacent
+Configure button with pointer, keyboard or touch. The saved non-sensitive control
+preference is scoped to the account: click-toggle starts/stops, while Hold to
+dictate stops capture on release, pointer cancellation, key release or blur.
+Release tracking survives React updates and pending permission. Hold release
+opens review; it never confirms or sends. Interim provider text is muted and the
+waveform measures actual microphone samples. Cancel/Escape leaves the original
+draft intact; Check inserts the reviewed transcript at the saved Tiptap selection
+through one undoable editor transaction, preserving surrounding mentions and
+attachments. Both actions restore editor focus/selection. If the original draft
+has changed, insertion refuses to overwrite it. No dictation transcript is sent
+as a chat message or persisted in chat history by the relay.
+
+### Bounded transcription transport and accounting
+
+Dictation options are read from
+`GET /api/v1/assistant/nyxagent/dictation/options?conversation_id=...`; capture uses
+the human-browser, same-origin WebSocket
+`GET /api/v1/assistant/nyxagent/conversations/{id}/dictation`. The delegated-read
+deny table already excludes the entire assistant namespace, including this
+execution-shaped GET. A live browser session, private conversation, bound
+credential/key/agent, organization access, service ACL, voice flags, operation
+limits, billing admission and the normal live slot/concurrency gates apply.
+Discovery is read-only and checks eligibility at that instant; it does not reserve
+funds or guarantee capacity/provider entitlement at capture time. Admission and
+live checks remain authoritative.
+
+The first transport offers platform OpenAI only and charges the acting person.
+It requires no per-specialist OpenAI connection/tool grant under the same bounded
+private-thread inference policy as platform voice. The selected operation is
+exactly WebSocket `GET /realtime`; it does not additionally require conversational
+voice's `POST /live/sessions`. Ordinary voice retains its HTTP create plus WS
+attach policy. Authored operation denials, including the existing scoped-service
+WebSocket restriction, remain effective; this does not authorize tools or a
+generic provider socket. BYOK is unavailable for this initial dictation transport.
+
+Only the server connects to
+`wss://api.openai.com/v1/realtime?intent=transcription`, using fixed
+`gpt-live-transcribe`, session type `transcription`, PCM16 mono 24 kHz and
+`turn_detection:null`. The server validates the provider's acknowledged type,
+model and audio configuration before forwarding audio. The browser can supply
+bounded PCM frames and Stop; it cannot submit provider JSON, session updates,
+tools, output generation, destinations or credentials. Total input is capped at
+120 seconds, individual ingress frames at 4096 bytes, channel backlogs and frame
+counts are bounded, and periodic manual commits limit pending audio. Lifecycle
+checks take precedence over provider-event floods. There is no browser Web Speech
+fallback or production destination override.
+
+Dictation reuses the administrator-authored OpenAI `voice_seconds` tariff and
+existing allowance → grant → wallet reservations/settlement. It measures
+**provider-confirmed transcription input seconds**, whereas conversational voice
+uses the adapter's documented conversational duration. Any actually charged,
+synced per-start `requests` component is disclosed alongside the input-second
+rate before capture. There is no source-code price or elapsed-clock user debit.
+Funds are reserved before forwarding, renewed within the hard cap, and checked
+through normal funding primitives. Source labels name `gpt-live-transcribe`;
+conversational catalog model rows do not duplicate dictation choices.
+
+Every completed item must report numeric
+`usage:{type:"duration",seconds:...}`. Item IDs deduplicate usage; conflicting
+replays or missing/token/wrong usage fail closed. Fractional seconds carry exactly
+across items, and only the cumulative total is floored at the existing whole-second
+tariff boundary. The terminal subsecond fraction is waived. Confirmed usage and
+item dedup commit atomically under the live lease before browser acknowledgement.
+Closing first fences the session and reads the latest durable total, freezes
+further checkpoints, then settles; stale workers cannot seal a newer owner's money
+windows or discard confirmed usage. Present malformed checkpoint fields fail
+closed rather than defaulting to zero.
+
+Stop/cancel/browser disconnect releases local capture immediately, stops new PCM
+and starts a bounded drain deadline then. Already-forwarded audio is committed
+and confirmed usage is settled even if the UI receiver has gone. Missing final
+confirmation remains bounded platform exposure under existing voice policy.
+Recovery settles durable confirmed usage without replaying uncertain audio or
+resurrecting capture. Dictation sessions cannot be attached through conversational
+voice stream/control paths and do not produce a conversational call receipt.
+
+### Real audio activity, caption timing and verification
+
+The aurora and waveform derive from live microphone/playback analysers; there is
+no random amplitude or always-running animation. Semantic theme tokens work in
+light/dark; reduced motion removes spatial animation, while the usable mobile
+text row and full-width toolbar retain visible control bounds at 320 px.
+
+Conversational user speech is projected live. Assistant narration preserves exact
+OpenAI fragment text and provider `start_ms`/`end_ms` boundaries, bounded to 256
+fragments and 4096 text bytes per segment. A dedicated response projection carries
+timing; empty/tiny malformed floods cannot grow metadata indefinitely. Muted
+pending fragments brighten when the media playback timeline passes their end,
+including during speaker mute. No word timings are inferred. Grok uses only its
+available segment/delivery evidence. A bounded delivery revision updates the
+memoized message row after a caption is persisted, and shared segment IDs dedup
+live captions when durable history catches up. Media close clears levels without
+resetting the final playback timestamp.
+
+The test-only browser fixture is
+`frontend/e2e/voice-fixture.ts::installVoiceFixture(page, permission)`. It supplies
+explicit synthetic oscillator MediaStreams, actual browser analysers/PCM, a fake
+peer and scripted NyxID API/WS events. Permission can be granted, denied, pending
+or revoked. It is excluded from production; it does not establish paid provider
+availability. `e2e/composer-voice.spec.ts` exercises selected rich draft insertion,
+one undo/focus, late grant cancellation, bounded responsive controls, real activity,
+caption playback, repeated open and actual asynchronous End. Rust loopback
+provider tests with real Mongo transactions cover usage/dedup/order/drain/recovery,
+lease races and operation/security fences. Exact execution receipts and remaining
+physical-device/live-provider limits are in
+[the implementation plan](../COMPOSER_VOICE_DICTATION_PLAN.md) and the
+[parent's personal review](../COMPOSER_VOICE_DICTATION_REVIEW.md).
+
 ## Sources
 
 Official sources retrieved 2026-10-03. Versioned behavior and prices must be
@@ -1498,3 +1633,7 @@ rechecked during implementation; this document records the observed contract.
 [b2]: ../AGENT_SKILLS.md
 [platform]: ../PLATFORM_KEYS_AND_INFERENCE.md
 [exact]: ../BILLING_EXACT_ACCOUNTING.md
+
+[oa-transcription]: https://developers.openai.com/api/docs/guides/realtime-transcription
+[oa-transcription-model]: https://developers.openai.com/api/docs/models/gpt-live-transcribe
+[oa-realtime-events]: https://developers.openai.com/api/reference/resources/realtime/server-events

@@ -1,4 +1,11 @@
-import { useEffect, useRef, useState, type ComponentProps } from "react";
+import { useAssistantDraftStore } from "@/stores/assistant-draft-store";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type ComponentProps,
+} from "react";
 import { FileText, Paperclip, X } from "lucide-react";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { Button } from "@/components/ui/button";
@@ -196,14 +203,44 @@ export function UploadComposer({ scope, onSend, onVoice, ...props }: Props) {
     }
     return handles;
   }
+  const getDictationThread = useCallback(async () => {
+    scopeId.current ??= scope.id
+      ? Promise.resolve(scope.id)
+      : createUploadDraft(scope.agentId);
+    try {
+      const id = await scopeId.current;
+      if (!alive.current) throw new Error("Composer closed");
+      resolved.current = { kind: scope.kind, agentId: scope.agentId, id };
+      return id;
+    } catch (error) {
+      if (!resolved.current.id) scopeId.current = undefined;
+      throw error;
+    }
+  }, [scope.id, scope.agentId, scope.kind]);
   async function openVoice() {
+    if (props.voiceActive && scope.id && onVoice) {
+      await onVoice(scope.id);
+      return;
+    }
     if (locked || openingVoice.current || pending.current.size || scope.kind !== "conversations" || !onVoice) return;
     openingVoice.current = true;
     try {
       scopeId.current ??= scope.id ? Promise.resolve(scope.id) : createUploadDraft(scope.agentId);
       const id = await scopeId.current;
       resolved.current = { ...scope, id };
-      if (alive.current) await onVoice(id);
+      if (alive.current) {
+        // ChatComposer flushes its editor before this callback. Adoption remounts it.
+        if (!scope.id && props.ownerUserId && props.draftKey) {
+          const drafts = useAssistantDraftStore.getState();
+          if (drafts.ownerUserId === props.ownerUserId)
+            drafts.saveDraft(
+              props.ownerUserId,
+              `conv:${id}`,
+              drafts.getDraft(props.draftKey),
+            );
+        }
+        await onVoice(id);
+      }
     } catch {
       if (!resolved.current.id) scopeId.current = undefined;
       if (alive.current) setNotice("Voice could not open. Please try again.");
@@ -212,7 +249,18 @@ export function UploadComposer({ scope, onSend, onVoice, ...props }: Props) {
   return (
     <ChatComposer
       {...props}
-      onVoice={onVoice ? () => { void openVoice(); } : undefined}
+      onVoice={
+        onVoice
+          ? () => {
+              void openVoice();
+            }
+          : undefined
+      }
+      getDictationThread={
+        onVoice && scope.kind === "conversations"
+          ? getDictationThread
+          : undefined
+      }
       hasAttachments={files.some((file) => file.item)}
       uploadBlocked={files.some((file) => !file.item) || Boolean(props.active && files.length)}
       onFiles={(items) => void add(items)}

@@ -14,6 +14,8 @@ import { Button } from "@/components/ui/button";
 import { useAppForm } from "@/components/ui/form";
 import { metricLabel } from "@/schemas/billing-metrics";
 import { api } from "@/lib/api-client";
+import { useAuthStore } from "@/stores/auth-store";
+import type { VoiceView } from "./voice-captions";
 import { useAssistantVoice } from "@/hooks/use-assistant-voice";
 import {
   voiceOptionsSchema,
@@ -56,14 +58,38 @@ function tariff(option: VoiceOption) {
 /** Media remains mounted when minimized; starting always needs a gesture. */
 export function VoicePanel({
   threadId,
+  panelId,
   savedPreferences,
   onClose,
+  onViewChange,
 }: {
   threadId: string;
+  panelId?: string;
   savedPreferences?: VoicePreferences | null;
   onClose: () => void;
+  onViewChange?: (view: VoiceView) => void;
 }) {
   const voice = useAssistantVoice(threadId);
+  const actorId = useAuthStore((state) => state.user?.id);
+  useEffect(() => {
+    onViewChange?.({
+      panelId,
+      threadId,
+      actorId,
+      snapshot: voice.snapshot,
+      active: voice.starting || voice.connected,
+      activity: voice.activity,
+    });
+  }, [
+    onViewChange,
+    panelId,
+    threadId,
+    actorId,
+    voice.snapshot,
+    voice.starting,
+    voice.connected,
+    voice.activity,
+  ]);
   const [minimized, setMinimized] = useState(false);
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
@@ -155,17 +181,22 @@ export function VoicePanel({
       notify_on_completion: notifyOnCompletion,
     };
     setSettingsError(null);
-    try {
-      await api.put("/assistant/nyxagent/settings", { voice: preferences });
-    } catch {
-      setSettingsError(
-        "Voice preferences could not be saved. Please try again.",
-      );
-      return;
-    }
-    if (isGrok) await voice.start(preferences, "xai_realtime");
-    else await voice.start(preferences);
+    await voice.start(
+      preferences,
+      isGrok ? "xai_realtime" : undefined,
+      async () => {
+        try {
+          await api.put("/assistant/nyxagent/settings", { voice: preferences });
+        } catch {
+          setSettingsError(
+            "Voice preferences could not be saved. Please try again.",
+          );
+          throw new Error("Voice preferences could not be saved.");
+        }
+      },
+    );
   }
+
   const micControl = (
     <Button
       variant="outline"
@@ -196,6 +227,171 @@ export function VoicePanel({
       End call
     </Button>
   );
+  const tasks = (
+    <ul className="mt-3 space-y-2" aria-label="Voice tasks">
+      {voice.snapshot?.tasks.map((t, i) => (
+        <li key={t.id} className="flex items-center justify-between gap-2">
+          <span className="min-w-0 truncate">
+            {t.title?.trim() || `Request ${i + 1}`} ·{" "}
+            {(
+              {
+                queued: "Queued",
+                claimed: "Running",
+                awaiting_confirmation: "Needs your OK",
+                completed: "Done",
+                cancelled: "Cancelled",
+              } as Record<string, string>
+            )[t.state] ?? t.state}
+            {t.result_message_id ? (
+              <a
+                className="ml-1 text-nyx-secondary-400 underline"
+                href={`#message-${t.result_message_id}`}
+              >
+                result
+              </a>
+            ) : null}
+          </span>
+          {!["completed", "cancelled"].includes(t.state) && (
+            <Button
+              size="sm"
+              variant="ghost"
+              aria-label={`Stop request ${i + 1}`}
+              onClick={() => {
+                void voice.stopTask(t.id);
+              }}
+            >
+              <Square className="h-3 w-3" />
+              Stop
+            </Button>
+          )}
+        </li>
+      ))}
+    </ul>
+  );
+  if (onViewChange && active)
+    return (
+      <section
+        aria-label="Voice conversation"
+        className="rounded-xl border border-border bg-card px-3 py-2 text-12"
+      >
+        <div className="flex flex-wrap items-center gap-2">
+          <span role="status" className="min-w-0 flex-1 text-primary">
+            {voice.starting ? "Allow microphone / connecting…" : status}{" "}
+            <span
+              aria-label="Call duration"
+              className="ml-1 font-mono text-text-tertiary"
+            >
+              {timer}
+            </span>
+          </span>
+          <Button
+            size="icon"
+            variant="ghost"
+            aria-label={
+              microphoneMuted ? "Unmute microphone" : "Mute microphone"
+            }
+            aria-pressed={microphoneMuted}
+            disabled={voice.starting}
+            onClick={() => void voice.mute(!microphoneMuted)}
+          >
+            {microphoneMuted ? <MicOff /> : <Mic />}
+          </Button>
+          <Button
+            size="icon"
+            variant="ghost"
+            aria-label={voice.speakerMuted ? "Enable speaker" : "Mute speaker"}
+            aria-pressed={voice.speakerMuted}
+            onClick={() => voice.muteSpeaker(!voice.speakerMuted)}
+          >
+            {voice.speakerMuted ? <VolumeX /> : <Volume2 />}
+          </Button>
+          <Button
+            size="icon"
+            variant="ghost"
+            className="text-destructive"
+            aria-label={voice.starting ? "Cancel voice connection" : "End call"}
+            onClick={() => {
+              void voice.end();
+              onClose();
+            }}
+          >
+            <PhoneOff />
+          </Button>
+        </div>
+        {inputMode === "push_to_talk" && (
+          <Button
+            className="mt-1 w-full touch-none"
+            variant={voice.holding ? "primary" : "outline"}
+            aria-label="Hold to talk"
+            aria-pressed={voice.holding}
+            disabled={voice.starting || microphoneMuted}
+            onPointerDown={(e) => {
+              e.currentTarget.setPointerCapture?.(e.pointerId);
+              voice.hold(true);
+            }}
+            onPointerUp={() => voice.hold(false)}
+            onPointerCancel={() => voice.hold(false)}
+            onLostPointerCapture={() => voice.hold(false)}
+            onBlur={() => voice.hold(false)}
+            onKeyDown={(e) => {
+              if (e.key === " " || e.key === "Enter") {
+                e.preventDefault();
+                voice.hold(true);
+              }
+            }}
+            onKeyUp={() => voice.hold(false)}
+          >
+            <Mic className="size-4" />
+            Hold to talk
+          </Button>
+        )}
+        {voice.error && (
+          <p role="alert" className="mt-2 text-destructive">
+            {voice.error}
+          </p>
+        )}
+        {settingsError && (
+          <p role="alert" className="mt-2 text-destructive">
+            {settingsError}
+          </p>
+        )}
+        {voice.snapshot?.session.idle_warning && (
+          <p role="status" className="mt-2 text-warning">
+            Speak to keep this call open. It will end shortly.
+          </p>
+        )}
+        <details className="mt-1 text-text-tertiary">
+          <summary className="cursor-pointer py-1">
+            Call details
+            {voice.snapshot?.tasks.length
+              ? ` · ${voice.snapshot.tasks.length} tasks`
+              : ""}
+          </summary>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => void voice.resumeAudio()}
+          >
+            Resume audio
+          </Button>
+          {option && (
+            <p className="mt-2">
+              {tariff(option)}. Paid by{" "}
+              {option.billing_owner === "organization"
+                ? "the organization"
+                : "you"}
+              . Assistant tasks are billed separately. Muting keeps the call
+              running and billed.
+            </p>
+          )}
+          <p className="mt-2">
+            Use headphones or Hold to talk if the assistant hears its own voice.
+            Calls end after 30 minutes or 3 minutes without user speech.
+          </p>
+          {tasks}
+        </details>
+      </section>
+    );
   if (minimized && active)
     return (
       <section
@@ -253,9 +449,9 @@ export function VoicePanel({
   return (
     <section
       aria-label="Voice conversation"
-      className="rounded-xl border border-border bg-card p-4 text-12"
+      className="max-h-[50dvh] overflow-y-auto rounded-xl border border-border bg-card p-3 text-12 shadow-sm"
     >
-      <div className="flex items-center justify-between gap-3">
+      <div className="flex flex-wrap items-center justify-between gap-2">
         <h2 className="text-15 font-semibold">Talk to your assistant</h2>
         <span role="status">{status}</span>
         <span aria-label="Call duration" className="font-mono tabular-nums">
@@ -284,11 +480,13 @@ export function VoicePanel({
           Close
         </Button>
       </div>
-      <p className="mt-2 text-muted-foreground">
-        Audio goes to {isGrok ? "xAI through NyxID" : "OpenAI"}. NyxID keeps the
-        transcript, never an audio recording. Muting keeps the call running and
-        billed.
-      </p>
+      {!active && (
+        <p className="mt-2 text-muted-foreground">
+          Audio goes to {isGrok ? "xAI through NyxID" : "OpenAI"}. NyxID keeps
+          the transcript, never an audio recording. Muting keeps the call
+          running and billed.
+        </p>
+      )}
       {voice.conflictSession && !active && (
         <div className="mt-4 rounded-lg border border-warning/40 p-3">
           <p role="status">A voice call is already active in this conversation.</p>
@@ -486,67 +684,34 @@ export function VoicePanel({
       <p className="mt-2 text-muted-foreground">
         If the assistant hears its own voice, use headphones or Hold to talk.
       </p>
-      <div className="mt-4 grid gap-3 sm:grid-cols-2">
-        {(["user", "assistant"] as const).map((speaker) => (
-          <div
-            key={speaker}
-            role="log"
-            aria-live="polite"
-            aria-label={
-              speaker === "user" ? "Your captions" : "Assistant captions"
-            }
-            className="max-h-48 space-y-2 overflow-y-auto"
-          >
-            <h3 className="font-medium">
-              {speaker === "user" ? "You" : "Assistant"}
-            </h3>
-            {voice.snapshot?.captions
-              .filter((c) => c.speaker === speaker)
-              .map((c) => (
-                <p key={c.id}>
-                  {c.text}
-                  {c.sealed && !c.complete ? " (interrupted)" : ""}
-                </p>
-              ))}
-          </div>
-        ))}
-      </div>
-      <ul className="mt-3 space-y-2" aria-label="Voice tasks">
-        {voice.snapshot?.tasks.map((t, i) => (
-          <li key={t.id} className="flex items-center justify-between gap-2">
-            <span className="min-w-0 truncate">
-              {t.title?.trim() || `Request ${i + 1}`} · {({
-                queued: "Queued",
-                claimed: "Running",
-                awaiting_confirmation: "Needs your OK",
-                completed: "Done",
-                cancelled: "Cancelled",
-              } as Record<string, string>)[t.state] ?? t.state}
-              {t.result_message_id ? (
-                <a
-                  className="ml-1 text-nyx-secondary-400 underline"
-                  href={`#message-${t.result_message_id}`}
-                >
-                  result
-                </a>
-              ) : null}
-            </span>
-            {!["completed", "cancelled"].includes(t.state) && (
-              <Button
-                size="sm"
-                variant="ghost"
-                aria-label={`Stop request ${i + 1}`}
-                onClick={() => {
-                  void voice.stopTask(t.id);
-                }}
-              >
-                <Square className="h-3 w-3" />
-                Stop
-              </Button>
-            )}
-          </li>
-        ))}
-      </ul>
+      {!onViewChange && (
+        <div className="mt-4 grid gap-3 sm:grid-cols-2">
+          {(["user", "assistant"] as const).map((speaker) => (
+            <div
+              key={speaker}
+              role="log"
+              aria-live="polite"
+              aria-label={
+                speaker === "user" ? "Your captions" : "Assistant captions"
+              }
+              className="max-h-48 space-y-2 overflow-y-auto"
+            >
+              <h3 className="font-medium">
+                {speaker === "user" ? "You" : "Assistant"}
+              </h3>
+              {voice.snapshot?.captions
+                .filter((c) => c.speaker === speaker)
+                .map((c) => (
+                  <p key={c.id}>
+                    {c.text}
+                    {c.sealed && !c.complete ? " (interrupted)" : ""}
+                  </p>
+                ))}
+            </div>
+          ))}
+        </div>
+      )}
+      {tasks}
     </section>
   );
 }
