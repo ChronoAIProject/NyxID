@@ -5340,6 +5340,8 @@ async fn specialist_drafts_and_owner_approval_publishes_its_own_skill() {
         .iter()
         .find(|e| e.kind == "skill_publication")
         .unwrap();
+    assert!(event.bound);
+    assert_eq!(event.report_to.as_deref(), Some(f.nyxbot_thread.as_str()));
     assert!(
         event
             .text
@@ -6679,6 +6681,19 @@ async fn automatic_format_failure_repairs_original_drafting_conversation_without
         pending_skill_event_count(&f.state.db, &f.row.id, &row.id).await,
         1
     );
+    let thread = crate::services::assistant_nyxagent::get(&f.state.db, &f.owner, &f.row.id)
+        .await
+        .unwrap();
+    let event = thread
+        .pending_events
+        .iter()
+        .find(|event| event.kind == "skill_publication")
+        .unwrap();
+    assert!(
+        event.bound,
+        "the repair uses the drafting claim's routing even without a card"
+    );
+    assert!(event.report_to.is_none());
     assert!(
         !server
             .received_requests()

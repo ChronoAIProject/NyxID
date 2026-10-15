@@ -3,7 +3,7 @@
 //! NyxBot (it assigned the work) or in a group chat that NyxBot is in.
 //! Ambiguity (no live turn, missing fields, legacy rows) never creates NyxBot
 //! involvement.
-use std::sync::OnceLock;
+use std::sync::LazyLock;
 
 use chrono::{DateTime, Utc};
 use mongodb::{
@@ -350,6 +350,11 @@ pub fn with_frontend(mut value: Value, frontend: &str) -> Value {
         && let Some(path) = value["grants_path"].as_str()
     {
         let url = format!("{}{}", frontend.trim_end_matches('/'), path);
+        let previous = value["grants_url"].as_str().unwrap_or(path);
+        if let Some(instructions) = value["instructions"].as_str() {
+            value["instructions"] =
+                json!(instructions.replace(&format!("({previous})"), &format!("({url})"),));
+        }
         value["grants_url"] = json!(url);
     }
     value
@@ -361,7 +366,7 @@ pub fn missing_access_error(value: &Value) -> AppError {
 
 /// The error itself stays neutral (code 12420); the context decides whom the
 /// agent turns to.
-pub fn machine_permission_guidance(chat: &ChatAuthority) -> String {
+pub fn machine_permission_guidance(chat: &ChatAuthority, frontend: &str) -> String {
     if chat.is_orchestrator() {
         "Read the machine's current capability revision with nyxid__machine_capabilities and \
         apply the capabilities the owner asked for under the governing permission mode."
@@ -371,7 +376,7 @@ pub fn machine_permission_guidance(chat: &ChatAuthority) -> String {
     } else if chat.involved() {
         "Request the needed capabilities with nyxid__machine_capabilities: read its current \
         revision first and propose only what the user's request needs; the request is \
-        decided by the NyxBot that assigned this work or by the owner."
+        decided by NyxBot for work it assigned or a group it is in, or by the owner."
             .into()
     } else {
         format!(
@@ -382,7 +387,7 @@ pub fn machine_permission_guidance(chat: &ChatAuthority) -> String {
                 agent: &chat.agent_id,
                 tab: AGENT_DETAILS_GRANTS,
             }
-            .path()
+            .url(frontend)
         )
     }
 }
@@ -402,10 +407,11 @@ pub fn connect_refusal(chat: &ChatAuthority) -> Value {
 pub const MIGRATIONS_COLLECTION_NAME: &str = "assistant_migrations";
 pub const CUTOVER_MARKER_ID: &str = "issue-1883";
 
-static CUTOVER: OnceLock<DateTime<Utc>> = OnceLock::new();
+static CUTOVER: LazyLock<dashmap::DashMap<String, DateTime<Utc>>> =
+    LazyLock::new(dashmap::DashMap::new);
 
 /// Write the immutable cutover marker (`$setOnInsert`: the first writer's
-/// value is kept forever) and cache the value read for this process. Every
+/// value is kept forever) and cache the value by database name for this process. Every
 /// replica calls this at startup before serving assistant traffic; an error
 /// means the marker is unreadable and skill routing must stay refused (fail
 /// closed) until it can be read. The upsert itself is idempotent and always
@@ -422,7 +428,7 @@ pub async fn ensure_cutover(db: &Database) -> AppResult<DateTime<Utc>> {
         .await?
         .ok_or_else(unreadable)?;
     let at = parse_cutover(&row)?;
-    Ok(*CUTOVER.get_or_init(|| at))
+    Ok(*CUTOVER.entry(db.name().to_owned()).or_insert(at))
 }
 
 fn unreadable() -> AppError {
@@ -438,8 +444,24 @@ pub fn parse_cutover(row: &bson::Document) -> AppResult<DateTime<Utc>> {
         .to_chrono())
 }
 
-pub fn cutover_at() -> Option<DateTime<Utc>> {
-    CUTOVER.get().copied()
+pub fn cutover_at(db: &Database) -> Option<DateTime<Utc>> {
+    CUTOVER.get(db.name()).map(|at| *at)
+}
+
+#[cfg(test)]
+pub(crate) async fn initialize_test_cutover(
+    db: &Database,
+    at: DateTime<Utc>,
+) -> AppResult<DateTime<Utc>> {
+    db.collection::<bson::Document>(MIGRATIONS_COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": CUTOVER_MARKER_ID},
+            doc! {"$set": {"cutover_at": bson::DateTime::from_chrono(at)}},
+        )
+        .upsert(true)
+        .await?;
+    CUTOVER.remove(db.name());
+    ensure_cutover(db).await
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -539,7 +561,7 @@ pub async fn admit_skill_events_in_session(
             admitted.dropped.push(event.id);
             continue;
         };
-        let verdict = match skill_notification_eligible(&card, cutover_at())? {
+        let verdict = match skill_notification_eligible(&card, cutover_at(db))? {
             SkillEligibility::Eligible(SkillDestination::GroupNyxbotHome { group_id }) => {
                 if nyxbot_in_personal_group(db, owner, &group_id, Some(&mut *session)).await? {
                     Ok(())

@@ -163,7 +163,7 @@ pub(crate) async fn enqueue(
             let Some(card) = db.collection::<AssistantAcknowledgement>(ACKS)
                 .find_one(doc! {"_id": &request_id, "user_id": &owner, "kind": "skills"})
                 .session(&mut *session).await? else { return Ok(None); };
-            let eligible = match policy::skill_notification_eligible(&card, policy::cutover_at())? {
+            let eligible = match policy::skill_notification_eligible(&card, policy::cutover_at(&db))? {
                 policy::SkillEligibility::Eligible(policy::SkillDestination::GroupNyxbotHome { group_id }) => {
                     policy::nyxbot_in_personal_group(&db, &owner, &group_id, Some(&mut *session)).await?
                         .then_some(()).ok_or("group_membership_changed")

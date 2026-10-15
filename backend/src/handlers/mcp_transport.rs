@@ -3120,8 +3120,11 @@ async fn chat_service_gate(
             Some(tool_result(request_id, &value.to_string(), true))
         }
         Err(error) => {
-            let result =
-                crate::services::assistant_account_tools::error_result_for(error, Some(chat));
+            let result = crate::services::assistant_account_tools::error_result_for(
+                error,
+                Some(chat),
+                &state.config.frontend_url,
+            );
             Some(tool_result(request_id, &result.value.to_string(), true))
         }
     }
@@ -3421,8 +3424,11 @@ async fn handle_account_tool(
     if let Err(error) =
         crate::services::service_history::context::authenticated(&state.db, &user).await
     {
-        let result =
-            crate::services::assistant_account_tools::error_result_for(error, auth.chat.as_ref());
+        let result = crate::services::assistant_account_tools::error_result_for(
+            error,
+            auth.chat.as_ref(),
+            &state.config.frontend_url,
+        );
         return tool_result(request_id, &result.value.to_string(), true);
     }
     if crate::services::assistant_team_tools::is_team_tool(name) {
@@ -3535,14 +3541,22 @@ async fn handle_attachment_read(
     {
         Ok(value) => tool_result(
             id,
-            &value.to_string(),
+            &crate::services::assistant_access_policy::with_frontend(
+                value.clone(),
+                &state.config.frontend_url,
+            )
+            .to_string(),
             value.get("error").is_some() || value["isError"] == true,
         ),
         Err(error) => tool_result(
             id,
-            &crate::services::assistant_account_tools::error_result_for(error, Some(chat))
-                .value
-                .to_string(),
+            &crate::services::assistant_account_tools::error_result_for(
+                error,
+                Some(chat),
+                &state.config.frontend_url,
+            )
+            .value
+            .to_string(),
             true,
         ),
     }
@@ -3571,14 +3585,22 @@ async fn handle_machine_tool(
     {
         Ok(value) => tool_result(
             request_id,
-            &value.to_string(),
+            &crate::services::assistant_access_policy::with_frontend(
+                value.clone(),
+                &state.config.frontend_url,
+            )
+            .to_string(),
             value.get("error").is_some() || value["isError"] == true,
         ),
         Err(error) => tool_result(
             request_id,
-            &crate::services::assistant_account_tools::error_result_for(error, Some(chat))
-                .value
-                .to_string(),
+            &crate::services::assistant_account_tools::error_result_for(
+                error,
+                Some(chat),
+                &state.config.frontend_url,
+            )
+            .value
+            .to_string(),
             true,
         ),
     }

@@ -1210,7 +1210,8 @@ async fn push_pinned_event(
         ),
         Some(&row.agent_id),
     );
-    event = crate::models::assistant_acknowledgement::bind_continuation(ack.routing.as_ref(), event);
+    event =
+        crate::models::assistant_acknowledgement::bind_continuation(ack.routing.as_ref(), event);
     event.id = Uuid::new_v5(
         &Uuid::NAMESPACE_OID,
         format!("skill-publication:{}:{}:pinned", row.id, row.revision).as_bytes(),

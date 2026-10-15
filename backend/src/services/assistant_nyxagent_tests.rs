@@ -2953,6 +2953,7 @@ fn production_recap_keeps_unrendered_tail_owners_in_requirements_and_omission_co
 #[test]
 fn recap_sections_keep_mid_history_owner_rules_tail_and_manifest_with_cjk() {
     let message = |i, text: String| AssistantMessage {
+        report_to: None,
         continuation_of: None,
         specialist_id: None,
         retry_of: None,
@@ -3003,6 +3004,7 @@ fn recap_sections_keep_mid_history_owner_rules_tail_and_manifest_with_cjk() {
 #[test]
 fn recap_owner_overflow_points_to_history_tool() {
     let message = |i: i64| AssistantMessage {
+        report_to: None,
         continuation_of: None,
         specialist_id: None,
         retry_of: None,
@@ -3973,8 +3975,8 @@ async fn turn_snapshot_is_decided_at_admission_and_copied_to_the_settled_reply()
     assert_eq!(row.report_to.as_deref(), Some(nb));
     settle(&db, keys, &owner, &row, "done", None).await;
 
-    // 7. A retry of a failed assigned turn is the owner's message: no
-    // snapshot, legacy marker cleared.
+    // 7. A retry has no report snapshot, but preserves the compatibility
+    // marker because it continues an earlier owner request.
     let row = begin_turn(&db, &owner, assigned("Fragile work"), keys)
         .await
         .unwrap();
@@ -3990,7 +3992,7 @@ async fn turn_snapshot_is_decided_at_admission_and_copied_to_the_settled_reply()
     .await
     .unwrap();
     assert_eq!(turn_target(&retried), None);
-    assert_eq!(retried.report_to, None);
+    assert_eq!(retried.report_to.as_deref(), Some(nb));
     settle(&db, keys, &owner, &retried, "done", None).await;
 
     // 8. A lost assigned turn is reclaimed with its snapshot on the failed

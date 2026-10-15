@@ -870,9 +870,17 @@ async fn setup_links_create_bots_that_link_themselves_and_resume_the_chat() {
         .update_one(doc! {"_id":&home.id}, doc! {"$set":{"group_id":&group_id}})
         .await
         .unwrap();
-    let (group, _) = setup_link_tool(&state, OWNER, &home.id, "lark", None, &team, LEGACY_PROVENANCE)
-        .await
-        .unwrap();
+    let (group, _) = setup_link_tool(
+        &state,
+        OWNER,
+        &home.id,
+        "lark",
+        None,
+        &team,
+        LEGACY_PROVENANCE,
+    )
+    .await
+    .unwrap();
     assert!(
         group["url"]
             .as_str()
@@ -885,7 +893,16 @@ async fn setup_links_create_bots_that_link_themselves_and_resume_the_chat() {
         .update_one(doc! {"_id":&home.id}, doc! {"$unset":{"group_id":""}})
         .await
         .unwrap();
-    let unknown = setup_link_tool(&state, OWNER, &home.id, "myspace", None, &team, LEGACY_PROVENANCE).await;
+    let unknown = setup_link_tool(
+        &state,
+        OWNER,
+        &home.id,
+        "myspace",
+        None,
+        &team,
+        LEGACY_PROVENANCE,
+    )
+    .await;
     assert!(matches!(unknown, Err(AppError::ValidationError(message)) if message.contains("lark")));
     // Without an administrator-configured creation manager, Telegram uses
     // the bot-token page.

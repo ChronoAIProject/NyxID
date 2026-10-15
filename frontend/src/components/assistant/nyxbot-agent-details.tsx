@@ -144,7 +144,7 @@ export function accessAuthorityCopy(
   }
   return requestMode === "routed_to_nyxbot"
     ? `${sandbox} ${direct} Only for work NyxBot assigned, or in a group with NyxBot, do its requests go to NyxBot, which approves or denies them.`
-    : `${sandbox} ${direct} Its requests are never routed: only work NyxBot assigned reports the missing access to NyxBot instead.`;
+    : `${sandbox} ${direct} Its requests are never routed: only work NyxBot assigned, or work in a group NyxBot is in, reports the missing access to NyxBot instead.`;
 }
 
 const GRANTS_SECTION_ID = "agent-details-grants";
@@ -599,7 +599,7 @@ function GrantsForm({ agent }: { readonly agent: AssistantAgent }) {
     <Section
       id={GRANTS_SECTION_ID}
       title="Grants"
-      description="This specialist is sandboxed and cannot grant access itself. Saving replaces the current grants on every thread. When you talk to it directly, anything beyond them is reported to you as missing; only work NyxBot assigned asks NyxBot."
+      description="This specialist is sandboxed and cannot grant access itself. Saving replaces the current grants on every thread. When you talk to it directly, anything beyond them is reported to you as missing; only work NyxBot assigned, or work in a group NyxBot is in, asks NyxBot."
     >
       <Form {...form}>
         <form aria-label="Grants" noValidate onSubmit={form.handleSubmit(save)} className="space-y-3">

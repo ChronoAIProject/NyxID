@@ -176,7 +176,7 @@ function renderSheet(props: Partial<ComponentProps<typeof AgentDetailsSheet>> = 
 /**
  * No specialist-facing copy may tell the owner that NyxBot takes over a direct
  * chat: the retired phrases, plus generic takeover claims. Accurate statements
- * about work NyxBot assigned ("only work NyxBot assigned asks NyxBot") and
+ * about work NyxBot assigned ("only work NyxBot assigned, or work in a group NyxBot is in, asks NyxBot") and
  * owner-directed tips ("ask NyxBot to change this") are allowed.
  */
 const NYXBOT_TAKEOVER =
@@ -434,7 +434,7 @@ it("explains the specialist sandbox and who approves in each request policy", as
   // Direct chats never hand the work to NyxBot: no copy in the sheet says so.
   expect(sheet).not.toHaveTextContent(NYXBOT_TAKEOVER);
   expect(within(sheet).getByRole("region", { name: "Grants" })).toHaveTextContent(
-    "anything beyond them is reported to you as missing; only work NyxBot assigned asks NyxBot",
+    "anything beyond them is reported to you as missing; only work NyxBot assigned, or work in a group NyxBot is in, asks NyxBot",
   );
   cleanup();
   requestMode = "routed_to_nyxbot";

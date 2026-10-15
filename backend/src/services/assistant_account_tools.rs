@@ -424,10 +424,24 @@ impl std::fmt::Debug for ToolResult {
 }
 
 pub fn error_result(error: AppError) -> ToolResult {
-    error_result_for(error, None)
+    error_result_inner(error, None, "")
 }
 
-pub fn error_result_for(error: AppError, chat: Option<&acks::ChatAuthority>) -> ToolResult {
+pub fn error_result_for(
+    error: AppError,
+    chat: Option<&acks::ChatAuthority>,
+    frontend: &str,
+) -> ToolResult {
+    let mut result = error_result_inner(error, chat, frontend);
+    result.value = super::assistant_access_policy::with_frontend(result.value, frontend);
+    result
+}
+
+fn error_result_inner(
+    error: AppError,
+    chat: Option<&acks::ChatAuthority>,
+    frontend: &str,
+) -> ToolResult {
     let body = error.response_body();
     let message = match error {
         AppError::AssistantMissingAccess(value) => {
@@ -442,7 +456,7 @@ pub fn error_result_for(error: AppError, chat: Option<&acks::ChatAuthority>) -> 
                 "message": body.message});
             if let Some(chat) = chat {
                 value["instructions"] = json!(
-                    super::assistant_access_policy::machine_permission_guidance(chat)
+                    super::assistant_access_policy::machine_permission_guidance(chat, frontend)
                 );
             }
             return ToolResult {
@@ -578,7 +592,9 @@ impl AccountTools<'_> {
             Ok(None) => Err(AppError::Forbidden("Conversation key required".into())),
             Err(error) => Err(error),
         };
-        let result = result.unwrap_or_else(error_result);
+        let mut result = result.unwrap_or_else(error_result);
+        result.value =
+            super::assistant_access_policy::with_frontend(result.value, &self.config.frontend_url);
         // Never audit arguments, output, URLs, names or raw service-layer errors.
         let actor = audit_service::AuditActor::from_auth_user(auth);
         let target = ["api_key_id", "bot_id", "route_id", "service_id", "node_id"]

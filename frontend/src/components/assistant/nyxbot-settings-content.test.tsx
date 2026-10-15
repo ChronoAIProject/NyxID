@@ -278,7 +278,7 @@ it("asks before every change in Ask every time and explains the specialist reque
     within(page).getByText(/A specialist you talk to directly tells you what it is missing and continues; you grant it in the specialist's details/),
   ).toBeVisible();
   // Denied mode: a direct chat is never handed to NyxBot; only assigned work reports there.
-  expect(within(page).getByText(/Only work NyxBot assigned reports to NyxBot instead/)).toBeVisible();
+  expect(within(page).getByText(/Only work NyxBot assigned, or work in a group NyxBot is in, reports to NyxBot instead/)).toBeVisible();
   await user.click(within(page).getByRole("combobox", { name: "Access mode" }));
   await user.click(await screen.findByRole("option", { name: "Ask every time" }));
   expect(

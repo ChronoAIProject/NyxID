@@ -628,13 +628,16 @@ async fn deliver_skill_notification(
     use crate::services::assistant_access_policy as policy;
     // An unreadable cutover fails closed: the marker stays and the next sweep
     // tries again.
-    let destination = match policy::skill_notification_eligible(request, policy::cutover_at())? {
-        policy::SkillEligibility::Eligible(destination) => destination,
-        policy::SkillEligibility::Ineligible(reason) => {
-            return acks::skill_notifications::terminalize(&state.db, request, &attempt, reason)
+    let destination =
+        match policy::skill_notification_eligible(request, policy::cutover_at(&state.db))? {
+            policy::SkillEligibility::Eligible(destination) => destination,
+            policy::SkillEligibility::Ineligible(reason) => {
+                return acks::skill_notifications::terminalize(
+                    &state.db, request, &attempt, reason,
+                )
                 .await;
-        }
-    };
+            }
+        };
     let result: AppResult<()> = async {
         let owner = &request.user_id;
         let row = engine::get(&state.db, owner, &request.conversation_id).await?;
@@ -1201,8 +1204,11 @@ pub(crate) async fn execute_tool(
     let outcome = match result {
         Ok(outcome) => outcome,
         Err(error) => {
-            let tool =
-                crate::services::assistant_account_tools::error_result_for(error, Some(chat));
+            let tool = crate::services::assistant_account_tools::error_result_for(
+                error,
+                Some(chat),
+                &state.config.frontend_url,
+            );
             (tool.value, true)
         }
     };

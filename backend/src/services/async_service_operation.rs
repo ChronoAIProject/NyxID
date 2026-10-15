@@ -284,10 +284,20 @@ pub async fn enqueue(db: &Database, w: &AsyncServiceOperation) -> AppResult<bool
             };
             if row.pending_events.len()>=super::assistant_nyxagent::MAX_PENDING_EVENTS {return Ok(false);}
             if db.collection::<bson::Document>(WATCHES).update_one(lease_filter(&w),doc!{"$set":{"state":"queued","lease_id":null,"lease_until":null}}).session(&mut *session).await?.modified_count==0{return Ok(false);}
-            let event=AgentEvent{id:w.id.clone(),kind:EVENT_KIND.into(),text:format!("Asynchronous service operation finished: {}. Its result is quoted in this turn's context.",w.reason.as_deref().unwrap_or("failed")),agent_id:Some(w.agent_id.clone()),question_key:None,reply_to:Vec::new(),
-                bound:w.delivery.report_provenance==REPORT_PROVENANCE_V1,
-                report_to:carried_report_to(w.delivery.report_to.as_deref(),w.delivery.report_provenance),
-                created_at:Utc::now()};
+            let event = AgentEvent {
+                id: w.id.clone(),
+                kind: EVENT_KIND.into(),
+                text: format!(
+                    "Asynchronous service operation finished: {}. Its result is quoted in this turn's context.",
+                    w.reason.as_deref().unwrap_or("failed"),
+                ),
+                agent_id: Some(w.agent_id.clone()),
+                question_key: None,
+                reply_to: Vec::new(),
+                bound: w.delivery.report_provenance == REPORT_PROVENANCE_V1,
+                report_to: carried_report_to(w.delivery.report_to.as_deref(), w.delivery.report_provenance),
+                created_at: Utc::now(),
+            };
             conversations.update_one(doc!{"_id":&row.id,"user_id":&w.user_id},doc!{"$push":{"pending_events":bson::to_bson(&event).map_err(|_|invalid())?}}).session(&mut *session).await?;Ok(true)
         }).await;transactions::transaction_result(result)
     }).await.map_err(transactions::map_transaction_error)

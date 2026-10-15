@@ -254,12 +254,21 @@ fn missing_access_copy_never_names_nyxbot_and_links_the_agent_page() {
     }
     // The machine permission guidance is contextual; only involved work and
     // NyxBot itself hear about NyxBot.
-    let direct = machine_permission_guidance(&chat(AgentRole::Subagent, false, None, false));
+    let direct = machine_permission_guidance(
+        &chat(AgentRole::Subagent, false, None, false),
+        "https://app.example",
+    );
     assert!(!direct.to_lowercase().contains("nyxbot"), "{direct}");
     assert!(direct.contains("No request was created") || direct.contains("no request was created"));
-    let involved = machine_permission_guidance(&chat(AgentRole::Subagent, false, Some("t"), false));
+    let involved = machine_permission_guidance(
+        &chat(AgentRole::Subagent, false, Some("t"), false),
+        "https://app.example",
+    );
     assert!(involved.contains("nyxid__machine_capabilities"));
-    let guest = machine_permission_guidance(&chat(AgentRole::Subagent, true, Some("t"), false));
+    let guest = machine_permission_guidance(
+        &chat(AgentRole::Subagent, true, Some("t"), false),
+        "https://app.example",
+    );
     assert!(!guest.to_lowercase().contains("nyxbot"));
     assert_eq!(
         connect_refusal(&chat(AgentRole::Subagent, false, None, false))["error"],
@@ -333,7 +342,7 @@ async fn cutover_marker_is_written_once_and_never_moves() {
         stored.timestamp_millis()
     );
     assert_eq!(ensure_cutover(db).await.unwrap(), first);
-    assert_eq!(cutover_at(), Some(first));
+    assert_eq!(cutover_at(db), Some(first));
     f.state.db.drop().await.unwrap();
 }
 
@@ -406,7 +415,31 @@ async fn direct_specialist_work_gets_missing_access_without_card_or_nyxbot_notic
     .await
     .unwrap_err();
     results.push(("saved_login", tools::error_result(error).value));
-    for (scope, value) in &results {
+    for (scope, raw) in &results {
+        // Both typed refusals and successful gate values reach this same
+        // final assistant boundary before becoming model context.
+        let result = tools::error_result_for(
+            missing_access_error(raw),
+            Some(&f.chat),
+            &f.state.config.frontend_url,
+        );
+        let value = &result.value;
+        let instructions = value["instructions"].as_str().unwrap();
+        assert!(
+            instructions.contains(&format!(
+                "({}/assistant",
+                f.state.config.frontend_url.trim_end_matches('/')
+            )),
+            "{scope}: {instructions}"
+        );
+        assert!(
+            !instructions.contains("(/assistant?"),
+            "{scope}: {instructions}"
+        );
+        assert_eq!(
+            with_frontend(value.clone(), &f.state.config.frontend_url),
+            *value
+        );
         assert_eq!(value["error"], MISSING_ACCESS, "{scope}: {value}");
         assert_eq!(value["scope"], *scope, "{value}");
         assert_eq!(value["request_created"], false, "{scope}");
@@ -937,7 +970,7 @@ async fn admission_filters_ineligible_skill_events_and_terminalizes_their_outbox
     let f = fixture("policy_admission_filter").await;
     let db = &f.state.db;
     let cutover = ensure_cutover(db).await.unwrap();
-    assert_eq!(cutover_at(), Some(cutover));
+    assert_eq!(cutover_at(db), Some(cutover));
     assert_eq!(ensure_cutover(db).await.unwrap(), cutover);
     let cards = db.collection::<Document>(ACKS);
     let mut ids = Vec::new();
@@ -1339,5 +1372,93 @@ async fn routed_request_notice_is_fenced_to_the_live_turn_and_the_cards_routing(
         None
     );
     assert_eq!(queued(home.clone(), left_card.id.clone()).await, 0);
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn cutover_cache_is_independent_for_explicit_test_databases() {
+    let first = crate::test_utils::connect_transaction_test_database("cutover_first").await;
+    let second = crate::test_utils::connect_transaction_test_database("cutover_second").await;
+    let early = chrono::DateTime::from_timestamp_millis(1_700_000_000_000).unwrap();
+    let late = early + Duration::days(5);
+    assert_eq!(initialize_test_cutover(&first, early).await.unwrap(), early);
+    assert_eq!(initialize_test_cutover(&second, late).await.unwrap(), late);
+    assert_eq!(cutover_at(&first), Some(early));
+    assert_eq!(cutover_at(&second), Some(late));
+    assert_eq!(ensure_cutover(&first).await.unwrap(), early);
+    assert_eq!(ensure_cutover(&second).await.unwrap(), late);
+    first.drop().await.unwrap();
+    second.drop().await.unwrap();
+}
+
+#[test]
+fn final_connect_and_revoked_machine_guidance_contains_absolute_links() {
+    let chat = chat(AgentRole::Subagent, false, None, false);
+    let frontend = "https://nyxid.example/app/";
+    let value = with_frontend(connect_refusal(&chat), frontend);
+    assert!(
+        value["instructions"]
+            .as_str()
+            .unwrap()
+            .contains("(https://nyxid.example/app/assistant?")
+    );
+    assert!(
+        !value["instructions"]
+            .as_str()
+            .unwrap()
+            .contains("(/assistant?")
+    );
+    let result = tools::error_result_for(AppError::MachinePermissionRevoked, Some(&chat), frontend);
+    assert!(
+        result.value["instructions"]
+            .as_str()
+            .unwrap()
+            .contains("(https://nyxid.example/app/assistant?")
+    );
+    assert!(
+        !result.value["instructions"]
+            .as_str()
+            .unwrap()
+            .contains("(/assistant?")
+    );
+}
+
+#[test]
+fn specialist_prompt_preserves_granted_service_actions() {
+    assert!(engine::SUBAGENT_PROMPT.contains(
+        "delete account resources; service actions follow your grants and confirmations"
+    ));
+    assert!(!engine::SUBAGENT_PROMPT.contains("delete anything"));
+}
+
+#[tokio::test]
+async fn final_account_and_skill_tool_boundaries_expand_missing_access_instructions() {
+    let f = direct_fixture("policy_absolute_tool_results").await;
+    let account = Box::pin(
+        f.tools()
+            .execute(&f.auth, "nyxid__list_my_services", &json!({})),
+    )
+    .await;
+    assert!(account.is_error);
+    let (skills, error) = Box::pin(crate::handlers::assistant_team::execute_tool(
+        &f.state,
+        &f.chat,
+        "nyxid__request_agent_skills",
+        &json!({"agent": f.chat.agent_id, "skill": "weekly-review", "version": "1.0.0"}),
+    ))
+    .await;
+    assert!(error);
+    for value in [account.value, skills] {
+        assert_eq!(value["error"], MISSING_ACCESS);
+        let instructions = value["instructions"].as_str().unwrap();
+        assert!(
+            instructions.contains(&format!(
+                "({}/assistant?",
+                f.state.config.frontend_url.trim_end_matches('/')
+            )),
+            "{instructions}"
+        );
+        assert!(!instructions.contains("(/assistant?"));
+    }
     f.state.db.drop().await.unwrap();
 }
