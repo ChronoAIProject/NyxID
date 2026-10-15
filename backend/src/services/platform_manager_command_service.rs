@@ -97,19 +97,19 @@ pub async fn execute(
             if *kind!=PersonalCommandKind::Unlink && (row.retired || row.emergency_stopped || !row.personal_enabled) {
                 return Err(AppError::Conflict("Personal linking is currently unavailable".into()));
             }
-            let reply=match kind {
+            let (reply,revocation)=match kind {
                 PersonalCommandKind::Link=> {
                     let issued=intents::begin_original_in_session(db,session,key,command,&claim.receipt_id).await?;
                     let token=issued.token.ok_or_else(|| AppError::Conflict("Link was already issued; send /link again".into()))?;
-                    PersonalCommandReply::Link {token}
+                    (PersonalCommandReply::Link {token},None)
                 },
                 PersonalCommandKind::Confirm=> {
                     intents::confirm_original_in_session(db,session,key,audit_key,command,*lifecycle).await?;
-                    PersonalCommandReply::Confirmed
+                    (PersonalCommandReply::Confirmed,None)
                 },
                 PersonalCommandKind::Unlink=> {
-                    lifecycle.unlink_sender_in_session(db,session,command).await?;
-                    PersonalCommandReply::Unlinked
+                    let revocation=lifecycle.unlink_sender_in_session(db,session,command).await?;
+                    (PersonalCommandReply::Unlinked,Some(revocation))
                 }
             };
             let manager=controls::policy(&row).manager;
@@ -120,7 +120,7 @@ pub async fn execute(
             db.collection::<mongodb::bson::Document>(crate::models::platform_manager_ingress::COLLECTION_NAME)
                 .update_one(mongodb::bson::doc!{"_id":&claim.receipt_id,"claim_id":&claim.claim_id,"audience.kind":"control"},
                     mongodb::bson::doc!{"$set":{"phase":"settled","settled_at":mongodb::bson::DateTime::now()}}).session(&mut *session).await?;
-            Ok(Some(CommittedCommand {ingress:claim.clone(),manager,sender_id:update.sender_id,chat_id:update.chat_id,reply}))
+            Ok(Some((CommittedCommand {ingress:claim.clone(),manager,sender_id:update.sender_id,chat_id:update.chat_id,reply},revocation)))
         }.await;
         transaction_result(result)
     })).await.map_err(map_transaction_error);
@@ -133,7 +133,19 @@ pub async fn execute(
             return Ok(None);
         }
     }
-    result
+    result.map(|committed| {
+        committed.map(|(command, revocation)| {
+            if let Some(revocation) = revocation {
+                tracing::info!(
+                    receipt_id = command.ingress.receipt_id,
+                    revoked = revocation.revoked,
+                    pending_stop_records = revocation.stop_effect_record_ids.len(),
+                    "Personal unlink committed; exact stop recovery owns pending effects"
+                );
+            }
+            command
+        })
+    })
 }
 
 impl PersonalCommandReply {

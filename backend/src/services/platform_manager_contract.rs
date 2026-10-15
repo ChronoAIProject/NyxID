@@ -581,36 +581,10 @@ pub enum SettledExecution {
     PersistenceUnavailable { turn: TurnRef },
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PersonalStopReason {
-    Unlinked,
-    Replaced,
-    PersonalPaused,
-    EmergencyStopped,
-    ManagerRetired,
-    AccountDisabled,
-    AccountDeleted,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ManagerRetirementReason {
-    Retired,
-    IdentityChanged,
-    Deleted,
-    CredentialsCleared,
-}
-
 #[derive(Clone, Debug)]
 pub struct PersonalRevocationResult {
     pub revoked: bool,
     pub stop_effect_record_ids: Vec<String>,
-}
-
-#[derive(Clone, Debug)]
-pub struct PersonalRetirementBatch {
-    pub processed: u32,
-    pub next_binding_id: Option<String>,
-    pub complete: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -703,37 +677,12 @@ pub trait ManagerIdentityProducer: Send + Sync {
 /// Part 1 owns durable personal retirement/stop records and bounded recovery.
 #[async_trait]
 pub trait ManagerLifecycleProducer: Send + Sync {
-    async fn enqueue_exact_stop_in_session(
-        &self,
-        db: &Database,
-        session: &mut ClientSession,
-        effects: &CapturedPlatformStop,
-        reason: PersonalStopReason,
-    ) -> AppResult<String>;
-
     async fn unlink_sender_in_session(
         &self,
         db: &Database,
         session: &mut ClientSession,
         command: &OriginalManagerCommand,
     ) -> AppResult<PersonalRevocationResult>;
-
-    async fn retire_personal_owner_in_session(
-        &self,
-        db: &Database,
-        session: &mut ClientSession,
-        owner: &str,
-        deleted: bool,
-        after_binding_id: Option<&str>,
-    ) -> AppResult<PersonalRetirementBatch>;
-
-    async fn retire_manager_in_session(
-        &self,
-        db: &Database,
-        session: &mut ClientSession,
-        manager: &ManagerAuthority,
-        reason: ManagerRetirementReason,
-    ) -> AppResult<()>;
 
     async fn recover_personal_lifecycle(
         &self,
@@ -767,16 +716,6 @@ pub trait PersonalTurnProducer: Send + Sync {
         effects: &CapturedPlatformStop,
     ) -> AppResult<ExactStopProgress>;
 
-    async fn fence_platform_execution_in_session(
-        &self,
-        db: &Database,
-        session: &mut ClientSession,
-        user_id: &str,
-        api_key_id: &str,
-        turn: &TurnRef,
-        expected_origin: &PlatformTurnOrigin,
-    ) -> AppResult<FenceOutcome>;
-
     async fn decide_platform_reply(
         &self,
         db: &Database,
@@ -784,16 +723,6 @@ pub trait PersonalTurnProducer: Send + Sync {
         conversation_id: &str,
         command: OriginalManagerCommand,
     ) -> AppResult<PlatformDecisionOutcome>;
-
-    async fn clear_binding_thread(
-        &self,
-        db: &Database,
-        session: &mut ClientSession,
-        user_id: &str,
-        binding_id: &str,
-        binding_generation: i64,
-        conversation_id: &str,
-    ) -> AppResult<bool>;
 }
 
 /// Part 2. Public cannot enter owner credential convergence through this enum.
@@ -988,10 +917,6 @@ pub struct PlatformManagerProducers {
     pub lifecycle: Arc<dyn ManagerLifecycleProducer>,
     pub personal: Arc<dyn PersonalTurnProducer>,
     pub public: Arc<dyn PublicTurnProducer>,
-    pub execution: Arc<dyn NyxAgentExecutionProducer>,
-    pub egress: Arc<dyn NyxAgentEgress>,
-    pub public_runtime: Arc<dyn PublicNyxAgentRuntime>,
-    pub ingress: Arc<dyn ManagerIngressTurnStore>,
     pub transport: Arc<dyn ManagerTransportProducer>,
 }
 

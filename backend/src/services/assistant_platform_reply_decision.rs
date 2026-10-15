@@ -99,9 +99,16 @@ pub(crate) async fn decide_personal_reply_in_session(
     }
     if !matches!(
         identity
-            .fence_personal_origin(db, session, authority)
+            .resolve_thread_authority(
+                db,
+                session,
+                &authority.user_id,
+                &authority.binding_id,
+                authority.binding_generation,
+                conversation_id,
+            )
             .await?,
-        contract::FenceOutcome::Authorized
+        contract::ThreadAuthorityResolution::Personal(resolved) if resolved == *authority
     ) {
         return Ok(contract::PlatformDecisionOutcome::Unavailable(
             contract::UnavailableReason::OriginRevoked,

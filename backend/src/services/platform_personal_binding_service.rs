@@ -1283,44 +1283,6 @@ impl PersonalLifecycleEffects for LifecycleProducer {
 
 #[async_trait]
 impl super::platform_manager_contract::ManagerLifecycleProducer for LifecycleProducer {
-    async fn enqueue_exact_stop_in_session(
-        &self,
-        db: &Database,
-        session: &mut ClientSession,
-        effects: &super::platform_manager_contract::CapturedPlatformStop,
-        _reason: super::platform_manager_contract::PersonalStopReason,
-    ) -> AppResult<String> {
-        enqueue_stop_in_session(
-            db,
-            session,
-            &CapturedPersonalStop {
-                active_turn: PersonalActiveTurn {
-                    conversation_id: effects.turn.conversation_id.clone(),
-                    turn_id: effects.turn.turn_id.clone(),
-                    origin: stored_origin(&effects.origin),
-                },
-                stop_requested_at: effects.stop_requested_at,
-                machine_scopes: effects
-                    .machine_scopes
-                    .iter()
-                    .map(|scope| ExactMachineScope {
-                        node_id: scope.node_id.clone(),
-                        runtime_id: scope.runtime_id.clone(),
-                    })
-                    .collect(),
-                machine_jobs: effects
-                    .machine_jobs
-                    .iter()
-                    .map(|j| ExactMachineJob {
-                        node_id: j.node_id.clone(),
-                        runtime_id: j.runtime_id.clone(),
-                        job_id: j.job_id.clone(),
-                    })
-                    .collect(),
-            },
-        )
-        .await
-    }
     async fn unlink_sender_in_session(
         &self,
         db: &Database,
@@ -1413,68 +1375,6 @@ impl super::platform_manager_contract::ManagerLifecycleProducer for LifecyclePro
             revoked,
             stop_effect_record_ids: ids,
         })
-    }
-    async fn retire_personal_owner_in_session(
-        &self,
-        db: &Database,
-        session: &mut ClientSession,
-        owner: &str,
-        deleted: bool,
-        _after_binding_id: Option<&str>,
-    ) -> AppResult<super::platform_manager_contract::PersonalRetirementBatch> {
-        let processed = retire_owner_batch_in_session(db, session, owner, deleted, self).await?;
-        // Every processed active row is revoked, so repeated bounded scans make
-        // progress without trusting an external cursor to omit earlier rows.
-        Ok(super::platform_manager_contract::PersonalRetirementBatch {
-            processed: processed as u32,
-            next_binding_id: None,
-            complete: processed < 50,
-        })
-    }
-    async fn retire_manager_in_session(
-        &self,
-        db: &Database,
-        session: &mut ClientSession,
-        manager: &super::platform_manager_contract::ManagerAuthority,
-        _reason: super::platform_manager_contract::ManagerRetirementReason,
-    ) -> AppResult<()> {
-        use super::platform_manager_contract::{PublicRevocationReason, PublicRevocationScope};
-        let Some(current) = super::platform_bot_runtime_control_service::get_in_session(
-            db,
-            session,
-            &manager.profile_id,
-        )
-        .await?
-        else {
-            // Legacy managers never created this purpose's authority or work.
-            return Ok(());
-        };
-        if current.manager_bot_id != manager.manager_bot_id
-            || current.telegram_bot_id != manager.telegram_bot_id
-            || (!current.retired
-                && current.manager_authority_epoch != manager.manager_authority_epoch)
-        {
-            return Err(conflict());
-        }
-        super::platform_bot_runtime_control_service::emergency_stop_in_session(
-            db,
-            session,
-            &manager.profile_id,
-            true,
-        )
-        .await?;
-        stop_manager_batch_in_session(db, session, &manager.profile_id, None, true, self).await?;
-        self.public
-            .revoke_public_sessions_in_session(
-                db,
-                session,
-                &PublicRevocationScope::Manager {
-                    manager: manager.clone(),
-                },
-                PublicRevocationReason::ManagerRetired,
-            )
-            .await?;
-        Ok(())
     }
     async fn recover_personal_lifecycle(
         &self,

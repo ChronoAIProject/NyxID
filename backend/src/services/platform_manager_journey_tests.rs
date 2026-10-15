@@ -179,7 +179,7 @@ impl Journey {
             egress.clone(),
             public_runtime.clone(),
         );
-        let mut producers = assemble(state.clone(), execution, egress.clone(), public_runtime);
+        let mut producers = assemble(state.clone(), execution, egress.clone());
         let identity = producers.identity.clone();
         Arc::get_mut(&mut producers).unwrap().transport = Arc::new(LocalTransport {
             state: state.clone(),

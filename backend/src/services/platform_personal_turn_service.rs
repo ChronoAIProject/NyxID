@@ -678,27 +678,6 @@ impl contract::PersonalTurnProducer for PersonalTurns {
         apply_exact_stop(&self.state, effects).await
     }
 
-    async fn fence_platform_execution_in_session(
-        &self,
-        db: &Database,
-        session: &mut ClientSession,
-        user_id: &str,
-        key_id: &str,
-        turn: &contract::TurnRef,
-        origin: &contract::PlatformTurnOrigin,
-    ) -> AppResult<contract::FenceOutcome> {
-        fence_execution_in_session(
-            db,
-            session,
-            self.identity.as_ref(),
-            user_id,
-            key_id,
-            turn,
-            origin,
-        )
-        .await
-    }
-
     async fn decide_platform_reply(
         &self,
         db: &Database,
@@ -722,27 +701,6 @@ impl contract::PersonalTurnProducer for PersonalTurns {
                 transactions::transaction_result(result)
             }),
         ).await.map_err(transactions::map_transaction_error)
-    }
-
-    async fn clear_binding_thread(
-        &self,
-        db: &Database,
-        session: &mut ClientSession,
-        user_id: &str,
-        binding_id: &str,
-        generation: i64,
-        conversation_id: &str,
-    ) -> AppResult<bool> {
-        self.identity
-            .clear_binding_thread_reference(
-                db,
-                session,
-                user_id,
-                binding_id,
-                generation,
-                conversation_id,
-            )
-            .await
     }
 }
 

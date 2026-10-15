@@ -58,12 +58,9 @@ pub fn compose(state: AppState) -> Arc<PlatformManagerProducers> {
     let identity = bindings::producer(state.clone());
     let egress = super::assistant_nyxagent_egress::producer(state.clone(), identity);
     let public_runtime = super::platform_public_credential_service::producer(state.clone());
-    let execution = super::assistant_nyxagent_runtime::producer(
-        state.clone(),
-        egress.clone(),
-        public_runtime.clone(),
-    );
-    assemble(state, execution, egress, public_runtime)
+    let execution =
+        super::assistant_nyxagent_runtime::producer(state.clone(), egress.clone(), public_runtime);
+    assemble(state, execution, egress)
 }
 
 /// Every dependency is real. The public producers remain explicitly unavailable.
@@ -71,7 +68,6 @@ pub fn assemble(
     state: AppState,
     execution: Arc<dyn NyxAgentExecutionProducer>,
     egress: Arc<dyn NyxAgentEgress>,
-    public_runtime: Arc<dyn PublicNyxAgentRuntime>,
 ) -> Arc<PlatformManagerProducers> {
     let identity = bindings::producer(state.clone());
     let ingress = super::platform_manager_ingress_service::producer(state.clone());
@@ -79,13 +75,9 @@ pub fn assemble(
         state.clone(),
         identity.clone(),
         ingress.clone(),
-        egress.clone(),
+        egress,
     );
-    let public = super::platform_public_agent_service::producer(
-        state.clone(),
-        execution.clone(),
-        ingress.clone(),
-    );
+    let public = super::platform_public_agent_service::producer(state.clone(), execution, ingress);
     let lifecycle = super::platform_bot_runtime_control_service::producer(
         state.clone(),
         personal.clone(),
@@ -97,14 +89,10 @@ pub fn assemble(
     });
     Arc::new(PlatformManagerProducers {
         identity,
-        ingress,
         personal,
         public,
         lifecycle,
         transport,
-        execution,
-        egress,
-        public_runtime,
     })
 }
 
@@ -227,11 +215,51 @@ pub(crate) async fn dispatch_update(
         .transport
         .admit_manager_update(&state.db, &verified)
         .await?;
-    let IngressAdmission::Claimed { ingress, audience } = admission else {
-        return Ok(true);
+    let (ingress, audience) = match admission {
+        IngressAdmission::Claimed { ingress, audience } => (ingress, audience),
+        IngressAdmission::Duplicate { receipt_id } => {
+            tracing::debug!(
+                receipt_id,
+                "Manager update already admitted; preserving original audience"
+            );
+            return Ok(true);
+        }
     };
     match audience {
         ManagerAudience::Personal(admitted) => {
+            let live = producers
+                .identity
+                .runtime_policy(&state.db, &verified.profile_id)
+                .await?;
+            let unavailable = match live {
+                None => Some(UnavailableReason::ManagerUnavailable),
+                Some(policy) if policy.emergency_stopped => {
+                    Some(UnavailableReason::EmergencyStopped)
+                }
+                Some(policy) if !policy.personal_enabled => {
+                    Some(UnavailableReason::PersonalDisabled)
+                }
+                Some(policy)
+                    if policy.manager != admitted.authority.manager
+                        || policy.personal_control_revision
+                            != admitted.authority.personal_control_revision =>
+                {
+                    Some(UnavailableReason::OriginRevoked)
+                }
+                Some(_) => None,
+            };
+            if let Some(reason) = unavailable {
+                send_fixed(
+                    state,
+                    &producers,
+                    &verified,
+                    &ingress,
+                    admitted.authority.manager,
+                    reason,
+                )
+                .await?;
+                return Ok(true);
+            }
             if text.trim().is_empty() || text.starts_with('/') {
                 let destination = fixed_destination(
                     super::platform_bot_runtime_control_service::policy(&runtime).manager,
@@ -255,8 +283,9 @@ pub(crate) async fn dispatch_update(
                 // Read the exact binding's existing thread, never an owner's home.
                 let mut session = state.db.client().start_session().await?;
                 if let SenderResolution::Personal {
+                    authority,
+                    nyxbot_agent_id: Some(agent_id),
                     conversation_id: Some(id),
-                    ..
                 } = producers
                     .identity
                     .resolve_sender(&state.db, &mut session, &verified)
@@ -266,13 +295,65 @@ pub(crate) async fn dispatch_update(
                         TurnInput { text: text.into() },
                     )
                 {
+                    let thread_matches = state
+                        .db
+                        .collection::<crate::models::assistant_conversation::AssistantConversation>(
+                            crate::models::assistant_conversation::COLLECTION_NAME,
+                        )
+                        .find_one(doc! {
+                            "_id": &id,
+                            "user_id": &admitted.authority.user_id,
+                            "platform_thread.nyxbot_agent_id": &agent_id,
+                            "platform_thread.binding_id": &admitted.authority.binding_id,
+                            "platform_thread.binding_generation": admitted.authority.binding_generation,
+                        })
+                        .session(&mut session)
+                        .await?
+                        .is_some();
+                    if authority != admitted.authority || !thread_matches {
+                        send_fixed(
+                            state,
+                            &producers,
+                            &verified,
+                            &ingress,
+                            admitted.authority.manager,
+                            UnavailableReason::OriginRevoked,
+                        )
+                        .await?;
+                        return Ok(true);
+                    }
                     match producers
                         .personal
                         .decide_platform_reply(&state.db, &admitted, &id, command)
                         .await?
                     {
-                        PlatformDecisionOutcome::Decided(_) => return Ok(true),
-                        PlatformDecisionOutcome::Unavailable(_) => return Ok(true),
+                        PlatformDecisionOutcome::Decided(decision) => {
+                            if decision.requested_turn.conversation_id != id
+                                || decision.acknowledgement_id.is_empty()
+                            {
+                                return Err(AppError::Conflict(
+                                    "Personal decision thread changed".into(),
+                                ));
+                            }
+                            tracing::info!(
+                                acknowledgement_id = decision.acknowledgement_id,
+                                allowed = decision.allowed,
+                                "Personal manager card decision committed"
+                            );
+                            return Ok(true);
+                        }
+                        PlatformDecisionOutcome::Unavailable(reason) => {
+                            send_fixed(
+                                state,
+                                &producers,
+                                &verified,
+                                &ingress,
+                                admitted.authority.manager,
+                                reason,
+                            )
+                            .await?;
+                            return Ok(true);
+                        }
                         PlatformDecisionOutcome::NoPendingDecision => {}
                     }
                 }
@@ -301,7 +382,11 @@ pub(crate) async fn dispatch_update(
                 }
             };
             match started {
-                PersonalTurnStart::Started { destination, .. } => {
+                PersonalTurnStart::Started { turn, destination } => {
+                    if !matches!(&destination.authority,ReplyAuthority::Personal {turn:expected,..} if *expected==turn)
+                    {
+                        return Err(AppError::Conflict("Personal delivery turn changed".into()));
+                    }
                     let state = state.clone();
                     tokio::spawn(async move {
                         consume_events(state, producers, destination, receiver).await;
@@ -406,6 +491,29 @@ async fn refuse_control(
     Ok(())
 }
 
+async fn send_fixed(
+    state: &AppState,
+    producers: &PlatformManagerProducers,
+    update: &VerifiedManagerUpdate,
+    ingress: &IngressClaim,
+    manager: ManagerAuthority,
+    reason: UnavailableReason,
+) -> AppResult<()> {
+    let destination = fixed_destination(manager, update, ingress.clone());
+    producers
+        .transport
+        .deliver_platform_reply(
+            &state.db,
+            &destination,
+            &DeliveryRef::Fixed {
+                ingress: ingress.clone(),
+            },
+            ReplyContent::Fixed(reason),
+        )
+        .await?;
+    Ok(())
+}
+
 fn expected_failure(error: &AppError) -> Option<UnavailableReason> {
     Some(match error {
         AppError::AssistantTurnActive
@@ -443,7 +551,14 @@ pub(crate) async fn consume_events(
                     );
                 }
             }
-            ExecutionEvent::Settled { .. } => break,
+            ExecutionEvent::Settled { turn } => {
+                if !matches!(&destination.authority,ReplyAuthority::Personal {turn:expected,..} if *expected==turn)
+                {
+                    tracing::warn!("Manager execution emitted settlement for another turn");
+                    continue;
+                }
+                break;
+            }
         }
     }
 }
@@ -479,54 +594,81 @@ pub fn spawn_sweeps(state: AppState, producers: Arc<PlatformManagerProducers>) {
     tokio::spawn(async move {
         let mut ticks = tokio::time::interval(std::time::Duration::from_secs(15));
         ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut pending = false;
         loop {
-            ticks.tick().await;
-            if let Err(error) =
-                super::platform_personal_owner_lifecycle::recover_pending(&state.db, 32).await
-            {
-                tracing::warn!(
+            if pending {
+                // Drain backlog in bounded passes while yielding between passes.
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            } else {
+                ticks.tick().await;
+            }
+            pending = false;
+            match super::platform_personal_owner_lifecycle::recover_pending(&state.db, 32).await {
+                Ok(visited) => {
+                    pending |= visited == 32;
+                    if visited > 0 {
+                        tracing::debug!(
+                            visited,
+                            "Personal account retirement recovery visited owners"
+                        );
+                    }
+                }
+                Err(error) => tracing::warn!(
                     error_code = error.error_code(),
                     "Personal account retirement recovery failed"
-                );
+                ),
             }
-            if let Err(error) = producers
-                .lifecycle
-                .recover_personal_lifecycle(&state.db, producers.personal.as_ref(), 100)
-                .await
-            {
-                tracing::warn!(
-                    error_code = error.error_code(),
-                    "Personal manager lifecycle recovery failed"
-                );
-            }
-            if let Err(error) =
-                super::platform_public_agent_service::sweep_public_lifecycle(&state, 100).await
-            {
-                tracing::warn!(
-                    error_code = error.error_code(),
-                    "Public manager lifecycle recovery failed"
-                );
-            }
-            if let Err(error) = super::platform_public_budget_service::sweep(&state.db, 100).await {
-                tracing::warn!(
-                    error_code = error.error_code(),
-                    "Public manager budget recovery failed"
-                );
-            }
+            pending |= recovery_progress(
+                "personal lifecycle",
+                producers
+                    .lifecycle
+                    .recover_personal_lifecycle(&state.db, producers.personal.as_ref(), 100)
+                    .await,
+            );
+            pending |= recovery_progress(
+                "public lifecycle",
+                super::platform_public_agent_service::sweep_public_lifecycle(&state, 100).await,
+            );
+            pending |= recovery_progress(
+                "public budget",
+                super::platform_public_budget_service::sweep(&state.db, 100).await,
+            );
             if let Err(error) = recover_ingress(&state, &producers, 100).await {
                 tracing::warn!(
                     error_code = error.error_code(),
                     "Manager ingress recovery failed"
                 );
             }
-            if let Err(error) = delivery::sweep(&state, producers.identity.clone(), 100).await {
-                tracing::warn!(
-                    error_code = error.error_code(),
-                    "Manager delivery recovery failed"
-                );
-            }
+            pending |= recovery_progress(
+                "delivery",
+                delivery::sweep(&state, producers.identity.clone(), 100).await,
+            );
         }
     });
+}
+
+fn recovery_progress(component: &'static str, result: AppResult<RecoveryBatch>) -> bool {
+    match result {
+        Ok(batch) => {
+            if batch.processed > 0 || batch.has_more {
+                tracing::debug!(
+                    component,
+                    processed = batch.processed,
+                    has_more = batch.has_more,
+                    "Manager recovery batch completed"
+                );
+            }
+            batch.has_more
+        }
+        Err(error) => {
+            tracing::warn!(
+                component,
+                error_code = error.error_code(),
+                "Manager recovery batch failed"
+            );
+            false
+        }
+    }
 }
 
 async fn recover_ingress(

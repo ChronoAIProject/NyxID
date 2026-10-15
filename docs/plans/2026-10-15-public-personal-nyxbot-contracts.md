@@ -554,7 +554,10 @@ Construction order is identity/ingress/egress/public-runtime, common runtime,
 personal/public, lifecycle, transport. Existing ordinary owner hooks are internal
 to the Part 2 runtime constructor. Part 3 egress calls module-level policy/live
 fences, not a cyclic personal producer dependency. PlatformManagerProducers holds
-these nine Arc adapters, with no Default; absent producer means unmounted mode.
+identity, personal, public, lifecycle and transport adapters, with no Default.
+Execution, egress, public-runtime and ingress dependencies live in their actual
+consumers; the aggregate does not retain redundant copies. An absent required
+producer means unmounted mode.
 
 Each of these service modules supplies the exact index entry below:
 platform_personal_binding_service, platform_link_intent_service,
@@ -646,3 +649,23 @@ a local mock Telegram endpoint and a test NyxAgent egress. These are regression
 sources, not upstream/public proof or real Telegram acceptance evidence. Their
 first checkpoint was formatted and whitespace-checked; compilation and execution
 belong to the primary's single build slot.
+
+### Production consumer cleanup checkpoint
+
+Personal card decisions resolve thread authority inside the existing decision
+transaction and require full equality with the admitted binding proof, including
+the personal control revision. Web-only or changed authority refuses the
+decision. Original-private provenance, exact ingress claims, requested-turn
+checks and the previous-message selection boundary still apply. Unlink reports
+actual revocation and queued exact-stop counts only after its transaction commits;
+the durable lifecycle recovery path owns those effects.
+
+The unused personal execution/thread forwarding methods and lifecycle
+enqueue/owner-retirement/manager-retirement wrappers were removed with their
+matching implementation bodies. The free execution fence, deletion/thread clear,
+durable stop helpers and account/manager lifecycle entrypoints remain. Recovery
+consumes processed/backlog results and yields between bounded passes; delivery
+reports confirmed, deferred, refused and uncertain outcomes without logging
+bodies or bearer tokens. Public runtime and fresh-event obligations remain in
+the contract for their owners to connect. This source cleanup was rustfmt- and
+whitespace-checked only; production compilation remains primary/CI validation.

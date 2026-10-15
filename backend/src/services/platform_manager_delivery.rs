@@ -200,11 +200,10 @@ async fn enqueue(
         )
         .upsert(true)
         .await;
-    if let Err(error) = inserted {
-        if !matches!(error.kind.as_ref(), mongodb::error::ErrorKind::Write(failure) if matches!(failure, mongodb::error::WriteFailure::WriteError(write) if write.code == 11000))
-        {
-            return Err(error.into());
-        }
+    if let Err(error) = inserted
+        && !matches!(error.kind.as_ref(), mongodb::error::ErrorKind::Write(failure) if matches!(failure, mongodb::error::WriteFailure::WriteError(write) if write.code == 11000))
+    {
+        return Err(error.into());
     }
     let stored = state
         .db
@@ -656,7 +655,9 @@ pub async fn deliver(
         _ => return Err(refused()),
     };
     let row = enqueue(state, destination, stored, &claim, origin).await?;
-    send(state, identity, row, body, api).await
+    let outcome = send(state, identity, row, body, api).await?;
+    report_delivery(&outcome, "reply");
+    Ok(outcome)
 }
 
 pub async fn deliver_command(
@@ -683,7 +684,32 @@ pub async fn deliver_command(
         None,
     )
     .await?;
-    send(state, identity, row, body, api).await
+    let outcome = send(state, identity, row, body, api).await?;
+    report_delivery(&outcome, "command");
+    Ok(outcome)
+}
+
+fn report_delivery(outcome: &DeliveryOutcome, source: &'static str) {
+    match outcome {
+        DeliveryOutcome::Sent {
+            telegram_message_ids,
+        } => tracing::debug!(
+            source,
+            message_count = telegram_message_ids.len(),
+            "Manager delivery confirmed by Telegram"
+        ),
+        DeliveryOutcome::Duplicate => tracing::debug!(source, "Manager delivery already claimed"),
+        DeliveryOutcome::Deferred { retry_at } => {
+            tracing::debug!(source,%retry_at,"Manager delivery deferred to durable retry")
+        }
+        DeliveryOutcome::Refused(reason) => {
+            tracing::info!(source, ?reason, "Manager delivery refused")
+        }
+        DeliveryOutcome::Uncertain => tracing::warn!(
+            source,
+            "Manager delivery outcome uncertain; automatic replay disabled"
+        ),
+    }
 }
 
 pub async fn sweep(
@@ -736,7 +762,7 @@ pub async fn sweep(
                 DeliveryReference::Command => None,
             };
             if let Some(body) = body {
-                if let Err(error) = send(
+                match send(
                     state,
                     identity.clone(),
                     row,
@@ -745,10 +771,11 @@ pub async fn sweep(
                 )
                 .await
                 {
-                    tracing::warn!(
+                    Ok(outcome) => report_delivery(&outcome, "recovery"),
+                    Err(error) => tracing::warn!(
                         error_code = error.error_code(),
                         "Manager delivery recovery remains pending"
-                    );
+                    ),
                 }
             } else {
                 refuse_pending(state, &row).await?;
