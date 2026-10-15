@@ -517,7 +517,8 @@ pub async fn load_or_provision_in_session(
     })
 }
 
-/// Recovery only; first-use provisioning belongs to begin_turn's transaction.
+/// Recovery test helper; production recovery occurs through turn admission or replacement.
+#[cfg(test)]
 pub async fn load_or_provision(
     db: &Database,
     keys: &std::sync::Arc<EncryptionKeys>,

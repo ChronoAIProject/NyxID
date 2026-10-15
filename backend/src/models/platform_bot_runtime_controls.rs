@@ -5,7 +5,6 @@ use super::{credits::Credits, platform_personal_binding::PersonalActiveTurn};
 
 pub const COLLECTION_NAME: &str = "platform_bot_runtime_controls";
 pub const STOP_EFFECTS: &str = "platform_personal_stop_effects";
-pub const RUNTIME_MODE: &str = "public_personal_v1";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PublicRuntimePolicy {

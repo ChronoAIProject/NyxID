@@ -421,38 +421,6 @@ pub async fn usable_owners(db: &Database, actor: &str) -> AppResult<Vec<String>>
     Ok(owners)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn changes_confirm_all_commands_and_only_mutating_computer_tools() {
-        for op in [
-            Operation::Exec,
-            Operation::JobCancel,
-            Operation::WriteFile,
-            Operation::EditFile,
-            Operation::SaveAttachment,
-            Operation::FillLogin,
-        ] {
-            assert!(changing(op, &json!({})));
-        }
-        for op in [
-            Operation::Job,
-            Operation::ReadFile,
-            Operation::ListFiles,
-            Operation::ShareFile,
-        ] {
-            assert!(!changing(op, &json!({})));
-        }
-        assert!(!changing(
-            Operation::Computer,
-            &json!({"tool":"get_window_state"})
-        ));
-        assert!(changing(Operation::Computer, &json!({"tool":"click"})));
-        assert!(changing(Operation::Computer, &json!({"tool":"unknown"})));
-    }
-}
-
 pub async fn dispatch(
     state: &AppState,
     node: &Node,
@@ -670,5 +638,37 @@ pub(crate) async fn send_cancel(state: &AppState, id: &str, args: serde_json::Va
             node_id = id,
             "Machine stop delivery pending or node offline"
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn changes_confirm_all_commands_and_only_mutating_computer_tools() {
+        for op in [
+            Operation::Exec,
+            Operation::JobCancel,
+            Operation::WriteFile,
+            Operation::EditFile,
+            Operation::SaveAttachment,
+            Operation::FillLogin,
+        ] {
+            assert!(changing(op, &json!({})));
+        }
+        for op in [
+            Operation::Job,
+            Operation::ReadFile,
+            Operation::ListFiles,
+            Operation::ShareFile,
+        ] {
+            assert!(!changing(op, &json!({})));
+        }
+        assert!(!changing(
+            Operation::Computer,
+            &json!({"tool":"get_window_state"})
+        ));
+        assert!(changing(Operation::Computer, &json!({"tool":"click"})));
+        assert!(changing(Operation::Computer, &json!({"tool":"unknown"})));
     }
 }
