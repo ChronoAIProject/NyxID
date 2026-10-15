@@ -83,9 +83,11 @@ pub async fn apply_authority(
     authority: &KeyAuthority,
     session: &mut ClientSession,
 ) -> AppResult<()> {
+    require_ordinary_key(db, user, key, Some(&mut *session)).await?;
     let result = mutations::update_one(
         db,
-        doc! {"_id": key, "user_id": user, "is_active": true},
+        doc! {"_id": key, "user_id": user, "is_active": true,
+        "$or": [{"purpose": "general"}, {"purpose": {"$exists": false}}]},
         doc! {"$set": authority.key_fields()},
         Some(session),
     )
@@ -113,6 +115,15 @@ pub(crate) async fn authority_with_access(
     session: &mut ClientSession,
     snapshot: Option<&std::sync::Arc<super::org_agent_service::RequestAccess>>,
 ) -> AppResult<KeyAuthority> {
+    if !conversation.credential_api_key_id.is_empty() {
+        require_ordinary_key(
+            db,
+            &conversation.user_id,
+            &conversation.credential_api_key_id,
+            Some(&mut *session),
+        )
+        .await?;
+    }
     let Some(agent_id) = conversation.agent_id.as_deref() else {
         return Ok(KeyAuthority::Orchestrator);
     };
@@ -207,6 +218,38 @@ fn unavailable() -> AppError {
     AppError::Internal("Assistant credential storage unavailable".into())
 }
 
+fn require_ordinary_purpose(row: &bson::Document) -> AppResult<()> {
+    match row.get("purpose") {
+        None => Ok(()),
+        Some(bson::Bson::String(purpose)) if purpose == "general" => Ok(()),
+        _ => Err(AppError::Forbidden(
+            "Key is not an ordinary assistant credential".into(),
+        )),
+    }
+}
+
+/// Check the unfiltered key before decryption, convergence or invalid-key
+/// recovery. A purpose mismatch must never become a newly minted owner key.
+async fn require_ordinary_key(
+    db: &Database,
+    user: &str,
+    key: &str,
+    session: Option<&mut ClientSession>,
+) -> AppResult<()> {
+    let collection = db.collection::<bson::Document>(KEYS);
+    let read = collection
+        .find_one(doc! {"_id": key, "user_id": user})
+        .projection(doc! {"purpose": 1});
+    let row = match session {
+        Some(session) => read.session(session).await?,
+        None => read.await?,
+    };
+    if let Some(row) = row {
+        require_ordinary_purpose(&row)?;
+    }
+    Ok(())
+}
+
 /// Whether `key_id` is a live assistant conversation key of `user_id` (NyxID
 /// stores one per conversation; people cannot create these rows).
 pub async fn is_conversation_key(db: &Database, user_id: &str, key_id: &str) -> AppResult<bool> {
@@ -291,6 +334,8 @@ pub async fn adopt_rotated_key(
         .map_err(|_| unavailable())?
         .is_some();
     if exists {
+        require_ordinary_key(db, user_id, predecessor_id, Some(&mut *session)).await?;
+        require_ordinary_key(db, user_id, successor_id, Some(&mut *session)).await?;
         let ciphertext = keys
             .encrypt(successor_key.as_bytes())
             .await
@@ -359,6 +404,7 @@ pub async fn load_or_provision_in_session(
         .map_err(|_| unavailable())?;
     let mut revoked_children = Vec::new();
     if let Some(old) = old {
+        require_ordinary_key(db, user_id, &old.api_key_id, Some(&mut *session)).await?;
         let raw = decrypt(keys, &old).await?;
         let valid = db
             .collection::<ApiKey>(KEYS)
@@ -449,10 +495,7 @@ pub async fn load_or_provision_in_session(
         user_id: user_id.into(),
         conversation_id: conversation_id.into(),
         api_key_id: created.id.clone(),
-        key_ciphertext: keys
-            .encrypt(raw.as_bytes())
-            .await
-            .map_err(|_| unavailable())?,
+        key_ciphertext: encrypt_runtime_key(keys, &raw).await?,
         created_at: now,
         last_used_at: now,
     };
@@ -476,11 +519,22 @@ pub async fn load_or_provision(
     user_id: &str,
     conversation_id: &str,
 ) -> AppResult<AssistantCredential> {
+    recover_or_replace(db, keys, user_id, conversation_id, None).await
+}
+
+async fn recover_or_replace(
+    db: &Database,
+    keys: &std::sync::Arc<EncryptionKeys>,
+    user_id: &str,
+    conversation_id: &str,
+    replace_key_id: Option<&str>,
+) -> AppResult<AssistantCredential> {
     let mut session = db.client().start_session().await?;
     let db = db.clone();
     let keys = keys.clone();
     let user_id = user_id.to_owned();
     let conversation_id = conversation_id.to_owned();
+    let replace_key_id = replace_key_id.map(str::to_owned);
     let audit_db = db.clone();
     let audit_user = user_id.clone();
     let audit_conversation = conversation_id.clone();
@@ -500,6 +554,25 @@ pub async fn load_or_provision(
                 if result.matched_count != 1 {
                     return Err(AppError::NotFound("Conversation not found".into()));
                 }
+                let mut revoked_children = Vec::new();
+                if let Some(key_id) = replace_key_id.as_deref() {
+                    require_ordinary_key(&db, &user_id, key_id, Some(&mut *session)).await?;
+                    match key_service::delete_api_key_in_session(
+                        &db,
+                        &user_id,
+                        key_id,
+                        None,
+                        Some(&mut *session),
+                    )
+                    .await
+                    {
+                        Ok(children) => revoked_children = children,
+                        Err(AppError::NotFound(_)) => {
+                            invalidate_for_key(&db, &user_id, key_id, Some(&mut *session)).await?
+                        }
+                        Err(error) => return Err(error),
+                    }
+                }
                 let conversation = db
                     .collection::<AssistantConversation>(CONVERSATIONS)
                     .find_one(doc! {"_id": &conversation_id, "user_id": &user_id})
@@ -507,7 +580,7 @@ pub async fn load_or_provision(
                     .await?
                     .ok_or_else(|| AppError::NotFound("Conversation not found".into()))?;
                 let authority = authority_in_session(&db, &conversation, session).await?;
-                load_or_provision_in_session(
+                let mut credential = load_or_provision_in_session(
                     &db,
                     &keys,
                     &user_id,
@@ -515,7 +588,9 @@ pub async fn load_or_provision(
                     &authority,
                     session,
                 )
-                .await
+                .await?;
+                credential.revoked_children.extend(revoked_children);
+                Ok(credential)
             }
             .await;
             mutations::transaction_result(operation)
@@ -576,18 +651,16 @@ pub async fn replace(
     conversation_id: &str,
     old_key_id: &str,
 ) -> AppResult<AssistantCredential> {
-    match key_service::delete_api_key(db, user_id, old_key_id).await {
-        Ok(()) => {}
-        Err(AppError::NotFound(_)) => invalidate_for_key(db, user_id, old_key_id, None).await?,
-        Err(error) => return Err(error),
-    }
-    load_or_provision(db, keys, user_id, conversation_id).await
+    recover_or_replace(db, keys, user_id, conversation_id, Some(old_key_id)).await
 }
 
 fn valid_key_filter(user_id: &str, key_id: &str, raw: &str) -> bson::Document {
     doc! {
         "_id": key_id, "user_id": user_id, "key_hash": hash_token(raw), "is_active": true,
-        "$or": [{"expires_at": bson::Bson::Null}, {"expires_at": {"$gt": bson::DateTime::now()}}],
+        "$and": [
+            {"$or": [{"expires_at": bson::Bson::Null}, {"expires_at": {"$gt": bson::DateTime::now()}}]},
+            {"$or": [{"purpose": "general"}, {"purpose": {"$exists": false}}]},
+        ],
     }
 }
 
@@ -595,11 +668,23 @@ async fn decrypt(
     keys: &EncryptionKeys,
     row: &AssistantAgentCredential,
 ) -> AppResult<Zeroizing<String>> {
-    let bytes = Zeroizing::new(
-        keys.decrypt(&row.key_ciphertext)
-            .await
-            .map_err(|_| unavailable())?,
-    );
+    decrypt_runtime_key(keys, &row.key_ciphertext).await
+}
+
+pub(crate) async fn encrypt_runtime_key(
+    keys: &EncryptionKeys,
+    raw: &Zeroizing<String>,
+) -> AppResult<Vec<u8>> {
+    keys.encrypt(raw.as_bytes())
+        .await
+        .map_err(|_| unavailable())
+}
+
+pub(crate) async fn decrypt_runtime_key(
+    keys: &EncryptionKeys,
+    ciphertext: &[u8],
+) -> AppResult<Zeroizing<String>> {
+    let bytes = Zeroizing::new(keys.decrypt(ciphertext).await.map_err(|_| unavailable())?);
     Ok(Zeroizing::new(
         String::from_utf8(bytes.to_vec()).map_err(|_| unavailable())?,
     ))
@@ -643,6 +728,7 @@ async fn load_existing_filtered(
         .await
         .map_err(|_| unavailable())?;
     while let Some(row) = cursor.try_next().await.map_err(|_| unavailable())? {
+        require_ordinary_key(db, user_id, &row.api_key_id, None).await?;
         let raw = decrypt(keys, &row).await?;
         if db
             .collection::<ApiKey>(KEYS)
@@ -701,6 +787,161 @@ mod tests {
         )
         .await
         .unwrap()
+    }
+
+    #[test]
+    fn ordinary_purpose_accepts_only_general_and_legacy_absence() {
+        assert!(require_ordinary_purpose(&doc! {}).is_ok());
+        assert!(require_ordinary_purpose(&doc! {"purpose": "general"}).is_ok());
+        for purpose in [
+            bson::Bson::Null,
+            bson::Bson::Int32(1),
+            "platform_public".into(),
+            "scheduled_invocation".into(),
+            "permission_bound".into(),
+            "unknown".into(),
+        ] {
+            assert!(require_ordinary_purpose(&doc! {"purpose": purpose}).is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn nonordinary_key_cannot_be_loaded_converged_replaced_or_adopted() {
+        let (state, owner, row) = fixture("nyxa_nonordinary_credentials").await;
+        let db = &state.db;
+        let keys = db.collection::<bson::Document>(KEYS);
+        let credentials = db.collection::<AssistantAgentCredential>(CREDENTIALS);
+        let before = credentials
+            .find_one(doc! {"conversation_id": &row.id})
+            .await
+            .unwrap()
+            .unwrap();
+        for purpose in [
+            "platform_public",
+            "scheduled_invocation",
+            "permission_bound",
+        ] {
+            keys.update_one(
+                doc! {"_id": &row.credential_api_key_id},
+                doc! {"$set": {"purpose": purpose}},
+            )
+            .await
+            .unwrap();
+            assert!(
+                load_for_conversation(db, &state.encryption_keys, &owner, &row.id)
+                    .await
+                    .is_err()
+            );
+            assert!(
+                load_or_provision(db, &state.encryption_keys, &owner, &row.id)
+                    .await
+                    .is_err()
+            );
+            assert!(
+                replace(
+                    db,
+                    &state.encryption_keys,
+                    &owner,
+                    &row.id,
+                    &row.credential_api_key_id
+                )
+                .await
+                .is_err()
+            );
+            let mut session = db.client().start_session().await.unwrap();
+            session.start_transaction().await.unwrap();
+            assert!(
+                apply_authority(
+                    db,
+                    &owner,
+                    &row.credential_api_key_id,
+                    &KeyAuthority::Orchestrator,
+                    &mut session
+                )
+                .await
+                .is_err()
+            );
+            assert!(
+                adopt_rotated_key(
+                    db,
+                    &state.encryption_keys,
+                    &owner,
+                    &row.credential_api_key_id,
+                    &row.credential_api_key_id,
+                    "unusable-successor",
+                    &mut session
+                )
+                .await
+                .is_err()
+            );
+            session.abort_transaction().await.unwrap();
+            let key = keys
+                .find_one(doc! {"_id": &row.credential_api_key_id})
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(key.get_str("purpose").unwrap(), purpose);
+            assert!(key.get_bool("is_active").unwrap());
+            assert_eq!(
+                keys.count_documents(doc! {"user_id": &owner})
+                    .await
+                    .unwrap(),
+                1
+            );
+            let after = credentials
+                .find_one(doc! {"conversation_id": &row.id})
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(after.api_key_id, before.api_key_id);
+            assert_eq!(after.key_ciphertext, before.key_ciphertext);
+        }
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn replacement_authority_failure_rolls_back_key_revocation() {
+        let (state, owner, row) = fixture("nyxa_replace_authority_rollback").await;
+        let db = &state.db;
+        db.collection::<bson::Document>(AGENTS)
+            .update_one(
+                doc! {"_id": &row.agent_id},
+                doc! {"$set": {"destroyed_at": bson::DateTime::now()}},
+            )
+            .await
+            .unwrap();
+        assert!(
+            replace(
+                db,
+                &state.encryption_keys,
+                &owner,
+                &row.id,
+                &row.credential_api_key_id
+            )
+            .await
+            .is_err()
+        );
+        let key = db
+            .collection::<ApiKey>(KEYS)
+            .find_one(doc! {"_id": &row.credential_api_key_id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(key.is_active);
+        let stored = db
+            .collection::<AssistantAgentCredential>(CREDENTIALS)
+            .find_one(doc! {"conversation_id": &row.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.api_key_id, key.id);
+        assert!(
+            load_for_conversation(db, &state.encryption_keys, &owner, &row.id)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        db.drop().await.unwrap();
     }
 
     #[tokio::test]
