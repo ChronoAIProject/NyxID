@@ -543,13 +543,15 @@ async fn post_cap(
         .update_one(doc! {"_id":&row.loop_id}, doc! {"$inc":increments})
         .session(&mut *session)
         .await?;
+    let mut fields = doc! {"state":if final_cost {"settled"} else {"conservative"},"cap_charge":cost.decimal(),"cap_overrun":cost>row.maximum};
+    if first && !final_cost {
+        fields.insert("reconcile_rounds", 0_i64);
+    }
     if db
         .collection::<PublicCallReservation>(CALLS)
         .update_one(
             doc! {"_id":&row.id,"state":state_bson(row.state)?},
-            doc! {"$set":{
-            "state":if final_cost {"settled"} else {"conservative"},"cap_charge":cost.decimal(),
-            "cap_overrun":cost>row.maximum}},
+            doc! {"$set":fields},
         )
         .session(&mut *session)
         .await?
@@ -1122,7 +1124,25 @@ mod tests {
         );
         session.abort_transaction().await.unwrap();
         db.collection::<PublicCallReservation>(CALLS).update_one(doc! {"_id":&call.id},doc! {"$set":{"expires_at":bson::DateTime::from_chrono(Utc::now()-Duration::seconds(1))}}).await.unwrap();
+        db.collection::<Document>(CALLS)
+            .update_one(
+                doc! {"_id":&call.id},
+                doc! {"$set":{"reconcile_rounds":100_i64}},
+            )
+            .await
+            .unwrap();
         reconcile_call(&db, &call.id).await.unwrap();
+        let first = db
+            .collection::<Document>(CALLS)
+            .find_one(doc! {"_id":&call.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.get_i64("reconcile_rounds").unwrap(), 1);
+        assert!(
+            first.get_datetime("next_reconcile_at").unwrap().to_chrono()
+                < Utc::now() + Duration::minutes(2)
+        );
         reconcile_call(&db, &call.id).await.unwrap();
         session.start_transaction().await.unwrap();
         assert!(

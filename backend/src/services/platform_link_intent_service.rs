@@ -274,7 +274,9 @@ pub(crate) async fn begin_public_in_session(
     )
     .await?
     .ok_or_else(bindings::unavailable)?;
-    if controls.manager_authority_epoch != receipt.manager_authority_epoch {
+    if !controls.personal_enabled
+        || controls.manager_authority_epoch != receipt.manager_authority_epoch
+    {
         return Err(bindings::unavailable());
     }
     let reference = format!(
@@ -1224,7 +1226,7 @@ mod tests {
             .update_one(
                 doc! {"platform_config_id": &update.profile_id},
                 doc! {"$set": {
-                "public_enabled": true, "personal_enabled": false,
+                "public_enabled": true, "personal_enabled": true,
                 "public_policy": bson::to_bson(&PublicRuntimePolicy {
                     sponsor_owner_user_id: public.sponsor_owner_user_id.clone(),
                     nyxagent_profile: public.nyxagent_profile.clone(),
@@ -1321,6 +1323,19 @@ mod tests {
                 .unwrap(),
             0
         );
+    }
+
+    #[tokio::test]
+    async fn public_signup_requires_personal_linking_to_be_enabled() {
+        let (db, _, context) = public_fixture("public_signup_personal_paused").await;
+        db.collection::<Document>(crate::models::platform_bot_runtime_controls::COLLECTION_NAME)
+            .update_one(
+                doc! {"platform_config_id":&context.ingress.manager.profile_id},
+                doc! {"$set":{"personal_enabled":false}},
+            )
+            .await
+            .unwrap();
+        refused_public(&db, &context).await;
     }
 
     #[tokio::test]
