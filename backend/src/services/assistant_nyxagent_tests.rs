@@ -1213,6 +1213,13 @@ async fn stale_fence_is_reclaimed_with_lost_reply_and_late_settlement_is_a_noop(
     )
     .await
     .unwrap();
+    let proof = platform_test_origin(&old);
+    db.collection::<bson::Document>(CONVERSATIONS)
+        .update_one(doc! {"_id": &old.id}, doc! {"$set": {
+            "platform_thread": bson::to_bson(&proof.thread).unwrap(),
+            "active_turn.platform_origin": bson::to_bson(&proof).unwrap(),
+        }})
+        .await.unwrap();
     db.collection::<AssistantConversation>(CONVERSATIONS)
         .update_one(
             doc! {"_id": &old.id},
@@ -1238,6 +1245,8 @@ async fn stale_fence_is_reclaimed_with_lost_reply_and_late_settlement_is_a_noop(
     let transcript = messages(&db, "owner", &old.id, 100, None).await.unwrap();
     assert_eq!(transcript.len(), 3);
     let lost = &transcript[1];
+    assert_eq!(lost.platform_origin.as_ref(), Some(&proof));
+    assert!(next.active_turn.as_ref().unwrap().platform_origin.is_none());
     assert_eq!(lost.turn_id, old.active_turn.as_ref().unwrap().turn_id);
     assert_eq!(lost.role, "assistant");
     assert_eq!(lost.status, "failed");

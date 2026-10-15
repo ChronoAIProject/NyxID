@@ -2080,7 +2080,7 @@ pub async fn begin_turn_with_voice(
                     let lost_turn = lost.clone();
                     row.message_count += 1;
                     let message = AssistantMessage {
-                        platform_origin: None,
+                        platform_origin: lost.platform_origin.clone(),
                         retry_of: lost.retry_of.clone(),
                         retry_claimed_by: None,
                         activity_count: lost.activity_count,
