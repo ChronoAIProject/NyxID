@@ -327,6 +327,8 @@ it("shows history thread links, pages older runs and confirms deletion", async (
               id: "run",
               outcome: "completed",
               scheduled_at: trigger.created_at,
+              started_at: new Date(Date.parse(trigger.created_at) + 23_000).toISOString(),
+              capacity_wait_ms: 80_000,
               reason: null,
               duration_ms: 2000,
               thread_id: "thread-1",
@@ -359,6 +361,8 @@ it("shows history thread links, pages older runs and confirms deletion", async (
     "href",
     "/assistant?c=thread-1",
   );
+  expect(screen.getByText("waited 1 minute 20 seconds for capacity")).toBeInTheDocument();
+  expect(screen.getByText(/^Started /)).toBeInTheDocument();
   expect(
     screen.getByText(/Missed 864 occurrences between/),
   ).toBeInTheDocument();

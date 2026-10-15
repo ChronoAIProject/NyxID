@@ -2341,3 +2341,155 @@ async fn voice_without_byok_duration_price_records_seconds_without_charges_or_be
     })
     .await;
 }
+
+#[tokio::test]
+async fn zero_admission_usage_releases_reservations_without_spending_benefits_or_resale() {
+    use crate::models::service_billing::{
+        BillingMetric, PlatformUsage, ResaleSpec, ResaleUsage, ServiceBilling,
+    };
+    for funding_class in ["wallet", "grant", "allowance"] {
+        let db = database("zero_admission_usage").await;
+        db.collection::<Document>("billing_wallet")
+            .insert_one(old_wallet(100_000_000))
+            .await
+            .unwrap();
+        if funding_class == "grant" {
+            db.collection::<Document>("credit_grants")
+                .insert_one(old_grant(1_000_000))
+                .await
+                .unwrap();
+        }
+        exact_migration::run(&db).await.unwrap();
+        for metric in ["platform_requests", "resale_requests"] {
+            db.collection::<Document>("billing_rate_cache")
+                .insert_one(doc! {
+                    "_id": format!("{metric}:*"), "lago_metric_code": metric,
+                    "credits_per_unit_micros": 1_000_000_i64, "synced_at": bson::DateTime::now(),
+                })
+                .await
+                .unwrap();
+        }
+        let allowance = crate::models::usage_allowance::UsageAllowance {
+            id: "allowance".into(),
+            bundle_id: None,
+            service_id: "service".into(),
+            service_slug: "service".into(),
+            metric: BillingMetric::Requests,
+            quantity: 10,
+            recurrence: crate::models::usage_allowance::AllowanceRecurrence::Daily,
+            target_kind: crate::models::billing_target::BillingTargetKind::AllUsers,
+            target_user_ids: vec![],
+            target_org_ids: vec![],
+            target_group_ids: vec![],
+            is_active: funding_class == "allowance",
+            created_by: "admin".into(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        db.collection::<crate::models::usage_allowance::UsageAllowance>("usage_allowances")
+            .insert_one(&allowance)
+            .await
+            .unwrap();
+        let period = allowances::ensure_current_period(&db, &allowance, "owner", Utc::now())
+            .await
+            .unwrap();
+        let before_wallet = db
+            .collection::<Document>("billing_wallet")
+            .find_one(doc! {})
+            .await
+            .unwrap()
+            .unwrap();
+        let before_grant = db
+            .collection::<Document>("credit_grants")
+            .find_one(doc! {})
+            .await
+            .unwrap();
+        for _ in 0..3 {
+            let mut ctx = route_context::BillingRouteContext::new(
+                route_inventory::BillingIngress::Proxy,
+                uuid::Uuid::new_v4().to_string(),
+                "owner".into(),
+                "owner".into(),
+                None,
+                Some("service".into()),
+                Some("service".into()),
+                Some("service".into()),
+                route_context::NodeIntent::Direct,
+                "bearer".into(),
+                crate::models::usage_meter::CredentialClass::UserOwned,
+                BillingMetric::Requests,
+                Some(&ServiceBilling {
+                    platform_billable: true,
+                    ..Default::default()
+                }),
+                false,
+            )
+            .with_platform_metering(true);
+            ctx.resale = Some(ResaleSpec {
+                metric: BillingMetric::Requests,
+                lago_metric_code: "resale_requests".into(),
+            });
+            let reservation = reservation::gate_and_reserve(&db, Some(&Entitled), &ctx, false, 900)
+                .await
+                .unwrap()
+                .unwrap();
+            let metered = meter::open(&db, &ctx, Some(&reservation)).await.unwrap();
+            meter::mark_forwarded(&db, &metered).await.unwrap();
+            meter::settle(
+                &db,
+                &metered,
+                PlatformUsage::default(),
+                Some(ResaleUsage {
+                    metric: BillingMetric::Requests,
+                    quantity: 0,
+                }),
+                None,
+            )
+            .await
+            .unwrap();
+            let rows = db
+                .collection::<UsageMeterRow>("usage_meter")
+                .find(doc! {"billing_request_id": &ctx.billing_request_id})
+                .await
+                .unwrap()
+                .try_collect::<Vec<_>>()
+                .await
+                .unwrap();
+            assert_eq!(rows.len(), 2);
+            for row in rows {
+                assert!(row.released);
+                assert_eq!(row.quantity, Some(0));
+            }
+        }
+        let after_wallet = db
+            .collection::<Document>("billing_wallet")
+            .find_one(doc! {})
+            .await
+            .unwrap()
+            .unwrap();
+        for field in ["balance_credits", "reserved_credits", "pending_lago_debits"] {
+            assert_eq!(before_wallet.get(field), after_wallet.get(field), "{field}");
+        }
+        let after_grant = db
+            .collection::<Document>("credit_grants")
+            .find_one(doc! {})
+            .await
+            .unwrap();
+        for field in ["remaining", "reserved"] {
+            assert_eq!(
+                before_grant.as_ref().and_then(|row| row.get(field)),
+                after_grant.as_ref().and_then(|row| row.get(field)),
+                "{field}"
+            );
+        }
+        let after_period = db
+            .collection::<Document>("usage_allowance_periods")
+            .find_one(doc! {"_id": &period.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(after_period.get_i64("consumed_quantity").unwrap(), 0);
+        assert_eq!(after_period.get_i64("reserved_quantity").unwrap(), 0);
+        db.drop().await.unwrap();
+    }
+}

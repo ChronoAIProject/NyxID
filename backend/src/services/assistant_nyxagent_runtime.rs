@@ -298,9 +298,16 @@ where
         Some("cancelled") => "cancelled",
         Some(_) => "failed",
     };
+    let saved_message_id = match &settled {
+        SettledExecution::Saved { message_id, .. } => message_id.as_str(),
+        _ => message_id,
+    };
+    let metadata = db.collection::<AssistantMessage>(crate::models::assistant_message::COLLECTION_NAME)
+        .find_one(doc! {"_id": saved_message_id, "conversation_id": &row.id, "user_id": &row.user_id, "turn_id": turn_id})
+        .await.ok().flatten().and_then(|message| message.turn_metadata);
     events.emit(
         "turn.completed",
-        json!({"turn_id": turn_id, "status": status, "error": error}),
+        json!({"turn_id": turn_id, "status": status, "error": error, "turn_metadata": metadata}),
     );
     drop(permit);
     settled
@@ -703,7 +710,10 @@ pub(crate) async fn run_owner_turn(
         .clone();
     let message_id = Uuid::new_v4().to_string();
     let block_id = format!("{message_id}-text");
-    tracing::info!(turn_id = %turn_id, "Assistant turn started");
+    tracing::info!(turn_id = %turn_id,
+        worker_instance = %super::assistant_engine_worker::instance().id,
+        worker_hostname = super::assistant_engine_worker::instance().hostname.as_deref(),
+        "Assistant turn started");
     let (heartbeat_stop, mut heartbeat_stop_rx) = oneshot::channel();
     let heartbeat_db = state.db.clone();
     let heartbeat_user = row.user_id.clone();
@@ -751,7 +761,7 @@ pub(crate) async fn run_owner_turn(
     );
     let mut partial = String::new();
     let mut instruction_context = None;
-    let mut result = {
+    let mut result = crate::services::assistant_engine_worker::contain(&row, async {
         // Execution includes upload planning and upstream streaming. Keep that
         // state off the caller's stack when this task is created by a tool.
         let mut execution = Box::pin(async {
@@ -780,7 +790,8 @@ pub(crate) async fn run_owner_turn(
                 Err(TurnError::internal("turn_timeout", "turn_deadline"))
             }
         }
-    }
+    })
+    .await
     .unwrap_or_else(|error| TurnResult {
         text: partial,
         session_id: None,
@@ -860,6 +871,10 @@ async fn watch_stop(state: &AppState, row: &AssistantConversation, turn_id: &str
 pub(crate) fn proxy_turn_error(error: AppError) -> TurnError {
     match error {
         AppError::InsufficientCredits => TurnError::internal("insufficient_credits", "connect"),
+        AppError::WalletSuspended => TurnError::internal("wallet_suspended", "connect"),
+        AppError::PlanEntitlementRequired(_) => {
+            TurnError::internal("plan_entitlement_required", "connect")
+        }
         _ => TurnError::internal("assistant_unavailable", "connect"),
     }
 }
@@ -871,8 +886,12 @@ pub(crate) fn upstream_error_code(status: u16, envelope: &Value) -> &str {
     if let Some(code) = envelope["error"]["code"].as_str() {
         return code;
     }
-    if status == 402 && envelope["error"].as_str() == Some("insufficient_credits") {
-        return "insufficient_credits";
+    if status == 402
+        && let Some(
+            code @ ("insufficient_credits" | "wallet_suspended" | "plan_entitlement_required"),
+        ) = envelope["error"].as_str()
+    {
+        return code;
     }
     ""
 }
@@ -995,6 +1014,128 @@ pub(crate) async fn execute_owner_turn(
     outcome
 }
 
+struct EngineAttempt<'a> {
+    row: &'a AssistantConversation,
+    number: u32,
+    http_status: Option<u16>,
+    upstream_code: Option<Box<str>>,
+    wait_started: Option<DateTime<Utc>>,
+    wait_ended: Option<DateTime<Utc>>,
+    accrued_wait_ms: u64,
+    deadline: tokio::time::Instant,
+    logged: bool,
+}
+impl EngineAttempt<'_> {
+    fn log(&mut self, decision: &str) {
+        let turn = self.row.active_turn.as_ref().expect("claimed turn");
+        tracing::info!(target: "nyxid::assistant_engine", conversation_id = %self.row.id,
+            turn_id = %turn.turn_id, origin = crate::services::assistant_turn_observability::origin(turn),
+            worker_instance = %crate::services::assistant_engine_worker::instance().id,
+            worker_hostname = crate::services::assistant_engine_worker::instance().hostname.as_deref(),
+            attempt = self.number, http_status = self.http_status, upstream_code = self.upstream_code.as_deref(),
+            decision, waited_ms = self.accrued_wait_ms.saturating_add(self.wait_started.map_or(0, |at| (self.wait_ended.unwrap_or_else(Utc::now) - at).num_milliseconds().max(0) as u64)),
+            remaining_deadline_ms = self.deadline.saturating_duration_since(tokio::time::Instant::now()).as_millis() as u64,
+            "Assistant engine attempt");
+        self.logged = true;
+    }
+}
+impl Drop for EngineAttempt<'_> {
+    fn drop(&mut self) {
+        if !self.logged {
+            self.log("failed");
+        }
+    }
+}
+
+struct AdmissionAcknowledgement {
+    due: Option<tokio::time::Instant>,
+    started_at: Option<DateTime<Utc>>,
+    emitted: bool,
+    checked: bool,
+    enabled: bool,
+    notice: Option<CapacityNotice>,
+}
+impl AdmissionAcknowledgement {
+    async fn start(
+        &mut self,
+        state: &AppState,
+        row: &AssistantConversation,
+        deadline: DateTime<Utc>,
+    ) -> Result<(), TurnError> {
+        if self.due.is_some() {
+            return Ok(());
+        }
+        let now = Utc::now();
+        let started = row
+            .active_turn
+            .as_ref()
+            .and_then(|t| t.engine_request_started_at)
+            .unwrap_or(now);
+        crate::services::assistant_turn_observability::request_started(
+            &state.db, row, started, deadline,
+        )
+        .await
+        .map_err(|_| TurnError::internal("assistant_unavailable", "prepare"))?;
+        self.started_at = Some(started);
+        let remaining = (started
+            + chrono::Duration::from_std(crate::services::assistant_engine_policy::ACK_DELAY)
+                .expect("bounded acknowledgement delay")
+            - now)
+            .to_std()
+            .unwrap_or_default();
+        self.due = Some(tokio::time::Instant::now() + remaining);
+        Ok(())
+    }
+
+    async fn wait<F: std::future::Future>(
+        &mut self,
+        future: F,
+        state: &AppState,
+        row: &AssistantConversation,
+        events: &mut Events,
+        egress: &dyn contract::NyxAgentEgress,
+    ) -> F::Output {
+        if !self.enabled || self.checked {
+            return future.await;
+        }
+        let Some(due) = self.due else {
+            return future.await;
+        };
+        tokio::pin!(future);
+        tokio::select! {
+            biased;
+            result = &mut future => result,
+            _ = tokio::time::sleep_until(due) => {
+                self.checked = true;
+                if let Ok(Some(turn)) = crate::services::assistant_turn_observability::acknowledge(&state.db, row, Utc::now()).await {
+                    self.emitted = true;
+                    events.emit("turn.status", json!({"conversation_id": row.id, "turn_id": turn.turn_id,
+                        "status": "waiting", "waiting_for_capacity": turn.waiting_for_capacity,
+                        "capacity_wait_note_origin": turn.capacity_wait_note_origin,
+                        "engine_request_started_at": turn.engine_request_started_at,
+                        "capacity_wait_started_at": turn.capacity_wait_started_at,
+                        "capacity_wait_deadline": turn.capacity_wait_deadline}));
+                    self.notice = egress.admission_acknowledged(row).map(CapacityNotice);
+                }
+                future.await
+            }
+        }
+    }
+
+    fn accepted(&mut self) {
+        self.enabled = false;
+        self.emitted = false;
+        self.notice.take();
+    }
+}
+
+struct CapacityNotice(tokio::task::JoinHandle<()>);
+impl Drop for CapacityNotice {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn execute_turn_inner(
     state: &AppState,
@@ -1010,6 +1151,41 @@ async fn execute_turn_inner(
     instruction_context: &mut Option<crate::services::assistant_instruction_context::Prepared>,
     tool_images: &mut images::ToolImages,
 ) -> Result<TurnResult, TurnError> {
+    let turn = row.active_turn.as_ref().expect("claimed turn");
+    let run_deadline = if let Some(run_id) = turn
+        .trigger_run_id
+        .as_ref()
+        .filter(|_| !turn.trigger_continuation)
+    {
+        Some(
+            state
+                .db
+                .collection::<crate::models::trigger_run::TriggerRun>(
+                    crate::models::trigger_run::COLLECTION_NAME,
+                )
+                .find_one(doc! {"_id": run_id, "user_id": &row.user_id})
+                .await
+                .map_err(|_| TurnError::internal("assistant_unavailable", "prepare"))?
+                .ok_or_else(|| TurnError::internal("assistant_unavailable", "prepare"))?
+                .deadline,
+        )
+    } else {
+        None
+    };
+    let mut wait_started = turn
+        .capacity_wait_started_at
+        .filter(|_| turn.waiting_for_capacity);
+    let mut accrued_wait_ms = turn.capacity_wait_ms;
+    let mut acknowledgement = AdmissionAcknowledgement {
+        due: None,
+        started_at: None,
+        emitted: false,
+        checked: false,
+        enabled: turn.origin != crate::models::assistant_conversation::TurnOrigin::Trigger
+            && turn.trigger_run_id.is_none()
+            && turn.capacity_accepted_at.is_none(),
+        notice: None,
+    };
     let turn_id = &row.active_turn.as_ref().expect("claimed turn").turn_id;
     let mut history = engine::messages(
         &state.db,
@@ -1250,6 +1426,8 @@ async fn execute_turn_inner(
         text
     };
     let mut recovery = engine::Recovery::default();
+    let mut admission: Option<(String, tokio::time::Instant, DateTime<Utc>)> = None;
+    let mut capacity_error: Option<TurnError> = None;
     loop {
         // History and upload preparation can outlive the initial admission
         // check. Recheck every bound source before model execution, including
@@ -1303,87 +1481,153 @@ async fn execute_turn_inner(
             format!("{turn_id}:continuation:{}", continuations.count)
         };
         tool_images.attempted(state, row).await;
-        let bounds = stream_bounds();
-        let deadline = tokio::time::Instant::now() + bounds.first_byte;
-        let response = tokio::time::timeout_at(
-            deadline,
-            request(
-                state,
-                egress,
-                authority,
-                credential,
-                "POST",
-                "v1/responses",
-                Some({
-                    let request_input = if tool_images.note.is_empty() {
-                        input.to_owned()
-                    } else {
-                        format!("{input}\n\n{}", tool_images.note)
-                    };
-                    let input = context.input_with_memory(
-                        if (continuations.count == 0 && tool_images.fallback.is_none())
-                            || binding.is_none()
-                        {
-                            // Recovery into a fresh session must restore the
-                            // turn facts that its discarded session had seen.
-                            &decisions
-                        } else {
-                            // Documents have no image part. Keep their listing
-                            // and availability notices visible on continuations
-                            // too, once per request, without repeating events.
-                            &listing
-                        },
-                        &request_input,
-                        continuations.count == 0 || binding.is_none(),
-                    );
-                    let mut body =
-                        engine::upstream_body(&row.model, &input, binding.as_deref(), &prompt);
-                    let parts = if !tool_images.parts.is_empty() {
-                        &tool_images.parts
-                    } else if continuations.count == 0 && tool_images.fallback.is_none() {
-                        &image_parts
-                    } else {
-                        &Vec::new()
-                    };
-                    if !parts.is_empty() {
-                        let mut content = vec![json!({"type":"input_text", "text":input})];
-                        content.extend(parts.clone());
-                        body["input"] = json!([{"role":"user", "content":content}]);
-                    }
-                    body
-                }),
-                Some(&request_key),
-                policy,
-            ),
-        )
-        .await
-        .map_err(|_| TurnError::internal("first_byte_timeout", "first_byte"))?
-        .map_err(proxy_turn_error)?;
-        if !response.status().is_success() {
-            if tool_images.fallback.is_some() {
-                let mut error = TurnError::internal("assistant_unavailable", "upstream_response");
-                error.http_status = Some(response.status().as_u16());
-                return Err(error);
+        let request_body = {
+            let request_input = if tool_images.note.is_empty() {
+                input.to_owned()
+            } else {
+                format!("{input}\n\n{}", tool_images.note)
+            };
+            let input = context.input_with_memory(
+                if (continuations.count == 0 && tool_images.fallback.is_none()) || binding.is_none()
+                {
+                    // Recovery into a fresh session must restore the
+                    // turn facts that its discarded session had seen.
+                    &decisions
+                } else {
+                    // Documents have no image part. Keep their listing
+                    // and availability notices visible on continuations
+                    // too, once per request, without repeating events.
+                    &listing
+                },
+                &request_input,
+                continuations.count == 0 || binding.is_none(),
+            );
+            let mut body = engine::upstream_body(&row.model, &input, binding.as_deref(), &prompt);
+            let parts = if !tool_images.parts.is_empty() {
+                &tool_images.parts
+            } else if continuations.count == 0 && tool_images.fallback.is_none() {
+                &image_parts
+            } else {
+                &Vec::new()
+            };
+            if !parts.is_empty() {
+                let mut content = vec![json!({"type":"input_text", "text":input})];
+                content.extend(parts.clone());
+                body["input"] = json!([{"role":"user", "content":content}]);
             }
+            body
+        };
+        // Refusal retries share one request window. Explicit continuations
+        // are new requests; credential/session recovery flags stay turn-scoped.
+        if admission
+            .as_ref()
+            .is_none_or(|(key, _, _)| key != &request_key)
+        {
+            let now = Utc::now();
+            let deadline = if admission.is_none() {
+                run_deadline
+            } else if turn.trigger_run_id.is_some() && !turn.trigger_continuation {
+                Some(
+                    now + chrono::Duration::from_std(
+                        crate::services::assistant_engine_policy::AUTOMATION_CAPACITY_CAP,
+                    )
+                    .expect("bounded automation cap"),
+                )
+            } else {
+                None
+            };
+            let budget = engine::capacity_budget(now, deadline, now);
+            admission = Some((
+                request_key.clone(),
+                tokio::time::Instant::now() + budget,
+                now + chrono::Duration::from_std(budget).expect("bounded admission budget"),
+            ));
+            capacity_error = None;
+            recovery.retries = 0;
+        }
+        let (_, capacity_deadline, capacity_deadline_at) =
+            admission.as_ref().expect("request window");
+        let (capacity_deadline, capacity_deadline_at) = (*capacity_deadline, *capacity_deadline_at);
+        if tokio::time::Instant::now() >= capacity_deadline
+            && let Some(error) = capacity_error.take()
+        {
+            return Err(error);
+        }
+        let number = crate::services::assistant_turn_observability::attempt(&state.db, row)
+            .await
+            .map_err(|_| TurnError::internal("assistant_unavailable", "prepare"))?;
+        let mut attempt = EngineAttempt {
+            row,
+            number,
+            http_status: None,
+            upstream_code: None,
+            wait_started,
+            wait_ended: None,
+            accrued_wait_ms,
+            deadline: capacity_deadline,
+            logged: false,
+        };
+        acknowledgement
+            .start(state, row, capacity_deadline_at)
+            .await?;
+        if tokio::time::Instant::now() >= capacity_deadline
+            && let Some(error) = capacity_error.take()
+        {
+            return Err(error);
+        }
+        let bounds = stream_bounds();
+        let first_byte_deadline = tokio::time::Instant::now() + bounds.first_byte;
+        let deadline = first_byte_deadline;
+        let response = acknowledgement
+            .wait(
+                tokio::time::timeout_at(
+                    deadline,
+                    request(
+                        state,
+                        egress,
+                        authority,
+                        credential,
+                        "POST",
+                        "v1/responses",
+                        Some(request_body),
+                        Some(&request_key),
+                        policy,
+                    ),
+                ),
+                state,
+                row,
+                events,
+                egress,
+            )
+            .await
+            .map_err(|_| TurnError::internal("first_byte_timeout", "first_byte"))?
+            .map_err(proxy_turn_error)?;
+        attempt.http_status = Some(response.status().as_u16());
+        if !response.status().is_success() {
             let status = response.status().as_u16();
             let upstream_request_id = response
                 .headers()
                 .get("x-request-id")
                 .and_then(|value| value.to_str().ok())
                 .and_then(sanitize_upstream_request_id);
-            let bytes = tokio::time::timeout(
-                Duration::from_secs(10),
-                axum::body::to_bytes(response.into_body(), 65536),
-            )
+            let retry_after = response
+                .headers()
+                .get("retry-after")
+                .and_then(|v| v.to_str().ok())
+                .and_then(engine::retry_after);
+            let bytes = acknowledgement.wait(tokio::time::timeout_at(
+                tokio::time::Instant::now() + crate::services::assistant_engine_policy::ADMISSION_ERROR_BODY_TIMEOUT,
+                axum::body::to_bytes(response.into_body(), crate::services::assistant_engine_policy::ADMISSION_ERROR_BODY_MAX_BYTES),
+            ), state, row, events, egress)
             .await
-            .ok()
-            .and_then(Result::ok);
-            let envelope: Value = bytes
-                .as_ref()
-                .and_then(|bytes| serde_json::from_slice(bytes).ok())
-                .unwrap_or(Value::Null);
+            .map_err(|_| TurnError::internal("first_byte_timeout", "first_byte"))?
+            .map_err(|_| TurnError::internal("invalid_stream", "upstream_response"))?;
+            let envelope: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
             let code = upstream_error_code(status, &envelope);
-            if matches!(code, "tool_budget_exhausted" | "turn_timeout") {
+            attempt.upstream_code = TurnError::new(code).upstream_code;
+            if tool_images.fallback.is_none()
+                && matches!(code, "tool_budget_exhausted" | "turn_timeout")
+            {
                 let mut error = TurnError::new(code).at_stage("upstream_response");
                 error.http_status = Some(status);
                 match continue_turn(
@@ -1419,6 +1663,7 @@ async fn execute_turn_inner(
                     }
                 }
             }
+            capacity_error = None;
             match recovery.decide(status, code, binding.is_some()) {
                 RecoveryAction::Rebind => {
                     events.emit(
@@ -1458,15 +1703,38 @@ async fn execute_turn_inner(
                     events.notice();
                 }
                 RecoveryAction::Backoff => {
+                    let mut error =
+                        TurnError::new("capacity_exceeded").at_stage("upstream_response");
+                    error.upstream_code = TurnError::new(code).upstream_code;
+                    error.http_status = Some(status);
+                    error.upstream_request_id = upstream_request_id.map(String::into_boxed_str);
+                    capacity_error = Some(error);
+                    let started = *wait_started.get_or_insert_with(Utc::now);
+                    engine::waiting_for_capacity(&state.db, row, started, capacity_deadline_at)
+                        .await
+                        .map_err(|_| TurnError::internal("assistant_unavailable", "recovery"))?;
                     events.emit(
-                        "turn.notice",
-                        json!({"code": "retrying", "message": "Retrying…"}),
+                        "turn.status",
+                        json!({"conversation_id": row.id, "turn_id": turn_id,
+                        "status": "waiting", "waiting_for_capacity": true,
+                        "capacity_wait_note_origin": acknowledgement.emitted.then_some("nyxid_system"),
+                        "engine_request_started_at": acknowledgement.started_at,
+                        "capacity_wait_started_at": started, "capacity_wait_deadline": capacity_deadline_at}),
                     );
-                    let jitter = u64::from(rand::random::<u16>() % 500);
-                    tokio::time::sleep(Duration::from_millis(
-                        (1 << recovery.retries) * 1000 + jitter,
-                    ))
-                    .await;
+                    attempt.log("backoff");
+                    let delay =
+                        engine::capacity_delay(recovery.retries, retry_after, rand::random());
+                    acknowledgement
+                        .wait(
+                            tokio::time::sleep_until(
+                                (tokio::time::Instant::now() + delay).min(capacity_deadline),
+                            ),
+                            state,
+                            row,
+                            events,
+                            egress,
+                        )
+                        .await;
                 }
                 RecoveryAction::Fail => {
                     let mut error = TurnError::new(if status == 401 || status == 403 {
@@ -1484,6 +1752,21 @@ async fn execute_turn_inner(
             }
             continue;
         }
+        attempt.wait_ended = Some(Utc::now());
+        attempt.log("accepted");
+        acknowledgement.accepted();
+        crate::services::assistant_turn_observability::accepted(&state.db, row)
+            .await
+            .map_err(|_| TurnError::internal("assistant_unavailable", "recovery"))?;
+        events.emit("turn.status", json!({"conversation_id": row.id, "turn_id": turn_id, "status": "running", "waiting_for_capacity": false, "engine_accepted": true}));
+        if let Some(started) = wait_started.take() {
+            accrued_wait_ms = accrued_wait_ms.saturating_add(
+                (attempt.wait_ended.expect("accepted") - started)
+                    .num_milliseconds()
+                    .max(0) as u64,
+            );
+        }
+        let deadline = first_byte_deadline;
         if !response
             .headers()
             .get("content-type")

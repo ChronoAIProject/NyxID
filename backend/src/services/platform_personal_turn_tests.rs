@@ -814,6 +814,7 @@ async fn personal_event_captures_fresh_authority_and_unlinked_events_remain_web_
         let reply = finish_claim(
             &state,
             &engine::OwnerTurnClaim {
+                reclaimed: None,
                 conversation: row.clone(),
                 credential,
             },
@@ -1225,6 +1226,7 @@ async fn async_result_settlement_retains_original_destination_across_new_revisio
         let reply = finish_claim(
             &state,
             &engine::OwnerTurnClaim {
+                reclaimed: None,
                 conversation: continued.clone(),
                 credential,
             },
@@ -1256,5 +1258,42 @@ async fn async_result_settlement_retains_original_destination_across_new_revisio
         );
         assert_eq!(original_watch.state, "delivered");
     }
+    state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn platform_execution_claim_records_actual_worker_and_remains_single_use() {
+    let (state, admitted) = fixture("personal_execution_worker_identity").await;
+    let claim = claimed_input(&state, &admitted).await;
+    state
+        .db
+        .collection::<bson::Document>(CONVERSATIONS)
+        .update_one(
+            doc! {"_id": &claim.conversation.id},
+            doc! {"$set": {"active_turn.worker_instance": {"id": "previous-admission-worker"}}},
+        )
+        .await
+        .unwrap();
+    claim_platform_worker(&state.db, &claim.conversation, &claim.credential.api_key_id)
+        .await
+        .unwrap();
+    let current = engine::get(
+        &state.db,
+        &claim.conversation.user_id,
+        &claim.conversation.id,
+    )
+    .await
+    .unwrap();
+    let turn = current.active_turn.unwrap();
+    assert!(turn.execution_started);
+    assert_eq!(
+        turn.worker_instance.as_ref(),
+        Some(super::super::assistant_engine_worker::instance())
+    );
+    assert!(
+        claim_platform_worker(&state.db, &claim.conversation, &claim.credential.api_key_id)
+            .await
+            .is_err()
+    );
     state.db.drop().await.unwrap();
 }

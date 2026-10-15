@@ -12,12 +12,14 @@ use utoipa::ToSchema;
 
 use crate::AppState;
 #[cfg(test)]
-use crate::services::proxy_http_response::{ALLOWED_RESPONSE_HEADERS, STREAMING_CONTENT_TYPES};
+use crate::services::proxy_http_response::{
+    ALLOWED_RESPONSE_HEADERS, STREAMING_CONTENT_TYPES, proven_nyxagent_refusal,
+};
 use crate::services::proxy_http_response::{
     ProxyExchangeDiagnostics, ProxyStreamDiagnostics, USAGE_CAPTURE_MAX_BYTES, elapsed_ms,
     emit_preheader_diagnostics, forwardable_response_header, llm_platform_usage,
-    proxy_client_disconnected, resale_usage_from_optional_reported, settle_meter_async,
-    should_capture_llm_usage, should_stream_response,
+    observe_model_response, proxy_client_disconnected, resale_usage_from_optional_reported,
+    settle_meter_async, should_capture_llm_usage, should_stream_response,
 };
 
 use crate::downstream_disconnect::{
@@ -367,6 +369,10 @@ const ALLOWED_WS_FORWARD_HEADERS: &[&str] = &[
     "x-request-id",
     "x-correlation-id",
 ];
+
+/// Constructed only by the NyxAgent turn handler, never from client headers.
+#[derive(Clone)]
+pub(super) struct NyxAgentAdmission;
 
 /// Only the permission engine's transport can construct this in-process ingress.
 #[derive(Clone)]
@@ -3985,6 +3991,8 @@ async fn execute_resolved_proxy_inner(
         )
         .await
         .inspect_err(|error| request_audit.admission_error(error))?;
+    let nyxagent_admission = request.extensions().get::<NyxAgentAdmission>().is_some()
+        && target.service.slug == crate::services::assistant_nyxagent::SERVICE_SLUG;
     let is_ws_candidate = is_ws_upgrade_request(&request);
     let platform_metric = platform_metric_for_target(&target, is_ws_candidate);
     let node_intent = match &node_route {
@@ -4683,13 +4691,42 @@ async fn execute_resolved_proxy_inner(
         }
     }
 
+    let model_request = if machine_ingress.is_none()
+        && target.service.inference.is_some()
+        && method == Method::POST
+        && (crate::services::assistant_model_observer::protocol(path)
+            != crate::services::assistant_model_observer::Protocol::Unknown
+            || path.trim_matches('/').ends_with("responses/compact"))
+        && let (Some(fence), Some(key)) = (
+            &auth_user.assistant_turn_fence,
+            auth_user.api_key_id.as_deref(),
+        ) {
+        crate::services::assistant_model_observer::ModelRequest::capture(
+            &state.db,
+            &fence.conversation_id,
+            key,
+            fence.turn_id.as_deref().unwrap_or_default(),
+        )
+        .await?
+    } else {
+        None
+    };
     let mut billing_ctx = billing_ctx.with_request_body(body.as_deref());
     billing_ctx.pool_attempt = pool_accounting.as_ref().map(|ctx| ctx.metadata.clone());
     // Billing and durable-grant admission carry their own database state.
     // Do not reserve it in every proxy poll, including early scope refusals.
-    let metered = Box::pin(state.billing.open(&billing_ctx))
-        .await
-        .inspect_err(|error| request_audit.admission_error(error))?;
+    let metered = match Box::pin(state.billing.open(&billing_ctx)).await {
+        Ok(metered) => metered,
+        Err(error) => {
+            request_audit.admission_error(&error);
+            if let Some(model_request) = &model_request
+                && model_request.refusal(&error).await.is_err()
+            {
+                tracing::warn!("Assistant model refusal attribution deferred");
+            }
+            return Err(error);
+        }
+    };
 
     let durable_reservation = if let Some(api_key_id) = scheduled_api_key_id {
         let grant_id = match durable_grant_id.as_deref() {
@@ -4853,7 +4890,7 @@ async fn execute_resolved_proxy_inner(
             Err(rejection) => {
                 let response = rejection.into_response();
                 request_audit.denied(response.status().as_u16());
-                return Ok(response);
+                return observe_model_response(model_request, path, response).await;
             }
         };
 
@@ -5175,7 +5212,7 @@ async fn execute_resolved_proxy_inner(
                             )
                             .await;
                         }
-                        return Ok(response);
+                        return observe_model_response(model_request, path, response).await;
                     }
 
                     let response_result: AppResult<Response> = async {
@@ -5457,7 +5494,7 @@ async fn execute_resolved_proxy_inner(
                         )
                         .await;
                     }
-                    return Ok(response);
+                    return observe_model_response(model_request, path, response).await;
                 }
                 Err(NodeProxyFailure {
                     error: err @ AppError::NodeCredentialMissing(_),
@@ -5900,7 +5937,7 @@ async fn execute_resolved_proxy_inner(
             )
             .await;
         }
-        return Ok(response);
+        return observe_model_response(model_request, path, response).await;
     }
 
     // Reuse the shared reqwest::Client from AppState for connection pooling.
@@ -6049,8 +6086,10 @@ async fn execute_resolved_proxy_inner(
         .get("content-type")
         .and_then(|v| v.to_str().ok())
         .is_some_and(crate::mw::security_headers::is_sse_media_type);
-    let should_stream =
-        machine_ingress.is_some() || should_stream_response(&downstream_response, status, is_sse);
+    let bounded_admission_body = nyxagent_admission && matches!(status.as_u16(), 409 | 503);
+    let should_stream = !bounded_admission_body
+        && (machine_ingress.is_some()
+            || should_stream_response(&downstream_response, status, is_sse));
     let exchange_diagnostics = ProxyExchangeDiagnostics::new(
         exchange_started_at,
         target_admission_ms,
@@ -6066,17 +6105,17 @@ async fn execute_resolved_proxy_inner(
         },
         &all_headers,
     );
-    let usage_context = should_capture_llm_usage(&target.service, platform_metric).then(|| {
-        llm_usage_service::UsageAuditContext {
-            db: state.db.clone(),
-            user_id: user_id_str.clone(),
-            provider_slug: None,
-            service_id: Some(service_id.to_string()),
-            model: None,
-            path: path.to_string(),
-            api_key_id: auth_user.api_key_id.clone(),
-            api_key_name: auth_user.api_key_name.clone(),
-        }
+    let usage_context = (should_capture_llm_usage(&target.service, platform_metric)
+        || model_request.is_some())
+    .then(|| llm_usage_service::UsageAuditContext {
+        db: state.db.clone(),
+        user_id: user_id_str.clone(),
+        provider_slug: None,
+        service_id: Some(service_id.to_string()),
+        model: None,
+        path: path.to_string(),
+        api_key_id: auth_user.api_key_id.clone(),
+        api_key_name: auth_user.api_key_name.clone(),
     });
 
     if let Some(accounting) = pool_accounting {
@@ -6123,7 +6162,7 @@ async fn execute_resolved_proxy_inner(
             )
             .await;
         }
-        return Ok(response);
+        return observe_model_response(model_request, path, response).await;
     }
 
     let mut response_builder = Response::builder().status(status);
@@ -6150,6 +6189,9 @@ async fn execute_resolved_proxy_inner(
         state,
         crate::services::proxy_http_response::HttpResponseContext {
             service_id: service_id.to_string(),
+            path: path.to_string(),
+            nyxagent_admission,
+            model_request: model_request.clone(),
             response_builder,
             status,
             is_sse,
@@ -14224,5 +14266,446 @@ mod discovery_tests {
         assert!(personal.asyncapi_url.is_none());
         assert!(!personal.streaming_supported);
         assert!(!personal.websocket_supported);
+    }
+}
+
+#[cfg(test)]
+mod nyxagent_admission_tests {
+    #[test]
+    fn only_marked_engine_status_code_pairs_are_free() {
+        for (status, code) in [
+            (503, "capacity_exceeded"),
+            (503, "draining"),
+            (409, "session_busy"),
+        ] {
+            let body = serde_json::to_vec(&serde_json::json!({"error":{"code":code}})).unwrap();
+            assert!(super::proven_nyxagent_refusal(true, status, &body));
+            assert!(!super::proven_nyxagent_refusal(false, status, &body));
+            assert!(!super::proven_nyxagent_refusal(true, 200, &body));
+            assert!(!super::proven_nyxagent_refusal(true, 500, &body));
+        }
+        assert!(!super::proven_nyxagent_refusal(
+            true,
+            503,
+            br#"{"error":{"code":"provider_unavailable"}}"#
+        ));
+        assert!(!super::proven_nyxagent_refusal(
+            true,
+            409,
+            br#"{"error":{"code":"capacity_exceeded"}}"#
+        ));
+        assert!(!super::proven_nyxagent_refusal(true, 503, b"incomplete"));
+    }
+
+    #[tokio::test]
+    async fn model_observer_persists_faults_before_eof_or_body_error_and_cancellation_is_diagnostic()
+     {
+        use crate::models::assistant_conversation::AssistantConversation;
+        use crate::services::{
+            assistant_model_observer::{ModelRequest, attribute},
+            assistant_nyxagent as engine,
+        };
+        use crate::test_utils::{connect_transaction_test_database, test_app_state};
+        use mongodb::bson::doc;
+        let db = connect_transaction_test_database("model_stream_observer").await;
+        let state = test_app_state(db.clone());
+        engine::ensure_indexes(&db).await.unwrap();
+        for (path, data, kind) in [
+            (
+                "v1/responses",
+                Some("data: {\"type\":\"response.completed\"}\n\n"),
+                None,
+            ),
+            ("v1/chat/completions", Some("data: [DONE]\n\n"), None),
+            (
+                "v1/messages",
+                Some("data: {\"type\":\"message_stop\"}\n\n"),
+                None,
+            ),
+            (
+                "v1/responses",
+                Some("data: {\"type\":\"response.output_text.delta\"}\n\n"),
+                Some("missing_terminal"),
+            ),
+            (
+                "v1/responses",
+                Some("data: {\"type\":\"response.failed\"}\n\n"),
+                Some("provider_error"),
+            ),
+            (
+                "v1/responses/compact",
+                Some("data: unknown\n\n"),
+                Some("unknown"),
+            ),
+            ("v1/responses", None, Some("transport_error")),
+            ("v1/responses", None, Some("consumer_cancelled")),
+            ("v1/responses", None, Some("unknown")),
+        ] {
+            let input = serde_json::from_value::<engine::TurnRequest>(
+                serde_json::json!({"text":"test model stream"}),
+            )
+            .unwrap();
+            let row = Box::pin(engine::begin_turn(
+                &db,
+                "owner",
+                &input,
+                &state.encryption_keys,
+            ))
+            .await
+            .unwrap();
+            let request = ModelRequest::capture(
+                &db,
+                &row.id,
+                &row.credential_api_key_id,
+                &row.active_turn.as_ref().unwrap().turn_id,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            let gate = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+            let body_gate = gate.clone();
+            let body = if kind == Some("provider_error") {
+                axum::body::Body::from_stream(async_stream::stream! {
+                    yield Ok::<_, std::io::Error>(bytes::Bytes::from_static(b"data: {\"type\":\"response.failed\"}\n\n"));
+                    body_gate.acquire().await.unwrap().forget();
+                    for _ in 0..3 {
+                        yield Ok(bytes::Bytes::from_static(b": keepalive\n\n"));
+                    }
+                })
+            } else if let Some(data) = data {
+                axum::body::Body::from(data)
+            } else if kind == Some("unknown") {
+                let prefix = format!(
+                    "data: {{\"type\":\"response.completed\",\"padding\":\"{}",
+                    "x".repeat(crate::services::assistant_engine_policy::MODEL_STREAM_OBSERVER_MAX_BUFFER_BYTES)
+                );
+                axum::body::Body::from_stream(futures::stream::iter([
+                    Ok::<_, std::io::Error>(bytes::Bytes::from(prefix)),
+                    Ok(bytes::Bytes::from_static(b"\"}\n\n")),
+                ]))
+            } else if kind == Some("consumer_cancelled") {
+                axum::body::Body::from_stream(futures::stream::pending::<
+                    Result<bytes::Bytes, std::io::Error>,
+                >())
+            } else {
+                axum::body::Body::from_stream(futures::stream::iter([Err::<bytes::Bytes, _>(
+                    std::io::Error::other("fixture body error"),
+                )]))
+            };
+            let response = axum::http::Response::builder()
+                .status(200)
+                .header("content-type", "text/event-stream")
+                .body(body)
+                .unwrap();
+            let response = super::observe_model_response(Some(request), path, response)
+                .await
+                .unwrap();
+            assert_eq!(response.status(), axum::http::StatusCode::OK);
+            let response = if kind == Some("provider_error") {
+                use futures::StreamExt;
+                let mut body = response.into_body().into_data_stream();
+                body.next().await.unwrap().unwrap();
+                // Any later write, including EOF, would replace this sentinel.
+                db.collection::<mongodb::bson::Document>(crate::models::assistant_conversation::COLLECTION_NAME)
+                    .update_one(doc! {"_id": &row.id}, doc! {"$set": {"active_turn.model_stream_fault.at": mongodb::bson::DateTime::from_millis(1)}})
+                    .await.unwrap();
+                gate.add_permits(1);
+                axum::http::Response::new(axum::body::Body::from_stream(body))
+            } else {
+                response
+            };
+            if kind == Some("consumer_cancelled") {
+                drop(response);
+                tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                    loop {
+                        if db.collection::<AssistantConversation>(crate::models::assistant_conversation::COLLECTION_NAME)
+                            .find_one(doc! {"_id":&row.id, "active_turn.model_stream_cancellation.kind":"consumer_cancelled"})
+                            .await.unwrap().is_some() { break; }
+                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    }
+                }).await.unwrap();
+            } else {
+                let result = axum::body::to_bytes(
+                    response.into_body(),
+                    crate::services::assistant_engine_policy::MODEL_STREAM_OBSERVER_MAX_BUFFER_BYTES
+                        + 1024,
+                )
+                .await;
+                assert_eq!(result.is_err(), kind == Some("transport_error"));
+            }
+            let saved = engine::get(&db, "owner", &row.id).await.unwrap();
+            let turn = saved.active_turn.as_ref().unwrap();
+            let fact = if kind == Some("consumer_cancelled") {
+                turn.model_stream_cancellation.as_ref()
+            } else {
+                turn.model_stream_fault.as_ref()
+            };
+            assert_eq!(fact.map(|fact| fact.kind.as_str()), kind);
+            if kind == Some("provider_error") {
+                assert_eq!(fact.unwrap().at.timestamp_millis(), 1);
+            }
+            let attributable = matches!(kind, Some("missing_terminal" | "transport_error"));
+            assert_eq!(
+                attribute(
+                    &engine::TurnError::new("turn_failed"),
+                    turn,
+                    chrono::Utc::now()
+                )
+                .code,
+                if attributable {
+                    "model_interrupted"
+                } else {
+                    "assistant_unavailable"
+                }
+            );
+        }
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn both_model_transports_preserve_bytes_and_decode_bounded_sse_framing() {
+        use crate::models::{
+            downstream_service::{COLLECTION_NAME as SERVICES, DownstreamService},
+            user::{COLLECTION_NAME as USERS, UserType},
+        };
+        use crate::services::{
+            assistant_acknowledgement_service::AssistantTurnFence,
+            assistant_model_observer::{ModelRequest, attribute},
+            assistant_nyxagent as engine,
+        };
+        use crate::test_utils::{
+            connect_transaction_test_database, test_app_state, test_auth_user, test_user,
+        };
+        use axum::{Router, body::Body, http::Request, response::IntoResponse, routing::post};
+        use futures::StreamExt;
+        use std::sync::Arc;
+        use uuid::Uuid;
+
+        let db = connect_transaction_test_database("model_transport_framing").await;
+        let state = test_app_state(db.clone());
+        let owner = Uuid::new_v4().to_string();
+        db.collection(USERS)
+            .insert_one(test_user(&owner, UserType::Person))
+            .await
+            .unwrap();
+        engine::ensure_indexes(&db).await.unwrap();
+        let mut cases = Vec::new();
+        for (path, terminal) in [
+            ("v1/responses", r#"{"type":"response.completed"}"#),
+            ("v1/chat/completions", "[DONE]"),
+            ("v1/messages", r#"{"type":"message_stop"}"#),
+        ] {
+            for ending in ["\n", "\r\n", "\r"] {
+                // Split every CRLF and the final blank line across real chunks.
+                let mut chunks = vec![format!("data: {terminal}{}", &ending[..1]).into_bytes()];
+                if ending == "\r\n" {
+                    chunks.push(b"\n".to_vec());
+                }
+                chunks.push(ending.as_bytes()[..1].to_vec());
+                if ending == "\r\n" {
+                    chunks.push(b"\n".to_vec());
+                }
+                cases.push((path, chunks, None));
+            }
+        }
+        let oversized = format!(
+            "data: {{\"type\":\"response.completed\",\"padding\":\"{}\"}}\r\n\r\n",
+            "x".repeat(
+                crate::services::assistant_engine_policy::MODEL_STREAM_OBSERVER_MAX_BUFFER_BYTES
+            )
+        );
+        cases.push((
+            "v1/responses",
+            oversized
+                .as_bytes()
+                .chunks(64 * 1024)
+                .map(<[u8]>::to_vec)
+                .collect(),
+            Some("unknown"),
+        ));
+        let recovered = format!("{oversized}data: {{\"type\":\"response.completed\"}}\n\n");
+        cases.push((
+            "v1/responses",
+            recovered
+                .as_bytes()
+                .chunks(64 * 1024)
+                .map(<[u8]>::to_vec)
+                .collect(),
+            Some("unknown"),
+        ));
+        cases.push((
+            "v1/responses",
+            vec![b"data: ".to_vec(), vec![0xff], b"\n\n".to_vec()],
+            Some("unknown"),
+        ));
+        cases.push((
+            "v1/responses",
+            vec![b"data: {broken".to_vec(), b"\r\n\r\n".to_vec()],
+            Some("unknown"),
+        ));
+        cases.push((
+            "v1/responses",
+            vec![b"data: {unfinished".to_vec()],
+            Some("unknown"),
+        ));
+
+        for direct in [false, true] {
+            for (path, chunks, expected_fault) in &cases {
+                let input = serde_json::from_value::<engine::TurnRequest>(
+                    serde_json::json!({"text":"test framing"}),
+                )
+                .unwrap();
+                let row = Box::pin(engine::begin_turn(
+                    &db,
+                    &owner,
+                    &input,
+                    &state.encryption_keys,
+                ))
+                .await
+                .unwrap();
+                let turn = row.active_turn.as_ref().unwrap();
+                let gate = Arc::new(tokio::sync::Semaphore::new(0));
+                let body_gate = gate.clone();
+                let body_chunks = chunks.clone();
+                let make_body = move || {
+                    let gate = body_gate.clone();
+                    let chunks = body_chunks.clone();
+                    Body::from_stream(async_stream::stream! {
+                        for chunk in chunks {
+                            yield Ok::<_, std::io::Error>(bytes::Bytes::from(chunk));
+                            gate.acquire().await.unwrap().forget();
+                        }
+                    })
+                };
+                let (response, server) = if direct {
+                    let upstream = Router::new().route(
+                        "/v1/{*path}",
+                        post(move || {
+                            let body = make_body();
+                            async move {
+                                ([("content-type", "text/event-stream")], body).into_response()
+                            }
+                        }),
+                    );
+                    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                    let address = listener.local_addr().unwrap();
+                    let server = tokio::spawn(async move {
+                        axum::serve(listener, upstream).await.unwrap();
+                    });
+                    let mut model =
+                        crate::models::downstream_service::test_helpers::dummy_service();
+                    model.id = Uuid::new_v4().to_string();
+                    model.slug = format!("framing-{}", model.id);
+                    model.base_url = format!("http://{address}");
+                    model.auth_method = "none".into();
+                    model.requires_user_credential = false;
+                    model.credential_encrypted.clear();
+                    model.inference = Some(serde_json::from_value(serde_json::json!({"wire_protocol":"openai_responses", "model_list":true})).unwrap());
+                    db.collection::<DownstreamService>(SERVICES)
+                        .insert_one(&model)
+                        .await
+                        .unwrap();
+                    let mut auth = test_auth_user(&owner);
+                    auth.api_key_id = Some(row.credential_api_key_id.clone());
+                    auth.assistant_turn_fence = Some(AssistantTurnFence {
+                        platform_origin: None,
+                        platform_thread: false,
+                        conversation_id: row.id.clone(),
+                        turn_id: Some(turn.turn_id.clone()),
+                        turn_live: true,
+                        turn_stopped: false,
+                    });
+                    let mut request = Request::builder()
+                        .method("POST")
+                        .header("content-type", "application/json")
+                        .body(Body::from(r#"{"model":"test","stream":true}"#))
+                        .unwrap();
+                    request
+                        .extensions_mut()
+                        .insert(crate::handlers::assistant_nyxagent::SERVER_TURN_POLICY);
+                    let response = Box::pin(super::execute_admin_proxy(
+                        &state,
+                        &auth,
+                        &model.id,
+                        path,
+                        request,
+                        vec![],
+                        &mut String::new(),
+                    ))
+                    .await
+                    .unwrap();
+                    (response, Some(server))
+                } else {
+                    let request = ModelRequest::capture(
+                        &db,
+                        &row.id,
+                        &row.credential_api_key_id,
+                        &turn.turn_id,
+                    )
+                    .await
+                    .unwrap()
+                    .unwrap();
+                    let response = axum::http::Response::builder()
+                        .status(200)
+                        .header("content-type", "text/event-stream")
+                        .body(make_body())
+                        .unwrap();
+                    (
+                        super::observe_model_response(Some(request), path, response)
+                            .await
+                            .unwrap(),
+                        None,
+                    )
+                };
+                assert_eq!(response.status(), axum::http::StatusCode::OK);
+                let mut body = response.into_body().into_data_stream();
+                let mut forwarded = Vec::new();
+                for chunk in chunks {
+                    let mut received = Vec::new();
+                    while received.len() < chunk.len() {
+                        received.extend_from_slice(
+                            &tokio::time::timeout(std::time::Duration::from_secs(10), body.next())
+                                .await
+                                .unwrap()
+                                .unwrap()
+                                .unwrap(),
+                        );
+                    }
+                    assert_eq!(&received, chunk);
+                    forwarded.extend_from_slice(&received);
+                    gate.add_permits(1);
+                }
+                assert!(
+                    tokio::time::timeout(std::time::Duration::from_secs(10), body.next())
+                        .await
+                        .unwrap()
+                        .is_none()
+                );
+                assert_eq!(forwarded, chunks.concat());
+                let saved = engine::get(&db, &owner, &row.id).await.unwrap();
+                let turn = saved.active_turn.as_ref().unwrap();
+                let fault = turn.model_stream_fault.as_ref();
+                assert_eq!(
+                    fault.map(|fact| fact.kind.as_str()),
+                    *expected_fault,
+                    "direct={direct}, path={path}"
+                );
+                assert!(fault.is_none_or(|fact| !fact.attributable));
+                assert_eq!(
+                    attribute(
+                        &engine::TurnError::new("turn_failed"),
+                        turn,
+                        chrono::Utc::now()
+                    )
+                    .code,
+                    "assistant_unavailable"
+                );
+                assert_eq!(turn.model_requests_active, 0);
+                if let Some(server) = server {
+                    server.abort();
+                }
+            }
+        }
+        db.drop().await.unwrap();
     }
 }

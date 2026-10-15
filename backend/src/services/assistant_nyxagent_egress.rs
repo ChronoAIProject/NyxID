@@ -369,7 +369,10 @@ impl NyxAgentEgress for Egress {
             .get("content-type")
             .and_then(|v| v.to_str().ok())
             .is_some_and(crate::mw::security_headers::is_sse_media_type);
-        let stream = response_core::should_stream_response(&downstream, status, is_sse);
+        let nyxagent_admission =
+            request.method == Method::POST && request.relative_path == "v1/responses";
+        let stream = !(nyxagent_admission && matches!(status.as_u16(), 409 | 503))
+            && response_core::should_stream_response(&downstream, status, is_sse);
         let diagnostics = ProxyExchangeDiagnostics::new(
             started,
             admission_ms,
@@ -408,6 +411,9 @@ impl NyxAgentEgress for Egress {
             state,
             HttpResponseContext {
                 service_id: service.id.clone(),
+                path: request.relative_path.clone(),
+                nyxagent_admission,
+                model_request: None,
                 response_builder: builder,
                 status,
                 is_sse,

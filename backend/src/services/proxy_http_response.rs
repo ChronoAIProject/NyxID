@@ -4,7 +4,7 @@
 use crate::downstream_disconnect::{CancelOnDropStream, until_client_disconnect};
 use crate::models::service_billing::{BillingMetric, PlatformUsage, ResaleUsage};
 use crate::services::billing::MeteredProxyContext;
-use crate::services::{llm_usage_service, proxy_service, sse_parser};
+use crate::services::{llm_usage_service, proxy_service};
 use crate::{
     AppState,
     errors::{AppError, AppResult},
@@ -20,6 +20,9 @@ use tokio_util::sync::CancellationToken;
 
 pub(crate) struct HttpResponseContext {
     pub service_id: String,
+    pub path: String,
+    pub nyxagent_admission: bool,
+    pub model_request: Option<super::assistant_model_observer::ModelRequest>,
     pub response_builder: http::response::Builder,
     pub status: StatusCode,
     pub is_sse: bool,
@@ -39,6 +42,9 @@ pub(crate) async fn relay_response(
 ) -> AppResult<Response> {
     let HttpResponseContext {
         service_id,
+        path,
+        nyxagent_admission,
+        model_request,
         response_builder,
         status,
         is_sse,
@@ -51,6 +57,14 @@ pub(crate) async fn relay_response(
         exchange_diagnostics,
     } = context;
     let service_id = service_id.as_str();
+    let path = path.as_str();
+    let bounded_admission_body = nyxagent_admission && matches!(status.as_u16(), 409 | 503);
+    if status.is_success()
+        && let Some(request) = &model_request
+        && request.accepted().await.is_err()
+    {
+        tracing::warn!("Assistant model success attribution deferred");
+    }
     let response = if should_stream {
         // Stream responses without buffering, but use a forwarding task when
         // we need to observe SSE usage so client disconnects are visible.
@@ -65,13 +79,21 @@ pub(crate) async fn relay_response(
             let stream_metered = metered.clone();
             let request_len = request_body_len;
             let task_cancellation = downstream_cancellation.clone();
+            let model_protocol = crate::services::assistant_model_observer::protocol(path);
+            let model_request = model_request.clone().filter(|_| status.is_success());
 
             tokio::spawn(async move {
                 let mut exchange_diagnostics = ProxyStreamDiagnostics::new(exchange_diagnostics);
-                let mut sse_buffer = String::new();
                 let mut usage_accumulator =
                     llm_usage_service::ReportedLlmUsageAccumulator::default();
                 let mut response_len: i64 = 0;
+                // Billing keeps the full SSE event; the bounded model observer is diagnostic only.
+                let mut sse_buffer = String::new();
+                let mut model_observer = model_request.as_ref().map(|_| {
+                    crate::services::assistant_model_observer::StreamObserver::new(model_protocol)
+                });
+                let mut provider_fault_recorded = false;
+                let mut framing_fault_recorded = false;
 
                 loop {
                     let next = until_client_disconnect(
@@ -81,6 +103,10 @@ pub(crate) async fn relay_response(
                     .await;
                     match next {
                         Err(_) => {
+                            if let Some(model_request) = &model_request {
+                                let _ = model_request.fault("consumer_cancelled", false).await;
+                                let _ = model_request.complete().await;
+                            }
                             exchange_diagnostics.finish("client_disconnect");
                             drop(upstream_stream);
                             let usage = usage_accumulator.finalize();
@@ -110,7 +136,9 @@ pub(crate) async fn relay_response(
                         Ok(Ok(Some(Ok(bytes)))) => {
                             response_len += bytes.len() as i64;
                             sse_buffer.push_str(&String::from_utf8_lossy(&bytes));
-                            while let Some(event) = parse_sse_event(&mut sse_buffer) {
+                            while let Some(event) =
+                                super::sse_parser::parse_next_event(&mut sse_buffer)
+                            {
                                 if let Some((mut usage, mode)) =
                                     llm_usage_service::extract_reported_usage_from_sse_event(
                                         event.event_type.as_deref(),
@@ -124,7 +152,26 @@ pub(crate) async fn relay_response(
                                 }
                             }
 
+                            if let (Some(observer), Some(request)) =
+                                (&mut model_observer, &model_request)
+                            {
+                                for &byte in &bytes {
+                                    let _ = observer.push_byte(byte);
+                                }
+                                if observer.framing_invalid() && !framing_fault_recorded {
+                                    let _ = request.fault("unknown", false).await;
+                                    framing_fault_recorded = true;
+                                }
+                                if observer.provider_failed() && !provider_fault_recorded {
+                                    let _ = request.fault("provider_error", true).await;
+                                    provider_fault_recorded = true;
+                                }
+                            }
                             if tx.send(Ok(bytes)).await.is_err() {
+                                if let Some(model_request) = &model_request {
+                                    let _ = model_request.fault("consumer_cancelled", false).await;
+                                    let _ = model_request.complete().await;
+                                }
                                 exchange_diagnostics.finish("client_disconnect");
                                 drop(upstream_stream);
                                 let usage = usage_accumulator.finalize();
@@ -153,6 +200,13 @@ pub(crate) async fn relay_response(
                             }
                         }
                         Ok(Ok(Some(Err(e)))) => {
+                            if let (Some(model_request), Some(observer)) =
+                                (&model_request, &model_observer)
+                            {
+                                let (kind, attributable) = observer.transport_fault();
+                                let _ = model_request.fault(kind, attributable).await;
+                                let _ = model_request.complete().await;
+                            }
                             exchange_diagnostics.finish("body_error");
                             tracing::error!(
                                 service_id = %service_id_owned,
@@ -190,6 +244,17 @@ pub(crate) async fn relay_response(
                             return;
                         }
                         Ok(Ok(None)) => {
+                            if let Some(kind) =
+                                model_observer.as_mut().and_then(|observer| observer.eof())
+                                && !(kind == "provider_error" && provider_fault_recorded)
+                                && !(kind == "unknown" && framing_fault_recorded)
+                                && let Some(model_request) = &model_request
+                            {
+                                let _ = model_request.fault(kind, kind != "unknown").await;
+                            }
+                            if let Some(model_request) = &model_request {
+                                let _ = model_request.complete().await;
+                            }
                             exchange_diagnostics.finish("completed");
                             let usage = usage_accumulator.finalize();
                             if let Some(usage) = usage.clone() {
@@ -216,6 +281,13 @@ pub(crate) async fn relay_response(
                             return;
                         }
                         Ok(Err(_)) => {
+                            if let (Some(model_request), Some(observer)) =
+                                (&model_request, &model_observer)
+                            {
+                                let (kind, attributable) = observer.transport_fault();
+                                let _ = model_request.fault(kind, attributable).await;
+                                let _ = model_request.complete().await;
+                            }
                             exchange_diagnostics.finish("upstream_error");
                             tracing::warn!(
                                 service_id = %service_id_owned,
@@ -369,22 +441,79 @@ pub(crate) async fn relay_response(
             .and_then(|value| value.to_str().ok())
             .unwrap_or("unknown")
             .to_string();
-        let response_body =
-            match until_client_disconnect(&downstream_cancellation, downstream_response.bytes())
-                .await
-            {
-                Err(_) => {
-                    exchange_diagnostics.emit("client_disconnect");
-                    return Err(proxy_client_disconnected(service_id));
+        let mut admission_response_len = 0_i64;
+        let response_body = match until_client_disconnect(&downstream_cancellation, async {
+            if bounded_admission_body {
+                let mut stream = downstream_response.bytes_stream();
+                let mut captured = bytes::BytesMut::new();
+                while let Some(chunk) = stream.next().await {
+                    let chunk = chunk.map_err(|_| {
+                        AppError::Internal("Invalid assistant admission response".into())
+                    })?;
+                    admission_response_len =
+                        admission_response_len.saturating_add(chunk.len() as i64);
+                    if captured.len().saturating_add(chunk.len())
+                        > crate::services::assistant_engine_policy::ADMISSION_ERROR_BODY_MAX_BYTES
+                    {
+                        return Err(AppError::Internal(
+                            "Assistant admission response too large".into(),
+                        ));
+                    }
+                    captured.extend_from_slice(&chunk);
                 }
-                Ok(Err(e)) => {
-                    exchange_diagnostics.emit("body_error");
-                    return Err(AppError::Internal(format!(
-                        "Failed to read downstream response: {e}"
-                    )));
+                Ok(captured.freeze())
+            } else {
+                downstream_response.bytes().await.map_err(|e| {
+                    AppError::Internal(format!("Failed to read downstream response: {e}"))
+                })
+            }
+        })
+        .await
+        {
+            Err(_) => {
+                exchange_diagnostics.emit("client_disconnect");
+                if bounded_admission_body {
+                    settle_meter_async(
+                        state.billing.clone(),
+                        metered,
+                        llm_platform_usage(None, request_body_len + admission_response_len),
+                        resale_metric.and_then(|metric| {
+                            resale_usage_from_optional_reported(
+                                metric,
+                                None,
+                                request_body_len + admission_response_len,
+                            )
+                        }),
+                        None,
+                    )
+                    .await;
                 }
-                Ok(Ok(body)) => body,
-            };
+                return Err(proxy_client_disconnected(service_id));
+            }
+            Ok(Err(e)) => {
+                exchange_diagnostics.emit("body_error");
+                if bounded_admission_body {
+                    settle_meter_async(
+                        state.billing.clone(),
+                        metered,
+                        llm_platform_usage(None, request_body_len + admission_response_len),
+                        resale_metric.and_then(|metric| {
+                            resale_usage_from_optional_reported(
+                                metric,
+                                None,
+                                request_body_len + admission_response_len,
+                            )
+                        }),
+                        None,
+                    )
+                    .await;
+                }
+                return Err(AppError::Internal(format!(
+                    "Failed to read downstream response: {e}"
+                )));
+            }
+            Ok(Ok(body)) => body,
+        };
         exchange_diagnostics.emit("completed");
 
         if !status.is_success() {
@@ -420,21 +549,148 @@ pub(crate) async fn relay_response(
                 request_len + response_len,
             )
         });
-        settle_meter_async(
-            state.billing.clone(),
-            metered,
-            llm_platform_usage(reported_usage.as_ref(), request_len + response_len),
-            resale,
-            model,
-        )
-        .await;
+        let rejected_admission =
+            proven_nyxagent_refusal(nyxagent_admission, status.as_u16(), &response_body);
+        if rejected_admission {
+            // Returning the refusal admits a retry. Its funding must be free first.
+            if let Err(error) = state
+                .billing
+                .settle(
+                    &metered,
+                    PlatformUsage::default(),
+                    resale.map(|mut usage| {
+                        usage.quantity = 0;
+                        usage
+                    }),
+                    model,
+                )
+                .await
+            {
+                tracing::error!(
+                    code = error.error_code(),
+                    "Assistant admission funding release failed"
+                );
+                return Err(AppError::Internal(
+                    "Assistant admission funding release failed".into(),
+                ));
+            }
+        } else {
+            settle_meter_async(
+                state.billing.clone(),
+                metered,
+                llm_platform_usage(reported_usage.as_ref(), request_len + response_len),
+                resale,
+                model,
+            )
+            .await;
+        }
 
         response_builder
             .body(Body::from(response_body))
             .map_err(|e| AppError::Internal(format!("Failed to build response: {e}")))?
     };
 
+    if !(should_stream && is_sse)
+        && let Some(request) = &model_request
+    {
+        let _ = request.complete().await;
+    }
     Ok(response)
+}
+
+pub(crate) fn proven_nyxagent_refusal(engine: bool, status: u16, body: &[u8]) -> bool {
+    engine
+        && serde_json::from_slice::<serde_json::Value>(body)
+            .ok()
+            .and_then(|value| value["error"]["code"].as_str().map(str::to_owned))
+            .is_some_and(|code| {
+                crate::services::assistant_nyxagent::admission_refusal(status, &code)
+            })
+}
+
+pub(crate) async fn observe_model_response(
+    request: Option<crate::services::assistant_model_observer::ModelRequest>,
+    path: &str,
+    response: Response,
+) -> AppResult<Response> {
+    let Some(request) = request else {
+        return Ok(response);
+    };
+    if !response.status().is_success() {
+        let _ = request.complete().await;
+        return Ok(response);
+    }
+    if request.accepted().await.is_err() {
+        tracing::warn!("Assistant model success attribution deferred");
+    }
+    if !response
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(crate::mw::security_headers::is_sse_media_type)
+    {
+        let _ = request.complete().await;
+        return Ok(response);
+    }
+    let protocol = crate::services::assistant_model_observer::protocol(path);
+    let (parts, body) = response.into_parts();
+    let (tx, rx) = tokio::sync::mpsc::channel(1);
+    tokio::spawn(async move {
+        let mut body = body.into_data_stream();
+        let mut observer = crate::services::assistant_model_observer::StreamObserver::new(protocol);
+        let mut provider_fault_recorded = false;
+        let mut framing_fault_recorded = false;
+        loop {
+            let chunk = tokio::select! {
+                biased;
+                _ = tx.closed() => { let _ = request.fault("consumer_cancelled", false).await; let _ = request.complete().await; return; }
+                chunk = body.next() => chunk,
+            };
+            match chunk {
+                Some(Ok(bytes)) => {
+                    for &byte in &bytes {
+                        let _ = observer.push_byte(byte);
+                    }
+                    if observer.framing_invalid() && !framing_fault_recorded {
+                        let _ = request.fault("unknown", false).await;
+                        framing_fault_recorded = true;
+                    }
+                    if observer.provider_failed() && !provider_fault_recorded {
+                        let _ = request.fault("provider_error", true).await;
+                        provider_fault_recorded = true;
+                    }
+                    if tx.send(Ok::<_, std::io::Error>(bytes)).await.is_err() {
+                        let _ = request.fault("consumer_cancelled", false).await;
+                        let _ = request.complete().await;
+                        return;
+                    }
+                }
+                Some(Err(_)) => {
+                    let (kind, attributable) = observer.transport_fault();
+                    let _ = request.fault(kind, attributable).await;
+                    let _ = request.complete().await;
+                    let _ = tx
+                        .send(Err(std::io::Error::other("Model stream interrupted")))
+                        .await;
+                    return;
+                }
+                None => {
+                    if let Some(kind) = observer.eof()
+                        && !(kind == "provider_error" && provider_fault_recorded)
+                        && !(kind == "unknown" && framing_fault_recorded)
+                    {
+                        let _ = request.fault(kind, kind != "unknown").await;
+                    }
+                    let _ = request.complete().await;
+                    return;
+                }
+            }
+        }
+    });
+    Ok(Response::from_parts(
+        parts,
+        Body::from_stream(ReceiverStream::new(rx)),
+    ))
 }
 
 pub(crate) fn proxy_client_disconnected(service_id: &str) -> AppError {
@@ -622,10 +878,6 @@ pub(crate) fn sanitized_request_id(headers: &axum::http::HeaderMap) -> Option<St
     .then(|| value.to_string())
 }
 
-pub(crate) fn parse_sse_event(buffer: &mut String) -> Option<sse_parser::SseEvent> {
-    sse_parser::parse_next_event(buffer)
-}
-
 pub(crate) fn should_capture_llm_usage(
     service: &crate::models::downstream_service::DownstreamService,
     platform_metric: BillingMetric,
@@ -761,3 +1013,7 @@ pub(crate) fn should_stream_response(
         Some(len) => len > STREAM_SIZE_THRESHOLD,
     }
 }
+
+#[cfg(test)]
+#[path = "proxy_http_response_tests.rs"]
+mod tests;
