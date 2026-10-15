@@ -226,10 +226,12 @@ mod tests {
         };
         let binding =
             crate::services::platform_personal_binding_service::tests::binding(&update, &owner);
-        db.collection(crate::models::platform_personal_binding::COLLECTION_NAME)
-            .insert_one(&binding)
-            .await
-            .unwrap();
+        db.collection::<crate::models::platform_personal_binding::PlatformPersonalBinding>(
+            crate::models::platform_personal_binding::COLLECTION_NAME,
+        )
+        .insert_one(&binding)
+        .await
+        .unwrap();
         assert!(
             matches!(admit_manager_update(&db,&IdentityProducer,&update).await.unwrap(),IngressAdmission::Duplicate {receipt_id} if receipt_id==original.receipt_id)
         );
@@ -253,10 +255,12 @@ mod tests {
         ingress::ensure_indexes(&db).await.unwrap();
         let binding =
             crate::services::platform_personal_binding_service::tests::binding(&update, &owner);
-        db.collection(crate::models::platform_personal_binding::COLLECTION_NAME)
-            .insert_one(&binding)
-            .await
-            .unwrap();
+        db.collection::<crate::models::platform_personal_binding::PlatformPersonalBinding>(
+            crate::models::platform_personal_binding::COLLECTION_NAME,
+        )
+        .insert_one(&binding)
+        .await
+        .unwrap();
         db.collection::<mongodb::bson::Document>(
             crate::models::platform_bot_runtime_controls::COLLECTION_NAME,
         )
