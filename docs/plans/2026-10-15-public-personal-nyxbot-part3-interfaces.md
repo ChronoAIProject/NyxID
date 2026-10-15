@@ -1118,3 +1118,103 @@ Registration manifest for Part 5: `services/mod.rs` must register
 `assistant_nyxagent_egress` and `proxy_http_response`; the adapter also
 requires Part 2’s `platform_personal_turn_service` module. No route, model,
 index, or background-task registration is added by this slice.
+
+## Implementation checkpoint: public confinement and unavailable runtime
+
+The public key representation is now the immutable unit purpose
+`ApiKeyPurpose::PublicNyxbot` plus a separate immutable session-to-key binding
+in `platform_public_sessions`. It adds no session fields to `ApiKey` and
+requires no other owners to change key literals. The mutation service rejects
+purpose changes, dotted authority fields, replacement documents and `$rename`
+targets. Generic key, credential and agent-binding APIs hide/refuse this
+purpose. Generic issuance cannot create it. Ordinary REST authentication,
+stateless MCP, proxy and LLM ingress reject it before owner convergence or
+sponsor inventory resolution, independently of `assistant:live-turn-gate`.
+The existing ordinary assistant model-call exception excludes this purpose.
+
+The LLM confinement covers exactly these mounted route families:
+
+- `/api/v1/llm/{provider_slug}/v1/{*path}`
+- `/api/v1/llm/gateway/v1/{*path}`
+- `/api/v1/llm/status`
+- `/api/v1/llm/pools`
+
+`platform_public_policy` records metadata-only Unavailable assessments for
+the exact selected sponsor/profile/caps/manager/public revision and pinned
+source build `fe9745799cc1d46f1290e84effb366ff12600577`. Its candidate digest
+is not runtime proof. Repeated discovery returns no profiles or default;
+it does not fall back to the bundled chat profile. All readiness, execution
+and reply fences return `Unavailable(PublicNotReady)`, including when the
+caller supplies a structurally valid Ready evidence value. Context preparation,
+turn execution, credential issuance/replacement, observed binding adoption and
+reply settlement return an error. None calls owner credential convergence,
+opens a meter, performs a provider request, or manufactures a saved reply.
+
+`platform_public_agent_service::revoke_in_session` implements local lifecycle
+work independently of public readiness and joins its caller's transaction.
+For each matching session it validates the exact sponsor/public-purpose key,
+deactivates that key through the shared mutation service, revokes child
+credentials, requests the exact active public turn stop, clears encrypted
+credential material, and records durable exact-session cleanup work. An empty
+scope returns `recovery_record_id: None`. The separate session model retains
+encrypted upstream handles, exact ingress receipt/claim/turn linkage, the
+absolute expiry and revocation metadata. There is no destructive TTL index.
+
+This bounded slice permits at most 256 matching live sessions in a single
+caller transaction. A larger scope aborts the whole mutation before any
+cleanup intent or key update; it never returns partial success. The larger
+scope generation marker and paged drain described above remain unimplemented.
+This limitation must be removed before public activation or any issuer is
+enabled. Manager identity matching includes the exact profile/bot/Telegram
+identity and only epochs at or before the revoked epoch, preserving a future
+replacement manager's authority.
+
+The cleanup worker uses durable claims and retries. It records
+`upstream_cleanup_contract_unproven` when an upstream session may exist, keeps
+the encrypted upstream binding, and leaves cleanup incomplete. It never
+restores a revoked key, calls an unproven deletion protocol or reports expiry
+as verified erasure. Only a session durably known never to have dispatched,
+with no upstream binding and no active key, can complete local cleanup. Missing
+legacy upstream evidence defaults conservatively to `upstream_may_exist: true`.
+This is local recovery support, not proof of upstream session deletion.
+
+The personal egress transaction uses MongoDB's explicit `and_run` context and
+boxed callback to avoid the driver's documented reborrowed async-closure Send
+issue. Its context owns authority metadata and an identity-producer reference;
+raw key material is not captured. Known failures after opening a meter and
+before dispatch use the existing billing failure/release path. Ambiguous
+forwarded attempts retain ordinary durable reconciliation behavior.
+
+Registration manifest for Part 5, without new routes:
+
+- `models::platform_public_session` (sessions, cleanup records, readiness records).
+- `services::{platform_public_policy, platform_public_agent_service,
+  platform_public_credential_service}`.
+- `platform_public_agent_service::ensure_indexes(&Database)` at index setup.
+- `platform_public_agent_service::producer(state, execution, ingress)` supplies
+  the frozen `PublicTurnProducer`.
+- `platform_public_credential_service::producer(state)` supplies the frozen
+  `PublicNyxAgentRuntime`.
+- `platform_public_agent_service::sweep_public_lifecycle(&AppState, limit)`
+  returns `RecoveryBatch`; each pass revokes at most 100 expired sessions and
+  processes at most 100 due cleanup records, with at most 256 sessions in each
+  cleanup record. Part 5 owns scheduling and lifecycle entry-point wiring.
+
+Added focused tests cover forged readiness/discovery refusal, idempotent local
+assessment, transactional rollback of revocation, bounded-scope rejection,
+unknown upstream cleanup retention, completion of proven never-dispatched
+sessions, retry timing, BSON date/binary storage and redacted Debug output.
+Existing confinement tests cover ordinary auth/MCP route denial, LLM guard,
+operation allowlist and protected key mutations. Targeted rustfmt and
+`git diff --check` passed. No Cargo/build/test command ran on this worker; the
+primary owns central compile and transaction-test execution.
+
+Per the primary's worker rotation, exact-money cap admission, sponsor-meter
+binding/settlement, FAQ/signup tool execution, scope revocation markers and
+runtime acceptance remain next-wave work. There is no public budget producer
+or public tool runtime in this slice. Source-reviewed native-tool flags and
+NyxID responses/compaction propagation still do not prove deployed build,
+immutable profile/purpose binding, hard model/token/whole-loop cost bounds,
+disabled provider web search, strict request-field denial, absolute upstream
+retention, revoked-key cleanup, or enforcement on every replica. Public
+activation remains blocked; personal execution does not wait for those gaps.

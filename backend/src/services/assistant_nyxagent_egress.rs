@@ -485,21 +485,23 @@ impl Egress {
                                     active.turn_id == turn.turn_id && !active.stop_requested
                                 })
                                 .ok_or(AppError::AssistantTurnRequired)?;
-                            if active.platform_origin.is_none()
-                        || super::platform_personal_turn_service::fence_execution_in_session(
-                            db,
-                            session,
-                            identity.as_ref(),
-                            user_id,
-                            key_id,
-                            turn,
-                            origin,
-                        )
-                        .await?
-                            != FenceOutcome::Authorized
-                    {
-                        return Err(AppError::AssistantTurnRequired);
-                    }
+                            if active.platform_origin.is_none() {
+                                return Err(AppError::AssistantTurnRequired);
+                            }
+                            let fence =
+                                super::platform_personal_turn_service::fence_execution_in_session(
+                                    db,
+                                    session,
+                                    identity.as_ref(),
+                                    user_id,
+                                    key_id,
+                                    turn,
+                                    origin,
+                                )
+                                .await?;
+                            if fence != FenceOutcome::Authorized {
+                                return Err(AppError::AssistantTurnRequired);
+                            }
                             Ok(row)
                         }
                         .await;

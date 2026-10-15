@@ -1,0 +1,821 @@
+//! Public routing fails closed; local revocation and cleanup remain operational.
+use super::{
+    api_key_mutation_service as transactions, platform_manager_contract::*,
+    platform_public_policy as policy,
+};
+use crate::{
+    AppState,
+    errors::{AppError, AppResult},
+    models::{
+        api_key::{ApiKey, ApiKeyPurpose, COLLECTION_NAME as KEYS},
+        platform_public_session::{
+            CLEANUP_RECORDS, COLLECTION_NAME as SESSIONS, PlatformPublicSession,
+            PublicCleanupRecord, READINESS_RECORDS,
+        },
+    },
+};
+use async_trait::async_trait;
+use chrono::{Duration, Utc};
+use futures::TryStreamExt;
+use mongodb::{
+    ClientSession, Database, IndexModel,
+    bson::{self, Document, doc},
+    options::{IndexOptions, ReturnDocument},
+};
+use std::sync::Arc;
+use tokio::sync::mpsc;
+
+const MAX_REVOKE_SESSIONS: usize = 256;
+const CLEANUP_LEASE_SECS: i64 = 60;
+
+pub fn producer(
+    _state: AppState,
+    _execution: Arc<dyn NyxAgentExecutionProducer>,
+    _ingress: Arc<dyn ManagerIngressTurnStore>,
+) -> Arc<dyn PublicTurnProducer> {
+    // No dependency can override the local absence of runtime proof.
+    Arc::new(PublicProducer)
+}
+struct PublicProducer;
+
+pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
+    db.collection::<PlatformPublicSession>(SESSIONS).create_indexes([
+        IndexModel::builder().keys(doc! {"credential_api_key_id":1})
+            .options(IndexOptions::builder().unique(true).name("public_key_binding_unique".to_owned()).build()).build(),
+        IndexModel::builder().keys(doc! {"profile_id":1,"manager_bot_id":1,"telegram_bot_id":1,"sender_id":1,"chat_id":1})
+            .options(IndexOptions::builder().unique(true).partial_filter_expression(doc! {"revoked_at":bson::Bson::Null})
+                .name("public_sender_live_unique".to_owned()).build()).build(),
+        IndexModel::builder().keys(doc! {"revoked_at":1,"expires_at":1}).build(),
+        IndexModel::builder().keys(doc! {"sponsor_owner_user_id":1,"revoked_at":1}).build(),
+    ]).await?;
+    db.collection::<PublicCleanupRecord>(CLEANUP_RECORDS)
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"completed":1,"retry_at":1,"lease_expires_at":1})
+                .build(),
+        )
+        .await?;
+    db.collection::<Document>(READINESS_RECORDS)
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"candidate_digest":1})
+                .options(IndexOptions::builder().unique(true).build())
+                .build(),
+        )
+        .await?;
+    // No TTL: expired authority is revoked before local/upstream cleanup.
+    Ok(())
+}
+
+#[async_trait]
+impl PublicTurnProducer for PublicProducer {
+    async fn discover_public_profiles(
+        &self,
+        db: &Database,
+        reviewed: &ManagerRuntimePolicy,
+    ) -> AppResult<PublicProfileDiscovery> {
+        Ok(PublicProfileDiscovery {
+            profiles: Vec::new(),
+            default_profile: None,
+            readiness: policy::assess(db, reviewed).await?,
+        })
+    }
+    async fn probe_public_readiness(
+        &self,
+        db: &Database,
+        reviewed: &ManagerRuntimePolicy,
+    ) -> AppResult<PublicReadiness> {
+        policy::assess(db, reviewed).await
+    }
+    async fn fence_public_readiness(
+        &self,
+        _db: &Database,
+        _session: &mut ClientSession,
+        _reviewed: &ManagerRuntimePolicy,
+        _evidence: &PublicReadinessEvidence,
+    ) -> AppResult<FenceOutcome> {
+        // Even a caller-constructed Ready snapshot cannot create deployment proof.
+        Ok(FenceOutcome::Unavailable(UnavailableReason::PublicNotReady))
+    }
+    async fn prepare_public_context(
+        &self,
+        _db: &Database,
+        _admitted: &PublicIngress,
+    ) -> AppResult<PublicExecutionContext> {
+        Err(policy::unavailable())
+    }
+    async fn fence_public_execution(
+        &self,
+        _db: &Database,
+        _session: &mut ClientSession,
+        _context: &PublicExecutionContext,
+    ) -> AppResult<FenceOutcome> {
+        Ok(FenceOutcome::Unavailable(UnavailableReason::PublicNotReady))
+    }
+    async fn run_public_turn(
+        &self,
+        _db: &Database,
+        _context: PublicExecutionContext,
+        _input: TurnInput,
+        _events: mpsc::Sender<ExecutionEvent>,
+    ) -> AppResult<TurnRef> {
+        Err(policy::unavailable())
+    }
+    async fn fence_public_reply(
+        &self,
+        _db: &Database,
+        _session: &mut ClientSession,
+        _destination: &ReplyDestination,
+    ) -> AppResult<FenceOutcome> {
+        Ok(FenceOutcome::Unavailable(UnavailableReason::PublicNotReady))
+    }
+    async fn revoke_public_sender(
+        &self,
+        db: &Database,
+        session: &mut ClientSession,
+        manager: &ManagerAuthority,
+        sender_id: i64,
+        chat_id: i64,
+    ) -> AppResult<()> {
+        revoke_in_session(
+            db,
+            session,
+            &PublicRevocationScope::Sender {
+                manager: manager.clone(),
+                sender_id,
+                chat_id,
+            },
+            PublicRevocationReason::PersonalLinkConfirmed,
+        )
+        .await
+        .map(|_| ())
+    }
+    async fn revoke_public_sessions_in_session(
+        &self,
+        db: &Database,
+        session: &mut ClientSession,
+        scope: &PublicRevocationScope,
+        reason: PublicRevocationReason,
+    ) -> AppResult<PublicRevocationRecorded> {
+        revoke_in_session(db, session, scope, reason).await
+    }
+    async fn process_public_cleanup_record(
+        &self,
+        db: &Database,
+        recovery_record_id: &str,
+    ) -> AppResult<()> {
+        process_cleanup(db, recovery_record_id).await
+    }
+}
+
+fn reason_label(reason: PublicRevocationReason) -> &'static str {
+    match reason {
+        PublicRevocationReason::PersonalLinkConfirmed => "personal_link_confirmed",
+        PublicRevocationReason::SenderUnlinked => "sender_unlinked",
+        PublicRevocationReason::ManagerRetired => "manager_retired",
+        PublicRevocationReason::ManagerIdentityChanged => "manager_identity_changed",
+        PublicRevocationReason::SponsorUnavailable => "sponsor_unavailable",
+        PublicRevocationReason::SessionExpired => "session_expired",
+    }
+}
+
+fn scope_filter(scope: &PublicRevocationScope) -> Document {
+    let mut filter = doc! {"revoked_at":bson::Bson::Null};
+    match scope {
+        PublicRevocationScope::Sender {
+            manager,
+            sender_id,
+            chat_id,
+        } => {
+            filter.extend(manager_filter(manager));
+            filter.insert("sender_id", *sender_id);
+            filter.insert("chat_id", *chat_id);
+        }
+        PublicRevocationScope::Manager { manager } => filter.extend(manager_filter(manager)),
+        PublicRevocationScope::Sponsor {
+            sponsor_owner_user_id,
+        } => {
+            filter.insert("sponsor_owner_user_id", sponsor_owner_user_id);
+        }
+        PublicRevocationScope::Session { public_session_id } => {
+            filter.insert("_id", public_session_id);
+        }
+    }
+    filter
+}
+fn manager_filter(manager: &ManagerAuthority) -> Document {
+    doc! {"profile_id":&manager.profile_id,"manager_bot_id":&manager.manager_bot_id,
+    "telegram_bot_id":manager.telegram_bot_id,"manager_authority_epoch":{"$lte":manager.manager_authority_epoch}}
+}
+fn changed() -> AppError {
+    AppError::Conflict("Public session authority changed".into())
+}
+fn empty_binary() -> bson::Binary {
+    bson::Binary {
+        subtype: bson::spec::BinarySubtype::Generic,
+        bytes: Vec::new(),
+    }
+}
+
+/// Joins the caller transaction. Consent cannot commit ahead of key revocation,
+/// turn cancellation and durable cleanup intent. Oversized work aborts the whole
+/// transaction; it never reports successful partial revocation.
+pub(crate) async fn revoke_in_session(
+    db: &Database,
+    session: &mut ClientSession,
+    scope: &PublicRevocationScope,
+    reason: PublicRevocationReason,
+) -> AppResult<PublicRevocationRecorded> {
+    let mut cursor = db
+        .collection::<PlatformPublicSession>(SESSIONS)
+        .find(scope_filter(scope))
+        .limit((MAX_REVOKE_SESSIONS + 1) as i64)
+        .session(&mut *session)
+        .await?;
+    let mut rows = Vec::new();
+    while let Some(row) = cursor.next(&mut *session).await.transpose()? {
+        rows.push(row);
+    }
+    if rows.len() > MAX_REVOKE_SESSIONS {
+        return Err(AppError::Conflict(
+            "Public revocation exceeds bounded transaction capacity; keep routing paused".into(),
+        ));
+    }
+    if rows.is_empty() {
+        return Ok(PublicRevocationRecorded {
+            recovery_record_id: None,
+        });
+    }
+    let record_id = uuid::Uuid::new_v4().to_string();
+    let now = Utc::now();
+    let record = PublicCleanupRecord {
+        id: record_id.clone(),
+        session_ids: rows.iter().map(|row| row.id.clone()).collect(),
+        reason: reason_label(reason).into(),
+        completed: false,
+        claim_id: None,
+        attempts: 0,
+        blocked_reason: None,
+        lease_expires_at: None,
+        retry_at: now,
+        created_at: now,
+    };
+    db.collection::<PublicCleanupRecord>(CLEANUP_RECORDS)
+        .insert_one(&record)
+        .session(&mut *session)
+        .await?;
+    for row in rows {
+        let key = db
+            .collection::<ApiKey>(KEYS)
+            .find_one(doc! {"_id":&row.credential_api_key_id})
+            .session(&mut *session)
+            .await?;
+        if let Some(key) = key {
+            if key.purpose != ApiKeyPurpose::PublicNyxbot
+                || key.user_id != row.sponsor_owner_user_id
+            {
+                return Err(changed());
+            }
+            let result = transactions::update_one(
+                db,
+                doc! {"_id":&key.id,"user_id":&row.sponsor_owner_user_id,"purpose":"public_nyxbot"},
+                doc! {"$set":{"is_active":false}},
+                Some(&mut *session),
+            )
+            .await?;
+            if result.matched_count != 1 {
+                return Err(changed());
+            }
+        }
+        let mut fields = doc! {"revoked_at":bson::DateTime::from_chrono(now),"revocation_reason":reason_label(reason),
+        "cleanup_record_id":&record_id,"credential_ciphertext":empty_binary()};
+        if row.active_turn.is_some() {
+            fields.insert("active_turn.stop_requested", true);
+        }
+        if db.collection::<PlatformPublicSession>(SESSIONS).update_one(
+            doc! {"_id":&row.id,"credential_api_key_id":&row.credential_api_key_id,"revoked_at":bson::Bson::Null},
+            doc! {"$set":fields,"$inc":{"effect_revision":1_i64}},
+        ).session(&mut *session).await?.matched_count != 1 { return Err(changed()); }
+        // Existing child credentials can only be corrupt/legacy data, but must
+        // not survive a public revocation either. No child secret is returned.
+        super::api_key_credential_service::revoke_children(
+            db,
+            &row.credential_api_key_id,
+            crate::models::api_key_credential::CredentialRevokedReason::ParentRevoked,
+            Some(&mut *session),
+        )
+        .await?;
+    }
+    Ok(PublicRevocationRecorded {
+        recovery_record_id: Some(record_id),
+    })
+}
+
+async fn process_cleanup(db: &Database, id: &str) -> AppResult<()> {
+    let claim_id = uuid::Uuid::new_v4().to_string();
+    let now = Utc::now();
+    let Some(record) = db.collection::<PublicCleanupRecord>(CLEANUP_RECORDS).find_one_and_update(
+        doc! {"_id":id,"completed":false,"retry_at":{"$lte":bson::DateTime::from_chrono(now)},
+            "$or":[{"lease_expires_at":bson::Bson::Null},{"lease_expires_at":{"$lte":bson::DateTime::from_chrono(now)}}]},
+        doc! {"$set":{"claim_id":&claim_id,"lease_expires_at":bson::DateTime::from_chrono(now+Duration::seconds(CLEANUP_LEASE_SECS))},"$inc":{"attempts":1_i64}},
+    ).return_document(ReturnDocument::After).await? else { return Ok(()); };
+    let mut blocked = None;
+    for session_id in &record.session_ids {
+        let row = db
+            .collection::<PlatformPublicSession>(SESSIONS)
+            .find_one(doc! {
+                "_id":session_id,"cleanup_record_id":id,"revoked_at":{"$ne":bson::Bson::Null},
+            })
+            .await?;
+        let Some(row) = row else {
+            blocked = Some("local_session_missing");
+            continue;
+        };
+        if row.cleanup_complete {
+            continue;
+        }
+        if db
+            .collection::<ApiKey>(KEYS)
+            .count_documents(doc! {"_id":&row.credential_api_key_id,"is_active":true})
+            .limit(1)
+            .await?
+            != 0
+        {
+            blocked = Some("execution_key_not_revoked");
+            continue;
+        }
+        if row.upstream_may_exist || !row.upstream_binding_ciphertext.is_empty() {
+            // DELETE currently requires the revoked original key. Never restore
+            // execution to perform cleanup, nor report TTL as verified erasure.
+            blocked = Some("upstream_cleanup_contract_unproven");
+            continue;
+        }
+        let result = db.collection::<PlatformPublicSession>(SESSIONS).update_one(doc! {
+            "_id":session_id,"cleanup_record_id":id,"revoked_at":{"$ne":bson::Bson::Null},
+            "upstream_may_exist":false,"upstream_binding_ciphertext":empty_binary(),
+        }, doc! {"$set":{"cleanup_complete":true,"active_turn":bson::Bson::Null,
+            "credential_ciphertext":empty_binary(),"upstream_binding_ciphertext":empty_binary()},
+            "$inc":{"effect_revision":1_i64}}).await?;
+        if result.matched_count != 1 {
+            blocked = Some("local_session_authority_changed");
+        }
+    }
+    let result = db
+        .collection::<PublicCleanupRecord>(CLEANUP_RECORDS)
+        .update_one(
+            doc! {"_id":id,"claim_id":&claim_id,"completed":false},
+            doc! {"$set":{"completed":blocked.is_none(),"blocked_reason":blocked,
+            "claim_id":bson::Bson::Null,"lease_expires_at":bson::Bson::Null,
+            "retry_at":bson::DateTime::from_chrono(Utc::now()+Duration::hours(1))}},
+        )
+        .await?;
+    if result.matched_count != 1 {
+        return Err(changed());
+    }
+    Ok(())
+}
+/// Bounded local-only sweep. There is no network call or erasure assertion for
+/// an upstream session whose cleanup contract remains unproven.
+pub async fn sweep_public_lifecycle(state: &AppState, limit: u32) -> AppResult<RecoveryBatch> {
+    let db = &state.db;
+    let limit = limit.clamp(1, 100);
+    let expired: Vec<PlatformPublicSession> = db
+        .collection::<PlatformPublicSession>(SESSIONS)
+        .find(doc! {"revoked_at":bson::Bson::Null,"expires_at":{"$lte":bson::DateTime::now()}})
+        .sort(doc! {"expires_at":1,"_id":1})
+        .limit(i64::from(limit))
+        .await?
+        .try_collect()
+        .await?;
+    let mut processed = 0;
+    for row in expired {
+        let mut session = db.client().start_session().await?;
+        session
+            .start_transaction()
+            .and_run((db.clone(), row.id), |session, (db, session_id)| {
+                Box::pin(async move {
+                    transactions::transaction_result(
+                        revoke_in_session(
+                            db,
+                            session,
+                            &PublicRevocationScope::Session {
+                                public_session_id: session_id.clone(),
+                            },
+                            PublicRevocationReason::SessionExpired,
+                        )
+                        .await,
+                    )
+                })
+            })
+            .await
+            .map_err(transactions::map_transaction_error)?;
+        processed += 1;
+    }
+    let due = doc! {"completed":false,"retry_at":{"$lte":bson::DateTime::now()},
+    "$or":[{"lease_expires_at":bson::Bson::Null},{"lease_expires_at":{"$lte":bson::DateTime::now()}}]};
+    let records: Vec<PublicCleanupRecord> = db
+        .collection::<PublicCleanupRecord>(CLEANUP_RECORDS)
+        .find(due.clone())
+        .sort(doc! {"retry_at":1,"_id":1})
+        .limit(i64::from(limit))
+        .await?
+        .try_collect()
+        .await?;
+    for record in records {
+        process_cleanup(db, &record.id).await?;
+        processed += 1;
+    }
+    let has_more = db
+        .collection::<PublicCleanupRecord>(CLEANUP_RECORDS)
+        .count_documents(due)
+        .limit(1)
+        .await?
+        > 0
+        || db
+            .collection::<PlatformPublicSession>(SESSIONS)
+            .count_documents(
+                doc! {"revoked_at":bson::Bson::Null,"expires_at":{"$lte":bson::DateTime::now()}},
+            )
+            .limit(1)
+            .await?
+            > 0;
+    Ok(RecoveryBatch {
+        processed,
+        has_more,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::platform_public_session::PublicTurnBinding;
+
+    async fn fixture(
+        db: &Database,
+        sender_id: i64,
+        upstream_may_exist: bool,
+    ) -> PlatformPublicSession {
+        let now = Utc::now();
+        let row = PlatformPublicSession {
+            id: uuid::Uuid::new_v4().to_string(),
+            profile_id: "profile".into(),
+            manager_bot_id: "99".into(),
+            telegram_bot_id: 99,
+            manager_authority_epoch: 3,
+            sender_id,
+            chat_id: sender_id,
+            sponsor_owner_user_id: uuid::Uuid::new_v4().to_string(),
+            public_policy_revision: 1,
+            policy_digest: "candidate-only".into(),
+            nyxagent_profile: "unverified-public".into(),
+            credential_api_key_id: uuid::Uuid::new_v4().to_string(),
+            credential_ciphertext: vec![10, 20, 30],
+            upstream_binding_ciphertext: if upstream_may_exist {
+                vec![40, 50, 60]
+            } else {
+                vec![]
+            },
+            upstream_may_exist,
+            active_turn: Some(PublicTurnBinding {
+                conversation_id: uuid::Uuid::new_v4().to_string(),
+                turn_id: uuid::Uuid::new_v4().to_string(),
+                receipt_id: uuid::Uuid::new_v4().to_string(),
+                claim_id: uuid::Uuid::new_v4().to_string(),
+                stop_requested: false,
+                expires_at: now + Duration::minutes(5),
+            }),
+            effect_revision: 0,
+            cleanup_record_id: None,
+            cleanup_complete: false,
+            revocation_reason: None,
+            revoked_at: None,
+            created_at: now,
+            expires_at: now + Duration::hours(24),
+        };
+        // No raw credential or live account is created by this fixture.
+        db.collection::<Document>(KEYS)
+            .insert_one(doc! {
+                "_id":&row.credential_api_key_id,"user_id":&row.sponsor_owner_user_id,
+                "name":"public test capability","key_prefix":"fixture",
+                "key_hash":"unusable-test-hash","scopes":"", "is_active":true,
+                "purpose":"public_nyxbot","created_at":bson::DateTime::from_chrono(now),
+            })
+            .await
+            .unwrap();
+        db.collection::<PlatformPublicSession>(SESSIONS)
+            .insert_one(&row)
+            .await
+            .unwrap();
+        row
+    }
+
+    async fn session_row(db: &Database, row: &PlatformPublicSession) -> PlatformPublicSession {
+        db.collection::<PlatformPublicSession>(SESSIONS)
+            .find_one(doc! {"_id":&row.id})
+            .await
+            .unwrap()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn public_discovery_and_caller_supplied_proof_cannot_enable_execution() {
+        let db = crate::test_utils::connect_transaction_test_database("public_no_proof").await;
+        ensure_indexes(&db).await.unwrap();
+        let now = Utc::now();
+        let reviewed = ManagerRuntimePolicy {
+            manager: ManagerAuthority {
+                profile_id: "profile".into(),
+                manager_bot_id: "99".into(),
+                telegram_bot_id: 99,
+                manager_authority_epoch: 1,
+            },
+            personal_enabled: true,
+            public_enabled: true,
+            emergency_stopped: false,
+            personal_control_revision: 1,
+            public_policy_revision: 1,
+            public_policy: Some(PublicPolicySelection {
+                sponsor_owner_user_id: "sponsor".into(),
+                nyxagent_profile: "chat".into(),
+                total_daily_credits: crate::models::credits::Credits::from_whole(10),
+                sender_daily_credits: crate::models::credits::Credits::from_whole(1),
+            }),
+        };
+        let public = PublicProducer;
+        for _ in 0..2 {
+            let discovery = public
+                .discover_public_profiles(&db, &reviewed)
+                .await
+                .unwrap();
+            assert!(discovery.profiles.is_empty());
+            assert!(discovery.default_profile.is_none());
+            assert!(matches!(
+                discovery.readiness,
+                PublicReadiness::Unavailable(UnavailableReason::PublicNotReady)
+            ));
+        }
+        assert_eq!(
+            db.collection::<Document>(READINESS_RECORDS)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            1
+        );
+        let evidence = PublicReadinessEvidence {
+            manager: reviewed.manager.clone(),
+            public_policy_revision: 1,
+            policy_digest: "forged".into(),
+            proof_record_id: "forged".into(),
+            candidate_digest: policy::candidate_digest(&reviewed).unwrap(),
+            evidence_digest: "forged".into(),
+            sponsor_owner_user_id: "sponsor".into(),
+            nyxagent_build: policy::UPSTREAM_SOURCE_BUILD.into(),
+            nyxagent_profile: "chat".into(),
+            model_operations: vec![],
+            limits: PublicExecutionLimits {
+                max_duration_secs: 1,
+                max_model_calls: 1,
+                max_tool_calls: 1,
+                max_continuations: 0,
+                max_input_tokens: 1,
+                max_output_tokens: 1,
+                max_input_bytes: 1,
+                max_context_bytes: 1,
+                max_output_bytes: 1,
+            },
+            checked_at: now,
+            expires_at: now + Duration::minutes(5),
+        };
+        let mut session = db.client().start_session().await.unwrap();
+        session.start_transaction().await.unwrap();
+        assert_eq!(
+            public
+                .fence_public_readiness(&db, &mut session, &reviewed, &evidence)
+                .await
+                .unwrap(),
+            FenceOutcome::Unavailable(UnavailableReason::PublicNotReady)
+        );
+        session.abort_transaction().await.unwrap();
+        assert_eq!(
+            db.collection::<Document>(KEYS)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            db.collection::<Document>(SESSIONS)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn public_revocation_rolls_back_with_its_caller_transaction() {
+        let db = crate::test_utils::connect_transaction_test_database("public_revoke_abort").await;
+        ensure_indexes(&db).await.unwrap();
+        let row = fixture(&db, 5, true).await;
+        let mut session = db.client().start_session().await.unwrap();
+        session.start_transaction().await.unwrap();
+        let recorded = revoke_in_session(
+            &db,
+            &mut session,
+            &PublicRevocationScope::Session {
+                public_session_id: row.id.clone(),
+            },
+            PublicRevocationReason::PersonalLinkConfirmed,
+        )
+        .await
+        .unwrap();
+        assert!(recorded.recovery_record_id.is_some());
+        let in_transaction = db
+            .collection::<PlatformPublicSession>(SESSIONS)
+            .find_one(doc! {"_id":&row.id})
+            .session(&mut session)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(in_transaction.revoked_at.is_some());
+        assert!(in_transaction.credential_ciphertext.is_empty());
+        assert!(in_transaction.active_turn.unwrap().stop_requested);
+        session.abort_transaction().await.unwrap();
+        let unchanged = session_row(&db, &row).await;
+        assert!(unchanged.revoked_at.is_none());
+        assert_eq!(unchanged.credential_ciphertext, row.credential_ciphertext);
+        assert!(!unchanged.active_turn.unwrap().stop_requested);
+        assert_eq!(
+            db.collection::<PublicCleanupRecord>(CLEANUP_RECORDS)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
+        );
+        assert!(
+            db.collection::<ApiKey>(KEYS)
+                .find_one(doc! {"_id":&row.credential_api_key_id})
+                .await
+                .unwrap()
+                .unwrap()
+                .is_active
+        );
+    }
+
+    #[tokio::test]
+    async fn cleanup_retains_unknown_upstream_and_completes_only_never_dispatched_sessions() {
+        let db = crate::test_utils::connect_transaction_test_database("public_cleanup_proof").await;
+        ensure_indexes(&db).await.unwrap();
+        let local = fixture(&db, 5, false).await;
+        let remote = fixture(&db, 6, true).await;
+        let mut session = db.client().start_session().await.unwrap();
+        session.start_transaction().await.unwrap();
+        let recorded = revoke_in_session(
+            &db,
+            &mut session,
+            &PublicRevocationScope::Manager {
+                manager: ManagerAuthority {
+                    profile_id: "profile".into(),
+                    manager_bot_id: "99".into(),
+                    telegram_bot_id: 99,
+                    manager_authority_epoch: 3,
+                },
+            },
+            PublicRevocationReason::ManagerRetired,
+        )
+        .await
+        .unwrap();
+        session.commit_transaction().await.unwrap();
+        let id = recorded.recovery_record_id.unwrap();
+        process_cleanup(&db, &id).await.unwrap();
+        let local = session_row(&db, &local).await;
+        let remote_after = session_row(&db, &remote).await;
+        assert!(local.cleanup_complete);
+        assert!(local.active_turn.is_none());
+        assert!(!remote_after.cleanup_complete);
+        assert!(remote_after.active_turn.unwrap().stop_requested);
+        assert_eq!(
+            remote_after.upstream_binding_ciphertext,
+            remote.upstream_binding_ciphertext
+        );
+        assert!(remote_after.credential_ciphertext.is_empty());
+        assert_eq!(
+            db.collection::<ApiKey>(KEYS)
+                .count_documents(doc! {"is_active":true})
+                .await
+                .unwrap(),
+            0
+        );
+        let record = db
+            .collection::<PublicCleanupRecord>(CLEANUP_RECORDS)
+            .find_one(doc! {"_id":&id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!record.completed);
+        assert_eq!(
+            record.blocked_reason.as_deref(),
+            Some("upstream_cleanup_contract_unproven")
+        );
+        assert_eq!(record.attempts, 1);
+        process_cleanup(&db, &id).await.unwrap();
+        let record = db
+            .collection::<PublicCleanupRecord>(CLEANUP_RECORDS)
+            .find_one(doc! {"_id":id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            record.attempts, 1,
+            "a pending retry must respect its due time"
+        );
+    }
+
+    #[tokio::test]
+    async fn oversized_scope_aborts_before_any_key_or_session_mutation() {
+        let db = crate::test_utils::connect_transaction_test_database("public_revoke_bound").await;
+        ensure_indexes(&db).await.unwrap();
+        let row = fixture(&db, 5, true).await;
+        let mut extra = Vec::new();
+        for n in 0..MAX_REVOKE_SESSIONS {
+            let mut next = row.clone();
+            next.id = uuid::Uuid::new_v4().to_string();
+            next.credential_api_key_id = uuid::Uuid::new_v4().to_string();
+            next.sender_id = 100 + n as i64;
+            next.chat_id = next.sender_id;
+            extra.push(next);
+        }
+        db.collection::<PlatformPublicSession>(SESSIONS)
+            .insert_many(extra)
+            .await
+            .unwrap();
+        let mut session = db.client().start_session().await.unwrap();
+        session.start_transaction().await.unwrap();
+        assert!(
+            revoke_in_session(
+                &db,
+                &mut session,
+                &PublicRevocationScope::Manager {
+                    manager: ManagerAuthority {
+                        profile_id: "profile".into(),
+                        manager_bot_id: "99".into(),
+                        telegram_bot_id: 99,
+                        manager_authority_epoch: 3
+                    },
+                },
+                PublicRevocationReason::ManagerRetired
+            )
+            .await
+            .is_err()
+        );
+        session.abort_transaction().await.unwrap();
+        assert_eq!(
+            db.collection::<PublicCleanupRecord>(CLEANUP_RECORDS)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            db.collection::<PlatformPublicSession>(SESSIONS)
+                .count_documents(doc! {"revoked_at":{"$ne":bson::Bson::Null}})
+                .await
+                .unwrap(),
+            0
+        );
+        assert!(
+            db.collection::<ApiKey>(KEYS)
+                .find_one(doc! {"_id":row.credential_api_key_id})
+                .await
+                .unwrap()
+                .unwrap()
+                .is_active
+        );
+    }
+
+    #[test]
+    fn revocation_scope_preserves_exact_manager_identity_and_future_epochs() {
+        let manager = ManagerAuthority {
+            profile_id: "profile".into(),
+            manager_bot_id: "99".into(),
+            telegram_bot_id: 99,
+            manager_authority_epoch: 3,
+        };
+        let filter = scope_filter(&PublicRevocationScope::Sender {
+            manager,
+            sender_id: 5,
+            chat_id: 5,
+        });
+        assert_eq!(filter.get_str("profile_id").unwrap(), "profile");
+        assert_eq!(filter.get_i64("sender_id").unwrap(), 5);
+        assert_eq!(
+            filter
+                .get_document("manager_authority_epoch")
+                .unwrap()
+                .get_i64("$lte")
+                .unwrap(),
+            3
+        );
+        assert_eq!(filter.get("revoked_at"), Some(&bson::Bson::Null));
+    }
+}
