@@ -86,6 +86,7 @@ pub struct PublicCleanupRecord {
 pub struct PublicRevocationMarker {
     #[serde(rename = "_id")]
     pub id: String,
+    pub scope_key: String,
     pub session_filter: bson::Document,
     pub maximum_epoch: Option<i64>,
     #[serde(with = "crate::models::bson_datetime::optional")]

@@ -77,6 +77,14 @@ pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
                 .build(),
         )
         .await?;
+    db.collection::<PublicRevocationMarker>(REVOCATION_SCOPES)
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"scope_key":1})
+                .options(IndexOptions::builder().unique(true).build())
+                .build(),
+        )
+        .await?;
     // No TTL: expired authority is revoked before local/upstream cleanup.
     Ok(())
 }
@@ -265,7 +273,8 @@ pub(crate) async fn revoke_in_session(
 ) -> AppResult<PublicRevocationRecorded> {
     let (id, filter, epoch) = marker_identity(scope);
     let marker = db.collection::<PublicRevocationMarker>(REVOCATION_SCOPES)
-        .find_one_and_update(doc! {"_id":&id}, vec![doc! {"$set": {
+        .find_one_and_update(doc! {"scope_key":&id}, vec![doc! {"$set": {
+            "_id":{"$ifNull":["$_id",uuid::Uuid::new_v4().to_string()]},"scope_key":&id,
             "session_filter":{"$literal":filter},
             "maximum_epoch": match epoch { Some(epoch) => bson::Bson::Document(doc! {"$max":[{"$ifNull":["$maximum_epoch",0_i64]},epoch]}), None => bson::Bson::Null },
             "revoked_before":"$$NOW", "drain_pending":true,"reason":reason_label(reason),
@@ -274,7 +283,7 @@ pub(crate) async fn revoke_in_session(
         .session(&mut *session).await?.ok_or_else(changed)?;
     let count = revoke_page_in_session(db, session, &marker).await?;
     Ok(PublicRevocationRecorded {
-        recovery_record_id: (count != 0).then_some(id),
+        recovery_record_id: (count != 0).then_some(marker.id),
     })
 }
 
@@ -452,7 +461,7 @@ pub(crate) async fn fence_local_session_in_session(
     ] {
         let (id, filter, _) = marker_identity(&scope);
         let marker = db.collection::<PublicRevocationMarker>(REVOCATION_SCOPES).find_one_and_update(
-            doc! {"_id":&id}, doc! {"$setOnInsert":{"session_filter":filter,"maximum_epoch":bson::Bson::Null,
+            doc! {"scope_key":&id}, doc! {"$setOnInsert":{"_id":uuid::Uuid::new_v4().to_string(),"scope_key":&id,"session_filter":filter,"maximum_epoch":bson::Bson::Null,
                 "revoked_before":bson::Bson::Null,"drain_pending":false,"reason":""},"$inc":{"effect_revision":1_i64}},
         ).upsert(true).return_document(ReturnDocument::After).session(&mut *session).await?.ok_or_else(changed)?;
         if marker
@@ -620,11 +629,11 @@ pub async fn sweep_public_lifecycle(state: &AppState, limit: u32) -> AppResult<R
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::models::platform_public_session::PublicTurnBinding;
 
-    async fn fixture(
+    pub(crate) async fn fixture(
         db: &Database,
         sender_id: i64,
         upstream_may_exist: bool,

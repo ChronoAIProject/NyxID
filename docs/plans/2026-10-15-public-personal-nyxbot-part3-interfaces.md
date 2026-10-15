@@ -1218,3 +1218,74 @@ immutable profile/purpose binding, hard model/token/whole-loop cost bounds,
 disabled provider web search, strict request-field denial, absolute upstream
 retention, revoked-key cleanup, or enforcement on every replica. Public
 activation remains blocked; personal execution does not wait for those gaps.
+
+## Resumed implementation: paged scope fences and exact sponsor bridge
+
+The previous 256-session scope limitation is superseded by `1ff2fc756` and
+its follow-up. Revocation writes a persistent DB-time scope cutoff in the
+caller's transaction, drains at most 256 keys/turns into exact cleanup records,
+and leaves the remaining pages pending. Admission writes the same manager,
+sender, sponsor and session scope documents; undrained old sessions fail the
+local fence immediately. The recovery worker drains pages transactionally,
+without restoring keys or claiming remote deletion. Scope digests are unique
+lookup keys; persisted model IDs remain UUID v4. New scope/cleanup indexes are
+owned by the existing public lifecycle `ensure_indexes` entry point.
+
+`models::platform_public_budget` and `services::platform_public_budget_service`
+add exact whole-loop holds and per-dispatch reservations. A loop reserves its
+maximum in both total and sender UTC-day buckets in one caller transaction.
+Bucket identity is profile/day and profile/sender/day; policy revisions,
+sponsor switches and manager epochs do not reset spent capacity. MongoDB
+`$$NOW` sets the day and bounds the loop deadline to that day's end. Money is
+checked `Credits` and stored as Decimal128; no micro truncation or cap ledger
+posting exists. Each prepared call consumes loop call/token limits and an
+allocation within the already reserved whole-loop maximum.
+
+The durable call states are `Prepared -> Funded -> DispatchAdmitted`, with
+`Cancelling/Released`, `Conservative` and `Settled` recovery states. A stable
+billing request ID, exact sponsor/key, pinned model, complete billing route
+digest and frozen meter row IDs bind each call. The existing pool funding
+transaction was generalized behind its unchanged wrapper. Public admission
+uses a separate typed deadline, commits allowance/grant/wallet holds and all
+meter rows atomically with `Prepared -> Funded`, and retains existing funding
+precedence and charge identities. No fabricated pool identity or second wallet
+debit is introduced. The public branch requires enabled, chargeable billing;
+a disabled rollout cannot silently turn sponsor work into metering-only work.
+
+Final dispatch admission fences the exact session/turn/receipt/claim, live
+controls/sponsor/key and revocation scopes, and atomically marks every frozen
+meter row forwarded with the once-only call transition. A repeated call ID
+cannot dispatch again. Expired unadmitted calls first lose dispatch authority,
+then release only existing rows proven unforwarded. Ambiguous admitted calls
+consume their full bound conservatively; only settled sponsor meter gross
+cost can refund the exact difference against the original buckets. Existing
+billing owns all real settlements and ledger postings, including allowance
+and grant funding. Unused loop holds release only after every call is terminal
+or conservatively accounted. Recovery uses bounded scans and per-call retry
+times so blocked old evidence does not monopolize one page.
+
+Production access to quoting and loop creation requires an opaque
+`VerifiedPublicContract`. Its fields are private, and the production verifier
+currently returns unavailable for every supplied evidence value: the pinned
+upstream has no accepted deployed public contract. Only transaction fixtures
+can construct a local test capability. This support does not create Ready
+state, issue a production key, or make live model calls. Remaining public
+engine/model dispatch wiring must consume these helpers after actual proof.
+
+Written tests cover two competing senders against a sub-micro total cap,
+caller rollback of both buckets, idempotent preparation, dispatch rollback and
+once-only admission, conservative crash accounting and exact late refunds.
+The real funding test forces meter insertion failure after benefit/wallet
+mutations and verifies rollback of every hold and `Funded`, then verifies
+successful once-only funding with unchanged allowance/grant/wallet precedence.
+Existing pool admission tests exercise the unchanged ordinary wrapper. No
+Cargo or runtime test ran on this worker; targeted rustfmt and whitespace
+checks passed.
+
+Additional registration manifest: register `models::platform_public_budget`
+and `services::platform_public_budget_service`; call its
+`ensure_indexes(&Database)` at setup and bounded
+`sweep(&Database, limit) -> AppResult<RecoveryBatch>` from the recovery runner.
+No route or shared producer signature changes are required. Closed tools,
+immutable public issuance and final common-loop wiring remain the following
+slices; deployed capability/retention proof remains an external blocker.

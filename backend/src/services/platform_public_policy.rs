@@ -10,6 +10,29 @@ use mongodb::{
 };
 use sha2::{Digest, Sha256};
 
+/// Only a deployment verifier may construct this capability. Selected profile
+/// names and caller-supplied Ready records are not constructors.
+pub(crate) struct VerifiedPublicContract {
+    policy_digest: String,
+}
+impl VerifiedPublicContract {
+    pub(crate) fn policy_digest(&self) -> &str {
+        &self.policy_digest
+    }
+    #[cfg(test)]
+    pub(crate) fn for_local_tests(policy_digest: String) -> Self {
+        Self { policy_digest }
+    }
+}
+
+pub(crate) fn verify_contract(
+    _evidence: &super::platform_manager_contract::PublicReadinessEvidence,
+) -> AppResult<VerifiedPublicContract> {
+    // The pinned upstream lacks the required public contract. No production
+    // constructor exists until actual deployed evidence can be validated.
+    Err(unavailable())
+}
+
 pub const UPSTREAM_SOURCE_BUILD: &str = "fe9745799cc1d46f1290e84effb366ff12600577";
 pub const PROOF_GAPS: &[&str] = &[
     "deployed_build_and_effective_public_profile_binding",
