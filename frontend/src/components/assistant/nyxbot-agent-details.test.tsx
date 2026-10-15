@@ -68,6 +68,7 @@ beforeEach(() => {
     is_admin: false,
     is_active: true,
     created_at: at,
+    capabilities: { billing_available: false, enabled_features: ["assistant:model-controls"] },
   });
   client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
@@ -450,17 +451,17 @@ it("selects the agent's model from the live list and its own access mode", async
   const { user } = renderSheet();
   const profile = await screen.findByRole("form", { name: "Profile" });
   const model = within(profile).getByRole("combobox", { name: "Agent model" });
-  await waitFor(() => expect(model).toHaveTextContent("chat"));
+  await waitFor(() => expect(model).toHaveTextContent("Default model"));
   await user.click(model);
-  expect(await screen.findByRole("option", { name: "retired (unavailable)" })).toHaveAttribute(
+  expect(await screen.findByRole("option", { name: "Retired (unavailable)" })).toHaveAttribute(
     "aria-disabled",
     "true",
   );
-  await user.click(screen.getByRole("option", { name: "research" }));
+  await user.click(screen.getByRole("option", { name: "Research" }));
   const mode = within(profile).getByRole("combobox", { name: "Agent access mode" });
-  expect(mode).toHaveTextContent("Workspace setting (NyxMode)");
+  expect(mode).toHaveTextContent("Workspace setting (Auto)");
   await user.click(mode);
-  await user.click(await screen.findByRole("option", { name: "Ask Every Time" }));
+  await user.click(await screen.findByRole("option", { name: "Ask every time" }));
   await user.click(within(profile).getByRole("button", { name: "Save" }));
   await waitFor(() =>
     expect(writes).toContainEqual({
@@ -476,9 +477,9 @@ it("clears an agent's own access mode back to the workspace setting", async () =
   const { user } = renderSheet();
   const profile = await screen.findByRole("form", { name: "Profile" });
   const mode = within(profile).getByRole("combobox", { name: "Agent access mode" });
-  expect(mode).toHaveTextContent("Autopilot");
+  expect(mode).toHaveTextContent("Full access");
   await user.click(mode);
-  await user.click(await screen.findByRole("option", { name: "Workspace setting (NyxMode)" }));
+  await user.click(await screen.findByRole("option", { name: "Workspace setting (Auto)" }));
   await user.click(within(profile).getByRole("button", { name: "Save" }));
   await waitFor(() =>
     expect(writes).toContainEqual({
@@ -487,4 +488,12 @@ it("clears an agent's own access mode back to the workspace setting", async () =
       body: { access_mode_override: null },
     }),
   );
+});
+
+it("hides the agent model selector without the internal model-controls flag", async () => {
+  const owner = useAuthStore.getState().user!;
+  useAuthStore.getState().setUser({ ...owner, capabilities: { billing_available: false, enabled_features: [] } });
+  renderSheet();
+  const profile = await screen.findByRole("form", { name: "Profile" });
+  expect(within(profile).queryByRole("combobox", { name: "Agent model" })).not.toBeInTheDocument();
 });

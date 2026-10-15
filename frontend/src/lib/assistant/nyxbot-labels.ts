@@ -4,6 +4,7 @@ import type {
   AssistantAgentKind,
   NyxAgentAccessMode,
   NyxAgentActionConfirmation,
+  NyxAgentModel,
 } from "@/schemas/assistant-nyxagent";
 import type { Conversation } from "@/types/assistant";
 
@@ -321,9 +322,9 @@ export function agentOwnerSections(agents: readonly AssistantAgent[]) {
 }
 
 export const ACCESS_MODE_LABEL = {
-  autopilot: "Autopilot",
-  nyxmode: "NyxMode",
-  ask_every_time: "Ask Every Time",
+  autopilot: "Full access",
+  nyxmode: "Auto",
+  ask_every_time: "Ask every time",
 } as const satisfies Record<NyxAgentAccessMode, string>;
 
 /** What each access mode asks before, in one line. */
@@ -358,4 +359,13 @@ export function confirmationReason(confirmation: NyxAgentActionConfirmation): st
   return confirmation.access_mode
     ? `Your access mode is ${ACCESS_MODE_LABEL[confirmation.access_mode]}.`
     : "Your access mode asks.";
+}
+
+/** Prefer the upstream name; older servers supply only the routing alias. */
+export function modelDisplayName(model: Pick<NyxAgentModel, "id" | "label">): string {
+  const alias = model.id.replace(/^nyxagent\//, "");
+  const label = model.label.trim();
+  if (label && label !== alias && label !== model.id) return label;
+  if (model.id === "nyxagent/chat") return "Default model";
+  return alias.replace(/[_-]+/g, " ").replace(/^./, (letter) => letter.toUpperCase());
 }

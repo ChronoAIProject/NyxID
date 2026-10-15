@@ -1095,6 +1095,30 @@ pub struct ModelResponse {
 type ModelCache = HashMap<String, (Instant, Vec<ModelResponse>)>;
 static MODELS: LazyLock<Mutex<ModelCache>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
+/// Keep upstream display metadata; the routing alias is not a model name.
+fn model_response(row: &Value) -> Option<ModelResponse> {
+    let id = row["id"].as_str().filter(|id| engine::valid_model(id))?;
+    let label = ["display_name", "label", "name"]
+        .into_iter()
+        .filter_map(|key| row[key].as_str())
+        .map(str::trim)
+        .find(|name| !name.is_empty());
+    Some(ModelResponse {
+        id: id.into(),
+        label: label
+            .unwrap_or_else(|| {
+                if id == engine::DEFAULT_MODEL {
+                    "Default model"
+                } else {
+                    id.trim_start_matches("nyxagent/")
+                }
+            })
+            .into(),
+        available: row["available"].as_bool() != Some(false),
+        description: row["description"].as_str().map(str::to_owned),
+    })
+}
+
 /// The models NyxAgent currently offers this owner, or `None` when its list
 /// cannot be read. Cached per owner for a minute: availability follows the
 /// owner's assistant credential, so owners never share an entry.
@@ -1145,18 +1169,8 @@ pub(crate) async fn live_models(
             .as_array()
             .into_iter()
             .flatten()
-            .filter(|row| row["id"].as_str().is_some_and(engine::valid_model))
+            .filter_map(model_response)
             .take(50)
-            .map(|row| {
-                let id = row["id"].as_str().unwrap_or_default();
-                ModelResponse {
-                    id: id.into(),
-                    label: id.trim_start_matches("nyxagent/").into(),
-                    // NyxAgent may list a profile it cannot serve right now.
-                    available: row["available"].as_bool() != Some(false),
-                    description: None,
-                }
-            })
             .collect();
         if rows.is_empty() {
             return Err(AppError::Internal("Assistant profiles unavailable".into()));
@@ -1205,7 +1219,7 @@ pub async fn models(
         live_models(&state, &auth, policy).await.unwrap_or_else(|| {
             vec![ModelResponse {
                 id: engine::DEFAULT_MODEL.into(),
-                label: "chat".into(),
+                label: "Default model".into(),
                 available: true,
                 description: None,
             }]

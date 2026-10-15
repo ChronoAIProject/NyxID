@@ -1,3 +1,4 @@
+vi.mock("./composer-editor", () => import("./composer-editor.test-support"));
 import {
   act,
   fireEvent,
@@ -680,7 +681,7 @@ function renderMeasuredComposer() {
   const textarea = screen.getByRole("textbox");
   const button = screen.getByRole("button", { name: "Send message" });
   const controls = button.parentElement;
-  const composer = controls?.parentElement;
+  const composer = textarea.closest<HTMLElement>("[data-composer-editor]");
   const textMeasure = composer?.querySelector(":scope > span[aria-hidden]");
   if (!controls || !composer || !(textMeasure instanceof HTMLElement)) {
     throw new Error("Composer measurement elements were not rendered");
@@ -758,9 +759,9 @@ describe("ChatComposer measured layout", () => {
     expect(parts.controls).not.toHaveClass("self-end");
   });
 
-  it("moves the action below at 95% of the remaining inline width", () => {
+  it("moves the action below when text exceeds the remaining inline width", () => {
     const parts = renderMeasuredComposer();
-    setComposerMetrics({ ...parts, textWidth: 350 });
+    setComposerMetrics({ ...parts, textWidth: 370 });
 
     fireEvent.change(parts.textarea, {
       target: { value: "Draft reaching the remaining-width threshold" },
@@ -772,7 +773,7 @@ describe("ChatComposer measured layout", () => {
 
   it("returns inline when text falls below the threshold", () => {
     const parts = renderMeasuredComposer();
-    let textWidth = 350;
+    let textWidth = 370;
     setComposerMetrics({ ...parts, textWidth });
     vi.mocked(parts.textMeasure.getBoundingClientRect).mockImplementation(
       () => ({ width: textWidth }) as DOMRect,
@@ -798,7 +799,7 @@ describe("ChatComposer measured layout", () => {
     expect(parts.composer).toHaveClass("flex-col", "items-stretch");
   });
 
-  it("recalculates remaining text width when controls grow", () => {
+  it("recalculates remaining text width when controls grow", async () => {
     const parts = renderMeasuredComposer();
     let controlsWidth = 32;
     setComposerMetrics({ ...parts, controlsWidth, textWidth: 310 });
@@ -815,7 +816,7 @@ describe("ChatComposer measured layout", () => {
         callback([], {} as ResizeObserver);
       }
     });
-    expect(parts.composer).toHaveClass("flex-col");
+    await waitFor(() => expect(parts.composer).toHaveClass("flex-col"));
   });
 
   it("caps long drafts and fades only scrollable textarea edges", () => {
@@ -830,10 +831,10 @@ describe("ChatComposer measured layout", () => {
     });
 
     fireEvent.change(textarea, { target: { value: "A long draft" } });
-    expect(textarea).toHaveStyle({ height: "88px", overflowY: "auto" });
+    expect(textarea).toHaveStyle({ height: "88px", overflowY: "scroll" });
 
     const fades = textarea.parentElement?.querySelectorAll(
-      ':scope > [aria-hidden="true"]',
+      ':scope > [aria-hidden="true"]:not([data-composer-scrollbar])',
     );
     expect(fades).toBeDefined();
     if (!fades) return;
@@ -939,6 +940,7 @@ it("offers voice only for an empty eligible composer and keeps Stop reachable", 
   useAssistantDraftStore.setState({ownerUserId:null,drafts:{}});
   const onVoice=vi.fn();
   const {rerender}=render(<ChatComposer {...baseProps} draftKey={null} onVoice={onVoice} />);
+  expect(screen.queryByRole("button", { name: "Send message" })).not.toBeInTheDocument();
   fireEvent.click(screen.getByRole("button",{name:"Open voice call"}));expect(onVoice).toHaveBeenCalledTimes(1);
   fireEvent.change(screen.getByRole("textbox"),{target:{value:"An unsent draft"}});
   expect(screen.queryByRole("button",{name:"Open voice call"})).not.toBeInTheDocument();

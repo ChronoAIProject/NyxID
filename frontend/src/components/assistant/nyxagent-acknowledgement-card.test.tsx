@@ -119,8 +119,8 @@ it.each([
 );
 
 it.each([
-  [{ risk: "destructive", access_mode: "nyxmode", reason: "access_mode" }, "Destructive", "Your access mode is NyxMode."],
-  [{ risk: "change", access_mode: "ask_every_time", reason: "access_mode" }, "Change", "Your access mode is Ask Every Time."],
+  [{ risk: "destructive", access_mode: "nyxmode", reason: "access_mode" }, "Destructive", "Your access mode is Auto."],
+  [{ risk: "change", access_mode: "ask_every_time", reason: "access_mode" }, "Change", "Your access mode is Ask every time."],
   [{ risk: "sensitive", access_mode: null, reason: "webhook" }, "Sensitive", "This automation's confirmation policy asks."],
   [{ risk: "change", reason: "policy" }, "Change", "This machine's or saved login's confirmation setting asks."],
 ] as const)("explains an action card's risk and why it asks (%o)", (confirmation, risk, why) => {

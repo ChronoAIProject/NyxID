@@ -1,5 +1,4 @@
 import { navigateWithBuildUpdate } from "@/lib/build-update-navigation";
-import { AccessModeSwitcher, ThreadModelSelect } from "@/components/assistant/nyxbot-access-controls";
 import { parseAccountPanelSearch } from "@/lib/assistant/account-panel-search";
 import { ConversationMachineDesktops } from "./machine-desktop-panel";
 import { ReviewCardTarget } from "./review-card-target";
@@ -653,23 +652,6 @@ function NyxAgentThreadPage() {
           destroyed={destroyed}
           channelPlatform={channelPlatform}
           onOpenDetails={() => setDetailsAgentId(headerAgent.id)}
-          controls={
-            <>
-              <AccessModeSwitcher
-                agentOverride={
-                  agents.data?.agents.find((row) => row.id === headerAgent.id)
-                    ?.access_mode_override
-                }
-              />
-              {selectedId && conversation ? (
-                <ThreadModelSelect
-                  conversationId={selectedId}
-                  model={conversation.model}
-                  disabled={destroyed || chat.isStreaming}
-                />
-              ) : null}
-            </>
-          }
         />
         {headerAgent.kind === "nyxbot" ? (
           <TeamStrip agents={agents.data?.agents ?? []} onOpenConversation={go} />
@@ -885,11 +867,11 @@ function NyxAgentThreadPage() {
                   : "screen:nyxagent:assistant"
             }
             focusRequest={focusRequest}
-            // Model routing is server-side: there is no profile selector here.
+            agentOverride={selectedAgent?.access_mode_override}
             placeholder={`Message ${agentName}`}
-            onSend={async (text, uploads) => {
+            onSend={async (text, uploads, model) => {
               try {
-                await chat.send(text, uploads);
+                await chat.send(text, uploads, model);
               } catch (error) {
                 toast.error(
                   error instanceof Error ? error.message : "The assistant is unavailable.",

@@ -28,6 +28,7 @@ export const FEATURE_FLAG = {
   VOICE_GROK_PLATFORM: "assistant:voice-grok-platform",
   VOICE_OPENAI_PLATFORM: "assistant:voice-openai-platform",
   NYXAGENT_ENGINE: "assistant:nyxagent-engine",
+  ASSISTANT_MODEL_CONTROLS: "assistant:model-controls",
   ORG_AGENTS: "assistant:org-agents",
   MACHINE_CAPABILITIES: "assistant:machine-capabilities",
   MACHINE_CONTEXTS: "assistant:machine-contexts",

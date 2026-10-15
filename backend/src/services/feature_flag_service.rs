@@ -157,6 +157,13 @@ const SKILL_PIN_DISABLE_FLAG: FeatureFlagDef = FeatureFlagDef {
     default_enabled: false,
 };
 
+pub const ASSISTANT_MODEL_CONTROLS_FLAG_KEY: &str = "assistant:model-controls";
+const ASSISTANT_MODEL_CONTROLS_FLAG: FeatureFlagDef = FeatureFlagDef {
+    key: ASSISTANT_MODEL_CONTROLS_FLAG_KEY,
+    description: "Shows advanced model and reasoning controls for internal assistant users. Other users see Thinking and Permissions.",
+    default_enabled: false,
+};
+
 pub const NYXAGENT_ENGINE_FLAG_KEY: &str = "assistant:nyxagent-engine";
 const NYXAGENT_ENGINE_FLAG: FeatureFlagDef = FeatureFlagDef {
     key: NYXAGENT_ENGINE_FLAG_KEY,
@@ -271,6 +278,7 @@ const NYXBOT_GATEWAY_FLAG_DEFS: [FeatureFlagDef; 7] = [
 pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     INVITATION_CODE_FLAG,
     NYXAGENT_ENGINE_FLAG,
+    ASSISTANT_MODEL_CONTROLS_FLAG,
     SKILL_PIN_DISABLE_FLAG,
     NYXBOT_THREAD_FOLLOW_FLAG,
     AGENT_OPERATION_SCOPES_FLAG,
@@ -302,6 +310,7 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
 pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     INVITATION_CODE_FLAG,
     NYXAGENT_ENGINE_FLAG,
+    ASSISTANT_MODEL_CONTROLS_FLAG,
     SKILL_PIN_DISABLE_FLAG,
     NYXBOT_THREAD_FOLLOW_FLAG,
     AGENT_OPERATION_SCOPES_FLAG,
@@ -1835,6 +1844,7 @@ mod tests {
             vec![
                 "auth:invitation-code",
                 "assistant:nyxagent-engine",
+                "assistant:model-controls",
                 "assistant:skill-pin-disable",
                 "nyxbot:thread-follow",
                 "assistant:operation-scopes",
@@ -1859,6 +1869,12 @@ mod tests {
                 "nyxbot:gateway-x",
                 "nyxbot:gateway-aurinko",
             ]
+        );
+        assert!(
+            !find_flag(ASSISTANT_MODEL_CONTROLS_FLAG_KEY)
+                .expect("model controls flag is registered")
+                .default_enabled,
+            "advanced model controls must default to off"
         );
         assert_eq!(
             AEVATAR_CHAT_WIRE_LOG_FLAG_KEY,

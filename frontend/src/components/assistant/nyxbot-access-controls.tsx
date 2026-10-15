@@ -18,6 +18,7 @@ import {
   ACCESS_MODE_DESCRIPTION,
   ACCESS_MODE_LABEL,
   effectiveAccessMode,
+  modelDisplayName,
 } from "@/lib/assistant/nyxbot-labels";
 import { cn } from "@/lib/utils";
 import {
@@ -148,7 +149,7 @@ export function ModelSelect({
       <SelectContent>
         {options.map((row) => (
           <SelectItem key={row.id} value={row.id} disabled={!row.available}>
-            {row.available ? row.label : `${row.label} (unavailable)`}
+            {row.available ? modelDisplayName(row) : `${modelDisplayName(row)} (unavailable)`}
           </SelectItem>
         ))}
       </SelectContent>
