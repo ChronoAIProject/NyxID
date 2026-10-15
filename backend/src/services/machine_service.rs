@@ -26,7 +26,7 @@ pub async fn settle_watch(
     error: Option<&str>,
 ) -> AppResult<bool> {
     use super::api_key_mutation_service as transactions;
-    let event = bson::to_bson(&super::assistant_team_service::event(kind, text, None))
+    let event = bson::to_bson(&super::nyxbot_watch_service::watch_event(watch, kind, text))
         .map_err(|_| AppError::Internal("Could not encode machine event".into()))?;
     let mut session = db.client().start_session().await?;
     let db = db.clone();
@@ -212,6 +212,15 @@ pub async fn issue_job(
         agent_id: chat.agent_id.clone(),
         state: "running".into(),
         services,
+        report_to: chat
+            .report_to
+            .clone()
+            .filter(|_| chat.turn_live && !chat.turn_stopped),
+        report_provenance: if chat.turn_live && !chat.turn_stopped {
+            crate::models::assistant_conversation::REPORT_PROVENANCE_V1
+        } else {
+            0
+        },
         created_at: now,
         expires_at: now + Duration::seconds(timeout.min(86400) as i64 + 15),
         finished_at: None,

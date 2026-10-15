@@ -415,6 +415,25 @@ pub async fn native(
                     return Ok((refusal, true));
                 }
             } else {
+                if !chat.involved() {
+                    acks::audit_missing_access(
+                        &state.db,
+                        chat,
+                        Some(node),
+                        crate::services::assistant_access_policy::AccessArea::MachineCapabilities
+                            .scope(),
+                    )
+                    .await;
+                    return Ok((
+                        crate::services::assistant_access_policy::missing_access(
+                            crate::services::assistant_access_policy::AccessArea::MachineCapabilities,
+                            Some(&machine.name),
+                            &agent.id,
+                            None,
+                        ),
+                        true,
+                    ));
+                }
                 let routed =
                     crate::services::assistant_settings_service::get(&state.db, &chat.user_id)
                         .await
@@ -439,7 +458,7 @@ pub async fn native(
                         &state.db, chat, acks::Request {
                             kind: "machine", service: Some((node, node, &machine.name)),
                             tool: Some(tool), arguments: Some(args),
-                            summary: &format!("{receipt_summary} Desired selection: {}. NyxBot must inspect the current machine policy and apply these capabilities with nyxid__machine_capabilities after deciding this request.", args["selection"]),
+                            summary: &format!("{receipt_summary} Desired selection: {}. After this request is decided, the current machine policy is inspected and these capabilities are applied with nyxid__machine_capabilities.", args["selection"]),
                             platform: false,
                         }).await?;
                     if created {

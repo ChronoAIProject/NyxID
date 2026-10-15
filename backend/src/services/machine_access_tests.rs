@@ -2190,3 +2190,84 @@ async fn full_access_machine_pairing_completes_with_receipt_while_auto_asks() {
         f.state.db.drop().await.unwrap();
     }
 }
+
+/// Issue #1883: a specialist the owner talks to directly (no NyxBot
+/// assignment, no shared group) gets a neutral `missing_access` answer for a
+/// capability change: no card, no NyxBot event, whatever the owner's routing
+/// setting, and the audit row records it as missing access.
+#[tokio::test]
+async fn direct_specialist_machine_capability_request_gets_missing_access_without_a_card() {
+    use crate::models::assistant_settings::SpecialistAccessRequests;
+    use crate::services::assistant_settings_service as settings;
+    let f = super::assistant_authority_tests::direct_fixture("direct_machine_capability").await;
+    assert!(!f.chat.involved());
+    enable(&f).await;
+    let n = v2(&f).await;
+    let revision = Box::pin(access::policy(&f.state.db, &f.chat.agent_id))
+        .await
+        .unwrap()
+        .revision;
+    let args = json!({"agent":f.chat.agent_id,"machine":n.id,"selection":selection(revision,Capabilities{files:true,..Default::default()})});
+    for policy in [
+        SpecialistAccessRequests::Denied,
+        SpecialistAccessRequests::RoutedToNyxbot,
+    ] {
+        settings::update(
+            &f.state.db,
+            &f.owner,
+            settings::Update {
+                specialist_access_requests: Some(policy),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let (value, pending) = Box::pin(crate::handlers::machine_access::native(
+            &f.state, &f.chat, &args,
+        ))
+        .await
+        .unwrap();
+        assert!(pending);
+        assert_eq!(value["error"], "missing_access", "{value}");
+        assert_eq!(value["scope"], "machine_capabilities");
+        assert_eq!(value["target"], n.name);
+        assert_eq!(value["request_created"], false);
+        assert!(
+            value["grants_path"]
+                .as_str()
+                .unwrap()
+                .contains(&f.chat.agent_id)
+        );
+        assert!(
+            !value.to_string().to_lowercase().contains("nyxbot"),
+            "{value}"
+        );
+    }
+    assert_eq!(
+        f.state
+            .db
+            .collection::<Document>(crate::models::assistant_acknowledgement::COLLECTION_NAME)
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        0
+    );
+    let nyxbot = super::assistant_nyxagent::get(&f.state.db, &f.owner, &f.nyxbot_thread)
+        .await
+        .unwrap();
+    assert!(nyxbot.pending_events.is_empty());
+    let audit = f
+        .state
+        .db
+        .collection::<Document>(crate::models::audit_log::COLLECTION_NAME)
+        .find_one(doc! {"event_type":"assistant_access_request_denied",
+        "event_data.scope":"machine_capabilities"})
+        .await
+        .unwrap()
+        .expect("missing-access audit");
+    let data = audit.get_document("event_data").unwrap();
+    assert_eq!(data.get_str("target").unwrap(), n.id);
+    assert_eq!(data.get_str("decision").unwrap(), "missing_access");
+    assert!(!data.get_bool("involved").unwrap());
+    f.state.db.drop().await.unwrap();
+}

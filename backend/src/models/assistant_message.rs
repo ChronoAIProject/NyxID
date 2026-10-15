@@ -64,6 +64,8 @@ pub struct AssistantMessage {
     /// Owner decision that caused this browser continuation turn.
     #[serde(default)]
     pub continuation_of: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report_to: Option<String>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]

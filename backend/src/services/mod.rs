@@ -334,5 +334,7 @@ mod platform_provisioning_acceptance_tests;
 
 pub mod platform_setup_notice_service;
 
+pub mod assistant_access_policy;
 pub(crate) mod nyxbot_gateway_service;
+pub mod nyxbot_watch_service;
 pub mod tools_manager_service;

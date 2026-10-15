@@ -260,7 +260,7 @@ pub fn virtual_service(chat: &acks::ChatAuthority) -> McpToolService {
             .endpoints
             .retain(|endpoint| read_only(&endpoint.name));
         service.description = Some(
-            "Read the user's NyxID account (specialist: read-only, with NyxBot's grant) and \
+            "Read the user's NyxID account (specialist: read-only, when granted) and \
             manage your memory."
                 .into(),
         );
@@ -424,8 +424,33 @@ impl std::fmt::Debug for ToolResult {
 }
 
 pub fn error_result(error: AppError) -> ToolResult {
+    error_result_for(error, None)
+}
+
+pub fn error_result_for(error: AppError, chat: Option<&acks::ChatAuthority>) -> ToolResult {
     let body = error.response_body();
     let message = match error {
+        AppError::AssistantMissingAccess(value) => {
+            return ToolResult {
+                permission_request: None,
+                is_error: true,
+                value: *value,
+            };
+        }
+        AppError::MachinePermissionRevoked => {
+            let mut value = json!({"error": body.error, "error_code": body.error_code,
+                "message": body.message});
+            if let Some(chat) = chat {
+                value["instructions"] = json!(
+                    super::assistant_access_policy::machine_permission_guidance(chat)
+                );
+            }
+            return ToolResult {
+                permission_request: None,
+                is_error: true,
+                value,
+            };
+        }
         AppError::SkillDraftValidation(_) => {
             return ToolResult {
                 permission_request: None,
@@ -455,6 +480,7 @@ pub fn error_result(error: AppError) -> ToolResult {
                 value: super::assistant_acknowledgement_service::access_request_denied(),
             };
         }
+
         error if error.is_forbidden() || matches!(error, AppError::Unauthorized(_)) => {
             "This operation requires a conversation key and human acknowledgement."
         }

@@ -275,7 +275,7 @@ pub async fn create(
     }
     if !chat.is_orchestrator() && agent.id != chat.agent_id {
         return Err(AppError::Forbidden(
-            "Specialists may draft skills only for their own agent; ask NyxBot for others".into(),
+            "Specialists may draft skills only for their own agent".into(),
         ));
     }
     // The owner reviews the paths Ornn will receive.
@@ -514,7 +514,7 @@ pub async fn create_improve_draft(
         .ok_or_else(|| AppError::NotFound("Attached skill not found".into()))?;
     if !pin.dependencies.is_empty() {
         return Err(AppError::Conflict(
-            "skill_dependencies_unsupported: skills with pinned dependencies are improved through NyxBot".into(),
+            "skill_dependencies_unsupported: skills with pinned dependencies cannot be improved here; draft the improvement from the agent's chat".into(),
         ));
     }
     let mut files = super::agent_skill_service::pinned_files(reader, &pin).await?;
@@ -531,7 +531,7 @@ pub async fn create_improve_draft(
         });
         let Some(content) = content else {
             return Err(AppError::Conflict(
-                "skill_files_unsupported: only .md and .txt text files can be edited here; improve this skill through NyxBot".into(),
+                "skill_files_unsupported: only .md and .txt text files can be edited here; draft the improvement from the agent's chat".into(),
             ));
         };
         // The owner reviews the paths Ornn will receive.

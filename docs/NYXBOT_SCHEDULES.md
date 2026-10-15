@@ -184,8 +184,10 @@ And a new **delivery**:
   browser. NyxBot asks when it is unknown and schedules are involved.
 - **Instructions.** NyxBot's instructions explain schedules and triggers
   briefly: when to offer them, confirming times, and preferring `deliver_to`
-  for things the owner wants pushed. Specialists ask NyxBot rather than
-  managing schedules themselves.
+  for things the owner wants pushed. Specialists never manage schedules
+  themselves: a specialist you talk to directly points you to the Automations
+  page filtered to its automations (`/assistant/automations?agent=<id>`), and
+  NyxBot manages them when you talk to NyxBot.
 - **Guests.** Guests can never create, see or change triggers (`nyxid__`
   tools are refused for guests today; keep it so).
 

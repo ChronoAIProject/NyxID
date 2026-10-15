@@ -210,6 +210,15 @@ deletes the conversation instead. Rotation and revocation remain available to th
 
 ## Authority: NyxBot access modes and granted specialists
 
+NyxBot is involved in a specialist's work only when the turn's admission
+snapshot says so: `ActiveTurn.report_to` (the exact assigning NyxBot thread) or
+`ActiveTurn.with_nyxbot` (a personal group whose current members include the
+owner's NyxBot). A direct chat with a specialist, in the app or on a channel, is
+handled by that specialist alone: an ungranted call returns `missing_access`
+(no card, no NyxBot event, a link to the agent's details) and the specialist
+continues; the owner grants access in the agent's details. See
+[NyxBot orchestrator §8](09-nyxbot-orchestrator.md#8-permission-requests-specialist--nyxbot).
+
 Every owner has one persistent **NyxBot** agent. The workspace access mode is
 selected in NyxBot settings and is visible in the composer toolbars; an agent may have its own override, shown on the agent page and in its
 thread. The server resolves the effective mode from that persisted policy, so a
@@ -425,7 +434,9 @@ bounded JSON output (100 list rows, 64 KiB), and an explicit destructive descrip
 NyxBot reaches every tool; destructive tools add the single-use action
 confirmation unless the owner turned confirmations off. Specialists reach only the
 read-only tools (`list_*`, `get_*`) and only with an `account_read` grant; every
-other tool returns `orchestrator_only`. NyxBot also gets the agent and channel
+other tool returns `orchestrator_only`, whose guidance names the NyxID page the
+owner uses instead and never tells a direct specialist chat that NyxBot must
+take over. NyxBot also gets the agent and channel
 tools, and every agent gets its memory tools (see NyxBot agents). The closed
 account inventory is:
 
@@ -493,12 +504,24 @@ Creating a specialist fences the owner's NyxBot row; `max_live_subagents`
 (default 8, at most 32) bounds live specialists.
 
 NyxID starts turns itself: specialist work in the agent's home thread
-(`origin: orchestrator`, with `report_to` set to the assigning NyxBot thread),
-wake-ups (`origin: event`) and channel messages (`origin: channel`), with the
-owner's identity and billing. A NyxBot-assigned or event-resumed specialist turn
-reports to `report_to` as a `subagent_settled` event; a direct chat does not wake
-NyxBot and is listed in its next turn's input context instead. A specialist's
-permission request goes to `report_to` or NyxBot's home thread. Events queue on
+(`origin: orchestrator`, with the turn's `report_to` snapshot set to the
+assigning NyxBot thread), wake-ups (`origin: event`) and channel messages
+(`origin: channel`), with the owner's identity and billing. Every turn snapshots
+`report_to` and `with_nyxbot` once at admission, inside `begin_turn`'s
+transaction: an `orchestrator` turn keeps its assigning thread only if every
+event drained into it is bound to that same target; an `event` turn takes the
+one target every drained event is bound to and is otherwise `None`; `user`,
+`channel`, `trigger` and `group` turns are `None` (a group turn sets
+`with_nyxbot` when the owner's NyxBot is a current member of that personal
+group). Unbound, legacy or mixed events and `conversation.report_to` (still
+written for old readers, never read) never create involvement; steering
+continues the running turn and keeps its snapshot. A turn whose snapshot has
+`report_to` reports there as a `subagent_settled` event when it settles; a
+direct chat does not wake NyxBot and is listed in its next turn's input context
+instead. A specialist's permission request exists only for an involved turn and
+goes to the card's stored `routing` (its `assigned` thread, or NyxBot's home
+thread for `group_with_nyxbot` after a live membership recheck); non-involved
+work gets `missing_access` and continues. Events queue on
 the thread (at most 20) and one event turn drains them when it is idle; other
 turns carry drained events in their input context. Loop guards: at most 20 event
 turns per owner per hour, and a NyxBot thread stops after 3 consecutive event

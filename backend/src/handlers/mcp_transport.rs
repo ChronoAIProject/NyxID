@@ -3102,10 +3102,15 @@ async fn chat_service_gate(
             if let Some(request) = request {
                 super::assistant_team::permission_requested(state, chat, &request).await;
             }
+            let value = crate::services::assistant_access_policy::with_frontend(
+                value,
+                &state.config.frontend_url,
+            );
             Some(tool_result(request_id, &value.to_string(), true))
         }
         Err(error) => {
-            let result = crate::services::assistant_account_tools::error_result(error);
+            let result =
+                crate::services::assistant_account_tools::error_result_for(error, Some(chat));
             Some(tool_result(request_id, &result.value.to_string(), true))
         }
     }
@@ -3405,7 +3410,8 @@ async fn handle_account_tool(
     if let Err(error) =
         crate::services::service_history::context::authenticated(&state.db, &user).await
     {
-        let result = crate::services::assistant_account_tools::error_result(error);
+        let result =
+            crate::services::assistant_account_tools::error_result_for(error, auth.chat.as_ref());
         return tool_result(request_id, &result.value.to_string(), true);
     }
     if crate::services::assistant_team_tools::is_team_tool(name) {
@@ -3523,7 +3529,7 @@ async fn handle_attachment_read(
         ),
         Err(error) => tool_result(
             id,
-            &crate::services::assistant_account_tools::error_result(error)
+            &crate::services::assistant_account_tools::error_result_for(error, Some(chat))
                 .value
                 .to_string(),
             true,
@@ -3559,7 +3565,7 @@ async fn handle_machine_tool(
         ),
         Err(error) => tool_result(
             request_id,
-            &crate::services::assistant_account_tools::error_result(error)
+            &crate::services::assistant_account_tools::error_result_for(error, Some(chat))
                 .value
                 .to_string(),
             true,
@@ -4229,23 +4235,36 @@ async fn handle_meta_connect(
     if let Some(chat) = auth.chat.as_ref()
         && !chat.access_request_allowed()
     {
-        crate::services::assistant_acknowledgement_service::audit_access_request_denied(
-            &state.db,
-            chat,
-            // Model-supplied text never enters the audit row: only a UUID.
-            arguments
-                .get("service_id")
-                .and_then(|v| v.as_str())
-                .filter(|id| uuid::Uuid::parse_str(id).is_ok()),
-            "connect_service",
-        )
-        .await;
-        return tool_result(
-            request_id,
-            &crate::services::assistant_acknowledgement_service::access_request_denied()
-                .to_string(),
-            true,
-        );
+        let target = arguments
+            .get("service_id")
+            .and_then(|v| v.as_str())
+            .filter(|id| uuid::Uuid::parse_str(id).is_ok());
+        if chat.involved() || chat.guest {
+            crate::services::assistant_acknowledgement_service::audit_access_request_denied(
+                &state.db,
+                chat,
+                target,
+                "connect_service",
+            )
+            .await;
+        } else {
+            crate::services::assistant_acknowledgement_service::audit_missing_access(
+                &state.db,
+                chat,
+                target,
+                "connect_service",
+            )
+            .await;
+        }
+        let refusal = if chat.guest {
+            crate::services::assistant_acknowledgement_service::access_request_denied()
+        } else {
+            crate::services::assistant_access_policy::with_frontend(
+                crate::services::assistant_access_policy::connect_refusal(chat),
+                &state.config.frontend_url,
+            )
+        };
+        return tool_result(request_id, &refusal.to_string(), true);
     }
     if auth.chat.is_some() && arguments.get("credential").is_some() {
         return tool_result(
@@ -4341,6 +4360,7 @@ async fn handle_meta_connect(
                         &chat.user_id,
                         &chat.conversation_id,
                         &link_id,
+                        crate::services::nyxbot_watch_service::ReportProvenance::from_chat(chat),
                     )
                     .await
                     {
@@ -7837,6 +7857,8 @@ mod skill_authoring_discovery_tests {
         auth.is_api_key = true;
         auth.api_key_id = Some("chat-key".into());
         auth.chat = Some(ChatAuthority {
+            report_to: None,
+            with_nyxbot: false,
             org_agent_access: None,
             turn_id: Some("turn".into()),
             turn_stopped: false,

@@ -116,6 +116,7 @@ pub async fn reserve(
             let now = Utc::now();
             let message = AssistantMessage {
                 author: Some(crate::models::assistant_message::MessageAuthor::Owner),
+                report_to: None,
                 continuation_of: None,
                 specialist_id: None,
                 steering: Some(Box::new(Steering {

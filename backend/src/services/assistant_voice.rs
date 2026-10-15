@@ -237,6 +237,7 @@ pub(crate) async fn enqueue_in_session(
     } else {
         db.collection::<AssistantMessage>(MESSAGES)
             .insert_one(AssistantMessage {
+                report_to: None,
                 continuation_of: None,
                 retry_of: None,
                 specialist_id: None,
@@ -349,6 +350,7 @@ pub(crate) async fn publish_result(
                 let text: String = source.text.chars().take(12_000).collect();
                 db.collection::<AssistantMessage>(MESSAGES)
                     .insert_one(AssistantMessage {
+        report_to: None,
         continuation_of: None,
         retry_of: None,
                         specialist_id: None,
@@ -754,6 +756,7 @@ async fn settle_lost_in_session(
     };
     db.collection::<AssistantMessage>(MESSAGES)
         .insert_one(AssistantMessage {
+            report_to: None,
             continuation_of: None,
             retry_of: None,
             specialist_id: None,

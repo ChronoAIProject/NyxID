@@ -79,7 +79,10 @@ function continuationInstruction(acknowledgement: NyxAgentAcknowledgement): stri
         acknowledgement.service_name ?? acknowledgement.service_slug ?? "the service"
       }. Continue.`;
     case "skills":
-      return `Skill proposal reviewed: ${acknowledgement.summary} NyxBot will resolve the exact version and apply the governing mode to attach it (automatic in Full access, otherwise an owner card). Do not request the skill again.`;
+      // An unrouted skills card attaches nothing and wakes nobody.
+      return acknowledgement.decider === "orchestrator"
+        ? `Skill proposal reviewed: ${acknowledgement.summary} NyxBot will resolve the exact version and apply the governing mode to attach it (automatic in Full access, otherwise an owner card). Do not request the skill again.`
+        : `Skill proposal reviewed: ${acknowledgement.summary} Nothing was attached and nobody else was asked; the user adds the skill from this agent's Skills editor. Do not request the skill again.`;
     case "operations":
       return `Approved: ${acknowledgement.summary} Continue within the updated operation scope.`;
     case "machine":
