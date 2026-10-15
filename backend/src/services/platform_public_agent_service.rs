@@ -808,8 +808,10 @@ pub(crate) mod tests {
                 sender_daily_credits: crate::models::credits::Credits::from_whole(1),
             }),
         };
+        let state = crate::test_utils::test_app_state(db.clone());
         let public = super::super::platform_manager_transport::compose(
-            crate::test_utils::test_app_state(db.clone()),
+            state.clone(),
+            crate::handlers::assistant_team::owner_turn_settled_hook(state),
         )
         .public
         .clone();
