@@ -3428,6 +3428,8 @@ mod tests {
         let auth = AuthUser {
             assistant_turn_fence: Some(
                 crate::services::assistant_acknowledgement_service::AssistantTurnFence {
+                    platform_thread: false,
+                    platform_origin: None,
                     conversation_id: "conversation".into(),
                     turn_id: Some("turn".into()),
                     turn_live: true,
@@ -3497,6 +3499,8 @@ mod tests {
         let mut auth = AuthUser {
             assistant_turn_fence: Some(
                 crate::services::assistant_acknowledgement_service::AssistantTurnFence {
+                    platform_thread: false,
+                    platform_origin: None,
                     conversation_id: "conversation".into(),
                     turn_id: None,
                     turn_live: false,
@@ -3659,6 +3663,8 @@ mod tests {
         let mut user = test_auth_user(AuthMethod::ApiKey, "proxy");
         user.assistant_turn_fence = Some(
             crate::services::assistant_acknowledgement_service::AssistantTurnFence {
+                platform_thread: false,
+                platform_origin: None,
                 conversation_id: "conversation".into(),
                 turn_id: Some("turn".into()),
                 turn_live: true,
@@ -3708,6 +3714,8 @@ mod tests {
     #[test]
     fn conversation_fence_requires_a_live_non_stopped_turn() {
         let base = crate::services::assistant_acknowledgement_service::AssistantTurnFence {
+            platform_thread: false,
+            platform_origin: None,
             conversation_id: "conversation".into(),
             turn_id: Some("turn".into()),
             turn_live: true,
