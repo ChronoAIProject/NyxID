@@ -357,6 +357,53 @@ pub(crate) async fn owner_denial_decided(
 
 /// Type-erased settlement hook. `run_turn` awaits this so the detached turn's
 /// future type never depends on the turns it may start.
+pub(crate) fn owner_turn_settled_hook(
+    state: AppState,
+) -> std::sync::Arc<dyn crate::services::assistant_nyxagent_runtime::OwnerTurnSettledHook> {
+    std::sync::Arc::new(OwnerTurnSettled { state })
+}
+
+struct OwnerTurnSettled {
+    state: AppState,
+}
+
+#[async_trait::async_trait]
+impl crate::services::assistant_nyxagent_runtime::OwnerTurnSettledHook for OwnerTurnSettled {
+    async fn settled(
+        &self,
+        row: AssistantConversation,
+        reply: crate::services::platform_manager_contract::ReplyRef,
+    ) {
+        if row.id != reply.turn.conversation_id
+            || row
+                .active_turn
+                .as_ref()
+                .is_none_or(|turn| turn.turn_id != reply.turn.turn_id)
+        {
+            return;
+        }
+        let saved = self
+            .state
+            .db
+            .collection::<crate::models::assistant_message::AssistantMessage>(
+                crate::models::assistant_message::COLLECTION_NAME,
+            )
+            .find_one(mongodb::bson::doc! {
+                "_id": &reply.reply_id, "conversation_id": &row.id, "user_id": &row.user_id,
+                "turn_id": &reply.turn.turn_id, "role": "assistant",
+            })
+            .await;
+        match saved {
+            Ok(Some(message)) => {
+                let error = message.error_code.as_deref().map(TurnError::new);
+                after_turn_boxed(self.state.clone(), row, message.text, error).await;
+            }
+            Ok(None) => {}
+            Err(error) => tracing::warn!(error = %error, "Personal after-turn reply read deferred"),
+        }
+    }
+}
+
 pub(crate) fn after_turn_boxed(
     state: AppState,
     row: AssistantConversation,

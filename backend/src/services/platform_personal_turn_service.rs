@@ -483,18 +483,21 @@ pub(crate) async fn clear_thread_in_session(
 use super::{api_key_mutation_service as transactions, assistant_nyxagent_runtime as runtime};
 use crate::AppState;
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
+use tracing::Instrument;
 
 pub fn producer(
     state: AppState,
     identity: Arc<dyn contract::ManagerIdentityProducer>,
     ingress: Arc<dyn contract::ManagerIngressTurnStore>,
     egress: Arc<dyn contract::NyxAgentEgress>,
+    settled_hook: Arc<dyn runtime::OwnerTurnSettledHook>,
 ) -> Arc<dyn contract::PersonalTurnProducer> {
     Arc::new(PersonalTurns {
         state,
         identity,
         ingress,
         egress,
+        settled_hook,
     })
 }
 
@@ -503,6 +506,7 @@ struct PersonalTurns {
     identity: Arc<dyn contract::ManagerIdentityProducer>,
     ingress: Arc<dyn contract::ManagerIngressTurnStore>,
     egress: Arc<dyn contract::NyxAgentEgress>,
+    settled_hook: Arc<dyn runtime::OwnerTurnSettledHook>,
 }
 
 #[async_trait::async_trait]
@@ -612,52 +616,71 @@ impl contract::PersonalTurnProducer for PersonalTurns {
         let state = self.state.clone();
         let egress = self.egress.clone();
         let running = turn.clone();
+        let settled_hook = self.settled_hook.clone();
         // The bounded receiver belongs to the caller before the worker starts.
-        tokio::spawn(async move {
-            let row = claim.conversation;
-            let text = engine::turn_input(&row, &start);
-            let (sender, _) = tokio::sync::broadcast::channel(256);
-            let settled = runtime::run_owner_turn(
-                state.clone(),
-                egress,
-                row.clone(),
-                text,
-                claim.credential,
-                Some(
-                    super::billing::route_inventory::BillingRoutePolicy::Metered(
-                        super::billing::route_inventory::BillingIngress::Proxy,
+        tokio::spawn(
+            async move {
+                let row = claim.conversation;
+                let text = engine::turn_input(&row, &start);
+                let (sender, _) = tokio::sync::broadcast::channel(256);
+                let settled = runtime::run_owner_turn(
+                    state.clone(),
+                    egress,
+                    row.clone(),
+                    text,
+                    claim.credential,
+                    Some(
+                        super::billing::route_inventory::BillingRoutePolicy::Metered(
+                            super::billing::route_inventory::BillingIngress::Proxy,
+                        ),
                     ),
-                ),
-                permit,
-                runtime::Events {
-                    sender,
-                    cursor: 0,
-                    reset_notified: false,
-                },
-            )
-            .await;
-            if let Some(settled) = settled {
-                let _ = tokio::time::timeout(
-                    Duration::from_secs(2),
-                    events.send(contract::ExecutionEvent::ReplyReady(contract::ReplyRef {
-                        turn: running.clone(),
-                        reply_id: settled.message_id,
-                    })),
+                    permit,
+                    runtime::Events {
+                        sender,
+                        cursor: 0,
+                        reset_notified: false,
+                    },
                 )
                 .await;
-                if settled.error.is_none()
-                    && row.message_count == 1
-                    && super::assistant_title_service::eligible(&row)
-                {
-                    super::assistant_title_service::spawn(state, row.user_id, row.id);
+                if let Some(settled) = settled {
+                    let _ = tokio::time::timeout(
+                        Duration::from_secs(2),
+                        events.send(contract::ExecutionEvent::ReplyReady(contract::ReplyRef {
+                            turn: running.clone(),
+                            reply_id: settled.message_id.clone(),
+                        })),
+                    )
+                    .await;
+                    if settled.error.is_none()
+                        && row.message_count == 1
+                        && super::assistant_title_service::eligible(&row)
+                    {
+                        super::assistant_title_service::spawn(
+                            state.clone(),
+                            row.user_id.clone(),
+                            row.id.clone(),
+                        );
+                    }
+                    let _ = tokio::time::timeout(
+                        Duration::from_secs(2),
+                        events.send(contract::ExecutionEvent::Settled {
+                            turn: running.clone(),
+                        }),
+                    )
+                    .await;
+                    settled_hook
+                        .settled(
+                            row,
+                            contract::ReplyRef {
+                                turn: running,
+                                reply_id: settled.message_id,
+                            },
+                        )
+                        .await;
                 }
-                let _ = tokio::time::timeout(
-                    Duration::from_secs(2),
-                    events.send(contract::ExecutionEvent::Settled { turn: running }),
-                )
-                .await;
             }
-        });
+            .in_current_span(),
+        );
         Ok(contract::PersonalTurnStart::Started { turn, destination })
     }
 

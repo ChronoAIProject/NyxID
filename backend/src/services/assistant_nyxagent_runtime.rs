@@ -32,6 +32,13 @@ use tokio::sync::oneshot;
 use tokio_util::task::AbortOnDropHandle;
 use uuid::Uuid;
 
+/// HTTP composition supplies existing reporting and queue wake-up behavior.
+/// Called only with a confirmed durable reply, never a candidate stream result.
+#[async_trait::async_trait]
+pub trait OwnerTurnSettledHook: Send + Sync {
+    async fn settled(&self, row: AssistantConversation, reply: contract::ReplyRef);
+}
+
 pub fn producer(
     state: AppState,
     egress: std::sync::Arc<dyn contract::NyxAgentEgress>,
