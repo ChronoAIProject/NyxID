@@ -89,3 +89,34 @@ this new feature. Track actual completion in the
   ordinary live-turn flag, first-use missing NyxBot identity, initial runtime
   creation semantics and pre-router token scrubbing as concrete integration
   points. These have been sent to the relevant owners.
+
+## Implementation handoff
+
+Parts 1, 2 and 3 completed their source/interface proposals. The primary integrated
+them through `921411d5e`; these are design evidence, not completed feature code.
+Part 5 is reconciling their concrete corrections into the shared contract. Part 4
+is completing the bounded HTTP review. Part 1 has begun its durable models and
+consent/control services; independent work does not wait for another design round.
+The active wave is Parts 1, 4 and 5. Parts 2 and 3 are queued for implementation.
+
+The primary approves the narrow scope additions in Part 2's interface proposal:
+`handlers/nyxbot.rs::owner_thread`, settled message origin, image/steering/title
+execution helpers, machine job issuing-turn provenance and exact cancellation,
+and async operation delivery provenance. Part 2 is their sole writer. Part 3
+owns the new `services/assistant_nyxagent_egress.rs` adapter and existing proxy
+core extraction. Part 5 retains all shared registration and composition edits.
+
+Initial **Enable bot** must initialize both personal and public lanes atomically
+after public readiness, without requiring a second hidden personal toggle.
+Explicit personal-only opt-in remains possible while public proof is unavailable.
+Subsequent public-only settings do not alter personal controls. An enforcing
+server with no configuration reports `supported: true, runtime: null`; explicit
+initialization uses zero absence preconditions and the live legacy profile
+generation, then stores positive epoch/revisions. Ordinary updates use positive
+expected versions. Trusted backend time governs expiry; client time never does.
+
+The host briefly fell to approximately 200 MiB free while unrelated worktrees
+were building. The primary verified no compiler used this checkout's target,
+then removed only its disposable `target/debug/incremental` cache, recovering
+approximately 5 GiB. Other build artifacts/processes were not touched. Rust
+builds remain serialized and subject to a fresh capacity check.
