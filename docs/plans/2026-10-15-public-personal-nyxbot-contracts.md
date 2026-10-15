@@ -100,6 +100,9 @@ Part 3 claims the public receipt before execution. Claims compare exact audience
 identity, binding/session and claim ID and refuse a duplicate start. Decision
 claim and acknowledgement/continuation scheduling share the card transaction;
 a consumed decision receipt cannot also start a free-form turn.
+`claim_personal_decision` also takes `&OriginalManagerCommand` and matches its
+authenticated update/message/observation against that receipt, including the
+persisted original-private eligibility. Same-sender proof alone is insufficient.
 
 Settlement persists reply linkage through `ManagerIngressTurnStore` in the
 owning settlement transaction. `ReplyReady(ReplyRef)` references a retained saved

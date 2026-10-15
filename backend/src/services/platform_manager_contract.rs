@@ -933,6 +933,7 @@ pub trait ManagerIngressTurnStore: Send + Sync {
         db: &Database,
         session: &mut ClientSession,
         admitted: &AdmittedPersonalUpdate,
+        command: &OriginalManagerCommand,
         decision: &PlatformCardDecision,
     ) -> AppResult<()>;
 
