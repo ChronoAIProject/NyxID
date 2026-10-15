@@ -162,6 +162,7 @@ pub mod platform_personal_binding_service;
 pub mod platform_personal_owner_lifecycle;
 pub mod platform_personal_turn_service;
 pub mod platform_public_agent_service;
+pub mod platform_public_budget_service;
 pub mod platform_public_credential_service;
 pub mod platform_public_policy;
 pub mod platform_settings_service;

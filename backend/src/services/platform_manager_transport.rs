@@ -507,6 +507,12 @@ pub fn spawn_sweeps(state: AppState, producers: Arc<PlatformManagerProducers>) {
                     "Public manager lifecycle recovery failed"
                 );
             }
+            if let Err(error) = super::platform_public_budget_service::sweep(&state.db, 100).await {
+                tracing::warn!(
+                    error_code = error.error_code(),
+                    "Public manager budget recovery failed"
+                );
+            }
             if let Err(error) = recover_ingress(&state, &producers, 100).await {
                 tracing::warn!(
                     error_code = error.error_code(),
