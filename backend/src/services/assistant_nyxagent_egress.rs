@@ -453,42 +453,60 @@ impl Egress {
     ) -> AppResult<AssistantConversation> {
         let db = self.state.db.clone();
         let mut session = db.client().start_session().await?;
+        // MongoDB's reborrowed async-closure API cannot always prove Send for
+        // borrowed captures. The explicit context owns authority metadata only;
+        // runtime secret material never enters the retryable transaction.
+        let context = (
+            db,
+            Arc::clone(&self.identity),
+            user_id.to_owned(),
+            credential.api_key_id.clone(),
+            turn.clone(),
+            expected_origin.clone(),
+        );
         session
             .start_transaction()
-            .and_run2(async |session| {
-                let result: AppResult<_> = async {
-                    let row = db
-                        .collection::<AssistantConversation>(CONVERSATIONS)
-                        .find_one(doc! {
-                            "_id": &turn.conversation_id, "user_id": user_id,
-                            "credential_api_key_id": &credential.api_key_id,
-                        })
-                        .session(&mut *session)
-                        .await?
-                        .ok_or(AppError::AssistantTurnRequired)?;
-                    let active = engine::live_turn(&row, Utc::now())
-                        .filter(|active| active.turn_id == turn.turn_id && !active.stop_requested)
-                        .ok_or(AppError::AssistantTurnRequired)?;
-                    if active.platform_origin.is_none()
+            .and_run(
+                context,
+                |session, (db, identity, user_id, key_id, turn, origin)| {
+                    Box::pin(async move {
+                        let result: AppResult<_> = async {
+                            let row = db
+                                .collection::<AssistantConversation>(CONVERSATIONS)
+                                .find_one(doc! {
+                                    "_id": &turn.conversation_id, "user_id": &*user_id,
+                                    "credential_api_key_id": &*key_id,
+                                })
+                                .session(&mut *session)
+                                .await?
+                                .ok_or(AppError::AssistantTurnRequired)?;
+                            let active = engine::live_turn(&row, Utc::now())
+                                .filter(|active| {
+                                    active.turn_id == turn.turn_id && !active.stop_requested
+                                })
+                                .ok_or(AppError::AssistantTurnRequired)?;
+                            if active.platform_origin.is_none()
                         || super::platform_personal_turn_service::fence_execution_in_session(
-                            &db,
+                            db,
                             session,
-                            self.identity.as_ref(),
+                            identity.as_ref(),
                             user_id,
-                            &credential.api_key_id,
+                            key_id,
                             turn,
-                            expected_origin,
+                            origin,
                         )
                         .await?
                             != FenceOutcome::Authorized
                     {
                         return Err(AppError::AssistantTurnRequired);
                     }
-                    Ok(row)
-                }
-                .await;
-                transactions::transaction_result(result)
-            })
+                            Ok(row)
+                        }
+                        .await;
+                        transactions::transaction_result(result)
+                    })
+                },
+            )
             .await
             .map_err(transactions::map_transaction_error)
     }
