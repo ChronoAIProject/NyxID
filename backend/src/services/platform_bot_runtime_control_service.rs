@@ -888,3 +888,150 @@ mod tests {
         db.drop().await.unwrap();
     }
 }
+
+#[cfg(test)]
+mod stop_queue_tests {
+    use super::*;
+    use crate::services::{
+        platform_manager_contract::*, platform_personal_binding_service as bindings,
+    };
+
+    #[tokio::test]
+    async fn stop_capture_is_atomic_and_reclaimed_effect_rejects_the_old_lease() {
+        let (db, update, owner) = bindings::tests::fixture("personal_stop_lease").await;
+        let binding = bindings::tests::binding(&update, &owner);
+        let origin = PlatformTurnOrigin {
+            authority: bindings::authority(&binding, 1),
+            nyxbot_agent_id: uuid::Uuid::new_v4().to_string(),
+            source: PlatformOriginSource::ThreadEvent {
+                admission_id: uuid::Uuid::new_v4().to_string(),
+            },
+        };
+        let at = chrono::DateTime::from_timestamp_millis(1_000_000).unwrap();
+        let capture = bindings::CapturedPersonalStop {
+            active_turn: crate::models::platform_personal_binding::PersonalActiveTurn {
+                conversation_id: "exact-conversation".into(),
+                turn_id: "exact-turn".into(),
+                origin: bindings::stored_origin(&origin),
+            },
+            stop_requested_at: at,
+            machine_jobs: vec![
+                crate::models::platform_bot_runtime_controls::ExactMachineJob {
+                    node_id: "node".into(),
+                    runtime_id: "runtime-before-reconnect".into(),
+                    job_id: "job".into(),
+                },
+            ],
+            machine_scopes: vec![
+                crate::models::platform_bot_runtime_controls::ExactMachineScope {
+                    node_id: "node".into(),
+                    runtime_id: "runtime-before-reconnect".into(),
+                },
+            ],
+        };
+        let rows = db.collection::<PlatformPersonalStopEffect>(STOP_EFFECTS);
+        let mut session = db.client().start_session().await.unwrap();
+        session.start_transaction().await.unwrap();
+        bindings::enqueue_stop_in_session(&db, &mut session, &capture)
+            .await
+            .unwrap();
+        session.abort_transaction().await.unwrap();
+        assert_eq!(rows.count_documents(doc! {}).await.unwrap(), 0);
+        session.start_transaction().await.unwrap();
+        let id = bindings::enqueue_stop_in_session(&db, &mut session, &capture)
+            .await
+            .unwrap();
+        assert_eq!(
+            bindings::enqueue_stop_in_session(&db, &mut session, &capture)
+                .await
+                .unwrap(),
+            id
+        );
+        session.commit_transaction().await.unwrap();
+        let first = claim_stop_effect(&db).await.unwrap().unwrap();
+        rows.update_one(
+            doc! {"_id":&id},
+            doc! {"$set":{"lease_expires_at":bson::DateTime::from_millis(0)}},
+        )
+        .await
+        .unwrap();
+        let reclaimed = claim_stop_effect(&db).await.unwrap().unwrap();
+        assert_ne!(first.claim_id, reclaimed.claim_id);
+        assert!(
+            !finish_stop_effect(&db, &id, first.claim_id.as_deref().unwrap(), true)
+                .await
+                .unwrap()
+        );
+        assert_eq!(reclaimed.stop_requested_at, at);
+        assert_eq!(reclaimed.machine_jobs, capture.machine_jobs);
+        assert_eq!(reclaimed.machine_scopes, capture.machine_scopes);
+        assert!(
+            !finish_stop_effect(&db, &id, "unrelated-claim", true)
+                .await
+                .unwrap()
+        );
+        assert!(
+            finish_stop_effect(&db, &id, reclaimed.claim_id.as_deref().unwrap(), true)
+                .await
+                .unwrap()
+        );
+        assert!(claim_stop_effect(&db).await.unwrap().is_none());
+        db.drop().await.unwrap();
+    }
+}
+
+pub(crate) async fn record_stop_progress(
+    db: &Database,
+    id: &str,
+    claim_id: &str,
+    progress: &super::platform_manager_contract::ExactStopProgress,
+) -> AppResult<bool> {
+    use super::platform_manager_contract::{ExactMachineCancelOutcome, ExactStopSettlement};
+    let outcome = |value| match value {
+        ExactMachineCancelOutcome::Cancelled => MachineCancelState::Cancelled,
+        ExactMachineCancelOutcome::AlreadyFinished => MachineCancelState::AlreadyFinished,
+        ExactMachineCancelOutcome::NodeUnavailable => MachineCancelState::NodeUnavailable,
+        ExactMachineCancelOutcome::Unsupported => MachineCancelState::Unsupported,
+        ExactMachineCancelOutcome::RuntimeChanged => MachineCancelState::RuntimeChanged,
+    };
+    let stored = PersonalStopProgress {
+        settlement: match progress.settlement {
+            ExactStopSettlement::Pending => StopSettlementState::Pending,
+            ExactStopSettlement::Settled => StopSettlementState::Settled,
+            ExactStopSettlement::AlreadySettled => StopSettlementState::AlreadySettled,
+            ExactStopSettlement::ConversationDeleted => StopSettlementState::ConversationDeleted,
+        },
+        machine_jobs: progress
+            .machine_jobs
+            .iter()
+            .map(|p| MachineJobProgress {
+                job: ExactMachineJob {
+                    node_id: p.job.node_id.clone(),
+                    runtime_id: p.job.runtime_id.clone(),
+                    job_id: p.job.job_id.clone(),
+                },
+                outcome: outcome(p.outcome),
+            })
+            .collect(),
+        machine_scopes: progress
+            .machine_scopes
+            .iter()
+            .map(|p| MachineScopeProgress {
+                scope: ExactMachineScope {
+                    node_id: p.scope.node_id.clone(),
+                    runtime_id: p.scope.runtime_id.clone(),
+                },
+                outcome: outcome(p.outcome),
+            })
+            .collect(),
+    };
+    Ok(db
+        .collection::<PlatformPersonalStopEffect>(STOP_EFFECTS)
+        .update_one(
+            doc! {"_id":id,"claim_id":claim_id,"completed":false},
+            doc! {"$set":{"progress":bson::to_bson(&stored).map_err(|_|changed())?}},
+        )
+        .await?
+        .matched_count
+        == 1)
+}

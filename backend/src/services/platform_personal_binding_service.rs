@@ -3,7 +3,8 @@ use crate::{
     errors::{AppError, AppResult},
     models::{
         platform_bot_runtime_controls::{
-            ExactMachineJob, PlatformBotRuntimeControls, PlatformPersonalStopEffect,
+            ExactMachineJob, ExactMachineScope, PlatformBotRuntimeControls,
+            PlatformPersonalStopEffect,
         },
         platform_personal_binding::*,
     },
@@ -46,6 +47,7 @@ pub struct CapturedPersonalStop {
     pub active_turn: PersonalActiveTurn,
     pub stop_requested_at: chrono::DateTime<Utc>,
     pub machine_jobs: Vec<ExactMachineJob>,
+    pub machine_scopes: Vec<ExactMachineScope>,
 }
 
 pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> {
@@ -75,7 +77,7 @@ pub(crate) async fn fence_person(
     Ok(db
         .collection::<Document>(crate::models::user::COLLECTION_NAME)
         .update_one(
-            doc! {"_id":user_id,"is_active":true,"user_type":"person"},
+            doc! {"_id":user_id,"is_active":true,"$or":[{"user_type":"person"},{"user_type":{"$exists":false}}]},
             doc! {"$inc":{"platform_personal_effect_revision":1_i64}},
         )
         .session(session)
@@ -303,7 +305,7 @@ pub async fn clear_thread_in_session(
     generation: i64,
     conversation: &str,
 ) -> AppResult<bool> {
-    Ok(db.collection::<PlatformPersonalBinding>(COLLECTION_NAME).update_one(doc! {"_id":binding_id,"user_id":owner,"generation":generation,"conversation_id":conversation},doc! {"$set":{"conversation_id":bson::Bson::Null,"active_turn":bson::Bson::Null}}).session(session).await?.matched_count == 1)
+    Ok(db.collection::<PlatformPersonalBinding>(COLLECTION_NAME).update_one(doc! {"_id":binding_id,"user_id":owner,"generation":generation,"conversation_id":conversation},doc! {"$set":{"conversation_id":bson::Bson::Null,"nyxbot_agent_id":bson::Bson::Null,"active_turn":bson::Bson::Null}}).session(session).await?.matched_count == 1)
 }
 
 pub async fn enqueue_stop_in_session(
@@ -324,6 +326,8 @@ pub async fn enqueue_stop_in_session(
         active_turn: turn.clone(),
         stop_requested_at: effects.stop_requested_at,
         machine_jobs: effects.machine_jobs.clone(),
+        machine_scopes: effects.machine_scopes.clone(),
+        progress: None,
         completed: false,
         claim_id: None,
         lease_expires_at: None,
@@ -973,7 +977,7 @@ impl super::platform_manager_contract::ManagerIdentityProducer for IdentityProdu
         Ok(
             super::platform_bot_runtime_control_service::get(db, profile_id)
                 .await?
-                .filter(|r| r.contract_version == 1 && !r.retired)
+                .filter(|r| r.contract_version == 1)
                 .as_ref()
                 .map(super::platform_bot_runtime_control_service::policy),
         )
@@ -1168,6 +1172,14 @@ impl PersonalLifecycleEffects for LifecycleProducer {
                 Ok(Some(CapturedPersonalStop {
                     active_turn: active.clone(),
                     stop_requested_at: capture.stop_requested_at,
+                    machine_scopes: capture
+                        .machine_scopes
+                        .into_iter()
+                        .map(|scope| ExactMachineScope {
+                            node_id: scope.node_id,
+                            runtime_id: scope.runtime_id,
+                        })
+                        .collect(),
                     machine_jobs: capture
                         .machine_jobs
                         .into_iter()
@@ -1218,6 +1230,14 @@ impl super::platform_manager_contract::ManagerLifecycleProducer for LifecyclePro
                     origin: stored_origin(&effects.origin),
                 },
                 stop_requested_at: effects.stop_requested_at,
+                machine_scopes: effects
+                    .machine_scopes
+                    .iter()
+                    .map(|scope| ExactMachineScope {
+                        node_id: scope.node_id.clone(),
+                        runtime_id: scope.runtime_id.clone(),
+                    })
+                    .collect(),
                 machine_jobs: effects
                     .machine_jobs
                     .iter()
@@ -1484,6 +1504,16 @@ impl super::platform_manager_contract::ManagerLifecycleProducer for LifecyclePro
                     turn_id: row.active_turn.turn_id.clone(),
                 },
                 stop_requested_at: row.stop_requested_at,
+                machine_scopes: row
+                    .machine_scopes
+                    .iter()
+                    .map(
+                        |scope| super::platform_manager_contract::ExactMachineScope {
+                            node_id: scope.node_id.clone(),
+                            runtime_id: scope.runtime_id.clone(),
+                        },
+                    )
+                    .collect(),
                 machine_jobs: row
                     .machine_jobs
                     .iter()
@@ -1495,22 +1525,18 @@ impl super::platform_manager_contract::ManagerLifecycleProducer for LifecyclePro
                     .collect(),
             };
             let outcome = personal.apply_exact_platform_stop(&capture).await;
-            let complete = outcome.as_ref().is_ok_and(|p| {
-                p.settlement != ExactStopSettlement::Pending
-                    && capture.machine_jobs.iter().all(|j| {
-                        p.machine_jobs.iter().any(|done| {
-                            done.job.node_id == j.node_id
-                                && done.job.runtime_id == j.runtime_id
-                                && done.job.job_id == j.job_id
-                                && matches!(
-                                    done.outcome,
-                                    ExactMachineCancelOutcome::Cancelled
-                                        | ExactMachineCancelOutcome::AlreadyFinished
-                                        | ExactMachineCancelOutcome::RuntimeChanged
-                                )
-                        })
-                    })
-            });
+            let complete = outcome
+                .as_ref()
+                .is_ok_and(|progress| stop_effect_complete(&capture, progress));
+            if let Ok(progress) = &outcome {
+                super::platform_bot_runtime_control_service::record_stop_progress(
+                    db,
+                    &row.id,
+                    row.claim_id.as_deref().ok_or_else(conflict)?,
+                    progress,
+                )
+                .await?;
+            }
             super::platform_bot_runtime_control_service::finish_stop_effect(
                 db,
                 &row.id,
@@ -1542,8 +1568,150 @@ impl super::platform_manager_contract::ManagerLifecycleProducer for LifecyclePro
     }
 }
 
+fn stop_effect_complete(
+    capture: &super::platform_manager_contract::CapturedPlatformStop,
+    progress: &super::platform_manager_contract::ExactStopProgress,
+) -> bool {
+    use super::platform_manager_contract::{ExactMachineCancelOutcome, ExactStopSettlement};
+    let terminal = |outcome| {
+        matches!(
+            outcome,
+            ExactMachineCancelOutcome::Cancelled
+                | ExactMachineCancelOutcome::AlreadyFinished
+                | ExactMachineCancelOutcome::RuntimeChanged
+        )
+    };
+    progress.settlement != ExactStopSettlement::Pending
+        && capture.machine_jobs.iter().all(|j| {
+            progress.machine_jobs.iter().any(|done| {
+                done.job.node_id == j.node_id
+                    && done.job.runtime_id == j.runtime_id
+                    && done.job.job_id == j.job_id
+                    && terminal(done.outcome)
+            })
+        })
+        && capture.machine_scopes.iter().all(|scope| {
+            progress.machine_scopes.iter().any(|done| {
+                done.scope.node_id == scope.node_id
+                    && done.scope.runtime_id == scope.runtime_id
+                    && terminal(done.outcome)
+            })
+        })
+}
+
 pub fn producer(
     _state: crate::AppState,
 ) -> std::sync::Arc<dyn super::platform_manager_contract::ManagerIdentityProducer> {
     std::sync::Arc::new(IdentityProducer)
+}
+
+#[cfg(test)]
+mod stop_completion_tests {
+    use super::*;
+    use crate::services::platform_manager_contract::*;
+    #[test]
+    fn settlement_alone_cannot_complete_non_job_cancellation() {
+        let at = Utc::now();
+        let capture = CapturedPlatformStop {
+            origin: PlatformTurnOrigin {
+                authority: PersonalBindingAuthority {
+                    manager: ManagerAuthority {
+                        profile_id: "profile".into(),
+                        manager_bot_id: "991100".into(),
+                        telegram_bot_id: 991100,
+                        manager_authority_epoch: 1,
+                    },
+                    sender_id: 123,
+                    chat_id: 123,
+                    binding_id: "binding".into(),
+                    binding_generation: 1,
+                    personal_control_revision: 1,
+                    user_id: "owner".into(),
+                },
+                nyxbot_agent_id: "agent".into(),
+                source: PlatformOriginSource::ThreadEvent {
+                    admission_id: "admission".into(),
+                },
+            },
+            turn: TurnRef {
+                conversation_id: "conversation".into(),
+                turn_id: "turn".into(),
+            },
+            stop_requested_at: at,
+            machine_jobs: vec![],
+            machine_scopes: vec![
+                crate::services::platform_manager_contract::ExactMachineScope {
+                    node_id: "node".into(),
+                    runtime_id: "captured-runtime".into(),
+                },
+            ],
+        };
+        let mut progress = ExactStopProgress {
+            settlement: ExactStopSettlement::Settled,
+            machine_jobs: vec![],
+            machine_scopes: vec![],
+        };
+        assert!(!stop_effect_complete(&capture, &progress));
+        progress.machine_scopes.push(ExactMachineScopeProgress {
+            scope: crate::services::platform_manager_contract::ExactMachineScope {
+                node_id: "node".into(),
+                runtime_id: "new-runtime".into(),
+            },
+            outcome: ExactMachineCancelOutcome::Cancelled,
+        });
+        assert!(!stop_effect_complete(&capture, &progress));
+        progress.machine_scopes[0].scope.runtime_id = "captured-runtime".into();
+        progress.machine_scopes[0].outcome = ExactMachineCancelOutcome::NodeUnavailable;
+        assert!(!stop_effect_complete(&capture, &progress));
+        progress.machine_scopes[0].outcome = ExactMachineCancelOutcome::Cancelled;
+        assert!(stop_effect_complete(&capture, &progress));
+        progress.settlement = ExactStopSettlement::Pending;
+        assert!(!stop_effect_complete(&capture, &progress));
+    }
+}
+
+pub struct ManagerDisplay {
+    pub username: String,
+}
+
+/// Safe current manager metadata only. The projections never load credentials
+/// or bot secrets, and both metadata sources must match the profile identity and
+/// the current verified credential observation.
+pub async fn manager_display(
+    db: &Database,
+    profile_id: &str,
+    manager_bot_id: &str,
+) -> AppResult<Option<ManagerDisplay>> {
+    let Some(profile) = db
+        .collection::<crate::models::platform_bot_config::PlatformBotConfig>(
+            crate::models::platform_bot_config::COLLECTION_NAME,
+        )
+        .find_one(
+            doc! {"_id":profile_id,"manager_bot_id":manager_bot_id,"deleted_at":bson::Bson::Null},
+        )
+        .await?
+    else {
+        return Ok(None);
+    };
+    let Some(credential)=db.collection::<Document>(crate::models::platform_credential::COLLECTION_NAME).find_one(doc! {"provider":"telegram-new","fields.manager_bot_id":manager_bot_id,"fields.observation_id":&profile.observation_id,"fields.webhook_ready":"true"}).projection(doc! {"_id":0,"fields.manager_username":1}).await? else {return Ok(None);};
+    let Some(bot)=db.collection::<Document>(crate::models::channel_bot::COLLECTION_NAME).find_one(doc! {"_id":&profile.channel_bot_id,"platform_profile_id":profile_id,"platform_bot_id":manager_bot_id,"is_active":true}).projection(doc! {"_id":0,"platform_bot_username":1}).await? else {return Ok(None);};
+    let valid = |value: &str| {
+        (5..=32).contains(&value.len())
+            && value
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_')
+    };
+    let username = credential
+        .get_document("fields")
+        .ok()
+        .and_then(|fields| fields.get_str("manager_username").ok())
+        .filter(|value| valid(value))
+        .or_else(|| {
+            bot.get_str("platform_bot_username")
+                .ok()
+                .filter(|value| valid(value))
+        });
+    Ok(username.map(|username| ManagerDisplay {
+        username: username.to_owned(),
+    }))
 }

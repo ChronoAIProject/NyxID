@@ -45,7 +45,7 @@ pub struct RevokeInput {
 pub struct ListInput {
     pub before_id: Option<uuid::Uuid>,
 }
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 pub struct ManagerResponse {
     pub id: String,
     pub username: Option<String>,
@@ -110,12 +110,28 @@ fn private_headers() -> HeaderMap {
         (header::REFERRER_POLICY, "no-referrer".parse().unwrap()),
     ])
 }
-fn manager(id: String) -> ManagerResponse {
-    ManagerResponse {
-        id,
-        username: None,
-        display_name: "NyxBot".into(),
+async fn manager(
+    db: &mongodb::Database,
+    profile_id: &str,
+    manager_bot_id: &str,
+    required: bool,
+) -> AppResult<ManagerResponse> {
+    if let Some(display) = bindings::manager_display(db, profile_id, manager_bot_id).await? {
+        return Ok(ManagerResponse {
+            id: profile_id.to_owned(),
+            display_name: format!("@{}", display.username),
+            username: Some(display.username),
+        });
     }
+    if required {
+        return Err(bindings::unavailable());
+    }
+    // Retired inventory can still identify its exact historical bot numerically.
+    Ok(ManagerResponse {
+        id: profile_id.to_owned(),
+        username: None,
+        display_name: format!("Telegram bot {manager_bot_id}"),
+    })
 }
 fn project_status(row: PlatformLinkChallenge) -> StatusResponse {
     StatusResponse {
@@ -167,7 +183,13 @@ pub async fn preview(
         Json(PreviewResponse {
             purpose: "personal_nyxbot",
             status: "pending",
-            manager: manager(row.platform_config_id),
+            manager: manager(
+                &state.db,
+                &row.platform_config_id,
+                &row.manager_bot_id,
+                true,
+            )
+            .await?,
             sender: SenderResponse {
                 id: row.telegram_sender_id.to_string(),
                 display_name: None,
@@ -199,7 +221,7 @@ pub async fn review(
     let user = state
         .db
         .collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
-        .find_one(bson::doc! {"_id":&actor,"is_active":true,"user_type":"person"})
+        .find_one(bson::doc! {"_id":&actor,"is_active":true,"$or":[{"user_type":"person"},{"user_type":{"$exists":false}}]})
         .await?
         .ok_or_else(bindings::unavailable)?;
     let replaces = row.previous_binding.as_ref().is_some_and(|b| {
@@ -320,12 +342,27 @@ pub async fn list(
     } else {
         None
     };
-    let rows = rows
-        .into_iter()
-        .map(|row| OwnedBindingResponse {
+    let mut projected = Vec::with_capacity(rows.len());
+    let mut displays = std::collections::HashMap::new();
+    for row in rows {
+        let key = (row.platform_config_id.clone(), row.manager_bot_id.clone());
+        let display = if let Some(display) = displays.get(&key) {
+            Clone::clone(display)
+        } else {
+            let display = manager(
+                &state.db,
+                &row.platform_config_id,
+                &row.manager_bot_id,
+                false,
+            )
+            .await?;
+            displays.insert(key, display.clone());
+            display
+        };
+        projected.push(OwnedBindingResponse {
             id: row.id,
             generation: row.generation,
-            manager: manager(row.platform_config_id),
+            manager: display,
             sender: SenderResponse {
                 id: row.telegram_sender_id.to_string(),
                 display_name: None,
@@ -333,13 +370,13 @@ pub async fn list(
             state: row.state,
             conversation_id: row.conversation_id,
             consented_at: row.consented_at.to_rfc3339(),
-            revoked_at: row.revoked_at.map(|d| d.to_rfc3339()),
-        })
-        .collect();
+            revoked_at: row.revoked_at.map(|date| date.to_rfc3339()),
+        });
+    }
     Ok((
         private_headers(),
         Json(ListResponse {
-            bindings: rows,
+            bindings: projected,
             next_before_id,
         }),
     ))
@@ -384,4 +421,125 @@ pub async fn revoke(
             work_may_continue_in_app: true,
         }),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::services::platform_personal_binding_service::tests::fixture;
+    use mongodb::bson::{Bson, Document, doc};
+
+    #[tokio::test]
+    async fn legacy_person_can_review_but_explicit_null_org_and_unknown_fail_the_fence() {
+        let (db, update, owner) = fixture("personal_legacy_human").await;
+        let users = db.collection::<Document>(crate::models::user::COLLECTION_NAME);
+        users
+            .update_one(doc! {"_id":&owner}, doc! {"$unset":{"user_type":""}})
+            .await
+            .unwrap();
+        let state = crate::test_utils::test_app_state(db.clone());
+        let mut session = db.client().start_session().await.unwrap();
+        session.start_transaction().await.unwrap();
+        assert!(
+            bindings::fence_person(&db, &mut session, &owner)
+                .await
+                .unwrap()
+        );
+        let issued = proofs::begin_in_session(
+            &db,
+            &mut session,
+            state.auth_device_hmac_key.as_slice(),
+            &update,
+            false,
+            "legacy-review",
+        )
+        .await
+        .unwrap();
+        session.commit_transaction().await.unwrap();
+        let (_, Json(reviewed)) = review(
+            State(state),
+            crate::test_utils::test_auth_user(&owner),
+            Json(IntentInput {
+                intent_token: issued.token.unwrap(),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(reviewed.account.id, owner);
+        assert_eq!(reviewed.permission_mode, "nyxmode");
+        for invalid in [
+            Bson::Null,
+            Bson::String("org".into()),
+            Bson::String("unknown".into()),
+        ] {
+            users
+                .update_one(doc! {"_id":&owner}, doc! {"$set":{"user_type":invalid}})
+                .await
+                .unwrap();
+            session.start_transaction().await.unwrap();
+            assert!(
+                !bindings::fence_person(&db, &mut session, &owner)
+                    .await
+                    .unwrap()
+            );
+            session.abort_transaction().await.unwrap();
+        }
+        db.drop().await.unwrap();
+    }
+    #[tokio::test]
+    async fn consent_manager_uses_only_metadata_for_the_current_verified_observation() {
+        let (db, update, _) = fixture("personal_manager_display").await;
+        let credentials =
+            db.collection::<Document>(crate::models::platform_credential::COLLECTION_NAME);
+        credentials
+            .update_one(
+                doc! {"provider":"telegram-new"},
+                doc! {"$set":{"fields.manager_username":"VerifiedManagerBot"}},
+            )
+            .await
+            .unwrap();
+        let metadata = manager(&db, &update.profile_id, &update.manager_bot_id, true)
+            .await
+            .unwrap();
+        assert_eq!(metadata.id, update.profile_id);
+        assert_eq!(metadata.username.as_deref(), Some("VerifiedManagerBot"));
+        assert_eq!(metadata.display_name, "@VerifiedManagerBot");
+        credentials
+            .update_one(
+                doc! {"provider":"telegram-new"},
+                doc! {"$set":{"fields.observation_id":"unrelated-observation"}},
+            )
+            .await
+            .unwrap();
+        assert!(
+            manager(&db, &update.profile_id, &update.manager_bot_id, true)
+                .await
+                .is_err()
+        );
+        let historical = manager(&db, &update.profile_id, &update.manager_bot_id, false)
+            .await
+            .unwrap();
+        assert_eq!(
+            historical.display_name,
+            format!("Telegram bot {}", update.telegram_bot_id)
+        );
+        assert!(historical.username.is_none());
+        credentials.update_one(doc! {"provider":"telegram-new"},doc! {"$set":{"fields.observation_id":&update.observation_id},"$unset":{"fields.manager_username":""}}).await.unwrap();
+        db.collection::<Document>(crate::models::channel_bot::COLLECTION_NAME)
+            .update_one(
+                doc! {"platform_profile_id":&update.profile_id},
+                doc! {"$set":{"platform_bot_username":"ChannelManagerBot"}},
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            manager(&db, &update.profile_id, &update.manager_bot_id, true)
+                .await
+                .unwrap()
+                .username
+                .as_deref(),
+            Some("ChannelManagerBot")
+        );
+        db.drop().await.unwrap();
+    }
 }

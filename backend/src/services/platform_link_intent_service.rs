@@ -779,6 +779,12 @@ mod tests {
                 active_turn: active.clone(),
                 stop_requested_at: Utc::now(),
                 machine_jobs: vec![],
+                machine_scopes: vec![
+                    crate::models::platform_bot_runtime_controls::ExactMachineScope {
+                        node_id: "test-node".into(),
+                        runtime_id: "captured-runtime".into(),
+                    },
+                ],
             }))
         }
         async fn revoke_public_sender(
@@ -805,6 +811,12 @@ mod tests {
                 active_turn: active.clone(),
                 stop_requested_at: Utc::now(),
                 machine_jobs: vec![],
+                machine_scopes: vec![
+                    crate::models::platform_bot_runtime_controls::ExactMachineScope {
+                        node_id: "test-node".into(),
+                        runtime_id: "captured-runtime".into(),
+                    },
+                ],
             }))
         }
         async fn revoke_public_sender(

@@ -12,6 +12,11 @@ use crate::{
 
 async fn admin(state: &AppState, auth: &AuthUser) -> AppResult<()> {
     super::login_client_context::require_first_party_human(auth)?;
+    if state.db.collection::<mongodb::bson::Document>(crate::models::user::COLLECTION_NAME)
+        .find_one(mongodb::bson::doc! {"_id":auth.user_id.to_string(),"is_active":true,"$or":[{"user_type":"person"},{"user_type":{"$exists":false}}]})
+        .projection(mongodb::bson::doc! {"_id":1}).await?.is_none() {
+        return Err(crate::errors::AppError::Forbidden("Active human administrator required".into()));
+    }
     super::admin_helpers::require_admin(state, auth).await
 }
 

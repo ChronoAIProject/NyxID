@@ -127,7 +127,7 @@ pub(crate) async fn fence_admin(
     let user = db
         .collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
         .find_one_and_update(
-            doc! {"_id": actor, "is_active": true, "user_type": "person"},
+            doc! {"_id":actor,"is_active":true,"$or":[{"user_type":"person"},{"user_type":{"$exists":false}}]},
             doc! {"$inc": {"platform_admin_authority_revision": 1_i64}},
         )
         .return_document(mongodb::options::ReturnDocument::After)

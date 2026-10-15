@@ -48,14 +48,56 @@ pub struct ExactMachineJob {
     pub job_id: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExactMachineScope {
+    pub node_id: String,
+    pub runtime_id: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StopSettlementState {
+    Pending,
+    Settled,
+    AlreadySettled,
+    ConversationDeleted,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MachineCancelState {
+    Cancelled,
+    AlreadyFinished,
+    NodeUnavailable,
+    Unsupported,
+    RuntimeChanged,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct MachineJobProgress {
+    pub job: ExactMachineJob,
+    pub outcome: MachineCancelState,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct MachineScopeProgress {
+    pub scope: ExactMachineScope,
+    pub outcome: MachineCancelState,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PersonalStopProgress {
+    pub settlement: StopSettlementState,
+    pub machine_jobs: Vec<MachineJobProgress>,
+    pub machine_scopes: Vec<MachineScopeProgress>,
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct PlatformPersonalStopEffect {
     #[serde(rename = "_id")]
     pub id: String,
     pub active_turn: PersonalActiveTurn,
     pub machine_jobs: Vec<ExactMachineJob>,
+    pub machine_scopes: Vec<ExactMachineScope>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub stop_requested_at: DateTime<Utc>,
+    pub progress: Option<PersonalStopProgress>,
     pub completed: bool,
     pub claim_id: Option<String>,
     #[serde(with = "crate::models::bson_datetime::optional")]
