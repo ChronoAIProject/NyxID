@@ -818,8 +818,8 @@ fn mcp_extract_user_agent(headers: &HeaderMap) -> Option<String> {
 /// On failure returns an MCP-formatted 401 response with `WWW-Authenticate`.
 #[allow(clippy::result_large_err)]
 enum McpAuthentication {
-    Ordinary(McpAuthContext),
-    Public(crate::services::platform_public_tools::PublicMcpAuthority),
+    Ordinary(Box<McpAuthContext>),
+    Public(Box<crate::services::platform_public_tools::PublicMcpAuthority>),
 }
 
 #[allow(clippy::result_large_err)]
@@ -829,7 +829,7 @@ async fn authenticate_mcp(
     session_fallback: bool,
 ) -> Result<McpAuthContext, Response> {
     match authenticate_mcp_or_public(state, headers, session_fallback, false).await? {
-        McpAuthentication::Ordinary(auth) => Ok(auth),
+        McpAuthentication::Ordinary(auth) => Ok(*auth),
         McpAuthentication::Public(_) => Err(mcp_403_api_key_insufficient_scope()),
     }
 }
@@ -861,7 +861,7 @@ async fn authenticate_mcp_or_public(
                         credential_id.as_deref(),
                     )
                     .await
-                    .map(McpAuthentication::Public)
+                    .map(|authority| McpAuthentication::Public(Box::new(authority)))
                     .map_err(IntoResponse::into_response);
                 }
                 if api_key.purpose == crate::models::api_key::ApiKeyPurpose::PermissionBound {
@@ -915,7 +915,7 @@ async fn authenticate_mcp_or_public(
                     )
                     .await
                     .map_err(axum::response::IntoResponse::into_response)?;
-                return Ok(McpAuthentication::Ordinary(McpAuthContext {
+                return Ok(McpAuthentication::Ordinary(Box::new(McpAuthContext {
                     caller_token: proxy_service::caller_bearer_token_for_downstream(headers, false),
                     scope: api_key.scopes.clone(),
                     resource_uris: None,
@@ -953,7 +953,7 @@ async fn authenticate_mcp_or_public(
                     rate_limit_burst: api_key.rate_limit_burst,
                     ip_address: request_ip.clone(),
                     user_agent: request_ua.clone(),
-                }));
+                })));
             }
             Err(_) => return Err(mcp_401(&state.config.base_url)),
         }
@@ -980,7 +980,7 @@ async fn authenticate_mcp_or_public(
                     child.as_deref(),
                 )
                 .await
-                .map(McpAuthentication::Public)
+                .map(|authority| McpAuthentication::Public(Box::new(authority)))
                 .map_err(IntoResponse::into_response);
             }
         }
@@ -1118,7 +1118,7 @@ async fn authenticate_mcp_or_public(
                 ctx.approval_owner_user_id = approval_owner_user_id;
                 ctx.ip_address = request_ip.clone();
                 ctx.user_agent = request_ua.clone();
-                return Ok(McpAuthentication::Ordinary(ctx));
+                return Ok(McpAuthentication::Ordinary(Box::new(ctx)));
             }
             Err(_) if session_fallback => {
                 // Any JWT error (expired, invalid issuer, etc.) -- fall through
@@ -1159,7 +1159,7 @@ async fn authenticate_mcp_or_public(
         let mut ctx = McpAuthContext::user(user_id, AuthMethod::Session);
         ctx.ip_address = request_ip;
         ctx.user_agent = request_ua;
-        return Ok(McpAuthentication::Ordinary(ctx));
+        return Ok(McpAuthentication::Ordinary(Box::new(ctx)));
     }
 
     Err(mcp_401(&state.config.base_url))
@@ -1401,7 +1401,7 @@ pub async fn mcp_post(
     // All other methods allow session-based auth fallback.
     let is_initialize = request.method == "initialize";
     let auth = match authenticate_mcp_or_public(&state, &headers, !is_initialize, true).await {
-        Ok(McpAuthentication::Ordinary(a)) => a,
+        Ok(McpAuthentication::Ordinary(a)) => *a,
         Ok(McpAuthentication::Public(a)) => {
             return handle_public_rpc(&state, &headers, &body, &request, &a).await;
         }

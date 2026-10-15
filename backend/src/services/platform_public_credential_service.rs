@@ -782,7 +782,7 @@ pub(crate) async fn fence_reply_in_session(
     {
         return Err(denied());
     }
-    let receipt=db.collection::<PlatformManagerIngress>(RECEIPTS).find_one_and_update(doc! {
+    db.collection::<PlatformManagerIngress>(RECEIPTS).find_one_and_update(doc! {
         "_id":&ingress.ingress.receipt_id,"claim_id":&ingress.ingress.claim_id,"phase":"settled",
         "profile_id":&manager.profile_id,"manager_bot_id":&manager.manager_bot_id,
         "telegram_bot_id":manager.telegram_bot_id,"manager_authority_epoch":manager.manager_authority_epoch,
@@ -792,13 +792,26 @@ pub(crate) async fn fence_reply_in_session(
         "execution.turn_id":&turn.turn_id,"execution.payer_user_id":&row.sponsor_owner_user_id,
         "execution.public_policy_digest":&row.policy_digest,"reply_id":retained.reply_id.as_deref().ok_or_else(denied)?,
     },doc! {"$inc":{"effect_revision":1_i64}}).session(&mut *session).await?.ok_or_else(denied)?;
+    // Token rotation for the same numeric bot does not change authority epoch.
+    // Bind the current profile observation, not the historical receipt token.
+    let profile = db
+        .collection::<crate::models::platform_bot_config::PlatformBotConfig>(
+            crate::models::platform_bot_config::COLLECTION_NAME,
+        )
+        .find_one(
+            doc! {"_id":&manager.profile_id,"manager_bot_id":&manager.manager_bot_id,
+            "deleted_at":bson::Bson::Null},
+        )
+        .session(&mut *session)
+        .await?
+        .ok_or_else(denied)?;
     let controls = super::platform_bot_runtime_control_service::fence_manager_in_session(
         db,
         session,
         &manager.profile_id,
         &manager.manager_bot_id,
         manager.telegram_bot_id,
-        Some(&receipt.observation_id),
+        Some(&profile.observation_id),
     )
     .await?
     .ok_or_else(denied)?;
