@@ -1130,22 +1130,28 @@ mod tests {
     }
 
     #[tokio::test]
-    #[allow(clippy::await_holding_lock)] // serializes proxy environment mutations
     async fn loopback_api_and_credential_transfer_bypass_environment_proxies() {
-        let _env_guard = env_lock().lock().unwrap_or_else(|err| err.into_inner());
+        const CHILD_ORIGIN: &str = "NYXID_TEST_LOOPBACK_PROXY_ORIGIN";
+        const TEST_NAME: &str =
+            "api::tests::loopback_api_and_credential_transfer_bypass_environment_proxies";
+
+        if let Some(address) = std::env::var_os(CHILD_ORIGIN) {
+            let address = address.into_string().expect("child origin must be UTF-8");
+            for transfer in [false, true] {
+                let mut api = ApiClient::new(&address, uuid::Uuid::new_v4().to_string()).unwrap();
+                if transfer {
+                    api = api.for_credential_transfer().unwrap();
+                }
+                assert_eq!(
+                    api.get_value("/transport-fixture").await.unwrap(),
+                    serde_json::json!({"direct": true})
+                );
+            }
+            return;
+        }
+
         let origin = MockServer::start().await;
         let proxy = MockServer::start().await;
-        let proxy_url = proxy.uri();
-        let _env = EnvGuard::set(&[
-            ("HTTP_PROXY", Some(&proxy_url)),
-            ("http_proxy", Some(&proxy_url)),
-            ("HTTPS_PROXY", Some(&proxy_url)),
-            ("https_proxy", Some(&proxy_url)),
-            ("ALL_PROXY", Some(&proxy_url)),
-            ("all_proxy", Some(&proxy_url)),
-            ("NO_PROXY", Some("")),
-            ("no_proxy", Some("")),
-        ]);
         Mock::given(method("GET"))
             .and(path("/api/v1/transport-fixture"))
             .respond_with(
@@ -1159,19 +1165,55 @@ mod tests {
             .expect(0)
             .mount(&proxy)
             .await;
+
+        // Other HTTP tests read proxy variables without taking env_lock. Set
+        // them only in a child running this exact test, so parallel clients
+        // cannot accidentally send their requests to this test's proxy.
+        let home = tempfile::tempdir().expect("child home");
         let address = origin.uri().replace("127.0.0.1", "localhost");
-        for transfer in [false, true] {
-            let mut api = ApiClient::new(&address, uuid::Uuid::new_v4().to_string()).unwrap();
-            if transfer {
-                api = api.for_credential_transfer().unwrap();
-            }
-            assert_eq!(
-                api.get_value("/transport-fixture").await.unwrap(),
-                serde_json::json!({"direct": true})
-            );
-        }
+        let mut child = tokio::process::Command::new(std::env::current_exe().unwrap());
+        child
+            .args(["--exact", TEST_NAME, "--nocapture", "--test-threads=1"])
+            .env(CHILD_ORIGIN, &address)
+            .env("HOME", home.path())
+            .env("HTTP_PROXY", proxy.uri())
+            .env("http_proxy", proxy.uri())
+            .env("HTTPS_PROXY", proxy.uri())
+            .env("https_proxy", proxy.uri())
+            .env("ALL_PROXY", proxy.uri())
+            .env("all_proxy", proxy.uri())
+            .env("NO_PROXY", "")
+            .env("no_proxy", "")
+            .stdin(std::process::Stdio::null())
+            .kill_on_drop(true);
+        let output = tokio::time::timeout(std::time::Duration::from_secs(30), child.output())
+            .await
+            .expect("proxy isolation child timed out")
+            .expect("failed to run proxy isolation child");
+        assert!(
+            output.status.success(),
+            "proxy isolation child failed: {}\n{}\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
         origin.verify().await;
         proxy.verify().await;
+        assert!(
+            origin
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .all(|request| {
+                    request
+                        .headers
+                        .get("authorization")
+                        .and_then(|value| value.to_str().ok())
+                        .is_some_and(|value| value.starts_with("Bearer ") && value.len() > 7)
+                })
+        );
+        assert!(proxy.received_requests().await.unwrap().is_empty());
     }
 
     #[tokio::test]
