@@ -215,7 +215,7 @@ pub async fn persist(
                 doc!{"_id":&call.conversation_id,"user_id":&call.user_id},doc!{"$inc":{"message_count":1},"$set":{"updated_at":bson::DateTime::now()}})
                 .return_document(mongodb::options::ReturnDocument::After).session(&mut *tx).await?
                 .ok_or_else(||AppError::NotFound("Voice conversation unavailable".into()))?;
-            messages.insert_one(AssistantMessage{platform_delivery_recovery_queued:false,platform_reply:None,platform_origin:None,retry_claimed_by:None,activity_count:None,continuation_of:None,specialist_id:None,steering:None,author:Some(crate::models::assistant_message::MessageAuthor::Owner),id:segment.id.clone(),voice:Some(metadata),execution_pending:true,
+            messages.insert_one(AssistantMessage{turn_metadata:None,platform_delivery_recovery_queued:false,platform_reply:None,platform_origin:None,retry_claimed_by:None,activity_count:None,continuation_of:None,specialist_id:None,steering:None,author:Some(crate::models::assistant_message::MessageAuthor::Owner),id:segment.id.clone(),voice:Some(metadata),execution_pending:true,
                 conversation_id:call.conversation_id.clone(),user_id:call.user_id.clone(),seq:thread.message_count,
                 turn_id:uuid::Uuid::new_v4().to_string(),role:if segment.speaker==Speaker::User {"user"}else{"assistant"}.into(),
                 text:segment.text.clone(),status:"completed".into(),error_code:None,upstream_error_code:None,error_detail:None,created_at:chrono::Utc::now(),activities:Vec::new(),

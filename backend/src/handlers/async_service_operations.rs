@@ -162,7 +162,7 @@ async fn step(state: &AppState, w: &AsyncServiceOperation) -> crate::errors::App
         {
             let _ = tokio::time::timeout(Duration::from_secs(5), call(state, w, name)).await;
         }
-        return watches::cancelled(&state.db, w).await;
+        return watches::cancelled(&state.db, w, &state.config.frontend_url).await;
     }
     if chrono::Utc::now() >= w.deadline {
         return watches::ready(&state.db, w, None, "timeout", None).await;

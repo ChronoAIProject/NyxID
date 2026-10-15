@@ -31,6 +31,16 @@ impl RunOutcome {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TriggerRun {
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
+    pub trigger_generation: Option<DateTime<Utc>>,
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
+    pub dispatch_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub terminal_result_recorded: bool,
+    #[serde(default)]
+    pub attempts: Option<u32>,
+    #[serde(default)]
+    pub capacity_wait_ms: Option<u64>,
     #[serde(rename = "_id")]
     pub id: String,
     pub trigger_id: String,

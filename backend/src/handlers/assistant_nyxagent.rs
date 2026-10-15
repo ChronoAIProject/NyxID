@@ -208,6 +208,11 @@ impl From<&crate::models::assistant_conversation::PlatformTurnOrigin>
 }
 #[derive(Serialize)]
 pub struct ActiveTurnResponse {
+    waiting_for_capacity: bool,
+    capacity_wait_note_origin: Option<String>,
+    engine_request_started_at: Option<DateTime<Utc>>,
+    capacity_wait_started_at: Option<DateTime<Utc>>,
+    capacity_wait_deadline: Option<DateTime<Utc>>,
     platform_origin: Option<PlatformTurnOriginResponse>,
     response_id: Option<String>,
     steering_allowed: bool,
@@ -307,6 +312,11 @@ impl ConversationResponse {
 impl From<AssistantConversation> for ConversationResponse {
     fn from(row: AssistantConversation) -> Self {
         let active_turn = engine::live_turn(&row, Utc::now()).map(|turn| ActiveTurnResponse {
+            waiting_for_capacity: turn.waiting_for_capacity,
+            capacity_wait_note_origin: turn.capacity_wait_note_origin.clone(),
+            engine_request_started_at: turn.engine_request_started_at,
+            capacity_wait_started_at: turn.capacity_wait_started_at,
+            capacity_wait_deadline: turn.capacity_wait_deadline,
             platform_origin: turn
                 .platform_origin
                 .as_ref()
@@ -400,6 +410,8 @@ impl From<crate::models::assistant_message::VoiceTranscript> for VoiceTranscript
 }
 #[derive(Serialize)]
 pub struct ErrorDetailResponse {
+    attempts: Option<u32>,
+    capacity_wait_ms: Option<u64>,
     stage: String,
     http_status: Option<u16>,
     upstream_request_id: Option<String>,
@@ -412,6 +424,8 @@ pub struct ErrorDetailResponse {
 impl From<crate::models::assistant_message::AssistantErrorDetail> for ErrorDetailResponse {
     fn from(value: crate::models::assistant_message::AssistantErrorDetail) -> Self {
         Self {
+            attempts: value.attempts,
+            capacity_wait_ms: value.capacity_wait_ms,
             stage: value.stage,
             http_status: value.http_status,
             upstream_request_id: value.upstream_request_id,
@@ -421,6 +435,12 @@ impl From<crate::models::assistant_message::AssistantErrorDetail> for ErrorDetai
             occurred_at: value.occurred_at,
         }
     }
+}
+
+#[derive(Serialize)]
+pub struct TurnMetadataResponse {
+    attempts: Option<u32>,
+    capacity_wait_ms: Option<u64>,
 }
 
 #[derive(Serialize)]
@@ -441,6 +461,7 @@ pub struct MessageResponse {
     error_code: Option<String>,
     upstream_error_code: Option<String>,
     error_detail: Option<ErrorDetailResponse>,
+    turn_metadata: Option<TurnMetadataResponse>,
     created_at: DateTime<Utc>,
     activities: Vec<ActivityResponse>,
     attachments: Vec<AttachmentResponse>,
@@ -473,6 +494,10 @@ impl From<AssistantMessage> for MessageResponse {
             error_code: row.error_code,
             upstream_error_code: row.upstream_error_code,
             error_detail: row.error_detail.map(ErrorDetailResponse::from),
+            turn_metadata: row.turn_metadata.map(|data| TurnMetadataResponse {
+                attempts: data.attempts,
+                capacity_wait_ms: data.capacity_wait_ms,
+            }),
             created_at: row.created_at,
             activities: row
                 .activities
@@ -1426,6 +1451,11 @@ async fn proxy_raw(
     if let Some(policy) = policy {
         request.extensions_mut().insert(policy);
     }
+    if method == "POST" && path == "v1/responses" {
+        request
+            .extensions_mut()
+            .insert(super::proxy::NyxAgentAdmission);
+    }
     let mut headers = vec![("authorization".into(), format!("Bearer {}", raw_key))];
     if let Some(turn_id) = turn_id {
         headers.push(("idempotency-key".into(), turn_id.into()));
@@ -1456,6 +1486,17 @@ pub(crate) fn http_egress(
 
 #[async_trait::async_trait]
 impl crate::services::platform_manager_contract::NyxAgentEgress for HttpNyxAgentEgress {
+    fn admission_acknowledged(
+        &self,
+        row: &AssistantConversation,
+    ) -> Option<tokio::task::JoinHandle<()>> {
+        let state = self.state.clone();
+        let row = row.clone();
+        Some(tokio::spawn(
+            async move { capacity_notice(&state, &row).await },
+        ))
+    }
+
     async fn request(
         &self,
         context: &crate::services::platform_manager_contract::NyxAgentExecutionContext,
@@ -1830,4 +1871,38 @@ async fn execute_turn(
         instruction_context,
     )
     .await
+}
+
+pub(crate) async fn capacity_notice(state: &AppState, row: &AssistantConversation) {
+    use engine::PrimaryDestination;
+    let turn = row.active_turn.as_ref().expect("claimed turn");
+    let destination = engine::answer_routing(row, turn).primary;
+    if turn.origin == crate::models::assistant_conversation::TurnOrigin::Trigger
+        || turn.trigger_run_id.is_some()
+        || !matches!(
+            destination,
+            PrimaryDestination::ChannelEvent { .. } | PrimaryDestination::ChatUpdate { .. }
+        )
+    {
+        return;
+    }
+    if !crate::services::assistant_turn_observability::claim_notice(&state.db, row, Utc::now())
+        .await
+        .unwrap_or(false)
+    {
+        return;
+    }
+    let text = crate::services::assistant_turn_observability::CAPACITY_ACKNOWLEDGEMENT;
+    match destination {
+        PrimaryDestination::ChannelEvent { origin } => {
+            super::nyxbot::deliver_to(state, row, &origin, text, None).await
+        }
+        PrimaryDestination::ChatUpdate { origins } => {
+            // One notice per turn, to the primary chat only.
+            if let Some(origin) = origins.first() {
+                super::nyxbot::deliver_to(state, row, origin, text, None).await;
+            }
+        }
+        _ => {}
+    }
 }

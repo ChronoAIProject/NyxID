@@ -170,6 +170,32 @@ pub struct BillingService {
     config: Arc<AppConfig>,
     owner_resolver: BillingOwnerResolver,
     lago: Option<Arc<dyn LagoApi>>,
+    #[cfg(test)]
+    pub(crate) settlement_gate: Option<Arc<SettlementGate>>,
+}
+
+#[cfg(test)]
+pub(crate) struct SettlementGate {
+    pub entered: tokio::sync::Notify,
+    pub release: tokio::sync::Semaphore,
+    pub fail: bool,
+    pub used: std::sync::atomic::AtomicBool,
+}
+
+#[cfg(test)]
+impl SettlementGate {
+    async fn wait(&self) -> AppResult<()> {
+        if !self.used.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            self.entered.notify_one();
+            self.release.acquire().await.unwrap().forget();
+            if self.fail {
+                return Err(crate::errors::AppError::Internal(
+                    "Settlement fixture failure".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 impl BillingService {
@@ -192,6 +218,8 @@ impl BillingService {
             config,
             owner_resolver: BillingOwnerResolver::new(db),
             lago,
+            #[cfg(test)]
+            settlement_gate: None,
         }
     }
 
@@ -206,6 +234,7 @@ impl BillingService {
             config,
             owner_resolver: BillingOwnerResolver::new(db),
             lago: Some(lago),
+            settlement_gate: None,
         }
     }
 
@@ -603,6 +632,10 @@ impl BillingService {
         resale: Option<crate::models::service_billing::ResaleUsage>,
         model: Option<String>,
     ) -> AppResult<()> {
+        #[cfg(test)]
+        if let Some(gate) = &self.settlement_gate {
+            gate.wait().await?;
+        }
         meter::settle(&self.db, metered, platform, resale, model).await
     }
 
@@ -621,7 +654,15 @@ impl BillingService {
         let persisted =
             meter::persist_settlement_intent(&self.db, metered, platform, resale, model).await?;
         let db = self.db.clone();
+        #[cfg(test)]
+        let gate = self.settlement_gate.clone();
         tokio::spawn(async move {
+            #[cfg(test)]
+            if let Some(gate) = gate
+                && gate.wait().await.is_err()
+            {
+                return;
+            }
             if meter::settle_persisted(&db, persisted).await.is_err() {
                 tracing::warn!(
                     billing_request_id,

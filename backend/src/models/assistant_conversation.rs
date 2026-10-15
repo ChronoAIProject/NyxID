@@ -233,7 +233,66 @@ pub struct ToolProgress {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ModelRefusal {
+    pub code: String,
+    pub attempt_id: String,
+    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+    pub at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ModelStreamFault {
+    pub kind: String,
+    pub attempt_id: String,
+    pub attributable: bool,
+    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+    pub at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EngineWorkerInstance {
+    pub id: String,
+    #[serde(default)]
+    pub hostname: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ActiveTurn {
+    /// Process incarnation that claimed execution; absent on older replicas' turns.
+    #[serde(default)]
+    pub worker_instance: Option<EngineWorkerInstance>,
+    #[serde(default)]
+    pub model_attempt_id: Option<String>,
+    #[serde(default)]
+    pub model_requests_active: u32,
+    #[serde(default)]
+    pub model_attribution_uncertain: bool,
+    #[serde(default)]
+    pub model_refusal: Option<ModelRefusal>,
+    #[serde(default)]
+    pub model_stream_fault: Option<ModelStreamFault>,
+    #[serde(default)]
+    pub model_stream_cancellation: Option<ModelStreamFault>,
+    #[serde(default)]
+    pub waiting_for_capacity: bool,
+    /// NyxID-authored display note only; never a transcript/model message.
+    #[serde(default)]
+    pub capacity_wait_note_origin: Option<String>,
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
+    pub engine_request_started_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub engine_attempts: u32,
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
+    pub capacity_wait_started_at: Option<DateTime<Utc>>,
+    /// Accumulated completed admission waits; excludes execution between requests.
+    #[serde(default)]
+    pub capacity_wait_ms: u64,
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
+    pub capacity_wait_deadline: Option<DateTime<Utc>>,
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
+    pub capacity_accepted_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub capacity_notice_claimed: bool,
     #[serde(default)]
     pub platform_reply: Option<PlatformReplyRouting>,
     /// One platform worker may execute an admitted turn. A lost worker is
@@ -290,6 +349,9 @@ pub struct ActiveTurn {
     /// admission (org groups: never).
     #[serde(default)]
     pub with_nyxbot: bool,
+    /// Confirmation continuation claims ignore the original run grace deadline.
+    #[serde(default)]
+    pub trigger_continuation: bool,
     pub turn_id: String,
     #[serde(default)]
     pub origin: TurnOrigin,

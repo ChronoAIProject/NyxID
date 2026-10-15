@@ -19,7 +19,6 @@ export function useBuildUpdates(ready: boolean, queryClient: QueryClient) {
   const pending = useBuildUpdateStore((state) => state.pending);
   const [now, setNow] = useState(Date.now);
   const assistantBuild = document.querySelector('meta[name="nyxid-assistant-build-id"]')?.getAttribute("content");
-  const assistantChanged = !pending?.build.assistant || !assistantBuild || pending.build.assistant !== assistantBuild;
   const available = ready && import.meta.env.PROD && !!pending && pending.build.buildId !== __BUILD_ID__ && now - pending.detectedAt >= UPDATE_REMINDER_DELAY;
   const updatesRef = useRef<ReturnType<typeof startBuildUpdates> | null>(null);
   useEffect(() => {
@@ -109,5 +108,5 @@ export function useBuildUpdates(ready: boolean, queryClient: QueryClient) {
       document.removeEventListener("visibilitychange", trackVisibility);
     };
   }, [ready, queryClient, assistantBuild]);
-  return { available, assistantChanged, refresh: () => updatesRef.current?.apply() ?? Promise.resolve(false) };
+  return { buildId: pending?.build.buildId, available, refresh: () => updatesRef.current?.apply() ?? Promise.resolve(false) };
 }
