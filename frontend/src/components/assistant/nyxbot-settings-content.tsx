@@ -1,4 +1,5 @@
 import { AutomationPreferences } from "./automation-preferences";
+import { PlatformPersonalBindings } from "./platform-personal-bindings";
 import { useState } from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { AlertTriangle } from "lucide-react";
@@ -72,6 +73,7 @@ export function NyxBotSettingsContent() {
           <ChannelBotsSection />
         </div>
       </DetailSection>
+      <DetailSection title="Personal Telegram links"><div className="p-5"><PlatformPersonalBindings /></div></DetailSection>
     </section>
   );
 }
