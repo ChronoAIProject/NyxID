@@ -66,7 +66,7 @@ fn protocol(service: &DownstreamService) -> AppResult<PublicModelProtocol> {
         None => Err(denied()),
     }
 }
-fn require_service(
+pub(crate) fn require_model_catalog(
     service: &DownstreamService,
     context: &PublicExecutionContext,
     operation: &PublicModelOperation,
@@ -124,7 +124,7 @@ async fn fence_catalog(
         .session(&mut *session)
         .await?
         .ok_or_else(denied)?;
-    require_service(&service, context, operation)?;
+    require_model_catalog(&service, context, operation)?;
     db.collection::<DownstreamService>(SERVICES)
         .update_one(
             doc! {"_id":&service.id},
@@ -409,7 +409,7 @@ pub(crate) async fn dispatch_model(
         .find_one(doc! {"_id":service_id})
         .await?
         .ok_or_else(denied)?;
-    require_service(&service, context, &operation)?;
+    require_model_catalog(&service, context, &operation)?;
     // Shared live ACL precedes decryption, without owner connection resolution.
     let mut target = SecretTarget(
         proxy_service::resolve_catalog_platform_target(
@@ -910,7 +910,16 @@ mod tests {
     #[tokio::test]
     async fn outer_attempt_and_unknown_upstream_evidence_commit_together_and_never_replay() {
         let db = crate::test_utils::connect_transaction_test_database("public_outer_commit").await;
-        let (row, _, context) = super::super::platform_public_credential_service::tests::fixture();
+        let (mut row, _, context) =
+            super::super::platform_public_credential_service::tests::fixture();
+        row.active_turn = Some(crate::models::platform_public_session::PublicTurnBinding {
+            conversation_id: context.turn.conversation_id.clone(),
+            turn_id: context.turn.turn_id.clone(),
+            receipt_id: context.ingress.ingress.receipt_id.clone(),
+            claim_id: context.ingress.ingress.claim_id.clone(),
+            stop_requested: false,
+            expires_at: context.expires_at,
+        });
         db.collection::<PlatformPublicSession>(SESSIONS)
             .insert_one(&row)
             .await

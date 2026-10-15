@@ -96,6 +96,7 @@ pub(crate) async fn quote_operation(
         .find_one(doc! {"_id":&operation.service_id,"is_active":true})
         .await?
         .ok_or_else(denied)?;
+    super::platform_public_proxy_service::require_model_catalog(&service, context, operation)?;
     let metric = billing::metric_resolution::platform_metric_for_request(&service, false);
     let mut route = BillingRouteContext::new(
         billing::BillingIngress::Proxy,
