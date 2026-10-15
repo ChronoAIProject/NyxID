@@ -644,7 +644,7 @@ payload or, once, from the platform's chat lookup (Telegram `getChat`, Lark
 | --- | --- | --- |
 | `reply_mode` | `mention` (groups, channels) | Answer only when the bot is mentioned or a message replies to one of its messages; `all` answers every message. Private chats always answer. |
 | `members` | default: `everyone` once the owner has talked to the bot there, else `owner` (groups, channels) | Members other than the owner may talk to the agent as guests; `owner` answers only the owner; `default` returns to the default. A stranger who adds the bot to their own group gets nothing; a member who addresses it before the owner has talked there is told why, at most daily. |
-| `allow_posts` | off | The chat's agent may post there without being asked (`nyxid__post_to_chat`). |
+| `allow_posts` | off | The chat's agent may post there without being asked (`nyxid__post_to_chat`, text and, with `include_images`, its own turn's images). |
 | agent | the bot's agent | The chat reaches another agent; it starts a new thread with it, and relinking the bot leaves such chats alone. |
 
 Per bot, `private_chats` (`nyxid__update_channel_access`) is `owner` (default)
@@ -783,8 +783,23 @@ the gateway refused one (`gateway_groups_retry_at`).
 
 **Posting.** `nyxid__post_to_chat` sends through the bot's own route (NyxID's
 initiated-send path: rate limit, outbound record and audit) into a chat that
-allows posts: the chat's agent or NyxBot, never a guest turn. Posts go to the
-chat itself, not a topic.
+allows posts: the chat's agent or NyxBot, never a guest turn. Posts keep the
+thread's native topic (`NyxbotThread.platform_thread_id`, e.g. a Telegram forum
+topic or Slack root thread) for text and images. Optional `include_images`
+(default false; `nyxbot_chats::post_current_turn`) also sends the calling
+turn's own tool images (trusted `TurnAttachment` metadata of the exact live
+turn, `chat_tool_image` only, deduplicated, at most 8) before the text: the
+limiter token is taken once with the text validation, each image rechecks the
+turn fence immediately before dispatch and takes a per-(image, audience)
+delivery claim (`services/channel_image_delivery.rs`, audience from
+`services/channel_image_audience.rs`), the text follows a final fence recheck,
+and nothing further is sent after Stop or replacement. Image metadata that is
+unavailable never blocks the final text: the text is still sent and the image
+counts as failed. The result reports `text: sent|failed|unknown|cancelled` and
+per-image counts (`sent_now`, `previously_delivered`, `failed`, `skipped`,
+`unknown`, `in_progress_or_unknown`, `cancelled`); its failure line covers only
+this call's attempts. Tool-image notes mention `include_images` when the turn's
+images would not otherwise reach a chat the agent posts to. Guests cannot post.
 
 **UI.** Under each agent, a bot's chats are one collapsed section (label,
 platform, count, a dot while one is working) that opens for the thread being

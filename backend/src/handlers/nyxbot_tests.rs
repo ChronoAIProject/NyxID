@@ -4917,6 +4917,8 @@ mod late_delivery_tests;
 
 #[path = "nyxbot_gateway_thread_tests.rs"]
 mod gateway_thread_tests;
+#[path = "nyxbot_gateway_topic_tests.rs"]
+mod gateway_topic_tests;
 
 /// Plan v7 §2.2 carriers: a watch stores the causing turn's report snapshot
 /// with validated provenance and wakes its thread with an event bound from

@@ -945,6 +945,88 @@ Each X DM image is a separately billed request using the ordinary channel
 billing context. A billing refusal suspends the channel through the existing
 path and skips the remaining images; X public replies do not support images.
 
+### Per-image delivery claims, audiences and topics (P15)
+
+Property P15: **one send per source image and resolved audience, for the
+image's whole lifetime, across every NyxBot path** (automatic replies on
+direct and gateway transports, followed threads, event and duplicate-question
+chats, chat-delivered automations and explicit `nyxid__post_to_chat
+include_images` posts). Uncertain or in-progress sends are never retried and
+never reported as delivered.
+
+**Claim (v2).** `nyxbot_image_deliveries` holds one document per (source
+image, audience): `_id = sha256("v2\0{owner}\0{attachment_id}\0{audience_key}")`
+plus plain `user_id`, `conversation_id`, `attachment_id`, `audience_key`,
+`state`, `attempt`, `code` and `created_at`, with cleanup indexes on
+`attachment_id` and `(user_id, conversation_id)` and **no TTL**
+(`services/channel_image_delivery.rs`, `models/nyxbot_image_delivery.rs`).
+States move `pending` -> `sending{attempt}` -> `sent | failed{code} |
+skipped{code} | unknown` through compare-and-set on the attempt token. Only the
+winner of the `pending -> sending` race dispatches; success is reported only
+after an acknowledged matching completion write, an ambiguous write settles
+locally as `unknown`, and a claim found `sending` reports
+`in_progress_or_unknown`. A later caller reports an existing claim's durable
+state (`previously_delivered`, the same failure or skip code, in progress or
+unknown) without resending and without repeating another path's failure line.
+Claims live as long as their source image: they are deleted in the same
+transactions that delete `assistant_attachments` (retention, conversation and
+group deletion, user purge), a sender that finds its source gone after claiming
+deletes the claim and reports `unavailable`, and a bounded orphan sweep on the
+assistant upload-retention cadence removes only claims whose source attachment
+no longer exists. Claims hold identifiers, states and codes only.
+
+**Audience.** The audience is the outbound target actually sent to, resolved
+by `services/channel_image_audience.rs` after the adapter's own normalization
+and fallback, and serialized as
+`"{channel_bot_id}\u{1f}{platform_chat_id}\u{1f}{native_thread_or_empty}"`
+with the real `ChannelBot.id` (never a gateway partition or `NyxbotChannel`
+id). Per adapter:
+
+| Platform | Chat | Audience boundary | Not a boundary |
+| --- | --- | --- | --- |
+| Telegram, telegram-new | chat id | forum topic `message_thread_id` (normalized to a decimal string) | reply chains (`reply_to_message_id`) |
+| Slack | channel id | a root thread (`thread_ts`, else the replied-to message, as the adapter posts it) is distinct from the top-level channel | — |
+| Discord | channel id (threads are channels) | — | — |
+| Lark, Feishu | chat id | — | thread replies share the chat audience |
+| WhatsApp | normalized `wa_id` digits | — | — |
+| X | DM conversation id | — | public replies carry no images |
+| Aurinko, device, OpenClaw and other adapters | chat id or no image delivery, per the adapter's declared capability | — | — |
+
+The Telegram and Slack adapters build their outbound `message_thread_id` /
+`thread_ts` from the same `native_thread` function the audience uses, so the
+key and the provider payload cannot drift. Telegram topic evidence is
+`is_topic_message: true` only (`telegram::topic_of`, shared by the relay
+parser and the follow-scope thread facts): Telegram also stamps replies in
+plain supergroups and in a forum's General topic with `message_thread_id`
+(the reply-chain root), and `chat.is_forum` alone proves nothing, so those
+stay chat-level. Gateway Activities carry no native payload; for Telegram
+channels NyxID keeps `conversation.thread_id` only when version 1
+`activity.thread` facts say `topic` (its decimal `native_thread_id`), or,
+without facts, when it is a positive integer sent for a forum topic under the
+gateway contract. Version 1 reply-chain facts make the message chat-level
+even if the gateway sent an id. NyxID validates Lark and Feishu facts only
+(`gateway::retain`); Telegram facts are the gateway's declaration.
+
+**Topics.** Agent-initiated posts (`nyxid__post_to_chat` and chat-delivered
+automation results) keep the thread's native topic
+(`NyxbotThread.platform_thread_id`: a Telegram forum topic or a Slack root
+thread) for text and images through the adapter's `reply_context`; a topic is
+therefore its own audience, and the parent chat is another.
+
+**Explicit posts and automations.** `include_images` (default false) sends the
+calling turn's own tool images (trusted `TurnAttachment` metadata of the exact
+live turn, `chat_tool_image` only, deduplicated, at most 8) before the text,
+each behind a turn-fence recheck and its claim; the text follows a final fence
+recheck and nothing further is sent after Stop or replacement. Multi-turn
+automation runs keep `TriggerRun.image_refs` (at most 16, oldest terminal
+evicted against the run's configured audience, else `image_refs_truncated`)
+and deliver first sends for refs whose claim is absent or `pending`, newest
+first and at most eight, reporting the other claim states without consuming
+that budget; an omitted-images line names the count. Unavailable image
+metadata never blocks the final text: the text is sent and the image counts as
+failed. The text/stream delivery barrier (`channel_turn_delivery.rs`) is
+separate and unchanged.
+
 ### ADR-013 metadata boundary
 
 Inbound `ChannelMessage.attachments` stores only `StoredAttachment { content_type, provider_ref, platform_message_id, file_key, image_key, filename, mime_type, size_bytes }`. Provider references are routing metadata needed to fetch an attachment; they are not its bytes. Old rows without the field deserialize as an empty list. The legacy cleanup retains new provider-reference metadata while removing historical content fields. Outbound rows store only the first attachment's `content_type` and an empty attachment list, never sources, bytes, captions or filenames. Audits contain only attachment kinds/count plus existing routing identifiers; idempotency rows store a fingerprint, never source content. No media is put in token claims and no new telemetry events are introduced.

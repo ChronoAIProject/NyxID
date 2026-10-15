@@ -339,6 +339,17 @@ pub(crate) fn image_note(
             }
         }
     };
+    if !guest
+        && matches!(
+            destination,
+            ImageNoteDestination::App
+                | ImageNoteDestination::Group { .. }
+                | ImageNoteDestination::AppViaTrigger
+                | ImageNoteDestination::Trigger { .. }
+        )
+    {
+        note.push_str(" If the owner asked you to post to a chat, use nyxid__post_to_chat with include_images:true to include this turn's tool images in that post.");
+    }
     note.push_str(TAIL);
     if guest && matches!(destination, ImageNoteDestination::Chat { .. }) {
         note.push_str(" This turn answers a chat member who is not the owner; the image goes only to that chat and never to anyone else.");
@@ -8049,6 +8060,16 @@ mod image_note_tests {
                     let note = image_note(&destination, guest, supported, 2);
                     assert!(!note.contains("Delivered"));
                     assert!(!note.contains("shown below"));
+                    assert_eq!(
+                        note.contains("include_images"),
+                        !guest
+                            && matches!(
+                                &destination,
+                                ImageNoteDestination::App
+                                    | ImageNoteDestination::Group { .. }
+                                    | ImageNoteDestination::AppViaTrigger
+                            )
+                    );
                     assert!(note.contains("do not describe its contents before you have seen it"));
                     match &destination {
                         ImageNoteDestination::Chat { platform, .. } => {

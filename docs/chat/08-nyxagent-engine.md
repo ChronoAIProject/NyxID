@@ -808,8 +808,36 @@ use one filter. For legacy metadata without this field, only the exact label
 `Machine screenshot` is excluded. This rolling-upgrade shim can be deleted one
 release after every replica runs this version. Web and group display is unchanged.
 
-Each destination has a durable `nyxbot_image_deliveries` claim with a seven-day
-TTL, fixed item states/codes and identifiers only. `sending`, `unknown` and
+Each (source image, audience) pair has one durable `nyxbot_image_deliveries`
+claim (v2, `models/nyxbot_image_delivery.rs`, sent through
+`services/channel_image_delivery.rs`): `_id = sha256("v2\0{owner}\0{attachment_id}\0{audience_key}")`
+with plain `user_id`, `conversation_id`, `attachment_id` and `audience_key`
+fields and cleanup indexes on `attachment_id` and `(user_id, conversation_id)`.
+The audience (`services/channel_image_audience.rs`) is the resolved outbound
+target actually sent to, after the adapter's own normalization and fallback,
+serialized as
+`"{channel_bot_id}\u{1f}{platform_chat_id}\u{1f}{native_thread_or_empty}"`
+(the real `ChannelBot.id`, never a gateway partition or `NyxbotChannel` id;
+Telegram forum topics and Slack root threads are audience boundaries, reply
+chains and Lark/Feishu thread replies are not; Discord threads are channels;
+WhatsApp uses `wa_id`, X the DM conversation id). Claims hold identifiers,
+fixed states and codes only and have no TTL: they live as long as their source
+image and are deleted in the same paths that delete `assistant_attachments`
+(retention, conversation and group deletion, user purge), plus a bounded
+orphan sweep on the assistant sweep cadence that removes only claims whose
+source attachment no longer exists; a sender that finds its source gone after
+claiming deletes the claim and reports `unavailable`. States move `pending` ->
+`sending{attempt}` -> `sent | failed{code} | skipped{code} | unknown` through
+compare-and-set on the attempt token: success is reported only after an
+acknowledged matching write, an ambiguous write settles locally as `unknown`
+and is never resent, and a claim found `sending` reports
+`in_progress_or_unknown`. Only the winner of the `pending -> sending` race
+dispatches; every other path (automatic replies, explicit `post_to_chat
+include_images`, automation results) reports the existing state
+(`previously_delivered`, the same failure or skip code, or in progress) without
+resending, so one source image reaches one audience once for its whole
+lifetime. Unavailable image metadata never blocks the final text: the text is
+still sent and the image is counted as failed. `sending`, `unknown` and
 completed claims are never retried. A transport failure or ambiguous receipt
 marks an image unknown and skips the rest; a definite refusal permits the next
 image, except a billing refusal stops the batch. Telegram group sends are spaced

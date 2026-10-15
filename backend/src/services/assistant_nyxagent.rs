@@ -2872,6 +2872,7 @@ async fn finish_turn_inner(
                         .session(&mut *session).await?;
                 }
                 let continuations = current.active_turn.as_ref().map_or(0, |t| t.continuations);
+                super::trigger_run_images::accumulate_in_session(&db, session, &current).await?;
                 let settled_turn = current.active_turn.take();
                 if error.as_ref().is_some_and(|e| !e.preserves_session()) || !credential_alive {
                     current.nyxagent_session_id = None;
@@ -3915,6 +3916,7 @@ pub async fn delete(
                         crate::models::assistant_voice_session::COLLECTION_NAME,
                         crate::models::assistant_acknowledgement::COLLECTION_NAME,
                         crate::models::assistant_attachment::COLLECTION_NAME,
+                        crate::models::nyxbot_image_delivery::COLLECTION_NAME,
                         crate::models::assistant_upload_retention::TOMBSTONES,
                         crate::models::assistant_agent_credential::COLLECTION_NAME,
                         MESSAGES,

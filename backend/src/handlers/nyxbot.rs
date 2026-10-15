@@ -3680,7 +3680,9 @@ async fn gateway_inbound(
     let conversation = &activity["conversation"];
     let kind = chats::chat_kind(conversation["kind"].as_str().unwrap_or("private"));
     let chat_id = conversation["id"].as_str().unwrap_or_default();
-    let thread_id = conversation["thread_id"].as_str();
+    let thread_id =
+        crate::services::channel_adapters::telegram::gateway_thread_id(&row.platform, activity);
+    let thread_id = thread_id.as_deref();
     if crate::services::channel_thread_service::gateway::candidate(row, activity)
         && let Some(result) = Box::pin(thread_follow::gateway_inbound(
             state, row, activity, text, event_key,
@@ -3897,7 +3899,6 @@ pub async fn deliver_to(
         if let Some(plan) = images
             && let Some(turn) = row.active_turn.as_ref()
         {
-            let claim_key = format!("chat:{}", thread.id);
             let report = images::report_or_failure(
                 state,
                 images::ImageSendContext {
@@ -3914,8 +3915,9 @@ pub async fn deliver_to(
                                     && thread.owner_chat)),
                     },
                     deadline: None,
-                    claim_key: &claim_key,
+
                     initiated: None,
+                    fence: None,
                 },
                 plan,
             )

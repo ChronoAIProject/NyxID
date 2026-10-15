@@ -371,6 +371,26 @@ owner-private chat mentions the automation's thread in the NyxID app. Failed
 runs and confirmation notices send text only. Thread results retain their web
 attachments; notification delivery remains text-only.
 
+A run that spans several turns (the initial turn plus confirmation-resumed or
+async-result continuations, identified by the turn's `trigger_run_id`) keeps
+`TriggerRun.image_refs` (`RunImageRef { conversation_id, turn_id, attachment }`
+trusted metadata snapshots, `chat_tool_image` only, deduplicated by attachment
+id, bounded to 16; `services/trigger_run_images.rs`), appended from the fenced
+settlement snapshot in each run turn's settlement transaction. When full, the oldest ref whose delivery claim for the
+run's configured audience is terminal (`sent`, `failed`, `skipped`, `unknown`)
+is evicted; if none is, the newest ref is not added and the run records
+`image_refs_truncated += 1`. Chat delivery verifies each ref's run membership
+and source tuple, loads bytes per tuple with the existing loader, attempts
+first sends only for refs whose claim is absent or `pending` (newest first, up
+to 8, through the shared compare-and-set claim), reports existing claim states
+without consuming that budget, and appends "N additional images were omitted
+from this delivery. Check the automation's thread in the app; older images may
+have expired." when truncated or over budget. A ref whose metadata or source
+is unavailable never blocks the result text: the text is still delivered and
+the image is counted as failed. The single result-attempt claim and the
+error/Stop semantics are unchanged. Screenshots and images of an unrelated
+owner turn in the same home thread never enter a run.
+
 Final delivery is claimed once. If a replica dies around a remote send, recovery
 reports `result_delivery_interrupted` rather than duplicating an ambiguous send.
 Schedule-to-webhook delivery retains the existing signed delivery record and

@@ -354,6 +354,24 @@ pub async fn delete(db: &Database, owner: &str, id: &str) -> AppResult<()> {
         .delete_one(owner_filter(owner, id)?)
         .session(&mut session)
         .await?;
+    let mut attachment_cursor = db
+        .collection::<bson::Document>(crate::models::assistant_attachment::COLLECTION_NAME)
+        .find(doc! {"group_id": id, "user_id": owner})
+        .projection(doc! {"_id": 1})
+        .session(&mut session)
+        .await?;
+    let attachment_rows: Vec<bson::Document> =
+        attachment_cursor.stream(&mut session).try_collect().await?;
+    let attachment_ids: Vec<String> = attachment_rows
+        .iter()
+        .filter_map(|row| row.get_str("_id").ok().map(str::to_owned))
+        .collect();
+    if !attachment_ids.is_empty() {
+        db.collection::<bson::Document>(crate::models::nyxbot_image_delivery::COLLECTION_NAME)
+            .delete_many(doc! {"attachment_id": {"$in": &attachment_ids}, "user_id": owner})
+            .session(&mut session)
+            .await?;
+    }
     db.collection::<bson::Document>(crate::models::assistant_attachment::COLLECTION_NAME)
         .delete_many(doc! {"group_id": id, "user_id": owner})
         .session(&mut session)

@@ -56,11 +56,8 @@ pub(super) fn telegram(message: &InboundMessage, bot: &ChannelBot) -> Option<Cha
         .get("message")
         .or_else(|| raw.get("edited_message"))
         .or_else(|| raw.get("channel_post"))?;
-    // message_thread_id can also appear on non-forum reply threads. Only
-    // positive forum evidence makes the follow scope an entire topic.
-    let topic = (native["is_topic_message"] == true || native["chat"]["is_forum"] == true)
-        .then(|| numeric_id(&native["message_thread_id"]))
-        .flatten();
+    // See `telegram::topic_of`.
+    let topic = super::telegram::topic_of(native);
     let mut facts = base(
         message,
         if topic.is_some() {
@@ -456,4 +453,97 @@ pub(super) fn aurinko(message: &InboundMessage) -> Option<ChannelThreadFacts> {
         ThreadAddress::NotAddressed
     };
     Some(facts)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn bot() -> ChannelBot {
+        let now = bson::DateTime::now();
+        bson::from_document(bson::doc! {
+            "_id": "bot", "user_id": "owner", "platform": "telegram", "label": "Home bot",
+            "bot_token_encrypted": bson::Binary { subtype: bson::spec::BinarySubtype::Generic, bytes: vec![1] },
+            "platform_bot_id": "100", "platform_bot_username": "home_bot",
+            "webhook_registered": true, "webhook_secret_hash": "hash", "status": "active",
+            "is_active": true, "created_at": now, "updated_at": now,
+        })
+        .unwrap()
+    }
+
+    fn inbound(native: Value) -> InboundMessage {
+        InboundMessage {
+            platform_message_id: native["message_id"].to_string(),
+            conversation_id: "-100999".into(),
+            conversation_type: "group".into(),
+            sender_platform_id: "111".into(),
+            sender_display_name: None,
+            content_type: "text".into(),
+            text: Some("hi".into()),
+            attachments: vec![],
+            reply_to_platform_message_id: native["reply_to_message"]["message_id"]
+                .as_i64()
+                .map(|id| id.to_string()),
+            thread_id: None,
+            raw_data: json!({ "update_id": 1, "message": native }),
+        }
+    }
+
+    fn reply(topic: bool, forum: bool) -> Value {
+        let mut native = json!({
+            "message_id": 91, "message_thread_id": 16,
+            "from": { "id": 111, "is_bot": false, "first_name": "Thread" },
+            "chat": { "id": -100999, "type": "supergroup" },
+            "date": 1700000050, "text": "Reply",
+            "reply_to_message": { "message_id": 16, "from": { "id": 222, "is_bot": false }, "date": 1700000040, "text": "Root" }
+        });
+        if topic {
+            native["is_topic_message"] = json!(true);
+        }
+        if forum {
+            native["chat"]["is_forum"] = json!(true);
+        }
+        native
+    }
+
+    #[test]
+    fn telegram_follow_scope_is_a_topic_only_for_messages_telegram_flags_as_topic() {
+        let bot = bot();
+        let topic = telegram(&inbound(reply(true, true)), &bot).unwrap();
+        assert_eq!(topic.kind, ThreadKind::Topic);
+        assert_eq!(topic.native_thread_id.as_deref(), Some("16"));
+        assert_eq!(topic.root_id.as_deref(), Some("16"));
+        // A reply chain in a plain supergroup and one inside a forum's
+        // General topic carry the same field: neither is a topic.
+        for forum in [false, true] {
+            let chain = telegram(&inbound(reply(false, forum)), &bot).unwrap();
+            assert_eq!(chain.kind, ThreadKind::ReplyChain, "forum flag {forum}");
+            assert_eq!(chain.native_thread_id, None);
+            assert_eq!(chain.parent_message_id.as_deref(), Some("16"));
+            assert!(
+                chain.root_id.is_none(),
+                "an immediate parent is not a proven root"
+            );
+        }
+        // Only the literal boolean counts, and only with a positive id.
+        let mut falsy = reply(false, true);
+        falsy["is_topic_message"] = json!("true");
+        assert_eq!(
+            telegram(&inbound(falsy), &bot).unwrap().kind,
+            ThreadKind::ReplyChain
+        );
+        let mut zero = reply(true, true);
+        zero["message_thread_id"] = json!(0);
+        assert_eq!(
+            telegram(&inbound(zero), &bot).unwrap().kind,
+            ThreadKind::ReplyChain
+        );
+        let mut no_id = reply(true, true);
+        no_id.as_object_mut().unwrap().remove("message_thread_id");
+        assert_eq!(
+            telegram(&inbound(no_id), &bot).unwrap().kind,
+            ThreadKind::ReplyChain
+        );
+    }
 }

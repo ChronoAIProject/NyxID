@@ -2517,15 +2517,23 @@ async fn dispatch_channels(
         "post_to_chat" => {
             // NyxBot posts to any of the owner's chats; a specialist only to
             // chats it answers.
-            let agent = (!chat.is_orchestrator()).then_some(chat.agent_id.as_str());
+            let include_images = match args.get("include_images") {
+                None => false,
+                Some(Value::Bool(value)) => *value,
+                Some(_) => {
+                    return Err(AppError::ValidationError(
+                        "include_images must be a boolean".into(),
+                    ));
+                }
+            };
             // Boxed: the platform send is a large future.
             (
-                Box::pin(super::nyxbot::chats::post(
+                Box::pin(super::nyxbot::chats::post_current_turn(
                     state,
-                    owner,
+                    chat,
                     text_arg(args, "chat_id"),
                     text_arg(args, "text"),
-                    agent,
+                    include_images,
                 ))
                 .await?,
                 false,

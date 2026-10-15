@@ -402,7 +402,12 @@ pub fn schema(name: &str) -> Value {
                     "description": "A chat id from nyxid__list_channel_chats (or the chat \
                     id NyxID named in your instructions)"},
                 "text": {"type": "string", "minLength": 1, "maxLength": 4000,
-                    "description": "The message to post, as plain text"}}),
+                    "description": "The message to post, as plain text"},
+                "include_images": {"type": "boolean", "default": false,
+                    "description": "Also send the tool images of this turn only (verified \
+                    images your tools returned during the current turn, at most eight), \
+                    before the text. Each image reaches a chat once: images already \
+                    delivered there are reported, not resent. Default false."}}),
             vec!["chat_id", "text"],
         ),
         "list_channel_chats" => (
@@ -749,7 +754,10 @@ pub(crate) fn description(name: &str) -> &'static str {
         "post_to_chat" => {
             "Post a message into a chat your channel bot is in, without being asked there \
             (e.g. a scheduled update). Works only in chats you answer (NyxBot: any of the \
-            user's chats) whose posting is allowed; only when the user asked for it."
+            user's chats) whose posting is allowed; only when the user asked for it. Set \
+            include_images to true to send this turn's tool images (current turn only, at \
+            most eight) before the text; the result reports per image whether it was sent \
+            now, already delivered to that chat, skipped or failed."
         }
         "list_channel_chats" => {
             "List the chats the user's channel bots are in: each private chat, group, channel \
