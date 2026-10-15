@@ -6,17 +6,24 @@ different evidence states. Record the tested commit and actual commands/results
 before changing any row to verified. Mocked upstream calls cannot satisfy A13
 or the external portion of A1/A15.
 
-Current checkpoint: identity, personal execution/settlement/Stop, ingress and
-frontend slices are integrated through `243d0d5e5`. Telegram transport/route
-assembly and account lifecycle recovery remain in progress. Public execution
-remains unavailable; its real runtime, FAQ tools and full-loop budget enforcement
-are incomplete. Personal event wakes and delayed-result delivery also remain.
+Current checkpoint: identity, personal execution/settlement/Stop, ingress,
+Telegram transport, account lifecycle recovery and frontend slices are integrated
+through `c88400b6f` on [draft PR #1901](https://github.com/ChronoAIProject/NyxID/pull/1901).
+Seven integrated journey/regression tests are written, including real local
+consent and personal execution against mocked upstream/Telegram HTTP. They have
+not yet compiled or run. Public execution remains unavailable; its real runtime,
+FAQ tools and full-loop budget enforcement are incomplete. Personal event wakes,
+after-turn continuation and original delayed-result delivery also remain.
 
-The third production-bin Clippy run reached lint checking and failed with 214
-diagnostics: predominantly unused paths awaiting assembly, plus 16 Clippy
-findings. Earlier import/async-lifetime fixes are integrated. This is not a
-passing build. Test-target type checking is now running; no backend feature
-runtime test or full acceptance gate has passed.
+The first CI run, on `69e7ffba8`, failed backend compilation on three legacy
+webhook fixture calls missing the new optional producer argument and four
+transaction callback `Send` diagnostics. The callback corrections are integrated
+in `544b6f25e`; compiler verification and fixture fixes are in progress. Its
+frontend run passed 5,611 tests but failed an existing settings test because the
+new Telegram section adds another Retry button. Frontend and wizard freshness
+fixes are assigned to their owner. Main advanced to `828009878`, producing merge
+conflicts that the primary is resolving before the next CI run. No backend
+feature runtime test or full acceptance gate has passed.
 
 Frontend worker checkpoint `8ac676907`, integrated as `678409e8b`, passed 187
 tests across 12 files, focused ESLint, TypeScript checking, production and
@@ -27,6 +34,12 @@ history after unlink; and a fresh review after ten-minute challenge expiry.
 Command: `node_modules/.bin/playwright test --config
 playwright.platform-personal.config.ts` from `frontend`. These results support
 A3/A5/A11/A16/A17 but do not prove integrated backend or live Telegram behavior.
+
+The primary's full frontend run passed 5,611 tests and timed out once in the
+unchanged `platform-anonymous-adoption.test.tsx` file under host load. That file
+then passed both tests unchanged in isolation. Full ESLint passed; workspace
+formatting passed at `98a360c87`. The full run is recorded as a timeout followed
+by a successful focused retry, not as an uninterrupted full-suite pass.
 
 | Gate | Owners | Required evidence | Status |
 | --- | --- | --- | --- |
