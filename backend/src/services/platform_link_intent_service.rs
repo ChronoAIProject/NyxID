@@ -476,6 +476,10 @@ pub async fn deny(db: &Database, actor: &str, challenge_id: &str) -> AppResult<(
     }).await.map_err(map_transaction_error)
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Frozen transaction seam carries independent proof and lifecycle authorities"
+)]
 pub async fn confirm_in_session(
     db: &Database,
     session: &mut ClientSession,

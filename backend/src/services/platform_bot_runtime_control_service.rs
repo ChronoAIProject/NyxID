@@ -339,22 +339,19 @@ pub async fn update(
             if policy_digest_fields(&rebuilt)!=policy_digest_fields(&proposed) {return Err(changed());}
             proposed.effect_revision=rebuilt.effect_revision;
             proposed.updated_at=Utc::now();
-            if proposed.personal_enabled || proposed.public_enabled {
-                if db.collection::<Document>(crate::models::platform_credential::COLLECTION_NAME).update_one(doc! {"provider":"telegram-new","fields.manager_bot_id":&live.manager_bot_id,"fields.webhook_ready":"true"},doc! {"$inc":{"runtime_configuration_revision":1_i64}}).session(&mut *session).await?.matched_count!=1 {return Err(changed());}
-            }
-            if proposed.personal_enabled || proposed.public_enabled {
-                if db.collection::<Document>(crate::models::channel_bot::COLLECTION_NAME).update_one(doc! {"_id":&live.channel_bot_id,"platform_profile_id":&profile_id,"platform_bot_id":&live.manager_bot_id,"is_active":true},doc! {"$inc":{"runtime_configuration_revision":1_i64}}).session(&mut *session).await?.matched_count!=1 {return Err(changed());}
-            }
+            if (proposed.personal_enabled || proposed.public_enabled)
+                && db.collection::<Document>(crate::models::platform_credential::COLLECTION_NAME).update_one(doc! {"provider":"telegram-new","fields.manager_bot_id":&live.manager_bot_id,"fields.webhook_ready":"true"},doc! {"$inc":{"runtime_configuration_revision":1_i64}}).session(&mut *session).await?.matched_count!=1 {return Err(changed());}
+            if (proposed.personal_enabled || proposed.public_enabled)
+                && db.collection::<Document>(crate::models::channel_bot::COLLECTION_NAME).update_one(doc! {"_id":&live.channel_bot_id,"platform_profile_id":&profile_id,"platform_bot_id":&live.manager_bot_id,"is_active":true},doc! {"$inc":{"runtime_configuration_revision":1_i64}}).session(&mut *session).await?.matched_count!=1 {return Err(changed());}
             if proposed.public_enabled && public_changed {
                 let sponsor=proposed.public_policy.as_ref().ok_or_else(changed)?;
                 if db.collection::<Document>(crate::models::user::COLLECTION_NAME).update_one(doc! {"_id":&sponsor.sponsor_owner_user_id,"is_active":true,"user_type":"org"},doc! {"$inc":{"runtime_funding_revision":1_i64}}).session(&mut *session).await?.matched_count!=1 {return Err(changed());}
                 if db.collection::<Document>(crate::models::org_membership::COLLECTION_NAME).update_one(doc! {"org_user_id":&sponsor.sponsor_owner_user_id,"member_user_id":&actor.user_id,"role":"admin","revoked_at":bson::Bson::Null},doc! {"$inc":{"runtime_funding_revision":1_i64}}).session(&mut *session).await?.matched_count!=1 {return Err(changed());}
                 if let Some(evidence)=&evidence {readiness.fence(&db,session,&policy(&proposed),evidence).await?;} else if needs_probe {return Err(changed());}
             }
-            if let Some(old)=&current {
-                if old.public_enabled && (!proposed.public_enabled || old.public_policy!=proposed.public_policy) {
-                    readiness.revoke_public_manager(&db,session,&policy(old)).await?;
-                }
+            if let Some(old)=&current
+                && old.public_enabled && (!proposed.public_enabled || old.public_policy!=proposed.public_policy) {
+                readiness.revoke_public_manager(&db,session,&policy(old)).await?;
             }
             if current.is_some() {db.collection::<PlatformBotRuntimeControls>(COLLECTION_NAME).replace_one(doc! {"platform_config_id":&profile_id},&proposed).session(&mut *session).await?;}else{db.collection::<PlatformBotRuntimeControls>(COLLECTION_NAME).insert_one(&proposed).session(&mut *session).await?;}
             super::audit_service::log_actor_event_in_session(&db,session,&key,&actor,"platform_manager_runtime_changed",serde_json::json!({"profile_id":profile_id,"epoch":proposed.manager_authority_epoch,"personal_revision":proposed.personal_control_revision,"public_revision":proposed.public_policy_revision,"personal_enabled":proposed.personal_enabled,"public_enabled":proposed.public_enabled})).await?;
@@ -400,6 +397,10 @@ pub async fn emergency_stop_in_session(
     Ok(())
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Frozen transaction seam binds actor, audit and all expected runtime revisions"
+)]
 pub async fn clear_emergency_stop_in_session(
     db: &Database,
     session: &mut ClientSession,

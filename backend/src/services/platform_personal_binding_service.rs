@@ -20,8 +20,8 @@ use mongodb::{
 pub enum ResolvedPersonalSender {
     Unlinked,
     Personal {
-        binding: PlatformPersonalBinding,
-        controls: PlatformBotRuntimeControls,
+        binding: Box<PlatformPersonalBinding>,
+        controls: Box<PlatformBotRuntimeControls>,
     },
     Unavailable(super::platform_manager_contract::UnavailableReason),
 }
@@ -185,7 +185,10 @@ pub async fn resolve_sender_in_session(
     {
         return Err(conflict());
     }
-    Ok(ResolvedPersonalSender::Personal { binding, controls })
+    Ok(ResolvedPersonalSender::Personal {
+        binding: Box::new(binding),
+        controls: Box::new(controls),
+    })
 }
 
 /// Checks a captured consent snapshot without consulting guide/public policy.
@@ -366,13 +369,13 @@ pub async fn revoke_binding_in_session(
     if current.state == PersonalBindingState::Revoked {
         return Ok(false);
     }
-    if let Some(active) = &current.active_turn {
-        if let Some(captured) = effects.capture_stop(db, session, active).await? {
-            if captured.active_turn != *active {
-                return Err(AppError::Internal("Exact Stop capture mismatch".into()));
-            }
-            enqueue_stop_in_session(db, session, &captured).await?;
+    if let Some(active) = &current.active_turn
+        && let Some(captured) = effects.capture_stop(db, session, active).await?
+    {
+        if captured.active_turn != *active {
+            return Err(AppError::Internal("Exact Stop capture mismatch".into()));
         }
+        enqueue_stop_in_session(db, session, &captured).await?;
     }
     db.collection::<PlatformPersonalBinding>(COLLECTION_NAME).update_one(doc! {"_id":&current.id,"generation":current.generation,"state":"active"},doc! {"$set":{"state":"revoked","revocation_reason":bson::to_bson(&reason).map_err(|_|conflict())?,"revoked_at":bson::DateTime::now(),"updated_at":bson::DateTime::now()},"$inc":{"effect_revision":1_i64}}).session(&mut *session).await?;
     cancel_sender_proofs_in_session(db, session, &current, except_intent).await?;
@@ -1447,7 +1450,7 @@ impl super::platform_manager_contract::ManagerLifecycleProducer for LifecyclePro
                                 return Ok(());
                             };
                             let next = stop_manager_batch_in_session(
-                                &db,
+                                db,
                                 session,
                                 &current.platform_config_id,
                                 None,
@@ -1471,7 +1474,7 @@ impl super::platform_manager_contract::ManagerLifecycleProducer for LifecyclePro
                                 lifecycle
                                     .public
                                     .revoke_public_sessions_in_session(
-                                        &db,
+                                        db,
                                         session,
                                         &PublicRevocationScope::Manager { manager },
                                         PublicRevocationReason::ManagerRetired,
@@ -1553,9 +1556,7 @@ impl super::platform_manager_contract::ManagerLifecycleProducer for LifecyclePro
             processed += 1;
             // Provider failure is left durably retryable, and stops this bounded
             // pass so a broken node/provider does not cause a tight retry loop.
-            if let Err(error) = outcome {
-                return Err(error);
-            }
+            outcome?;
         }
         let has_more = db
             .collection::<Document>(STOP_EFFECTS)

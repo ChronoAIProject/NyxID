@@ -6,7 +6,7 @@ use crate::crypto::password;
 use crate::errors::{AppError, AppResult};
 use crate::models::session::{COLLECTION_NAME as SESSIONS, Session};
 use crate::models::user::{COLLECTION_NAME as USERS, PlatformRole, User};
-use crate::services::{api_key_mutation_service as key_mutations, role_service};
+use crate::services::role_service;
 
 /// Maximum password length to prevent Argon2 DoS via extremely long passwords.
 const MAX_PASSWORD_LENGTH: usize = 128;
@@ -371,17 +371,17 @@ pub async fn set_user_active(
         ));
     }
 
-    let _target = db
+    let target = db
         .collection::<User>(USERS)
         .find_one(doc! { "_id": target_user_id })
         .await?
         .ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
 
-    if is_active && !_target.is_active {
+    if is_active && !target.is_active {
         super::platform_personal_owner_lifecycle::retire(db, target_user_id, false).await?;
     }
     let now = Utc::now();
-    let mut filter = doc! { "_id": target_user_id, "is_active": _target.is_active };
+    let mut filter = doc! { "_id": target_user_id, "is_active": target.is_active };
     if is_active {
         filter.insert("platform_personal_retirement_pending", doc! {"$ne": true});
         filter.insert("platform_personal_deleting", doc! {"$ne": true});
@@ -392,7 +392,10 @@ pub async fn set_user_active(
     }
     if db
         .collection::<User>(USERS)
-        .update_one(filter, doc! {"$set": fields})
+        .update_one(
+            filter,
+            doc! {"$set": fields, "$inc": {"platform_personal_effect_revision": 1_i64}},
+        )
         .await?
         .matched_count
         != 1
@@ -402,20 +405,8 @@ pub async fn set_user_active(
         ));
     }
 
-    // Revoke all sessions and deactivate API keys when disabling a user
     if !is_active {
         super::platform_personal_owner_lifecycle::retire(db, target_user_id, false).await?;
-        revoke_all_user_sessions(db, target_user_id).await?;
-
-        key_mutations::update_many(
-            db,
-            doc! { "user_id": target_user_id, "is_active": true },
-            doc! { "$set": { "is_active": false } },
-            None,
-        )
-        .await?;
-        super::assistant_agent_credential_service::invalidate_for_owner(db, target_user_id).await?;
-        super::platform_setup_service::retire_owner(db, target_user_id, false).await?;
     }
 
     Ok(())
@@ -520,7 +511,8 @@ async fn delete_user_cascade_internal(
 
     // Phase 1: mark user inactive so they cannot authenticate during cleanup
     let now = Utc::now();
-    db.collection::<User>(USERS)
+    if db
+        .collection::<User>(USERS)
         .update_one(
             doc! { "_id": target_user_id },
             doc! { "$set": {
@@ -528,12 +520,16 @@ async fn delete_user_cascade_internal(
                 "platform_personal_retirement_pending": true,
                 "platform_personal_deleting": true,
                 "updated_at": bson::DateTime::from_chrono(now),
-            }},
+            }, "$inc": {"platform_personal_effect_revision": 1_i64}},
         )
-        .await?;
+        .await?
+        .matched_count
+        != 1
+    {
+        return Err(AppError::NotFound("User not found".into()));
+    }
 
     super::platform_personal_owner_lifecycle::retire(db, target_user_id, true).await?;
-    super::platform_setup_service::retire_owner(db, target_user_id, true).await?;
 
     // Org bots the user linked to their NyxBot keep an org-owned route and
     // route key; remove them so the org's bot is free for its admins.
@@ -650,7 +646,9 @@ async fn delete_user_cascade_internal(
     // Phase 3: delete the user document itself
     let user_delete_result = db
         .collection::<User>(USERS)
-        .delete_one(doc! { "_id": target_user_id })
+        .delete_one(doc! { "_id": target_user_id, "is_active": false,
+        "platform_personal_deleting": true,
+        "platform_personal_retirement_pending": {"$ne": true} })
         .await?;
 
     if user_delete_result.deleted_count != 1 {
