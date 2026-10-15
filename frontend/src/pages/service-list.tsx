@@ -1,5 +1,8 @@
+import { useAuthStore } from "@/stores/auth-store";
+import { canManageCatalog, canAdminWrite } from "@/types/api";
 import { useState } from "react";
 import { useServices, useDeleteService } from "@/hooks/use-services";
+import { useProviders } from "@/hooks/use-providers";
 import { CreateServiceDialog } from "@/components/services/create-service-dialog";
 import { ServiceCard } from "@/components/dashboard/service-card";
 import { PageHeader } from "@/components/shared/page-header";
@@ -9,7 +12,12 @@ import { BrickWallIcon } from "@/components/icons/empty-state";
 import { toast } from "sonner";
 
 export function ServiceListPage() {
+  const user = useAuthStore((state) => state.user);
   const { data: services, isLoading } = useServices();
+  const { data: providers } = useProviders();
+  const providerIcons = new Map(
+    providers?.map((provider) => [provider.id, provider.icon_url]),
+  );
   const deleteMutation = useDeleteService();
   const [createOpen, setCreateOpen] = useState(false);
   const [deletingId, setDeletingId] = useState<string | null>(null);
@@ -32,7 +40,12 @@ export function ServiceListPage() {
         title="Services"
         description="Manage downstream services and their authentication."
         actions={
-          <AddCtaButton label="Create Service" onClick={() => setCreateOpen(true)} />
+          canManageCatalog(user) && (
+            <AddCtaButton
+              label="Create Service"
+              onClick={() => setCreateOpen(true)}
+            />
+          )
         }
       />
 
@@ -48,7 +61,9 @@ export function ServiceListPage() {
         <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
           <BrickWallIcon className="h-64 w-64 text-muted-foreground" />
           <div className="space-y-1">
-            <p className="text-12 font-medium text-muted-foreground">No services yet</p>
+            <p className="text-12 font-medium text-muted-foreground">
+              No services yet
+            </p>
             <p className="text-xs text-muted-foreground">
               Add a service to get started.
             </p>
@@ -60,7 +75,8 @@ export function ServiceListPage() {
             <ServiceCard
               key={service.id}
               service={service}
-              onDelete={handleDelete}
+              providerIconUrl={providerIcons.get(service.provider_config_id ?? "")}
+              onDelete={canAdminWrite(user) ? handleDelete : undefined}
               isDeleting={deletingId === service.id}
             />
           ))}

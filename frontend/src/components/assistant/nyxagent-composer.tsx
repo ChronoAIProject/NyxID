@@ -1,16 +1,25 @@
 import { useRef, useState, type ComponentProps } from "react";
 import { useQuery } from "@tanstack/react-query";
+import { toast } from "sonner";
 import { UploadComposer } from "./upload-composer";
 import { Button } from "@/components/ui/button";
 import { ApiError } from "@/lib/api-client";
 import { nyxAgentTransport } from "@/lib/assistant/nyxagent-transport";
 import { steeringNotice } from "@/lib/assistant/nyxagent-steering";
-import type { NyxAgentConversation } from "@/schemas/assistant-nyxagent";
+import { nyxBotApi } from "@/lib/assistant/nyxbot-api";
+import { ComposerSettings } from "./composer-settings";
+import type { NyxAgentAccessMode, NyxAgentConversation } from "@/schemas/assistant-nyxagent";
 
-type Props = ComponentProps<typeof UploadComposer> & { readonly conversation?: NyxAgentConversation };
+type UploadProps = ComponentProps<typeof UploadComposer>;
+type Props = Omit<UploadProps, "onSend"> & {
+  readonly conversation?: NyxAgentConversation;
+  readonly agentOverride?: NyxAgentAccessMode | null;
+  readonly onSend: (...args: [...Parameters<UploadProps["onSend"]>, model?: string]) => Promise<void>;
+};
 
 /** Key by person + thread: pending guidance must never move with navigation. */
-export function NyxAgentComposer({ conversation, ...props }: Props) {
+export function NyxAgentComposer({ conversation, agentOverride, ...props }: Props) {
+  const [draftModel, setDraftModel] = useState<string>();
   const capabilities = useQuery({
     queryKey: ["nyxagent-steer-capabilities", props.ownerUserId, conversation?.id],
     queryFn: () => nyxAgentTransport.capabilities(conversation!.id),
@@ -26,6 +35,18 @@ export function NyxAgentComposer({ conversation, ...props }: Props) {
   const canSteer = Boolean(props.active && capabilities.data?.steer && turn?.steering_allowed && !turn.stop_requested);
 
   return <UploadComposer {...props}
+    footerControls={<ComposerSettings
+      conversationId={conversation?.id}
+      model={conversation?.model ?? draftModel ?? "nyxagent/chat"}
+      onDraftModelChange={setDraftModel}
+      agentOverride={agentOverride}
+      active={props.active || props.sending || submitting}
+      disabled={props.disabled}
+    />}
+    onVoice={props.onVoice ? async (id) => {
+      if (!conversation && draftModel) await nyxBotApi.changeModel(id, draftModel);
+      await props.onVoice!(id);
+    } : undefined}
     allowActiveInput={canSteer}
     sending={submitting || (props.sending && !canSteer)}
     activePlaceholder="Guide this running reply…"
@@ -43,7 +64,25 @@ export function NyxAgentComposer({ conversation, ...props }: Props) {
         }}>Send as new message</Button>}
     </div>}</>}
     onSend={async (text, uploads) => {
-      if (!props.active) { setNotice(undefined); return props.onSend(text, uploads); }
+      if (!props.active) {
+        setNotice(undefined);
+        // Uploads already created a persisted draft; apply its selection before admission.
+        if (!conversation && uploads?.conversationId && draftModel) {
+          if (busy.current) throw new Error("Wait for the current request.");
+          busy.current = true;
+          setSubmitting(true);
+          try {
+            await nyxBotApi.changeModel(uploads.conversationId, draftModel);
+          } catch (error) {
+            toast.error(error instanceof Error ? error.message : "Could not change the model.");
+            throw error;
+          } finally {
+            busy.current = false;
+            setSubmitting(false);
+          }
+        }
+        return props.onSend(text, uploads, draftModel);
+      }
       if (!canSteer || !conversation || !turn || busy.current) throw new Error("Wait for the current request.");
       if (uploads?.attachmentIds.length || [...text].length > (capabilities.data?.steer?.max_chars ?? 32_000)) {
         setNotice({ code: "invalid_request" }); throw new Error("Guidance must be bounded text only.");

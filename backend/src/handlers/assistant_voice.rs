@@ -315,6 +315,7 @@ pub(crate) async fn sweep(state: &AppState) -> AppResult<()> {
                 "turn_id":&request.turn_id,"execution_pending":true,
             }).await?.ok_or_else(|| AppError::NotFound("Voice input unavailable".into()))?;
             let mut start = engine::TurnStart::from(&engine::TurnRequest {
+            acknowledgement_id: None,
             retry_of: None,
                 conversation_id:Some(request.task_conversation_id.clone().ok_or_else(|| AppError::Conflict("Voice task thread unavailable".into()))?),text:message.text,
                 model:None,agent_id:None,attachment_ids:Vec::new(),access_mode:None,

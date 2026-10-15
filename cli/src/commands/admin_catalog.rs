@@ -11,7 +11,9 @@ use anyhow::{Context, Result, anyhow, bail};
 use comfy_table::{Table, presets::UTF8_FULL_CONDENSED};
 use serde::Serialize;
 use serde_json::{Map, Value, json};
+use zeroize::Zeroizing;
 
+use super::admin_catalog_playbook as playbook;
 use crate::api::ApiClient;
 use crate::cli::{AdminCatalogCommands, AdminProviderCommands, AuthArgs, OutputFormat};
 
@@ -26,6 +28,22 @@ const PROVIDER_SECRET_FIELDS: &[&str] = &["client_id", "client_secret", "clear_c
 
 /// Service fields the update route cannot change.
 const SERVICE_CREATE_ONLY: &[&str] = &["service_type", "auth_method", "auth_key_name"];
+
+/// UUID references select exactly that identity. Slugs must be unambiguous even
+/// when inactive rows are present; inventory order never decides a write target.
+pub(crate) fn unambiguous_row<'a>(rows: &'a [Value], reference: &str) -> Result<Option<&'a Value>> {
+    let explicit_id = uuid::Uuid::parse_str(reference).is_ok();
+    let mut matches = rows
+        .iter()
+        .filter(|row| row["id"] == reference || (!explicit_id && row["slug"] == reference));
+    let first = matches.next();
+    if matches.next().is_some() {
+        bail!(
+            "Ambiguous existing catalog identity; use an explicit UUID or resolve duplicate slugs"
+        );
+    }
+    Ok(first)
+}
 
 pub async fn run_provider(command: AdminProviderCommands) -> Result<()> {
     match command {
@@ -68,7 +86,7 @@ pub async fn run_provider(command: AdminProviderCommands) -> Result<()> {
             auth,
         } => {
             let wizard = file.is_none();
-            let mut body = match file {
+            let body = match file {
                 Some(path) => read_document(&path)?,
                 None => {
                     require_terminal("Pass --file without a terminal")?;
@@ -77,7 +95,8 @@ pub async fn run_provider(command: AdminProviderCommands) -> Result<()> {
                 }
             };
             reject_fields(&body, PROVIDER_SECRET_FIELDS, "provider file")?;
-            if client_required_at_creation(&body) {
+            let mut api = ApiClient::from_auth_with_credential_transport(&auth)?;
+            let client = if client_required_at_creation(&body) {
                 if client_id_env.is_some()
                     && client_secret_env.is_none()
                     && body["provider_type"] != "device_code"
@@ -96,13 +115,11 @@ pub async fn run_provider(command: AdminProviderCommands) -> Result<()> {
                     client_id_env.as_deref(),
                     client_secret_env.as_deref(),
                 )?;
-                body["client_id"] = id.into();
-                if let Some(secret) = secret {
-                    body["client_secret"] = secret.into();
-                }
-            }
-            let mut api = ApiClient::from_auth_checked(&auth).await?;
-            let created: Value = api.post("/providers", &body).await?;
+                Some((id, secret))
+            } else {
+                None
+            };
+            let created = post_provider(&mut api, &body, client.as_ref()).await?;
             print_provider(&created, &auth)?;
             if wizard && !client_configured(&created) {
                 offer_client(&mut api, &created, &auth).await?;
@@ -117,7 +134,7 @@ pub async fn run_provider(command: AdminProviderCommands) -> Result<()> {
             client_secret_env,
             auth,
         } => {
-            let mut api = ApiClient::from_auth_checked(&auth).await?;
+            let mut api = ApiClient::from_auth_with_credential_transport(&auth)?;
             let current = find_provider(&mut api, &provider)
                 .await?
                 .ok_or_else(|| anyhow!("Provider not found: {provider}"))?;
@@ -137,24 +154,36 @@ pub async fn run_provider(command: AdminProviderCommands) -> Result<()> {
                 }
             };
             reject_fields(&body, PROVIDER_SECRET_FIELDS, "provider file")?;
-            let mut body = body;
-            if with_client {
-                let (client_id, client_secret) = read_client_values(
+            let client = if with_client {
+                api.require_credential_transport()?;
+                Some(read_client_values(
                     current["provider_type"] != "device_code",
                     client_id_env.as_deref(),
                     client_secret_env.as_deref(),
-                )?;
-                body["client_id"] = client_id.into();
-                if let Some(secret) = client_secret {
-                    body["client_secret"] = secret.into();
-                }
-            }
-            let updated: Value = if body.as_object().is_some_and(Map::is_empty) {
+                )?)
+            } else {
+                None
+            };
+            let updated: Value = if body.as_object().is_some_and(Map::is_empty) && client.is_none()
+            {
                 eprintln!("No changes.");
                 current
             } else {
-                api.put(&format!("/providers/{}", text(&current, "id")), &body)
-                    .await?
+                let request = ClientRequest {
+                    fields: &body,
+                    client_id: client.as_ref().map(|(id, _)| id.as_str()),
+                    client_secret: client
+                        .as_ref()
+                        .and_then(|(_, secret)| secret.as_ref().map(|s| s.as_str())),
+                };
+                let result = api
+                    .put(&format!("/providers/{}", text(&current, "id")), &request)
+                    .await;
+                if client.is_some() {
+                    result.map_err(redacted_client_error)?
+                } else {
+                    result?
+                }
             };
             print_provider(&updated, &auth)?;
             if file.is_none() && !with_client {
@@ -168,7 +197,7 @@ pub async fn run_provider(command: AdminProviderCommands) -> Result<()> {
             client_secret_env,
             auth,
         } => {
-            let mut api = ApiClient::from_auth_checked(&auth).await?;
+            let mut api = ApiClient::from_auth_with_credential_transport(&auth)?;
             let current = find_provider(&mut api, &provider)
                 .await?
                 .ok_or_else(|| anyhow!("Provider not found: {provider}"))?;
@@ -275,14 +304,18 @@ pub async fn run_catalog(command: AdminCatalogCommands) -> Result<()> {
         } => {
             let manifest = Manifest::load(&manifest.file, &manifest.vars, false)?;
             let clients = clients_from_env(&manifest)?;
-            let mut api = ApiClient::from_auth_checked(&auth).await?;
+            let mut api = if dry_run {
+                ApiClient::from_auth(&auth)?.without_token_refresh()
+            } else {
+                ApiClient::from_auth_with_credential_transport(&auth)?
+            };
             let rows = apply(&mut api, &manifest, dry_run, &clients).await?;
             print_apply(&rows, dry_run, auth.output)?;
             fail_on_errors(&rows)
         }
         AdminCatalogCommands::Validate { manifest, auth } => {
             let manifest = Manifest::load(&manifest.file, &manifest.vars, false)?;
-            let mut api = ApiClient::from_auth_checked(&auth).await?;
+            let mut api = ApiClient::from_auth(&auth)?.without_token_refresh();
             let report = validate(&mut api, &manifest, &redirect_uri(&auth)?).await?;
             print_validation(&report, auth.output)?;
             if report.iter().any(|row| row.status == "failed") {
@@ -331,16 +364,22 @@ pub async fn run_catalog(command: AdminCatalogCommands) -> Result<()> {
             if let Some(id_env) = client_id_env.as_deref() {
                 let desired = &manifest.providers[0];
                 let needs_secret = desired["provider_type"] != "device_code";
-                let secret = match (client_secret_env.as_deref(), needs_secret) {
-                    (Some(name), _) => Some(env_secret(name)?),
-                    (None, true) => bail!("--client-id-env needs --client-secret-env"),
-                    (None, false) => None,
-                };
-                clients.insert(text(desired, "slug"), (env_secret(id_env)?, secret));
+                if needs_secret && client_secret_env.is_none() {
+                    bail!("--client-id-env needs --client-secret-env");
+                }
+                clients.insert(
+                    text(desired, "slug"),
+                    ClientSource::Environment {
+                        id: id_env.to_owned(),
+                        secret: client_secret_env.clone(),
+                        prompt_redirect: None,
+                    },
+                );
             }
+
             let redirect = redirect_uri(&auth)?;
 
-            let mut api = ApiClient::from_auth_checked(&auth).await?;
+            let mut api = ApiClient::from_auth(&auth)?.without_token_refresh();
             let plan = apply(&mut api, &manifest, true, &clients).await?;
             print_apply(&plan, true, OutputFormat::Table)?;
             fail_on_errors(&plan)?;
@@ -352,24 +391,17 @@ pub async fn run_catalog(command: AdminCatalogCommands) -> Result<()> {
                     bail!("Cancelled");
                 }
             }
-            // Managed (admin-mode) providers need their client before they
-            // can be created.
-            for row in plan
-                .iter()
-                .filter(|row| row.kind == "provider" && row.note.is_some())
-            {
-                if skip_credentials || !interactive {
-                    bail!("{}: {}", row.slug, row.note.as_deref().unwrap_or_default());
+            // Environment sources hold names only. A prompt fallback is read at
+            // the mutation that needs it, after the plan is accepted.
+            if interactive && !skip_credentials {
+                for source in clients.values_mut() {
+                    let ClientSource::Environment {
+                        prompt_redirect, ..
+                    } = source;
+                    *prompt_redirect = Some(redirect.clone());
                 }
-                let desired = manifest
-                    .providers
-                    .iter()
-                    .find(|provider| provider["slug"] == row.slug.as_str())
-                    .ok_or_else(|| anyhow!("Provider {} is not in the manifest", row.slug))?;
-                let needs_secret = desired["provider_type"] != "device_code";
-                let client = read_client(&row.slug, needs_secret, &redirect, None, None)?;
-                clients.insert(row.slug.clone(), client);
             }
+            api.require_credential_transport()?;
             let rows = apply(&mut api, &manifest, false, &clients).await?;
             print_apply(&rows, false, OutputFormat::Table)?;
             fail_on_errors(&rows)?;
@@ -383,9 +415,6 @@ pub async fn run_catalog(command: AdminCatalogCommands) -> Result<()> {
                         continue;
                     }
                     let slug = text(desired, "slug");
-                    if clients.contains_key(&slug) {
-                        continue;
-                    }
                     let current = find_provider(&mut api, &slug)
                         .await?
                         .ok_or_else(|| anyhow!("Provider {slug} was not created"))?;
@@ -415,10 +444,7 @@ pub async fn run_catalog(command: AdminCatalogCommands) -> Result<()> {
             print_validation(&report, auth.output)?;
             if matches!(auth.output, OutputFormat::Table) {
                 for row in &report {
-                    eprintln!(
-                        "Test {} as a user: nyxid service add {} --oauth",
-                        row.service, row.service
-                    );
+                    eprintln!("Connect {} as a user: {}", row.service, row.connect_command);
                 }
             }
             if report.iter().any(|row| row.status == "failed") {
@@ -466,6 +492,7 @@ impl Manifest {
         for provider in &providers {
             require_slug(provider, "provider")?;
             reject_fields(provider, PROVIDER_SECRET_FIELDS, "manifest provider")?;
+            playbook::validate(provider, false)?;
         }
         for service in &services {
             require_slug(service, "service")?;
@@ -474,6 +501,7 @@ impl Manifest {
                 &["credential", "provider_config_id"],
                 "manifest service",
             )?;
+            playbook::validate(service, true)?;
         }
         if providers.is_empty() && services.is_empty() {
             bail!("The manifest has no providers or services");
@@ -679,12 +707,32 @@ async fn apply(
     let mut rows = Vec::new();
     let mut provider_ids: BTreeMap<String, Option<String>> = BTreeMap::new();
     let existing_providers = list_providers(api).await?;
+    let existing_services = list_services(api).await?;
+    // Resolve all authored identities before writes; duplicate inventory is not
+    // an ordering rule, including when one of the duplicate rows is inactive.
+    for (kind, desired_rows, inventory) in [
+        ("provider", &manifest.providers, &existing_providers),
+        ("service", &manifest.services, &existing_services),
+    ] {
+        for desired in desired_rows {
+            if unambiguous_row(inventory, &text(desired, "slug")).is_err() {
+                rows.push(ApplyRow::failed(
+                    kind,
+                    &text(desired, "slug"),
+                    "ambiguous_existing_catalog_identity",
+                ));
+            }
+        }
+    }
+    if !rows.is_empty() {
+        return Ok(rows);
+    }
 
-    for desired in &manifest.providers {
+    for authored in &manifest.providers {
+        let fields = playbook::api_fields(authored);
+        let desired = &fields;
         let slug = text(desired, "slug");
-        let current = existing_providers
-            .iter()
-            .find(|provider| provider["slug"] == desired["slug"]);
+        let current = unambiguous_row(&existing_providers, &slug)?;
         let row = match current {
             None => {
                 let client = clients.get(&slug);
@@ -697,19 +745,22 @@ async fn apply(
                 };
                 match (dry_run, missing) {
                     (true, _) => ApplyRow {
-                        note: missing.then(hint),
+                        note: client_required_at_creation(desired).then(hint),
                         ..ApplyRow::new("provider", &slug, "create")
                     },
                     (false, true) => ApplyRow::failed("provider", &slug, hint()),
                     (false, false) => {
-                        let mut body = desired.clone();
-                        if let Some((id, secret)) = client {
-                            body["client_id"] = id.clone().into();
-                            if let Some(secret) = secret {
-                                body["client_secret"] = secret.clone().into();
+                        api.require_credential_transport()?;
+                        let credentials = client.map(|source| source.load(&slug)).transpose();
+                        let result = match credentials {
+                            Ok(credentials) => {
+                                post_provider(api, desired, credentials.as_ref()).await
                             }
-                        }
-                        match api.post::<Value, _>("/providers", &body).await {
+                            Err(_) => {
+                                Err(anyhow!("OAuth client input missing or invalid; {}", hint()))
+                            }
+                        };
+                        match result {
                             Ok(created) => ApplyRow {
                                 id: created["id"].as_str().map(str::to_string),
                                 ..ApplyRow::new("provider", &slug, "created")
@@ -719,6 +770,14 @@ async fn apply(
                     }
                 }
             }
+            Some(current) if current["is_active"] == false => ApplyRow {
+                id: current["id"].as_str().map(str::to_owned),
+                note: Some(format!(
+                    "Ask an Admin: nyxid admin provider update {} --file reactivate-provider.json (file contains {{\"is_active\":true}})",
+                    text(current, "id")
+                )),
+                ..ApplyRow::new("provider", &slug, "inactive")
+            },
             Some(current) => {
                 if desired.get("provider_type").is_some()
                     && desired["provider_type"] != current["provider_type"]
@@ -751,59 +810,71 @@ async fn apply(
             }
         };
         let id = row.id.clone();
-        let usable = row.action != "failed";
+        let usable = !["failed", "inactive"].contains(&row.action);
         rows.push(row);
         if usable {
             provider_ids.insert(slug, id);
         }
     }
 
-    let existing_services = list_services(api).await?;
     for desired in &manifest.services {
         let slug = text(desired, "slug");
         let provider_ref = desired.get("provider").and_then(Value::as_str);
         let provider_id = match provider_ref {
             None => None,
-            Some(reference) => match provider_ids.get(reference) {
-                Some(id) => id.clone(),
-                None if manifest
-                    .providers
-                    .iter()
-                    .any(|provider| provider["slug"] == reference) =>
-                {
-                    rows.push(ApplyRow::failed(
-                        "service",
-                        &slug,
-                        format!("provider {reference} failed"),
-                    ));
-                    continue;
-                }
-                None => match existing_providers
-                    .iter()
-                    .find(|provider| provider["slug"] == reference || provider["id"] == reference)
-                {
-                    Some(provider) => Some(text(provider, "id")),
-                    None => {
+            Some(reference) => {
+                match provider_ids.get(reference) {
+                    Some(id) => id.clone(),
+                    None if manifest
+                        .providers
+                        .iter()
+                        .any(|provider| provider["slug"] == reference) =>
+                    {
                         rows.push(ApplyRow::failed(
                             "service",
                             &slug,
-                            format!("provider {reference} not found"),
+                            format!("provider {reference} failed"),
                         ));
                         continue;
                     }
-                },
-            },
+                    None => {
+                        match unambiguous_row(&existing_providers, reference) {
+                            Ok(Some(provider)) if provider["is_active"] != false => {
+                                Some(text(provider, "id"))
+                            }
+                            Ok(Some(_)) => {
+                                rows.push(ApplyRow::failed("service",&slug,"referenced provider is inactive; ask an Admin to reactivate it"));
+                                continue;
+                            }
+                            Ok(None) => {
+                                rows.push(ApplyRow::failed(
+                                    "service",
+                                    &slug,
+                                    format!("provider {reference} not found"),
+                                ));
+                                continue;
+                            }
+                            Err(_) => {
+                                rows.push(ApplyRow::failed(
+                                    "service",
+                                    &slug,
+                                    "ambiguous_existing_provider",
+                                ));
+                                continue;
+                            }
+                        }
+                    }
+                }
+            }
         };
-        let mut body = desired.clone();
+        let mut body = playbook::api_fields(desired);
         if let Some(object) = body.as_object_mut() {
             object.remove("provider");
             if let Some(id) = &provider_id {
                 object.insert("provider_config_id".into(), id.clone().into());
             }
         }
-        let current = existing_services
-            .iter()
-            .find(|service| service["slug"] == desired["slug"]);
+        let current = unambiguous_row(&existing_services, &slug)?;
         let row = match current {
             None if dry_run => ApplyRow::new("service", &slug, "create"),
             None => match api.post::<Value, _>("/services", &body).await {
@@ -812,6 +883,14 @@ async fn apply(
                     ..ApplyRow::new("service", &slug, "created")
                 },
                 Err(error) => ApplyRow::failed("service", &slug, error),
+            },
+            Some(current) if current["is_active"] == false => ApplyRow {
+                id: current["id"].as_str().map(str::to_owned),
+                note: Some(format!(
+                    "Ask an Admin: nyxid service update {} --catalog-admin --active",
+                    text(current, "id")
+                )),
+                ..ApplyRow::new("service", &slug, "inactive")
             },
             Some(current) => {
                 // In a dry run a provider about to be created has no ID yet;
@@ -829,9 +908,110 @@ async fn apply(
                 .await
             }
         };
+        if !["failed", "inactive"].contains(&row.action) && desired.get("operations").is_some() {
+            rows.extend(reconcile_operations(api, desired, row.id.as_deref(), dry_run).await?);
+        }
         rows.push(row);
     }
     Ok(rows)
+}
+
+async fn reconcile_operations(
+    api: &mut ApiClient,
+    desired: &Value,
+    service_id: Option<&str>,
+    dry_run: bool,
+) -> Result<Vec<ApplyRow>> {
+    let existing = match service_id {
+        Some(id) => list_operations(api, id).await?,
+        None => vec![],
+    };
+    let operations = playbook::operations(desired)?;
+    let mut rows = Vec::new();
+    for operation in &operations {
+        let slug = format!("{}/{}", text(desired, "slug"), operation.name);
+        let matches: Vec<_> = existing
+            .iter()
+            .filter(|row| row["name"] == operation.name)
+            .collect();
+        if matches.len() > 1 {
+            rows.push(ApplyRow::failed(
+                "operation",
+                &slug,
+                "ambiguous_existing_operation",
+            ));
+            continue;
+        }
+        let body = serde_json::to_value(operation)?;
+        let current = matches.first().copied();
+        let changed = current
+            .map(|row| changed_fields(&body, row, &["name"]))
+            .unwrap_or_default();
+        let action = if current.is_none() {
+            "create"
+        } else if changed.is_empty() {
+            "unchanged"
+        } else {
+            "update"
+        };
+        let mut row = ApplyRow::new("operation", &slug, action);
+        row.changed = changed.clone();
+        row.id = current
+            .and_then(|row| row["id"].as_str())
+            .map(str::to_owned);
+        if !dry_run && action != "unchanged" {
+            let id = service_id.ok_or_else(|| anyhow!("Service creation returned no ID"))?;
+            let result = if let Some(endpoint) = current {
+                api.put::<Value, _>(
+                    &format!("/services/{id}/endpoints/{}", text(endpoint, "id")),
+                    &pick(&body, &changed),
+                )
+                .await
+            } else {
+                api.post::<Value, _>(&format!("/services/{id}/endpoints"), &body)
+                    .await
+            };
+            row = match result {
+                Ok(value) => ApplyRow {
+                    id: value["id"].as_str().map(str::to_owned).or(row.id),
+                    action: if current.is_some() {
+                        "updated"
+                    } else {
+                        "created"
+                    },
+                    ..row
+                },
+                Err(error) => ApplyRow::failed("operation", &slug, error),
+            };
+        }
+        rows.push(row);
+    }
+    for endpoint in &existing {
+        if !operations
+            .iter()
+            .any(|operation| endpoint["name"] == operation.name)
+        {
+            rows.push(ApplyRow {
+                id: endpoint["id"].as_str().map(str::to_owned),
+                ..ApplyRow::new(
+                    "operation",
+                    &format!("{}/{}", text(desired, "slug"), text(endpoint, "name")),
+                    "unmanaged",
+                )
+            });
+        }
+    }
+    Ok(rows)
+}
+
+async fn list_operations(api: &mut ApiClient, service_id: &str) -> Result<Vec<Value>> {
+    let response: Value = api
+        .get(&format!("/services/{service_id}/endpoints"))
+        .await?;
+    Ok(response["endpoints"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default())
 }
 
 async fn apply_service_update(
@@ -939,7 +1119,10 @@ fn pick(source: &Value, fields: &[String]) -> Value {
 }
 
 fn fail_on_errors(rows: &[ApplyRow]) -> Result<()> {
-    let failed = rows.iter().filter(|row| row.action == "failed").count();
+    let failed = rows
+        .iter()
+        .filter(|row| ["failed", "inactive"].contains(&row.action))
+        .count();
     if failed > 0 {
         bail!("{failed} manifest row(s) failed");
     }
@@ -987,6 +1170,11 @@ struct ValidationRow {
     connect_command: String,
     /// Values for the Lark Platform Accounts row (no secrets).
     lark: Value,
+    playbook: Value,
+    verification: Value,
+    smoke_command: Option<String>,
+    operation_count: usize,
+    unmanaged_operations: Vec<String>,
 }
 
 async fn validate(
@@ -994,99 +1182,180 @@ async fn validate(
     manifest: &Manifest,
     redirect: &str,
 ) -> Result<Vec<ValidationRow>> {
+    let me: Value = api.get("/users/me").await?;
+    let services = list_services(api).await?;
+    let providers = list_providers(api).await?;
     let mut report = Vec::new();
+    let mut icon_presence = std::collections::HashMap::new();
     for desired in &manifest.services {
         let slug = text(desired, "slug");
         let mut failures = Vec::new();
         let mut pending = Vec::new();
         let mut notes = Vec::new();
-        let service = find_service(api, &slug).await?;
+        let service = match unambiguous_row(&services, &slug) {
+            Ok(row) => row,
+            Err(_) => {
+                failures.push("ambiguous_existing_service".to_owned());
+                None
+            }
+        };
         let provider_ref = desired
             .get("provider")
             .and_then(Value::as_str)
-            .map(str::to_string)
-            .or_else(|| {
-                service
-                    .as_ref()
-                    .and_then(|row| row["provider_config_id"].as_str().map(str::to_string))
-            });
-        let provider = match &provider_ref {
-            Some(reference) => find_provider(api, reference).await?,
+            .or_else(|| service.and_then(|row| row["provider_config_id"].as_str()));
+        let provider = match provider_ref {
+            Some(reference) => match unambiguous_row(&providers, reference) {
+                Ok(row) => row,
+                Err(_) => {
+                    failures.push("ambiguous_existing_provider".to_owned());
+                    None
+                }
+            },
             None => None,
         };
-        let desired_provider = provider_ref.as_ref().and_then(|reference| {
-            manifest
-                .providers
-                .iter()
-                .find(|row| row["slug"] == reference.as_str())
+        let desired_provider = provider_ref.and_then(|reference| {
+            manifest.providers.iter().find(|row| {
+                row["slug"] == reference || provider.is_some_and(|live| live["slug"] == row["slug"])
+            })
         });
-
-        match &service {
-            None => failures.push("service not found".to_string()),
-            Some(service) => {
-                if service["is_active"] != true {
-                    failures.push("service is inactive".to_string());
+        if let Some(service) = service {
+            if service["is_active"] != true {
+                failures.push("service is inactive".into());
+            }
+            let body = playbook::api_fields(desired);
+            for (field, value) in body.as_object().into_iter().flatten() {
+                if field == "provider" {
+                    continue;
                 }
-                if let Some(url) = desired.get("base_url")
-                    && &service["base_url"] != url
-                {
-                    failures.push(format!(
-                        "base_url is {} (manifest: {})",
-                        service["base_url"], url
-                    ));
-                }
-                if let Some(provider) = &provider
-                    && service["provider_config_id"] != provider["id"]
-                {
-                    failures.push(format!(
-                        "service is not linked to provider {}",
-                        text(provider, "slug")
-                    ));
+                let live = if field == "auth_method" && service[field].is_null() {
+                    &service["auth_type"]
+                } else {
+                    &service[field]
+                };
+                if !playbook::matches_fields(value, live) {
+                    failures.push(format!("service {field} differs from the manifest"));
                 }
             }
+            if let Some(provider) = provider
+                && service["provider_config_id"] != provider["id"]
+            {
+                failures.push("service is not linked to the declared provider".into());
+            }
+        } else {
+            failures.push("service not found".into());
         }
-        match (&provider_ref, &provider) {
-            (Some(reference), None) => failures.push(format!("provider {reference} not found")),
-            (_, Some(provider)) => {
-                if provider["is_active"] != true {
-                    failures.push("provider is inactive".to_string());
-                }
-                if let Some(desired) = desired_provider {
-                    for field in [
-                        "authorization_url",
-                        "token_url",
-                        "default_scopes",
-                        "extra_auth_params",
-                        "token_endpoint_auth_method",
-                        "supports_pkce",
-                    ] {
-                        if let Some(value) = desired.get(field)
-                            && &provider[field] != value
-                        {
-                            failures.push(format!("provider {field} differs from the manifest"));
-                        }
+        if provider_ref.is_some() && provider.is_none() {
+            failures.push("referenced provider not found".into());
+        }
+        if let Some(provider) = provider {
+            if provider["is_active"] != true {
+                failures.push("provider is inactive".into());
+            }
+            if let Some(desired) = desired_provider {
+                let fields = playbook::api_fields(desired);
+                for field in [
+                    "authorization_url",
+                    "token_url",
+                    "device_code_url",
+                    "device_token_url",
+                    "default_scopes",
+                    "extra_auth_params",
+                    "token_endpoint_auth_method",
+                    "supports_pkce",
+                    "supports_oauth_scopes",
+                    "credential_mode",
+                    "revocation_url",
+                    "revocation",
+                ] {
+                    if let Some(value) = fields.get(field)
+                        && !playbook::matches_fields(value, &provider[field])
+                    {
+                        failures.push(format!("provider {field} differs from the manifest"));
                     }
                 }
-                let oauth = matches!(
-                    provider["provider_type"].as_str(),
-                    Some("oauth2" | "device_code")
-                );
-                if oauth && provider["credential_mode"] == "user" {
-                    notes.push(
-                        "credential_mode is user: each user brings their own OAuth app".to_string(),
-                    );
-                } else if oauth && !client_configured(provider) {
-                    pending.push(format!(
-                        "OAuth client not set: nyxid admin provider set-credentials {}",
-                        text(provider, "slug")
+            }
+            let oauth = matches!(
+                provider["provider_type"].as_str(),
+                Some("oauth2" | "device_code")
+            );
+            if oauth && provider["credential_mode"] == "user" {
+                notes.push("credential_mode is user: each user brings their own OAuth app; playbook C4 is missing".into());
+            } else if oauth && !client_configured(provider) {
+                pending.push(format!(
+                    "OAuth client not set: nyxid admin provider set-credentials {}",
+                    text(provider, "slug")
+                ));
+            } else if oauth && provider["has_oauth_config"] != true {
+                failures.push("provider OAuth configuration is incomplete".into());
+            }
+        }
+        // An ambiguous identity must never choose arbitrary endpoints.
+        let endpoints = if let Some(service) = service {
+            list_operations(api, &text(service, "id")).await?
+        } else {
+            vec![]
+        };
+        let authored_operations = playbook::operations(desired)?;
+        for operation in &authored_operations {
+            let matches: Vec<_> = endpoints
+                .iter()
+                .filter(|row| row["name"] == operation.name)
+                .collect();
+            if matches.len() != 1 {
+                failures.push(format!(
+                    "operation {} is missing or ambiguous",
+                    operation.name
+                ));
+            } else {
+                let fields = serde_json::to_value(operation)?;
+                if !playbook::matches_fields(&fields, matches[0]) {
+                    failures.push(format!(
+                        "operation {} differs from the manifest",
+                        operation.name
                     ));
-                } else if oauth && provider["has_oauth_config"] != true {
-                    failures.push("provider OAuth configuration is incomplete".to_string());
                 }
             }
-            (None, None) => {}
         }
-
+        let unmanaged_operations = if desired.get("operations").is_some() {
+            endpoints
+                .iter()
+                .filter(|row| {
+                    !authored_operations
+                        .iter()
+                        .any(|operation| row["name"] == operation.name)
+                })
+                .filter_map(|row| row["name"].as_str().map(str::to_owned))
+                .collect()
+        } else {
+            vec![]
+        };
+        let icon_present = if let Some(provider) = provider {
+            let id = text(provider, "id");
+            if let Some(present) = icon_presence.get(&id) {
+                *present
+            } else {
+                let present = playbook::served_icon(api.base_url_root(), provider).await?;
+                icon_presence.insert(id, present);
+                present
+            }
+        } else {
+            false
+        };
+        let (mut checklist, verification, smoke_command) = playbook::report(
+            desired,
+            desired_provider,
+            provider,
+            provider_ref.is_some(),
+            &endpoints,
+            &me,
+            icon_present,
+        );
+        if failures
+            .iter()
+            .any(|reason| reason.starts_with("ambiguous_existing"))
+        {
+            checklist["complete"] = false.into();
+        }
         let status = if !failures.is_empty() {
             "failed"
         } else if !pending.is_empty() {
@@ -1094,43 +1363,30 @@ async fn validate(
         } else {
             "ready"
         };
-        let scopes: Vec<String> = provider
-            .as_ref()
+        let scopes = provider
             .and_then(|row| row["default_scopes"].as_array())
             .map(|items| {
                 items
                     .iter()
                     .filter_map(Value::as_str)
-                    .map(str::to_string)
-                    .collect()
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>()
             })
             .unwrap_or_default();
-        let provider_slug = provider.as_ref().map(|row| text(row, "slug"));
+        let provider_slug = provider.map(|row| text(row, "slug"));
         let mut issues = failures;
         issues.extend(pending);
         issues.extend(notes);
-        let remarks = format!(
-            "NyxID service {slug}; scopes: {}; managed OAuth client: {}; validation: {status}",
-            if scopes.is_empty() {
-                "none".to_string()
-            } else {
-                scopes.join(" ")
-            },
-            provider.as_ref().map_or("n/a", client_status),
-        );
+        if checklist["complete"] == false {
+            issues.push("playbook incomplete; configuration readiness is not verification".into());
+        }
         report.push(ValidationRow {
-            connect_command: format!("nyxid service add {slug} --oauth"),
-            lark: json!({
-                "platform": provider_slug.as_ref().map(|slug| format!("platform-{slug}")),
-                "type": "Platform services",
-                "remarks": remarks,
-            }),
-            service: slug,
-            provider: provider_slug,
-            status,
-            issues,
-            scopes,
-            redirect_uri: redirect.to_string(),
+            connect_command: playbook::connect_command(&slug,provider),
+            lark: json!({"platform":provider_slug.as_ref().map(|slug|format!("platform-{slug}")),"type":"Platform services","configuration":status,"remarks":format!("NyxID service {slug}; configured; not verified; playbook complete: {}",checklist["complete"])}),
+            service:slug, provider:provider_slug, status, issues, scopes,
+            redirect_uri:redirect.to_owned(), playbook:checklist, verification, smoke_command,
+            operation_count:endpoints.iter().filter(|row|row["is_active"]==true).count(),
+            unmanaged_operations,
         });
     }
     Ok(report)
@@ -1142,17 +1398,31 @@ fn print_validation(report: &[ValidationRow], output: OutputFormat) -> Result<()
         OutputFormat::Table => {
             let mut table = Table::new();
             table.load_preset(UTF8_FULL_CONDENSED);
-            table.set_header(["Service", "Provider", "Status", "Issues"]);
+            table.set_header(["Service", "Provider", "Status", "Playbook", "Issues"]);
             for row in report {
                 let issues = row.issues.join("; ");
                 table.add_row([
                     row.service.as_str(),
                     row.provider.as_deref().unwrap_or("-"),
                     row.status,
+                    if row.playbook["complete"] == true {
+                        "complete"
+                    } else {
+                        "incomplete"
+                    },
                     issues.as_str(),
                 ]);
             }
             eprintln!("{table}");
+            for row in report {
+                eprintln!("{}: Connect: {}", row.service, row.connect_command);
+                if let Some(command) = &row.smoke_command {
+                    eprintln!("  Smoke: {command}");
+                }
+                eprintln!("  Playbook: {}", row.playbook);
+                eprintln!("  Verification: {}", row.verification);
+                eprintln!("  Lark: {}", row.lark);
+            }
             if let Some(row) = report.first() {
                 eprintln!("OAuth redirect URI for vendor apps: {}", row.redirect_uri);
             }
@@ -1172,6 +1442,7 @@ async fn set_client(
 ) -> Result<Value> {
     let slug = text(provider, "slug");
     let needs_secret = provider["provider_type"] != "device_code";
+    api.require_credential_transport()?;
     let (client_id, client_secret) = read_client(
         &slug,
         needs_secret,
@@ -1179,13 +1450,16 @@ async fn set_client(
         client_id_env,
         client_secret_env,
     )?;
-    let mut body = json!({ "client_id": client_id });
-    if let Some(secret) = client_secret {
-        body["client_secret"] = secret.into();
-    }
+    let fields = json!({});
+    let body = ClientRequest {
+        fields: &fields,
+        client_id: Some(client_id.as_str()),
+        client_secret: client_secret.as_ref().map(|value| value.as_str()),
+    };
     let updated: Value = api
         .put(&format!("/providers/{}", text(provider, "id")), &body)
-        .await?;
+        .await
+        .map_err(redacted_client_error)?;
     eprintln!(
         "{slug}: OAuth client {}.",
         if client_configured(&updated) {
@@ -1199,7 +1473,77 @@ async fn set_client(
 
 /// OAuth client values for providers created in this run, keyed by provider
 /// slug. They are sent to the API only, never written to a file or printed.
-type Clients = BTreeMap<String, (String, Option<String>)>;
+type ClientValues = (Zeroizing<String>, Option<Zeroizing<String>>);
+// Only environment variable names survive planning. Never inspect env in dry-run.
+enum ClientSource {
+    Environment {
+        id: String,
+        secret: Option<String>,
+        prompt_redirect: Option<String>,
+    },
+}
+type Clients = BTreeMap<String, ClientSource>;
+
+impl ClientSource {
+    fn load(&self, slug: &str) -> Result<ClientValues> {
+        let Self::Environment {
+            id,
+            secret,
+            prompt_redirect,
+        } = self;
+        if std::env::var_os(id).is_none()
+            && let Some(redirect) = prompt_redirect
+        {
+            return read_client(slug, secret.is_some(), redirect, None, None);
+        }
+        Ok((
+            env_secret(id)?,
+            secret.as_deref().map(env_secret).transpose()?,
+        ))
+    }
+}
+
+#[derive(Serialize)]
+struct ClientRequest<'a> {
+    #[serde(flatten)]
+    fields: &'a Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    client_id: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    client_secret: Option<&'a str>,
+}
+async fn post_provider(
+    api: &mut ApiClient,
+    fields: &Value,
+    client: Option<&ClientValues>,
+) -> Result<Value> {
+    if client.is_some() {
+        api.require_credential_transport()?;
+    }
+    let body = ClientRequest {
+        fields,
+        client_id: client.map(|(id, _)| id.as_str()),
+        client_secret: client.and_then(|(_, secret)| secret.as_ref().map(|s| s.as_str())),
+    };
+    let result = api.post("/providers", &body).await;
+    if client.is_some() {
+        result.map_err(redacted_client_error)
+    } else {
+        result
+    }
+}
+
+fn redacted_client_error(error: anyhow::Error) -> anyhow::Error {
+    if let Some(api) = error.downcast_ref::<crate::api::ApiError>() {
+        let code = api.body_json().and_then(|body| body["error_code"].as_i64());
+        return anyhow!(
+            "OAuth client request failed (HTTP {}, error_code {}); response details redacted",
+            api.status().as_u16(),
+            code.map_or_else(|| "unavailable".into(), |n| n.to_string())
+        );
+    }
+    anyhow!("OAuth client request failed; transport details redacted")
+}
 
 /// The server refuses to create an OAuth or device-code provider in admin
 /// mode (the default) without its client.
@@ -1230,25 +1574,23 @@ fn client_env_names(slug: &str) -> (String, String) {
 }
 
 fn clients_from_env(manifest: &Manifest) -> Result<Clients> {
-    let mut clients = Clients::new();
-    for desired in manifest
+    Ok(manifest
         .providers
         .iter()
         .filter(|desired| client_required_at_creation(desired))
-    {
-        let slug = text(desired, "slug");
-        let (id_env, secret_env) = client_env_names(&slug);
-        if std::env::var_os(&id_env).is_none() {
-            continue;
-        }
-        let secret = if desired["provider_type"] == "device_code" {
-            None
-        } else {
-            Some(env_secret(&secret_env)?)
-        };
-        clients.insert(slug, (env_secret(&id_env)?, secret));
-    }
-    Ok(clients)
+        .map(|desired| {
+            let slug = text(desired, "slug");
+            let (id, secret) = client_env_names(&slug);
+            (
+                slug,
+                ClientSource::Environment {
+                    id,
+                    secret: (desired["provider_type"] != "device_code").then_some(secret),
+                    prompt_redirect: None,
+                },
+            )
+        })
+        .collect())
 }
 
 /// Read a client ID and (unless the provider is device-code) a secret from
@@ -1259,7 +1601,7 @@ fn read_client(
     redirect: &str,
     client_id_env: Option<&str>,
     client_secret_env: Option<&str>,
-) -> Result<(String, Option<String>)> {
+) -> Result<ClientValues> {
     eprintln!("{slug}: register this redirect URI in the vendor's OAuth app: {redirect}");
     read_client_values(needs_secret, client_id_env, client_secret_env)
 }
@@ -1268,17 +1610,17 @@ fn read_client_values(
     needs_secret: bool,
     client_id_env: Option<&str>,
     client_secret_env: Option<&str>,
-) -> Result<(String, Option<String>)> {
+) -> Result<ClientValues> {
     let client_id = match client_id_env {
         Some(name) => env_secret(name)?,
-        None => ask_required("Client ID", None)?,
+        None => Zeroizing::new(ask_required("Client ID", None)?),
     };
     let client_secret = match (client_secret_env, needs_secret) {
         (Some(name), _) => Some(env_secret(name)?),
-        (None, true) => Some(
+        (None, true) => Some(Zeroizing::new(
             rpassword::prompt_password("Client secret (hidden): ")
-                .context("Failed to read the client secret")?,
-        ),
+                .map_err(|_| anyhow!("Failed to read the client secret"))?,
+        )),
         (None, false) => None,
     };
     if client_secret
@@ -1288,14 +1630,15 @@ fn read_client_values(
         bail!("The client secret is empty");
     }
     Ok((
-        client_id.trim().to_string(),
-        client_secret.map(|secret| secret.trim().to_string()),
+        Zeroizing::new(client_id.trim().to_string()),
+        client_secret.map(|secret| Zeroizing::new(secret.trim().to_string())),
     ))
 }
 
-fn env_secret(name: &str) -> Result<String> {
-    let value =
-        std::env::var(name).with_context(|| format!("Environment variable {name} is not set"))?;
+fn env_secret(name: &str) -> Result<Zeroizing<String>> {
+    let value = Zeroizing::new(
+        std::env::var(name).map_err(|_| anyhow!("Environment variable {name} is not set"))?,
+    );
     if value.trim().is_empty() {
         bail!("Environment variable {name} is empty");
     }
@@ -1319,7 +1662,37 @@ fn client_status(provider: &Value) -> &'static str {
 
 fn wizard_document() -> Result<Value> {
     eprintln!("New catalog service. Press Enter to accept a [default].");
-    let provider = provider_wizard(None)?;
+    let mut provider = provider_wizard(None)?;
+    if matches!(
+        provider["provider_type"].as_str(),
+        Some("oauth2" | "device_code")
+    ) {
+        let scope_kind = if provider["supports_oauth_scopes"] == false {
+            "no_scopes".to_owned()
+        } else {
+            ask_choice(
+                "Scope source",
+                &["vendor_cli", "documented_minimum"],
+                "documented_minimum",
+            )?
+        };
+        let revocation_kind = ask_choice(
+            "Revocation applicability",
+            &["configured", "vendor_unsupported", "nyxid_incompatible"],
+            if provider["revocation_url"].is_string() {
+                "configured"
+            } else {
+                "vendor_unsupported"
+            },
+        )?;
+        if revocation_kind == "configured" && !provider["revocation_url"].is_string() {
+            provider["revocation_url"] = ask_required("Token revocation URL", None)?.into();
+        }
+        provider["playbook"] = json!({
+            "scope_source":{"kind":scope_kind,"url":ask_required("HTTPS scope evidence URL",None)?},
+            "revocation":{"kind":revocation_kind,"source":ask_required("HTTPS revocation evidence source",None)?}
+        });
+    }
     let provider_slug = text(&provider, "slug");
     let mut service = json!({
         "name": provider["name"],
@@ -1341,7 +1714,16 @@ fn wizard_document() -> Result<Value> {
     let spec = ask("OpenAPI spec URL (optional)", None)?;
     if !spec.is_empty() {
         service["openapi_spec_url"] = spec.into();
+        service["smoke_test"] = json!({"method":"GET","path":ask_required("Literal read-only GET smoke path (no query or placeholders)",None)?});
+    } else {
+        let name = ask_required("Read-only operation name", Some("list_accounts"))?;
+        let path = ask_required("Literal GET operation path", None)?;
+        service["operations"] = json!([{"name":name,"method":"GET","path":path}]);
+        service["smoke_test"] = json!({"operation":name});
     }
+    eprintln!(
+        "After apply, attach a permitted static SVG with nyxid admin catalog icon {provider_slug} --file <brand.svg>."
+    );
     Ok(json!({ "providers": [provider], "services": [service] }))
 }
 
@@ -1585,12 +1967,12 @@ fn confirm(question: &str) -> Result<bool> {
 // --- API helpers ---
 
 async fn list_providers(api: &mut ApiClient) -> Result<Vec<Value>> {
-    let listing: Value = api.get("/providers").await?;
+    let listing: Value = api.get("/providers?include_inactive=true").await?;
     Ok(listing["providers"].as_array().cloned().unwrap_or_default())
 }
 
 async fn list_services(api: &mut ApiClient) -> Result<Vec<Value>> {
-    let listing: Value = api.get("/services").await?;
+    let listing: Value = api.get("/services?include_inactive=true").await?;
     Ok(listing["services"].as_array().cloned().unwrap_or_default())
 }
 
@@ -1598,10 +1980,7 @@ async fn find_provider(api: &mut ApiClient, reference: &str) -> Result<Option<Va
     if uuid::Uuid::parse_str(reference).is_ok() {
         return api.get_optional(&format!("/providers/{reference}")).await;
     }
-    Ok(list_providers(api)
-        .await?
-        .into_iter()
-        .find(|provider| provider["slug"] == reference))
+    Ok(unambiguous_row(&list_providers(api).await?, reference)?.cloned())
 }
 
 async fn provider_id(api: &mut ApiClient, reference: &str) -> Result<String> {
@@ -1615,10 +1994,7 @@ async fn find_service(api: &mut ApiClient, reference: &str) -> Result<Option<Val
     if uuid::Uuid::parse_str(reference).is_ok() {
         return api.get_optional(&format!("/services/{reference}")).await;
     }
-    Ok(list_services(api)
-        .await?
-        .into_iter()
-        .find(|service| service["slug"] == reference))
+    Ok(unambiguous_row(&list_services(api).await?, reference)?.cloned())
 }
 
 fn redirect_uri(auth: &AuthArgs) -> Result<String> {
@@ -1697,6 +2073,19 @@ mod tests {
             manifest.services[0]["base_url"],
             "https://mail.zoho.com/api"
         );
+        assert_eq!(manifest.services[0]["auth_scheme"], "Zoho-oauthtoken");
+        assert_eq!(
+            playbook::operations(&manifest.services[0]).unwrap().len(),
+            3
+        );
+        assert_eq!(
+            playbook::smoke_command(&manifest.services[0]).as_deref(),
+            Some("nyxid proxy request api-zoho-mail /accounts --method GET")
+        );
+        assert_eq!(
+            manifest.providers[0]["playbook"]["revocation"]["kind"],
+            "nyxid_incompatible"
+        );
         let eu = zoho(&["zoho_domain=zoho.eu"]).unwrap();
         assert_eq!(eu.services[0]["base_url"], "https://mail.zoho.eu/api");
         assert!(zoho(&["zoho_domain=evil.example"]).is_err());
@@ -1746,7 +2135,7 @@ mod tests {
 
     fn service_row() -> Value {
         let manifest = zoho(&[]).unwrap();
-        let mut row = manifest.services[0].clone();
+        let mut row = playbook::api_fields(&manifest.services[0]);
         let object = row.as_object_mut().unwrap();
         object.remove("provider");
         object.insert("id".into(), "22222222-2222-4222-8222-222222222222".into());
@@ -1762,6 +2151,37 @@ mod tests {
 
     async fn listing(server: &MockServer, providers: Value, services: Value) {
         Mock::given(method("GET"))
+            .and(path("/api/v1/users/me"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({"id":"admin","is_admin":true})),
+            )
+            .mount(server)
+            .await;
+        for service in services.as_array().into_iter().flatten() {
+            if let Some(id) = service["id"].as_str() {
+                Mock::given(method("GET"))
+                    .and(path(format!("/api/v1/services/{id}/endpoints")))
+                    .respond_with(
+                        ResponseTemplate::new(200)
+                            .set_body_json(json!({"endpoints":template_operations()})),
+                    )
+                    .mount(server)
+                    .await;
+            }
+        }
+        if services.as_array().is_some_and(Vec::is_empty) {
+            Mock::given(method("GET"))
+                .and(path(
+                    "/api/v1/services/22222222-2222-4222-8222-222222222222/endpoints",
+                ))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_body_json(json!({"endpoints":template_operations()})),
+                )
+                .mount(server)
+                .await;
+        }
+        Mock::given(method("GET"))
             .and(path("/api/v1/providers"))
             .respond_with(
                 ResponseTemplate::new(200).set_body_json(json!({ "providers": providers })),
@@ -1773,6 +2193,44 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "services": services })))
             .mount(server)
             .await;
+    }
+
+    fn template_operations() -> Vec<Value> {
+        playbook::operations(&zoho(&[]).unwrap().services[0])
+            .unwrap()
+            .into_iter()
+            .map(|operation| {
+                let mut row = serde_json::to_value(operation).unwrap();
+                row["id"] = format!("ep-{}", row["name"].as_str().unwrap()).into();
+                row["is_active"] = true.into();
+                row
+            })
+            .collect()
+    }
+
+    #[test]
+    fn catalog_auth_scheme_manifest_validation_is_strict_and_passes_api_field() {
+        assert!(
+            Manifest::from_document(
+                json!({"services":[{"slug":"scheme","auth_scheme":"Zoho-oauthtoken"}]}),
+                &[],
+                false
+            )
+            .is_err()
+        );
+        for scheme in [
+            json!(""),
+            json!("two words"),
+            json!("Bearer\r\n"),
+            json!("a".repeat(65)),
+            json!(3),
+        ] {
+            assert!(Manifest::from_document(json!({"services":[{"slug":"scheme","auth_method":"bearer","auth_scheme":scheme}]}), &[], false).is_err());
+        }
+        assert!(Manifest::from_document(json!({"services":[{"slug":"scheme","auth_method":"header","auth_scheme":"Zoho-oauthtoken"}]}), &[], false).is_err());
+        let row = &zoho(&[]).unwrap().services[0];
+        assert_eq!(playbook::api_fields(row)["auth_scheme"], "Zoho-oauthtoken");
+        assert!(playbook::api_fields(row).get("operations").is_none());
     }
 
     #[tokio::test]
@@ -1811,7 +2269,9 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn provider_update_with_client_sends_the_client_with_the_change() {
+        let _guard = env_lock().lock().unwrap_or_else(|err| err.into_inner());
         let server = MockServer::start().await;
         listing(&server, json!([provider_row(true)]), json!([])).await;
         let file = tempfile::NamedTempFile::new().unwrap();
@@ -1854,11 +2314,13 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn apply_creates_provider_then_links_the_new_service_to_it() {
+        let _guard = env_lock().lock().unwrap_or_else(|err| err.into_inner());
         let server = MockServer::start().await;
         listing(&server, json!([]), json!([])).await;
         let manifest = zoho(&[]).unwrap();
-        let mut provider_body = manifest.providers[0].clone();
+        let mut provider_body = playbook::api_fields(&manifest.providers[0]);
         provider_body["client_id"] = "zoho-id".into();
         provider_body["client_secret"] = "zoho-secret".into();
         Mock::given(method("POST"))
@@ -1868,7 +2330,7 @@ mod tests {
             .expect(1)
             .mount(&server)
             .await;
-        let mut service = manifest.services[0].clone();
+        let mut service = playbook::api_fields(&manifest.services[0]);
         service.as_object_mut().unwrap().remove("provider");
         service["provider_config_id"] = provider_row(false)["id"].clone();
         Mock::given(method("POST"))
@@ -1879,6 +2341,30 @@ mod tests {
             .mount(&server)
             .await;
 
+        Mock::given(method("GET"))
+            .and(path(
+                "/api/v1/services/22222222-2222-4222-8222-222222222222/endpoints",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"endpoints":[]})))
+            .with_priority(1)
+            .mount(&server)
+            .await;
+        for operation in playbook::operations(&manifest.services[0]).unwrap() {
+            let body = serde_json::to_value(operation).unwrap();
+            let mut response = body.clone();
+            response["id"] = format!("ep-{}", response["name"].as_str().unwrap()).into();
+            response["is_active"] = true.into();
+            Mock::given(method("POST"))
+                .and(path(
+                    "/api/v1/services/22222222-2222-4222-8222-222222222222/endpoints",
+                ))
+                .and(body_json(body))
+                .respond_with(ResponseTemplate::new(200).set_body_json(response))
+                .expect(1)
+                .mount(&server)
+                .await;
+        }
+
         let mut api = ApiClient::from_auth(&mock_auth(server.uri())).unwrap();
         // Without a client the managed provider is planned with a note and
         // refused on a real run.
@@ -1887,7 +2373,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             plan.iter().map(|row| row.action).collect::<Vec<_>>(),
-            ["create", "create"]
+            ["create", "create", "create", "create", "create"]
         );
         assert!(
             plan[0]
@@ -1902,14 +2388,27 @@ mod tests {
         assert_eq!(refused[0].action, "failed");
         assert_eq!(refused[1].action, "failed");
 
+        unsafe {
+            std::env::set_var("NYXID_CATALOG_TEST_CLIENT_ID", "zoho-id");
+            std::env::set_var("NYXID_CATALOG_TEST_CLIENT_SECRET", "zoho-secret");
+        }
         let clients = Clients::from([(
             "zoho-mail".to_string(),
-            ("zoho-id".to_string(), Some("zoho-secret".to_string())),
+            ClientSource::Environment {
+                id: "NYXID_CATALOG_TEST_CLIENT_ID".into(),
+                secret: Some("NYXID_CATALOG_TEST_CLIENT_SECRET".into()),
+                prompt_redirect: None,
+            },
         )]);
-        let rows = apply(&mut api, &manifest, false, &clients).await.unwrap();
+        let result = apply(&mut api, &manifest, false, &clients).await;
+        unsafe {
+            std::env::remove_var("NYXID_CATALOG_TEST_CLIENT_ID");
+            std::env::remove_var("NYXID_CATALOG_TEST_CLIENT_SECRET");
+        }
+        let rows = result.unwrap();
         assert_eq!(
             rows.iter().map(|row| row.action).collect::<Vec<_>>(),
-            ["created", "created"]
+            ["created", "created", "created", "created", "created"]
         );
     }
 
@@ -1925,26 +2424,26 @@ mod tests {
             )
         );
         let manifest = zoho(&[]).unwrap();
-        assert!(clients_from_env(&manifest).unwrap().is_empty());
+        let sources = clients_from_env(&manifest).unwrap();
+        assert!(sources.contains_key("zoho-mail"));
         unsafe {
             std::env::set_var("ZOHO_MAIL_CLIENT_ID", "id-from-env");
         }
-        let missing_secret = clients_from_env(&manifest);
+        let missing_secret = sources["zoho-mail"].load("zoho-mail");
         unsafe {
             std::env::set_var("ZOHO_MAIL_CLIENT_SECRET", "secret-from-env");
         }
-        let clients = clients_from_env(&manifest);
+        let client = sources["zoho-mail"].load("zoho-mail");
         unsafe {
             std::env::remove_var("ZOHO_MAIL_CLIENT_ID");
             std::env::remove_var("ZOHO_MAIL_CLIENT_SECRET");
         }
         assert!(missing_secret.is_err());
+        let (id, secret) = client.unwrap();
+        assert_eq!(id.as_str(), "id-from-env");
         assert_eq!(
-            clients.unwrap()["zoho-mail"],
-            (
-                "id-from-env".to_string(),
-                Some("secret-from-env".to_string())
-            )
+            secret.as_ref().map(|value| value.as_str()),
+            Some("secret-from-env")
         );
     }
 
@@ -1976,8 +2475,9 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(rows[0].action, "unchanged");
-        assert_eq!(rows[1].action, "updated");
-        assert_eq!(rows[1].changed, ["description"]);
+        let service = rows.iter().find(|row| row.kind == "service").unwrap();
+        assert_eq!(service.action, "updated");
+        assert_eq!(service.changed, ["description"]);
     }
 
     #[tokio::test]
@@ -2007,8 +2507,9 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(plan[0].action, "create");
-        assert_eq!(plan[1].action, "update");
-        assert_eq!(plan[1].changed, ["provider"]);
+        let service = plan.iter().find(|row| row.kind == "service").unwrap();
+        assert_eq!(service.action, "update");
+        assert_eq!(service.changed, ["provider"]);
     }
 
     #[tokio::test]
@@ -2085,5 +2586,496 @@ mod tests {
             std::env::remove_var("NYXID_TEST_ZOHO_SECRET");
         }
         result.unwrap();
+    }
+    #[test]
+    fn manifest_evidence_is_strict_and_never_in_api_fields() {
+        let manifest=Manifest::from_document(json!({
+            "providers":[{"slug":"p","playbook":{"scope_source":{"kind":"vendor_cli","url":"https://vendor.example/scopes"},"revocation":{"kind":"vendor_unsupported","source":"https://vendor.example/revoke"}}}],
+            "services":[{"slug":"s","provider":"p","operations":[{"name":"accounts","method":"GET","path":"/accounts"}],"smoke_test":{"operation":"accounts"}}]
+        }),&[],false).unwrap();
+        assert!(manifest.to_document()["providers"][0]["playbook"].is_object());
+        assert!(
+            playbook::api_fields(&manifest.providers[0])
+                .get("playbook")
+                .is_none()
+        );
+        assert!(
+            playbook::api_fields(&manifest.services[0])
+                .get("operations")
+                .is_none()
+        );
+        assert!(
+            playbook::api_fields(&manifest.services[0])
+                .get("smoke_test")
+                .is_none()
+        );
+        for bad in [
+            json!({"scope_source":{"kind":"vendor_cli","source":"https://vendor.example"}}),
+            json!({"revocation":{"kind":"configured","url":"https://vendor.example"}}),
+            json!({"scope_source":{"kind":"vendor_cli","url":"https://user:secret@vendor.example"}}),
+            json!({"revocation":{"kind":"unknown","source":"https://vendor.example"}}),
+        ] {
+            assert!(
+                Manifest::from_document(
+                    json!({"providers":[{"slug":"p","playbook":bad}]}),
+                    &[],
+                    false
+                )
+                .is_err()
+            );
+        }
+        for bad in [
+            json!({"operation":"accounts","headers":{"Authorization":"canary"}}),
+            json!({"method":"POST","path":"/accounts"}),
+            json!({"method":"GET","path":"/accounts?token=canary"}),
+            json!({"method":"GET","path":"/accounts/{id}"}),
+        ] {
+            assert!(
+                Manifest::from_document(
+                    json!({"services":[{"slug":"s","smoke_test":bad}]}),
+                    &[],
+                    false
+                )
+                .is_err()
+            );
+        }
+        let both = json!({"services":[{"slug":"s","openapi_spec_url":"https://vendor.example/spec","operations":[]}]});
+        assert!(Manifest::from_document(both, &[], false).is_err());
+    }
+
+    fn evidenced_manifest() -> Manifest {
+        Manifest::from_document(json!({
+            "providers":[{"slug":"zoho-mail","default_scopes":["read"],"playbook":{"scope_source":{"kind":"documented_minimum","url":"https://vendor.example/scopes"},"revocation":{"kind":"configured","source":"https://vendor.example/revocation"}},"revocation_url":"https://vendor.example/revoke"}],
+            "services":[{"slug":"api-zoho-mail","provider":"zoho-mail","operations":[{"name":"accounts","method":"GET","path":"/accounts"}],"smoke_test":{"operation":"accounts"}}]
+        }),&[],false).unwrap()
+    }
+
+    #[tokio::test]
+    async fn catalog_readiness_reports_applicability_and_pending_real_gates() {
+        for (provider_type, mode, client, expected_c1, expected_c4) in [
+            ("oauth2", "admin", true, "met", "met"),
+            ("oauth2", "both", false, "missing", "met"),
+            ("oauth2", "user", false, "missing", "missing"),
+            ("device_code", "admin", true, "met", "met"),
+            (
+                "api_key",
+                "admin",
+                false,
+                "not_applicable",
+                "not_applicable",
+            ),
+        ] {
+            let server = MockServer::start().await;
+            let manifest = evidenced_manifest();
+            let mut provider = provider_row(client);
+            provider["provider_type"] = provider_type.into();
+            provider["credential_mode"] = mode.into();
+            provider["has_oauth_config"] = true.into();
+            provider["default_scopes"] = json!(["read"]);
+            provider["revocation_url"] = "https://vendor.example/revoke".into();
+            provider["device_code_url"] = "https://vendor.example/device".into();
+            provider["device_token_url"] = "https://vendor.example/token".into();
+            if provider_type == "device_code" {
+                provider["has_client_secret"] = false.into();
+            }
+            provider["icon_url"] = format!(
+                "{}/catalog-icons/33333333-3333-4333-8333-333333333333",
+                server.uri()
+            )
+            .into();
+            Mock::given(method("GET"))
+                .and(path("/catalog-icons/33333333-3333-4333-8333-333333333333"))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_body_raw("<svg viewBox=\"0 0 1 1\"/>", "image/svg+xml"),
+                )
+                .mount(&server)
+                .await;
+            listing(&server, json!([provider]), json!([service_row()])).await;
+            Mock::given(method("GET")).and(path("/api/v1/services/22222222-2222-4222-8222-222222222222/endpoints"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({"endpoints":[{"id":"ep","name":"accounts","method":"GET","path":"/accounts","is_active":true}]}))).with_priority(1).mount(&server).await;
+            let mut api = ApiClient::from_auth(&mock_auth(server.uri()))
+                .unwrap()
+                .without_token_refresh();
+            let report = validate(&mut api, &manifest, "https://nyx.example/cb")
+                .await
+                .unwrap();
+            let row = &report[0];
+            assert_eq!(row.playbook["c1"]["state"], expected_c1, "{row:?}");
+            assert_eq!(row.playbook["c4"]["state"], expected_c4, "{row:?}");
+            assert_eq!(row.playbook["c5"]["state"], "met");
+            assert_eq!(row.playbook["c6"]["state"], "met");
+            assert_eq!(
+                row.verification,
+                json!({"status":"not_verified","pending_gates":["api_smoke_test_real_vendor","outside_user_connection_admin_confirmed"]})
+            );
+            assert_eq!(
+                row.smoke_command.as_deref(),
+                Some("nyxid proxy request api-zoho-mail /accounts --method GET")
+            );
+            let option = match provider_type {
+                "oauth2" => "--oauth",
+                "device_code" => "--device-code",
+                _ => "--credential-env VENDOR_API_KEY",
+            };
+            assert!(row.connect_command.ends_with(option));
+            assert!(
+                row.lark["remarks"]
+                    .as_str()
+                    .unwrap()
+                    .contains("configured; not verified")
+            );
+            let requests = server.received_requests().await.unwrap();
+            assert!(
+                requests
+                    .iter()
+                    .all(|request| request.method == wiremock::http::Method::GET)
+            );
+        }
+    }
+
+    #[test]
+    fn playbook_missing_provider_and_no_scope_evidence_fail_closed() {
+        let manifest = evidenced_manifest();
+        let me = json!({"id":"manager","is_admin":false,"capabilities":{"manage_catalog":true}});
+        let endpoints = vec![json!({"is_active":true})];
+        let desired = &manifest.services[0];
+        let (missing, _, _) = playbook::report(desired, None, None, true, &endpoints, &me, false);
+        assert_eq!(missing["complete"], false);
+        assert_eq!(missing["c1"]["reason"], "referenced_provider_missing");
+        let (na, verification, _) = playbook::report(
+            &json!({"slug":"internal"}),
+            None,
+            None,
+            false,
+            &[],
+            &me,
+            false,
+        );
+        assert_eq!(na["c1"]["state"], "not_applicable");
+        assert_eq!(verification["pending_gates"], json!([]));
+        let mut provider = provider_row(true);
+        provider["supports_oauth_scopes"] = false.into();
+        provider["default_scopes"] = json!([]);
+        let mut authored = manifest.providers[0].clone();
+        authored["default_scopes"] = json!([]);
+        authored["playbook"]["scope_source"]["kind"] = "no_scopes".into();
+        let (proof, _, _) = playbook::report(
+            desired,
+            Some(&authored),
+            Some(&provider),
+            true,
+            &endpoints,
+            &me,
+            false,
+        );
+        assert_eq!(proof["c2"]["state"], "not_applicable");
+        assert_eq!(proof["c6"]["requires_admin"], false);
+        assert!(
+            proof["client_bound_write_requirement"]
+                .as_str()
+                .unwrap()
+                .contains("existing_client_reentry")
+        );
+        authored["playbook"]["scope_source"]["kind"] = "documented_minimum".into();
+        let (missing, _, _) = playbook::report(
+            desired,
+            Some(&authored),
+            Some(&provider),
+            true,
+            &endpoints,
+            &me,
+            false,
+        );
+        assert_eq!(missing["c2"]["state"], "missing");
+        provider["created_by"] = "manager".into();
+        let (own, _, _) = playbook::report(
+            desired,
+            Some(&authored),
+            Some(&provider),
+            true,
+            &endpoints,
+            &me,
+            false,
+        );
+        assert_eq!(own["c6"]["requires_admin"], false);
+    }
+
+    #[tokio::test]
+    async fn catalog_icon_readiness_requires_owned_served_asset_without_credentials_or_redirects() {
+        for case in [
+            "valid",
+            "missing",
+            "foreign",
+            "redirect",
+            "not_svg",
+            "oversized",
+            "query",
+        ] {
+            let server = MockServer::start().await;
+            let foreign = MockServer::start().await;
+            let asset = "/catalog-icons/33333333-3333-4333-8333-333333333333";
+            let mut provider = provider_row(true);
+            let icon_url = match case {
+                "foreign" => format!("{}{asset}", foreign.uri()),
+                "query" => format!("{}{asset}?ignored=1", server.uri()),
+                _ => format!("{}{asset}", server.uri()),
+            };
+            provider["icon_url"] = icon_url.into();
+            let response = match case {
+                "missing" => ResponseTemplate::new(404),
+                "redirect" => ResponseTemplate::new(302)
+                    .insert_header("Location", format!("{}/redirected", foreign.uri())),
+                "not_svg" => ResponseTemplate::new(200).set_body_json(json!({})),
+                "oversized" => ResponseTemplate::new(200)
+                    .set_body_raw("x".repeat(128 * 1024 + 1), "image/svg+xml"),
+                _ => ResponseTemplate::new(200)
+                    .set_body_raw("<svg viewBox=\"0 0 1 1\"/>", "image/svg+xml"),
+            };
+            Mock::given(method("GET"))
+                .and(path(asset))
+                .respond_with(response)
+                .mount(&server)
+                .await;
+            listing(&server, json!([provider]), json!([service_row()])).await;
+            let mut api = ApiClient::from_auth(&mock_auth(server.uri()))
+                .unwrap()
+                .without_token_refresh();
+            let report = validate(&mut api, &evidenced_manifest(), "https://nyx.example/cb")
+                .await
+                .unwrap();
+            assert_eq!(
+                report[0].playbook["c6"]["state"],
+                if case == "valid" { "met" } else { "missing" },
+                "{case}"
+            );
+            assert_eq!(report[0].verification["status"], "not_verified");
+            let requests = server.received_requests().await.unwrap();
+            assert!(
+                requests
+                    .iter()
+                    .all(|request| request.method == wiremock::http::Method::GET)
+            );
+            let assets: Vec<_> = requests
+                .iter()
+                .filter(|request| request.url.path() == asset)
+                .collect();
+            assert_eq!(
+                assets.len(),
+                usize::from(!matches!(case, "foreign" | "query")),
+                "{case}"
+            );
+            assert!(
+                assets
+                    .iter()
+                    .all(|request| !request.headers.contains_key("authorization"))
+            );
+            assert!(
+                foreign.received_requests().await.unwrap().is_empty(),
+                "{case}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn catalog_inactive_or_ambiguous_rows_never_create_and_validate_fails_closed() {
+        for ambiguous in [false, true] {
+            let server = MockServer::start().await;
+            let mut inactive = service_row();
+            inactive["is_active"] = false.into();
+            let services = if ambiguous {
+                json!([service_row(), inactive])
+            } else {
+                json!([inactive])
+            };
+            listing(&server, json!([provider_row(true)]), services).await;
+            let manifest = zoho(&[]).unwrap();
+            let mut api = ApiClient::from_auth(&mock_auth(server.uri())).unwrap();
+            let rows = apply(&mut api, &manifest, false, &Clients::new())
+                .await
+                .unwrap();
+            assert!(rows.iter().any(|row| if ambiguous {
+                row.action == "failed" && row.error.as_deref().unwrap().contains("ambiguous")
+            } else {
+                row.action == "inactive"
+            }));
+            let validation = validate(&mut api, &manifest, "https://nyx.example/cb")
+                .await
+                .unwrap();
+            assert_eq!(validation[0].status, "failed");
+            assert_eq!(validation[0].playbook["complete"], false);
+            assert!(
+                server
+                    .received_requests()
+                    .await
+                    .unwrap()
+                    .iter()
+                    .all(|request| request.method == wiremock::http::Method::GET)
+            );
+        }
+        let server = MockServer::start().await;
+        let mut inactive = provider_row(true);
+        inactive["is_active"] = false.into();
+        listing(&server, json!([inactive]), json!([])).await;
+        let mut api = ApiClient::from_auth(&mock_auth(server.uri())).unwrap();
+        let rows = apply(&mut api, &zoho(&[]).unwrap(), false, &Clients::new())
+            .await
+            .unwrap();
+        assert_eq!(rows[0].action, "inactive");
+        assert!(
+            rows[0]
+                .note
+                .as_deref()
+                .unwrap()
+                .contains("--file reactivate-provider.json")
+        );
+        assert_eq!(rows[1].action, "failed");
+    }
+
+    #[tokio::test]
+    async fn explicit_operations_create_update_noop_and_retain_unmanaged_rows() {
+        let server = MockServer::start().await;
+        let desired = json!({"slug":"api-example","operations":[{"name":"accounts","method":"GET","path":"/accounts","description":"new"},{"name":"folders","method":"GET","path":"/folders"}]});
+        let id = "service-id";
+        Mock::given(method("GET")).and(path("/api/v1/services/service-id/endpoints"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"endpoints":[{"id":"one","name":"accounts","method":"GET","path":"/accounts","description":"old"},{"id":"extra","name":"unmanaged","method":"GET","path":"/other"}]}))).mount(&server).await;
+        Mock::given(method("PUT"))
+            .and(path("/api/v1/services/service-id/endpoints/one"))
+            .and(body_json(json!({"description":"new"})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id":"one"})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/services/service-id/endpoints"))
+            .and(body_json(
+                json!({"name":"folders","method":"GET","path":"/folders"}),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id":"two"})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let mut api = ApiClient::from_auth(&mock_auth(server.uri())).unwrap();
+        let rows = reconcile_operations(&mut api, &desired, Some(id), false)
+            .await
+            .unwrap();
+        assert_eq!(
+            rows.iter().map(|row| row.action).collect::<Vec<_>>(),
+            ["updated", "created", "unmanaged"]
+        );
+        server.verify().await;
+        server.reset().await;
+        Mock::given(method("GET")).and(path("/api/v1/services/service-id/endpoints"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"endpoints":[{"id":"one","name":"accounts","method":"GET","path":"/accounts","description":"new"},{"id":"two","name":"folders","method":"GET","path":"/folders"},{"id":"extra","name":"unmanaged","method":"GET","path":"/other"}]}))).mount(&server).await;
+        let rows = reconcile_operations(&mut api, &desired, Some(id), false)
+            .await
+            .unwrap();
+        assert_eq!(
+            rows.iter().map(|row| row.action).collect::<Vec<_>>(),
+            ["unchanged", "unchanged", "unmanaged"]
+        );
+        assert!(
+            server
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .all(|request| request.method == wiremock::http::Method::GET)
+        );
+    }
+
+    #[tokio::test]
+    async fn catalog_client_errors_redact_only_secret_requests_and_keep_status_code() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST")).and(path("/api/v1/providers"))
+            .respond_with(ResponseTemplate::new(403).set_body_json(json!({"error":"forbidden","error_code":1003,"message":"server echoed client-canary"}))).mount(&server).await;
+        let mut api = ApiClient::from_auth(&mock_auth(server.uri())).unwrap();
+        let client = (
+            Zeroizing::new("id-canary".into()),
+            Some(Zeroizing::new("secret-canary".into())),
+        );
+        let error = post_provider(&mut api, &json!({"slug":"p"}), Some(&client))
+            .await
+            .unwrap_err();
+        let rendered = format!("{error:#}");
+        assert!(rendered.contains("403"), "{rendered}");
+        assert!(rendered.contains("1003"), "{rendered}");
+        assert!(!rendered.contains("canary"), "{rendered}");
+        let error = post_provider(&mut api, &json!({"slug":"p"}), None)
+            .await
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("server echoed client-canary"));
+        let auth = mock_auth("http://example.invalid");
+        assert!(ApiClient::from_auth_with_credential_transport(&auth).is_err());
+    }
+
+    #[tokio::test]
+    async fn catalog_client_create_does_not_follow_redirects() {
+        let origin = MockServer::start().await;
+        let target = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/providers"))
+            .respond_with(
+                ResponseTemplate::new(307)
+                    .insert_header("Location", format!("{}/sink", target.uri())),
+            )
+            .expect(1)
+            .mount(&origin)
+            .await;
+        let mut api = ApiClient::from_auth(&mock_auth(origin.uri())).unwrap();
+        let client = (
+            Zeroizing::new("fake-id".into()),
+            Some(Zeroizing::new("redirect-canary".into())),
+        );
+        assert!(
+            post_provider(&mut api, &json!({"slug":"p"}), Some(&client))
+                .await
+                .is_err()
+        );
+        assert!(target.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn catalog_dry_run_ignores_poisoned_client_environment() {
+        let _guard = env_lock().lock().unwrap_or_else(|err| err.into_inner());
+        let server = MockServer::start().await;
+        listing(&server, json!([]), json!([])).await;
+        let manifest = zoho(&[]).unwrap();
+        let mut api = ApiClient::from_auth(&mock_auth(server.uri()))
+            .unwrap()
+            .without_token_refresh();
+        unsafe {
+            std::env::remove_var("ZOHO_MAIL_CLIENT_ID");
+            std::env::remove_var("ZOHO_MAIL_CLIENT_SECRET");
+        }
+        let sources = clients_from_env(&manifest).unwrap();
+        let empty = apply(&mut api, &manifest, true, &sources).await.unwrap();
+        unsafe {
+            std::env::set_var("ZOHO_MAIL_CLIENT_ID", "poisoned-client-canary");
+            std::env::set_var("ZOHO_MAIL_CLIENT_SECRET", "");
+        }
+        let poisoned = apply(
+            &mut api,
+            &manifest,
+            true,
+            &clients_from_env(&manifest).unwrap(),
+        )
+        .await;
+        unsafe {
+            std::env::remove_var("ZOHO_MAIL_CLIENT_ID");
+            std::env::remove_var("ZOHO_MAIL_CLIENT_SECRET");
+        }
+        let poisoned = poisoned.unwrap();
+        assert_eq!(empty, poisoned);
+        assert!(!serde_json::to_string(&poisoned).unwrap().contains("canary"));
+        assert!(
+            server
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .all(|request| request.method == wiremock::http::Method::GET)
+        );
     }
 }

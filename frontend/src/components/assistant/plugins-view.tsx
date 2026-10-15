@@ -36,6 +36,7 @@ interface PluginCardShape {
   readonly name: string;
   readonly initial: string;
   readonly iconSlug?: string | null;
+  readonly iconUrl?: string | null;
   readonly category: string;
   readonly description: string;
   readonly meta: string;
@@ -117,8 +118,8 @@ function PluginCard({
     >
       <div className="flex items-start gap-2.5">
         <PluginTile>
-          {item.iconSlug ? (
-            <ServiceIcon slug={item.iconSlug} size="md" />
+          {item.iconSlug || item.iconUrl ? (
+            <ServiceIcon slug={item.iconSlug} iconUrl={item.iconUrl} size="md" />
           ) : (
             item.initial
           )}
@@ -248,6 +249,7 @@ function ConnectorsTab({ query }: { readonly query: string }) {
     readonly keyId: string;
     readonly name: string;
     readonly iconSlug: string | null;
+    readonly iconUrl: string | null;
   } | null>(null);
 
   const items = useMemo(
@@ -356,6 +358,7 @@ function ConnectorsTab({ query }: { readonly query: string }) {
           keyIds={manageItem.manageKeyIds ?? []}
           serviceName={manageItem.name}
           iconSlug={manageItem.iconSlug}
+          iconUrl={manageItem.iconUrl}
           onClose={() => setManageCardId(null)}
         />
       )}
@@ -384,6 +387,7 @@ function ConnectorsTab({ query }: { readonly query: string }) {
                 keyId,
                 name: connecting?.name ?? connectSlug,
                 iconSlug: connecting?.iconSlug ?? connectSlug,
+                iconUrl: connecting?.iconUrl ?? null,
               });
             }, 0);
             return true;
@@ -399,6 +403,7 @@ function ConnectorsTab({ query }: { readonly query: string }) {
           keyIds={[popupResult.keyId]}
           serviceName={popupResult.name}
           iconSlug={popupResult.iconSlug}
+          iconUrl={popupResult.iconUrl}
           onClose={() => setPopupResult(null)}
         />
       )}

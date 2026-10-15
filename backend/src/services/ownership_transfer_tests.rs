@@ -40,6 +40,7 @@ async fn owner_transfer(
         TransferCommand {
             actor,
             api_key_id: key,
+            first_party_human: key.is_none(),
             kind,
             resource_id: id,
             destination,
@@ -205,6 +206,7 @@ async fn agent_transfer_checks_live_management_scope_and_binds_receipt_to_key() 
         &f.db,
         &f.owner,
         Some(&key.id),
+        true,
         ResourceKind::ChannelBot,
         &bot.id,
         &f.destination,
@@ -284,6 +286,7 @@ async fn agent_transfer_checks_live_management_scope_and_binds_receipt_to_key() 
             &f.db,
             &f.admin,
             Some(&admin_key.id),
+            true,
             ResourceKind::Service,
             &f.service.id,
             &f.destination,
@@ -297,6 +300,7 @@ async fn agent_transfer_checks_live_management_scope_and_binds_receipt_to_key() 
         &f.db,
         &f.destination,
         Some(&org_key.id),
+        true,
         ResourceKind::ChannelBot,
         &bot.id,
         &f.owner,
@@ -452,6 +456,7 @@ async fn move_resource(
         TransferCommand {
             actor: &f.admin,
             api_key_id: None,
+            first_party_human: true,
             kind,
             resource_id: id,
             destination,
@@ -2025,6 +2030,7 @@ async fn concurrent_registration_and_transfer_share_destination_capacity() {
             TransferCommand {
                 actor: &f.admin,
                 api_key_id: None,
+                first_party_human: true,
                 kind: ResourceKind::ChannelBot,
                 resource_id: &bot.id,
                 destination: &f.destination,
@@ -2208,4 +2214,71 @@ async fn route_creation_and_transfer_cannot_leave_an_active_previous_owner_route
         .await
         .is_err()
     );
+}
+
+#[tokio::test]
+async fn non_tool_receipt_replay_survives_inactive_and_deleted_resource() {
+    let f = fixture("ownership_non_tool_replay_deleted").await;
+    let reviewed = preview(
+        &f.db,
+        &f.admin,
+        ResourceKind::Service,
+        &f.service.id,
+        &f.destination,
+        5,
+    )
+    .await
+    .unwrap();
+    let request = Uuid::new_v4().to_string();
+    let receipt = move_resource(
+        &f,
+        ResourceKind::Service,
+        &f.service.id,
+        &f.destination,
+        &reviewed.version,
+        &request,
+    )
+    .await
+    .unwrap();
+    assert!(!receipt.tool_transfer);
+    f.db.collection::<Document>(SERVICES)
+        .update_one(
+            doc! {"_id":&f.service.id},
+            doc! {"$set":{"is_active":false}},
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        move_resource(
+            &f,
+            ResourceKind::Service,
+            &f.service.id,
+            &f.destination,
+            &reviewed.version,
+            &request
+        )
+        .await
+        .unwrap()
+        .id,
+        receipt.id
+    );
+    f.db.collection::<Document>(SERVICES)
+        .delete_one(doc! {"_id":&f.service.id})
+        .await
+        .unwrap();
+    assert_eq!(
+        move_resource(
+            &f,
+            ResourceKind::Service,
+            &f.service.id,
+            &f.destination,
+            &reviewed.version,
+            &request
+        )
+        .await
+        .unwrap()
+        .id,
+        receipt.id
+    );
+    f.db.drop().await.unwrap();
 }

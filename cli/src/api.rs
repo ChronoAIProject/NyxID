@@ -291,9 +291,16 @@ impl ApiClient {
     /// session renews on 401 through this client; caller-selected keys never do.
     pub fn from_auth_with_credential_transport(auth: &crate::cli::AuthArgs) -> Result<Self> {
         let mut api = Self::from_auth(auth)?;
-        let address = credential_delete_url(api.base_url_root())?;
-        api.client = credential_delete_client(api.profile.as_deref(), &address)?;
+        api.require_credential_transport()?;
         Ok(api)
+    }
+
+    /// Install HTTPS/exact-loopback and no-redirect guarantees before reading
+    /// or transmitting a caller-supplied downstream credential.
+    pub fn require_credential_transport(&mut self) -> Result<()> {
+        let address = credential_delete_url(self.base_url_root())?;
+        self.client = credential_delete_client(self.profile.as_deref(), &address)?;
+        Ok(())
     }
 
     /// Build a client after validating the saved session up front.

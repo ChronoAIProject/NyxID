@@ -26,6 +26,9 @@ pub struct AuthoredDraftClaim {
     pub requested_turn_id: Option<String>,
     pub voice_request_id: Option<String>,
     pub trigger_run_id: Option<String>,
+    /// Absent on claims written before the snapshot existed: unproven.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routing: Option<super::assistant_acknowledgement::CardRouting>,
 }
 
 pub const DEFAULT_THRESHOLD: i64 = 15;
@@ -191,6 +194,12 @@ pub struct AssistantAgentLearningProposal {
     #[serde(default)]
     pub failure_code: Option<String>,
     #[serde(default)]
+    pub failure_rules: Vec<String>,
+    #[serde(default, with = "crate::models::bson_bytes::optional")]
+    pub scope_encrypted: Option<Vec<u8>>,
+    #[serde(default)]
+    pub scope_digest: Option<String>,
+    #[serde(default)]
     pub evidence: Vec<LearningEvidence>,
     #[serde(default, with = "crate::models::bson_bytes::required")]
     pub body_encrypted: Vec<u8>,
@@ -292,6 +301,8 @@ pub struct LearningPublication {
     #[serde(default)]
     pub review_card_pending: bool,
     #[serde(default)]
+    pub reduced_scope_acceptance: Option<ScopeAcceptance>,
+    #[serde(default)]
     pub release_evidence: Option<ReleaseEvidence>,
 }
 
@@ -333,4 +344,18 @@ pub struct LearningPublicationTarget {
     pub created_at: DateTime<Utc>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DraftScope {
+    pub status: String,
+    pub omissions: Vec<String>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct ScopeAcceptance {
+    pub revision: i64,
+    pub approval_digest: String,
+    pub omission_count: usize,
 }

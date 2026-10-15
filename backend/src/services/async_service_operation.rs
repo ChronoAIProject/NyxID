@@ -5,7 +5,8 @@ use crate::{
     errors::{AppError, AppResult},
     models::{
         assistant_conversation::{
-            AgentEvent, AssistantConversation, COLLECTION_NAME as CONVERSATIONS, TurnOrigin,
+            AgentEvent, AssistantConversation, COLLECTION_NAME as CONVERSATIONS,
+            REPORT_PROVENANCE_V1, TurnOrigin, carried_report_to,
         },
         async_service_operation::{
             AsyncOperationContract, AsyncServiceOperation, COLLECTION_NAME as WATCHES,
@@ -162,11 +163,22 @@ pub async fn reserve(
                 return Err(AppError::Conflict("Async operation watch limit reached".into()));
             }
             let turn=row.active_turn.as_ref().ok_or(AppError::AssistantTurnRequired)?;
-            let delivery = if let Some(parent) = event_id(&row) {
+            let mut delivery = if let Some(parent) = event_id(&row) {
                 watches.find_one(doc!{"_id":parent,"user_id":&chat.user_id,"conversation_id":&row.id,"state":"queued"}).session(&mut *session).await?.ok_or(AppError::AssistantTurnRequired)?.delivery
             } else {
-                DeliveryBinding{origin:turn.origin,channel:turn.asked_from.clone().filter(|_|row.channel.is_some()).or_else(||row.channel.clone()),reply_channel:turn.asked_from.clone().filter(|_|row.channel.is_none()).or_else(||row.reply_channel.clone()),group_id:row.group_id.clone(),group_request_id:row.group_request_id.clone(),voice_request_id:turn.voice_request_id.clone(),trigger_run_id:turn.trigger_run_id.clone(),report_to:row.report_to.clone()}
+                DeliveryBinding{origin:turn.origin,channel:turn.asked_from.clone().filter(|_|row.channel.is_some()).or_else(||row.channel.clone()),reply_channel:turn.asked_from.clone().filter(|_|row.channel.is_none()).or_else(||row.reply_channel.clone()),group_id:row.group_id.clone(),group_request_id:row.group_request_id.clone(),voice_request_id:turn.voice_request_id.clone(),trigger_run_id:turn.trigger_run_id.clone(),report_to:None,report_provenance:0}
             };
+            // Never a parent operation's stored field wholesale.
+            match super::assistant_nyxagent::live_turn(&row, Utc::now()).filter(|live| !live.stop_requested) {
+                Some(live) => {
+                    delivery.report_to = live.report_to.clone();
+                    delivery.report_provenance = REPORT_PROVENANCE_V1;
+                }
+                None => {
+                    delivery.report_to = None;
+                    delivery.report_provenance = 0;
+                }
+            }
             if let Some(request) = &delivery.voice_request_id {
                 db.collection::<bson::Document>(crate::models::assistant_voice::REQUESTS)
                     .update_one(doc!{"_id":request,"user_id":&chat.user_id,"state":{"$ne":"cancelled"}},doc!{"$set":{"async_operation_pending":true}}).session(&mut *session).await?;
@@ -272,7 +284,20 @@ pub async fn enqueue(db: &Database, w: &AsyncServiceOperation) -> AppResult<bool
             };
             if row.pending_events.len()>=super::assistant_nyxagent::MAX_PENDING_EVENTS {return Ok(false);}
             if db.collection::<bson::Document>(WATCHES).update_one(lease_filter(&w),doc!{"$set":{"state":"queued","lease_id":null,"lease_until":null}}).session(&mut *session).await?.modified_count==0{return Ok(false);}
-            let event=AgentEvent{id:w.id.clone(),kind:EVENT_KIND.into(),text:format!("Asynchronous service operation finished: {}. Its result is quoted in this turn's context.",w.reason.as_deref().unwrap_or("failed")),agent_id:Some(w.agent_id.clone()),question_key:None,reply_to:Vec::new(),created_at:Utc::now()};
+            let event = AgentEvent {
+                id: w.id.clone(),
+                kind: EVENT_KIND.into(),
+                text: format!(
+                    "Asynchronous service operation finished: {}. Its result is quoted in this turn's context.",
+                    w.reason.as_deref().unwrap_or("failed"),
+                ),
+                agent_id: Some(w.agent_id.clone()),
+                question_key: None,
+                reply_to: Vec::new(),
+                bound: w.delivery.report_provenance == REPORT_PROVENANCE_V1,
+                report_to: carried_report_to(w.delivery.report_to.as_deref(), w.delivery.report_provenance),
+                created_at: Utc::now(),
+            };
             conversations.update_one(doc!{"_id":&row.id,"user_id":&w.user_id},doc!{"$push":{"pending_events":bson::to_bson(&event).map_err(|_|invalid())?}}).session(&mut *session).await?;Ok(true)
         }).await;transactions::transaction_result(result)
     }).await.map_err(transactions::map_transaction_error)
@@ -364,7 +389,6 @@ pub fn apply_delivery(row: &mut AssistantConversation, w: &AsyncServiceOperation
     row.reply_channel = w.delivery.reply_channel.clone();
     row.group_id = w.delivery.group_id.clone();
     row.group_request_id = w.delivery.group_request_id.clone();
-    row.report_to = w.delivery.report_to.clone();
     if let Some(turn) = row.active_turn.as_mut() {
         turn.voice_request_id = w.delivery.voice_request_id.clone();
         turn.trigger_run_id = w.delivery.trigger_run_id.clone();
@@ -459,6 +483,16 @@ pub async fn bind_in_session(
         .ok_or(AppError::AssistantTurnRequired)?;
     turn.voice_request_id = w.delivery.voice_request_id.clone();
     turn.trigger_run_id = w.delivery.trigger_run_id.clone();
+    // A bound event that disagrees with its carrier resolves to None.
+    if turn.report_to.is_some()
+        && turn.report_to
+            != carried_report_to(
+                w.delivery.report_to.as_deref(),
+                w.delivery.report_provenance,
+            )
+    {
+        turn.report_to = None;
+    }
     if let Some(id) = &turn.trigger_run_id {
         db.collection::<bson::Document>(crate::models::trigger_run::COLLECTION_NAME)
             .update_one(

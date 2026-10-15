@@ -29,7 +29,12 @@ pub struct DeliveryBinding {
     pub group_request_id: Option<String>,
     pub voice_request_id: Option<String>,
     pub trigger_run_id: Option<String>,
+    /// The causing turn's `ActiveTurn::report_to` snapshot. Trusted only with
+    /// `report_provenance == REPORT_PROVENANCE_V1`; legacy rows stored the
+    /// conversation's assignment marker here and are unproven.
     pub report_to: Option<String>,
+    #[serde(default)]
+    pub report_provenance: u8,
 }
 
 #[derive(Clone, Serialize, Deserialize)]

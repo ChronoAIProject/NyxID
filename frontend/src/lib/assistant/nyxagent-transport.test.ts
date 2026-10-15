@@ -1,3 +1,7 @@
+import { createElement } from "react";
+import { render, screen } from "@testing-library/react";
+import { ChatMessageList } from "@/components/assistant/chat-message";
+import { nyxAgentHistorySchema } from "@/schemas/assistant-nyxagent";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { NyxAgentTransport, CONTEXT_RESET_NOTICE, storedError, contextResetCopy } from "./nyxagent-transport";
 import { transitionAssistantIdentity } from "./identity";
@@ -5,6 +9,7 @@ import { assistantChatSurface } from "./conversation-ids";
 import type { NyxAgentConversation, NyxAgentHistory } from "@/schemas/assistant-nyxagent";
 import { nyxAgentMessageSchema } from "@/schemas/assistant-nyxagent";
 import { isAdmittedSendError } from "./send-admission";
+import { applyDirectTurnEvent, type DirectTurnState } from "./direct-transport";
 
 const id = `nyxa-${"1".repeat(32)}`;
 const other = `nyxa-${"2".repeat(32)}`;
@@ -172,7 +177,7 @@ afterEach(() => {
 });
 
 describe("NyxAgent server-backed transport", () => {
-  it("keeps stopped replies complete with a cancellation code", async () => {
+  it("keeps stopped replies visibly stopped with a cancellation code", async () => {
     globalThis.__nyxidAssistantHttpMock = () =>
       json({
         conversation: conversation(),
@@ -200,7 +205,7 @@ describe("NyxAgent server-backed transport", () => {
     const message = transport.session(id).messages[0];
     expect(message).toBeDefined();
     if (!message) throw new Error("stopped reply was not loaded");
-    expect(message.status).toBe("complete");
+    expect(message.status).toBe("stopped");
     expect(message.errorCode).toBe("cancelled");
     expect(message.error).toBeUndefined();
   });
@@ -258,6 +263,10 @@ describe("NyxAgent server-backed transport", () => {
     };
     const bodies: Record<string, unknown>[] = [];
     globalThis.__nyxidAssistantHttpMock = ({ endpoint, init }) => {
+      if (endpoint.endsWith("/messages/f1/recovery")) return json({
+        status: "available", reason: "available", text: "Send the brief",
+        attachments: ["brief.txt"],
+      });
       if (endpoint.endsWith("/turns")) {
         bodies.push(JSON.parse(String(init.body)));
         return stream();
@@ -269,8 +278,103 @@ describe("NyxAgent server-backed transport", () => {
     await transport.retry(id, "f1", () => undefined);
     expect(bodies).toEqual([{ conversation_id: id, text: "Send the brief", retry_of: "t1" }]);
     await expect(transport.retry(id, "u2", () => undefined)).rejects.toThrow(
-      "This reply can no longer be retried",
+      "Failed reply not found",
     );
+  });
+  it("checks a temporarily unavailable paginated attachment-only retry before sending", async () => {
+    const transcript = history();
+    transcript.messages = [{
+      id: "old-failed", seq: 1, turn_id: "old-turn", role: "assistant", text: "",
+      status: "failed", error_code: "turn_lost", created_at: start,
+      activities: [], attachments: [],
+      recovery: { status: "review", reason: "turn_active", text: "", attachments: ["scan.pdf"] },
+    }];
+    let checks = 0;
+    const bodies: Record<string, unknown>[] = [];
+    globalThis.__nyxidAssistantHttpMock = ({ endpoint, init }) => {
+      if (endpoint.endsWith("/messages/old-failed/recovery")) {
+        checks += 1;
+        return checks === 1 ? json({ error: "temporarily unavailable" }, 503)
+          : json({ status: "available", reason: "available", text: "", attachments: ["scan.pdf"] });
+      }
+      if (endpoint.endsWith("/turns")) {
+        bodies.push(JSON.parse(String(init.body)));
+        return stream();
+      }
+      return json(transcript);
+    };
+    const transport = new NyxAgentTransport();
+    await transport.history(id);
+    expect((await transport.checkRecovery(id, "old-failed")).reason).toBe("status_unavailable");
+    expect(transport.session(id).messages.find((message) => message.id === "old-failed")?.recovery?.reason)
+      .toBe("status_unavailable");
+    expect((await transport.checkRecovery(id, "old-failed")).status).toBe("available");
+    await transport.retry(id, "old-failed", () => undefined);
+    expect(bodies).toEqual([{ conversation_id: id, text: "", retry_of: "old-turn" }]);
+  });
+  it("does not turn an admitted retry into an error when final recovery refresh races history", async () => {
+    const oldPage = history();
+    oldPage.messages = [{ id: "failed", seq: 1, turn_id: "old-turn", role: "assistant",
+      text: "", status: "failed", error_code: "turn_lost", created_at: start,
+      activities: [], attachments: [], recovery: { status: "available", reason: "available",
+        text: "restore", attachments: [] } }];
+    const newest = history();
+    newest.messages = Array.from({ length: 100 }, (_, index) => ({
+      id: `new-${index}`, seq: 101 + index, turn_id: `new-turn-${index}`, role: "user",
+      text: "newer", status: "completed", error_code: null, created_at: start,
+      activities: [], attachments: [],
+    }));
+    newest.before_seq = 100;
+    let checks = 0;
+    let finalStarted: () => void = () => undefined;
+    const started = new Promise<void>((resolve) => { finalStarted = resolve; });
+    let resolveFinal: (response: Response) => void = () => undefined;
+    globalThis.__nyxidAssistantHttpMock = ({ endpoint }) => {
+      if (endpoint.endsWith("/messages/failed/recovery")) {
+        checks += 1;
+        if (checks === 1) return json({ status: "available", reason: "available", text: "restore", attachments: [] });
+        return new Promise<Response>((resolve) => { resolveFinal = resolve; finalStarted(); });
+      }
+      if (endpoint.endsWith("/turns")) return stream();
+      return json(endpoint.includes("before_seq=100") ? oldPage : newest);
+    };
+    const transport = new NyxAgentTransport();
+    await transport.history(id);
+    await transport.history(id, 100);
+    const attempt = transport.retry(id, "failed", () => undefined);
+    await started;
+    await transport.history(id);
+    resolveFinal(json({ status: "available", reason: "available", text: "restore", attachments: [] }));
+    await expect(attempt).resolves.toBeUndefined();
+    expect(transport.session(id).messages[0]?.recovery?.reason).toBe("already_retried");
+  });
+  it("reconciles an admission rejection through the clicked reply without resending", async () => {
+    const transcript = history();
+    transcript.messages = [{ id: "failed", seq: 1, turn_id: "old-turn", role: "assistant",
+      text: "", status: "failed", error_code: "turn_lost", created_at: start,
+      activities: [], attachments: [], recovery: { status: "available", reason: "available",
+        text: "restore", attachments: ["old.txt"] } }];
+    let checks = 0;
+    let posts = 0;
+    globalThis.__nyxidAssistantHttpMock = ({ endpoint }) => {
+      if (endpoint.endsWith("/messages/failed/recovery")) {
+        checks += 1;
+        return json(checks === 1
+          ? { status: "available", reason: "available", text: "restore", attachments: ["old.txt"] }
+          : { status: "review", reason: "attachment_expired", text: "restore", attachments: ["old.txt"] });
+      }
+      if (endpoint.endsWith("/turns")) {
+        posts += 1;
+        return json({ error: "attachment_expired" }, 410);
+      }
+      return json(transcript);
+    };
+    const transport = new NyxAgentTransport();
+    await transport.history(id);
+    await expect(transport.retry(id, "failed", () => undefined)).rejects.toThrow();
+    expect(posts).toBe(1);
+    expect(checks).toBe(2);
+    expect(transport.session(id).messages[0]?.recovery?.reason).toBe("attachment_expired");
   });
   it("retains a linked card during internal refresh and pagination, then clears its scope", async () => {
     const card = "12345678-1234-4123-8123-1234567890ab";
@@ -451,6 +555,70 @@ describe("NyxAgent server-backed transport", () => {
       1, 2,
     ]);
     expect(transport.getHistory(id)?.before_seq).toBeNull();
+  });
+
+  it("keeps each row's server time through a reload and an earlier page", async () => {
+    globalThis.__nyxidAssistantHttpMock = ({ endpoint }) => {
+      const page = history();
+      if (endpoint.includes("before_seq")) {
+        page.messages = [page.messages[0]!];
+      } else {
+        page.messages = [page.messages[1]!];
+        page.before_seq = 2;
+      }
+      return json(page);
+    };
+    const transport = new NyxAgentTransport();
+    await transport.history(id);
+    await transport.history(id, 2);
+    expect(transport.session(id).messages.map((m) => [m.id, m.timestamp])).toEqual([
+      ["u", Date.parse(start)],
+      ["a", Date.parse(afterReset)],
+    ]);
+  });
+
+  it("reuses unchanged rows across reads and identical refreshes, so only changed rows re-render", async () => {
+    let page = history();
+    globalThis.__nyxidAssistantHttpMock = () => json(page);
+    const transport = new NyxAgentTransport();
+    await transport.history(id);
+    const first = transport.session(id).messages;
+    expect(transport.session(id).messages).toEqual(first);
+    expect(transport.session(id).messages[0]).toBe(first[0]);
+    await transport.history(id);
+    const refreshed = transport.session(id).messages;
+    expect(refreshed[0]).toBe(first[0]);
+    expect(refreshed[1]).toBe(first[1]);
+    page = history();
+    page.messages[1] = { ...page.messages[1]!, text: "Edited" };
+    await transport.history(id);
+    const edited = transport.session(id).messages;
+    expect(edited[0]).toBe(first[0]);
+    expect(edited[1]).not.toBe(first[1]);
+    expect(edited[1]!.content).toBe("Edited");
+  });
+
+  it("changes only the message that owns a streamed block", () => {
+    const settled = {
+      id: "u", role: "user" as const, schema_version: 1 as const, created_at: start,
+      blocks: [{ type: "text" as const, block_id: "u", text: "Question" }],
+    };
+    const state: DirectTurnState = {
+      lastCursor: 3,
+      activeTurn: null,
+      messages: [settled, {
+        id: "a", role: "assistant", schema_version: 1, created_at: start,
+        blocks: [{ type: "text", block_id: "b", text: "An" }],
+      }],
+    };
+    const delta = applyDirectTurnEvent(state, { event: "block.delta", cursor: 4, block_id: "b", text: "swer" });
+    expect(delta.messages[0]).toBe(settled);
+    expect(delta.messages[1]!.blocks[0]!.text).toBe("Answer");
+    const completed = applyDirectTurnEvent(delta, {
+      event: "block.completed", cursor: 5, block_id: "b", block: { type: "text", block_id: "b", text: "Answer!" },
+    });
+    expect(completed.messages[0]).toBe(settled);
+    expect(completed.messages[1]!.blocks[0]!.text).toBe("Answer!");
   });
 
   it("marks messages the user wrote in a chat app with its platform", async () => {
@@ -655,7 +823,7 @@ describe("NyxAgent server-backed transport", () => {
       const transport = new NyxAgentTransport();
       const pending = transport.send(id, "Question", vi.fn());
       const rejected = expect(pending).rejects.toThrow(
-        "connection was interrupted",
+        "live reply was interrupted",
       );
       await vi.advanceTimersByTimeAsync(135_001);
       await rejected;
@@ -707,6 +875,15 @@ describe("NyxAgent server-backed transport", () => {
     expect(transport.session(id).messages.at(-1)?.error).toContain(
       "may have taken effect",
     );
+  });
+
+  it("keeps the idle-timeout warning uncertainty-aware when restoring a transcript", async () => {
+    const page = history();
+    page.messages[1] = { ...page.messages[1]!, status: "failed", error_code: "idle_timeout" };
+    globalThis.__nyxidAssistantHttpMock = () => json(page);
+    const transport = new NyxAgentTransport();
+    await transport.history(id);
+    expect(transport.session(id).messages.at(-1)?.error).toContain("Check what it already did");
   });
 
   it("detects repeated index cursors", async () => {
@@ -1295,11 +1472,167 @@ describe("steering transport", () => {
   });
 });
 
+it("tracks a failed live stream through polling and clears interruption on settle", async () => {
+  let active = true;
+  globalThis.__nyxidAssistantHttpMock = ({ endpoint }) => {
+    if (endpoint.endsWith("/turns")) return new Response(new ReadableStream({ start(controller) {
+      controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ event: "turn.status", conversation_id: id, turn_id: "turn", status: "running", cursor: 1 })}\n\n`));
+      controller.close();
+    } }));
+    const page = history();
+    if (active) { page.messages.pop(); page.conversation.active_turn = { turn_id: "turn", started_at: start, activities: [], attachments: [] }; }
+    return json(page);
+  };
+  const transport = new NyxAgentTransport();
+  await transport.history(id);
+  // send refuses a known active turn, so let admission establish it first.
+  active = false;
+  await transport.history(id);
+  active = true;
+  await expect(transport.send(id, "Question", vi.fn())).rejects.toThrow(/interrupted/);
+  await transport.history(id);
+  expect(transport.session(id).messages.find((message) => message.status === "streaming")?.turnStatus?.interrupted).toBe(true);
+  active = false;
+  await transport.history(id);
+  expect(transport.session(id).messages.some((message) => message.turnStatus?.interrupted)).toBe(false);
+});
+
+it.each([null, undefined])("parses backend failures with status %s through active polling, settlement and reload", async (status) => {
+  let active = true;
+  const attachment = { id: "upload", origin: "user_upload", content_type: "text/plain", size: 5, label: "source.txt", pages: null, image_input: null, expired: false };
+  const activity = { id: "failed", label: "tool", status: "error", started_at: start, ended_at: reset, machine: null, failure: { kind: "tool_error", ...(status === null ? { status: null } : {}) } };
+  globalThis.__nyxidAssistantHttpMock = () => {
+    const page = history();
+    const wire = {
+      ...page,
+      conversation: { ...page.conversation, active_turn: active ? { turn_id: "turn", started_at: start, activities: [activity], attachments: [attachment], activity_total: null } : null },
+      messages: active ? page.messages.slice(0, 1) : [{ ...page.messages[0] }, { ...page.messages[1], activities: [activity], attachments: [attachment], activity_total: null }],
+    };
+    const parsed = nyxAgentHistorySchema.parse(wire);
+    const failure = active ? parsed.conversation.active_turn?.activities[0]?.failure : parsed.messages[1]?.activities[0]?.failure;
+    expect(failure?.status).toBeUndefined();
+    return json(wire);
+  };
+  const transport = new NyxAgentTransport();
+  await transport.history(id);
+  await transport.history(id);
+  expect(transport.isRunning(id)).toBe(true);
+  expect(transport.session(id).messages.at(-1)?.toolCalls?.[0]?.failure).toEqual({ kind: "tool_error", ...(status === null ? { status: undefined } : {}) });
+  active = false;
+  await transport.history(id);
+  expect(transport.isRunning(id)).toBe(false);
+  expect(transport.session(id).status).toBe("completed_text");
+  expect(transport.session(id).messages.at(-1)?.toolCalls?.[0]?.status).toBe("error");
+  const reloaded = new NyxAgentTransport();
+  await reloaded.history(id);
+  expect(reloaded.isRunning(id)).toBe(false);
+  expect(reloaded.session(id).messages.at(-1)?.content).toBe("Answer 界");
+  expect(reloaded.session(id).messages.at(-1)?.toolCalls?.[0]?.failure?.kind).toBe("tool_error");
+});
+
+it.each(["", "Partial reply"])("keeps stopped replies visible live and after transcript reload: %s", async (text) => {
+  let stopped = false;
+  globalThis.__nyxidAssistantHttpMock = ({ endpoint }) => {
+    if (endpoint.endsWith("/stop")) { stopped = true; return new Response(null, { status: 204 }); }
+    const page = history();
+    if (!stopped) {
+      page.messages.pop();
+      page.conversation.active_turn = { turn_id: "turn", started_at: start, activities: [], attachments: [] };
+    } else {
+      page.messages[1] = { ...page.messages[1]!, text, status: "failed", error_code: "cancelled" };
+    }
+    return json(page);
+  };
+  const assertVisible = (transport: NyxAgentTransport) => {
+    const session = transport.session(id);
+    expect(session.status).toBe("stopped");
+    expect(session.messages.at(-1)?.status).toBe("stopped");
+    const view = render(createElement(ChatMessageList, { session, bottomInset: 0 }));
+    expect(screen.getByRole("status", { name: "Turn stopped" })).toHaveTextContent("Stopped");
+    if (text) expect(screen.getByText(text)).toBeVisible();
+    expect(view.container.querySelector("[data-empty-turn-error]")).toBeNull();
+    view.unmount();
+  };
+  const transport = new NyxAgentTransport();
+  await transport.history(id);
+  await transport.stop(id);
+  await transport.history(id);
+  assertVisible(transport);
+  const reloaded = new NyxAgentTransport();
+  await reloaded.history(id);
+  assertVisible(reloaded);
+});
+
 function sseBytes(...events: Record<string, unknown>[]): Uint8Array {
   return new TextEncoder().encode(
     events.map((event, i) => `data: ${JSON.stringify({ ...event, cursor: i + 1 })}\n\n`).join(""),
   );
 }
+
+it.each(["", "Partial stopped reply"])("retains stopped row identity during the next live turn and settlement: %s", async (text) => {
+  const page = history();
+  page.messages[1] = {
+    ...page.messages[1]!,
+    text,
+    status: "failed",
+    error_code: "cancelled",
+  };
+  let controller!: ReadableStreamDefaultController<Uint8Array>;
+  let cursor = 0;
+  const emit = (...events: Record<string, unknown>[]) => {
+    controller.enqueue(new TextEncoder().encode(events.map((event) =>
+      `data: ${JSON.stringify({ ...event, cursor: ++cursor })}\n\n`,
+    ).join("")));
+  };
+  globalThis.__nyxidAssistantHttpMock = ({ endpoint }) => {
+    if (endpoint.endsWith("/turns")) {
+      page.conversation.active_turn = { turn_id: "next-turn", started_at: afterReset, activities: [], attachments: [] };
+      page.messages.push({ ...page.messages[0]!, id: "next-user", seq: 3, turn_id: "next-turn", text: "Continue" });
+      return new Response(new ReadableStream({
+        start(value) {
+          controller = value;
+          emit(
+            { ...runningStatus, turn_id: "next-turn" },
+            { event: "message.started", message_id: "next-assistant", role: "assistant" },
+            { event: "block.started", message_id: "next-assistant", index: 0, block_id: "next-block", block: { type: "text", block_id: "next-block", text: "" } },
+            { event: "block.delta", block_id: "next-block", text: "New reply" },
+          );
+        },
+      }), { headers: { "content-type": "text/event-stream" } });
+    }
+    return endpoint.includes(`/conversations/${id}`)
+      ? json(page)
+      : json({ conversations: [page.conversation], next_cursor: null });
+  };
+  const transport = new NyxAgentTransport();
+  await transport.history(id);
+  const stopped = transport.session(id).messages.find((message) => message.id === "a");
+  expect(stopped).toMatchObject({ status: "stopped", errorCode: "cancelled", content: text });
+  const sending = transport.send(id, "Continue", vi.fn());
+  await vi.waitFor(() => expect(transport.session(id).messages.at(-1)).toMatchObject({ id: "next-assistant", status: "streaming", content: "New reply" }));
+  const assertStopped = () => {
+    const session = transport.session(id);
+    expect(session.messages.find((message) => message.id === "a")).toBe(stopped);
+    expect(stopped?.error).toBeUndefined();
+    const view = render(createElement(ChatMessageList, { session, bottomInset: 0 }));
+    expect(screen.getByRole("status", { name: "Turn stopped" })).toHaveTextContent("Stopped");
+    view.unmount();
+  };
+  assertStopped();
+  await transport.history(id);
+  assertStopped();
+  page.conversation.active_turn = null;
+  page.messages.push({ ...page.messages[1]!, id: "next-assistant", seq: 4, turn_id: "next-turn", text: "New reply", status: "completed", error_code: null });
+  emit(
+    { event: "block.completed", block_id: "next-block", block: { type: "text", block_id: "next-block", text: "New reply" } },
+    { event: "message.completed", message_id: "next-assistant" },
+    { event: "turn.completed", turn_id: "next-turn", status: "completed", error: null },
+  );
+  controller.close();
+  await sending;
+  assertStopped();
+  expect(transport.session(id).messages.at(-1)?.status).toBe("complete");
+});
 
 function chunked(...parts: Uint8Array[]): Response {
   return new Response(
@@ -1333,7 +1666,7 @@ describe("send admission", () => {
       "the 12 MiB response limit",
       () => chunked(sseBytes(runningStatus), new Uint8Array(12 * 1024 * 1024 + 1)),
       "message",
-      "Assistant response exceeded its limit.",
+      "The live reply was interrupted. NyxBot may still be working; check the chat before sending again.",
     ],
     ["an SSE payload that is not JSON", () => chunked(new TextEncoder().encode("data: broken\n\n")), "name", "SyntaxError"],
     ["a body that is not UTF-8", () => chunked(new Uint8Array([0xff, 0xfe, 0x0a])), "name", "TypeError"],
@@ -1341,15 +1674,15 @@ describe("send admission", () => {
       "a turn for another conversation",
       () => chunked(sseBytes({ ...runningStatus, conversation_id: other })),
       "message",
-      "Assistant conversation mismatch.",
+      "The live reply was interrupted. NyxBot may still be working; check the chat before sending again.",
     ],
     [
       "a stream that ends without a terminal event",
       () => chunked(sseBytes(runningStatus)),
       "message",
-      "The connection was interrupted. The assistant may still be working.",
+      "The live reply was interrupted. NyxBot may still be working; check the chat before sending again.",
     ],
-    ["a 2xx without a body", () => new Response(null), "message", "The assistant returned no stream."],
+    ["a 2xx without a body", () => new Response(null), "message", "The live reply was interrupted. NyxBot may still be working; check the chat before sending again."],
   ] as const)("marks %s after a 2xx as admitted", async (_label, turns, field, expected) => {
     const error = await sendFailure(turns);
     expect(error).toBeInstanceOf(Error);
@@ -1365,11 +1698,31 @@ describe("send admission", () => {
       );
       await vi.advanceTimersByTimeAsync(135_001);
       const error = await pending;
-      expect((error as Error).message).toBe("The connection was interrupted. The assistant may still be working.");
+      expect((error as Error).message).toBe("The live reply was interrupted. NyxBot may still be working; check the chat before sending again.");
       expect(isAdmittedSendError(error)).toBe(true);
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("keeps the server trace when the accepted stream breaks", async () => {
+    const error = await sendFailure(() => new Response(new ReadableStream({
+      start(controller) { controller.error(new TypeError("network error")); },
+    }), { headers: { "X-NyxID-Trace-Id": "9ad6d0fa-bb8f-489e-8fdd-f8e34960921b" } }));
+    expect((error as Error).message).toBe(
+      "The live reply was interrupted. NyxBot may still be working; check the chat before sending again.\nTrace ID: 9ad6d0fa-bb8f-489e-8fdd-f8e34960921b",
+    );
+    expect(isAdmittedSendError(error)).toBe(true);
+  });
+
+  it("preserves admission when a browser exception has a read-only message", async () => {
+    const browserError = new Error("network error");
+    Object.defineProperty(browserError, "message", { writable: false });
+    const error = await sendFailure(() => new Response(new ReadableStream({
+      start(controller) { controller.error(browserError); },
+    })));
+    expect((error as Error).message).toContain("NyxBot may still be working");
+    expect(isAdmittedSendError(error)).toBe(true);
   });
 
   it("does not mark a refused POST as admitted", async () => {
@@ -1384,7 +1737,7 @@ describe("send admission", () => {
     const error = await sendFailure(() => {
       throw new TypeError("Failed to fetch");
     });
-    expect((error as Error).message).toBe("Failed to fetch");
+    expect((error as Error).message).toContain("your message may have arrived");
     expect(isAdmittedSendError(error)).toBe(false);
   });
 });
@@ -1456,4 +1809,47 @@ describe("sent images", () => {
     expect(imageSets()).toEqual([expect.objectContaining({ id: "u2", images: [photoImage] })]);
     expect(most).toBe(1);
   });
+});
+
+it("sends the chosen draft model only for a new thread and never changes the next draft's default", async () => {
+  const transport = new NyxAgentTransport();
+  const bodies: unknown[] = [];
+  globalThis.__nyxidAssistantHttpMock = ({ endpoint, init }) => {
+    if (endpoint.endsWith("/turns")) {
+      bodies.push(JSON.parse(String(init.body)));
+      return stream();
+    }
+    if (endpoint.includes("/conversations?")) return json({ conversations: [conversation()], next_cursor: null });
+    return json(history());
+  };
+  await transport.send(undefined, "Selected model", vi.fn(), undefined, { model: "nyxagent/research" });
+  expect(bodies[0]).toEqual({ model: "nyxagent/research", text: "Selected model" });
+  expect(transport.getModel()).toBe("nyxagent/chat");
+  await transport.send(id, "Continue", vi.fn(), undefined, { model: "nyxagent/research" });
+  expect(bodies[1]).toEqual({ conversation_id: id, text: "Continue" });
+});
+
+it("persists decision continuation provenance through the request, optimistic turn and history without losing its turn count", async () => {
+  const transport = new NyxAgentTransport();
+  const card = "11111111-1111-4111-8111-111111111111";
+  const bodies: unknown[] = [];
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const stored = history();
+  stored.messages[0] = { ...stored.messages[0]!, continuation_of: card };
+  globalThis.__nyxidAssistantHttpMock = async ({ endpoint, init }) => {
+    if (endpoint.endsWith("/turns")) {
+      bodies.push(JSON.parse(String(init.body))); await gate; return stream();
+    }
+    if (endpoint.includes("/conversations?")) return json({ conversations: [conversation()], next_cursor: null });
+    return json(stored);
+  };
+  const sending = transport.send(id, "Continue after the decision", vi.fn(), undefined, { acknowledgementId: card });
+  await vi.waitFor(() => expect(bodies).toHaveLength(1));
+  expect(bodies[0]).toMatchObject({ acknowledgement_id: card });
+  expect(transport.session(id).messages.find((row) => row.role === "user")?.continuation_of).toBe(card);
+  expect(transport.session(id).expectedTurnCount).toBe(1);
+  release(); await sending;
+  expect(transport.session(id).messages.find((row) => row.id === "u")?.continuation_of).toBe(card);
+  expect(transport.session(id).expectedTurnCount).toBe(1);
 });

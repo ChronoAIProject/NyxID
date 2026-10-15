@@ -19,6 +19,7 @@ import { useUpdateMember } from "@/hooks/use-org-members";
 import { useOrgRoleScopes } from "@/hooks/use-org-role-scopes";
 import type { MemberResponse } from "@/schemas/orgs";
 import type { KeyInfo } from "@/types/keys";
+import { connectionIconUrl } from "@/lib/connection-icon";
 
 interface MemberScopeDialogProps {
   readonly orgId: string;
@@ -253,6 +254,7 @@ function MemberScopeForm({
                       />
                       <ServiceIcon
                         slug={service.catalog_service_slug}
+                        iconUrl={connectionIconUrl(service)}
                         size="2xs"
                       />
                       <Label

@@ -89,6 +89,14 @@ remove upstream copies or files the owner/agent already downloaded elsewhere.
 
 ## Documents and untrusted content
 
+### Context recovery
+
+Assistant upload metadata is scoped to its conversation and can be listed with
+`nyx__attachment_list`. Document reads are paged; a page with `next_offset`
+sets `complete: false` and includes a fixed continuation hint. Uploads remain
+untrusted data and every read is re-authorized against the active assistant
+turn.
+
 Use maintained, pure-Rust `lopdf` for PDF parsing/text and `zip` plus `quick-xml`
 for DOCX. They avoid external converters, shell commands and Office execution;
 DOCX extraction needs only bounded ZIP entries and WordprocessingML paragraphs.
@@ -121,6 +129,35 @@ user text. Expiry and unsupported-image notices travel in that same context,
 once per request, including continuations and recovery. File content, names and image text are
 untrusted data: they cannot alter instructions, confer grants or approve actions.
 Documents are read on demand, not pasted wholesale into prompts.
+
+When a reset recap omits or truncates owner requirements, an owner chat key may
+use `nyx__conversation_history {before_seq, offset, limit}` to page complete owner
+messages for that conversation. The tool returns a bounded, doubly escaped MCP
+envelope with `complete` and a continuation cursor. Messages are returned newest
+first. `before_seq` is an exclusive sequence bound; `offset` is a character
+offset into the newest message in that window. Use both cursor fields from the
+response to continue a split message before moving to older ones. Guest turns
+and stale or other-conversation keys are refused.
+
+The metadata list is restricted to message-bound user uploads in this conversation,
+including policy-expired rows. Its opaque keyset cursor follows `(created_at, _id)`
+newest first; pages return at most 50 rows and fewer when serialization requires it.
+Both list and document pages budget the final, doubly escaped MCP envelope below
+9,000 bytes. Offsets and recorded coverage reflect only the final returned text.
+Existing group-member read authority still permits the group uploads included in
+that thread's per-turn context; the list and recap manifest do not enumerate groups.
+
+Review cards show upload coverage as observations in the drafting conversation,
+which may belong to a different agent from the skill's attachment destination.
+Atomic interval appends retain
+the latest 512 returned ranges; their union never fills unread gaps. After interval
+eviction, percentages are lower bounds. Since-reset coverage uses only ranges
+recorded after the conversation's latest context reset. Review observations show the newest 50
+message-bound uploads in this conversation and count any earlier uploads. New
+extractions persist their character count; only legacy rows need decryption to
+compute it and back-fill the count once. Unreadable legacy text leaves that upload’s
+coverage unavailable without hiding the draft. A complete scope declaration is the author's
+claim, not a server guarantee; reduced scope needs separate owner acceptance.
 
 ## Images and upstream compatibility
 
@@ -157,6 +194,18 @@ the file; browser MIME is ignored. Plain text accepts `.txt`, `.text` and no
 extension, and Markdown accepts `.md` and `.markdown`.
 Unsupported types return an actionable server error shown beside that file in
 the composer; sending stays blocked until the rejected file is removed.
+
+Each attachment gets a composer handle (`@image-1`, `@file-1`, `@pasted-text-1`)
+shown on its chip and offered when the writer types `@`. Before sending, each
+`@handle` becomes a plain description of its file (`image "chart.png"`), so
+servers that route `@name` to agents never see a handle; removing a chip removes
+its references. Pasting more than six lines, or more than 1,500 characters, of
+text attaches it as `pasted-text-N.md` (when it looks like Markdown) or `.txt` and
+places its handle at the caret. While a reply runs, uploads are closed, so a long
+paste stays ordinary text. Attachments do not survive leaving the composer, so a
+saved draft never keeps a handle: pasted text returns inline (bounded like the
+textbox) and other files become their description. File names never add an
+`@mention`. Images show above the text of the message they belong to.
 
 Acceptance coverage includes spoofing, oversize, ZIP expansion, encrypted/malformed
 PDF, timeout, owner/guest/thread/specialist ACLs, atomic message binding, expiry,

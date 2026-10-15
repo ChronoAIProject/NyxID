@@ -63,3 +63,14 @@ it("labels an orchestrator instruction as coming from NyxBot", () => {
   expect(article).not.toHaveTextContent("orchestrator");
   expect(article).toHaveTextContent("Find urgent issues");
 });
+
+it("stamps an orchestrator instruction with its send time", () => {
+  const sent = "2026-10-12T07:40:43.000Z";
+  render(
+    <NyxBotOrchestratorMessage
+      message={{ ...message("orchestrator", "Find urgent issues"), timestamp: Date.parse(sent) }}
+    />,
+  );
+  const article = screen.getByRole("article", { name: "Message from NyxBot" });
+  expect(article.querySelector(`time[datetime="${sent}"]`)).toBeInTheDocument();
+});

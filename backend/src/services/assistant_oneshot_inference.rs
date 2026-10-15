@@ -840,16 +840,16 @@ fn text_parts<'a>(value: &'a Value, kind: &str) -> Option<Vec<&'a str>> {
 // A deadline can drop the request at any await, including after provider dispatch.
 // Keep ordinary billing recovery semantics: release unsent reservations, settle
 // forwarded requests using the gateway's usage/byte estimate if no reply arrived.
-struct MeterGuard {
-    billing: Arc<billing::BillingService>,
-    metered: billing::MeteredProxyContext,
-    forwarded: bool,
-    usage: PlatformUsage,
-    model: Option<String>,
-    armed: bool,
+pub(crate) struct MeterGuard {
+    pub(crate) billing: Arc<billing::BillingService>,
+    pub(crate) metered: billing::MeteredProxyContext,
+    pub(crate) forwarded: bool,
+    pub(crate) usage: PlatformUsage,
+    pub(crate) model: Option<String>,
+    pub(crate) armed: bool,
 }
 impl MeterGuard {
-    async fn finish(&self) -> AppResult<()> {
+    pub(crate) async fn finish(&self) -> AppResult<()> {
         if !self.forwarded {
             return self
                 .billing

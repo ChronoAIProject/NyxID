@@ -153,6 +153,8 @@ pub struct AsyncReplyResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     /// Platform acceptance receipt; does not prove that a recipient saw the message.
     pub platform_message_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delivered_as: Option<Vec<String>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -284,17 +286,53 @@ fn validate_reply_for_adapter(
     body: &AsyncReplyBody,
     adapter: &dyn crate::services::channel_platform::PlatformAdapter,
 ) -> AppResult<()> {
-    if body.attachments.len() > 10 {
+    validate_reply_parts(
+        body.text.as_deref(),
+        body.metadata.as_ref(),
+        body.attachments
+            .iter()
+            .map(|attachment| (attachment.kind, attachment.mime_type.as_deref())),
+        adapter,
+    )
+}
+
+fn validate_prepared_reply(
+    body: &OutboundReply,
+    adapter: &dyn crate::services::channel_platform::PlatformAdapter,
+) -> AppResult<()> {
+    validate_reply_parts(
+        body.text.as_deref(),
+        body.metadata.as_ref(),
+        body.attachments
+            .iter()
+            .map(|attachment| (attachment.kind, attachment.mime_type.as_deref())),
+        adapter,
+    )
+}
+
+fn validate_reply_parts<'a>(
+    text: Option<&str>,
+    metadata: Option<&serde_json::Value>,
+    attachments: impl ExactSizeIterator<
+        Item = (
+            crate::services::channel_platform::MediaKind,
+            Option<&'a str>,
+        ),
+    >,
+    adapter: &dyn crate::services::channel_platform::PlatformAdapter,
+) -> AppResult<()> {
+    let count = attachments.len();
+    if count > 10 {
         return Err(AppError::ValidationError(
             "At most 10 attachments are allowed".into(),
         ));
     }
     let supported = adapter.media_capabilities().outbound;
-    for attachment in &body.attachments {
-        if !supported.contains(&attachment.kind) {
+    for (kind, mime_type) in attachments {
+        if !supported.contains(&kind) {
             return Err(AppError::ValidationError(format!(
                 "Unsupported media kind {}; supported kinds: {}",
-                attachment.kind.as_str(),
+                kind.as_str(),
                 supported
                     .iter()
                     .map(|kind| kind.as_str())
@@ -302,7 +340,7 @@ fn validate_reply_for_adapter(
                     .join(", ")
             )));
         }
-        if attachment.mime_type.as_deref().is_some_and(|mime| {
+        if mime_type.is_some_and(|mime| {
             reqwest::multipart::Part::bytes(Vec::new())
                 .mime_str(mime)
                 .is_err()
@@ -312,21 +350,13 @@ fn validate_reply_for_adapter(
             ));
         }
     }
-    if !body.attachments.is_empty()
-        || body.text.as_deref().is_some_and(|text| !text.is_empty())
-        || body
-            .metadata
-            .as_ref()
-            .is_some_and(|metadata| adapter.supports_reply_metadata(metadata))
+    if count > 0
+        || text.is_some_and(|text| !text.is_empty())
+        || metadata.is_some_and(|metadata| adapter.supports_reply_metadata(metadata))
     {
         return Ok(());
     }
-    if body
-        .metadata
-        .as_ref()
-        .and_then(|metadata| metadata.get("card"))
-        .is_some()
-    {
+    if metadata.and_then(|metadata| metadata.get("card")).is_some() {
         return Err(AppError::ValidationError(format!(
             "metadata.card is only supported on Lark/Feishu (got platform={})",
             adapter.platform_id()
@@ -399,11 +429,44 @@ fn message_to_item(
 const REPLY_TOKEN_USE_TTL_BUFFER_SECS: i64 = 120;
 
 #[derive(Debug)]
-struct ReplyRequestContext {
+pub(crate) struct ReplyRequestContext {
     original: ChannelMessage,
     conversation: ChannelConversation,
     attributed_api_key_id: String,
     validated_bot: Option<ChannelBot>,
+}
+
+pub(crate) fn image_reply_audience(
+    context: &ReplyRequestContext,
+    adapter: &dyn crate::services::channel_platform::PlatformAdapter,
+) -> AppResult<String> {
+    let original = &context.original;
+    let bot_id = context
+        .validated_bot
+        .as_ref()
+        .map(|bot| bot.id.as_str())
+        .or(original.channel_bot_id.as_deref())
+        .ok_or_else(|| AppError::NotFound("Image bot unavailable".into()))?;
+    let mut reply = OutboundReply {
+        text: None,
+        metadata: None,
+        attachments: Vec::new(),
+        reply_to_platform_message_id: original.platform_message_id.clone(),
+    };
+    adapter.reply_context(
+        crate::services::channel_image_audience::message_thread(original),
+        original.created_at,
+        &mut reply.metadata,
+    );
+    Ok(crate::services::channel_image_audience::resolve(
+        bot_id,
+        adapter.platform_id(),
+        original
+            .platform_conversation_id
+            .as_deref()
+            .unwrap_or(&context.conversation.platform_conversation_id),
+        &reply,
+    ))
 }
 
 #[derive(Debug)]
@@ -507,6 +570,7 @@ async fn load_active_bot(state: &AppState, original: &ChannelMessage) -> AppResu
         )
     })?;
     let bot = channel_bot_service::get_bot(&state.db, channel_bot_id).await?;
+    crate::services::platform_bot_authority::require_personal_routes(&state.db, &bot.id).await?;
     if !bot.is_active || bot.status == "suspended" {
         return Err(AppError::ChannelBotInactive(
             "Bot has been deactivated".to_string(),
@@ -825,7 +889,7 @@ async fn resolve_api_key_edit_context(
     })
 }
 
-async fn resolve_reply_request_context(
+pub(crate) async fn resolve_reply_request_context(
     state: &AppState,
     headers: &HeaderMap,
     auth_user: Option<&AuthUser>,
@@ -927,6 +991,7 @@ async fn resolve_initiated_context(
         .as_deref()
         .ok_or_else(|| AppError::ChannelBotNotFound("Conversation has no bot".to_string()))?;
     let bot = channel_bot_service::get_bot(&state.db, bot_id).await?;
+    crate::services::platform_bot_authority::require_personal_routes(&state.db, &bot.id).await?;
     if !bot.is_active || bot.status == "suspended" {
         return Err(AppError::ChannelBotInactive(
             "Bot has been deactivated".to_string(),
@@ -991,6 +1056,61 @@ pub(crate) async fn deliver_initiated_message(
     body: SendMessageRequest,
     adapter: &dyn crate::services::channel_platform::PlatformAdapter,
 ) -> AppResult<AsyncReplyResponse> {
+    deliver_initiated_inner(
+        state,
+        headers,
+        auth_user,
+        conversation,
+        bot,
+        body,
+        adapter,
+        None,
+    )
+    .await
+}
+
+pub(crate) async fn deliver_prepared_initiated_message(
+    state: &AppState,
+    headers: &HeaderMap,
+    auth_user: &AuthUser,
+    conversation: &ChannelConversation,
+    bot: &ChannelBot,
+    outbound: OutboundReply,
+    adapter: &dyn crate::services::channel_platform::PlatformAdapter,
+) -> AppResult<AsyncReplyResponse> {
+    let body = SendMessageRequest {
+        conversation_id: conversation.id.clone(),
+        idempotency_key: None,
+        message: AsyncReplyBody {
+            text: outbound.text.clone(),
+            metadata: outbound.metadata.clone(),
+            attachments: Vec::new(),
+        },
+    };
+    deliver_initiated_inner(
+        state,
+        headers,
+        auth_user,
+        conversation,
+        bot,
+        body,
+        adapter,
+        Some(outbound),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn deliver_initiated_inner(
+    state: &AppState,
+    headers: &HeaderMap,
+    auth_user: &AuthUser,
+    conversation: &ChannelConversation,
+    bot: &ChannelBot,
+    body: SendMessageRequest,
+    adapter: &dyn crate::services::channel_platform::PlatformAdapter,
+    prepared: Option<OutboundReply>,
+) -> AppResult<AsyncReplyResponse> {
     if !adapter.outbound_capabilities().initiated_send
         || (bot.platform == "x"
             && crate::services::channel_adapters::x::is_public_conversation(
@@ -999,7 +1119,18 @@ pub(crate) async fn deliver_initiated_message(
     {
         return Err(AppError::ChannelPlatformSendUnsupported);
     }
-    validate_reply_for_adapter(&body.message, adapter)?;
+    if let Some(outbound) = &prepared {
+        validate_prepared_reply(outbound, adapter)?;
+        if outbound
+            .attachments
+            .iter()
+            .any(|attachment| attachment.bytes.len() as u64 > state.config.channel_media_max_bytes)
+        {
+            return Err(AppError::ChannelMediaTooLarge);
+        }
+    } else {
+        validate_reply_for_adapter(&body.message, adapter)?;
+    }
     // These are relay-internal interaction credentials, not durable target/thread IDs.
     if body
         .message
@@ -1031,10 +1162,10 @@ pub(crate) async fn deliver_initiated_message(
             "idempotency_key must contain 1 to 128 characters".to_string(),
         ));
     }
-    let attachment_kinds: Vec<_> = body.message.attachments.iter().map(|a| a.kind).collect();
-    let content_type = attachment_kinds
-        .first()
-        .map_or("text", |kind| kind.as_str());
+    let attachment_kinds: Vec<_> = prepared.as_ref().map_or_else(
+        || body.message.attachments.iter().map(|a| a.kind).collect(),
+        |outbound| outbound.attachments.iter().map(|a| a.kind).collect(),
+    );
     let claim = if let Some(key) = &body.idempotency_key {
         let fingerprint = channel_send_service::delivery_fingerprint(
             body.message.text.as_deref(),
@@ -1053,6 +1184,7 @@ pub(crate) async fn deliver_initiated_message(
                 return Ok(AsyncReplyResponse {
                     message_id,
                     platform_message_id,
+                    delivered_as: None,
                 });
             }
         }
@@ -1068,11 +1200,20 @@ pub(crate) async fn deliver_initiated_message(
     );
     let send_result = async {
         crate::services::ownership_transfer_service::require_current_bot(&state.db, bot).await?;
-        let attachments = channel_media_service::materialize(
-            &body.message.attachments,
-            state.config.channel_media_max_bytes,
-        )
-        .await?;
+        let mut outbound = match prepared {
+            Some(outbound) => outbound,
+            None => OutboundReply {
+                attachments: channel_media_service::materialize(
+                    &body.message.attachments,
+                    state.config.channel_media_max_bytes,
+                )
+                .await?,
+                text: body.message.text,
+                metadata: body.message.metadata,
+                reply_to_platform_message_id: None,
+            },
+        };
+        outbound.reply_to_platform_message_id = None;
         let token = crate::services::channel_credentials::resolve_bot_token(
             &state.db,
             &state.encryption_keys,
@@ -1103,12 +1244,7 @@ pub(crate) async fn deliver_initiated_message(
                     platform_secrets: platform_secrets.as_ref(),
                 },
                 &conversation.platform_conversation_id,
-                &OutboundReply {
-                    attachments,
-                    text: body.message.text,
-                    reply_to_platform_message_id: None,
-                    metadata: body.message.metadata,
-                },
+                &outbound,
             )
             .await
     }
@@ -1141,6 +1277,14 @@ pub(crate) async fn deliver_initiated_message(
         observation.waba_id = bot.app_id.clone();
     }
     let platform_message_id = outcome.final_id;
+    let delivered_as = outcome
+        .delivered_kinds
+        .as_ref()
+        .map(|kinds| kinds.iter().map(|kind| kind.as_str().to_owned()).collect());
+    let attachment_kinds = outcome.delivered_kinds.unwrap_or(attachment_kinds);
+    let content_type = attachment_kinds
+        .first()
+        .map_or("text", |kind| kind.as_str());
     crate::services::channel_bot_service::record_outbound_outcome(
         &state.db,
         &bot.id,
@@ -1212,6 +1356,7 @@ pub(crate) async fn deliver_initiated_message(
     Ok(AsyncReplyResponse {
         message_id: stored.id,
         platform_message_id,
+        delivered_as,
     })
 }
 
@@ -1290,7 +1435,7 @@ pub(crate) static TEST_REPLY_ADAPTERS: std::sync::LazyLock<
     >,
 > = std::sync::LazyLock::new(Default::default);
 
-fn reply_adapter(
+pub(crate) fn reply_adapter(
     state: &AppState,
     context: &ReplyRequestContext,
 ) -> AppResult<std::sync::Arc<dyn crate::services::channel_platform::PlatformAdapter>> {
@@ -1326,6 +1471,39 @@ async fn deliver_async_reply(
     body: AsyncReplyRequest,
     adapter: &dyn crate::services::channel_platform::PlatformAdapter,
 ) -> AppResult<Json<AsyncReplyResponse>> {
+    deliver_reply(state, headers, context, body, adapter, None).await
+}
+
+/// Internal materialized media uses the same authority, billing, metadata,
+/// provider send and persistence path as the public asynchronous reply API.
+pub(crate) async fn deliver_prepared_reply(
+    state: &AppState,
+    headers: &HeaderMap,
+    context: ReplyRequestContext,
+    outbound: OutboundReply,
+    thread_reply: bool,
+    adapter: &dyn crate::services::channel_platform::PlatformAdapter,
+) -> AppResult<Json<AsyncReplyResponse>> {
+    let body = AsyncReplyRequest {
+        message_id: context.original.id.clone(),
+        thread_reply,
+        reply: AsyncReplyBody {
+            text: outbound.text.clone(),
+            metadata: outbound.metadata.clone(),
+            attachments: Vec::new(),
+        },
+    };
+    deliver_reply(state, headers, context, body, adapter, Some(outbound)).await
+}
+
+async fn deliver_reply(
+    state: &AppState,
+    headers: &HeaderMap,
+    context: ReplyRequestContext,
+    body: AsyncReplyRequest,
+    adapter: &dyn crate::services::channel_platform::PlatformAdapter,
+    prepared: Option<OutboundReply>,
+) -> AppResult<Json<AsyncReplyResponse>> {
     let ReplyRequestContext {
         original,
         conversation,
@@ -1352,7 +1530,18 @@ async fn deliver_async_reply(
     // Runs after bot lookup so we can reject card-only replies destined
     // for platforms (Telegram/Discord) that would otherwise emit an empty
     // message downstream.
-    validate_reply_for_adapter(&body.reply, adapter)?;
+    if let Some(outbound) = &prepared {
+        validate_prepared_reply(outbound, adapter)?;
+        if outbound
+            .attachments
+            .iter()
+            .any(|attachment| attachment.bytes.len() as u64 > state.config.channel_media_max_bytes)
+        {
+            return Err(AppError::ChannelMediaTooLarge);
+        }
+    } else {
+        validate_reply_for_adapter(&body.reply, adapter)?;
+    }
     let bot_token = crate::services::channel_credentials::resolve_bot_token(
         &state.db,
         &state.encryption_keys,
@@ -1370,28 +1559,34 @@ async fn deliver_async_reply(
 
     if bot.platform == "x"
         && crate::services::channel_adapters::x::is_public_conversation(platform_conversation_id)
-        && !body.reply.attachments.is_empty()
+        && prepared
+            .as_ref()
+            .map_or(!body.reply.attachments.is_empty(), |reply| {
+                !reply.attachments.is_empty()
+            })
     {
         return Err(AppError::ChannelMediaUnsupported);
     }
 
-    let mut metadata = body.reply.metadata;
-    adapter.reply_context(
-        original.thread_id.as_deref(),
-        original.created_at,
-        &mut metadata,
-    );
-
-    let outbound = OutboundReply {
-        attachments: channel_media_service::materialize(
-            &body.reply.attachments,
-            state.config.channel_media_max_bytes,
-        )
-        .await?,
-        text: body.reply.text,
-        reply_to_platform_message_id: original.platform_message_id.clone(),
-        metadata,
+    let mut outbound = match prepared {
+        Some(outbound) => outbound,
+        None => OutboundReply {
+            attachments: channel_media_service::materialize(
+                &body.reply.attachments,
+                state.config.channel_media_max_bytes,
+            )
+            .await?,
+            text: body.reply.text,
+            metadata: body.reply.metadata,
+            reply_to_platform_message_id: None,
+        },
     };
+    outbound.reply_to_platform_message_id = original.platform_message_id.clone();
+    adapter.reply_context(
+        crate::services::channel_image_audience::message_thread(&original),
+        original.created_at,
+        &mut outbound.metadata,
+    );
 
     // Send reply to platform
     let platform_secrets = if bot.credential_source == "platform" {
@@ -1457,6 +1652,13 @@ async fn deliver_async_reply(
         return Ok(Json(AsyncReplyResponse {
             message_id: stored.id,
             platform_message_id: Some(id.clone()),
+            delivered_as: (!outcome.delivered_kinds.is_empty()).then(|| {
+                outcome
+                    .delivered_kinds
+                    .iter()
+                    .map(|kind| kind.as_str().to_owned())
+                    .collect()
+            }),
         }));
     }
     let send_result = adapter
@@ -1508,6 +1710,13 @@ async fn deliver_async_reply(
         observation.waba_id = bot.app_id.clone();
     }
     let platform_msg_id = outcome.final_id;
+    let delivered_as = outcome
+        .delivered_kinds
+        .as_ref()
+        .map(|kinds| kinds.iter().map(|kind| kind.as_str().to_owned()).collect());
+    let kinds: Vec<_> = outcome
+        .delivered_kinds
+        .unwrap_or_else(|| outbound.attachments.iter().map(|a| a.kind).collect());
     // Store outbound-message metadata only (per ADR-013). The reply text
     // is already on the wire to the platform; we do not persist it.
     let stored = channel_relay_service::store_outbound_message(
@@ -1520,10 +1729,7 @@ async fn deliver_async_reply(
         Some(&original.id),
         platform_msg_id.as_deref(),
         original.platform_conversation_id.as_deref(),
-        outbound
-            .attachments
-            .first()
-            .map_or("text", |a| a.kind.as_str()),
+        kinds.first().map_or("text", |kind| kind.as_str()),
         outcome.observation,
     )
     .await?;
@@ -1533,7 +1739,6 @@ async fn deliver_async_reply(
     }
 
     if !outbound.attachments.is_empty() {
-        let kinds: Vec<_> = outbound.attachments.iter().map(|a| a.kind).collect();
         audit_service::log_async(
             state.db.clone(),
             Some(bot.user_id.clone()),
@@ -1592,6 +1797,7 @@ async fn deliver_async_reply(
     Ok(Json(AsyncReplyResponse {
         message_id: stored.id,
         platform_message_id: platform_msg_id,
+        delivered_as,
     }))
 }
 
@@ -2040,6 +2246,7 @@ mod tests {
     #[derive(Default)]
     struct RecordingSendAdapter {
         whatsapp_base: Option<String>,
+        telegram_base: Option<String>,
         calls: std::sync::atomic::AtomicUsize,
         media: bool,
         recorded_media: std::sync::Mutex<Vec<bytes::Bytes>>,
@@ -2130,7 +2337,7 @@ mod tests {
             thread_target: Option<&crate::services::channel_thread_service::ThreadReplyTarget>,
         ) -> AppResult<crate::services::channel_platform::SendOutcome> {
             assert!(thread_target.is_none());
-            if self.whatsapp_base.is_some() {
+            if self.whatsapp_base.is_some() || self.telegram_base.is_some() {
                 self.send_reply_outcome(http, credentials, target, reply)
                     .await
             } else {
@@ -2146,7 +2353,13 @@ mod tests {
             target: &str,
             reply: &OutboundReply,
         ) -> AppResult<crate::services::channel_platform::SendOutcome> {
-            if let Some(base) = &self.whatsapp_base {
+            if let Some(base) = &self.telegram_base {
+                crate::services::channel_adapters::telegram::TelegramAdapter::media_test_adapter(
+                    base,
+                )
+                .send_reply_outcome(http, credentials, target, reply)
+                .await
+            } else if let Some(base) = &self.whatsapp_base {
                 self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 crate::services::channel_adapters::whatsapp::send_outcome_at(
                     http,
@@ -5004,6 +5217,76 @@ mod tests {
                 caption: Some("private caption".into()),
             }],
         }
+    }
+
+    #[tokio::test]
+    async fn channel_telegram_photo_fallback_reply_exposes_and_persists_actual_kind() {
+        use tower::ServiceExt;
+        use wiremock::{Mock, MockServer, ResponseTemplate, matchers::path};
+        let fixture = setup_reply_token_fixture("channel_document_fallback")
+            .await
+            .expect("MongoDB required");
+        let server = MockServer::start().await;
+        Mock::given(path("/botbot-token/sendPhoto"))
+            .respond_with(ResponseTemplate::new(400).set_body_json(serde_json::json!({"ok":false,"error_code":400,"description":"PHOTO_INVALID_DIMENSIONS"})))
+            .expect(1).mount(&server).await;
+        Mock::given(path("/botbot-token/sendDocument"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"ok":true,"result":{"message_id":42}})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        TEST_REPLY_ADAPTERS.lock().unwrap().insert(
+            fixture.bot.id.clone(),
+            std::sync::Arc::new(RecordingSendAdapter {
+                telegram_base: Some(server.uri()),
+                media: true,
+                ..Default::default()
+            }),
+        );
+        let request = serde_json::json!({"message_id":fixture.message.id,"reply":{"attachments":[{
+            "kind":"image", "source":{"type":"base64","data":"aW1hZ2U="}, "mime_type":"image/png"
+        }]}});
+        let app = axum::Router::new()
+            .route(
+                "/api/v1/channel-relay/reply",
+                axum::routing::post(async_reply),
+            )
+            .with_state(fixture.state.clone());
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/channel-relay/reply")
+                    .header("content-type", "application/json")
+                    .header(
+                        "authorization",
+                        format!("Bearer {}", valid_reply_token(&fixture)),
+                    )
+                    .body(axum::body::Body::from(request.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), 8192)
+            .await
+            .unwrap();
+        let response: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(response["delivered_as"], serde_json::json!(["file"]));
+        let row = channel_relay_service::get_message(
+            &fixture.state.db,
+            response["message_id"].as_str().unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(row.content_type, "file");
+        assert!(row.attachments.is_empty());
+        TEST_REPLY_ADAPTERS.lock().unwrap().remove(&fixture.bot.id);
+        server.verify().await;
+        fixture.state.db.drop().await.unwrap();
     }
 
     #[tokio::test]

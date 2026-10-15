@@ -1,3 +1,6 @@
+import { useAuthStore } from "@/stores/auth-store";
+import { ToolManagerEditor } from "@/components/services/tool-manager-editor";
+import { canWriteTool } from "@/types/api";
 import {
   changedFields,
   describeChanges,
@@ -48,7 +51,7 @@ import { McpConnectionInfo } from "@/components/dashboard/mcp-connection-info";
 import { SshServiceInstructions } from "@/components/dashboard/ssh-service-instructions";
 import { ServiceRequirementsView } from "@/components/dashboard/service-requirements-editor";
 import { RoutingSection } from "@/components/dashboard/routing-section";
-import { useMyProviderTokens } from "@/hooks/use-providers";
+import { useMyProviderTokens, useProvider } from "@/hooks/use-providers";
 import { useDeveloperApps } from "@/hooks/use-developer-apps";
 import { Separator } from "@/components/ui/separator";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -116,9 +119,13 @@ const PROPAGATION_MODE_LABELS: Readonly<Record<string, string>> = {
 };
 
 export function ServiceDetailPage() {
+  const user = useAuthStore((state) => state.user);
   const { serviceId } = useParams({ strict: false }) as { serviceId: string };
   const navigate = useNavigate();
   const { data: service, isLoading, error, refetch } = useService(serviceId);
+  const { data: provider } = useProvider(
+    service?.offering_kind !== "tool" ? (service?.provider_config_id ?? "") : "",
+  );
   const deleteMutation = useDeleteService();
   const testSshMutation = useTestSshConnection();
   const { data: tokens } = useMyProviderTokens();
@@ -191,12 +198,36 @@ export function ServiceDetailPage() {
     sshAuthMode !== "proxy_only" &&
     service.ssh_config.allowed_principals.length > 0;
 
+  if (service.offering_kind === "tool" && !user?.is_admin) {
+    return canWriteTool(user, service) ? (
+      <ToolManagerEditor service={service} />
+    ) : (
+      <div className="space-y-6">
+        <PageHeader
+          title={service.name}
+          description={service.description ?? undefined}
+        />
+        <EndpointList
+          serviceId={service.id}
+          service={service}
+          canWrite={false}
+          hasApiSpecUrl={!!service.openapi_spec_url}
+        />
+      </div>
+    );
+  }
   return (
     <div className="space-y-8">
       <PageHeader
         title={service.name}
         description={service.description ?? undefined}
-        leading={<ServiceIcon slug={service.slug} size="md" />}
+        leading={
+          <ServiceIcon
+            slug={service.slug}
+            iconUrl={service.icon_url || provider?.icon_url}
+            size="md"
+          />
+        }
         actions={
           <>
             {terminalSupported && (
@@ -817,7 +848,9 @@ function ServiceCredentialPushSection({
                       <SelectItem value="header">Header</SelectItem>
                       <SelectItem value="query-param">Query param</SelectItem>
                       <SelectItem value="path-prefix">Path prefix</SelectItem>
-                      <SelectItem value="ifttt-webhook">IFTTT Webhooks</SelectItem>
+                      <SelectItem value="ifttt-webhook">
+                        IFTTT Webhooks
+                      </SelectItem>
                     </SelectContent>
                   </Select>
                   <FormMessage />
@@ -831,7 +864,12 @@ function ServiceCredentialPushSection({
                 <FormItem>
                   <FormLabel>Field name</FormLabel>
                   <FormControl>
-                    <Input readOnly={form.watch("injection_method") === "ifttt-webhook"} {...field} />
+                    <Input
+                      readOnly={
+                        form.watch("injection_method") === "ifttt-webhook"
+                      }
+                      {...field}
+                    />
                   </FormControl>
                   <FormMessage />
                 </FormItem>

@@ -61,8 +61,38 @@ pub struct AgentEvent {
     /// of the turn that drains it.
     #[serde(default)]
     pub reply_to: Vec<ChannelOrigin>,
+    /// The producer proved `report_to` from a validated source (the causing
+    /// turn's snapshot, a card's stored routing, or a carrier with validated
+    /// provenance). Unbound (legacy) events never create NyxBot involvement.
+    #[serde(default)]
+    pub bound: bool,
+    #[serde(default)]
+    pub report_to: Option<String>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
+}
+
+impl AgentEvent {
+    /// Mark the event as proved from a validated source. `None` means the
+    /// causing work was proven not to report to NyxBot (new owner work).
+    pub fn bound_to(mut self, report_to: Option<&str>) -> Self {
+        self.bound = true;
+        self.report_to = report_to.map(str::to_owned);
+        self
+    }
+}
+
+/// First validated report-snapshot format on delayed carriers (async
+/// operations, watches, machine jobs). 0 or absent is legacy and unproven;
+/// unknown versions fail closed.
+pub const REPORT_PROVENANCE_V1: u8 = 1;
+
+pub fn carried_report_to(report_to: Option<&str>, provenance: u8) -> Option<String> {
+    if provenance == REPORT_PROVENANCE_V1 {
+        report_to.map(str::to_owned)
+    } else {
+        None
+    }
 }
 
 /// The external channel a conversation answers, when it was started by a
@@ -92,16 +122,28 @@ pub struct TurnActivity {
     pub digest: Option<String>,
     /// `running`, `completed`, or `error`.
     pub status: String,
+    #[serde(default)]
+    pub failure: Option<ToolFailure>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub started_at: DateTime<Utc>,
     #[serde(default, with = "crate::models::bson_datetime::optional")]
     pub ended_at: Option<DateTime<Utc>>,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ToolFailure {
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<u16>,
+}
+
 /// Metadata for an image a tool returned during a turn; the bytes live in
 /// `assistant_attachments`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TurnAttachment {
+    /// Whether this tool image may accompany a reply sent to a channel chat.
+    #[serde(default)]
+    pub chat_delivery: Option<bool>,
     #[serde(default)]
     pub image_input: Option<String>,
     #[serde(default)]
@@ -128,6 +170,10 @@ pub struct ActiveTurn {
     /// The failed turn this turn retries (owner Retry only).
     #[serde(default)]
     pub retry_of: Option<String>,
+    /// New turns count every dispatched tool call, including entries evicted
+    /// from the bounded activity display. Absent on legacy turns.
+    #[serde(default)]
+    pub activity_count: Option<i64>,
     /// Canonical call digests the retried turn completed. A repeated call
     /// with the same tool and arguments is refused (`retry_duplicate_action`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -147,6 +193,8 @@ pub struct ActiveTurn {
     pub machine_node_ids: Vec<String>,
     #[serde(default)]
     pub continuations: u32,
+    #[serde(default)]
+    pub activity_total: i64,
     /// Rolling hashes only; never persist tool arguments or results. Reset per continuation.
     #[serde(default)]
     pub tool_progress: ToolProgress,
@@ -157,6 +205,14 @@ pub struct ActiveTurn {
     pub heartbeat_at: Option<DateTime<Utc>>,
     #[serde(default)]
     pub trigger_run_id: Option<String>,
+    /// Specialist threads: the NyxBot thread this turn reports to, decided
+    /// once at admission; ambiguity resolves to `None`.
+    #[serde(default)]
+    pub report_to: Option<String>,
+    /// Group turns: the owner's NyxBot was a member of this personal group at
+    /// admission (org groups: never).
+    #[serde(default)]
+    pub with_nyxbot: bool,
     pub turn_id: String,
     #[serde(default)]
     pub origin: TurnOrigin,
@@ -205,6 +261,11 @@ pub enum TitleSource {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct AssistantConversation {
+    /// Internal conversion fence; typed settlement must preserve it until exact cleanup completes.
+    #[serde(default)]
+    pub platform_cleanup_pending: bool,
+    #[serde(default)]
+    pub platform_cleanup_id: Option<String>,
     /// Human opt-in only; command previews are encrypted and expire within 30 days.
     #[serde(default)]
     pub machine_previews: bool,
@@ -256,8 +317,9 @@ pub struct AssistantConversation {
     /// the owner/member has opted in.
     #[serde(default)]
     pub learning_epoch: Option<i64>,
-    /// Specialist threads only: the NyxBot thread that assigned the current
-    /// work, which receives its report and permission requests.
+    /// Legacy assignment marker written for old readers only: the NyxBot
+    /// thread that assigned the newest work. New code reads the turn snapshot
+    /// (`ActiveTurn::report_to`), never this field.
     #[serde(default)]
     pub report_to: Option<String>,
     /// Bounded wake-up queue drained by the next event turn.

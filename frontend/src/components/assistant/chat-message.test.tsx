@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import * as telemetry from "@/lib/telemetry";
 import { api } from "@/lib/api-client";
@@ -9,10 +9,13 @@ import {
 } from "@/components/assistant/chat-message";
 import {
   AevatarAssistantMessageList,
+  ChannelUserEntry,
   NyxAgentThreadMessageList,
   NyxAgentAssistantEntry,
 } from "@/components/assistant/assistant-chat-page";
 import type { ChatMessage, ChatSessionState } from "@/lib/assistant/chat-types";
+import { messageTime } from "@/lib/assistant/message-time";
+import { describeToolActivity } from "@/lib/assistant/tool-activity-text";
 
 const BASE: ChatMessage = {
   id: "assistant-1",
@@ -33,14 +36,16 @@ describe("canonical chat presentation", () => {
       expectedTurnCount: 0,
     };
     const retry = vi.fn().mockResolvedValue(undefined);
-    const failed: ChatMessage = { ...BASE, id: "failed-1", status: "error", error: "Turn lost" };
+    const failed: ChatMessage = { ...BASE, id: "failed-1", status: "error", error: "Turn lost",
+      recovery: { status: "available", reason: "available", text: "Question", attachments: [] } };
     // The page's own assistant renderer, as the thread page passes it.
     const { rerender } = render(
       <NyxAgentThreadMessageList
         session={{ ...session, messages: [BASE, failed] }}
         bottomInset={0}
         renderMessage={(message) => (
-          <NyxAgentAssistantEntry message={message} conversationId={session.conversationId} retry={retry} />
+          <NyxAgentAssistantEntry message={message} conversationId={session.conversationId}
+            retry={retry} checkRecovery={vi.fn()} />
         )}
       />,
     );
@@ -272,6 +277,22 @@ describe("canonical chat presentation", () => {
     expect(screen.getByRole("button", { name: "Retry" })).toBeEnabled();
   });
 
+  it("checks temporary recovery status without posting and reports copy failure", async () => {
+    const check = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", { value: { writeText: vi.fn().mockRejectedValue(new Error("denied")) }, configurable: true });
+    render(<ChatMessageBubble message={{ ...BASE, status: "error", recovery: {
+      status: "review", reason: "status_unavailable", text: "Original request", attachments: ["scan.txt"],
+    } }} onCheckRecovery={check} />);
+    expect(screen.queryByRole("button", { name: "Retry" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Check retry availability" }));
+    await screen.findByRole("button", { name: "Check retry availability" });
+    expect(check).toHaveBeenCalledOnce();
+    fireEvent.click(screen.getByRole("button", { name: "Review request" }));
+    expect(screen.getByText("Original request")).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Copy request" }));
+    expect(await screen.findByRole("status")).toHaveTextContent("Copy failed");
+  });
+
   it("shows every diagnostic field and copies the diagnostic ID", async () => {
     const writeText = vi.fn().mockResolvedValue(undefined);
     Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
@@ -297,7 +318,9 @@ describe("canonical chat presentation", () => {
     for (const value of ["no_progress", "503", "turn-1", "resp_1", "req-1", "2"]) {
       expect(screen.getByText(value)).toBeInTheDocument();
     }
-    expect(screen.getByRole("time")).toHaveAttribute("datetime", "2026-01-01T00:00:00Z");
+    expect(
+      within(screen.getByText("Details").closest("details")!).getByRole("time"),
+    ).toHaveAttribute("datetime", "2026-01-01T00:00:00Z");
     fireEvent.click(screen.getByRole("button", { name: "Copy diagnostic ID" }));
     expect(writeText).toHaveBeenCalledWith("turn turn-1 / response resp_1 / request req-1");
   });
@@ -401,6 +424,144 @@ describe("canonical chat presentation", () => {
       <ChatMessageBubble message={{ ...running, status: "complete" }} />,
     );
     expect(container.querySelector("[data-running-tool]")).toBeNull();
+  });
+
+  it("counts the seconds a reply has waited, as thinking and then beside a running tool", () => {
+    vi.useFakeTimers();
+    try {
+      const waiting = { ...BASE, content: "", status: "streaming" as const };
+      const { container, rerender } = render(<ChatMessageBubble message={waiting} />);
+      expect(container.querySelector("[data-waiting-status]")).toBeNull();
+      act(() => void vi.advanceTimersByTime(3000));
+      expect(container.querySelector("[data-waiting-status]")).toHaveTextContent("Thinking · 3s");
+      rerender(
+        <ChatMessageBubble
+          message={{
+            ...waiting,
+            toolCalls: [{ id: "t", name: "github__list_issues", status: "running", startedAt: 1 }],
+          }}
+        />,
+      );
+      act(() => void vi.advanceTimersByTime(4000));
+      expect(container.querySelector("[data-running-tool]")).toHaveTextContent(
+        `${describeToolActivity("github__list_issues", "running")}… · 7s`,
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("re-renders only the rows whose message changed while a reply streams", () => {
+    const session: ChatSessionState = {
+      clientId: "client", conversationId: "nyxagent-page", status: "streaming", title: "Test",
+      messages: [], expectedTurnCount: 1,
+    };
+    const settled: ChatMessage = { ...BASE, id: "settled" };
+    const live: ChatMessage = { ...BASE, id: "live", content: "A", status: "streaming" };
+    const rendered: string[] = [];
+    const renderMessage = (message: ChatMessage) => {
+      rendered.push(message.id);
+      return <p>{message.content}</p>;
+    };
+    const { rerender } = render(
+      <ChatMessageList session={{ ...session, messages: [settled, live] }} bottomInset={0} renderMessage={renderMessage} />,
+    );
+    rendered.length = 0;
+    rerender(
+      <ChatMessageList
+        session={{ ...session, messages: [settled, { ...live, content: "AB" }] }}
+        bottomInset={0}
+        renderMessage={(message) => renderMessage(message)}
+      />,
+    );
+    expect(rendered).toEqual(["live"]);
+    expect(screen.getByText("AB")).toBeVisible();
+    rendered.length = 0;
+    rerender(
+      <ChatMessageList
+        session={{ ...session, messages: [settled, { ...live, content: "AB" }] }}
+        bottomInset={0}
+        renderMessage={renderMessage}
+        projectionVersion="card:1"
+      />,
+    );
+    expect(rendered).toEqual(["settled", "live"]);
+  });
+
+  it("mounts a bounded window of a long transcript, ending at the newest message", () => {
+    // happy-dom has no layout: give every element a 600px box.
+    const rect = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockReturnValue({
+      x: 0, y: 0, top: 0, left: 0, right: 600, bottom: 600, width: 600, height: 600, toJSON: () => ({}),
+    } as DOMRect);
+    const width = vi.spyOn(HTMLElement.prototype, "offsetWidth", "get").mockReturnValue(600);
+    const height = vi.spyOn(HTMLElement.prototype, "offsetHeight", "get").mockReturnValue(600);
+    try {
+      const messages = Array.from({ length: 200 }, (_, index): ChatMessage => ({
+        ...BASE, id: `m-${String(index)}`, content: `Message ${String(index)}`,
+        role: index % 2 ? "assistant" : "user",
+      }));
+      const { container } = render(
+        <ChatMessageList
+          session={{ clientId: "c", conversationId: "nyxagent-long", status: "completed_text", title: "Long", messages, expectedTurnCount: 100 }}
+          bottomInset={0}
+        />,
+      );
+      const rows = container.querySelectorAll("[id^=message-]");
+      expect(rows.length).toBeGreaterThan(0);
+      expect(rows.length).toBeLessThan(20);
+      expect(container.querySelector("#message-m-199")).not.toBeNull();
+      expect(container.querySelector("#message-m-0")).toBeNull();
+    } finally {
+      rect.mockRestore();
+      width.mockRestore();
+      height.mockRestore();
+    }
+  });
+
+  it("starts windowing only while the reader follows the newest message", () => {
+    const width = vi.spyOn(HTMLElement.prototype, "offsetWidth", "get").mockReturnValue(600);
+    const height = vi.spyOn(HTMLElement.prototype, "offsetHeight", "get").mockReturnValue(600);
+    try {
+      const session = (count: number): ChatSessionState => ({
+        clientId: "c", conversationId: "nyxagent-growing", status: "completed_text", title: "T",
+        expectedTurnCount: 0,
+        messages: Array.from({ length: count }, (_, index): ChatMessage => ({ ...BASE, id: `m-${String(index)}` })),
+      });
+      const { container, rerender } = render(<ChatMessageList session={session(30)} bottomInset={0} />);
+      const scroller = container.querySelector<HTMLDivElement>("[id^=message-]")!.closest<HTMLDivElement>(".overflow-y-auto")!;
+      let top = 0;
+      Object.defineProperty(scroller, "scrollHeight", { configurable: true, get: () => 5000 });
+      Object.defineProperty(scroller, "clientHeight", { configurable: true, get: () => 600 });
+      Object.defineProperty(scroller, "scrollTop", { configurable: true, get: () => top, set: (value: number) => { top = value; } });
+      const scrollTo = (value: number) => { top = value; fireEvent.scroll(scroller); };
+      scrollTo(4400);
+      scrollTo(1000); // the reader scrolls up
+      rerender(<ChatMessageList session={session(31)} bottomInset={0} />);
+      expect(container.querySelectorAll("[id^=message-]")).toHaveLength(31);
+      expect(top).toBe(1000);
+      scrollTo(4400); // back at the newest message
+      rerender(<ChatMessageList session={session(32)} bottomInset={0} />);
+      expect(container.querySelectorAll("[id^=message-]").length).toBeLessThan(32);
+    } finally {
+      width.mockRestore();
+      height.mockRestore();
+    }
+  });
+
+  it("shows a reply's images, and a message's attachments, above its text", () => {
+    // The image stays loading: only its position matters here.
+    globalThis.__nyxidAssistantHttpMock = () => new Promise<Response>(() => undefined);
+    const image = { id: "img", endpoint: "/assistant/nyxagent/conversations/c/attachments/img", contentType: "image/png", label: "chart.png" };
+    for (const role of ["assistant", "user"] as const) {
+      const { container, unmount } = render(
+        <ChatMessageBubble message={{ ...BASE, role, content: "Here is the chart.", images: [image] }} />,
+      );
+      const html = container.innerHTML;
+      expect(html.indexOf("Loading image from chart.png")).toBeGreaterThan(-1);
+      expect(html.indexOf("Loading image from chart.png")).toBeLessThan(html.indexOf("Here is the chart."));
+      unmount();
+    }
+    globalThis.__nyxidAssistantHttpMock = undefined;
   });
 
   it("renders tool images from the authenticated client and reports failures", async () => {
@@ -637,6 +798,81 @@ describe("canonical chat presentation", () => {
   });
 });
 
+describe("turn status and action ledger", () => {
+  it.each(["approval", "retrying", "continuing", "working", "active"] as const)("keeps %s status visible after reply text", (phase) => {
+    const labels = { approval: "Waiting for approval", retrying: "Retrying…", continuing: "Continuing task…", working: "Working…", active: "Working — the reply appears when it is ready" };
+    const { container, rerender } = render(<ChatMessageBubble message={{ ...BASE, status: "streaming", turnStatus: { phase, label: labels[phase] } }} />);
+    const row = container.querySelector("[data-turn-status]")!;
+    expect(row).toHaveTextContent(labels[phase]);
+    expect(row.className).not.toContain("animate");
+    expect(row.querySelector("span")?.className ?? "").not.toContain("animate");
+    for (const status of ["stopped", "error", "complete"]) {
+      rerender(<ChatMessageBubble message={{ ...BASE, status }} />);
+      expect(container.querySelector("[data-turn-status]")).toBeNull();
+    }
+  });
+
+  it("shows elapsed tool time and the interruption notice", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-10-13T00:00:12Z"));
+    const { rerender } = render(<ChatMessageBubble message={{ ...BASE, status: "streaming", turnStatus: { phase: "tool", label: "Running github__list", toolStartedAt: "2026-10-13T00:00:00Z", interrupted: true } }} />);
+    expect(screen.getByText("· 12s")).toBeVisible();
+    expect(screen.getByText("Connection interrupted; checking every few seconds")).toBeVisible();
+    const phase = screen.getByRole("status");
+    expect(phase).toHaveTextContent("Connection interrupted; checking every few seconds");
+    const announcement = phase.textContent;
+    act(() => vi.advanceTimersByTime(48_000));
+    expect(screen.getByText("· 1:00")).toBeVisible();
+    expect(phase.textContent).toBe(announcement);
+    expect(phase).not.toHaveTextContent("1:00");
+    rerender(<ChatMessageBubble message={{ ...BASE, status: "streaming", turnStatus: { phase: "tool", label: "Running github__list", toolStartedAt: "2026-10-13T00:00:00Z", interrupted: false } }} />);
+    expect(phase).not.toHaveTextContent("Connection interrupted");
+    expect(screen.getByText("· 1:00")).toBeVisible();
+    vi.useRealTimers();
+  });
+
+  it.each(["streaming", "complete", "error", "stopped"])("renders %s with an earlier failed action truthfully", (status) => {
+    render(<ChatMessageBubble message={{ ...BASE, status, activityTotal: 41, turnStatus: { phase: "working", label: "Working…" }, toolCalls: [{ id: "f", name: "github__read", status: "error", startedAt: 1, failure: { kind: "service_status", status: 404 } }] }} />);
+    const button = screen.getByRole("button", { name: /action/ });
+    expect(button).toHaveTextContent("41 actions");
+    expect(button).toHaveTextContent("latest 1 of 41 shown");
+    if (status === "streaming") expect(screen.queryByLabelText("Turn failed")).toBeNull();
+    if (status === "complete") {
+      expect(button).toHaveTextContent("Completed");
+      expect(button).toHaveTextContent("1 failed");
+      expect(screen.getByText(/1 failed/).className).toContain("text-warning");
+    }
+    fireEvent.click(button);
+    expect(screen.getByLabelText("Failed")).toBeVisible();
+    expect(screen.getByText(/The service responded with HTTP 404/)).toHaveTextContent("The assistant can continue after a failed step.");
+  });
+  it.each(["complete", "error", "stopped"])("shows unknown details for legacy or turn-terminated steps in a %s turn", (status) => {
+    render(<ChatMessageBubble message={{ ...BASE, status, toolCalls: [{ id: "legacy", name: "tool", status: "error", startedAt: 1 }] }} />);
+    fireEvent.click(screen.getByRole("button", { name: /action/ }));
+    expect(screen.getByLabelText("Failed")).toBeVisible();
+    expect(screen.getByText(/This step did not complete/)).toHaveTextContent("No additional error details are available. The assistant can continue after a failed step.");
+    expect(screen.queryByText(/The tool reported an error/)).toBeNull();
+  });
+
+  it("uses tool-error copy only for an explicit tool error", () => {
+    render(<ChatMessageBubble message={{ ...BASE, status: "complete", toolCalls: [{ id: "error", name: "tool", status: "error", startedAt: 1, failure: { kind: "tool_error" } }] }} />);
+    fireEvent.click(screen.getByRole("button", { name: /action/ }));
+    expect(screen.getByText(/The tool reported an error/)).toBeVisible();
+  });
+
+});
+
+
+it.each(["", "Partial reply"])("shows a persistent stopped label without activities: %s", (content) => {
+  const message = { ...BASE, content, status: "stopped" };
+  const { container, rerender } = render(<ChatMessageBubble message={message} />);
+  expect(screen.getByRole("status", { name: "Turn stopped" })).toHaveTextContent("Stopped");
+  expect(container.querySelector("[data-turn-status]")).toBeNull();
+  rerender(<ChatMessageList session={{ clientId: "chat", conversationId: "chat", expectedTurnCount: 1, title: "Chat", status: "completed_text", messages: [message] }} bottomInset={0} />);
+  expect(screen.getByRole("status", { name: "Turn stopped" })).toBeVisible();
+  expect(container.querySelector("[data-empty-turn-error]")).toBeNull();
+});
+
 it("focuses the comment field and closes it with Escape, showing save failures", async () => {
   render(<ChatMessageBubble message={BASE} conversationId="conversation-1" />);
   fireEvent.click(screen.getByRole("button", { name: "Add feedback comment" }));
@@ -651,4 +887,162 @@ it("focuses the comment field and closes it with Escape, showing save failures",
   fireEvent.click(screen.getByRole("button", { name: "Add feedback comment" }));
   fireEvent.click(screen.getByRole("button", { name: "Helpful" }));
   expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+});
+
+it("separates the described tool label from elapsed time without duplicate Thinking", () => {
+  vi.useFakeTimers();
+  try {
+    vi.setSystemTime(new Date("2026-10-13T00:00:12Z"));
+    const { container } = render(<ChatMessageBubble message={{
+      ...BASE,
+      content: "",
+      status: "streaming",
+      turnStatus: { phase: "tool", label: "Running github__read_issue", toolStartedAt: "2026-10-13T00:00:00Z" },
+      toolCalls: [{ id: "read", name: "github__read_issue", status: "running", startedAt: 1 }],
+    }} />);
+    const row = container.querySelector("[data-turn-status]")!;
+    expect(row).toHaveTextContent("Reading issue on GitHub… · 12s");
+    expect(row).not.toHaveTextContent("Thinking");
+    expect(container.querySelectorAll("[data-running-tool]")).toHaveLength(1);
+    const live = row.querySelector('[aria-live="polite"]')!;
+    const label = live.textContent;
+    act(() => vi.advanceTimersByTime(48000));
+    expect(live.textContent).toBe(label);
+    expect(row).toHaveTextContent("Reading issue on GitHub… · 1:00");
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+it("shows one working label with elapsed time only after three seconds", () => {
+  vi.useFakeTimers();
+  try {
+    const { container } = render(<ChatMessageBubble message={{
+      ...BASE, status: "streaming", turnStatus: { phase: "working", label: "Working…" },
+    }} />);
+    const row = container.querySelector("[data-turn-status]")!;
+    expect(row).toHaveTextContent(/^Working…$/);
+    act(() => vi.advanceTimersByTime(2000));
+    expect(row).toHaveTextContent(/^Working…$/);
+    act(() => vi.advanceTimersByTime(1000));
+    expect(row).toHaveTextContent(/^Working… · 3s$/);
+    expect(row).not.toHaveTextContent("Thinking");
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+it("does not invent an HTTP status when service failure metadata lacks it", () => {
+  render(<ChatMessageBubble message={{ ...BASE, status: "complete", toolCalls: [{
+    id: "failed", name: "tool", status: "error", startedAt: 1, failure: { kind: "service_status" },
+  }] }} />);
+  fireEvent.click(screen.getByRole("button", { name: /action/ }));
+  expect(screen.getByText(/The service returned an error/)).toHaveTextContent(
+    "No HTTP status is available. The assistant can continue after a failed step.",
+  );
+  expect(screen.queryByText(/HTTP undefined/)).toBeNull();
+});
+
+it("renders a decision continuation as a system status without the owner's instruction bubble", () => {
+  render(<ChatMessageBubble message={{ ...BASE, role: "user", content: "Confirmed: attach it now", continuation_of: "11111111-1111-4111-8111-111111111111" }} />);
+  expect(screen.getByRole("status")).toHaveTextContent("Continuing after your decision");
+  expect(screen.queryByText("Confirmed: attach it now")).not.toBeInTheDocument();
+});
+
+describe("message timestamps", () => {
+  const SENT = "2026-10-12T07:40:43.000Z";
+  const at = Date.parse(SENT);
+
+  function sentTime(container: HTMLElement) {
+    return container.querySelector(`time[datetime="${SENT}"]`);
+  }
+
+  it("stamps user messages and settled replies with their local send time", () => {
+    const expected = messageTime(at)!;
+    for (const message of [
+      { ...BASE, id: "user-1", role: "user", timestamp: at },
+      { ...BASE, timestamp: at },
+    ] satisfies ChatMessage[]) {
+      const { container, unmount } = render(
+        <ChatMessageEntry message={message} conversationId="conversation-1" />,
+      );
+      const time = sentTime(container);
+      expect(time).toHaveTextContent(expected.label);
+      expect(time).not.toHaveAttribute("title");
+      unmount();
+    }
+  });
+
+  it("stamps a user message written in a chat app", () => {
+    const { container } = render(
+      <ChannelUserEntry
+        message={{ ...BASE, id: "user-1", role: "user", content: "From Telegram", timestamp: at, via: "telegram" }}
+        platform="telegram"
+      />,
+    );
+    expect(screen.getByText("From Telegram")).toBeInTheDocument();
+    expect(sentTime(container)).toHaveTextContent(messageTime(at)!.label);
+  });
+
+  it("puts a reply's time on its feedback line, and keeps it without feedback", () => {
+    const { container, rerender } = render(
+      <ChatMessageBubble message={{ ...BASE, timestamp: at }} conversationId="conversation-1" />,
+    );
+    const feedback = screen.getByRole("group", { name: "Reply feedback" });
+    expect(feedback.parentElement).toContainElement(sentTime(container) as HTMLElement);
+    rerender(
+      <ChatMessageBubble
+        message={{ ...BASE, timestamp: at, status: "error", error: "Turn lost" }}
+        conversationId="conversation-1"
+      />,
+    );
+    expect(screen.queryByRole("group", { name: "Reply feedback" })).not.toBeInTheDocument();
+    expect(sentTime(container)).toBeInTheDocument();
+  });
+
+  it("waits for a streaming reply to settle instead of stamping each update", () => {
+    const { container } = render(
+      <ChatMessageBubble message={{ ...BASE, timestamp: Date.now(), status: "streaming" }} />,
+    );
+    expect(container.querySelector("time")).toBeNull();
+  });
+
+  it("omits a missing or invalid time rather than inventing one", () => {
+    for (const timestamp of [Number.NaN, Date.parse("not a date")]) {
+      const { container, unmount } = render(
+        <>
+          <ChatMessageBubble message={{ ...BASE, id: "user-1", role: "user", timestamp }} />
+          <ChatMessageBubble message={{ ...BASE, timestamp }} />
+        </>,
+      );
+      expect(container.querySelector("time")).toBeNull();
+      expect(container).not.toHaveTextContent("Invalid Date");
+      unmount();
+    }
+  });
+
+  it("stamps every restored history row in a transcript", () => {
+    const earlier = "2026-10-11T22:05:00.000Z";
+    const session: ChatSessionState = {
+      clientId: "history",
+      conversationId: "conversation-1",
+      status: "completed_text",
+      title: "History",
+      expectedTurnCount: 2,
+      messages: [
+        { ...BASE, id: "user-1", role: "user", content: "Yesterday", timestamp: Date.parse(earlier) },
+        { ...BASE, id: "assistant-1", timestamp: Date.parse(earlier) + 1000 },
+        { ...BASE, id: "user-2", role: "user", content: "Today", timestamp: at },
+        { ...BASE, id: "assistant-2", timestamp: at + 1000 },
+      ],
+    };
+    const { container } = render(<ChatMessageList session={session} bottomInset={0} />);
+    const times = [...container.querySelectorAll("time")].map((time) => time.getAttribute("datetime"));
+    expect(times).toEqual([
+      earlier,
+      new Date(Date.parse(earlier) + 1000).toISOString(),
+      SENT,
+      new Date(at + 1000).toISOString(),
+    ]);
+  });
 });

@@ -271,6 +271,17 @@ pub(super) async fn record_chat(
     facts: &ChatFacts,
     last_message_id: Option<&str>,
 ) -> AppResult<NyxbotThread> {
+    record_chat_with_relay(state, row, partition, facts, last_message_id, None).await
+}
+
+pub(super) async fn record_chat_with_relay(
+    state: &AppState,
+    row: &NyxbotChannel,
+    partition: &str,
+    facts: &ChatFacts,
+    last_message_id: Option<&str>,
+    relay_message_id: Option<&str>,
+) -> AppResult<NyxbotThread> {
     let now = bson::DateTime::now();
     let mut set = doc! {"updated_at": now, "last_message_at": now, "kind": facts.kind,
     "platform_chat_id": &facts.chat_id};
@@ -285,6 +296,44 @@ pub(super) async fn record_chat(
     }
     if let Some(message_id) = last_message_id {
         set.insert("last_message_id", message_id);
+    }
+    if let Some(message_id) = relay_message_id {
+        set.insert("last_relay_message_id", message_id);
+    }
+    if matches!(row.platform.as_str(), "telegram" | "telegram-new")
+        && let Some(message_id) = last_message_id.or(relay_message_id)
+    {
+        // Best effort: only the stored topic evidence is read, and a missing,
+        // partial or legacy message row (or a failed lookup) means "no
+        // evidence", which keeps the previous outbound target. It never fails
+        // the inbound message.
+        let topic = match state
+            .db
+            .collection::<bson::Document>(crate::models::channel_message::COLLECTION_NAME)
+            .find_one(doc! {"_id": message_id, "channel_bot_id": &row.channel_bot_id})
+            .projection(doc! {"_id": 0, "thread_context.telegram_topic": 1})
+            .await
+        {
+            Ok(source) => source
+                .as_ref()
+                .and_then(|source| source.get_document("thread_context").ok())
+                .and_then(|facts| facts.get("telegram_topic"))
+                .and_then(|topic| {
+                    bson::from_bson::<crate::models::channel_thread::TelegramTopic>(topic.clone())
+                        .ok()
+                }),
+            Err(error) => {
+                tracing::debug!(%error, "Telegram topic evidence unavailable");
+                None
+            }
+        };
+        if let Some(topic) = topic {
+            set.insert(
+                "telegram_topic",
+                bson::to_bson(&topic)
+                    .map_err(|_| AppError::Internal("Invalid outbound topic".into()))?,
+            );
+        }
     }
     let threads = state.db.collection::<NyxbotThread>(THREADS);
     // Before NyxID passed each message's own chat type on, a group reached
@@ -333,7 +382,10 @@ pub(super) fn unnamed_sender(platform: &str, sender_id: &str) -> String {
         .into_iter()
         .rev()
         .collect();
-    format!("{} user …{tail}", super::platform_name(platform))
+    format!(
+        "{} user …{tail}",
+        crate::services::channel_platform::platform_name(platform)
+    )
 }
 
 /// Lark and Feishu write each mention into the text as a key (`@_user_1`);
@@ -1042,6 +1094,11 @@ pub(crate) async fn update_chat(
     settings: &ChatSettings,
 ) -> AppResult<Value> {
     let (row, chat) = load_chat(state, owner, chat_id).await?;
+    crate::services::platform_bot_authority::require_personal_routes(
+        &state.db,
+        &row.channel_bot_id,
+    )
+    .await?;
     let group = is_group(&chat);
     if chat.kind.is_none() && (settings.reply_mode.is_some() || settings.members.is_some()) {
         return Err(AppError::Conflict(
@@ -1203,14 +1260,27 @@ pub(crate) async fn set_private_chats(
         ));
     }
     let row = load_channel(state, owner, channel_id).await?;
-    state
+    // Narrowing to the owner stays available on any channel; only widening is fenced.
+    let mut filter = doc! {"_id": &row.id, "user_id": owner};
+    if private_chats == "everyone" {
+        crate::services::platform_bot_authority::require_personal_routes(
+            &state.db,
+            &row.channel_bot_id,
+        )
+        .await?;
+        filter.insert("status", doc! {"$in": ["pending", "active"]});
+    }
+    let updated = state
         .db
         .collection::<NyxbotChannel>(CHANNELS)
         .update_one(
-            doc! {"_id": &row.id, "user_id": owner},
+            filter,
             doc! {"$set": {"private_chats": private_chats, "updated_at": bson::DateTime::now()}},
         )
         .await?;
+    if updated.matched_count != 1 {
+        return Err(AppError::Conflict("Channel authority changed".into()));
+    }
     audit(
         state,
         owner,
@@ -1270,6 +1340,171 @@ pub(crate) async fn post(
     post_inner(state, owner, chat_id, text, agent_id, None).await
 }
 
+/// This gate is unconditional, including when the general turn-gate flag is off.
+pub(super) async fn post_turn_is_live(
+    state: &AppState,
+    chat: &crate::services::assistant_acknowledgement_service::ChatAuthority,
+) -> AppResult<bool> {
+    if chat.guest || chat.turn_id.is_none() {
+        return Ok(false);
+    }
+    let active_key = state
+        .db
+        .collection::<bson::Document>(crate::models::api_key::COLLECTION_NAME)
+        .find_one(doc! {"_id": &chat.api_key_id, "user_id": &chat.user_id,
+        "is_active": true, "$or": [{"expires_at": bson::Bson::Null},
+            {"expires_at": {"$gt": bson::DateTime::now()}}]})
+        .projection(doc! {"_id": 1})
+        .await?
+        .is_some();
+    if !active_key {
+        return Ok(false);
+    }
+    // None deliberately forces fresh owner/org/group ACL resolution.
+    let current = crate::services::assistant_acknowledgement_service::for_key(
+        &state.db,
+        &chat.user_id,
+        Some(&chat.api_key_id),
+    )
+    .await?;
+    Ok(current.is_some_and(|current| {
+        current.turn_live
+            && !current.turn_stopped
+            && !current.guest
+            && current.conversation_id == chat.conversation_id
+            && current.agent_id == chat.agent_id
+            && current.role == chat.role
+            && current.turn_id == chat.turn_id
+            && current.report_to == chat.report_to
+            && current.with_nyxbot == chat.with_nyxbot
+    }))
+}
+
+pub(crate) async fn post_current_turn(
+    state: &AppState,
+    chat: &crate::services::assistant_acknowledgement_service::ChatAuthority,
+    chat_id: &str,
+    text: &str,
+    include_images: bool,
+) -> AppResult<Value> {
+    if chat.guest {
+        return Err(AppError::Forbidden(
+            "Only the owner can post to another chat".into(),
+        ));
+    }
+    let text = text.trim();
+    if text.is_empty() || text.chars().count() > MAX_POST_CHARS {
+        return Err(AppError::ValidationError(format!(
+            "text must have 1 to {MAX_POST_CHARS} characters"
+        )));
+    }
+    if !post_turn_is_live(state, chat).await? {
+        return Err(AppError::AssistantTurnRequired);
+    }
+    let target = prepare_post(
+        state,
+        &chat.user_id,
+        chat_id,
+        (!chat.is_orchestrator()).then_some(chat.agent_id.as_str()),
+    )
+    .await?;
+    let mut report = super::images::ImageReport::default();
+    if include_images {
+        let turn_id = chat
+            .turn_id
+            .as_deref()
+            .ok_or(AppError::AssistantTurnRequired)?;
+        let row = state
+            .db
+            .collection::<crate::models::assistant_conversation::AssistantConversation>(
+                crate::models::assistant_conversation::COLLECTION_NAME,
+            )
+            .find_one(doc! {
+                "_id":&chat.conversation_id,"user_id":&chat.user_id,"guest_turn":false,
+                "active_turn.turn_id":turn_id,"active_turn.stop_requested":false,
+            })
+            .await?;
+        if let Some(row) = row.filter(|row| engine::live_turn(row, Utc::now()).is_some()) {
+            let plan = super::images::ImageSendPlan {
+                attachments: row
+                    .active_turn
+                    .map(|turn| turn.attachments)
+                    .unwrap_or_default(),
+            };
+            report = super::images::report_or_failure(
+                state,
+                super::images::ImageSendContext {
+                    owner: &chat.user_id,
+                    conversation_id: &chat.conversation_id,
+                    turn_id,
+                    channel: &target.channel,
+                    thread: &target.thread,
+                    anchor: super::images::ImageAnchor::Initiated {
+                        chat_id: chat_id.into(),
+                    },
+                    audience: super::images::ImageAudience {
+                        owner_private: target.thread.owner_chat
+                            && target.thread.kind.as_deref() == Some("private"),
+                    },
+                    deadline: None,
+                    initiated: Some(&target),
+                    fence: Some(chat),
+                },
+                &plan,
+            )
+            .await;
+        }
+    }
+    let images = super::images::image_result(&report);
+    if !post_turn_is_live(state, chat).await.unwrap_or(false) {
+        return Ok(json!({"text":"cancelled","images":images,"chat_id":chat_id}));
+    }
+    let result = send_post_with_fence(
+        state,
+        &target,
+        crate::services::channel_platform::OutboundReply {
+            text: Some(super::images::append_failure(text, &report)),
+            metadata: None,
+            attachments: Vec::new(),
+            reply_to_platform_message_id: None,
+        },
+        Some(chat),
+    )
+    .await;
+    let (status, message_id) = match result {
+        Ok(sent) => ("sent", Some(sent.message_id)),
+        Err(AppError::AssistantTurnRequired) => ("cancelled", None),
+        Err(error)
+            if matches!(
+                super::images::classify_outcome(&error),
+                super::images::ImageOutcome::Unknown
+            ) =>
+        {
+            ("unknown", None)
+        }
+        Err(_) => ("failed", None),
+    };
+    audit(
+        state,
+        &chat.user_id,
+        "nyxbot_channel_chat_posted",
+        json!({
+            "channel_agent_id": target.channel.id,
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "text_status": status,
+        }),
+    )
+    .await;
+    Ok(json!({
+        "status": if status == "sent" { "posted" } else { status },
+        "text": status,
+        "images": images,
+        "chat_id": chat_id,
+        "message_id": message_id,
+    }))
+}
+
 pub(crate) async fn post_automation(
     state: &AppState,
     owner: &str,
@@ -1281,14 +1516,24 @@ pub(crate) async fn post_automation(
     post_inner(state, owner, chat_id, text, agent_id, Some(thread_id)).await
 }
 
-async fn post_inner(
+pub(crate) struct PostTarget {
+    pub agent_id: Option<String>,
+    pub channel: NyxbotChannel,
+    pub thread: NyxbotThread,
+    pub bot: ChannelBot,
+    pub auth: crate::mw::auth::AuthUser,
+    pub conversation: ChannelConversation,
+    pub adapter: std::sync::Arc<dyn crate::services::channel_platform::PlatformAdapter>,
+}
+
+/// A single logical post consumes one limiter token here. Its bounded image
+/// components reuse this admitted target and take no additional tokens.
+pub(super) async fn prepare_post(
     state: &AppState,
     owner: &str,
     chat_id: &str,
-    text: &str,
     agent_id: Option<&str>,
-    full_thread: Option<&str>,
-) -> AppResult<Value> {
+) -> AppResult<PostTarget> {
     let (row, chat) = load_chat(state, owner, chat_id).await?;
     if row.status != "active" {
         return Err(AppError::Conflict("The channel bot is not active".into()));
@@ -1309,12 +1554,6 @@ async fn post_inner(
             "Posting is off for this chat; the owner can allow it".into(),
         ));
     }
-    let text = text.trim();
-    if text.is_empty() || (full_thread.is_none() && text.chars().count() > MAX_POST_CHARS) {
-        return Err(AppError::ValidationError(format!(
-            "text must have 1 to {MAX_POST_CHARS} characters"
-        )));
-    }
     let platform_chat_id = chat
         .platform_chat_id
         .clone()
@@ -1333,29 +1572,18 @@ async fn post_inner(
             "Bot has been deactivated".to_string(),
         ));
     }
-    let text = full_thread.map_or_else(
-        || text.to_owned(),
-        |thread| {
-            automation_reply(
-                &bot.platform,
-                text,
-                &format!(
-                    "{}/assistant?c={thread}",
-                    state.config.frontend_url.trim_end_matches('/')
-                ),
-            )
-        },
-    );
     let adapter = resolve_adapter(&bot.platform, &state.token_exchange_cache)?;
+    let adapter: std::sync::Arc<dyn crate::services::channel_platform::PlatformAdapter> =
+        std::sync::Arc::from(adapter);
+    #[cfg(test)]
+    let adapter = crate::handlers::channel_relay::TEST_REPLY_ADAPTERS
+        .lock()
+        .unwrap()
+        .get(&bot.id)
+        .cloned()
+        .unwrap_or(adapter);
     crate::handlers::channel_relay::check_initiate_rate_limit(state, &chat.id).await?;
-    let key_owner = bot_owner(&row);
-    let key = key_service::get_api_key(&state.db, key_owner, &row.route_api_key_id).await?;
-    let mut auth = crate::handlers::assistant_team::owner_auth(key_owner)?;
-    auth.auth_method = crate::mw::auth::AuthMethod::ApiKey;
-    auth.api_key_id = Some(key.id.clone());
-    auth.api_key_name = Some(key.name.clone());
-    auth.scope = key.scopes.clone();
-    auth.allow_all_services = false;
+    let auth = super::route_key_auth(state, &row).await?;
     let now = Utc::now();
     // The bot's own route, addressed at this chat; nothing is stored.
     let conversation = ChannelConversation {
@@ -1375,33 +1603,378 @@ async fn post_inner(
         created_at: now,
         updated_at: now,
     };
-    let sent = crate::handlers::channel_relay::deliver_initiated_message(
+    Ok(PostTarget {
+        agent_id: agent_id.map(str::to_owned),
+        channel: row,
+        thread: chat,
+        bot,
+        auth,
+        conversation,
+        adapter,
+    })
+}
+
+pub(super) async fn send_post(
+    state: &AppState,
+    target: &PostTarget,
+    outbound: crate::services::channel_platform::OutboundReply,
+) -> AppResult<crate::handlers::channel_relay::AsyncReplyResponse> {
+    send_post_with_fence(state, target, outbound, None).await
+}
+
+pub(super) async fn send_post_with_fence(
+    state: &AppState,
+    target: &PostTarget,
+    mut outbound: crate::services::channel_platform::OutboundReply,
+    fence: Option<&crate::services::assistant_acknowledgement_service::ChatAuthority>,
+) -> AppResult<crate::handlers::channel_relay::AsyncReplyResponse> {
+    validate_post(
+        state,
+        &target.channel.user_id,
+        &target.thread.id,
+        target.agent_id.as_deref(),
+    )
+    .await?;
+    let (channel, thread) = load_chat(state, &target.channel.user_id, &target.thread.id).await?;
+    if channel.channel_bot_id != target.bot.id
+        || thread.platform_chat_id != target.thread.platform_chat_id
+        || thread.platform_thread_id != target.thread.platform_thread_id
+        || thread.telegram_topic != target.thread.telegram_topic
+    {
+        return Err(AppError::Conflict("Post target changed".into()));
+    }
+    let bot = channel_bot_service::get_bot(&state.db, &target.bot.id).await?;
+    if !bot.is_active || bot.status == "suspended" {
+        return Err(AppError::ChannelBotInactive(
+            "Bot has been deactivated".into(),
+        ));
+    }
+    target.adapter.reply_context(
+        crate::services::channel_image_audience::chat_thread(&target.thread),
+        target.thread.created_at,
+        &mut outbound.metadata,
+    );
+    if let Some(chat) = fence
+        && !post_turn_is_live(state, chat).await?
+    {
+        return Err(AppError::AssistantTurnRequired);
+    }
+    crate::handlers::channel_relay::deliver_prepared_initiated_message(
         state,
         &HeaderMap::new(),
-        &auth,
-        &conversation,
-        &bot,
-        crate::handlers::channel_relay::SendMessageRequest {
-            conversation_id: conversation.id.clone(),
-            message: crate::handlers::channel_relay::AsyncReplyBody {
-                text: Some(text.to_owned()),
-                metadata: None,
-                attachments: Vec::new(),
-            },
-            idempotency_key: None,
+        &target.auth,
+        &target.conversation,
+        &target.bot,
+        outbound,
+        target.adapter.as_ref(),
+    )
+    .await
+}
+
+async fn post_inner(
+    state: &AppState,
+    owner: &str,
+    chat_id: &str,
+    text: &str,
+    agent_id: Option<&str>,
+    full_thread: Option<&str>,
+) -> AppResult<Value> {
+    let text = text.trim();
+    if text.is_empty() || (full_thread.is_none() && text.chars().count() > MAX_POST_CHARS) {
+        return Err(AppError::ValidationError(format!(
+            "text must have 1 to {MAX_POST_CHARS} characters"
+        )));
+    }
+    let target = prepare_post(state, owner, chat_id, agent_id).await?;
+    let text = full_thread.map_or_else(
+        || text.to_owned(),
+        |thread| {
+            automation_reply(
+                &target.bot.platform,
+                text,
+                &format!(
+                    "{}/assistant?c={thread}",
+                    state.config.frontend_url.trim_end_matches('/')
+                ),
+            )
         },
-        adapter.as_ref(),
+    );
+    let sent = send_post(
+        state,
+        &target,
+        crate::services::channel_platform::OutboundReply {
+            text: Some(text),
+            metadata: None,
+            attachments: Vec::new(),
+            reply_to_platform_message_id: None,
+        },
     )
     .await?;
     audit(
         state,
         owner,
         "nyxbot_channel_chat_posted",
-        json!({"channel_agent_id": &row.id, "chat_id": &chat.id,
-            "message_id": &sent.message_id}),
+        json!({
+            "channel_agent_id": &target.channel.id,
+            "chat_id": &target.thread.id,
+            "message_id": &sent.message_id,
+        }),
     )
     .await;
-    Ok(json!({"status": "posted", "chat_id": chat.id, "message_id": sent.message_id}))
+    Ok(json!({
+        "status": "posted",
+        "chat_id": target.thread.id,
+        "message_id": sent.message_id,
+    }))
+}
+
+pub(crate) async fn post_automation_images(
+    state: &AppState,
+    run: &crate::models::trigger_run::TriggerRun,
+    chat_id: &str,
+    agent_id: Option<&str>,
+    conversation_id: &str,
+    text: &str,
+) -> AppResult<Value> {
+    let target = prepare_post(state, &run.user_id, chat_id, agent_id).await?;
+    let mut report = super::images::ImageReport {
+        app_visible: target.thread.owner_chat && target.thread.kind.as_deref() == Some("private"),
+        automation: true,
+        ..Default::default()
+    };
+    let mut outbound = crate::services::channel_platform::OutboundReply {
+        text: None,
+        metadata: None,
+        attachments: Vec::new(),
+        reply_to_platform_message_id: None,
+    };
+    target.adapter.reply_context(
+        crate::services::channel_image_audience::chat_thread(&target.thread),
+        target.thread.created_at,
+        &mut outbound.metadata,
+    );
+    let audience = crate::services::channel_image_audience::resolve(
+        &target.bot.id,
+        &target.bot.platform,
+        &target.conversation.platform_conversation_id,
+        &outbound,
+    );
+    let mut budget = engine::MAX_TURN_ATTACHMENTS;
+    let mut omitted = run.image_refs_truncated;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(135);
+    let mut seen = std::collections::HashSet::new();
+    let mut stop = None;
+    let mut last_send: Option<std::time::Instant> = None;
+    for item in run.image_refs.iter().rev() {
+        if !seen.insert(item.attachment.id.as_str()) {
+            continue;
+        }
+        if run.thread_id.as_deref() != Some(item.conversation_id.as_str())
+            || !engine::chat_tool_image(&item.attachment)
+        {
+            report.outcomes.push(super::images::ImageItemResult {
+                attachment_id: item.attachment.id.clone(),
+                status: "failed".into(),
+                code: Some("unavailable".into()),
+            });
+            report.failed += 1;
+            report.attempted += 1;
+            continue;
+        }
+        let metadata = match engine::turn_tool_attachments(
+            &state.db,
+            &run.user_id,
+            &item.conversation_id,
+            &item.turn_id,
+        )
+        .await
+        {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                tracing::warn!(
+                    run_id = run.id,
+                    code = error.error_code(),
+                    "Automation image metadata unavailable"
+                );
+                Vec::new()
+            }
+        };
+        if !metadata.iter().any(|attachment| {
+            attachment.id == item.attachment.id
+                && attachment.content_type == item.attachment.content_type
+                && attachment.size == item.attachment.size
+                && engine::chat_tool_image(attachment)
+        }) {
+            report.outcomes.push(super::images::ImageItemResult {
+                attachment_id: item.attachment.id.clone(),
+                status: "failed".into(),
+                code: Some("unavailable".into()),
+            });
+            report.failed += 1;
+            report.attempted += 1;
+            continue;
+        }
+        match crate::services::channel_image_delivery::read_legacy(
+            &state.db,
+            &run.user_id,
+            &item.conversation_id,
+            &item.turn_id,
+            &target.channel.id,
+            &item.attachment.id,
+        )
+        .await
+        {
+            Ok(Some(outcome)) => {
+                report
+                    .outcomes
+                    .push(super::images::legacy_item(&item.attachment.id, outcome));
+                continue;
+            }
+            Ok(None) => {}
+            Err(_) => {
+                report.outcomes.push(super::images::ImageItemResult {
+                    attachment_id: item.attachment.id.clone(),
+                    status: "unknown".into(),
+                    code: None,
+                });
+                report.unknown += 1;
+                report.attempted += 1;
+                stop = Some("after_unknown");
+                continue;
+            }
+        }
+        let existing = match crate::services::channel_image_delivery::read(
+            &state.db,
+            &run.user_id,
+            &item.attachment.id,
+            &audience,
+        )
+        .await
+        {
+            Ok(existing) => existing,
+            Err(_) => {
+                report.outcomes.push(super::images::ImageItemResult {
+                    attachment_id: item.attachment.id.clone(),
+                    status: "unknown".into(),
+                    code: None,
+                });
+                report.unknown += 1;
+                report.attempted += 1;
+                stop = Some("after_unknown");
+                continue;
+            }
+        };
+        let pending = existing.as_ref().is_none_or(|claim| {
+            claim.state == crate::models::nyxbot_image_delivery::ImageDeliveryState::Pending
+        });
+        if let Some(existing) = existing.as_ref().filter(|_| !pending) {
+            report.outcomes.push(super::images::existing_item(existing));
+            continue;
+        }
+        if pending && budget == 0 {
+            omitted = omitted.saturating_add(1);
+            continue;
+        }
+        if pending
+            && matches!(target.bot.platform.as_str(), "telegram" | "telegram-new")
+            && target.thread.kind.as_deref() != Some("private")
+            && let Some(last) = last_send
+        {
+            tokio::time::sleep(
+                (last + std::time::Duration::from_secs(1))
+                    .saturating_duration_since(std::time::Instant::now()),
+            )
+            .await;
+        }
+        if pending {
+            last_send = Some(std::time::Instant::now());
+        }
+        let one = super::images::report_or_failure_with_stop(
+            state,
+            super::images::ImageSendContext {
+                owner: &run.user_id,
+                conversation_id: &item.conversation_id,
+                turn_id: &item.turn_id,
+                channel: &target.channel,
+                thread: &target.thread,
+                anchor: super::images::ImageAnchor::Initiated {
+                    chat_id: chat_id.into(),
+                },
+                audience: super::images::ImageAudience {
+                    owner_private: report.app_visible,
+                },
+                deadline: Some(deadline),
+                initiated: Some(&target),
+                fence: None,
+            },
+            &super::images::ImageSendPlan {
+                attachments: vec![item.attachment.clone()],
+            },
+            stop,
+        )
+        .await;
+        if pending && (one.claimed > 0 || one.unknown > 0) {
+            budget -= 1;
+        }
+        if one.unknown > 0 {
+            stop = Some("after_unknown");
+        }
+        if one
+            .outcomes
+            .iter()
+            .any(|item| item.code.as_deref() == Some("billing"))
+        {
+            stop = Some("billing");
+        }
+        report.attempted += one.attempted;
+        report.sent += one.sent;
+        report.failed += one.failed;
+        report.unknown += one.unknown;
+        report.skipped += one.skipped;
+        report.unsupported |= one.unsupported;
+        report.outcomes.extend(one.outcomes);
+    }
+    let mut note = super::images::failure_note(&report);
+    if omitted > 0 {
+        note.push_str(&format!("\n\n{omitted} additional images were omitted from this delivery. Check the automation's thread in the app; older images may have expired."));
+    }
+    let reply = automation_reply_with_note(
+        &target.bot.platform,
+        text,
+        &format!(
+            "{}/assistant?c={conversation_id}",
+            state.config.frontend_url.trim_end_matches('/')
+        ),
+        &note,
+    );
+    let sent = send_post(
+        state,
+        &target,
+        crate::services::channel_platform::OutboundReply {
+            text: Some(reply),
+            metadata: None,
+            attachments: Vec::new(),
+            reply_to_platform_message_id: None,
+        },
+    )
+    .await?;
+    audit(
+        state,
+        &run.user_id,
+        "nyxbot_channel_chat_posted",
+        json!({
+            "channel_agent_id": target.channel.id,
+            "chat_id": chat_id,
+            "message_id": sent.message_id,
+        }),
+    )
+    .await;
+    Ok(json!({
+        "status": "posted",
+        "chat_id": chat_id,
+        "message_id": sent.message_id,
+        "images": super::images::image_result(&report),
+    }))
 }
 
 /// Chats given to a destroyed agent go back to their bot's agent (in new
@@ -1538,6 +2111,10 @@ pub async fn update_channel_chat(
 /// Fit a single proactive message to the destination's text contract. The full
 /// result stays in its durable thread; shortening is always explicit.
 fn automation_reply(platform: &str, text: &str, thread_url: &str) -> String {
+    automation_reply_with_note(platform, text, thread_url, "")
+}
+
+fn automation_reply_with_note(platform: &str, text: &str, thread_url: &str, note: &str) -> String {
     let limit = match platform {
         "discord" => 2000,
         "telegram" | "telegram-new" | "whatsapp" => 4096,
@@ -1555,10 +2132,11 @@ fn automation_reply(platform: &str, text: &str, thread_url: &str) -> String {
             value.encode_utf16().count()
         }
     };
-    if cost(text) <= limit {
-        return text.to_owned();
+    let full = format!("{text}{note}");
+    if cost(&full) <= limit {
+        return full;
     }
-    let suffix = format!("\n\n[Reply shortened. Read the full reply: {thread_url}]");
+    let suffix = format!("\n\n[Reply shortened. Read the full reply: {thread_url}]{note}");
     let mut result = String::new();
     let budget = limit.saturating_sub(cost(&suffix));
     let mut used = 0;

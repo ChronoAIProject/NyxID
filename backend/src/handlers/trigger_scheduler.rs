@@ -191,7 +191,7 @@ async fn run_job_once(state: &AppState, job: &Document) -> AppResult<()> {
             return schedules::reschedule(&state.db, job, expiry).await;
         }
         Some(format!(
-            "Continue the automation after these confirmation decisions. Retry only allowed actions using their acknowledgement_id; do not retry denied or expired actions.\n{}",
+            "Continue the automation after these confirmation decisions. Retry only allowed actions using their acknowledgement_id; do not retry denied or expired actions. Then tell the user in one or two plain sentences what you did and the result.\n{}",
             crate::services::assistant_acknowledgement_service::decisions_note(&cards)
         ))
     } else {
@@ -381,6 +381,7 @@ async fn run_job_once(state: &AppState, job: &Document) -> AppResult<()> {
         _ => "Your final reply stays in the web thread.",
     };
     let start = engine::TurnStart {
+        acknowledgement_id: None,
         retry_of: None,
         channel_event_id: None,
         org_access: None,
@@ -671,7 +672,7 @@ pub(crate) async fn settled(
     }
 }
 
-async fn settle_result(
+pub(super) async fn settle_result(
     state: &AppState,
     row: &crate::models::assistant_conversation::AssistantConversation,
     run: &TriggerRun,
@@ -797,10 +798,10 @@ async fn settle_result(
         )
         .await;
     }
-    if state
+    let Some(run) = state
         .db
         .collection::<TriggerRun>(RUNS)
-        .update_one(
+        .find_one_and_update(
             doc! {
                 "_id": &run.id,
                 "outcome": RunOutcome::Started.as_str(),
@@ -809,12 +810,11 @@ async fn settle_result(
             },
             doc! { "$set": {"result_claimed":true} },
         )
+        .return_document(mongodb::options::ReturnDocument::After)
         .await?
-        .modified_count
-        == 0
-    {
+    else {
         return Ok(());
-    }
+    };
     let final_text = if error.is_some() {
         "This automation could not finish. Open its thread for details."
     } else {
@@ -836,16 +836,27 @@ async fn settle_result(
             )
             .await
         }
-        DeliverTo::Chat { chat_id } => Box::pin(super::nyxbot::chats::post_automation(
-            state,
-            &run.user_id,
-            chat_id,
-            final_text,
-            run.agent_id.as_deref().filter(|_| row.is_subagent()),
-            &row.id,
-        ))
-        .await
-        .map(|_| ()),
+        DeliverTo::Chat { chat_id } => {
+            let agent_id = run.agent_id.as_deref().filter(|_| row.is_subagent());
+            if error.is_none() {
+                Box::pin(super::nyxbot::chats::post_automation_images(
+                    state, &run, chat_id, agent_id, &row.id, final_text,
+                ))
+                .await
+                .map(|_| ())
+            } else {
+                Box::pin(super::nyxbot::chats::post_automation(
+                    state,
+                    &run.user_id,
+                    chat_id,
+                    final_text,
+                    agent_id,
+                    &row.id,
+                ))
+                .await
+                .map(|_| ())
+            }
+        }
     };
     schedules::finish(
         &state.db,
@@ -969,9 +980,14 @@ pub(crate) async fn webhook(
                     .db
                     .collection::<AssistantMessage>(MESSAGES)
                     .insert_one(AssistantMessage {
+                        report_to: None,
+                    continuation_of: None,
                     retry_of: None,
+                        retry_claimed_by: None,
+                        activity_count: None,
                         specialist_id: None,
                         steering: None,
+                        author: None,
                         voice: None,
                         execution_pending: false,
                         id: message_id,
@@ -987,6 +1003,7 @@ pub(crate) async fn webhook(
                         error_detail: None,
                         created_at: now,
                         activities: vec![],
+                        activity_total: 0,
                         attachments: vec![],
                         origin: Some(TurnOrigin::Trigger),
                         via: None,

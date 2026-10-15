@@ -23,7 +23,7 @@ pub async fn get(db: &Database, user_id: &str) -> AppResult<AssistantSettings> {
 
 /// The settings and whether the row stores an access mode. Legacy rows
 /// predate access modes: an explicit destructive-action opt-out reads as
-/// Autopilot until the next write stores it.
+/// Full access until the next write stores it.
 async fn stored(db: &Database, user_id: &str) -> AppResult<(AssistantSettings, bool)> {
     let Some(raw) = db
         .collection::<bson::Document>(COLLECTION_NAME)
@@ -133,13 +133,13 @@ pub async fn update(db: &Database, user_id: &str, update: Update) -> AppResult<A
         super::assistant_voice::validate_preferences(voice)?;
     }
     // Rows written before access modes carry only the destructive-action
-    // switch; `get` reads an opted-out owner as Autopilot. Every write
+    // switch; `get` reads an opted-out owner as Full access. Every write
     // materializes that mode, so the stored row and what `get` returns agree.
     let (current, stored_mode) = stored(db, user_id).await?;
     let mode = match (update.access_mode, update.skip_destructive_confirmation) {
         (Some(mode), _) => Some(mode),
         // The legacy switch is a view of the mode: turning confirmations off
-        // is Autopilot, and turning them back on leaves Autopilot for NyxMode.
+        // is Full access, and turning them back on leaves Full access for Auto.
         (None, Some(true)) => Some(AccessMode::Autopilot),
         (None, Some(false)) if current.access_mode == AccessMode::Autopilot => {
             Some(AccessMode::Nyxmode)
@@ -223,7 +223,8 @@ pub async fn update(db: &Database, user_id: &str, update: Update) -> AppResult<A
         );
         defaults.remove("specialist_access_requests");
     }
-    db.collection::<AssistantSettings>(COLLECTION_NAME)
+    let updated = db
+        .collection::<AssistantSettings>(COLLECTION_NAME)
         .find_one_and_update(
             doc! {"_id":user_id},
             doc! {"$set":set,"$setOnInsert":defaults},
@@ -231,7 +232,16 @@ pub async fn update(db: &Database, user_id: &str, update: Update) -> AppResult<A
         .upsert(true)
         .return_document(ReturnDocument::After)
         .await?
-        .ok_or_else(|| AppError::Internal("Assistant settings unavailable".into()))
+        .ok_or_else(|| AppError::Internal("Assistant settings unavailable".into()))?;
+    if updated.access_mode == AccessMode::Autopilot && current.access_mode != updated.access_mode {
+        super::assistant_acknowledgement_service::retire_full_access_confirmations(
+            db,
+            Some(user_id),
+            None,
+        )
+        .await?;
+    }
+    Ok(updated)
 }
 
 /// Audit a settings change without free-form values.

@@ -6,6 +6,9 @@ use wiremock::{
     matchers::{method, path},
 };
 
+#[path = "nyxbot_image_delivery_tests.rs"]
+mod image_delivery_tests;
+
 struct Fixture {
     state: AppState,
     channel: NyxbotChannel,
@@ -35,7 +38,11 @@ async fn fixture(name: &str) -> Fixture {
     state
         .db
         .collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME)
-        .insert_one(bot)
+        .replace_one(
+            doc! {"_id": bot.get_str("_id").unwrap().to_owned()},
+            bot.clone(),
+        )
+        .upsert(true)
         .await
         .unwrap();
     let gateway = MockServer::start().await;

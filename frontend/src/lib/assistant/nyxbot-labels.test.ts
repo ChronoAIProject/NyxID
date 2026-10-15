@@ -213,3 +213,8 @@ describe("channel chats", () => {
     expect(channelChatTitle(null, null, "telegram")).toBe("Telegram chat");
   });
 });
+
+it("labels published and failed skill transitions separately from testing", () => {
+  expect(describeEventNotice("Skill weekly-review v1.0 published and attached; not yet tested.")).toMatchObject({ summary: "Skill publication", tone: "success", detail: expect.stringContaining("not yet tested") });
+  expect(describeEventNotice("Skill draft draft-id (weekly-review) v1.0 requires a corrected package: ornn_validation_failed.")).toMatchObject({ summary: "Skill publication", tone: "warning" });
+});

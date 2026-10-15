@@ -1,13 +1,13 @@
 use axum::{
     Json,
-    extract::{Path, State},
+    extract::{Path, Query, State},
 };
 use serde::{Deserialize, Serialize};
 
 use crate::AppState;
 use crate::errors::{AppError, AppResult};
 use crate::mw::auth::AuthUser;
-use crate::services::url_validation::validate_base_url;
+use crate::services::url_validation::{MAX_URL_LEN, validate_advisory_http_url, validate_base_url};
 use crate::services::{audit_service, provider_service, user_credentials_service};
 
 use super::catalog_authority::{self, CatalogAuthority};
@@ -314,11 +314,27 @@ fn provider_has_oauth_config(p: &crate::models::provider_config::ProviderConfig)
 // --- Handlers ---
 
 /// GET /api/v1/providers
+#[derive(Default, Deserialize)]
+pub struct ListProvidersQuery {
+    pub include_inactive: Option<bool>,
+}
+
 pub async fn list_providers(
     State(state): State<AppState>,
-    _auth_user: AuthUser,
+    auth_user: AuthUser,
+    Query(query): Query<ListProvidersQuery>,
 ) -> AppResult<Json<ProviderListResponse>> {
-    let providers = provider_service::list_providers(&state.db).await?;
+    let providers = if query.include_inactive == Some(true) {
+        let authority = catalog_authority::require_catalog_writer(&state, &auth_user).await?;
+        let filter = if authority == CatalogAuthority::Admin {
+            mongodb::bson::doc! {}
+        } else {
+            mongodb::bson::doc! {"$or": [{"is_active": true}, {"created_by": auth_user.user_id.to_string()}]}
+        };
+        provider_service::list_providers_filtered(&state.db, filter).await?
+    } else {
+        provider_service::list_providers(&state.db).await?
+    };
 
     let items: Vec<ProviderResponse> = providers.into_iter().map(provider_to_response).collect();
 
@@ -417,6 +433,12 @@ pub async fn create_provider(
             "device_code_format must be 'rfc8628' or 'openai'".to_string(),
         ));
     }
+
+    validate_display_urls(
+        body.icon_url.as_deref(),
+        body.documentation_url.as_deref(),
+        body.api_key_url.as_deref(),
+    )?;
 
     let user_id_str = auth_user.user_id.to_string();
 
@@ -620,6 +642,25 @@ pub async fn get_provider(
     Ok(Json(provider_to_response(provider)))
 }
 
+/// Links shown to users must be absolute http(s) URLs without credentials,
+/// whichever client wrote them. An empty value clears the field.
+fn validate_display_urls(
+    icon_url: Option<&str>,
+    documentation_url: Option<&str>,
+    api_key_url: Option<&str>,
+) -> AppResult<()> {
+    for (field, value) in [
+        ("icon_url", icon_url),
+        ("documentation_url", documentation_url),
+        ("api_key_url", api_key_url),
+    ] {
+        if let Some(url) = value.map(str::trim).filter(|url| !url.is_empty()) {
+            validate_advisory_http_url(url, field, MAX_URL_LEN)?;
+        }
+    }
+    Ok(())
+}
+
 /// PUT /api/v1/providers/{provider_id}
 pub async fn update_provider(
     State(state): State<AppState>,
@@ -674,6 +715,11 @@ pub async fn update_provider(
     {
         validate_base_url(url)?;
     }
+    validate_display_urls(
+        body.icon_url.as_deref(),
+        body.documentation_url.as_deref(),
+        body.api_key_url.as_deref(),
+    )?;
 
     let updates = provider_service::ProviderUpdateInput {
         name: body.name,
@@ -781,7 +827,7 @@ pub async fn list_linked_services(
     // credential inspection.
     let (services, inspection_keys): (Vec<_>, _) = match authority {
         CatalogAuthority::Admin => (services, Some(state.encryption_keys.as_ref())),
-        CatalogAuthority::CatalogManager => (
+        CatalogAuthority::CatalogManager | CatalogAuthority::ToolsManager => (
             services
                 .into_iter()
                 .filter(|service| {
@@ -791,13 +837,18 @@ pub async fn list_linked_services(
             None,
         ),
     };
+    let eligible =
+        crate::services::tools_manager_service::eligible_manager_tool_ids(&state.db, &services)
+            .await?;
     let mut responses = Vec::with_capacity(services.len());
     for service in services {
+        let can_manage = eligible.contains(&service.id);
         responses.push(
-            super::services_helpers::service_to_response_with_viewer(
+            super::services_helpers::service_to_response_with_known_eligibility(
                 inspection_keys,
                 service,
                 None,
+                can_manage,
             )
             .await,
         );
@@ -813,6 +864,12 @@ pub async fn link_service(
     Path((provider_id, service_id)): Path<(String, String)>,
 ) -> AppResult<Json<super::services::ServiceResponse>> {
     let authority = catalog_authority::require_catalog_writer(&state, &auth_user).await?;
+    let target = super::services_helpers::fetch_service(&state, &service_id).await?;
+    if target.offering_kind == crate::models::downstream_service::OfferingKind::Tool {
+        return Err(AppError::Forbidden(
+            "Tools must remain provider-less".into(),
+        ));
+    }
     if authority == CatalogAuthority::CatalogManager {
         let caller_id = auth_user.user_id.to_string();
         catalog_authority::check_owned_provider(&state, &caller_id, &provider_id).await?;
@@ -823,8 +880,20 @@ pub async fn link_service(
             ));
         }
     }
-    crate::services::provider_link_service::link(&state.db, &provider_id, &service_id, None)
-        .await?;
+    let mutation_authority = crate::services::catalog_mutation_service::Authority {
+        actor: audit_service::AuditActor::from_auth_user(&auth_user),
+        first_party_human: true,
+        admin_required: authority == CatalogAuthority::Admin,
+        catalog_base_url: state.config.base_url.clone(),
+    };
+    crate::services::provider_link_service::link_with_authority(
+        &state.db,
+        &provider_id,
+        &service_id,
+        None,
+        Some((&target, &mutation_authority)),
+    )
+    .await?;
     audit_service::log_for_user(
         state.db.clone(),
         &auth_user,
@@ -837,12 +906,13 @@ pub async fn link_service(
     );
     let service = super::services_helpers::fetch_service(&state, &service_id).await?;
     Ok(Json(
-        super::services_helpers::service_to_response_with_viewer(
+        super::services_helpers::service_to_response_with_eligibility(
+            &state.db,
             Some(&state.encryption_keys),
             service,
             None,
         )
-        .await,
+        .await?,
     ))
 }
 
@@ -924,6 +994,7 @@ mod tests {
         let response = super::list_providers(
             axum::extract::State(state.clone()),
             test_auth_user(&user_id),
+            axum::extract::Query(super::ListProvidersQuery::default()),
         )
         .await
         .unwrap();

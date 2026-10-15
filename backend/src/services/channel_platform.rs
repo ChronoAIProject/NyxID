@@ -32,12 +32,48 @@ impl WebhookSetupProgress {
     }
 }
 
+/// The platform name used in model instructions and delivery notices.
+pub fn platform_name(platform: &str) -> String {
+    match platform {
+        "telegram-new" => "Telegram".into(),
+        "whatsapp" => "WhatsApp".into(),
+        "x" | "twitter" => "X".into(),
+        other => {
+            let mut chars = other.chars();
+            chars
+                .next()
+                .map(|first| first.to_uppercase().chain(chars).collect())
+                .unwrap_or_default()
+        }
+    }
+}
+
+tokio::task_local! {
+    static PROVIDER_ATTEMPT: std::sync::Arc<std::sync::atomic::AtomicBool>;
+}
+
+pub(crate) async fn track_provider_attempt<F: std::future::Future>(
+    progress: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    send: F,
+) -> F::Output {
+    PROVIDER_ATTEMPT.scope(progress, send).await
+}
+
+/// Called immediately before provider I/O; the enclosing image attempt keeps
+/// this evidence even if its send future is cancelled or times out.
+pub(crate) fn mark_provider_attempt() {
+    let _ = PROVIDER_ATTEMPT.try_with(|progress| {
+        progress.store(true, std::sync::atomic::Ordering::Relaxed);
+    });
+}
+
 /// Adapter send evidence. WhatsApp returns `Err` only when no message could
 /// have been accepted. Once acceptance is possible, the outcome retains IDs
 /// and an optional failure; callers persist that evidence before returning it.
 /// Default hooks retain the legacy error semantics of other adapters.
 pub struct SendOutcome {
     pub final_id: Option<String>,
+    pub delivered_kinds: Option<Vec<MediaKind>>,
     pub observation: Option<crate::models::channel_delivery::PlatformSendRecord>,
     pub error: Option<crate::errors::AppError>,
 }
@@ -45,6 +81,7 @@ impl SendOutcome {
     pub fn legacy(final_id: Option<String>) -> Self {
         Self {
             final_id,
+            delivered_kinds: None,
             observation: None,
             error: None,
         }

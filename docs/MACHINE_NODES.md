@@ -765,7 +765,7 @@ machine's disk. Owner takeover (D15) stays available for everything else.
     - encodings scrubbed;
     - the no-secret-in-any-NyxID-channel sweep.
 - **Owner confirmation.** A per-login option makes each sign-in raise an action
-  card first (default off). A machine's `machine_confirm` applies as for other
+  card first in Auto and Ask every time (default off); Full access bypasses it with a `policy` receipt. A machine's `machine_confirm` applies as for other
   changing operations.
 - **Audit.** Metadata only: login ID, machine, field kind, matched origin and
   outcome; never values.
@@ -949,14 +949,14 @@ This document describes what shipped. Also update:
 Machine tools in scheduled turns retain the same live machine/login grants,
 owner-control lockout and `machine_confirm` rules as owner-initiated turns.
 Webhook turns add their per-run confirmation policy. One exact-argument,
-one-use owner action card satisfies both policies when both require approval.
+one-use owner action card satisfies both policies when both require approval in Auto or Ask every time. Full access bypasses all confirmation policies with automatic receipts (reason `webhook` or `policy`), while retaining grants, owner-control lockout and signed execution fences.
 Exec, file writes/attachment saves, job cancellation and changing computer
 input are destructive because they can overwrite data or interrupt arbitrary
 work. Saved-login filling and requesting owner control are changing, but not
 destructive: they are restricted field insertion or an owner handoff rather
 than arbitrary execution. Machine listing, saved-login metadata, file listing,
 file reads and job status pass the webhook read-only gate; machine-level `all`
-confirmation still applies to operations as configured. Both direct native
+confirmation applies as configured in Auto and Ask every time; Full access records its bypass. Both direct native
 calls and `nyx__call_tool` use these checks. Guests and developer OAuth tokens
 cannot use machine tools or the human desktop/control routes.
 
@@ -1322,7 +1322,7 @@ Nodes with companion reporting (0.41.4+) detect a live mailbox without valid
 command: `docker rm -f <name>-updater && <current companion command>`. It retains
 the update volume and machine container. NyxBot and granted specialists offer
 the guided step or run it on an owner-identified, different native Docker host
-after inspecting both containers and receiving an owner card. The durable watch
+after inspecting both containers and applying the governing mode (automatic with a receipt in Full access; an owner card in Auto and Ask every time). The durable watch
 wakes the thread when valid companion metadata arrives, without requiring a
 machine restart, or reports an actionable timeout. Subsequent releases update the companion
 automatically. The one-time migration command is unchanged.
@@ -1339,7 +1339,7 @@ own attempt even when a subsequent update starts.
 
 If the owner identifies another granted native/VM machine on the Docker host,
 the agent can run migration there: a read-only metadata-only Docker inspection
-must first find the target, and the owner card binds both machines, the inspected
+must first find the target. The confirmation or Full access receipt names both machines, the inspected
 container ID and target release. A container can never migrate itself. No host is
 guessed. Once authorized, replacement is a durable controller operation: stopping
 an assistant turn does not interrupt the controller's commit/rollback recovery.
@@ -1620,3 +1620,10 @@ at 64, default 4). Idle connections, expired leases and other nodes do not count
 there is no fleet-wide 500-lease limit. At saturation new work gets HTTP 429
 `machine_authority_busy` and can retry after an operation completes. Existing
 work, renewals and job cancellation continue. V1 work bypasses lease admission.
+
+Permission modes use the display names Full access (`autopilot`), Auto (`nyxmode`)
+and Ask every time (`ask_every_time`). Full access bypasses every owner ask,
+including pairing, capability widening, machine updates and saved-login fills,
+and records the completed action automatically. Resource confirmation settings
+apply in Auto and Ask every time. Grants, origin checks, protected fields,
+owner-control lockout, node authority and update attestation remain required.

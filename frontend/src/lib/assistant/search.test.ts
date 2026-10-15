@@ -31,6 +31,20 @@ describe("parseAssistantSearch", () => {
     expect(parseAssistantSearch({ g: "" })).toEqual({});
   });
 
+  it("keeps a linked agent details section only for the two sheet sections", () => {
+    expect(parseAssistantSearch({ agent: "a1", details: "grants" })).toEqual({
+      agent: "a1",
+      details: "grants",
+    });
+    expect(parseAssistantSearch({ c: "conv-1", details: "skills" })).toEqual({
+      c: "conv-1",
+      details: "skills",
+    });
+    for (const invalid of ["", "memory", "GRANTS", 1, true, ["grants"]]) {
+      expect(parseAssistantSearch({ agent: "a1", details: invalid })).toEqual({ agent: "a1" });
+    }
+  });
+
   it("drops junk rather than letting it reach the page", () => {
     expect(parseAssistantSearch({ c: 42, draft: "yes", other: "x" })).toEqual(
       {},
@@ -94,6 +108,21 @@ describe("/assistant search round-trip through a real router", () => {
     );
     expect(search.c).toBe("conv-new");
     expect(search.draft).toBeUndefined();
+  });
+
+  it("round-trips a server agent-details link and drops the section on close", async () => {
+    // The exact path `AssistantPage::AgentDetails { agent, tab }` builds.
+    const router = buildAssistantRouter("/assistant?agent=a1&details=grants");
+    await router.load();
+    expect(
+      parseAssistantSearch(router.state.location.search as Record<string, unknown>),
+    ).toEqual({ agent: "a1", details: "grants" });
+
+    await router.navigate({ to: "/assistant", search: { c: "conv-1", agent: "a1" } });
+    await router.invalidate();
+    const closed = parseAssistantSearch(router.state.location.search as Record<string, unknown>);
+    expect(closed).toEqual({ c: "conv-1", agent: "a1" });
+    expect(closed.details).toBeUndefined();
   });
 
   it("round-trips a group id", async () => {

@@ -215,12 +215,12 @@ async fn assistant_machine_guidance_uses_loaded_nyxbot_assignments_and_keeps_spe
     let first = prepare(&row, &agent);
     assert!(
         first
-            .instructions(&[], false)
+            .instructions()
             .contains(crate::services::machine_tools::USE_INSTRUCTIONS)
     );
     assert!(
         first
-            .instructions(&[], false)
+            .instructions()
             .contains(crate::services::machine_tools::SETUP_INSTRUCTIONS)
     );
     let mut binding = first.binding.clone();
@@ -245,12 +245,12 @@ async fn assistant_machine_guidance_uses_loaded_nyxbot_assignments_and_keeps_spe
         );
         assert!(
             !prepared
-                .instructions(&[], false)
+                .instructions()
                 .contains(crate::services::machine_tools::USE_INSTRUCTIONS)
         );
         assert!(
             prepared
-                .instructions(&[], false)
+                .instructions()
                 .contains(crate::services::machine_tools::SETUP_INSTRUCTIONS)
         );
     }
@@ -258,12 +258,12 @@ async fn assistant_machine_guidance_uses_loaded_nyxbot_assignments_and_keeps_spe
     agent.machine_access.as_mut().unwrap().version = 99;
     assert!(
         !prepare(&row, &agent)
-            .instructions(&[], false)
+            .instructions()
             .contains(crate::services::machine_tools::USE_INSTRUCTIONS)
     );
     agent.machine_access.as_mut().unwrap().version = 2;
     row.guest_turn = true;
-    let guest = prepare(&row, &agent).instructions(&[], false);
+    let guest = prepare(&row, &agent).instructions();
     assert!(!guest.contains(crate::services::machine_tools::USE_INSTRUCTIONS));
     assert!(!guest.contains(crate::services::machine_tools::SETUP_INSTRUCTIONS));
     row.guest_turn = false;
@@ -272,14 +272,14 @@ async fn assistant_machine_guidance_uses_loaded_nyxbot_assignments_and_keeps_spe
     // A policy alone never gives specialists the membership needed for guidance.
     assert!(
         !prepare(&row, &agent)
-            .instructions(&[], false)
+            .instructions()
             .contains(crate::services::machine_tools::USE_INSTRUCTIONS)
     );
     agent
         .machine_node_ids
         .push(uuid::Uuid::new_v4().to_string());
     agent.machine_access = None; // pre-policy specialist rule is unchanged
-    let specialist = prepare(&row, &agent).instructions(&[], false);
+    let specialist = prepare(&row, &agent).instructions();
     assert!(specialist.contains(crate::services::machine_tools::USE_INSTRUCTIONS));
     assert!(!specialist.contains(crate::services::machine_tools::SETUP_INSTRUCTIONS));
     f.state.db.drop().await.unwrap();

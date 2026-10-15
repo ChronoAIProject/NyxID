@@ -120,6 +120,7 @@ const PAGE_LABELS: Record<string, string> = {
   "/orgs": "Organizations",
   "/nodes": "Credential Nodes",
   "/channel-bots": "Channel Bots",
+  "/onboarding/setups": "Bot Setups",
   "/channel-bots/connect": "Setup links",
   "/settings": "Account Settings",
   "/settings/consents": "Access & Authorizations",
@@ -149,6 +150,7 @@ const PAGE_LABELS: Record<string, string> = {
   "/admin/invite-codes": "Invite Codes",
   "/admin/feature-flags": "Feature Flags",
   "/admin/platform-credentials": "Platform Credentials",
+  "/admin/platform-bots": "Platform BotFather",
   "/admin/upload-retention": "Upload retention",
   "/admin/nodes": "Nodes",
   "/admin/ownership": "Ownership transfers",
@@ -215,6 +217,10 @@ export function buildStudioBreadcrumbs(
   }
   if (path === "/channel-bots/connect") {
     return finish([page("/channel-bots"), { label: "Setup links" }]);
+  }
+  const platformSetup = path.match(/^\/onboarding\/setups\/[^/]+$/);
+  if (platformSetup) {
+    return finish([page("/onboarding/setups"), named(path, "Bot setup")]);
   }
   if (path === "/providers/callback") {
     return finish([

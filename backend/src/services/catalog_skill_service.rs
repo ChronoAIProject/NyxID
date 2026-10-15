@@ -419,6 +419,41 @@ pub async fn commit(
     restore_revision: Option<i64>,
     fingerprint_input: Option<&serde_json::Value>,
 ) -> AppResult<SkillCommit> {
+    commit_with_audit(
+        db,
+        service_id,
+        actor,
+        input,
+        base_revision,
+        request_id,
+        metadata,
+        identity_filter,
+        restore_revision,
+        fingerprint_input,
+        None,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn commit_with_audit(
+    db: &Database,
+    service_id: &str,
+    actor: &SkillActor,
+    input: &SkillUpdate,
+    base_revision: i64,
+    request_id: &str,
+    metadata: &Document,
+    identity_filter: &Document,
+    restore_revision: Option<i64>,
+    fingerprint_input: Option<&serde_json::Value>,
+    audit: Option<(&super::audit_service::AuditActor, &[u8])>,
+    mutation: Option<(
+        &DownstreamService,
+        &super::catalog_mutation_service::Authority,
+    )>,
+) -> AppResult<SkillCommit> {
     // Duplicate receipt keys do not have MongoDB's transient-transaction label.
     // A fresh transaction rechecks current authority and resolves the winner.
     for attempt in 0..2 {
@@ -433,6 +468,8 @@ pub async fn commit(
             identity_filter,
             restore_revision,
             fingerprint_input,
+            audit,
+            mutation,
         )
         .await;
         if result.as_ref().err().is_some_and(duplicate_key) {
@@ -462,6 +499,11 @@ async fn commit_once(
     identity_filter: &Document,
     restore_revision: Option<i64>,
     fingerprint_input: Option<&serde_json::Value>,
+    audit: Option<(&super::audit_service::AuditActor, &[u8])>,
+    mutation: Option<(
+        &DownstreamService,
+        &super::catalog_mutation_service::Authority,
+    )>,
 ) -> AppResult<SkillCommit> {
     if base_revision < 0
         || Uuid::parse_str(request_id).is_err()
@@ -498,6 +540,8 @@ async fn commit_once(
     let (kind, actor_id) = actor.identity();
     let operation_filter =
         doc! {"actor_kind": kind, "actor_id": actor_id, "request_id": request_id};
+    let audit = audit.map(|(actor, key)| (actor.clone(), zeroize::Zeroizing::new(key.to_vec())));
+    let mutation = mutation.map(|(row, authority)| (row.clone(), authority.clone()));
     let mut session = db.client().start_session().await?;
     let db = db.clone();
     let service_id = service_id.to_owned();
@@ -537,6 +581,14 @@ async fn commit_once(
                 reached.wait().await;
                 resume.wait().await;
             }
+            if let Some((observed, authority)) = &mutation {
+                let (live, admin) = super::catalog_mutation_service::validate_parent(db, session, observed, Some(authority)).await?;
+                super::catalog_mutation_service::require_desired_kind(&live, &metadata, authority, admin)?;
+                super::catalog_mutation_service::validate_update_fields(db, session, &live, &metadata, authority, admin).await?;
+                if metadata.get_str("offering_kind") == Ok("tool") {
+                    super::catalog_mutation_service::require_providerless_tool(db, session, &live).await?;
+                }
+            }
             if current.skills_revision != base_revision { return Err(AppError::Conflict(format!("Skills revision changed; expected {base_revision}, current {}", current.skills_revision))); }
             let previous = state(&current);
             let desired = if let Some(revision) = restore_revision {
@@ -552,6 +604,20 @@ async fn commit_once(
             });
             if !changed && !metadata_changed {
                 return Ok(SkillCommit { revision: current.skills_revision, service: current, state: desired, replayed: false, changed: false, mutated: false });
+            }
+            if let Some((observed, authority)) = &mutation {
+                super::catalog_mutation_service::fence(db, session, observed, Some(authority)).await?;
+            }
+            if current.offering_kind == crate::models::downstream_service::OfferingKind::Tool {
+                let SkillActor::Human { id } = actor else {
+                    return Err(AppError::Forbidden("Tool metadata requires human authority".into()));
+                };
+                if !super::tools_manager_service::fence_authority(db, session, id).await? {
+                    return Err(AppError::Forbidden("Tool skill metadata requires Admin authority".into()));
+                }
+                if super::tools_manager_service::tool_contract_changed(&current, &metadata)? {
+                    super::service_endpoint_service::demote_tool_in_session(db, session, service_id, None, audit.as_ref().map(|(actor,key)| (actor,key.as_slice()))).await?;
+                }
             }
             if changed && let SkillActor::Curation { id, token_jti, .. } = actor {
                 let fenced = db.collection::<ServiceAccountToken>(TOKENS).update_one(
@@ -679,6 +745,75 @@ pub async fn create_with_endpoints(
             }
 
             let result: AppResult<()> = async {
+                let mut endpoints = endpoints.clone();
+                if service.offering_kind == crate::models::downstream_service::OfferingKind::Tool {
+                    let admin =
+                        super::tools_manager_service::fence_authority(db, session, actor_id)
+                            .await?;
+                    if !service.tools_manager_created && !admin {
+                        return Err(AppError::Forbidden(
+                            "Tool creation requires live Admin authority".into(),
+                        ));
+                    }
+                }
+                if service.tools_manager_created
+                    && let Some(source) = service.import_source.as_ref().filter(|s| {
+                        matches!(
+                            s.kind,
+                            crate::models::downstream_service::CatalogImportKind::CatalogTwin
+                        )
+                    })
+                {
+                    let live = db
+                        .collection::<DownstreamService>(SERVICES)
+                        .find_one(doc! {"slug":&source.reference,"is_active":true})
+                        .session(&mut *session)
+                        .await?
+                        .ok_or_else(|| AppError::Conflict("Twin source changed".into()))?;
+                    if source.version.as_deref() != Some(live.updated_at.to_rfc3339().as_str())
+                        || (live.visibility == "private"
+                            && live.owner_user_id.as_deref().unwrap_or(&live.created_by)
+                                != actor_id)
+                    {
+                        return Err(AppError::Conflict(
+                            "Twin source changed or is no longer visible".into(),
+                        ));
+                    }
+                    use futures::TryStreamExt;
+                    endpoints = db
+                        .collection::<crate::models::service_endpoint::ServiceEndpoint>(
+                            crate::models::service_endpoint::COLLECTION_NAME,
+                        )
+                        .find(doc! {"service_id":&live.id})
+                        .session(&mut *session)
+                        .await?
+                        .stream(&mut *session)
+                        .try_collect()
+                        .await?;
+                    for row in &mut endpoints {
+                        if row.target_id.is_some() {
+                            return Err(AppError::ValidationError(
+                                "Manager twins cannot inherit destination-bound operations".into(),
+                            ));
+                        }
+                        row.id = Uuid::new_v4().to_string();
+                        row.service_id = service.id.clone();
+                        row.publication = crate::models::service_endpoint::PublicationState::Draft;
+                        row.is_active = false;
+                        row.operation_generation = 1;
+                        row.created_at = service.created_at;
+                        row.updated_at = service.created_at;
+                        row.async_operation = None;
+                        row.execution = Default::default();
+                    }
+                    db.collection::<mongodb::bson::Document>(SERVICES)
+                        .update_one(
+                            doc! {"_id":&live.id},
+                            doc! {"$inc":{"tools_twin_fence":1_i64}},
+                        )
+                        .session(&mut *session)
+                        .await?;
+                }
                 if let Some(provider_id) = service.provider_config_id.as_deref() {
                     super::provider_link_service::link_in_session(
                         db,

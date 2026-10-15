@@ -189,9 +189,13 @@ pub struct UserCapabilitiesResponse {
     /// Whether the caller may create providers and catalog services
     /// (Admin, or Operator with the Catalog Manager role).
     pub manage_catalog: bool,
+    pub manage_tools: bool,
     /// Whether the caller may read platform-wide admin usage (Admin,
     /// Operator, or a role carrying `nyxid:admin:usage:read`).
     pub read_admin_usage: bool,
+    pub read_feature_flags: bool,
+    pub create_feature_flags: bool,
+    pub manage_all_feature_flags: bool,
     /// Feature-flag keys enabled for this user on personal (non-org)
     /// surfaces, resolved server-side with specificity precedence:
     /// default -> global -> matching org -> user. Org-scoped pages
@@ -299,10 +303,14 @@ pub async fn get_me(
     let (is_admin, is_operator) = platform_role.legacy_flags();
     let manage_credit_grants =
         role_service::can_manage_credit_grants(&state.db, &user_model, platform_role).await?;
+    let manage_tools =
+        role_service::can_manage_tools(&state.db, &user_model, platform_role).await?;
     let manage_catalog =
         role_service::can_manage_catalog(&state.db, &user_model, platform_role).await?;
     let read_admin_usage =
         role_service::can_read_admin_usage(&state.db, &user_model, platform_role).await?;
+    let feature_flags =
+        role_service::feature_flag_access(&state.db, &user_model, platform_role).await?;
     // Personal-surface feature-flag resolution: org-aware specificity, so an
     // org override can override the global baseline for its members
     // (sidebar, /assistant guard).
@@ -343,7 +351,11 @@ pub async fn get_me(
                     .any(|key| key == crate::services::feature_flag_service::BILLING_FLAG_KEY),
             manage_credit_grants,
             manage_catalog,
+            manage_tools,
             read_admin_usage,
+            read_feature_flags: feature_flags.read_all || feature_flags.manage_own,
+            create_feature_flags: feature_flags.manage_own,
+            manage_all_feature_flags: feature_flags.manage_all,
             enabled_features,
         },
     }))
@@ -1125,7 +1137,11 @@ mod tests {
                 billing_available: true,
                 manage_credit_grants: false,
                 manage_catalog: false,
+                manage_tools: false,
                 read_admin_usage: false,
+                read_feature_flags: false,
+                create_feature_flags: false,
+                manage_all_feature_flags: false,
                 enabled_features: vec![],
             },
         };
@@ -1179,7 +1195,11 @@ mod tests {
                 billing_available: false,
                 manage_credit_grants: false,
                 manage_catalog: false,
+                manage_tools: false,
                 read_admin_usage: false,
+                read_feature_flags: false,
+                create_feature_flags: false,
+                manage_all_feature_flags: false,
                 enabled_features: vec![],
             },
         };
@@ -1224,7 +1244,11 @@ mod tests {
                 billing_available: false,
                 manage_credit_grants: false,
                 manage_catalog: false,
+                manage_tools: false,
                 read_admin_usage: false,
+                read_feature_flags: false,
+                create_feature_flags: false,
+                manage_all_feature_flags: false,
                 enabled_features: vec![],
             },
         };
@@ -1409,7 +1433,11 @@ mod tests {
                 billing_available: false,
                 manage_credit_grants: false,
                 manage_catalog: false,
+                manage_tools: false,
                 read_admin_usage: false,
+                read_feature_flags: false,
+                create_feature_flags: false,
+                manage_all_feature_flags: false,
                 enabled_features: vec![],
             },
         };

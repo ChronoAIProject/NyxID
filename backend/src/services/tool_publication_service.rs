@@ -5,7 +5,7 @@ use crate::{
         service_endpoint::{COLLECTION_NAME, PublicationState, ServiceEndpoint},
     },
     services::{
-        audit_service::{self, AuditActor},
+        audit_service,
         proxy_authorization::{self, CanonicalPath},
     },
 };
@@ -141,10 +141,10 @@ pub async fn gate_unconfigured_public_tool(
 
 pub async fn change_publication(
     db: &Database,
-    service_id: &str,
+    observed: &DownstreamService,
+    authority: &super::catalog_mutation_service::Authority,
     endpoint_ids: &[String],
     state: PublicationState,
-    actor: &AuditActor,
     audit_key: &[u8],
 ) -> AppResult<Vec<ServiceEndpoint>> {
     if endpoint_ids.is_empty() || endpoint_ids.len() > 200 {
@@ -154,9 +154,9 @@ pub async fn change_publication(
     }
     let mut session = db.client().start_session().await?;
     let transaction_db = db.clone();
-    let service_id = service_id.to_owned();
+    let observed = observed.clone();
+    let authority = authority.clone();
     let endpoint_ids = endpoint_ids.to_vec();
-    let actor = actor.clone();
     let audit_key = zeroize::Zeroizing::new(audit_key.to_vec());
     session
         .start_transaction()
@@ -164,10 +164,10 @@ pub async fn change_publication(
             let result = change_publication_in_session(
                 &transaction_db,
                 session,
-                &service_id,
+                &observed,
+                &authority,
                 &endpoint_ids,
                 state,
-                &actor,
                 &audit_key,
             )
             .await;
@@ -180,12 +180,39 @@ pub async fn change_publication(
 async fn change_publication_in_session(
     db: &Database,
     session: &mut mongodb::ClientSession,
-    service_id: &str,
+    observed: &DownstreamService,
+    authority: &super::catalog_mutation_service::Authority,
     endpoint_ids: &[String],
     state: PublicationState,
-    actor: &AuditActor,
     audit_key: &[u8],
 ) -> AppResult<Vec<ServiceEndpoint>> {
+    let (service, admin) =
+        super::catalog_mutation_service::fence(db, session, observed, Some(authority)).await?;
+    let service_id = service.id.as_str();
+    let actor = &authority.actor;
+    if (service.offering_kind == OfferingKind::Tool && state == PublicationState::Published)
+        && !admin
+    {
+        return Err(AppError::Forbidden(
+            "Only an Admin may publish Tool operations".into(),
+        ));
+    }
+    // Legacy non-Tool creators without a Catalog permission may edit their
+    // operations, but publication remains reserved for Catalog writers.
+    if service.offering_kind != OfferingKind::Tool && !admin {
+        super::tools_manager_service::fence_role_authority(
+            db,
+            session,
+            &actor.user_id,
+            Some(crate::models::role::CATALOG_SERVICES_WRITE_PERMISSION),
+        )
+        .await?;
+        if !authority.first_party_human {
+            return Err(AppError::Forbidden(
+                "Publication requires first-party human authority".into(),
+            ));
+        }
+    }
     let coll = db.collection::<ServiceEndpoint>(COLLECTION_NAME);
     let endpoints: Vec<ServiceEndpoint> = coll
         .find(doc! {"service_id": service_id, "_id": {"$in": endpoint_ids}})
@@ -251,6 +278,32 @@ pub async fn ids_by_name(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::services::{audit_service::AuditActor, catalog_mutation_service::Authority};
+
+    async fn publication_authority(db: &Database, actor: &AuditActor) -> Authority {
+        super::super::role_service::seed_system_roles(db)
+            .await
+            .unwrap();
+        let role = db
+            .collection::<crate::models::role::Role>(crate::models::role::COLLECTION_NAME)
+            .find_one(doc! {"slug":"admin"})
+            .await
+            .unwrap()
+            .unwrap();
+        let mut user =
+            crate::test_utils::test_user(&actor.user_id, crate::models::user::UserType::Person);
+        user.role_ids.push(role.id);
+        db.collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+            .insert_one(user)
+            .await
+            .unwrap();
+        Authority {
+            catalog_base_url: "http://localhost:3001".into(),
+            actor: actor.clone(),
+            first_party_human: true,
+            admin_required: true,
+        }
+    }
 
     fn endpoint(name: &str, path: &str, publication: PublicationState) -> ServiceEndpoint {
         ServiceEndpoint {
@@ -401,14 +454,20 @@ mod tests {
             api_key_id: None,
             api_key_name: None,
         };
+        let mut parent = crate::models::downstream_service::test_helpers::dummy_service();
+        parent.id = "tool".into();
+        db.collection::<DownstreamService>(crate::models::downstream_service::COLLECTION_NAME)
+            .insert_one(&parent)
+            .await
+            .unwrap();
         let ids = rows.iter().map(|row| row.id.clone()).collect::<Vec<_>>();
         assert!(matches!(
             change_publication(
                 &db,
-                "tool",
+                &parent,
+                &publication_authority(&db, &actor).await,
                 &ids,
                 PublicationState::Published,
-                &actor,
                 &[7; 32]
             )
             .await,
@@ -451,6 +510,13 @@ mod tests {
             api_key_id: None,
             api_key_name: None,
         };
+        let mut parent = crate::models::downstream_service::test_helpers::dummy_service();
+        parent.id = row.service_id.clone();
+        db.collection::<DownstreamService>(crate::models::downstream_service::COLLECTION_NAME)
+            .insert_one(&parent)
+            .await
+            .unwrap();
+        let authority = publication_authority(&db, &actor).await;
         for (index, state) in [
             PublicationState::Validated,
             PublicationState::Published,
@@ -460,16 +526,10 @@ mod tests {
         .into_iter()
         .enumerate()
         {
-            let changed = change_publication(
-                &db,
-                &row.service_id,
-                &[row.id.clone()],
-                state,
-                &actor,
-                &[7; 32],
-            )
-            .await
-            .unwrap();
+            let changed =
+                change_publication(&db, &parent, &authority, &[row.id.clone()], state, &[7; 32])
+                    .await
+                    .unwrap();
             assert_eq!(changed[0].publication, state);
             assert_eq!(changed[0].is_active, state == PublicationState::Published);
             assert_eq!(changed[0].operation_generation, index as i64 + 2);

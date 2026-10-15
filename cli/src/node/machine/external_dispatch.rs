@@ -595,6 +595,94 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn managed_cutoff_blocks_external_cached_receipts_and_queued_output() {
+        let (_root, runtime, mut a, _rx) = fixture().await;
+        let id = || uuid::Uuid::new_v4().to_string();
+        let binding = nyxid_machine::managed::Binding {
+            node_id: runtime.node_id.clone(),
+            sandbox_uid: id(),
+            pod_uid: id(),
+            runtime_generation: 1,
+            credential_epoch: 1,
+            writer_fence: id(),
+            operation_id: id(),
+            delivery_id: id(),
+        };
+        runtime.bind_managed_runtime(&binding).unwrap();
+        a.runtime_generation = Some(binding.runtime_generation);
+        a.credential_epoch = Some(binding.credential_epoch);
+        let now = chrono::Utc::now().timestamp_millis();
+        let window = nyxid_machine::managed::SignedRuntimeWindow::sign(
+            nyxid_machine::managed::RuntimeWindow {
+                binding,
+                control_revision: 1,
+                run_not_after_ms: now + 1_000,
+                issued_at_ms: now,
+            },
+            &[7; 32],
+        )
+        .unwrap();
+        runtime.apply_managed_window(&window, &[7; 32]).unwrap();
+        let request = signed(
+            &runtime,
+            Operation::Exec,
+            json!({"job_id":a.job_id,"command":"printf cached-external-output","background":false}),
+            a.clone(),
+        );
+        let output = runtime.handle(request.clone(), b"external-node-test").await;
+        assert_eq!(output["stdout"], "cached-external-output", "{output}");
+        let replay = runtime.handle(request.clone(), b"external-node-test").await;
+        assert!(replay.get("error").is_none(), "{replay}");
+        assert_eq!(replay["output_omitted_on_replay"], true);
+        assert!(replay.get("stdout").is_none());
+        let mut parameters = request.parameters.clone();
+        parameters["_signed_external_authority"] = serde_json::to_value(&a).unwrap();
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
+        sender
+            .send(crate::node::ws_client::NodeWsMessage::Text(
+                "occupied".into(),
+            ))
+            .await
+            .unwrap();
+        let active = runtime.clone();
+        let request_id = request.request_id.clone();
+        let sending = tokio::spawn(async move {
+            active
+                .send_result(
+                    &sender,
+                    &request_id,
+                    Operation::Exec,
+                    0,
+                    &parameters,
+                    output,
+                )
+                .await;
+        });
+        tokio::task::yield_now().await;
+        assert!(!sending.is_finished());
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while runtime.managed_window_live() {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let denied = runtime.handle(request, b"external-node-test").await;
+        assert_eq!(denied["error"]["code"], 12421, "{denied}");
+        assert!(denied.get("stdout").is_none());
+        receiver.recv().await.unwrap();
+        sending.await.unwrap();
+        let crate::node::ws_client::NodeWsMessage::Text(message) = receiver.recv().await.unwrap()
+        else {
+            panic!("expected fenced external result");
+        };
+        let result: Value = serde_json::from_str(&message).unwrap();
+        assert_eq!(result["result"]["error"]["code"], 12421, "{result}");
+        assert!(!message.contains("cached-external-output"));
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test]
     async fn signed_roots_limit_cwd_without_changing_shared_shell_authority() {
         let (root, runtime, mut a, _rx) = fixture().await;
         let granted = root.path().join("workspace/granted");

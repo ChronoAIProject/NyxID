@@ -2,6 +2,7 @@ use axum::{
     Json,
     extract::{Path, Query, State},
 };
+use mongodb::bson::doc;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -308,6 +309,31 @@ pub async fn approve(
     if args["agent_id"].as_str() != Some(&agent_id) {
         return Err(AppError::NotFound("Learning proposal not found".into()));
     }
+    if !chat.guest
+        && acks::effective_access_mode(&state.db, &chat).await?
+            == crate::models::assistant_settings::AccessMode::Autopilot
+    {
+        let agent =
+            crate::services::assistant_team_service::agent(&state.db, &owner, &agent_id).await?;
+        let owner_reader = super::agent_skills::Reader {
+            state: &state,
+            person: &owner,
+            thread_key: None,
+            scopes: None,
+            chat: None,
+        };
+        return Ok(Json(
+            crate::services::assistant_skill_authoring::publish_automatically(
+                &state,
+                &chat,
+                &agent,
+                &proposal_id,
+                &args,
+                &owner_reader,
+            )
+            .await?,
+        ));
+    }
     if let Some(id) = body.acknowledgement_id.as_deref() {
         review::confirm_learned_card(
             &state,
@@ -413,11 +439,12 @@ fn withheld() -> AppError {
     )
 }
 
-pub(crate) async fn decide_authored(
+pub(crate) async fn decide_authored_with_scope(
     state: &AppState,
     auth: &AuthUser,
     mut card: crate::models::assistant_acknowledgement::AssistantAcknowledgement,
     allow: bool,
+    accept_reduced_scope: bool,
 ) -> AppResult<crate::models::assistant_acknowledgement::AssistantAcknowledgement> {
     super::login_client_context::require_first_party_human(auth)?;
     let actor = auth.user_id.to_string();
@@ -472,6 +499,10 @@ pub(crate) async fn decide_authored(
                 Err(error) => return Err(error),
             }
         }
+        Box::pin(super::assistant_team::owner_denial_decided(
+            state, &actor, &card,
+        ))
+        .await;
         return Ok(card);
     }
     if !matches!(card.status.as_str(), "allowed" | "used") {
@@ -490,6 +521,7 @@ pub(crate) async fn decide_authored(
     };
     let attempt = review::publication_attempt(state, &actor, &reference).await?;
     let mut binding_failure_code = None;
+    let mut binding_failure_rules = Vec::new();
     let decision: AppResult<()> = async {
         let binding = review::approval_binding_typed(
             state,
@@ -503,8 +535,18 @@ pub(crate) async fn decide_authored(
         .await
         .map_err(|failure| {
             binding_failure_code = failure.code;
+            binding_failure_rules = failure.rules;
             failure.error
         })?;
+        Box::pin(review::accept_scope(
+            state,
+            &actor,
+            &reference.agent_id,
+            &reference.proposal_id,
+            &binding,
+            accept_reduced_scope,
+        ))
+        .await?;
         Box::pin(review::approve(
             state,
             &chat,
@@ -531,10 +573,34 @@ pub(crate) async fn decide_authored(
         } else {
             review::PublicationFailureCode::NyxidRefused
         };
-        let _ =
-            review::record_pre_claim_failure(state, &actor, &reference, &card, attempt, code).await;
+        let _ = Box::pin(review::record_pre_claim_failure(
+            state,
+            &actor,
+            &reference,
+            &card,
+            attempt,
+            code,
+            &binding_failure_rules,
+        ))
+        .await;
+        // Terminal notifications commit with the transition; this immediate wake
+        // is best effort and the durable queue remains the crash backstop.
+        Box::pin(super::assistant_team::wake(
+            state,
+            &actor,
+            &card.conversation_id,
+        ))
+        .await;
         return Err(error);
     }
+    // Terminal notifications commit with the transition; this immediate wake
+    // is best effort and the durable queue remains the crash backstop.
+    Box::pin(super::assistant_team::wake(
+        state,
+        &actor,
+        &card.conversation_id,
+    ))
+    .await;
     card.status = "used".into();
     Ok(card)
 }

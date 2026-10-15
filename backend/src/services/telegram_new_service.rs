@@ -1,3 +1,9 @@
+#![allow(
+    clippy::too_many_arguments,
+    clippy::collapsible_if,
+    clippy::needless_borrow
+)]
+
 use bson::doc;
 use chrono::{Duration, Utc};
 use mongodb::{
@@ -409,6 +415,12 @@ impl TelegramNewService<'_> {
             .collection::<TelegramBotRequest>(REQUESTS)
             .find_one(doc! {"actor_user_id": actor, "active": true})
             .await?;
+        if let Some(authority) = request.as_ref().and_then(|r| r.setup_authority.as_ref())
+            && super::platform_setup_service::release_terminal_request(self.db, &authority.setup_id)
+                .await?
+        {
+            return Ok(None);
+        }
         if let Some(request) = &request
             && !self.owner_still_authorized(request).await?
             && request.status != Status::Provisioning
@@ -427,6 +439,16 @@ impl TelegramNewService<'_> {
     }
 
     async fn owner_still_authorized(&self, request: &TelegramBotRequest) -> AppResult<bool> {
+        if request.setup_authority.is_some() {
+            match super::platform_provisioning_service::admit_request(self.db, request, false).await
+            {
+                Ok(_) => {}
+                Err(AppError::Conflict(_) | AppError::Forbidden(_) | AppError::NotFound(_)) => {
+                    return Ok(false);
+                }
+                Err(error) => return Err(error),
+            }
+        }
         match self
             .check_owner(&request.actor_user_id, &request.owner_user_id)
             .await
@@ -466,7 +488,7 @@ impl TelegramNewService<'_> {
         with_operation(
             self.db,
             "telegram-new-manager-configuration",
-            self.begin_inner(actor, owner, label, auto_connect, None),
+            self.begin_inner(actor, owner, label, auto_connect, None, None, None),
         )
         .await
     }
@@ -481,7 +503,29 @@ impl TelegramNewService<'_> {
         with_operation(
             self.db,
             "telegram-new-manager-configuration",
-            self.begin_inner(actor, owner, label, true, Some(link_claim)),
+            self.begin_inner(actor, owner, label, true, Some(link_claim), None, None),
+        )
+        .await
+    }
+
+    pub(crate) async fn begin_approved(
+        &self,
+        job: &crate::models::platform_installation::SetupStepJob,
+        label: &str,
+    ) -> AppResult<(TelegramBotRequest, String)> {
+        let authority = &job.authority;
+        with_operation(
+            self.db,
+            "telegram-new-manager-configuration",
+            self.begin_inner(
+                &authority.owner_user_id,
+                &authority.owner_user_id,
+                label,
+                false,
+                None,
+                Some(authority),
+                Some(job),
+            ),
         )
         .await
     }
@@ -493,6 +537,8 @@ impl TelegramNewService<'_> {
         label: &str,
         auto_connect: bool,
         link_claim: Option<&super::channel_connect_link_service::Claim>,
+        setup_authority: Option<&crate::models::platform_installation::SetupStepAuthority>,
+        claimed_step: Option<&crate::models::platform_installation::SetupStepJob>,
     ) -> AppResult<(TelegramBotRequest, String)> {
         self.check_owner(actor, owner).await?;
         let label = label.trim();
@@ -527,10 +573,31 @@ impl TelegramNewService<'_> {
                     .ok_or_else(|| AppError::NotFound("Account not found".into()))?,
             )
         };
+        let planned_id = if let Some(authority) = setup_authority {
+            let mut session = self.db.client().start_session().await?;
+            session.start_transaction().await?;
+            let setup = super::platform_provisioning_service::fence_authority(
+                self.db,
+                authority,
+                &mut session,
+            )
+            .await?;
+            session.abort_transaction().await?;
+            Some(
+                setup
+                    .resources
+                    .creation_request_id
+                    .ok_or_else(|| conflict("Missing approved creation identity"))?,
+            )
+        } else {
+            None
+        };
         let challenge = nonce();
         let request = TelegramBotRequest {
-            id: link_claim
-                .map(|claim| claim.link.id.clone())
+            setup_authority: setup_authority.cloned(),
+            connection_generation: 0,
+            id: planned_id
+                .or_else(|| link_claim.map(|claim| claim.link.id.clone()))
                 .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
             actor_user_id: actor.into(),
             owner_user_id: owner.into(),
@@ -560,7 +627,55 @@ impl TelegramNewService<'_> {
             expires_at: Utc::now() + Duration::minutes(15),
             purge_after: None,
         };
-        if let Some(claim) = link_claim {
+        if let Some(authority) = setup_authority {
+            let db = self.db.clone();
+            let authority = authority.clone();
+            let inserted = request.clone();
+            let claimed_step = claimed_step
+                .cloned()
+                .ok_or_else(|| conflict("Missing provisioning claim"))?;
+            let mut session = db.client().start_session().await?;
+            session
+                .start_transaction()
+                .and_run2(async move |session| {
+                    let result: AppResult<()> = async {
+                        super::platform_provisioning_service::fence_step(
+                            &db,
+                            &claimed_step,
+                            session,
+                        )
+                        .await?;
+                        let setup = super::platform_provisioning_service::fence_authority(
+                            &db, &authority, session,
+                        )
+                        .await?;
+                        if setup.resources.creation_request_id.as_deref()
+                            != Some(inserted.id.as_str())
+                        {
+                            return Err(conflict("Creation identity changed"));
+                        }
+                        db.collection::<TelegramBotRequest>(REQUESTS)
+                            .insert_one(&inserted)
+                            .session(&mut *session)
+                            .await?;
+                        super::platform_provisioning_service::fence_request(
+                            &db, &inserted, false, session,
+                        )
+                        .await?;
+                        super::platform_provisioning_service::fence_step(
+                            &db,
+                            &claimed_step,
+                            session,
+                        )
+                        .await?;
+                        Ok(())
+                    }
+                    .await;
+                    super::api_key_mutation_service::transaction_result(result)
+                })
+                .await
+                .map_err(super::api_key_mutation_service::map_transaction_error)?;
+        } else if let Some(claim) = link_claim {
             super::channel_connect_link_service::insert_telegram_request(self.db, claim, &request)
                 .await?;
         } else {
@@ -592,14 +707,20 @@ impl TelegramNewService<'_> {
             ));
         }
         let challenge = nonce();
-        let result = self
-            .db
-            .collection::<TelegramBotRequest>(REQUESTS)
-            .update_one(
-                doc! {"_id": id, "revision": request.revision, "active": true},
-                doc! {"$set": {"challenge_hash": hash(&challenge)}, "$inc": {"revision": 1}},
-            )
-            .await?;
+        let db = self.db.clone();
+        let captured = request.clone();
+        let challenge_hash = hash(&challenge);
+        let mut session = db.client().start_session().await?;
+        let result = session.start_transaction().and_run2(async move |session| {
+            let outcome: AppResult<_> = async {
+                super::platform_provisioning_service::fence_request(&db, &captured, false, session).await?;
+                Ok(db.collection::<TelegramBotRequest>(REQUESTS).update_one(
+                    doc! {"_id": &captured.id, "revision": captured.revision, "active": true},
+                    doc! {"$set": {"challenge_hash": &challenge_hash}, "$inc": {"revision": 1_i64, "connection_generation": 1_i64}},
+                ).session(&mut *session).await?)
+            }.await;
+            super::api_key_mutation_service::transaction_result(outcome)
+        }).await.map_err(super::api_key_mutation_service::map_transaction_error)?;
         if result.modified_count != 1 {
             return Err(conflict("The request changed; refresh and try again"));
         }
@@ -668,12 +789,21 @@ impl TelegramNewService<'_> {
         if !is_manager_update(&update) {
             let bot = match self.manager_channel(manager_id).await {
                 Ok(bot) => bot,
-                Err(_) => {
+                Err(error) => {
+                    let malformed = matches!(&error, AppError::DatabaseError(db_error) if matches!(db_error.kind.as_ref(), mongodb::error::ErrorKind::BsonDeserialization(_)));
+                    if !malformed {
+                        return Err(error);
+                    }
+                    let claimed = self.db.collection::<bson::Document>(crate::models::platform_bot_config::COLLECTION_NAME)
+                        .find_one(doc! {"manager_bot_id": manager_id.to_string()}).await?.is_some()
+                        || self.db.collection::<bson::Document>(BOTS).find_one(doc! {"platform_bot_id": manager_id.to_string(), "platform_profile_id": {"$exists": true}}).await?.is_some();
+                    if claimed {
+                        return Err(error);
+                    }
                     tracing::warn!(
-                        manager_id,
-                        "Telegram manager channel lookup failed; ordinary update dropped"
+                        "Malformed ordinary manager channel; native control remains available"
                     );
-                    return Ok(None);
+                    None
                 }
             };
             // Telegram embeds quoted messages in ordinary replies, including private setup codes.
@@ -761,6 +891,19 @@ impl TelegramNewService<'_> {
                 Some(request) if self.owner_still_authorized(&request).await? => Some(request),
                 _ => None,
             };
+            if pending.is_none()
+                && self
+                    .db
+                    .collection::<crate::models::platform_bot_config::PlatformBotConfig>(
+                        crate::models::platform_bot_config::COLLECTION_NAME,
+                    )
+                    .find_one(doc! {"manager_bot_id": manager_id.to_string()})
+                    .await?
+                    .is_some()
+            {
+                let bot = self.db.collection::<ChannelBot>(BOTS).find_one(doc! {"platform_bot_id": manager_id.to_string(), "platform_profile_id": {"$exists": true}}).await?;
+                return Ok(bot.map(|bot| (bot, update)));
+            }
             return self
                 .send_creation_prompt(manager_id, token, user_id, pending.as_ref())
                 .await
@@ -770,14 +913,47 @@ impl TelegramNewService<'_> {
             if challenge.len() != 48 || !challenge.bytes().all(|b| b.is_ascii_hexdigit()) {
                 return Ok(None);
             }
-            let request = self.db.collection::<TelegramBotRequest>(REQUESTS).find_one_and_update(
-                doc! {"manager_bot_id": manager_id, "challenge_hash": hash(challenge), "active": true, "expires_at": {"$gt": bson::DateTime::now()}, "status": {"$in": ["waiting_telegram", "waiting_bot", "waiting_consent"]}, "$or": [{"telegram_user_id": null}, {"telegram_user_id": user_id}]},
+            let claimed = self.db.collection::<TelegramBotRequest>(REQUESTS)
+                .find_one(doc! {"manager_bot_id": manager_id, "challenge_hash": hash(challenge), "active": true, "setup_authority": {"$ne": null}}).await?;
+            let request = if let Some(captured) = claimed {
+                if captured
+                    .setup_authority
+                    .as_ref()
+                    .is_none_or(|a| a.telegram_sender_id != user_id)
+                {
+                    return Ok(None);
+                }
+                let db = self.db.clone();
+                let challenge_hash = hash(challenge);
+                let mut session = db.client().start_session().await?;
+                session.start_transaction().and_run2(async move |session| {
+                    let outcome: AppResult<_> = async {
+                        super::platform_provisioning_service::fence_request(&db, &captured, false, session).await?;
+                        Ok(db.collection::<TelegramBotRequest>(REQUESTS).find_one_and_update(
+                            doc! {"_id": &captured.id, "revision": captured.revision, "connection_generation": captured.connection_generation,
+                                "challenge_hash": &challenge_hash, "active": true, "expires_at": {"$gt": bson::DateTime::now()},
+                                "status": {"$in": ["waiting_telegram", "waiting_bot", "waiting_consent"]},
+                                "$or": [{"telegram_user_id": null}, {"telegram_user_id": user_id}]},
+                            vec![doc! {"$set": {"telegram_user_id": user_id, "start_update_id": {"$ifNull": ["$start_update_id", update_id]},
+                                "revision": {"$add": ["$revision", 1_i64]}, "connection_generation": {"$add": ["$connection_generation", 1_i64]}}}]
+                        ).return_document(ReturnDocument::After).session(&mut *session).await?)
+                    }.await;
+                    super::api_key_mutation_service::transaction_result(outcome)
+                }).await
+            } else {
+                self.db.collection::<TelegramBotRequest>(REQUESTS).find_one_and_update(
+                doc! {"manager_bot_id": manager_id, "challenge_hash": hash(challenge), "setup_authority": null, "active": true, "expires_at": {"$gt": bson::DateTime::now()}, "status": {"$in": ["waiting_telegram", "waiting_bot", "waiting_consent"]}, "$and": [
+                    {"$or": [{"telegram_user_id": null}, {"telegram_user_id": user_id}]},
+                    {"$or": [{"setup_authority": null}, {"setup_authority.telegram_sender_id": user_id}]}
+                ]},
                 vec![doc! {"$set": {
                     "telegram_user_id": user_id,
                     "start_update_id": {"$ifNull": ["$start_update_id", update_id]},
                     "revision": {"$add": ["$revision", 1_i64]},
+                    "connection_generation": {"$add": [{"$ifNull": ["$connection_generation", 0_i64]}, 1_i64]},
                 }}],
-            ).return_document(ReturnDocument::After).await;
+            ).return_document(ReturnDocument::After).await
+            };
             let request = match request {
                 Ok(request) => request,
                 Err(error) if is_duplicate_key_error(&error) => {
@@ -855,6 +1031,24 @@ impl TelegramNewService<'_> {
         let pending = self.db.collection::<TelegramBotRequest>(REQUESTS).find_one(
             doc! {"manager_bot_id": manager_id, "telegram_user_id": user_id, "active": true, "status": "waiting_bot", "expires_at": {"$gt": bson::DateTime::now()}},
         ).await?;
+        if let Some(request) = pending
+            .as_ref()
+            .filter(|request| request.setup_authority.is_some())
+        {
+            if !is_creation
+                || request
+                    .setup_authority
+                    .as_ref()
+                    .is_none_or(|a| a.telegram_sender_id != user_id)
+            {
+                return Ok(None);
+            }
+            super::platform_provisioning_service::observe_child(
+                self.db, request, bot_id, &username, update_id,
+            )
+            .await?;
+            return Ok(None);
+        }
         if let Some(pending) = pending.filter(|request| request.auto_connect) {
             // The initial action authorizes one fresh creation through this private handoff.
             // Recovery and an earlier Telegram update cannot consume that authorization.
@@ -966,6 +1160,54 @@ impl TelegramNewService<'_> {
         if !self.owner_still_authorized(request).await? {
             return Ok(());
         }
+        if let Some(authority) = &request.setup_authority {
+            let profile =
+                super::platform_bot_config_service::get(self.db, &authority.platform_config_id)
+                    .await?;
+            let binding = self
+                .db
+                .collection::<crate::models::platform_binding::PlatformBinding>(
+                    crate::models::platform_binding::COLLECTION_NAME,
+                )
+                .find_one(doc! {"_id": &authority.binding_id})
+                .await?
+                .ok_or_else(|| AppError::Conflict("Onboarding authority changed".into()))?;
+            let db = self.db.clone();
+            let captured = request.clone();
+            let mut session = db.client().start_session().await?;
+            let admitted = session
+                .start_transaction()
+                .and_run2(async move |session| {
+                    let result: AppResult<bool> = async {
+                        super::platform_provisioning_service::fence_request(
+                            &db, &captured, false, session,
+                        )
+                        .await?;
+                        super::platform_binding_service::admit_native_reply_in_session(
+                            db.clone(),
+                            profile.clone(),
+                            Some(binding.clone()),
+                            profile.id.clone(),
+                            captured.telegram_user_id.unwrap_or_default().to_string(),
+                            captured.revision,
+                            "child_review",
+                            false,
+                            session,
+                        )
+                        .await
+                    }
+                    .await;
+                    super::api_key_mutation_service::transaction_result(result)
+                })
+                .await
+                .map_err(super::api_key_mutation_service::map_transaction_error)?;
+            if admitted {
+                self.api.call(token, "sendMessage", json!({"chat_id": request.telegram_user_id,
+                    "text": "Your Telegram bot was observed. Review its exact identity and the saved setup in NyxID before registration continues.",
+                    "protect_content": true, "reply_markup": {"inline_keyboard": [[{"text": "Review created bot", "url": format!("{}/onboarding/setups/{}", self.config.frontend_url.trim_end_matches('/'), authority.setup_id)}]]}})).await?;
+            }
+            return Ok(());
+        }
         let consent = nonce();
         let result = self.db.collection::<TelegramBotRequest>(REQUESTS).update_one(
             doc! {"_id": &request.id, "status": "waiting_consent", "revision": request.revision, "active": true},
@@ -1009,6 +1251,12 @@ impl TelegramNewService<'_> {
         if !self.owner_still_authorized(&pending).await? {
             return Ok(());
         }
+        // Platform child approval is an exact authenticated web review. Native
+        // personal consent callbacks cannot widen its approved creation scope.
+        if pending.setup_authority.is_some() {
+            return Ok(());
+        }
+
         let event = self
             .db
             .collection::<ManagedBotEvents>(MANAGED_BOTS)
@@ -1062,7 +1310,16 @@ impl TelegramNewService<'_> {
         token: &str,
     ) -> AppResult<()> {
         let event = self.db.collection::<ManagedBotEvents>(MANAGED_BOTS).find_one(doc! {"manager_bot_id": request.manager_bot_id, "telegram_bot_id": request.telegram_bot_id, "revision": 1_i64, "created_by": request.telegram_user_id, "observation_id": &request.observation_id, "retired": {"$ne": true}}).await?.ok_or_else(|| conflict("Bot management changed. Create a new bot or use its current token with the Telegram bot token option."))?;
-        let created_at = event.created_at.filter(|date| *date >= Utc::now() - Duration::minutes(CREATION_RECOVERY_MINUTES)).ok_or_else(|| conflict("This creation is too old to connect automatically. Use the Telegram bot token option with its current token."))?;
+        let durable_review = if let Some(a) = &request.setup_authority {
+            self.db.collection::<crate::models::platform_installation::PlatformInstallation>(crate::models::platform_installation::COLLECTION_NAME)
+                .find_one(doc! {"channel_bot_id": &request.id, "setup_id": &a.setup_id, "telegram_bot_id": request.telegram_bot_id.map(|id| id.to_string()),
+                    "native_creation.observation_id": &request.observation_id, "native_creation.sender_id": a.telegram_sender_id,
+                    "native_creation.start_update_id": request.start_update_id, "native_creation.request_created_at": bson::DateTime::from_chrono(request.created_at)})
+                .await?.is_some()
+        } else {
+            false
+        };
+        let created_at = event.created_at.filter(|date| durable_review || *date >= Utc::now() - Duration::minutes(CREATION_RECOVERY_MINUTES)).ok_or_else(|| conflict("This creation is too old to connect automatically. Use the Telegram bot token option with its current token."))?;
         let webhook = self.api.call(token, "getWebhookInfo", json!({})).await?;
         if webhook["url"] != self.manager_callback()
             || webhook["pending_update_count"].as_i64() != Some(0)

@@ -877,6 +877,7 @@ impl Runtime {
             computer: self.config.computer,
             browser: self.config.browser,
             authority_versions: vec![2, 3],
+            exact_cancel: true,
             separated: Some(self.context_support().await),
             os: std::env::consts::OS.into(),
             arch: std::env::consts::ARCH.into(),
@@ -977,6 +978,16 @@ impl Runtime {
             nyxid_machine::desktop::Display::Dev => &self.dev_owner_control,
         }
     }
+    async fn cancel_exact_local(&self, scope: &cancellation::Scope, ids: &[String]) {
+        if !scope.turn_id.is_empty() {
+            self.turns.stop(Some(scope));
+        }
+        self.jobs.preempt_ids(ids).await;
+        if let Some(gateway) = self.gateway.get() {
+            gateway.cancel_jobs(ids).await;
+        }
+    }
+
     fn control_channels(
         &self,
         operation: Operation,
@@ -1052,7 +1063,10 @@ impl Runtime {
         let external = parameters["_signed_external_authority"].is_object();
         if self.managed_binding.get().is_some()
             && !self.managed_window_live()
-            && !matches!(operation, Operation::JobCancel | Operation::AuthorityRevoke)
+            && !matches!(
+                operation,
+                Operation::JobCancel | Operation::AuthorityRevoke | Operation::CancelExact
+            )
         {
             result = json!({"error":{"code":12421,"message":"managed_runtime_deadline_expired"}});
         }
@@ -1089,6 +1103,7 @@ impl Runtime {
             Operation::AuthorityRenew
                 | Operation::AuthorityRevoke
                 | Operation::Cancel
+                | Operation::CancelExact
                 | Operation::Upgrade
                 | Operation::UpgradeStatus
                 | Operation::DesktopControl
@@ -1215,7 +1230,7 @@ impl Runtime {
             && !self.managed_window_live()
             && !matches!(
                 request.operation,
-                Operation::JobCancel | Operation::AuthorityRevoke
+                Operation::JobCancel | Operation::AuthorityRevoke | Operation::CancelExact
             )
         {
             return json!({"error":{"code":12421,"message":"managed_runtime_deadline_expired"}});
@@ -1415,6 +1430,7 @@ impl Runtime {
             && !matches!(
                 request.operation,
                 Operation::Cancel
+                    | Operation::CancelExact
                     | Operation::Upgrade
                     | Operation::UpgradeStatus
                     | Operation::ContainerInspect
@@ -1480,6 +1496,7 @@ impl Runtime {
         let agent_operation = !matches!(
             request.operation,
             Operation::Cancel
+                | Operation::CancelExact
                 | Operation::Upgrade
                 | Operation::UpgradeStatus
                 | Operation::DesktopControl
@@ -1564,6 +1581,7 @@ impl Runtime {
         let human = matches!(
             operation,
             Operation::Cancel
+                | Operation::CancelExact
                 | Operation::Upgrade
                 | Operation::UpgradeStatus
                 | Operation::DesktopControl
@@ -1620,6 +1638,7 @@ impl Runtime {
             computer: self.config.computer,
             browser: self.config.browser,
             authority_versions: vec![2],
+            exact_cancel: true,
             ..Default::default()
         };
         if !operation.allowed(&profile) {
@@ -1903,6 +1922,31 @@ impl Runtime {
                 )
                 .await;
                 Ok(result)
+            }
+            Operation::CancelExact => {
+                let scope: cancellation::Scope = serde_json::from_value(parameters.clone())?;
+                anyhow::ensure!(
+                    !scope.conversation_id.is_empty(),
+                    "exact_cancel_conversation_required"
+                );
+                let ids: Vec<String> = serde_json::from_value(parameters["job_ids"].clone())?;
+                anyhow::ensure!(ids.len() <= 1024, "exact_cancel_job_limit");
+                self.cancel_exact_local(&scope, &ids).await;
+                #[cfg(target_os = "linux")]
+                {
+                    let runtimes: Vec<_> = self
+                        .contexts
+                        .lock()
+                        .await
+                        .runtimes
+                        .values()
+                        .cloned()
+                        .collect();
+                    for runtime in runtimes {
+                        runtime.cancel_exact_local(&scope, &ids).await;
+                    }
+                }
+                Ok(json!({"stopped": true}))
             }
             Operation::Cancel => {
                 let scope = if parameters["all"] == true {
@@ -3320,6 +3364,227 @@ mod authority_runtime_tests {
     fn exec(a: &nyxid_machine::authority::Authority, job: &str, background: bool) -> Value {
         json!({"conversation_id":a.conversation_id,"turn_id":a.turn_id,"runtime_id":a.runtime_id,"job_id":job,"command":"sleep 30","background":background})
     }
+    fn managed_window(runtime: &Arc<Runtime>, duration_ms: i64) {
+        let id = || uuid::Uuid::new_v4().to_string();
+        let binding = nyxid_machine::managed::Binding {
+            node_id: runtime.node_id.clone(),
+            sandbox_uid: id(),
+            pod_uid: id(),
+            runtime_generation: 1,
+            credential_epoch: 1,
+            writer_fence: id(),
+            operation_id: id(),
+            delivery_id: id(),
+        };
+        runtime.bind_managed_runtime(&binding).unwrap();
+        let now = chrono::Utc::now().timestamp_millis();
+        let window = nyxid_machine::managed::SignedRuntimeWindow::sign(
+            nyxid_machine::managed::RuntimeWindow {
+                binding,
+                control_revision: 1,
+                run_not_after_ms: now + duration_ms,
+                issued_at_ms: now,
+            },
+            &[7; 32],
+        )
+        .unwrap();
+        runtime.apply_managed_window(&window, &[7; 32]).unwrap();
+    }
+
+    async fn wait_for_managed_cutoff(runtime: &Runtime) {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while runtime.managed_window_live() {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn managed_exact_cancel_after_cutoff_still_checks_signature_and_replay() {
+        let (_directory, runtime, a, _receiver) = fixture().await;
+        managed_window(&runtime, 1_000);
+        let job = uuid::Uuid::new_v4().to_string();
+        let started = runtime
+            .handle(
+                signed(
+                    &runtime,
+                    Operation::Exec,
+                    exec(&a, &job, true),
+                    Some(a.clone()),
+                ),
+                b"authority test",
+            )
+            .await;
+        assert!(started.get("error").is_none(), "{started}");
+        wait_for_managed_cutoff(&runtime).await;
+        let denied = runtime
+            .handle(
+                signed(
+                    &runtime,
+                    Operation::Exec,
+                    exec(&a, &uuid::Uuid::new_v4().to_string(), true),
+                    Some(a.clone()),
+                ),
+                b"authority test",
+            )
+            .await;
+        assert_eq!(denied["error"]["code"], 12421, "{denied}");
+        let request = signed(
+            &runtime,
+            Operation::CancelExact,
+            json!({"conversation_id":a.conversation_id,"turn_id":a.turn_id,"job_ids":[job]}),
+            None,
+        );
+        let cancelled = runtime.handle(request.clone(), b"authority test").await;
+        assert_eq!(cancelled, json!({"stopped":true}));
+        let replayed = runtime.handle(request.clone(), b"authority test").await;
+        assert_eq!(replayed["error"]["code"], 12401, "{replayed}");
+        let mut tampered = signed(
+            &runtime,
+            Operation::CancelExact,
+            request.parameters.clone(),
+            None,
+        );
+        tampered.parameters["job_ids"] = json!([uuid::Uuid::new_v4().to_string()]);
+        let denied = runtime.handle(tampered, b"authority test").await;
+        assert_eq!(denied["error"]["code"], 12401, "{denied}");
+        let mut stale = signed(&runtime, Operation::CancelExact, request.parameters, None);
+        stale.timestamp -= 120;
+        stale.signature = nyxid_machine::signing::sign(&stale, b"authority test");
+        let denied = runtime.handle(stale, b"authority test").await;
+        assert_eq!(denied["error"]["code"], 12401, "{denied}");
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn managed_exact_cancel_ack_survives_cutoff_while_socket_blocked() {
+        let (_directory, runtime, a, _receiver) = fixture().await;
+        managed_window(&runtime, 1_000);
+        let request = signed(
+            &runtime,
+            Operation::CancelExact,
+            json!({"conversation_id":a.conversation_id,"turn_id":a.turn_id,"job_ids":[]}),
+            None,
+        );
+        let revision = runtime
+            .control_revision(request.operation, &request.parameters)
+            .await;
+        let cancelled = runtime.handle(request.clone(), b"authority test").await;
+        assert_eq!(cancelled, json!({"stopped":true}));
+        assert!(runtime.managed_window_live());
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
+        sender
+            .send(crate::node::ws_client::NodeWsMessage::Text(
+                "occupied".into(),
+            ))
+            .await
+            .unwrap();
+        let active = runtime.clone();
+        let sending = tokio::spawn(async move {
+            active
+                .send_result(
+                    &sender,
+                    &request.request_id,
+                    request.operation,
+                    revision,
+                    &request.parameters,
+                    cancelled,
+                )
+                .await;
+        });
+        tokio::task::yield_now().await;
+        assert!(!sending.is_finished());
+        wait_for_managed_cutoff(&runtime).await;
+        receiver.recv().await.unwrap();
+        sending.await.unwrap();
+        let crate::node::ws_client::NodeWsMessage::Text(message) = receiver.recv().await.unwrap()
+        else {
+            panic!("expected cancellation result");
+        };
+        let result: Value = serde_json::from_str(&message).unwrap();
+        assert_eq!(result["result"], json!({"stopped":true}));
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn managed_exact_cancel_keeps_job_and_turn_targets_bounded() {
+        let (_directory, runtime, a, _receiver) = fixture().await;
+        managed_window(&runtime, 30_000);
+        let scopes = [
+            cancellation::Scope {
+                conversation_id: a.conversation_id.clone(),
+                turn_id: a.turn_id.clone(),
+            },
+            cancellation::Scope {
+                conversation_id: a.conversation_id.clone(),
+                turn_id: uuid::Uuid::new_v4().to_string(),
+            },
+            cancellation::Scope {
+                conversation_id: uuid::Uuid::new_v4().to_string(),
+                turn_id: a.turn_id.clone(),
+            },
+        ];
+        let jobs: Vec<_> = scopes
+            .iter()
+            .map(|_| uuid::Uuid::new_v4().to_string())
+            .collect();
+        for (scope, job) in scopes.iter().zip(&jobs) {
+            let started = runtime
+                .handle(
+                    signed(
+                        &runtime,
+                        Operation::Exec,
+                        json!({"conversation_id":scope.conversation_id,"turn_id":scope.turn_id,
+                            "runtime_id":runtime.runtime_id,"job_id":job,"command":"sleep 30","background":true}),
+                        None,
+                    ),
+                    b"authority test",
+                )
+                .await;
+            assert!(started.get("error").is_none(), "{started}");
+        }
+        for parameters in [
+            json!({"conversation_id":a.conversation_id,"turn_id":a.turn_id,"job_ids":vec![jobs[0].clone();1025]}),
+            json!({"conversation_id":"","turn_id":a.turn_id,"job_ids":[jobs[0]]}),
+        ] {
+            let denied = runtime
+                .handle(
+                    signed(&runtime, Operation::CancelExact, parameters, None),
+                    b"authority test",
+                )
+                .await;
+            assert!(denied.get("error").is_some(), "{denied}");
+            for job in &jobs {
+                assert!(runtime.jobs.running(job).await);
+            }
+            for scope in &scopes {
+                assert!(!*runtime.turns.subscribe(scope).borrow());
+            }
+        }
+        let cancelled = runtime
+            .handle(
+                signed(
+                    &runtime,
+                    Operation::CancelExact,
+                    json!({"conversation_id":a.conversation_id,"turn_id":a.turn_id,"job_ids":[jobs[0]]}),
+                    None,
+                ),
+                b"authority test",
+            )
+            .await;
+        assert_eq!(cancelled, json!({"stopped":true}));
+        let stopped = runtime.jobs.result(&jobs[0], 5, 0, 0).await.unwrap();
+        assert_eq!(stopped["status"], "finished");
+        assert!(*runtime.turns.subscribe(&scopes[0]).borrow());
+        for (scope, job) in scopes[1..].iter().zip(&jobs[1..]) {
+            assert!(runtime.jobs.running(job).await);
+            assert!(!*runtime.turns.subscribe(scope).borrow());
+        }
+        runtime.shutdown().await;
+    }
+
     #[tokio::test]
     async fn managed_signed_cutoff_cancels_real_job_without_wss_and_cannot_be_revived() {
         let (_directory, runtime, a, _receiver) = fixture().await;

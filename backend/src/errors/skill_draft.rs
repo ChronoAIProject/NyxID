@@ -119,6 +119,12 @@ mod tests {
             diagnostic.ornn_rules,
             ["description-no-xml", "allowed-root-items"]
         );
+        let wire = serde_json::to_value(&diagnostic).unwrap();
+        assert!(wire.get("rules").is_none());
+        assert_eq!(
+            wire["ornn_rules"],
+            serde_json::json!(["description-no-xml", "allowed-root-items"])
+        );
         let many: Vec<String> = (0..20).map(|i| format!("rule-{i}")).collect();
         let diagnostic = SkillDraftValidation::ornn_rejected(many.iter().map(String::as_str));
         assert_eq!(diagnostic.ornn_rules.len(), MAX_ORNN_RULES);

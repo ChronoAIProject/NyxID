@@ -319,6 +319,11 @@ async fn external_real_key_auth_grant_and_signed_dispatch_persist_no_assistant_i
             .unwrap(),
         "external"
     );
+    assert_eq!(raw.get("report_to"), Some(&bson::Bson::Null));
+    assert_eq!(raw.get_i32("report_provenance").unwrap(), 0);
+    let persisted = job(&f, &id).await;
+    assert!(persisted.report_to.is_none());
+    assert_eq!(persisted.report_provenance, 0);
     let page = history(&f.state.db, &source, &f.node.id, &json!({}))
         .await
         .unwrap();

@@ -35,7 +35,11 @@ export function groupServiceConnections(
           : first.label,
         slug,
         iconSlug: first.catalog_service_slug ?? first.slug,
-        iconUrl: connections.length === 1 ? (first.icon_url ?? null) : null,
+        iconUrl:
+          (connections.length === 1 ? first.icon_url : null) ||
+          first.catalog_icon_url ||
+          entry?.icon_url ||
+          null,
         description:
           entry?.description ??
           (connections.length === 1 ? first.description : null) ??

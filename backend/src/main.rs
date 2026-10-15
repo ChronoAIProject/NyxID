@@ -393,6 +393,9 @@ async fn server_main() {
         .await
         .expect("Failed to connect to database");
     services::assistant_nyxagent::warn_at_startup(&db).await;
+    services::assistant_access_policy::ensure_cutover(&db)
+        .await
+        .expect("Failed to read the immutable assistant skill-routing cutover");
 
     // Load JWT signing keys early: DB-backed CLI subcommands may audit-log
     // before the server state is built, and the audit-chain key can fall back
@@ -638,6 +641,20 @@ async fn server_main() {
     // Run unified collection migration (idempotent, non-fatal)
     if let Err(e) = db::migrate_to_unified_collections(&db).await {
         tracing::warn!("Unified collection migration encountered errors: {e}");
+    }
+
+    // Retire pre-upgrade owner asks in bounded pending-row batches. The sweep is
+    // idempotent; failures retry on policy writes or the next startup.
+    if services::assistant_acknowledgement_service::retire_full_access_confirmations(
+        &db, None, None,
+    )
+    .await
+    .is_err()
+    {
+        tracing::error!(
+            code = "assistant_full_access_retirement_failed",
+            "Failed to retire obsolete Full-access confirmations; continuing startup"
+        );
     }
 
     // --- Server startup ---
@@ -1133,6 +1150,73 @@ async fn server_main() {
         });
     }
 
+    // Budget holds must recover independently of external Telegram notice latency.
+    let platform_budget_db = state.db.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            interval.tick().await;
+            if let Err(error) =
+                services::platform_inference_service::sweep_abandoned(&platform_budget_db).await
+            {
+                tracing::warn!(
+                    error_code = error.error_code(),
+                    "Platform budget recovery sweep failed"
+                );
+            }
+        }
+    });
+
+    let platform_cleanup_state = state.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            interval.tick().await;
+            if let Err(error) =
+                handlers::platform_bots::sweep_cleanup(&platform_cleanup_state).await
+            {
+                tracing::warn!(
+                    error_code = error.error_code(),
+                    "Platform conversion cleanup sweep failed"
+                );
+            }
+            if let Err(error) =
+                services::platform_provisioning_service::sweep(&platform_cleanup_state).await
+            {
+                tracing::warn!(
+                    error_code = error.error_code(),
+                    "Platform setup provisioning sweep failed"
+                );
+            }
+            if let Err(error) =
+                services::platform_setup_notice_service::sweep(&platform_cleanup_state).await
+            {
+                tracing::warn!(
+                    error_code = error.error_code(),
+                    "Platform setup status notice sweep failed"
+                );
+            }
+            if let Err(error) =
+                services::platform_native_receipt_service::sweep(&platform_cleanup_state).await
+            {
+                tracing::warn!(
+                    error_code = error.error_code(),
+                    "Native platform recovery sweep failed"
+                );
+            }
+            if let Err(error) =
+                services::platform_setup_service::expire(&platform_cleanup_state.db).await
+            {
+                tracing::warn!(
+                    error_code = error.error_code(),
+                    "Platform setup expiry sweep failed"
+                );
+            }
+        }
+    });
+
     // Spawn background cleanup task for MCP session reaper.
     // Sessions live up to 30 days (extended on every request via touch()).
     // Reaper runs every 5 minutes to clean up sessions idle longer than 30 days.
@@ -1413,6 +1497,9 @@ async fn server_main() {
             "X-NyxID-Client-Version".parse().unwrap(),
             "X-NyxID-Account-Deletion-Policy".parse().unwrap(),
         ]))
+        .expose_headers([axum::http::HeaderName::from_static(
+            mw::assistant_trace::TRACE_HEADER,
+        )])
         .allow_credentials(true);
 
     // Build router — public OAuth routes get open CORS (per RFC 9207),
@@ -1470,7 +1557,8 @@ async fn server_main() {
     .layer(Extension(global_rate_limiter))
     .layer(Extension(trusted_proxy_ranges))
     .layer(Extension(rate_limit_exempt_ips))
-    .layer(TraceLayer::new_for_http());
+    .layer(TraceLayer::new_for_http())
+    .layer(axum_mw::from_fn(mw::assistant_trace::assistant_trace));
 
     // Bind both listeners before serving. Internal routes never enter the
     // public router and therefore cannot be exposed by an ingress path rule.

@@ -284,6 +284,7 @@ async fn assistant_operation_scope_transaction_sync_revision_regrant_rotation_an
         &f.state.db,
         &f.owner,
         &engine::TurnRequest {
+            acknowledgement_id: None,
             retry_of: None,
             agent_id: Some(f.chat.agent_id.clone()),
             conversation_id: None,
@@ -927,6 +928,8 @@ async fn unscoped_services_keep_guest_and_webhook_limits_on_raw_routes() {
     };
     let guest = as_chat(
         crate::services::assistant_acknowledgement_service::ChatAuthority {
+            report_to: None,
+            with_nyxbot: false,
             guest: true,
             ..f.chat.clone()
         },
@@ -956,6 +959,8 @@ async fn unscoped_services_keep_guest_and_webhook_limits_on_raw_routes() {
 
     let webhook = as_chat(
         crate::services::assistant_acknowledgement_service::ChatAuthority {
+            report_to: None,
+            with_nyxbot: false,
             guest: false,
             confirmation_policy: Some(ConfirmationPolicy::Changes),
             ..f.chat.clone()

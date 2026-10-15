@@ -44,7 +44,14 @@ import { useFeature } from "@/hooks/use-feature-flag";
 import { useAuthStore } from "@/stores/auth-store";
 import { useThemeStore, type SidebarMode } from "@/stores/theme-store";
 import { SidebarResizeHandle } from "@/components/layout/sidebar-resize-handle";
-import { canAdminWrite, canReadAdminUsage, hasAdminRead, isBillingAvailable } from "@/types/api";
+import {
+  canAdminWrite,
+  canManageTools,
+  canReadAdminUsage,
+  canReadFeatureFlags,
+  hasAdminRead,
+  isBillingAvailable,
+} from "@/types/api";
 
 export const MAIN_NAV = [
   { to: "/dashboard", icon: LayoutDashboard, label: "Dashboard" },
@@ -55,6 +62,7 @@ export const MAIN_NAV = [
   { to: "/nodes", icon: HardDrive, label: "Nodes" },
   { to: "/devices/onboard", icon: QrCode, label: "Device Onboard" },
   { to: "/channel-bots", icon: Radio, label: "Channel Bots" },
+  { to: "/onboarding/setups", icon: Bot, label: "Bot Setups" },
   { to: "/settings", icon: Settings, label: "Settings" },
   { to: "/settings/consents", icon: KeyRound, label: "Authorized Apps" },
   { to: "/docs", icon: BookOpen, label: "Docs" },
@@ -76,6 +84,7 @@ export const DEVELOPER_NAV = [
 const ADMIN_USAGE_PATH = "/admin/usage";
 
 export const ADMIN_NAV = [
+  { to: "/admin/platform-bots", icon: Bot, label: "Platform BotFather" },
   { to: "/admin/users", icon: Users, label: "Users" },
   { to: "/admin/invite-codes", icon: Ticket, label: "Invite Codes" },
   { to: "/admin/feature-flags", icon: Flag, label: "Feature Flags" },
@@ -115,24 +124,29 @@ export function getVisibleMainNav(
   );
 }
 
-/// Admin nav entries the user may open. Usage-only role holders (no admin
-/// read access) see just the Usage page.
+/// Admin nav entries permitted by platform roles or scoped capabilities.
 export function getVisibleAdminNav(
   user: Parameters<typeof canReadAdminUsage>[0],
 ): readonly NavItemDef[] {
   if (!hasAdminRead(user)) {
-    return canReadAdminUsage(user)
-      ? ADMIN_NAV.filter((item) => item.to === ADMIN_USAGE_PATH)
-      : [];
+    return ADMIN_NAV.filter(
+      (item) =>
+        (item.to === ADMIN_USAGE_PATH && canReadAdminUsage(user)) ||
+        (item.to === "/admin/tools" && canManageTools(user)) ||
+        (item.to === "/admin/feature-flags" && canReadFeatureFlags(user)),
+    );
   }
   return ADMIN_NAV.filter(
     (item) =>
       ![
         "/admin/platform-credentials",
+        "/admin/platform-bots",
         "/admin/ownership",
         "/admin/tools",
         "/admin/upload-retention",
-      ].includes(item.to) || canAdminWrite(user),
+      ].includes(item.to) ||
+      canAdminWrite(user) ||
+      (item.to === "/admin/tools" && canManageTools(user)),
   );
 }
 
@@ -255,7 +269,7 @@ export function Sidebar({
   const user = useAuthStore((s) => s.user);
   const currentPath = routerState.location.pathname;
   const mainNav = getVisibleMainNav(user);
-  const adminNav = hasAdminRead(user) ? getVisibleAdminNav(user) : [];
+  const adminNav = getVisibleAdminNav(user);
 
   const mode = useThemeStore((s) => s.sidebarMode);
   const setSidebarMode = useThemeStore((s) => s.setSidebarMode);

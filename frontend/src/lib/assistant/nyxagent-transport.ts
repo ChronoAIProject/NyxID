@@ -7,9 +7,11 @@ import {
 } from "@/lib/assistant/direct-transport";
 import { getAssistantIdentityUserId, subscribeAssistantIdentity } from "@/lib/assistant/identity";
 import { isNyxAgentConversationId } from "@/lib/assistant/conversation-ids";
-import { markAdmitted } from "@/lib/assistant/send-admission";
+import { isAdmittedSendError, markAdmitted } from "@/lib/assistant/send-admission";
+import { withAssistantTrace } from "@/lib/assistant/request-error";
 import type { ChatImage, ChatSessionState, ChatMessage } from "@/lib/assistant/chat-types";
 import type { RuntimeToolCallInfo } from "@/lib/assistant/runtime-event-semantics";
+import { deriveTurnStatus } from "@/lib/assistant/turn-status";
 import {
   nyxAgentAcknowledgementSchema,
   nyxAgentSteeringSchema,
@@ -18,6 +20,7 @@ import {
   nyxAgentHistorySchema,
   nyxAgentIndexSchema,
   nyxAgentEventSchema,
+  nyxAgentRecoverySchema,
   type NyxAgentConversation,
   type NyxAgentConversationAgent,
   type NyxAgentHistory,
@@ -29,11 +32,15 @@ const ROOT = "/assistant/nyxagent";
 export const CONTEXT_RESET_NOTICE =
   "The last turn failed, so the assistant continues in a fresh context with a recap of its completed actions, failures and attachments. Rerun only what did not complete.";
 
+type NyxAgentMessage = NyxAgentHistory["messages"][number];
+type LiveMessage = DirectTurnState["messages"][number];
+
 interface LiveTurn {
   state: DirectTurnState;
   conversation: NyxAgentConversation;
   controller: AbortController;
   resetBeforeMessageId?: string;
+  retrying?: boolean;
 }
 
 function toolCalls(
@@ -50,6 +57,7 @@ function toolCalls(
         activity.status === "running" ? "running" : activity.status === "error" ? "error" : "done",
       startedAt: Date.parse(activity.started_at),
       finishedAt: activity.ended_at ? Date.parse(activity.ended_at) : undefined,
+      failure: activity.failure,
     })),
   };
 }
@@ -80,7 +88,7 @@ function path(id: string): string {
 export function storedError(code: string | null): string {
   if (code === "tool_budget_exhausted" || code === "turn_timeout") return "This task reached its automatic continuation limit. Its context is saved; resume to continue, or adjust the limit in NyxBot settings.";
   if (code === "continuation_no_progress") return "Paused because the task repeated without progress. Its context is saved; give it new guidance.";
-  if (code === "idle_timeout") return "The assistant stopped responding. Try again.";
+  if (code === "idle_timeout") return "The assistant stopped responding. Check what it already did before asking it to continue.";
   if (code === "outcome_unknown") {
     return "The previous operation may have taken effect. Check its result before trying again.";
   }
@@ -144,6 +152,7 @@ async function subscriptionDeadline<T>(
 /** Only a presentation cache. MongoDB owns transcripts, running turns and stop. */
 export class NyxAgentTransport {
   private generation = 0;
+  private interrupted = new Set<string>();
   private owner = getAssistantIdentityUserId();
   private revision = 0;
   private mutationRevision = 0;
@@ -152,10 +161,16 @@ export class NyxAgentTransport {
   private listeners = new Set<() => void>();
   private index = new Map<string, NyxAgentConversation>();
   private histories = new Map<string, NyxAgentHistory>();
+  private consumedRetries = new Map<string, Set<string>>();
   private reviewCards = new Map<string, string>();
   private live = new Map<string, LiveTurn>();
   private requests = new Set<AbortController>();
   private draftModel = "nyxagent/chat";
+  // Views reused while their source is unchanged, so a streamed token or a
+  // history refresh re-renders only the rows that actually changed.
+  private settledViews = new WeakMap<NyxAgentMessage, ChatMessage>();
+  private liveViews = new WeakMap<LiveMessage, { id?: string; settled?: NyxAgentMessage; view: ChatMessage }>();
+  private views = new Map<string, Map<string, ChatMessage>>();
 
   constructor() {
     subscribeAssistantIdentity(() => this.clear());
@@ -175,6 +190,7 @@ export class NyxAgentTransport {
 
   clear() {
     this.generation += 1;
+    this.interrupted.clear();
     this.mutationRevision += 1;
     this.rowRevisions.clear();
     this.pendingTitles.clear();
@@ -184,7 +200,9 @@ export class NyxAgentTransport {
     this.live.clear();
     this.index.clear();
     this.histories.clear();
+    this.consumedRetries.clear();
     this.reviewCards.clear();
+    this.views.clear();
     this.draftModel = "nyxagent/chat";
     this.changed();
   }
@@ -221,7 +239,9 @@ export class NyxAgentTransport {
       this.rowRevisions.set(row.id, (this.rowRevisions.get(row.id) ?? 0) + 1);
       this.index.delete(row.id);
       this.histories.delete(row.id);
+      this.consumedRetries.delete(row.id);
       this.reviewCards.delete(row.id);
+      this.views.delete(row.id);
     }
     this.changed();
   }
@@ -327,8 +347,18 @@ export class NyxAgentTransport {
     };
     const existing = this.histories.get(id);
     // Preserve older pages during the running-turn poll and deduplicate by seq.
+    // An unchanged message keeps its object so its rendered row is reused.
     const merged = new Map((existing?.messages ?? []).map((message) => [message.seq, message]));
-    for (const message of page.messages) merged.set(message.seq, message);
+    for (const message of page.messages) {
+      const previous = merged.get(message.seq);
+      const received = this.consumedRetries.get(id)?.has(message.id) && message.recovery
+        ? { ...message, recovery: { ...message.recovery, status: "review" as const, reason: "already_retried" } }
+        : message;
+      merged.set(
+        message.seq,
+        previous && JSON.stringify(previous) === JSON.stringify(received) ? previous : received,
+      );
+    }
     const before_seq = beforeSeq || !existing ? page.before_seq : existing.before_seq;
     const history = {
       ...page,
@@ -336,6 +366,7 @@ export class NyxAgentTransport {
       messages: [...merged.values()].sort((a, b) => a.seq - b.seq),
     };
     this.histories.set(id, history);
+    if (!history.conversation.active_turn) this.interrupted.delete(id);
     this.index.set(id, page.conversation);
     this.changed();
     return history;
@@ -408,16 +439,18 @@ export class NyxAgentTransport {
     this.rowRevisions.set(id, (this.rowRevisions.get(id) ?? 0) + 1);
     this.index.delete(id);
     this.histories.delete(id);
+    this.consumedRetries.delete(id);
     this.reviewCards.delete(id);
+    this.views.delete(id);
     this.changed();
   }
 
-  async decide(id: string, acknowledgementId: string, decision: "allow" | "deny") {
+  async decide(id: string, acknowledgementId: string, decision: "allow" | "deny", acceptReducedScope = false) {
     const generation = this.identity();
     const acknowledgement = nyxAgentAcknowledgementSchema.parse(
       await assistantJson(`${path(id)}/acknowledgements/${encodeURIComponent(acknowledgementId)}`, {
         method: "POST",
-        body: { decision },
+        body: { decision, ...(acceptReducedScope ? { accept_reduced_scope: true } : {}) },
       }),
     );
     this.current(generation);
@@ -473,23 +506,30 @@ export class NyxAgentTransport {
     const live = this.live.get(id ?? "draft");
     const conversation = live?.conversation ?? history?.conversation ?? this.index.get(id ?? "");
     let messages: ChatMessage[] = (history?.messages ?? []).map((message) => {
+      const cached = this.settledViews.get(message);
+      if (cached) return cached;
       const failed = message.status === "failed" && message.error_code !== "cancelled";
-      return {
+      const view: ChatMessage = {
+        recovery: message.recovery,
         id: message.id,
         feedback: message.feedback ?? undefined,
         role: message.role,
         content: message.text,
         timestamp: Date.parse(message.created_at),
         turnId: message.turn_id,
-        status: failed ? "error" : "complete",
+        status: failed ? "error" : message.error_code === "cancelled" ? "stopped" : "complete",
         error: failed ? storedError(message.error_code) : undefined,
         errorDetail: message.error_detail ? { stage: message.error_detail.stage, httpStatus: message.error_detail.http_status, upstreamRequestId: message.error_detail.upstream_request_id, responseId: message.error_detail.response_id, continuations: message.error_detail.continuations, turnId: message.error_detail.turn_id, occurredAt: message.error_detail.occurred_at } : undefined,
         errorCode: message.error_code,
         ...toolCalls(message.activities, id),
         ...images(id, message.attachments),
         via: message.via,
+        activityTotal: message.activity_total,
         steering: message.steering,
+        continuation_of: message.continuation_of,
       };
+      this.settledViews.set(message, view);
+      return view;
     });
     // The live turn's tool activity arrives through the polled history metadata,
     // which the server records at the MCP boundary; the upstream stream is text only.
@@ -497,11 +537,23 @@ export class NyxAgentTransport {
     const polledTurn = history?.conversation.active_turn;
     const liveActivity =
       polledTurn && (!liveTurnId || polledTurn.turn_id === liveTurnId)
-        ? { ...toolCalls(polledTurn.activities, id), ...images(id, polledTurn.attachments) }
+        ? { ...toolCalls(polledTurn.activities, id), ...images(id, polledTurn.attachments), activityTotal: polledTurn.activity_total }
         : {};
     const settledImages = new Map(
       (history?.messages ?? []).map((message) => [message.id, images(id, message.attachments)]),
     );
+    const turnStatus = conversation
+      ? deriveTurnStatus({
+          activeTurn: conversation.active_turn,
+          live: Boolean(live),
+          pendingApproval: Boolean(
+            (history?.acknowledgements ?? []).some((row) => row.status === "pending")
+            || (history?.approvals ?? []).length,
+          ),
+          retrying: Boolean(live?.retrying),
+          interrupted: this.interrupted.has(id ?? "draft"),
+        })
+      : null;
     if (live) {
       const settledMessages = new Map(
         (history?.messages ?? []).map((message) => [message.id, message]),
@@ -509,38 +561,47 @@ export class NyxAgentTransport {
       messages = live.state.messages.map((message) => {
         const streaming =
           message.role === "assistant" && message === live.state.messages.at(-1);
-        return {
+        const settled = settledMessages.get(message.id);
+        const settledView = settled && this.settledViews.get(settled);
+        if (!streaming && settledView) return settledView;
+        const cached = streaming ? undefined : this.liveViews.get(message);
+        if (cached && cached.id === id && cached.settled === settled) return cached.view;
+        const view: ChatMessage = {
+          recovery: settled?.recovery,
           id: message.id,
-          role: settledMessages.get(message.id)?.role ?? message.role,
-          feedback: settledMessages.get(message.id)?.feedback ?? undefined,
-          errorCode: settledMessages.get(message.id)?.error_code,
-          steering: settledMessages.get(message.id)?.steering,
-          via: settledMessages.get(message.id)?.via,
-          turnId: settledMessages.get(message.id)?.turn_id,
+          role: settled?.role ?? message.role,
+          feedback: settled?.feedback ?? undefined,
+          errorCode: settled?.error_code,
+          steering: settled?.steering,
+          continuation_of: settled?.continuation_of ?? message.continuation_of,
+          via: settled?.via,
+          turnId: settled?.turn_id,
           content: message.blocks.map((block) => block.text).join("\n\n"),
           timestamp: Date.parse(message.created_at),
           status: streaming ? "streaming" : "complete",
+          ...(streaming ? { turnStatus } : {}),
           ...(message.attachments?.length
             ? images(id, message.attachments)
             : streaming
               ? liveActivity
               : settledImages.get(message.id)),
         };
+        if (!streaming) this.liveViews.set(message, { id, settled, view });
+        return view;
       });
     }
     if (live) {
       for (const message of history?.messages ?? []) {
         if (!message.steering || messages.some((m) => m.id === message.id)) continue;
         const position = messages.findIndex((m) => m.status === "streaming");
-        messages.splice(position < 0 ? messages.length : position, 0, {
-          id: message.id, role: message.role, content: message.text,
-          timestamp: Date.parse(message.created_at), status: "complete",
-          turnId: message.turn_id, steering: message.steering,
-        });
+        const view = this.settledViews.get(message);
+        if (view) {
+          messages.splice(position < 0 ? messages.length : position, 0, view);
+        }
       }
     }
     const running = Boolean(live || conversation?.active_turn);
-    if (running && messages.at(-1)?.role !== "assistant") {
+    if (running && messages.at(-1)?.status !== "streaming") {
       messages.push({
         id: `${conversation?.active_turn?.turn_id ?? "pending"}-assistant`,
         role: "assistant",
@@ -548,6 +609,7 @@ export class NyxAgentTransport {
         timestamp: Date.now(),
         status: "streaming",
         ...liveActivity,
+        turnStatus,
       });
     }
     const resetAt = conversation?.context_reset_at;
@@ -589,6 +651,16 @@ export class NyxAgentTransport {
         status: "complete",
       });
     }
+    // Rows rebuilt above with identical fields keep their previous object.
+    const previousViews = this.views.get(id ?? "draft");
+    const views = new Map<string, ChatMessage>();
+    messages = messages.map((message) => {
+      const previous = previousViews?.get(message.id);
+      const view = previous && sameFields(previous, message) ? previous : message;
+      views.set(message.id, view);
+      return view;
+    });
+    this.views.set(id ?? "draft", views);
     const tail = history?.messages.at(-1);
     return {
       clientId: id ?? "nyxagent-draft",
@@ -614,22 +686,24 @@ export class NyxAgentTransport {
     /** New threads only: the agent to talk to (the server defaults to NyxBot). */
     options: {
       readonly agent?: NyxAgentConversationAgent;
+      readonly model?: string;
       readonly attachmentIds?: string[];
       readonly attachments?: readonly NyxAgentAttachment[];
       readonly adoptExisting?: boolean;
       readonly retryOf?: string;
+      readonly acknowledgementId?: string;
     } = {},
   ) {
     const generation = this.identity();
     if (this.isRunning(id)) throw new Error("A turn is already active.");
-    if ((!text.trim() && !options.attachmentIds?.length && !options.attachments?.length) || [...text].length > 32768) {
+    if ((!text.trim() && !options.attachmentIds?.length && !options.attachments?.length && !options.retryOf) || [...text].length > 32768) {
       throw new Error("Message must contain 1 to 32768 characters.");
     }
     const controller = new AbortController();
     this.requests.add(controller);
     let key = id ?? "draft";
     const now = new Date().toISOString();
-    const model = this.getModel(id);
+    const model = (!id ? options.model : undefined) ?? this.getModel(id);
     const userMessageId = crypto.randomUUID();
     const baseMessages = this.histories.get(key)?.messages ?? [];
     const turn: LiveTurn = {
@@ -662,10 +736,12 @@ export class NyxAgentTransport {
             role: message.role === "assistant" ? ("assistant" as const) : ("user" as const),
             schema_version: 1 as const,
             created_at: message.created_at,
+            continuation_of: message.continuation_of,
             blocks: [{ type: "text" as const, block_id: message.id, text: message.text }],
           })),
           {
             id: userMessageId,
+            continuation_of: options.acknowledgementId,
             role: "user",
             schema_version: 1,
             created_at: now,
@@ -675,11 +751,13 @@ export class NyxAgentTransport {
         ],
       },
     };
+    this.interrupted.delete(key);
     this.live.set(key, turn);
     this.changed();
     let adopted = Boolean(id) && !options.adoptExisting;
     let terminal = false;
     let responded = false;
+    let traceId: string | null = null;
     try {
       const response = await subscriptionDeadline(
         assistantHttp(`${ROOT}/turns`, {
@@ -690,6 +768,7 @@ export class NyxAgentTransport {
               : { model, ...(options.agent ? { agent_id: options.agent.id } : {}) }),
             text,
             ...(options.retryOf ? { retry_of: options.retryOf } : {}),
+            ...(options.acknowledgementId ? { acknowledgement_id: options.acknowledgementId } : {}),
             ...(options.attachmentIds?.length ? { attachment_ids: options.attachmentIds } : {}),
           },
           headers: { Accept: "text/event-stream" },
@@ -703,6 +782,7 @@ export class NyxAgentTransport {
         controller,
       );
       responded = true;
+      traceId = response.headers.get("X-NyxID-Trace-Id");
       this.current(generation);
       if (!response.body) throw new Error("The assistant returned no stream.");
       const reader = response.body.getReader();
@@ -775,6 +855,11 @@ export class NyxAgentTransport {
                 }
               }
             }
+            if (event.event === "turn.notice" && event.code === "retrying") {
+              turn.retrying = true;
+            } else if (event.event !== "turn.notice") {
+              turn.retrying = false;
+            }
             if (event.event === "turn.notice" && event.code === "image_input_unavailable") {
               await this.history(key).catch(() => undefined);
               this.current(generation);
@@ -802,16 +887,27 @@ export class NyxAgentTransport {
     } catch (error) {
       // After a 2xx the server has stored the message and bound its uploads:
       // every later failure (deadline, size, parse, mismatch, early end) is admitted.
-      throw responded ? markAdmitted(error) : error;
+      if (!responded) throw error;
+      // A failed reader can throw a browser's opaque "network error" after
+      // admission. Keep that failure distinct from a rejected send, including
+      // the admission marker that prevents the composer restoring uploads.
+      const failure = new Error(withAssistantTrace(
+        "The live reply was interrupted. NyxBot may still be working; check the chat before sending again.",
+        traceId,
+      ), { cause: error });
+      // DOMException.message may be read-only. Preserve cancellation/type
+      // classification without mutating errors supplied by the browser.
+      if (error instanceof Error) failure.name = error.name;
+      throw markAdmitted(failure);
     } finally {
       this.requests.delete(controller);
       if (generation === this.generation) {
         if (adopted) await this.history(key).catch(() => undefined);
         this.current(generation);
         this.live.delete(key);
+        if (!terminal && this.getHistory(key)?.conversation.active_turn) this.interrupted.add(key);
+        else this.interrupted.delete(key);
         this.changed();
-        const agentId = this.getConversation(key)?.agent?.id;
-        if (agentId) await this.list(agentId).catch(() => undefined);
       }
     }
   }
@@ -819,24 +915,104 @@ export class NyxAgentTransport {
   /** Retry the failed reply `messageId`. The server fences the calls that
    * failed turn completed and re-attaches its input's uploads (they are
    * already bound, so their ids are never re-sent). */
+  private async refreshRecovery(id: string, messageId: string, generation: number) {
+    const revision = this.rowRevisions.get(id);
+    const source = this.histories.get(id)?.messages.find((message) => message.id === messageId);
+    if (!source || source.role !== "assistant" || source.status !== "failed") {
+      throw new Error("Failed reply not found. Refresh the conversation.");
+    }
+    let recovery;
+    try {
+      recovery = nyxAgentRecoverySchema.parse(
+        await assistantJson(`${path(id)}/messages/${encodeURIComponent(messageId)}/recovery`),
+      );
+    } catch {
+      const previous = this.histories.get(id)?.messages.find((message) => message.id === messageId)?.recovery;
+      recovery = { status: "review" as const, reason: "status_unavailable", text: previous?.text ?? null,
+        attachments: previous?.attachments ?? [] };
+    }
+    this.current(generation);
+    if (this.consumedRetries.get(id)?.has(messageId)) {
+      recovery = { ...recovery, status: "review" as const, reason: "already_retried" };
+    }
+    if (revision !== this.rowRevisions.get(id) ||
+      this.histories.get(id)?.messages.find((message) => message.id === messageId) !== source) {
+      throw new DOMException("Conversation changed", "AbortError");
+    }
+    const history = this.histories.get(id);
+    if (history && history.messages.some((message) => message.id === messageId)) {
+      this.rowRevisions.set(id, (this.rowRevisions.get(id) ?? 0) + 1);
+      this.histories.set(id, {
+        ...history,
+        messages: history.messages.map((message) => message.id === messageId
+          ? { ...message, recovery } : message),
+      });
+      this.changed();
+    }
+    return recovery;
+  }
+
+  async checkRecovery(id: string, messageId: string) {
+    return this.refreshRecovery(id, messageId, this.identity());
+  }
+
+  private markRecoveryConsumed(id: string, messageId: string, turnId: string) {
+    const history = this.histories.get(id);
+    if (!history?.messages.some((message) => message.id === messageId && message.turn_id === turnId)) return;
+    const consumed = this.consumedRetries.get(id) ?? new Set<string>();
+    consumed.add(messageId);
+    this.consumedRetries.set(id, consumed);
+    this.rowRevisions.set(id, (this.rowRevisions.get(id) ?? 0) + 1);
+    this.histories.set(id, { ...history, messages: history.messages.map((message) =>
+      message.id === messageId && message.turn_id === turnId
+        ? { ...message, recovery: { ...message.recovery, status: "review", reason: "already_retried",
+          text: message.recovery?.text ?? null, attachments: message.recovery?.attachments ?? [] } }
+        : message),
+    });
+    this.changed();
+  }
+
   async retry(id: string, messageId: string, onAdopt: (id: string) => void) {
     const messages = this.histories.get(id)?.messages ?? [];
     const failed = messages.find(
       (message) => message.id === messageId && message.role === "assistant" && message.status === "failed",
     );
-    const input = failed && messages.find(
-      (message) => message.turn_id === failed.turn_id && message.role === "user",
-    );
-    if (!failed || !input) throw new Error("This reply can no longer be retried. Send the request again.");
-    return this.send(id, input.text, onAdopt, undefined, {
-      adoptExisting: true,
-      retryOf: failed.turn_id,
-      attachments: input.attachments,
-    });
+    if (!failed) throw new Error("Failed reply not found. Refresh the conversation.");
+    const generation = this.identity();
+    const recovery = await this.refreshRecovery(id, messageId, generation);
+    const current = this.histories.get(id)?.messages.find((message) => message.id === messageId);
+    if (!current || current.status !== "failed" || current.turn_id !== failed.turn_id) {
+      throw new DOMException("Conversation changed", "AbortError");
+    }
+    if (recovery.status !== "available" || recovery.text === null) {
+      throw new Error("This reply needs review before another attempt.");
+    }
+    let admitted = false;
+    try {
+      const result = await this.send(id, recovery.text, onAdopt, undefined, {
+        adoptExisting: true,
+        retryOf: failed.turn_id,
+      });
+      admitted = true;
+      return result;
+    } catch (error) {
+      admitted = isAdmittedSendError(error);
+      throw error;
+    } finally {
+      if (generation === this.generation) {
+        if (admitted) this.markRecoveryConsumed(id, messageId, failed.turn_id);
+        await this.refreshRecovery(id, messageId, generation).catch(() => undefined);
+      }
+    }
   }
 }
 
 export const nyxAgentTransport = new NyxAgentTransport();
+
+function sameFields(a: ChatMessage, b: ChatMessage): boolean {
+  const keys = Object.keys(a) as (keyof ChatMessage)[];
+  return keys.length === Object.keys(b).length && keys.every((key) => a[key] === b[key]);
+}
 
 function provisionalTitle(text: string): string {
   const line = text.split(/\r?\n/).find((part) => part.trim()) ?? "";

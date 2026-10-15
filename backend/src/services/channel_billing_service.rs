@@ -106,6 +106,11 @@ pub struct ChannelBilling {
     forwarded: std::sync::atomic::AtomicBool,
 }
 
+/// A billed X request whose provider outcome is unknown. X media delivery maps
+/// this exact message to an uncertain image outcome; text sends keep it as is.
+pub(crate) const BILLED_SEND_UNKNOWN_MESSAGE: &str =
+    "X request outcome is unknown; check account activity before retrying";
+
 impl ChannelBilling {
     pub fn for_bot(
         db: &mongodb::Database,
@@ -308,15 +313,12 @@ impl ChannelBilling {
         self.billing.mark_forwarded(&meter).await?;
         self.forwarded
             .store(true, std::sync::atomic::Ordering::Relaxed);
+        super::channel_platform::mark_provider_attempt();
         let response = request
             .timeout(std::time::Duration::from_secs(20))
             .send()
             .await
-            .map_err(|_| {
-                AppError::ChannelPlatformError(
-                    "X request outcome is unknown; check account activity before retrying".into(),
-                )
-            })?;
+            .map_err(|_| AppError::ChannelPlatformError(BILLED_SEND_UNKNOWN_MESSAGE.into()))?;
         if response.status().is_success() {
             self.settle(&meter, 1).await?;
         } else if response.status().is_client_error() {

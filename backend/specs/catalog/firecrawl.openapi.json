@@ -148,7 +148,7 @@
         "summary": "Scrape a single URL",
         "x-aevatar-tool": {
           "name": "scrape",
-          "description": "Scrape one URL with Firecrawl and return its content.",
+          "description": "Extract readable content from one public URL. Request markdown for page body. A title-only result is incomplete; bounded waitFor may help JavaScript pages. maxAge controls cache eligibility, not proof that this response was live. Do not send private cookies or headers.",
           "readOnly": false,
           "destructive": false,
           "requiresApproval": false
@@ -165,17 +165,32 @@
                 ],
                 "properties": {
                   "url": {
-                    "type": "string"
+                    "type": "string",
+                    "description": "Public http(s) URL only; never pass private authenticated URLs."
                   },
                   "formats": {
                     "type": "array",
-                    "description": "e.g. markdown, html, links.",
-                    "items": {
-                      "type": "string"
-                    }
+                    "description": "Readable body is returned in data.markdown when markdown is requested.",
+                    "items": { "type": "string" }
                   },
                   "onlyMainContent": {
                     "type": "boolean"
+                  },
+                  "waitFor": {
+                    "type": "integer",
+                    "description": "Additional JavaScript render wait in milliseconds; use 0 to 10000 and at most one extra attempt for thin output."
+                  },
+                  "timeout": {
+                    "type": "integer",
+                    "description": "Request timeout in milliseconds; use 1000 to 60000."
+                  },
+                  "maxAge": {
+                    "type": "integer",
+                    "description": "Cached page maximum age in milliseconds; 0 requests a fresh scrape. Use at most 172800000. The response does not certify cache hit or render method."
+                  },
+                  "storeInCache": {
+                    "type": "boolean",
+                    "description": "Whether Firecrawl may store the page in its index and cache."
                   }
                 }
               }
@@ -184,12 +199,55 @@
         },
         "responses": {
           "200": {
-            "description": "ok",
+            "description": "Scrape result. Report sourceURL, final url, statusCode and provider when present; do not infer cache hit or render method from absent metadata.",
             "content": {
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "additionalProperties": true
+                  "additionalProperties": true,
+                  "properties": {
+                    "success": { "type": "boolean" },
+                    "data": {
+                      "type": "object",
+                      "additionalProperties": true,
+                      "properties": {
+                        "markdown": { "type": "string" },
+                        "html": { "type": "string" },
+                        "links": { "type": "array", "items": { "type": "string" } },
+                        "metadata": {
+                          "type": "object",
+                          "additionalProperties": true,
+                          "properties": {
+                            "title": { "type": "string" },
+                            "sourceURL": { "type": "string" },
+                            "url": { "type": "string" },
+                            "statusCode": { "type": "integer" },
+                            "contentType": { "type": "string" },
+                            "provider": {
+                              "type": "object",
+                              "additionalProperties": true,
+                              "properties": {
+                                "id": { "type": "string" },
+                                "creditsCost": { "type": "integer" },
+                                "steps": {
+                                  "type": "array",
+                                  "items": {
+                                    "type": "object",
+                                    "additionalProperties": true,
+                                    "properties": {
+                                      "provider": { "type": "string" },
+                                      "status": { "type": "string" },
+                                      "creditsCost": { "type": "integer" }
+                                    }
+                                  }
+                                }
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
                 }
               }
             }
@@ -255,7 +313,7 @@
         "summary": "Map a site's URLs",
         "x-aevatar-tool": {
           "name": "map_site",
-          "description": "List the URLs of a website with Firecrawl.",
+          "description": "Discover public page URLs. sitemap=include combines sitemap and other discovery, only uses sitemap URLs, skip ignores it. Sitemap data can be cached up to seven days; ignoreCache requests fresh discovery.",
           "readOnly": false,
           "destructive": false,
           "requiresApproval": false
@@ -272,14 +330,31 @@
                 ],
                 "properties": {
                   "url": {
-                    "type": "string"
+                    "type": "string",
+                    "description": "Public http(s) site URL."
                   },
                   "search": {
                     "type": "string",
                     "description": "Optional filter query."
                   },
                   "limit": {
-                    "type": "integer"
+                    "type": "integer",
+                    "description": "Maximum URLs to return; use 1 to 200 for focused research."
+                  },
+                  "sitemap": {
+                    "type": "string",
+                    "enum": ["include", "only", "skip"],
+                    "description": "Use sitemap together with other methods, exclusively, or not at all."
+                  },
+                  "includeSubdomains": { "type": "boolean" },
+                  "ignoreQueryParameters": { "type": "boolean" },
+                  "ignoreCache": {
+                    "type": "boolean",
+                    "description": "Bypass Firecrawl's sitemap cache, which can be up to seven days old."
+                  },
+                  "timeout": {
+                    "type": "integer",
+                    "description": "Timeout in milliseconds; use 1000 to 60000 because Firecrawl has no map timeout by default."
                   }
                 }
               }
@@ -293,7 +368,22 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "additionalProperties": true
+                  "additionalProperties": true,
+                  "properties": {
+                    "success": { "type": "boolean" },
+                    "links": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "required": ["url"],
+                        "properties": {
+                          "url": { "type": "string" },
+                          "title": { "type": "string" },
+                          "description": { "type": "string" }
+                        }
+                      }
+                    }
+                  }
                 }
               }
             }

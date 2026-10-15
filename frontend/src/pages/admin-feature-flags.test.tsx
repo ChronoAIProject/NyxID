@@ -11,17 +11,36 @@ import { AdminFeatureFlagsPage } from "./admin-feature-flags";
 import { useAuthStore } from "@/stores/auth-store";
 import type { User } from "@/types/api";
 
-const { mockUseFlags, mockUseUsers, mockSetFlag, mockClearFlag, mockSetMeta } =
-  vi.hoisted(() => ({
-    mockUseFlags: vi.fn(),
-    mockUseUsers: vi.fn(),
-    mockSetFlag: vi.fn(),
-    mockClearFlag: vi.fn(),
-    mockSetMeta: vi.fn(),
-  }));
+const {
+  mockUseFlags,
+  mockUseUsers,
+  mockSetFlag,
+  mockClearFlag,
+  mockSetMeta,
+  mockCreateFlag,
+} = vi.hoisted(() => ({
+  mockUseFlags: vi.fn(),
+  mockUseUsers: vi.fn(),
+  mockSetFlag: vi.fn(),
+  mockClearFlag: vi.fn(),
+  mockSetMeta: vi.fn(),
+  mockCreateFlag: vi.fn(),
+}));
 
 vi.mock("@/hooks/use-admin-feature-flags", () => ({
   useAdminFeatureFlags: mockUseFlags,
+  useCreateFeatureFlag: () => ({
+    mutateAsync: mockCreateFlag,
+    isPending: false,
+  }),
+  useFeatureFlagTargets: (
+    _flagKey: string,
+    kind: string,
+    search: string | undefined,
+    limit: number,
+    enabled: boolean,
+  ) =>
+    mockUseUsers(1, limit, search, kind, ...(limit === 8 ? [{ enabled }] : [])),
   useSetAdminFeatureFlag: () => ({
     mutateAsync: mockSetFlag,
     isPending: false,
@@ -317,7 +336,7 @@ describe("AdminFeatureFlagsPage", () => {
     ).not.toBeInTheDocument();
     // total (200) minus the 5 shown.
     expect(
-      screen.getByText("+195 more — keep typing to narrow"),
+      screen.getByText("More accounts — keep typing to narrow"),
     ).toBeInTheDocument();
     expect(mockUseUsers).toHaveBeenCalledWith(1, 8, undefined, "person", {
       enabled: true,
@@ -492,7 +511,7 @@ describe("AdminFeatureFlagsPage", () => {
     ).toHaveValue("Custom explanation.");
 
     // Clearing the description sends null, which restores the code default.
-    fireEvent.click(screen.getByText("Use code default"));
+    fireEvent.click(screen.getByText("Use default description"));
     fireEvent.click(screen.getByText("Save details"));
     fireEvent.click(
       await screen.findByRole("button", { name: "Confirm changes" }),
@@ -902,4 +921,94 @@ it("retains failed rollout changes and newer edits while consuming only the revi
     flagKey: "experimental:billing",
     body: { target_kind: "global", target_key: null, enabled: true },
   });
+});
+
+it("lets a regular feature flag operator create flags and edit owned flags", async () => {
+  useAuthStore.setState({
+    user: {
+      id: "operator-user",
+      is_admin: false,
+      role: "user",
+      capabilities: { read_feature_flags: true, create_feature_flags: true },
+    } as User,
+  });
+  mockUseFlags.mockReturnValue({
+    data: {
+      flags: [
+        {
+          ...flagFixture(),
+          key: "team:mine",
+          can_edit: true,
+          created_by: "operator-user",
+        },
+      ],
+    },
+    isLoading: false,
+  });
+  mockCreateFlag.mockResolvedValue({ key: "team:new" });
+  render(<AdminFeatureFlagsPage />);
+  fireEvent.click(screen.getByText("Create feature flag"));
+  fireEvent.change(screen.getByLabelText("Flag key"), {
+    target: { value: "team:new" },
+  });
+  fireEvent.change(screen.getByLabelText("Description"), {
+    target: { value: "My rollout" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Create flag" }));
+  await waitFor(() =>
+    expect(mockCreateFlag).toHaveBeenCalledWith({
+      key: "team:new",
+      description: "My rollout",
+      default_enabled: false,
+    }),
+  );
+  fireEvent.click(screen.getByText("team:mine"));
+  expect(screen.getByLabelText("Search users by email")).toBeInTheDocument();
+});
+
+it("uses per-flag authorization for a feature flag admin without platform admin", () => {
+  useAuthStore.setState({
+    user: {
+      id: "flag-admin",
+      is_admin: false,
+      role: "user",
+      capabilities: {
+        read_feature_flags: true,
+        create_feature_flags: true,
+        manage_all_feature_flags: true,
+      },
+    } as User,
+  });
+  mockUseFlags.mockReturnValue({
+    data: { flags: [{ ...flagFixture(), can_edit: true, created_by: null }] },
+    isLoading: false,
+  });
+  render(<AdminFeatureFlagsPage />);
+  fireEvent.click(screen.getByText("experimental:ai-assistant"));
+  expect(screen.getByLabelText("Search users by email")).toBeInTheDocument();
+});
+
+it("keeps another creator's flags read-only when the API denies editing", () => {
+  useAuthStore.setState({
+    user: {
+      id: "operator-user",
+      is_admin: false,
+      role: "operator",
+      capabilities: { create_feature_flags: true },
+    } as User,
+  });
+  mockUseFlags.mockReturnValue({
+    data: {
+      flags: [
+        { ...flagFixture(), can_edit: false, created_by: "someone-else" },
+      ],
+    },
+    isLoading: false,
+  });
+  render(<AdminFeatureFlagsPage />);
+  fireEvent.click(screen.getByText("experimental:ai-assistant"));
+  expect(
+    screen.queryByLabelText("Search users by email"),
+  ).not.toBeInTheDocument();
+  expect(screen.getByText("Create feature flag")).toBeInTheDocument();
 });

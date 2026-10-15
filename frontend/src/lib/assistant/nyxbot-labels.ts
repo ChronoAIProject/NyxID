@@ -4,6 +4,7 @@ import type {
   AssistantAgentKind,
   NyxAgentAccessMode,
   NyxAgentActionConfirmation,
+  NyxAgentModel,
 } from "@/schemas/assistant-nyxagent";
 import type { Conversation } from "@/types/assistant";
 
@@ -135,6 +136,9 @@ function firstSentence(text: string): string {
  */
 export function describeEventNotice(text: string): EventNotice {
   const notice = text.trim();
+  if (notice.startsWith("Skill ") && (notice.includes("published and attached") || notice.includes("requires a corrected package"))) {
+    return { kind: "notice", tone: notice.includes("published and attached") ? "success" : "warning", summary: "Skill publication", detail: notice };
+  }
   // The server swaps double quotes in quoted text for single ones.
   let match = /^Specialist (\S+) (replied|was stopped|failed \(([^)]*)\))\. Reply excerpt: "([^"]*)"/.exec(
     notice,
@@ -321,16 +325,16 @@ export function agentOwnerSections(agents: readonly AssistantAgent[]) {
 }
 
 export const ACCESS_MODE_LABEL = {
-  autopilot: "Autopilot",
-  nyxmode: "NyxMode",
-  ask_every_time: "Ask Every Time",
+  autopilot: "Full access",
+  nyxmode: "Auto",
+  ask_every_time: "Ask every time",
 } as const satisfies Record<NyxAgentAccessMode, string>;
 
 /** What each access mode asks before, in one line. */
 export const ACCESS_MODE_DESCRIPTION = {
   autopilot:
-    "Acts without approval prompts. Webhook, machine and saved-login confirmations still ask.",
-  nyxmode: "Acts on ordinary requests; asks before sensitive or destructive actions.",
+    "Never asks. Every action, including automation, machine, saved-login and service-approval confirmations, runs on its own and the chat records what was allowed automatically.",
+  nyxmode: "Acts on its own; asks before sensitive or destructive actions.",
   ask_every_time: "Asks before every action that changes something. Reading never asks.",
 } as const satisfies Record<NyxAgentAccessMode, string>;
 
@@ -358,4 +362,13 @@ export function confirmationReason(confirmation: NyxAgentActionConfirmation): st
   return confirmation.access_mode
     ? `Your access mode is ${ACCESS_MODE_LABEL[confirmation.access_mode]}.`
     : "Your access mode asks.";
+}
+
+/** Prefer the upstream name; older servers supply only the routing alias. */
+export function modelDisplayName(model: Pick<NyxAgentModel, "id" | "label">): string {
+  const alias = model.id.replace(/^nyxagent\//, "");
+  const label = model.label.trim();
+  if (label && label !== alias && label !== model.id) return label;
+  if (model.id === "nyxagent/chat") return "Default model";
+  return alias.replace(/[_-]+/g, " ").replace(/^./, (letter) => letter.toUpperCase());
 }

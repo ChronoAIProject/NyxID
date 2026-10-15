@@ -164,6 +164,7 @@ pub(crate) async fn team_pool_limit(state: &AppState, owner: &str) -> u32 {
 
 fn event_turn(conversation_id: &str) -> TurnStart {
     TurnStart {
+        acknowledgement_id: None,
         retry_of: None,
         channel_event_id: None,
         org_access: None,
@@ -326,6 +327,34 @@ pub(crate) async fn notify(
     }
 }
 
+/// Denials need a server event: they have no executable continuation card.
+pub(crate) async fn owner_denial_decided(
+    state: &AppState,
+    owner: &str,
+    row: &crate::models::assistant_acknowledgement::AssistantAcknowledgement,
+) {
+    if row.decider != "user"
+        || row.status != "denied"
+        || row.trigger_run_id.is_some()
+        || row.voice_request_id.is_some()
+    {
+        return;
+    }
+    let event = crate::models::assistant_acknowledgement::bind_continuation(
+        row.routing.as_ref(),
+        team::event(
+            "action_denied",
+            format!(
+                "The owner denied: {}. Do not execute or retry this action. Explain plainly what you skipped. {}",
+                engine::excerpt(&row.summary, 2000),
+                acks::DECISION_NARRATION
+            ),
+            None,
+        ),
+    );
+    notify(state, owner, &row.conversation_id, vec![event]).await;
+}
+
 /// Type-erased settlement hook. `run_turn` awaits this so the detached turn's
 /// future type never depends on the turns it may start.
 pub(crate) fn after_turn_boxed(
@@ -366,11 +395,9 @@ pub(crate) async fn after_turn(
         super::assistant_group::member_settled(state, row, text, error.map(|error| error.code))
             .await;
     }
-    // A direct user chat with a specialist does not wake NyxBot; it reads
-    // those on its next turn.
     if row.is_subagent()
-        && matches!(turn.origin, TurnOrigin::Orchestrator | TurnOrigin::Event)
-        && let Some(target) = row.report_to.as_deref()
+        && !row.guest_turn
+        && let Some(target) = settled_report_target(state, row, turn).await
         && let Ok(agent) = team::agent_for_conversation(&state.db, row).await
     {
         let status = match error.map(|error| error.code) {
@@ -387,7 +414,7 @@ pub(crate) async fn after_turn(
         notify(
             state,
             owner,
-            target,
+            &target,
             vec![team::event("subagent_settled", note, Some(&agent.id))],
         )
         .await;
@@ -412,78 +439,94 @@ pub(crate) async fn after_turn(
                 row,
                 origin,
                 "I couldn't finish answering that question. Please ask again.",
+                None,
             )
             .await;
         }
         return;
     }
-    // Only asynchronous event turns reach the chat: a channel turn answers its
-    // own event, and a turn the owner starts in the web app stays in the web app.
-    if (row.channel.is_some() || row.reply_channel.is_some()) && turn.origin == TurnOrigin::Event {
-        let bound: Vec<_> = turn
-            .events
-            .iter()
-            .flat_map(|e| &e.reply_to)
-            .filter(|o| o.thread.is_some())
-            .collect();
-        if bound.is_empty() {
-            super::nyxbot::deliver_update(state, row, text).await;
-        } else {
-            let mut sent = std::collections::HashSet::new();
-            for origin in bound {
-                if let Some(binding) = origin.thread.as_ref()
-                    && sent.insert(binding.source_message_id.clone())
-                {
-                    super::nyxbot::deliver_to(state, row, origin, text).await;
+    let plan = super::nyxbot::images::ImageSendPlan {
+        attachments: engine::turn_tool_attachments(&state.db, owner, &row.id, &turn.turn_id)
+            .await
+            .unwrap_or_default(),
+    };
+    // Keep the answer destination in lockstep with the model note and image
+    // delivery. Channel turns answer their admitted event; event turns wake
+    // their bound chats (or the configured home chat).
+    match engine::answer_routing(row, turn).primary {
+        engine::PrimaryDestination::ChatUpdate { origins } => {
+            if origins.len() == 1 && origins[0].thread.is_none() {
+                super::nyxbot::deliver_update(state, row, text, Some(&plan)).await;
+            } else {
+                for origin in origins {
+                    super::nyxbot::deliver_to(state, row, &origin, text, Some(&plan)).await;
                 }
             }
         }
+        engine::PrimaryDestination::ChannelEvent { .. }
+        | engine::PrimaryDestination::App
+        | engine::PrimaryDestination::Group { .. }
+        | engine::PrimaryDestination::Trigger { .. } => {}
     }
     for origin in &also {
-        super::nyxbot::deliver_to(state, row, origin, text).await;
+        super::nyxbot::deliver_to(state, row, origin, text, Some(&plan)).await;
     }
 }
 
-/// Where a specialist's permission request goes: the NyxBot thread that
-/// assigned its current work, otherwise NyxBot's home thread.
-async fn request_target(state: &AppState, chat: &ChatAuthority) -> AppResult<String> {
-    let row = engine::get(&state.db, &chat.user_id, &chat.conversation_id).await?;
-    let assigned = row
-        .active_turn
-        .as_ref()
-        .is_some_and(|turn| matches!(turn.origin, TurnOrigin::Orchestrator | TurnOrigin::Event));
-    if assigned && let Some(target) = row.report_to {
-        return Ok(target);
+/// Falls back to the turn when no reply row exists (a lost turn swept
+/// before it replied).
+async fn settled_report_target(
+    state: &AppState,
+    row: &AssistantConversation,
+    turn: &crate::models::assistant_conversation::ActiveTurn,
+) -> Option<String> {
+    let settled = state
+        .db
+        .collection::<crate::models::assistant_message::AssistantMessage>(
+            crate::models::assistant_message::COLLECTION_NAME,
+        )
+        .find_one(mongodb::bson::doc! {
+            "conversation_id": &row.id, "user_id": &row.user_id,
+            "turn_id": &turn.turn_id, "role": "assistant",
+        })
+        .await
+        .ok()
+        .flatten();
+    match settled {
+        Some(message) => message.report_to,
+        None => turn.report_to.clone(),
     }
-    Ok(nyxbot_home(state, &chat.user_id).await?.id)
 }
 
 /// A specialist asked for permission its grants do not cover: queue an event
-/// for NyxBot and wake it.
+/// for NyxBot and wake it; a turn stopped or replaced meanwhile notifies nobody.
 pub(crate) async fn permission_requested(
     state: &AppState,
     chat: &ChatAuthority,
     request: &AssistantAcknowledgement,
 ) {
-    if chat.is_orchestrator() {
+    if chat.is_orchestrator() || !chat.involved() {
         return;
     }
-    let Ok(target) = Box::pin(request_target(state, chat)).await else {
-        return;
-    };
     let target_name = match request.kind.as_str() {
         "service" => format!(
             "service {}",
             identifier(request.service_slug.as_deref().unwrap_or_default())
         ),
         "skills" => format!(
-            "skill proposal: {}. Approval is advisory; use nyxid__set_agent_skills afterward with the exact proposal, which requires the owner's card for additions",
+            "skill proposal: {}. Approval is advisory; use nyxid__set_agent_skills afterward with the exact proposal under the governing permission mode",
             request.summary
         ),
         "operations" => format!(
             "operation scope for service {}",
             identifier(request.service_id.as_deref().unwrap_or_default())
         ),
+        "machine" if request.tool_name.as_deref() == Some("nyxid__machine_capabilities") => {
+            format!(
+                "machine capability change for agent {}: {}",
+                chat.agent_id, request.summary
+            )
+        }
         "machine" | "saved_login" => format!(
             "{} {}",
             request.kind,
@@ -502,17 +545,15 @@ pub(crate) async fn permission_requested(
             .map(|text| format!("\"{}\".", excerpt(text, 600).replace('"', "'")))
             .unwrap_or_else(|| "(no text)".into()),
     );
-    Box::pin(notify(
-        state,
-        &chat.user_id,
-        &target,
-        vec![team::event(
-            "permission_requested",
-            note,
-            Some(&chat.agent_id),
-        )],
-    ))
-    .await;
+    // A notice on a NyxBot thread is a root event: unbound.
+    let event = team::event("permission_requested", note, Some(&chat.agent_id));
+    match Box::pin(acks::notify_nyxbot_request(&state.db, chat, request, event)).await {
+        Ok(Some(target)) => Box::pin(wake(state, &chat.user_id, &target)).await,
+        Ok(None) => {}
+        Err(error) => {
+            tracing::debug!(conversation_id = %chat.conversation_id, %error, "Routed request notice skipped");
+        }
+    }
 }
 
 /// A specialist's request was decided (by NyxBot or the user): resume the
@@ -529,7 +570,12 @@ pub(crate) async fn permission_decided(
             identifier(request.service_slug.as_deref().unwrap_or_default())
         ),
         "operations" => "operation scope".into(),
-        "skills" => "skill proposal (NyxBot must still attach it with an owner action card)".into(),
+        "skills" => "skill proposal (it is attached separately under the governing mode)".into(),
+        "machine" => {
+            "machine access (the requested capabilities are applied separately under the governing mode)"
+                .into()
+        }
+        "saved_login" => "saved-login access".into(),
         _ => "read-only account access".into(),
     };
     let by = match request.decided_by.as_deref() {
@@ -541,25 +587,25 @@ pub(crate) async fn permission_decided(
         .as_deref()
         .map(|reason| format!(" Reason: \"{}\".", excerpt(reason, 300).replace('"', "'")))
         .unwrap_or_default();
-    let note = format!(
+    let mut note = format!(
         "{by} {} your request for {target}.{reason} {}",
         if allowed { "allowed" } else { "denied" },
         if allowed && request.kind == "skills" {
-            "NyxBot now resolves the exact version and asks the user to confirm attaching it on a separate card. Do not call request_agent_skills again for this request; continue the task without it and check nyxid__get_agent_skills later."
+            "The exact version is now resolved and attached under the governing permission mode (automatic in Full access, otherwise an owner card). Do not call request_agent_skills again for this request; continue the task without it and check nyxid__get_agent_skills later."
         } else if allowed {
             "Retry the call now and continue your task."
         } else {
             "Do not retry it; finish what you can and report."
         }
     );
+    note.push(' ');
+    note.push_str(acks::DECISION_NARRATION);
     if request.trigger_run_id.is_none() {
-        notify(
-            state,
-            owner,
-            &request.conversation_id,
-            vec![team::event("permission_decided", note, None)],
-        )
-        .await;
+        let event = crate::models::assistant_acknowledgement::bind_continuation(
+            request.routing.as_ref(),
+            team::event("permission_decided", note, None),
+        );
+        notify(state, owner, &request.conversation_id, vec![event]).await;
     }
     if allowed
         && request.kind == "skills"
@@ -579,6 +625,19 @@ async fn deliver_skill_notification(
     let Some(attempt) = acks::skill_notifications::attempt(&state.db, request).await? else {
         return Ok(());
     };
+    use crate::services::assistant_access_policy as policy;
+    // An unreadable cutover fails closed: the marker stays and the next sweep
+    // tries again.
+    let destination =
+        match policy::skill_notification_eligible(request, policy::cutover_at(&state.db))? {
+            policy::SkillEligibility::Eligible(destination) => destination,
+            policy::SkillEligibility::Ineligible(reason) => {
+                return acks::skill_notifications::terminalize(
+                    &state.db, request, &attempt, reason,
+                )
+                .await;
+            }
+        };
     let result: AppResult<()> = async {
         let owner = &request.user_id;
         let row = engine::get(&state.db, owner, &request.conversation_id).await?;
@@ -600,10 +659,10 @@ async fn deliver_skill_notification(
             {
                 stored.to_owned()
             } else {
-                skill_notification_target(state, owner, &row).await?
+                skill_notification_target(state, owner, &destination).await?
             }
         } else {
-            skill_notification_target(state, owner, &row).await?
+            skill_notification_target(state, owner, &destination).await?
         };
         let destination = engine::get(&state.db, owner, &target).await?;
         if destination.role != crate::models::assistant_conversation::AgentRole::Orchestrator
@@ -646,13 +705,16 @@ async fn deliver_skill_notification(
     result
 }
 
+/// NyxBot's home once the assigning thread is deleted: the assignment proved
+/// the involvement, the thread is only the address.
 async fn skill_notification_target(
     state: &AppState,
     owner: &str,
-    source: &crate::models::assistant_conversation::AssistantConversation,
+    destination: &crate::services::assistant_access_policy::SkillDestination,
 ) -> AppResult<String> {
-    match source.report_to.as_deref() {
-        Some(target) => match engine::get(&state.db, owner, target).await {
+    use crate::services::assistant_access_policy::SkillDestination;
+    match destination {
+        SkillDestination::Assigned(target) => match engine::get(&state.db, owner, target).await {
             Ok(row)
                 if row.role == crate::models::assistant_conversation::AgentRole::Orchestrator =>
             {
@@ -661,7 +723,19 @@ async fn skill_notification_target(
             Ok(_) | Err(AppError::NotFound(_)) => Ok(nyxbot_home(state, owner).await?.id),
             Err(error) => Err(error),
         },
-        None => Ok(nyxbot_home(state, owner).await?.id),
+        SkillDestination::GroupNyxbotHome { group_id } => {
+            if !crate::services::assistant_access_policy::nyxbot_in_personal_group(
+                &state.db, owner, group_id, None,
+            )
+            .await?
+            {
+                return Err(AppError::Forbidden(
+                    "NyxBot is no longer a member of the group this request came from".into(),
+                ));
+            }
+            Ok(nyxbot_home(state, owner).await?.id)
+        }
+        SkillDestination::Legacy => Ok(nyxbot_home(state, owner).await?.id),
     }
 }
 
@@ -684,7 +758,7 @@ fn skill_request_allowed_note(
         Attach it now: resolve names with search_agent_skills and agent_skill_versions, \
         then preview each root with preview_agent_skill to obtain complete pins. \
         Call nyxid__set_agent_skills for this agent at its current revision. \
-        The user's separate attachment card is still required. Do not ask for another permission decision.",
+        Respect the effective permission mode; Full access bypasses all confirmations with receipts. Do not ask for another permission decision. Then tell the user in one or two plain sentences what you did and the result.",
         excerpt(&agent.name, 80),
         agent.id,
         request.id,
@@ -873,6 +947,7 @@ pub(crate) async fn assign(
         state,
         owner,
         TurnStart {
+            acknowledgement_id: None,
             retry_of: None,
             channel_event_id: None,
             org_access: None,
@@ -1078,6 +1153,7 @@ pub(crate) async fn execute_tool(
         // widening they make (operations, skills, machine capabilities and
         // updates, permission decisions) or are specialists' own permission
         // requests; never consume a second digest for them.
+        let mut auto_allowed = None;
         if !matches!(
             name,
             "set_agent_operations"
@@ -1085,12 +1161,15 @@ pub(crate) async fn execute_tool(
                 | "set_agent_skills"
                 | "decide_permission"
                 | "machine_update"
+                | "machine_pair"
                 | "machine_capabilities"
                 | "request_agent_operations"
                 | "request_agent_skills"
         ) {
             let facts = acks::ActionFacts::of(acks::classify_owner_action(tool_name, args));
-            if let Some(need) = acks::confirmation_needed(&state.db, chat, facts, false).await?
+            let gate = acks::confirmation_needed(&state.db, chat, facts, false).await?;
+            auto_allowed = gate.auto_allowed();
+            if let Some(need) = gate.ask()
                 && let Some(refusal) = acks::confirm_action(
                     &state.db,
                     chat,
@@ -1105,16 +1184,41 @@ pub(crate) async fn execute_tool(
             }
         }
         engine::require_enabled(&state.db, &chat.user_id).await?;
-        dispatch(state, chat, name, args).await
+        let outcome = dispatch(state, chat, name, args).await?;
+        if !outcome.1
+            && let Some(auto) = auto_allowed
+        {
+            acks::record_auto_allowed(
+                &state.db,
+                chat,
+                tool_name,
+                args,
+                &auto,
+                &action_summary(name, args),
+            )
+            .await;
+        }
+        Ok(outcome)
     }
     .await;
     let outcome = match result {
         Ok(outcome) => outcome,
         Err(error) => {
-            let tool = crate::services::assistant_account_tools::error_result(error);
+            let tool = crate::services::assistant_account_tools::error_result_for(
+                error,
+                Some(chat),
+                &state.config.frontend_url,
+            );
             (tool.value, true)
         }
     };
+    let outcome = (
+        crate::services::assistant_access_policy::with_frontend(
+            outcome.0,
+            &state.config.frontend_url,
+        ),
+        outcome.1,
+    );
     let _ = crate::services::audit_service::log_actor_event(
         state.db.clone(),
         &crate::services::audit_service::AuditActor {
@@ -1527,14 +1631,25 @@ async fn dispatch_operation_scopes(
             } else {
                 false
             };
-            if !confirmed && acks::webhook_confirmation_required(chat, false, false) {
+            let webhook_gate =
+                if !confirmed && acks::webhook_confirmation_required(chat, false, false) {
+                    acks::confirmation_needed(
+                        db,
+                        chat,
+                        acks::ActionFacts::of(acks::OwnerActionClass::Sensitive),
+                        false,
+                    )
+                    .await?
+                } else {
+                    acks::Gate::Proceed
+                };
+            if webhook_gate.ask().is_some() {
                 let digest = Box::pin(
                     crate::services::agent_operation_scope_service::preview_digest(
                         db, owner, &agent.id, service, &selection,
                     ),
                 )
                 .await?;
-                // Show the owner exactly what changes, as the widening card does.
                 let summary = Box::pin(
                     crate::services::agent_operation_scope_service::selection_summary(
                         db,
@@ -1564,15 +1679,48 @@ async fn dispatch_operation_scopes(
                 return Ok((refusal, error));
             }
             match Box::pin(crate::services::agent_operation_scope_service::set(
-                db, owner, &agent.id, service, &selection, confirmed,
+                db,
+                owner,
+                &agent.id,
+                service,
+                &selection,
+                confirmed || webhook_gate.auto_allowed().is_some(),
             ))
             .await
             {
-                Ok(updated) => (
-                    json!({"agent_id":updated.id,"service_id":service,"revision":updated.operation_scope_revisions.get(service)}),
-                    false,
-                ),
-                Err(error) if error.is_forbidden() && !confirmed => {
+                Ok(updated) => {
+                    if let Some(auto) = webhook_gate.auto_allowed() {
+                        let summary = Box::pin(
+                            crate::services::agent_operation_scope_service::selection_summary(
+                                db,
+                                &state.node_ws_manager,
+                                owner,
+                                &agent.id,
+                                service,
+                                &selection,
+                            ),
+                        )
+                        .await?;
+                        acks::record_auto_allowed(
+                            db,
+                            chat,
+                            "nyxid__set_agent_operations",
+                            args,
+                            &auto,
+                            &summary,
+                        )
+                        .await;
+                    }
+                    (
+                        json!({"agent_id":updated.id,"service_id":service,"revision":updated.operation_scope_revisions.get(service)}),
+                        false,
+                    )
+                }
+                Err(error)
+                    if error.is_forbidden()
+                        && !confirmed
+                        && webhook_gate.auto_allowed().is_none() =>
+                {
                     let digest = Box::pin(
                         crate::services::agent_operation_scope_service::preview_digest(
                             db, owner, &agent.id, service, &selection,
@@ -1596,22 +1744,49 @@ async fn dispatch_operation_scopes(
                     if let Some(map) = card_args.as_object_mut() {
                         map.remove("acknowledgement_id");
                     }
-                    let card = Box::pin(acks::request(
+                    let gate = acks::confirmation_needed(
                         db,
                         chat,
-                        acks::Request {
-                            kind: "action",
-                            service: None,
-                            tool: Some("nyxid__set_agent_operations"),
-                            arguments: Some(&card_args),
-                            summary: &summary,
-                            platform: false,
-                        },
-                    ))
+                        acks::ActionFacts::of(acks::OwnerActionClass::Sensitive),
+                        false,
+                    )
                     .await?;
-                    let mut refusal = acks::refusal(&card);
-                    with_retry_arguments(&mut refusal, card_args);
-                    (refusal, true)
+                    if let Some(auto) = gate.auto_allowed() {
+                        let updated =
+                            Box::pin(crate::services::agent_operation_scope_service::set(
+                                db, owner, &agent.id, service, &selection, true,
+                            ))
+                            .await?;
+                        acks::record_auto_allowed(
+                            db,
+                            chat,
+                            "nyxid__set_agent_operations",
+                            &card_args,
+                            &auto,
+                            &summary,
+                        )
+                        .await;
+                        (
+                            json!({"agent_id": updated.id, "service_id": service, "revision": updated.operation_scope_revisions.get(service)}),
+                            false,
+                        )
+                    } else {
+                        let need = gate.ask().ok_or_else(|| {
+                            AppError::Forbidden("Owner confirmation required".into())
+                        })?;
+                        let mut refusal = acks::confirm_action(
+                            db,
+                            chat,
+                            "nyxid__set_agent_operations",
+                            &card_args,
+                            &need,
+                            &summary,
+                        )
+                        .await?
+                        .ok_or_else(|| AppError::Forbidden("Owner confirmation required".into()))?;
+                        with_retry_arguments(&mut refusal, card_args);
+                        (refusal, true)
+                    }
                 }
                 Err(error) => return Err(error),
             }
@@ -1805,17 +1980,18 @@ async fn dispatch_permission_decisions(
                 )
                 .await?;
             }
+            let gate = acks::confirmation_needed(
+                db,
+                chat,
+                acks::ActionFacts::of(acks::classify_owner_action(
+                    "nyxid__decide_permission",
+                    args,
+                )),
+                false,
+            )
+            .await?;
             if !confirmed
-                && let Some(need) = acks::confirmation_needed(
-                    db,
-                    chat,
-                    acks::ActionFacts::of(acks::classify_owner_action(
-                        "nyxid__decide_permission",
-                        args,
-                    )),
-                    false,
-                )
-                .await?
+                && let Some(need) = gate.ask()
                 && let Some(refusal) = acks::confirm_action(
                     db,
                     chat,
@@ -1834,7 +2010,7 @@ async fn dispatch_permission_decisions(
                 None,
                 request_id,
                 allow,
-                if confirmed {
+                if confirmed || gate.auto_allowed().is_some() {
                     Decider::NyxbotOwnerConfirmed
                 } else {
                     Decider::Nyxbot
@@ -1844,7 +2020,9 @@ async fn dispatch_permission_decisions(
             .await
             {
                 Ok(row) => row,
-                Err(error) if error.is_forbidden() && !confirmed => {
+                Err(error)
+                    if error.is_forbidden() && !confirmed && gate.auto_allowed().is_none() =>
+                {
                     let pending =
                         acks::find_operation_request(db, owner, request_id, Some("pending"))
                             .await?
@@ -1874,6 +2052,17 @@ async fn dispatch_permission_decisions(
                 &row,
             )
             .await;
+            if let Some(auto) = gate.auto_allowed() {
+                acks::record_auto_allowed(
+                    db,
+                    chat,
+                    "nyxid__decide_permission",
+                    args,
+                    &auto,
+                    &action_summary("decide_permission", args),
+                )
+                .await;
+            }
             permission_decided(state, owner, &row).await;
             let requesting_agent = if row.kind == "skills" && allow {
                 engine::get(db, owner, &row.conversation_id)
@@ -1956,33 +2145,25 @@ async fn dispatch_groups(
             let author = team::ensure_nyxbot(db, owner).await?;
             // Posting can start member turns and bind uploads. Keep that nested
             // state off the group-tool frame.
-            let (message, addressed) = Box::pin(super::assistant_group::post(
+            let (message, addressed) = Box::pin(super::assistant_group::post_and_follow(
                 state,
                 owner,
                 &group.id,
                 text_arg(args, "text"),
                 Some(&author),
+                caller,
             ))
             .await?;
-            // This thread is woken with the members' replies once the group
-            // is quiet.
-            if !addressed.is_empty() {
-                crate::services::assistant_group_service::follow(
-                    db,
-                    owner,
-                    &group.id,
-                    caller,
-                    message.seq,
-                )
-                .await?;
-            }
             (
                 json!({"posted": message.seq, "addressed_agent_ids": addressed,
                 "note": if addressed.is_empty() {
                     "Nobody was addressed: @mention members to have them answer."
                 } else {
-                    "Members answer in the group. End your turn: NyxID wakes you with \
-                    their replies when the group is quiet."
+                    "Members answer in the group. End your turn: NyxID wakes you once with \
+                    their replies when the group is quiet. Following is temporary \
+                    participation, not membership: it ends when the group settles or after \
+                    24 hours, the wake-up is best effort, and it gives you no decision \
+                    authority over the members' cards."
                 }}),
                 false,
             )
@@ -2205,6 +2386,7 @@ async fn dispatch_settings(
                                 })?
                                 .unwrap_or_default(),
                         },
+                        crate::services::nyxbot_watch_service::ReportProvenance::from_chat(chat),
                     )
                     .await?,
                     false,
@@ -2247,6 +2429,7 @@ async fn dispatch_channels(
                 text_arg(args, "platform"),
                 args["label"].as_str(),
                 &agent,
+                crate::services::nyxbot_watch_service::ReportProvenance::from_chat(chat),
             )
             .await?
         }
@@ -2340,15 +2523,23 @@ async fn dispatch_channels(
         "post_to_chat" => {
             // NyxBot posts to any of the owner's chats; a specialist only to
             // chats it answers.
-            let agent = (!chat.is_orchestrator()).then_some(chat.agent_id.as_str());
+            let include_images = match args.get("include_images") {
+                None => false,
+                Some(Value::Bool(value)) => *value,
+                Some(_) => {
+                    return Err(AppError::ValidationError(
+                        "include_images must be a boolean".into(),
+                    ));
+                }
+            };
             // Boxed: the platform send is a large future.
             (
-                Box::pin(super::nyxbot::chats::post(
+                Box::pin(super::nyxbot::chats::post_current_turn(
                     state,
-                    owner,
+                    chat,
                     text_arg(args, "chat_id"),
                     text_arg(args, "text"),
-                    agent,
+                    include_images,
                 ))
                 .await?,
                 false,

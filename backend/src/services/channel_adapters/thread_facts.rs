@@ -74,6 +74,10 @@ pub(super) fn telegram(message: &InboundMessage, bot: &ChannelBot) -> Option<Cha
     } else {
         human(native["from"]["is_bot"].as_bool())
     };
+    facts.telegram_topic = Some(match super::telegram::topic_of(native) {
+        Some(id) => crate::models::channel_thread::TelegramTopic::Topic { id },
+        None => crate::models::channel_thread::TelegramTopic::Chat,
+    });
     facts.native_thread_id = topic.clone();
     facts.root_id = topic.or_else(|| {
         facts
@@ -456,4 +460,81 @@ pub(super) fn aurinko(message: &InboundMessage) -> Option<ChannelThreadFacts> {
         ThreadAddress::NotAddressed
     };
     Some(facts)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn bot() -> ChannelBot {
+        let now = bson::DateTime::now();
+        bson::from_document(bson::doc! {
+            "_id": "bot", "user_id": "owner", "platform": "telegram", "label": "Home bot",
+            "bot_token_encrypted": bson::Binary { subtype: bson::spec::BinarySubtype::Generic, bytes: vec![1] },
+            "platform_bot_id": "100", "platform_bot_username": "home_bot",
+            "webhook_registered": true, "webhook_secret_hash": "hash", "status": "active",
+            "is_active": true, "created_at": now, "updated_at": now,
+        })
+        .unwrap()
+    }
+
+    fn inbound(native: Value) -> InboundMessage {
+        InboundMessage {
+            platform_message_id: native["message_id"].to_string(),
+            conversation_id: "-100999".into(),
+            conversation_type: "group".into(),
+            sender_platform_id: "111".into(),
+            sender_display_name: None,
+            content_type: "text".into(),
+            text: Some("hi".into()),
+            attachments: vec![],
+            reply_to_platform_message_id: native["reply_to_message"]["message_id"]
+                .as_i64()
+                .map(|id| id.to_string()),
+            thread_id: None,
+            raw_data: json!({ "update_id": 1, "message": native }),
+        }
+    }
+
+    fn reply(topic: bool, forum: bool) -> Value {
+        let mut native = json!({
+            "message_id": 91, "message_thread_id": 16,
+            "from": { "id": 111, "is_bot": false, "first_name": "Thread" },
+            "chat": { "id": -100999, "type": "supergroup" },
+            "date": 1700000050, "text": "Reply",
+            "reply_to_message": { "message_id": 16, "from": { "id": 222, "is_bot": false }, "date": 1700000040, "text": "Root" }
+        });
+        if topic {
+            native["is_topic_message"] = json!(true);
+        }
+        if forum {
+            native["chat"]["is_forum"] = json!(true);
+        }
+        native
+    }
+
+    #[test]
+    fn telegram_outbound_topic_evidence_preserves_existing_follow_scope() {
+        use crate::models::channel_thread::TelegramTopic;
+        let bot = bot();
+        for forum in [false, true] {
+            let facts = telegram(&inbound(reply(false, forum)), &bot).unwrap();
+            assert_eq!(facts.telegram_topic, Some(TelegramTopic::Chat));
+            assert_eq!(
+                facts.kind,
+                if forum {
+                    ThreadKind::Topic
+                } else {
+                    ThreadKind::ReplyChain
+                },
+            );
+        }
+        let topic = telegram(&inbound(reply(true, true)), &bot).unwrap();
+        assert_eq!(topic.kind, ThreadKind::Topic);
+        assert_eq!(
+            topic.telegram_topic,
+            Some(TelegramTopic::Topic { id: "16".into() })
+        );
+    }
 }

@@ -12,7 +12,7 @@ use axum::{
     http::{HeaderMap, Uri},
     routing::post,
 };
-use mongodb::bson::doc;
+use mongodb::bson::{self, doc};
 use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering},
@@ -57,7 +57,13 @@ fn stream_timeout_is_the_earlier_of_transport_idle_and_no_progress() {
 fn failed_message_response_serializes_error_detail_as_rfc3339() {
     let occurred_at = Utc::now();
     let response = MessageResponse::from(AssistantMessage {
+        author: None,
+        activity_total: 0,
+        report_to: None,
+        continuation_of: None,
         retry_of: None,
+        retry_claimed_by: None,
+        activity_count: None,
         specialist_id: None,
         steering: None,
         voice: None,
@@ -212,8 +218,8 @@ async fn setup_options_with_tool_gate(
                     if attempt < tool_rounds {
                         let row = image_state.db.collection::<AssistantConversation>(crate::models::assistant_conversation::COLLECTION_NAME)
                             .find_one(doc! {"user_id":OWNER,"active_turn.turn_id":{"$exists":true}}).await.unwrap().unwrap();
-                        engine::attach_image(&image_state.db, &image_state.encryption_keys, OWNER, &row.id,
-                            "camera__snapshot", "image/png", b"fixture pixels").await.unwrap();
+                        engine::attach_routed_image(&image_state.db, &image_state.encryption_keys, OWNER, &row.id,
+                            "camera__snapshot", "image/png", b"fixture pixels", true).await.unwrap();
                     }
                     if failure == Some("invalid_stream") {
                         return (StatusCode::OK, "not an event stream").into_response();
@@ -707,8 +713,11 @@ async fn retried_turn_names_completed_actions_and_reattaches_bound_uploads() {
         .collection::<AssistantMessage>(crate::models::assistant_message::COLLECTION_NAME)
         .update_one(
             doc! {"_id": &failed.id},
-            doc! {"$push": {"activities": {"id": "a1", "label": "mail__send", "digest": "d1",
-            "status": "completed", "started_at": mongodb::bson::DateTime::now()}}},
+            doc! {
+                "$push": {"activities": {"id": "a1", "label": "mail__send", "digest": "d1",
+                    "status": "completed", "started_at": mongodb::bson::DateTime::now()}},
+                "$set": {"activity_count": 1},
+            },
         )
         .await
         .unwrap();
@@ -935,6 +944,7 @@ async fn context_route_lists_running_actions_as_pending() {
         &db,
         OWNER,
         &engine::TurnRequest {
+            acknowledgement_id: None,
             retry_of: None,
             attachment_ids: vec![],
             conversation_id: None,
@@ -947,9 +957,15 @@ async fn context_route_lists_running_actions_as_pending() {
     )
     .await
     .unwrap();
-    engine::activity_started(&db, OWNER, &row.id, "mcp.long_call")
-        .await
-        .unwrap();
+    engine::activity_started_for_turn(
+        &db,
+        OWNER,
+        &row.id,
+        &row.active_turn.as_ref().unwrap().turn_id,
+        "mcp.long_call",
+    )
+    .await
+    .unwrap();
     let value = serde_json::to_value(
         context(
             State(state.clone()),
@@ -1143,6 +1159,7 @@ async fn lost_session_rebinds_with_recap_and_same_turn_id() {
         &state.db,
         OWNER,
         &engine::TurnRequest {
+            acknowledgement_id: None,
             retry_of: None,
             attachment_ids: Vec::new(),
             agent_id: None,
@@ -1409,6 +1426,7 @@ async fn stale_fences_are_hidden_in_index_and_history_dtos() {
         &state.db,
         OWNER,
         &engine::TurnRequest {
+            acknowledgement_id: None,
             retry_of: None,
             attachment_ids: Vec::new(),
             agent_id: None,
@@ -1461,6 +1479,7 @@ async fn settlement_failure_is_bounded_emits_terminal_error_and_releases_permit(
         &state.db,
         OWNER,
         &engine::TurnRequest {
+            acknowledgement_id: None,
             retry_of: None,
             attachment_ids: Vec::new(),
             agent_id: None,
@@ -1607,6 +1626,7 @@ async fn model_fallbacks_are_uncached_and_successes_are_cached() {
         &state.db,
         OWNER,
         &engine::TurnRequest {
+            acknowledgement_id: None,
             retry_of: None,
             attachment_ids: Vec::new(),
             agent_id: None,
@@ -1662,6 +1682,7 @@ async fn invalid_and_wrong_owner_turns_do_not_consume_rate_limit() {
         &state.db,
         "other",
         &engine::TurnRequest {
+            acknowledgement_id: None,
             retry_of: None,
             attachment_ids: Vec::new(),
             agent_id: None,
@@ -1765,6 +1786,7 @@ async fn acknowledgements_are_owner_scoped_sanitized_decided_once_and_audited() 
         test_auth_user(&other),
         Path((f.row.id.clone(), ack.clone())),
         Json(AcknowledgementDecision {
+            accept_reduced_scope: false,
             decision: Decision::Allow,
         }),
     )
@@ -1775,6 +1797,7 @@ async fn acknowledgements_are_owner_scoped_sanitized_decided_once_and_audited() 
         test_auth_user(&f.owner),
         Path((f.row.id.clone(), ack.clone())),
         Json(AcknowledgementDecision {
+            accept_reduced_scope: false,
             decision: Decision::Allow,
         }),
     )
@@ -1788,6 +1811,7 @@ async fn acknowledgements_are_owner_scoped_sanitized_decided_once_and_audited() 
             test_auth_user(&f.owner),
             Path((f.row.id.clone(), ack)),
             Json(AcknowledgementDecision {
+                accept_reduced_scope: false,
                 decision: Decision::Deny
             }),
         )
@@ -1870,6 +1894,140 @@ async fn retired_access_mode_route_answers_gone_and_every_chat_reports_full() {
 }
 
 #[tokio::test]
+async fn history_keeps_user_decisions_and_receipts_with_their_message_pages() {
+    use crate::models::assistant_acknowledgement::{
+        AssistantAcknowledgement, COLLECTION_NAME as ACKS,
+    };
+    use crate::services::assistant_acknowledgement_service as acks;
+    let f =
+        crate::services::assistant_authority_tests::orchestrator_fixture("receipt_history_pages")
+            .await;
+    let messages = f
+        .state
+        .db
+        .collection::<AssistantMessage>(crate::models::assistant_message::COLLECTION_NAME);
+    let mut message = messages
+        .find_one(doc! {"conversation_id": &f.row.id, "role": "user"})
+        .await
+        .unwrap()
+        .unwrap();
+    let start = Utc::now() - chrono::Duration::minutes(40);
+    messages
+        .update_one(
+            doc! {"_id": &message.id},
+            doc! {"$set": {"created_at": bson::DateTime::from_chrono(start)}},
+        )
+        .await
+        .unwrap();
+    let card = acks::request(
+        &f.state.db,
+        &f.chat,
+        acks::Request {
+            kind: "action",
+            service: None,
+            tool: Some("nyxid__delete_node"),
+            arguments: Some(&json!({"node_id":"kept"})),
+            summary: "Keep this node",
+            platform: false,
+        },
+    )
+    .await
+    .unwrap();
+    acks::decide(&f.state.db, &f.owner, &f.row.id, &card.id, false)
+        .await
+        .unwrap();
+    let decisions = f.state.db.collection::<AssistantAcknowledgement>(ACKS);
+    decisions
+        .update_one(
+            doc! {"_id": &card.id},
+            doc! {"$set": {
+                "created_at": bson::DateTime::from_chrono(start + chrono::Duration::seconds(30)),
+            }},
+        )
+        .await
+        .unwrap();
+    let auto = acks::AutoAllowed {
+        class: acks::OwnerActionClass::Sensitive,
+        mode: crate::models::assistant_settings::AccessMode::Autopilot,
+        reason: "access_mode",
+    };
+    for index in 1..=30 {
+        let at = start + chrono::Duration::minutes(index);
+        message.id = uuid::Uuid::new_v4().to_string();
+        message.seq = index + 1;
+        message.created_at = at;
+        messages.insert_one(&message).await.unwrap();
+        let summary = format!("Automatic change {index}");
+        acks::record_auto_allowed(
+            &f.state.db,
+            &f.chat,
+            "nyxid__update_agent_key",
+            &json!({"index":index}),
+            &auto,
+            &summary,
+        )
+        .await;
+        decisions
+            .update_one(
+                doc! {"summary": &summary},
+                doc! {"$set": {
+                    "created_at": bson::DateTime::from_chrono(at + chrono::Duration::seconds(1)),
+                }},
+            )
+            .await
+            .unwrap();
+    }
+    let page = |limit, before_seq| {
+        history(
+            State(f.state.clone()),
+            test_auth_user(&f.owner),
+            Path(f.row.id.clone()),
+            Query(HistoryQuery {
+                card: None,
+                limit: Some(limit),
+                before_seq,
+            }),
+        )
+    };
+    let Json(all) = page(50, None).await.unwrap();
+    assert_eq!(all.acknowledgements.len(), 31);
+    assert!(
+        all.acknowledgements
+            .iter()
+            .any(|r| r.id == card.id && r.status == "denied")
+    );
+    let Json(latest) = page(10, None).await.unwrap();
+    assert_eq!(
+        latest.acknowledgements.len(),
+        20,
+        "always retain the newest twenty"
+    );
+    let Json(older) = page(10, Some(12)).await.unwrap();
+    assert_eq!(older.messages.first().unwrap().seq, 2);
+    assert!(
+        older
+            .acknowledgements
+            .iter()
+            .any(|r| r.summary == "Automatic change 1")
+    );
+    assert!(
+        older
+            .acknowledgements
+            .iter()
+            .any(|r| r.summary == "Automatic change 30")
+    );
+    let mut ids: Vec<_> = older.acknowledgements.iter().map(|r| &r.id).collect();
+    ids.sort();
+    ids.dedup();
+    assert_eq!(
+        ids.len(),
+        older.acknowledgements.len(),
+        "page/newest overlap is deduplicated"
+    );
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
 async fn history_surfaces_pending_proxy_approvals_raised_by_the_chat_key() {
     use crate::models::{
         approval_request::{ApprovalRequest, COLLECTION_NAME as APPROVALS},
@@ -1880,6 +2038,7 @@ async fn history_surfaces_pending_proxy_approvals_raised_by_the_chat_key() {
         &state.db,
         OWNER,
         &engine::TurnRequest {
+            acknowledgement_id: None,
             retry_of: None,
             attachment_ids: Vec::new(),
             agent_id: None,
@@ -1970,6 +2129,7 @@ async fn cards_decided_during_a_turn_are_reported_to_the_next_turn_exactly_once(
         &state.db,
         OWNER,
         &engine::TurnRequest {
+            acknowledgement_id: None,
             retry_of: None,
             attachment_ids: Vec::new(),
             agent_id: None,
@@ -1987,6 +2147,8 @@ async fn cards_decided_during_a_turn_are_reported_to_the_next_turn_exactly_once(
         .unwrap()
         .unwrap();
     let ack = |kind: &str, status: &str, decided: Option<DateTime<Utc>>| AssistantAcknowledgement {
+        routing: None,
+        link: None,
         requester_agent_id: None,
         confirmation: None,
         authored_skill: None,
@@ -3488,6 +3650,7 @@ async fn model_selection_uses_the_live_list_resets_context_and_is_audited() {
         &state.db,
         OWNER,
         &engine::TurnRequest {
+            acknowledgement_id: None,
             retry_of: None,
             attachment_ids: Vec::new(),
             agent_id: None,
@@ -3575,4 +3738,188 @@ async fn model_selection_uses_the_live_list_resets_context_and_is_audited() {
             .any(|row| row.id == "nyxagent/retired" && !row.available)
     );
     server.abort();
+}
+
+#[test]
+fn model_response_preserves_names_and_handles_legacy_aliases() {
+    let row = model_response(&json!({
+        "id": "nyxagent/chat", "display_name": "Claude Sonnet 4.5",
+        "label": "Chat", "available": false, "description": "Configured model"
+    }))
+    .unwrap();
+    assert_eq!(row.id, "nyxagent/chat");
+    assert_eq!(row.label, "Claude Sonnet 4.5");
+    assert!(!row.available);
+    assert_eq!(row.description.as_deref(), Some("Configured model"));
+    assert_eq!(
+        model_response(&json!({"id": "nyxagent/chat"}))
+            .unwrap()
+            .label,
+        "Default model"
+    );
+    assert_eq!(
+        model_response(&json!({"id": "nyxagent/research", "display_name": " ", "label": "GPT-5"}))
+            .unwrap()
+            .label,
+        "GPT-5"
+    );
+    assert!(model_response(&json!({"id": "untrusted/model", "label": "Anything"})).is_none());
+}
+
+#[test]
+fn activity_response_failure_contract_omits_absent_http_status() {
+    use crate::models::assistant_conversation::{ToolFailure, TurnActivity};
+    for (kind, status) in [
+        ("service_status", Some(404)),
+        ("tool_error", None),
+        ("refused", None),
+        ("internal", None),
+    ] {
+        let response: ActivityResponse = TurnActivity {
+            digest: None,
+            machine: None,
+            id: "activity".into(),
+            label: "tool".into(),
+            status: "error".into(),
+            failure: Some(ToolFailure {
+                kind: kind.into(),
+                status,
+            }),
+            started_at: Utc::now(),
+            ended_at: None,
+        }
+        .into();
+        let value = serde_json::to_value(response).unwrap();
+        assert_eq!(value["failure"]["kind"], kind);
+        if let Some(status) = status {
+            assert_eq!(value["failure"]["status"], status);
+        } else {
+            assert!(value["failure"].get("status").is_none());
+        }
+        assert!(value["machine"].is_null());
+        assert!(value["ended_at"].is_null());
+    }
+}
+
+#[tokio::test]
+async fn turns_store_and_return_decision_continuations_and_reject_foreign_or_pending_cards() {
+    let (state, _, server) = setup_stream(
+        "decision_continuations",
+        Duration::ZERO,
+        vec![Frame::Created, Frame::Completed],
+    )
+    .await;
+    run_turn_to_reply(&state).await;
+    let conversation = settled(&state).await;
+    let card = Uuid::new_v4().to_string();
+    let collection = state.db.collection::<mongodb::bson::Document>(
+        crate::models::assistant_acknowledgement::COLLECTION_NAME,
+    );
+    collection.insert_one(doc! {"_id":&card,"conversation_id":&conversation.id,"user_id":OWNER,
+        "api_key_id":&conversation.credential_api_key_id,"kind":"action","status":"pending","decider":"user",
+        "decided_by":"user","summary":"Attach weekly-review 1.0 to NyxBot","created_at":bson::DateTime::now(),
+        "expires_at":bson::DateTime::from_chrono(Utc::now()+chrono::Duration::minutes(10))}).await.unwrap();
+    let request = || {
+        let mut request = Request::builder().method("POST").uri("/api/v1/assistant/nyxagent/turns")
+            .body(Body::from(json!({"text":"Apply the allowed action and report the result","conversation_id":conversation.id,"acknowledgement_id":card}).to_string())).unwrap();
+        request.extensions_mut().insert(SERVER_TURN_POLICY);
+        request
+    };
+    for invalid in [
+        doc! {"status":"pending"},
+        doc! {"status":"allowed","conversation_id":"foreign"},
+        doc! {"status":"allowed","conversation_id":&conversation.id,"user_id":"foreign"},
+        doc! {"status":"allowed","user_id":OWNER,"decided_by":"access_mode"},
+    ] {
+        collection
+            .update_one(doc! {"_id":&card}, doc! {"$set":invalid})
+            .await
+            .unwrap();
+        let error = turns(State(state.clone()), test_auth_user(OWNER), request())
+            .await
+            .err()
+            .unwrap();
+        assert!(matches!(error, AppError::BadRequest(_)), "{error}");
+        assert!(
+            engine::get(&state.db, OWNER, &conversation.id)
+                .await
+                .unwrap()
+                .active_turn
+                .is_none()
+        );
+    }
+    for status in ["allowed", "used"] {
+        collection.update_one(doc! {"_id":&card},doc! {"$set":{"status":status,"conversation_id":&conversation.id,"user_id":OWNER,"decided_by":"user"}}).await.unwrap();
+        let response = turns(State(state.clone()), test_auth_user(OWNER), request())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        axum::body::to_bytes(response.into_body(), 1_000_000)
+            .await
+            .unwrap();
+        settled(&state).await;
+        let Json(history) = history(
+            State(state.clone()),
+            test_auth_user(OWNER),
+            Path(conversation.id.clone()),
+            Query(HistoryQuery::default()),
+        )
+        .await
+        .unwrap();
+        let value = serde_json::to_value(history).unwrap();
+        let continued: Vec<_> = value["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|m| m["continuation_of"] == card)
+            .collect();
+        assert_eq!(continued.len(), if status == "allowed" { 1 } else { 2 });
+        assert!(continued.iter().all(|message| message["role"] == "user"));
+    }
+    server.abort();
+    state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn denied_owner_action_queues_plain_narration_without_an_execution_continuation() {
+    let f =
+        crate::services::assistant_authority_tests::orchestrator_fixture("denied_owner_narration")
+            .await;
+    let card = acknowledgements::request(
+        &f.state.db,
+        &f.chat,
+        acknowledgements::Request {
+            kind: "action",
+            service: None,
+            tool: Some("nyxid__delete_node"),
+            arguments: Some(&json!({"node_id": Uuid::new_v4().to_string()})),
+            summary: "Delete node Workstation",
+            platform: false,
+        },
+    )
+    .await
+    .unwrap();
+    let decided = decide_acknowledgement(
+        State(f.state.clone()),
+        test_auth_user(&f.owner),
+        Path((f.row.id.clone(), card.id)),
+        Json(AcknowledgementDecision {
+            decision: Decision::Deny,
+            accept_reduced_scope: false,
+        }),
+    )
+    .await
+    .unwrap()
+    .0;
+    assert_eq!(decided.status, "denied");
+    let row = engine::get(&f.state.db, &f.owner, &f.row.id).await.unwrap();
+    let event = row
+        .pending_events
+        .iter()
+        .find(|event| event.kind == "action_denied")
+        .unwrap();
+    assert!(event.text.contains("Delete node Workstation"));
+    assert!(event.text.contains("Do not execute or retry"));
+    assert!(event.text.contains(acknowledgements::DECISION_NARRATION));
+    f.state.db.drop().await.unwrap();
 }

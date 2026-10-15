@@ -4,20 +4,31 @@ import type { PropsWithChildren } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   useAdminFeatureFlags,
+  useCreateFeatureFlag,
+  useFeatureFlagTargets,
   useClearAdminFeatureFlag,
   useSetAdminFeatureFlag,
   useUpdateAdminFeatureFlagMetadata,
 } from "./use-admin-feature-flags";
 
-const { mockGet, mockPut, mockPatch, mockDelete } = vi.hoisted(() => ({
-  mockGet: vi.fn(),
-  mockPut: vi.fn(),
-  mockPatch: vi.fn(),
-  mockDelete: vi.fn(),
-}));
+const { mockGet, mockPut, mockPatch, mockDelete, mockPost } = vi.hoisted(
+  () => ({
+    mockGet: vi.fn(),
+    mockPut: vi.fn(),
+    mockPatch: vi.fn(),
+    mockDelete: vi.fn(),
+    mockPost: vi.fn(),
+  }),
+);
 
 vi.mock("@/lib/api-client", () => ({
-  api: { get: mockGet, put: mockPut, patch: mockPatch, delete: mockDelete },
+  api: {
+    post: mockPost,
+    get: mockGet,
+    put: mockPut,
+    patch: mockPatch,
+    delete: mockDelete,
+  },
 }));
 
 function createWrapper() {
@@ -205,4 +216,35 @@ it("publishes rollout success before refresh and preserves unrelated target labe
     flags: [{ user_overrides: [] }],
   });
   client.clear();
+});
+
+it("creates a runtime feature flag", async () => {
+  mockPost.mockResolvedValue({ key: "team:new" });
+  const { result } = renderHook(() => useCreateFeatureFlag(), {
+    wrapper: createWrapper(),
+  });
+  await result.current.mutateAsync({
+    key: "team:new",
+    description: "Test",
+    default_enabled: false,
+  });
+  expect(mockPost).toHaveBeenCalledWith("/admin/feature-flags", {
+    key: "team:new",
+    description: "Test",
+    default_enabled: false,
+  });
+});
+
+it("uses the flag-scoped limited directory for rollout targets", async () => {
+  mockGet.mockResolvedValue([
+    { id: "u1", email: "user@example.com", display_name: null, slug: null },
+  ]);
+  const { result } = renderHook(
+    () => useFeatureFlagTargets("team:mine", "person", "user@example.com"),
+    { wrapper: createWrapper() },
+  );
+  await waitFor(() => expect(result.current.isSuccess).toBe(true));
+  expect(mockGet).toHaveBeenCalledWith(
+    "/admin/feature-flag-targets?flag_key=team%3Amine&kind=person&limit=20&search=user%40example.com",
+  );
 });

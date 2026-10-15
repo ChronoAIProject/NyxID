@@ -135,6 +135,28 @@ async function scope(flow: "device" | "agent-key" = "device") {
 const approvals = () =>
   mocks.post.mock.calls.filter(([path]) => String(path).includes("/approve"));
 describe("three-step device approval", () => {
+  it.each(["device", "agent-key"] as const)(
+    "requires manual code entry for a code-free CLI %s link with preferences",
+    async (flow) => {
+      mocks.query = "?login_type=agent&key_source=new&key_name=My+Agent&permissions=read,proxy";
+      mount(flow);
+      await act(async () => {});
+      const group = screen.getByRole("group", { name: "User code" });
+      for (const field of within(group).getAllByRole("textbox")) expect(field).toHaveValue("");
+      expect(mocks.preview).not.toHaveBeenCalled();
+      expect(approvals()).toHaveLength(0);
+      await act(async () => {
+        fireEvent.paste(within(group).getAllByRole("textbox")[0]!, {
+          clipboardData: { getData: () => "ABCD-EFGH" },
+        });
+      });
+      await click("Continue");
+      expect(mocks.preview).toHaveBeenCalledWith(`/auth/${flow}/preview`, expect.objectContaining({
+        body: { user_code: "ABCDEFGH" },
+      }));
+      expect(approvals()).toHaveLength(0);
+    },
+  );
   it.each([
     ["ABCD-EFGH", "ABCDEFGH", 8],
     ["2ABC-DEFG", "2ABCDEFG", 9],

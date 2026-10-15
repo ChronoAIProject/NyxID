@@ -1,3 +1,4 @@
+import { onboardingSearch } from "@/schemas/platform-onboarding";
 import { ToolsPage } from "@/pages/tools";
 import { AdminToolsPage } from "@/pages/admin-tools";
 import { parseAutomationSearch } from "@/lib/automation-search";
@@ -35,7 +36,14 @@ import { BillingRouteGuard } from "@/components/billing-route-guard";
 import { CreditsDeniedHost } from "@/components/billing/credits-denied-host";
 import { billingSearchSchema } from "@/schemas/billing";
 import { useAuthStore } from "@/stores/auth-store";
-import { canAdminWrite, canManageCatalog, canReadAdminUsage, hasAdminRead } from "@/types/api";
+import {
+  canAdminWrite,
+  canManageCatalog,
+  canManageTools,
+  canReadAdminUsage,
+  canReadFeatureFlags,
+  hasAdminRead,
+} from "@/types/api";
 import { shouldRedirectFromBilling } from "@/lib/billing-availability";
 import { normalizeAdminAuditLogSearch } from "@/lib/admin-audit-log";
 import { normalizeAdminOAuthClientSearch } from "@/lib/admin-oauth-clients";
@@ -52,6 +60,11 @@ import {
 } from "@/lib/url-tabs";
 
 import {
+  PlatformOnboardingPage,
+  PlatformBindingReviewPage,
+  PlatformSetupsPage,
+  PlatformSetupDetailPage,
+  AdminPlatformBotsPage,
   LandingPage,
   NyxbotOnboardingPage,
   AiSetupPage,
@@ -503,11 +516,11 @@ const toolsRoute = createRoute({
   getParentRoute: () => dashboardLayout,
   component: ToolsPage,
 });
-const adminToolsRoute = createRoute({
+export const adminToolsRoute = createRoute({
   path: "/admin/tools",
   getParentRoute: () => dashboardLayout,
   beforeLoad: () => {
-    if (!useAuthStore.getState().user?.is_admin)
+    if (!canManageTools(useAuthStore.getState().user))
       throw redirect({ to: "/tools" });
   },
   component: AdminToolsPage,
@@ -518,7 +531,11 @@ export const servicesRedirectRoute = createRoute({
   getParentRoute: () => dashboardLayout,
   beforeLoad: async () => {
     const { user } = useAuthStore.getState();
-    if (canManageCatalog(user)) {
+    if (
+      canManageCatalog(user) ||
+      canManageTools(user) ||
+      hasAdminRead(user)
+    ) {
       return;
     }
     throw redirect({ to: "/keys", search: {} });
@@ -880,6 +897,11 @@ const apiKeyDetailRoute = createRoute({
   component: ApiKeyDetailPage,
 });
 
+export const platformOnboardingRoute = createRoute({path: "/onboarding", getParentRoute: () => rootRoute, validateSearch: onboardingSearch, component: PlatformOnboardingPage});
+export const platformBindingReviewRoute = createRoute({path: "/onboarding/link", getParentRoute: () => rootRoute, validateSearch: onboardingSearch, component: PlatformBindingReviewPage});
+export const platformSetupsRoute = createRoute({path: "/onboarding/setups", getParentRoute: () => dashboardLayout, validateSearch: onboardingSearch, component: PlatformSetupsPage});
+export const platformSetupDetailRoute = createRoute({path: "/onboarding/setups/$setupId", getParentRoute: () => dashboardLayout, component: PlatformSetupDetailPage});
+
 const channelBotsRoute = createRoute({
   path: "/channel-bots",
   validateSearch: (
@@ -969,23 +991,28 @@ const adminLayout = createRoute({
     if (!isAuthenticated && !isLoading) {
       throw redirect({ to: "/login" });
     }
-    // Admin layout is reachable by both `admin` (read+write) and `operator`
-    // (read-only). Per-action write controls inside admin pages are gated
-    // separately so operators see admin data but cannot mutate it. Holders of
-    // the usage-read role permission reach only the Usage page.
     if (isLoading || hasAdminRead(user)) return;
     const usagePath =
       location.pathname === "/admin/usage" ||
       location.pathname === "/admin/analytics";
-    if (!canReadAdminUsage(user)) {
-      throw redirect({ to: "/dashboard" });
-    }
-    if (!usagePath) {
-      throw redirect({ to: "/admin/usage" });
-    }
+    const flagsPath = location.pathname === "/admin/feature-flags";
+    if (
+      (usagePath && canReadAdminUsage(user)) ||
+      (flagsPath && canReadFeatureFlags(user))
+    )
+      return;
+    if (canReadFeatureFlags(user))
+      throw redirect({ to: "/admin/feature-flags" });
+    if (canReadAdminUsage(user)) throw redirect({ to: "/admin/usage" });
+    throw redirect({ to: "/dashboard" });
   },
   component: () => <Outlet />,
 });
+
+export const adminPlatformBotsRoute = createRoute({path: "platform-bots", getParentRoute: () => adminLayout, beforeLoad: () => {
+  const {user, isLoading} = useAuthStore.getState();
+  if (!isLoading && !canAdminWrite(user)) throw redirect({to: "/dashboard"});
+}, component: AdminPlatformBotsPage});
 
 const adminUsersRoute = createRoute({
   path: "users",
@@ -1182,6 +1209,8 @@ const adminFeatureFlagsRoute = createRoute({
 });
 
 const routeTree = rootRoute.addChildren([
+  platformOnboardingRoute,
+  platformBindingReviewRoute,
   landingRoute,
   nyxbotOnboardingRoute,
   authLayout.addChildren([loginRoute, registerRoute]),
@@ -1257,6 +1286,8 @@ const routeTree = rootRoute.addChildren([
     apiKeyDetailRoute,
     nodesRoute,
     nodeDetailRoute,
+    platformSetupsRoute,
+    platformSetupDetailRoute,
     channelBotsRoute,
     channelBotSetupLinksRoute,
     channelBotDetailRoute,
@@ -1287,6 +1318,7 @@ const routeTree = rootRoute.addChildren([
       adminInviteCodesRoute,
       adminFeatureFlagsRoute,
       adminUploadRetentionRoute,
+      adminPlatformBotsRoute,
       adminPlatformCredentialsRoute,
     ]),
   ]),

@@ -371,3 +371,9 @@ export const AdminUploadRetentionPage = lazy(() =>
     default: m.AdminUploadRetentionPage,
   })),
 );
+
+export const PlatformOnboardingPage = lazy(() => import("./platform-onboarding").then(m => ({default: m.PlatformOnboardingPage})));
+export const PlatformBindingReviewPage = lazy(() => import("./platform-onboarding").then(m => ({default: m.PlatformBindingReviewPage})));
+export const PlatformSetupsPage = lazy(() => import("./platform-onboarding").then(m => ({default: m.PlatformSetupsPage})));
+export const PlatformSetupDetailPage = lazy(() => import("./platform-setup-detail").then(m => ({default: m.PlatformSetupDetailPage})));
+export const AdminPlatformBotsPage = lazy(() => import("./admin-platform-bots").then(m => ({default: m.AdminPlatformBotsPage})));

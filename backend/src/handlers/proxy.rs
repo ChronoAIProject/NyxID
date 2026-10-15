@@ -4432,7 +4432,7 @@ async fn execute_resolved_proxy_inner(
     let service_owner_for_approval = effective_owner_for_approval
         .as_deref()
         .unwrap_or(&approval_owner_user_id);
-    let approval_outcome = Box::pin(approval_service::evaluate_and_check(
+    let (approval_outcome, approval_auto) = Box::pin(approval_service::evaluate_for_chat(
         &state.db,
         &approval_owner_user_id,
         service_owner_for_approval,
@@ -4442,6 +4442,7 @@ async fn execute_resolved_proxy_inner(
         &auth_user.approval_requester_id(),
         auth_user.auth_method == crate::mw::auth::AuthMethod::Session,
         is_auto_connected_for_approval,
+        auth_user.assistant_chat.as_deref(),
     ))
     .await?;
 
@@ -5367,6 +5368,17 @@ async fn execute_resolved_proxy_inner(
                             target.connection_id.as_deref(),
                         );
                         destination_audit.complete(response.status().as_u16());
+                        if response.status().is_success() {
+                            approval_service::record_chat_approval(
+                                &state.db,
+                                auth_user.assistant_chat.as_deref(),
+                                approval_auto,
+                                service_id,
+                                &target.service.name,
+                                &operation,
+                            )
+                            .await;
+                        }
                         return Ok(response);
                     }
 
@@ -5638,6 +5650,17 @@ async fn execute_resolved_proxy_inner(
 
                     destination_audit.complete(response.status().as_u16());
                     request_audit.response(response.status().as_u16());
+                    if response.status().is_success() {
+                        approval_service::record_chat_approval(
+                            &state.db,
+                            auth_user.assistant_chat.as_deref(),
+                            approval_auto,
+                            service_id,
+                            &target.service.name,
+                            &operation,
+                        )
+                        .await;
+                    }
                     return Ok(response);
                 }
                 Err(NodeProxyFailure {
@@ -6070,6 +6093,17 @@ async fn execute_resolved_proxy_inner(
 
         destination_audit.complete(response.status().as_u16());
         request_audit.response(response.status().as_u16());
+        if response.status().is_success() {
+            approval_service::record_chat_approval(
+                &state.db,
+                auth_user.assistant_chat.as_deref(),
+                approval_auto,
+                service_id,
+                &target.service.name,
+                &operation,
+            )
+            .await;
+        }
         return Ok(response);
     }
 
@@ -6095,7 +6129,12 @@ async fn execute_resolved_proxy_inner(
     let downstream_result = until_client_disconnect(
         &downstream_cancellation,
         Box::pin(proxy_service::forward_request_with_extra_outbound_headers(
-            if is_pool_attempt || operation_scoped || permission_ingress.is_some() {
+            if is_pool_attempt
+                || operation_scoped
+                || permission_ingress.is_some()
+                || target.service.offering_kind
+                    == crate::models::downstream_service::OfferingKind::Tool
+            {
                 proxy_service::no_redirect_http_client()
             } else {
                 &state.http_client
@@ -6277,6 +6316,17 @@ async fn execute_resolved_proxy_inner(
             target.connection_id.as_deref(),
         );
         destination_audit.complete(status.as_u16());
+        if response.status().is_success() {
+            approval_service::record_chat_approval(
+                &state.db,
+                auth_user.assistant_chat.as_deref(),
+                approval_auto,
+                service_id,
+                &target.service.name,
+                &operation,
+            )
+            .await;
+        }
         return Ok(response);
     }
 
@@ -6707,6 +6757,17 @@ async fn execute_resolved_proxy_inner(
 
     destination_audit.complete(response.status().as_u16());
     request_audit.response(response.status().as_u16());
+    if response.status().is_success() {
+        approval_service::record_chat_approval(
+            &state.db,
+            auth_user.assistant_chat.as_deref(),
+            approval_auto,
+            service_id,
+            &target.service.name,
+            &operation,
+        )
+        .await;
+    }
     Ok(response)
 }
 
@@ -7342,8 +7403,13 @@ pub(crate) fn build_downstream_ws_request(
             headers.insert(name, value);
         }
         "bearer" => {
-            let (_, value) =
-                make_header(b"authorization", &format!("Bearer {}", target.credential))?;
+            let (_, value) = make_header(
+                b"authorization",
+                &crate::services::catalog_auth_scheme::header_value(
+                    target.service.auth_scheme.as_deref(),
+                    &target.credential,
+                )?,
+            )?;
             headers.insert(reqwest::header::AUTHORIZATION, value);
         }
         "basic" => {

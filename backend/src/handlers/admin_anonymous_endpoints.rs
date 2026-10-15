@@ -9,9 +9,7 @@ use utoipa::ToSchema;
 
 use crate::AppState;
 use crate::errors::{AppError, AppResult};
-use crate::models::downstream_service::{
-    AnonymousEndpointRule, COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService,
-};
+use crate::models::downstream_service::{AnonymousEndpointRule, DownstreamService};
 use crate::mw::auth::AuthUser;
 use crate::services::{anonymous_endpoint_service, audit_service};
 
@@ -109,7 +107,7 @@ pub async fn create_anonymous_endpoint(
     let mut rules = service.anonymous_endpoints.clone();
     rules.push(rule.clone());
     anonymous_endpoint_service::validate_rules_for_service(&service, &rules)?;
-    persist_rules(&state, &service_id, &rules).await?;
+    persist_rules(&state, &auth_user, &service, &rules).await?;
 
     audit_service::log_for_user(
         state.db.clone(),
@@ -160,7 +158,7 @@ pub async fn update_anonymous_endpoint(
     )?;
     rules[index] = updated.clone();
     anonymous_endpoint_service::validate_rules_for_service(&service, &rules)?;
-    persist_rules(&state, &service_id, &rules).await?;
+    persist_rules(&state, &auth_user, &service, &rules).await?;
 
     audit_service::log_for_user(
         state.db.clone(),
@@ -203,7 +201,7 @@ pub async fn delete_anonymous_endpoint(
         ));
     }
     anonymous_endpoint_service::validate_rules_for_service(&service, &rules)?;
-    persist_rules(&state, &service_id, &rules).await?;
+    persist_rules(&state, &auth_user, &service, &rules).await?;
 
     audit_service::log_for_user(
         state.db.clone(),
@@ -222,28 +220,30 @@ pub async fn delete_anonymous_endpoint(
 
 async fn persist_rules(
     state: &AppState,
-    service_id: &str,
+    auth: &AuthUser,
+    service: &DownstreamService,
     rules: &[AnonymousEndpointRule],
 ) -> AppResult<()> {
-    let rules_bson = bson::to_bson(rules)
-        .map_err(|e| AppError::Internal(format!("BSON serialization error: {e}")))?;
-    state
-        .db
-        .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
-        .update_one(
-            doc! { "_id": service_id },
-            doc! { "$set": {
-                "anonymous_endpoints": rules_bson,
-                "updated_at": bson::DateTime::from_chrono(Utc::now()),
-            }},
-        )
-        .await?;
+    let authority = crate::services::catalog_mutation_service::Authority {
+        actor: audit_service::AuditActor::from_auth_user(auth),
+        first_party_human: super::login_client_context::require_first_party_human(auth).is_ok(),
+        admin_required: service.offering_kind
+            == crate::models::downstream_service::OfferingKind::Tool
+            || service.owner_user_id.is_some()
+            || (service.catalog_manager_created && service.visibility != "private"),
+        catalog_base_url: state.config.base_url.clone(),
+    };
+    let rules_bson = bson::to_bson(rules).map_err(|e| AppError::Internal(e.to_string()))?;
+    crate::services::catalog_mutation_service::commit_update(&state.db,service,&authority,
+        &doc! {"anonymous_endpoints":rules_bson,"updated_at":bson::DateTime::from_chrono(Utc::now())},
+        &doc! {"_id":&service.id},state.audit_chain_hmac_key.as_ref().as_ref()).await?;
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::downstream_service::COLLECTION_NAME as DOWNSTREAM_SERVICES;
     use crate::models::user::{COLLECTION_NAME as USERS, User, UserType};
     use crate::services::role_service;
     use crate::test_utils::{connect_test_database, test_app_state, test_auth_user, test_user};
@@ -283,6 +283,7 @@ mod tests {
             credential_encrypted: vec![],
             platform_key: None,
             auth_type: None,
+            auth_scheme: None,
             openapi_spec_url: None,
             asyncapi_spec_url: None,
             streaming_supported: false,
@@ -293,6 +294,9 @@ mod tests {
             is_active: true,
             created_by: created_by.to_string(),
             catalog_manager_created: false,
+            tools_manager_created: false,
+            icon_url: None,
+            tools_credential_frozen: false,
             identity_propagation_mode: if identity_propagating {
                 "headers"
             } else {

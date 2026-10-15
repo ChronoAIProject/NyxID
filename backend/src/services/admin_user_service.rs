@@ -391,6 +391,7 @@ pub async fn set_user_active(
         )
         .await?;
         super::assistant_agent_credential_service::invalidate_for_owner(db, target_user_id).await?;
+        super::platform_setup_service::retire_owner(db, target_user_id, false).await?;
     }
 
     Ok(())
@@ -639,6 +640,8 @@ async fn delete_user_cascade_internal(
     )
     .await?;
 
+    super::platform_setup_service::retire_owner(db, target_user_id, true).await?;
+
     // Org bots the user linked to their NyxBot keep an org-owned route and
     // route key; remove them so the org's bot is free for its admins.
     release_nyxbot_org_links(db, target_user_id).await?;
@@ -668,6 +671,8 @@ async fn delete_user_cascade_internal(
         crate::models::assistant_group::COLLECTION_NAME,
         crate::models::assistant_group::MESSAGES_COLLECTION_NAME,
         crate::models::assistant_attachment::COLLECTION_NAME,
+        crate::models::nyxbot_image_delivery::COLLECTION_NAME,
+        crate::models::nyxbot_image_delivery::LEGACY_COLLECTION_NAME,
         crate::models::assistant_upload_retention::TOMBSTONES,
         crate::models::assistant_agent_credential::COLLECTION_NAME,
         crate::models::assistant_conversation::COLLECTION_NAME,

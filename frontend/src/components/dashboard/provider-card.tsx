@@ -99,14 +99,12 @@ export function ProviderCard({
                     : "bg-muted"
             }`}
           >
-            {provider.icon_url ? (
-              <img
-                src={provider.icon_url}
-                alt={provider.name}
-                className="h-4 w-4 rounded"
+            {provider.icon_url || SERVICE_ICONS[provider.slug] ? (
+              <ServiceIcon
+                slug={provider.slug}
+                iconUrl={provider.icon_url}
+                size="sm"
               />
-            ) : SERVICE_ICONS[provider.slug] ? (
-              <ServiceIcon slug={provider.slug} size="sm" />
             ) : hasBrand ? (
               <span className={`text-13 font-bold ${brand.textClass}`}>
                 {brand.initial}

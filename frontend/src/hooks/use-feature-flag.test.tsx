@@ -118,6 +118,7 @@ describe("feature flag catalog", () => {
       VOICE_GROK: "assistant:voice-grok",
       VOICE_GROK_PLATFORM: "assistant:voice-grok-platform",
       NYXAGENT_ENGINE: "assistant:nyxagent-engine",
+      ASSISTANT_MODEL_CONTROLS: "assistant:model-controls",
       MACHINE_CAPABILITIES: "assistant:machine-capabilities",
       MACHINE_CONTEXTS: "assistant:machine-contexts",
       AGENT_OPERATION_SCOPES: "assistant:operation-scopes",

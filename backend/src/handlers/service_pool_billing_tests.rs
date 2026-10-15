@@ -525,10 +525,15 @@ async fn pool_proxy_billing_releases_proven_unsent_hold_before_byok_admission() 
 
 #[tokio::test]
 async fn pool_proxy_billing_unknown_timeout_releases_hold_without_inventing_usage() {
+    // Admission shares the attempt deadline. A one-second budget can expire
+    // during real MongoDB admission under parallel fixture/index creation,
+    // exercising proven-unsent behavior instead of the post-dispatch timeout
+    // this test must cover. Keep the vendor slower than a generous admission
+    // and attempt budget; assertions below still require actual dispatch.
     let fixture = billed_fixture(
         "pool_billing_unknown",
         ResponseTemplate::new(200)
-            .set_delay(std::time::Duration::from_secs(3))
+            .set_delay(std::time::Duration::from_secs(30))
             .set_body_json(json!({"usage": {"total_tokens": 1}})),
     )
     .await;
@@ -540,8 +545,8 @@ async fn pool_proxy_billing_unknown_timeout_releases_hold_without_inventing_usag
         .update_one(
             doc! { "_id": &fixture.proxy.pool_id },
             doc! { "$set": {
-                "failover.retry_on": ["timeout"], "failover.per_attempt_timeout_ms": 1_000,
-                "failover.overall_deadline_ms": 2_000,
+                "failover.retry_on": ["timeout"], "failover.per_attempt_timeout_ms": 10_000,
+                "failover.overall_deadline_ms": 20_000,
             } },
         )
         .await
@@ -550,8 +555,19 @@ async fn pool_proxy_billing_unknown_timeout_releases_hold_without_inventing_usag
         Ok(response) => response,
         Err(error) => error.into_response(),
     };
-    assert!(response.status().is_server_error());
-    assert_eq!(fixture.first.received_requests().await.unwrap().len(), 1);
+    let status = response.status();
+    assert!(status.is_server_error());
+    let body = axum::body::to_bytes(response.into_body(), 8192)
+        .await
+        .unwrap();
+    let error_code =
+        serde_json::from_slice::<serde_json::Value>(&body).unwrap_or_default()["error_code"]
+            .clone();
+    assert_eq!(
+        fixture.first.received_requests().await.unwrap().len(),
+        1,
+        "must exercise a dispatched timeout; status={status}, error_code={error_code}"
+    );
     assert!(fixture.second.received_requests().await.unwrap().is_empty());
     let rows = settled_rows(&fixture, 1).await;
     assert!(

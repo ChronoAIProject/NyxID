@@ -11,6 +11,7 @@ export function TelegramNew({
   orgId,
   requestId,
   fullPage = false,
+  stayInPlace = false,
   onStarted,
   onCancelled,
   onConnected,
@@ -19,9 +20,10 @@ export function TelegramNew({
   readonly orgId: string | null;
   readonly requestId?: string;
   readonly fullPage?: boolean;
+  readonly stayInPlace?: boolean;
   readonly onStarted?: (id: string) => void | Promise<void>;
   readonly onCancelled?: () => void | Promise<void>;
-  readonly onConnected: (id: string) => void;
+  readonly onConnected: (id: string, username?: string | null) => void;
 }) {
   const { configuration, begin, launch, cancel, connect } =
     useTelegramNew(requestId);
@@ -74,7 +76,7 @@ export function TelegramNew({
       completed.current !== request.id
     ) {
       completed.current = request.id;
-      onConnected(request.channel_bot_id);
+      onConnected(request.channel_bot_id, request.bot_username);
     }
   }, [request, onConnected]);
 
@@ -121,7 +123,7 @@ export function TelegramNew({
         result.status === "connected" &&
         result.channel_bot_id
       )
-        onConnected(result.channel_bot_id);
+        onConnected(result.channel_bot_id, result.bot_username);
     } catch {
       /* The mutation error is displayed below. */
     }
@@ -184,7 +186,7 @@ export function TelegramNew({
             {connected ? `@${request?.bot_username} is connected.` : `Connecting @${request?.bot_username}…`}
           </p>
           <p className="text-xs text-muted-foreground">
-            You can close this page. NyxID will finish connecting your bot and send a message in the Telegram setup chat.
+            You can close this {stayInPlace ? "dialog" : "page"}. NyxID will finish connecting your bot and send a message in the Telegram setup chat.
           </p>
           {request?.connection_error && <p role="status" className="text-xs text-muted-foreground">{request.connection_error}</p>}
         </div>

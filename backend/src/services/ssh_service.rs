@@ -21,6 +21,7 @@ pub struct SshSessionManager {
 
 #[derive(Debug)]
 pub struct ResolvedSshAuthContext {
+    pub approval_bypass: Option<super::assistant_acknowledgement_service::AutoAllowed>,
     pub concurrency_policy: Option<crate::models::service_concurrency::ServiceConcurrencyPolicy>,
     pub mode: SshAuthMode,
     pub service_slug: String,
@@ -92,6 +93,7 @@ pub async fn resolve_ssh_auth_context_for_owner(
     .await?
     {
         return Ok(ResolvedSshAuthContext {
+            approval_bypass: None,
             concurrency_policy: service.concurrency_policy.clone(),
             mode: user_service.ssh_auth_mode,
             service_slug: user_service.slug,
@@ -102,6 +104,7 @@ pub async fn resolve_ssh_auth_context_for_owner(
     let ssh = ensure_ssh_service(service)?;
 
     Ok(ResolvedSshAuthContext {
+        approval_bypass: None,
         concurrency_policy: service.concurrency_policy.clone(),
         mode: ssh.ssh_auth_mode,
         service_slug: service.slug.clone(),

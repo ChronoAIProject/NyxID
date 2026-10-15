@@ -33,7 +33,13 @@ mod fixtures {
     /// A completed assistant reply; override fields with struct update syntax.
     pub fn message(id: String, conversation_id: String, user_id: String) -> AssistantMessage {
         AssistantMessage {
+            author: None,
+            activity_total: 0,
+            report_to: None,
+            continuation_of: None,
             retry_of: None,
+            retry_claimed_by: None,
+            activity_count: None,
             error_detail: None,
             specialist_id: None,
             upstream_error_code: None,
@@ -59,6 +65,7 @@ mod fixtures {
 
     pub fn activity(label: &str, status: &str) -> TurnActivity {
         TurnActivity {
+            failure: None,
             machine: None,
             id: uuid::Uuid::new_v4().to_string(),
             label: label.into(),
@@ -123,7 +130,10 @@ async fn feedback_concurrent_first_puts_share_one_row() {
     insert_feedback_message(
         &f,
         AssistantMessage {
+            continuation_of: None,
             retry_of: None,
+            retry_claimed_by: None,
+            activity_count: None,
             turn_id: "turn-r3".into(),
             ..fixtures::message(message_id.into(), conversation_id.into(), f.owner.clone())
         },
@@ -168,7 +178,10 @@ async fn feedback_concurrent_first_puts_share_one_row() {
     insert_feedback_message(
         &f,
         AssistantMessage {
+            continuation_of: None,
             retry_of: None,
+            retry_claimed_by: None,
+            activity_count: None,
             seq: 2,
             turn_id: "turn-direct".into(),
             ..fixtures::message(
@@ -343,7 +356,10 @@ async fn feedback_put_change_withdraw_and_ineligible_reply() {
     insert_feedback_message(
         &f,
         AssistantMessage {
+            continuation_of: None,
             retry_of: None,
+            retry_claimed_by: None,
+            activity_count: None,
             turn_id: "b5-turn".into(),
             ..fixtures::message(message_id.into(), conversation_id.into(), f.owner.clone())
         },
@@ -407,7 +423,10 @@ async fn feedback_vote_change_preserves_comment_without_comment_field() {
     insert_feedback_message(
         &f,
         AssistantMessage {
+            continuation_of: None,
             retry_of: None,
+            retry_claimed_by: None,
+            activity_count: None,
             turn_id: "s2-turn".into(),
             ..fixtures::message(
                 message_id.into(),
@@ -455,7 +474,10 @@ async fn feedback_withdraw_is_idempotent_after_first_delete() {
     insert_feedback_message(
         &f,
         AssistantMessage {
+            continuation_of: None,
             retry_of: None,
+            retry_claimed_by: None,
+            activity_count: None,
             turn_id: "s3-turn".into(),
             ..fixtures::message(
                 message_id.into(),
@@ -548,7 +570,10 @@ async fn feedback_routes_reject_when_engine_flag_is_disabled() {
     insert_feedback_message(
         &f,
         AssistantMessage {
+            continuation_of: None,
             retry_of: None,
+            retry_claimed_by: None,
+            activity_count: None,
             turn_id: "turn".into(),
             ..fixtures::message(message_id.into(), conversation_id.into(), f.owner.clone())
         },
@@ -559,6 +584,7 @@ async fn feedback_routes_reject_when_engine_flag_is_disabled() {
         "/api/v1/assistant/nyxagent/conversations/{conversation_id}/messages/{message_id}/feedback"
     );
     let override_doc = crate::models::feature_flag_override::FeatureFlagOverride {
+        definition_id: None,
         id: "s5-off".into(),
         org_user_id: None,
         flag_key: crate::services::feature_flag_service::NYXAGENT_ENGINE_FLAG_KEY.into(),
@@ -621,7 +647,10 @@ async fn feedback_rejects_user_failed_and_stopped_replies() {
         insert_feedback_message(
             &f,
             AssistantMessage {
+                continuation_of: None,
                 retry_of: None,
+                retry_claimed_by: None,
+                activity_count: None,
                 turn_id: id.into(),
                 role: role.into(),
                 status: status.into(),
@@ -878,7 +907,10 @@ async fn feedback_existing_conversation_rejects_other_user_put_and_delete() {
     insert_feedback_message(
         &f,
         AssistantMessage {
+            continuation_of: None,
             retry_of: None,
+            retry_claimed_by: None,
+            activity_count: None,
             turn_id: "turn".into(),
             ..fixtures::message(message_id.into(), conversation_id.into(), f.owner.clone())
         },
@@ -967,7 +999,10 @@ async fn feedback_rejects_message_from_another_owned_conversation() {
     insert_feedback_message(
         &f,
         AssistantMessage {
+            continuation_of: None,
             retry_of: None,
+            retry_claimed_by: None,
+            activity_count: None,
             turn_id: "turn".into(),
             ..fixtures::message(
                 "scoped-reply".into(),
@@ -1083,7 +1118,10 @@ async fn feedback_revoked_org_member_cannot_vote_on_org_agent_thread() {
     insert_feedback_message(
         &f,
         AssistantMessage {
+            continuation_of: None,
             retry_of: None,
+            retry_claimed_by: None,
+            activity_count: None,
             turn_id: "t".into(),
             ..fixtures::message(
                 "org-reply".into(),
@@ -1293,7 +1331,10 @@ async fn feedback_vote_persists_reply_context_and_logs_metadata_only() {
     let answered = asked + Duration::milliseconds(1500);
     for message in [
         AssistantMessage {
+            continuation_of: None,
             retry_of: None,
+            retry_claimed_by: None,
+            activity_count: None,
             role: "user".into(),
             turn_id: "turn-ctx".into(),
             text: "PROMPT-SENTINEL".into(),
@@ -1301,7 +1342,10 @@ async fn feedback_vote_persists_reply_context_and_logs_metadata_only() {
             ..fixtures::message("ctx-user".into(), conversation_id.into(), f.owner.clone())
         },
         AssistantMessage {
+            continuation_of: None,
             retry_of: None,
+            retry_claimed_by: None,
+            activity_count: None,
             seq: 2,
             turn_id: "turn-ctx".into(),
             text: "REPLY-SENTINEL".into(),

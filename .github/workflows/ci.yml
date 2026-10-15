@@ -499,6 +499,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+      - name: Prepare backend memory reserve
+        run: bash .github/scripts/prepare-backend-runner.sh
       - name: Install system dependencies
         timeout-minutes: 5
         run: bash .github/scripts/install-linux-build-deps.sh

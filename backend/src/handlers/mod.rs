@@ -92,6 +92,9 @@ pub mod oracle_worker_bundle;
 pub mod oracle_workers;
 pub mod org_role_scopes;
 pub mod orgs;
+pub mod platform_binding;
+pub mod platform_bots;
+pub mod platform_setups;
 pub mod providers;
 pub mod proxy;
 pub mod public_mcp;
@@ -195,3 +198,5 @@ pub mod catalog_icons;
 pub mod machine_external_grant;
 
 pub mod admin_remote_machine_platform;
+#[cfg(test)]
+mod tools_manager_tests;

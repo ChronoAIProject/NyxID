@@ -167,6 +167,7 @@ pub async fn begin(
     conversation: Option<&str>,
     automatic: bool,
     manual: bool,
+    provenance: &super::nyxbot_watch_service::ReportProvenance,
 ) -> AppResult<MachineUpdate> {
     super::remote_machine_service::guard_legacy_node_mutation(db, &node.id, "update").await?;
     if automatic && !idle(db, &node.id).await? {
@@ -202,7 +203,7 @@ pub async fn begin(
         "updated_at": bson::DateTime::from_chrono(now),
     }};
     let watch = conversation.map(|conversation| {
-        doc! {
+        let mut watch = doc! {
             "_id": uuid::Uuid::new_v4().to_string(),
             "user_id": actor,
             "kind": "machine_update",
@@ -211,7 +212,9 @@ pub async fn begin(
             "status": "pending",
             "created_at": bson::DateTime::from_chrono(now),
             "expires_at": bson::DateTime::from_chrono(deadline + Duration::hours(1)),
-        }
+        };
+        watch.extend(provenance.fields());
+        watch
     });
     let mut session = db.client().start_session().await?;
     let database = db.clone();

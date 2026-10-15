@@ -125,6 +125,7 @@ pub(crate) async fn new_orchestrator(
         &state.db,
         owner,
         &engine::TurnRequest {
+            acknowledgement_id: None,
             retry_of: None,
             attachment_ids: Vec::new(),
             agent_id: None,
@@ -147,9 +148,25 @@ pub(crate) async fn orchestrator_fixture(name: &str) -> Fixture {
     chat_fixture(state, owner, row, thread).await
 }
 
-/// A specialist agent with no grants, in a live user turn in its home
-/// thread: every service and account tool is gated and requests go to NyxBot.
+/// A specialist agent with no grants, in a live turn in its home thread that
+/// NyxBot assigned from the fixture's NyxBot thread (`nyxbot_thread`): every
+/// service and account tool is gated and requests go to that NyxBot thread.
+/// The assignment is pinned onto the live turn's report snapshot exactly as
+/// `begin_turn` writes it for an Orchestrator start (issue #1883), so the
+/// gated flows observe involved semantics without a model round trip. Use
+/// [`direct_fixture`] for the owner's direct chat with the specialist.
 pub(crate) async fn fixture(name: &str) -> Fixture {
+    specialist_fixture(name, true).await
+}
+
+/// A specialist agent with no grants, in a live *direct* owner turn in its
+/// home thread: NyxBot did not assign this work and is not in the room, so
+/// a missing grant is reported to the owner without any request card.
+pub(crate) async fn direct_fixture(name: &str) -> Fixture {
+    specialist_fixture(name, false).await
+}
+
+async fn specialist_fixture(name: &str, assigned: bool) -> Fixture {
     let (state, owner) = base(name).await;
     let orchestrator = new_orchestrator(&state, &owner, "Coordinate my work").await;
     let (_, home) = super::assistant_team_service::create_specialist(
@@ -176,6 +193,7 @@ pub(crate) async fn fixture(name: &str) -> Fixture {
         &state.db,
         &owner,
         &engine::TurnRequest {
+            acknowledgement_id: None,
             retry_of: None,
             attachment_ids: Vec::new(),
             agent_id: None,
@@ -188,6 +206,11 @@ pub(crate) async fn fixture(name: &str) -> Fixture {
     )
     .await
     .unwrap();
+    let row = if assigned {
+        pin_assignment(&state.db, &owner, &row.id, Some(&orchestrator.id)).await
+    } else {
+        row
+    };
     let fixture = chat_fixture(state, owner, row, orchestrator.id).await;
     // Legacy specialist-flow fixtures explicitly opt into routed compatibility;
     // production defaults remain denied.
@@ -203,6 +226,85 @@ pub(crate) async fn fixture(name: &str) -> Fixture {
         .await
         .unwrap();
     fixture
+}
+
+/// Pin the report snapshot of a thread's live turn (issue #1883): `Some`
+/// marks the turn as work assigned from that NyxBot thread, `None` makes it
+/// direct work again. A thread without a live turn gets a synthetic one, in
+/// the shape `begin_turn` writes. Returns the refreshed row; refresh the
+/// chat with [`chat_for_row`].
+pub(crate) async fn pin_assignment(
+    db: &Database,
+    owner: &str,
+    conversation_id: &str,
+    report_to: Option<&str>,
+) -> AssistantConversation {
+    let conversations =
+        db.collection::<bson::Document>(crate::models::assistant_conversation::COLLECTION_NAME);
+    let live = conversations
+        .find_one(doc! {"_id": conversation_id, "user_id": owner,
+        "active_turn.turn_id": {"$type": "string"}})
+        .await
+        .unwrap()
+        .is_some();
+    let report_to = report_to.map(bson::Bson::from).unwrap_or(bson::Bson::Null);
+    if live {
+        conversations
+            .update_one(
+                doc! {"_id": conversation_id, "user_id": owner},
+                doc! {"$set": {"active_turn.report_to": report_to, "active_turn.with_nyxbot": false}},
+            )
+            .await
+            .unwrap();
+    } else {
+        conversations
+            .update_one(
+                doc! {"_id": conversation_id, "user_id": owner},
+                doc! {"$set": {"active_turn": {
+                    "turn_id": Uuid::new_v4().to_string(),
+                    "origin": "orchestrator",
+                    "started_at": bson::DateTime::now(),
+                    "lease_expires_at": bson::DateTime::from_chrono(Utc::now() + Duration::minutes(30)),
+                    "stop_requested": false,
+                    "report_to": report_to,
+                    "with_nyxbot": false,
+                }}},
+            )
+            .await
+            .unwrap();
+    }
+    engine::get(db, owner, conversation_id).await.unwrap()
+}
+
+/// Mark a thread's live turn as running in `group_id`, a personal group the
+/// owner's NyxBot is a member of (`with_nyxbot`).
+pub(crate) async fn pin_group_with_nyxbot(
+    db: &Database,
+    owner: &str,
+    conversation_id: &str,
+    group_id: &str,
+) -> AssistantConversation {
+    let row = pin_assignment(db, owner, conversation_id, None).await;
+    db.collection::<bson::Document>(crate::models::assistant_conversation::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": &row.id, "user_id": owner},
+            doc! {"$set": {"group_id": group_id, "active_turn.with_nyxbot": true}},
+        )
+        .await
+        .unwrap();
+    engine::get(db, owner, conversation_id).await.unwrap()
+}
+
+/// The chat authority of a thread's credential, as a tool call sees it now.
+pub(crate) async fn chat_for_row(
+    state: &crate::AppState,
+    owner: &str,
+    row: &AssistantConversation,
+) -> acks::ChatAuthority {
+    acks::for_key(&state.db, owner, Some(&row.credential_api_key_id))
+        .await
+        .unwrap()
+        .unwrap()
 }
 
 fn orchestrator_chat() -> acks::ChatAuthority {
@@ -221,6 +323,8 @@ fn orchestrator_chat() -> acks::ChatAuthority {
         agent_id: "agent".into(),
         agent_name: "NyxBot".into(),
         guest: false,
+        report_to: None,
+        with_nyxbot: false,
     }
 }
 
@@ -401,7 +505,9 @@ async fn acknowledgements_deny_expire_and_reask_only_after_a_new_user_message() 
         .unwrap();
     assert_eq!(denial["error"], "acknowledgement_denied");
     assert_eq!(denial["acknowledgement_id"], id);
-    // A following event turn must retain the initiating user turn's denial.
+    // A following event turn of the same assignment must retain the
+    // initiating user turn's denial. Each turn's tool calls authenticate
+    // afresh (issue #1883: a request is fenced to the exact live turn).
     db.collection::<bson::Document>(crate::models::assistant_conversation::COLLECTION_NAME)
         .update_one(
             doc! {"_id": &f.row.id},
@@ -411,7 +517,19 @@ async fn acknowledgements_deny_expire_and_reask_only_after_a_new_user_message() 
         )
         .await
         .unwrap();
-    let event_denial = service_gate(db, &f.chat, &service, "github", "GitHub", false)
+    let stale = service_gate(db, &f.chat, &service, "github", "GitHub", false).await;
+    assert!(
+        matches!(stale, Err(crate::errors::AppError::Conflict(_))),
+        "a chat authenticated for the previous turn cannot ask"
+    );
+    let event_chat = chat_for_row(
+        &f.state,
+        &f.owner,
+        &engine::get(db, &f.owner, &f.row.id).await.unwrap(),
+    )
+    .await;
+    assert!(event_chat.involved());
+    let event_denial = service_gate(db, &event_chat, &service, "github", "GitHub", false)
         .await
         .unwrap()
         .unwrap();
@@ -466,17 +584,40 @@ async fn acknowledgements_deny_expire_and_reask_only_after_a_new_user_message() 
     )
     .await
     .unwrap();
+    // With the turn settled there is no live assignment: a late call is not
+    // NyxBot's work, so it is told what is missing and raises no new card.
+    let cards_before = db
+        .collection::<AssistantAcknowledgement>(ACKS)
+        .count_documents(doc! {})
+        .await
+        .unwrap();
+    let settled_chat = chat_for_row(
+        &f.state,
+        &f.owner,
+        &engine::get(db, &f.owner, &f.row.id).await.unwrap(),
+    )
+    .await;
+    assert!(!settled_chat.turn_live && !settled_chat.involved());
     assert_eq!(
-        service_gate(db, &f.chat, &service, "github", "GitHub", false)
+        service_gate(db, &settled_chat, &service, "github", "GitHub", false)
             .await
             .unwrap()
             .unwrap()["error"],
-        "acknowledgement_denied"
+        "missing_access"
     );
+    assert_eq!(
+        db.collection::<AssistantAcknowledgement>(ACKS)
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        cards_before
+    );
+    // A new user message within NyxBot-assigned work may ask again.
     engine::begin_turn(
         db,
         &f.owner,
         &engine::TurnRequest {
+            acknowledgement_id: None,
             retry_of: None,
             attachment_ids: Vec::new(),
             agent_id: None,
@@ -489,7 +630,9 @@ async fn acknowledgements_deny_expire_and_reask_only_after_a_new_user_message() 
     )
     .await
     .unwrap();
-    let again = service_gate(db, &f.chat, &service, "github", "GitHub", false)
+    let row = pin_assignment(db, &f.owner, &f.row.id, Some(&f.nyxbot_thread)).await;
+    let next_chat = chat_for_row(&f.state, &f.owner, &row).await;
+    let again = service_gate(db, &next_chat, &service, "github", "GitHub", false)
         .await
         .unwrap()
         .unwrap();
@@ -571,6 +714,7 @@ async fn action_acknowledgements_bind_arguments_key_conversation_and_are_single_
         db,
         &f.owner,
         &engine::TurnRequest {
+            acknowledgement_id: None,
             retry_of: None,
             attachment_ids: Vec::new(),
             agent_id: None,
@@ -1185,8 +1329,8 @@ async fn native_inventory(full: bool) {
             assert_eq!(count, 1, "{name}");
         }
     }
-    // Orchestrators never see consent cards; only destructive confirmations,
-    // and none at all once the owner turns confirmations off.
+    // Orchestrators never see scope-consent cards. Full access records
+    // automatic allowances instead of creating pending action confirmations.
     assert_eq!(
         db.collection::<bson::Document>(ACKS)
             .count_documents(doc! {"kind": {"$ne": "action"}})
@@ -1195,13 +1339,32 @@ async fn native_inventory(full: bool) {
         0
     );
     if full {
+        let rows = db.collection::<bson::Document>(ACKS);
         assert_eq!(
-            db.collection::<bson::Document>(ACKS)
-                .count_documents(doc! {})
+            rows.count_documents(doc! {"status": "pending"})
                 .await
                 .unwrap(),
             0
         );
+        assert_eq!(
+            rows.count_documents(doc! {"decided_by": {"$ne": "access_mode"}})
+                .await
+                .unwrap(),
+            0
+        );
+        for tool in ["nyxid__delete_node", "nyxid__delete_agent_key"] {
+            assert_eq!(
+                rows.count_documents(doc! {
+                    "tool_name": tool, "status": "allowed",
+                    "confirmation.risk": "destructive",
+                    "confirmation.reason": "access_mode",
+                })
+                .await
+                .unwrap(),
+                1,
+                "{tool} leaves one successful automatic allowance",
+            );
+        }
     }
     assert_eq!(
         db.collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME)
@@ -1279,6 +1442,22 @@ async fn legacy_ask_conversation_upgrades_to_full_on_its_next_turn_and_credentia
         assistant_conversation::{AccessMode, AgentRole, COLLECTION_NAME as CONVERSATIONS},
     };
     let f = orchestrator_fixture("native_legacy_migration").await;
+    // The stale consent card is raised while its turn is still live (a card
+    // needs the exact live turn); the row then goes idle and legacy.
+    let stale = acks::request(
+        &f.state.db,
+        &f.chat,
+        acks::Request {
+            kind: "service",
+            service: Some(("service", "example", "Example")),
+            tool: None,
+            arguments: None,
+            summary: "Allow Example?",
+            platform: false,
+        },
+    )
+    .await
+    .unwrap();
     idle(&f).await;
     // A pre-NyxBot Ask-mode row: no role/team fields, restricted key, a stale
     // consent card.
@@ -1312,24 +1491,11 @@ async fn legacy_ask_conversation_upgrades_to_full_on_its_next_turn_and_credentia
     )
     .await
     .unwrap();
-    let stale = acks::request(
-        &f.state.db,
-        &f.chat,
-        acks::Request {
-            kind: "service",
-            service: Some(("service", "example", "Example")),
-            tool: None,
-            arguments: None,
-            summary: "Allow Example?",
-            platform: false,
-        },
-    )
-    .await
-    .unwrap();
     engine::begin_turn(
         &f.state.db,
         &f.owner,
         &engine::TurnRequest {
+            acknowledgement_id: None,
             retry_of: None,
             attachment_ids: Vec::new(),
             agent_id: None,
@@ -1398,6 +1564,7 @@ async fn assert_assistant_key_boundaries(f: &Fixture) {
         &f.state.db,
         &f.owner,
         &engine::TurnRequest {
+            acknowledgement_id: None,
             retry_of: None,
             attachment_ids: Vec::new(),
             agent_id: None,
@@ -1686,6 +1853,7 @@ async fn conversation_provisioning_rolls_back_its_key_when_the_first_message_can
         db,
         &f.owner,
         &engine::TurnRequest {
+            acknowledgement_id: None,
             retry_of: None,
             attachment_ids: Vec::new(),
             agent_id: None,

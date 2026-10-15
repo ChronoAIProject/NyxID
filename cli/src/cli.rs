@@ -340,6 +340,11 @@ pub enum AdminCommands {
         #[command(subcommand)]
         command: AdminProviderCommands,
     },
+    /// Prepare Tools with a manifest or wizard (publication is Admin-only)
+    Tools {
+        #[command(subcommand)]
+        command: AdminToolsCommands,
+    },
     /// Add, apply and validate catalog services from a manifest (Admin or Catalog Manager)
     Catalog {
         #[command(subcommand)]
@@ -495,6 +500,57 @@ pub enum AdminCatalogCommands {
     Validate {
         #[command(flatten)]
         manifest: ManifestArgs,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum AdminToolsCommands {
+    /// Upload and attach an immutable static SVG to a provider-less Tool
+    Icon {
+        tool: String,
+        #[arg(long)]
+        file: std::path::PathBuf,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Onboard a twin or new HTTP API; save only secret-free metadata
+    Add {
+        #[arg(long, conflicts_with = "template")]
+        file: Option<std::path::PathBuf>,
+        #[arg(long)]
+        template: Option<String>,
+        #[arg(long)]
+        save: Option<std::path::PathBuf>,
+        #[arg(long)]
+        yes: bool,
+        #[arg(long)]
+        skip_credentials: bool,
+        #[arg(long)]
+        credential_env: Option<String>,
+        #[arg(long = "set", value_name = "NAME=VALUE")]
+        vars: Vec<String>,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Reconcile by slug, without rotating credentials; reruns are no-ops
+    Apply {
+        #[arg(long)]
+        file: std::path::PathBuf,
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(long = "set", value_name = "NAME=VALUE")]
+        vars: Vec<String>,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Read-only readiness report (exit 0 ready, 2 pending, 1 failed)
+    Validate {
+        #[arg(long)]
+        file: std::path::PathBuf,
+        #[arg(long = "set", value_name = "NAME=VALUE")]
+        vars: Vec<String>,
         #[command(flatten)]
         auth: AuthArgs,
     },
@@ -802,7 +858,7 @@ pub enum PublicCommands {
 #[derive(Args, Default)]
 #[command(
     after_help = crate::tls::ENV_HELP,
-    after_long_help = concat!("Agent login URL:\n  nyxid login --agent-key --no-wait --output json --profile my-agent\n\nShare verification_uri_complete from the JSON with the human. The request is\nnot approved until they finish the browser review. Resume after approval:\n  nyxid login resume <request_id> --once --output json\n\nAdd --scopes, --service, --service-permission, --key-source, --key-name, and\n--expiry-days to prefill the requested access. Use --device instead of\n--agent-key when either full account or restricted access is acceptable.\n\nNetwork / TLS: NYXID_CA_CERT adds a PEM CA file; SSL_CERT_FILE / SSL_CERT_DIR select system roots. HTTPS_PROXY / NO_PROXY control HTTP proxies. Run nyxid doctor for diagnostics.")
+    after_long_help = concat!("Agent login URL:\n  nyxid login --agent-key --no-wait --output json --profile my-agent\n\nShare verification_uri_complete and user_code separately with the human.\nThey must paste the code into the page and finish the browser review.\nNever append the code to the URL. Resume after approval:\n  nyxid login resume <request_id> --once --output json\n\nAdd --scopes, --service, --service-permission, --key-source, --key-name, and\n--expiry-days to prefill the requested access. Use --device instead of\n--agent-key when either full account or restricted access is acceptable.\n\nNetwork / TLS: NYXID_CA_CERT adds a PEM CA file; SSL_CERT_FILE / SSL_CERT_DIR select system roots. HTTPS_PROXY / NO_PROXY control HTTP proxies. Run nyxid doctor for diagnostics.")
 )]
 pub struct LoginArgs {
     /// NyxID base URL, e.g. https://auth.nyxid.dev
@@ -829,7 +885,7 @@ pub struct LoginArgs {
     /// Agent profile name (isolates tokens)
     #[arg(long, env = "NYXID_PROFILE", global = true)]
     pub profile: Option<String>,
-    /// Mint a complete login URL (verification_uri_complete) and exit without polling or opening a browser; combine with --output json for agents
+    /// Print a login URL and a separate code for manual entry, then exit without polling or opening a browser; combine with --output json for agents
     #[arg(long, conflicts_with_all = ["password", "code"])]
     pub no_wait: bool,
     /// Structured login events on stdout; credentials are never printed

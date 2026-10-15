@@ -23,6 +23,7 @@ use std::{
 };
 use tokio::sync::{Mutex, broadcast, oneshot};
 use tokio_util::task::AbortOnDropHandle;
+use tracing::Instrument;
 use uuid::Uuid;
 
 use crate::{
@@ -106,6 +107,8 @@ pub struct ActivityResponse {
     status: String,
     started_at: DateTime<Utc>,
     ended_at: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    failure: Option<crate::models::assistant_conversation::ToolFailure>,
 }
 impl From<crate::models::assistant_conversation::TurnActivity> for ActivityResponse {
     fn from(row: crate::models::assistant_conversation::TurnActivity) -> Self {
@@ -116,6 +119,7 @@ impl From<crate::models::assistant_conversation::TurnActivity> for ActivityRespo
             status: row.status,
             started_at: row.started_at,
             ended_at: row.ended_at,
+            failure: row.failure,
         }
     }
 }
@@ -167,6 +171,7 @@ pub struct ActiveTurnResponse {
     steering_allowed: bool,
     stop_requested: bool,
     continuations: u32,
+    activity_total: i64,
     turn_id: String,
     started_at: DateTime<Utc>,
     activities: Vec<ActivityResponse>,
@@ -269,6 +274,7 @@ impl From<AssistantConversation> for ConversationResponse {
             ),
             stop_requested: turn.stop_requested,
             continuations: turn.continuations,
+            activity_total: turn.activity_total,
             turn_id: turn.turn_id.clone(),
             started_at: turn.started_at,
             activities: turn
@@ -368,10 +374,12 @@ impl From<crate::models::assistant_message::AssistantErrorDetail> for ErrorDetai
 
 #[derive(Serialize)]
 pub struct MessageResponse {
+    recovery: Option<RecoveryResponse>,
     pub feedback: Option<crate::handlers::assistant_feedback::FeedbackResponse>,
     steering: Option<steering::SteeringResponse>,
     voice: Option<VoiceTranscriptResponse>,
     execution_pending: bool,
+    continuation_of: Option<String>,
     id: String,
     seq: i64,
     turn_id: String,
@@ -386,10 +394,12 @@ pub struct MessageResponse {
     attachments: Vec<AttachmentResponse>,
     /// A user message written in a chat app: its platform.
     via: Option<String>,
+    activity_total: i64,
 }
 impl From<AssistantMessage> for MessageResponse {
     fn from(row: AssistantMessage) -> Self {
         Self {
+            recovery: None,
             feedback: None,
             steering: row
                 .steering
@@ -397,6 +407,7 @@ impl From<AssistantMessage> for MessageResponse {
                 .map(steering::SteeringResponse::from),
             voice: row.voice.map(VoiceTranscriptResponse::from),
             execution_pending: row.execution_pending,
+            continuation_of: row.continuation_of,
             id: row.id,
             seq: row.seq,
             turn_id: row.turn_id,
@@ -418,6 +429,24 @@ impl From<AssistantMessage> for MessageResponse {
                 .map(AttachmentResponse::from)
                 .collect(),
             via: row.via,
+            activity_total: row.activity_total,
+        }
+    }
+}
+#[derive(Serialize)]
+pub struct RecoveryResponse {
+    status: &'static str,
+    reason: &'static str,
+    text: Option<String>,
+    attachments: Vec<String>,
+}
+impl From<engine::RecoveryPreview> for RecoveryResponse {
+    fn from(preview: engine::RecoveryPreview) -> Self {
+        Self {
+            status: preview.status,
+            reason: preview.reason,
+            text: preview.text,
+            attachments: preview.attachments.into_iter().map(|a| a.label).collect(),
         }
     }
 }
@@ -568,7 +597,13 @@ pub async fn history(
         rows.remove(0);
     }
     let before_seq = more.then(|| rows[0].seq);
-    let mut acknowledgements = acknowledgements::history(&state.db, &user_id, &id).await?;
+    let mut acknowledgements = acknowledgements::history_for_messages(
+        &state.db,
+        &user_id,
+        &id,
+        rows.first().map(|message| message.created_at),
+    )
+    .await?;
     if let Some(card) = query.card {
         acknowledgements::include_card(
             &state.db,
@@ -606,6 +641,21 @@ pub async fn history(
     .await?;
     let agents = crate::services::assistant_team_service::agents(&state.db, &user_id, true).await?;
     let agent_id = conversation.agent_id.clone();
+    let agent_available = agents.iter().any(|agent| {
+        agent_id
+            .as_deref()
+            .map_or_else(|| agent.is_nyxbot(), |id| agent.id == id)
+            && agent.destroyed_at.is_none()
+    });
+    let recovery = engine::recovery_previews(
+        &state.db,
+        &user_id,
+        &id,
+        &conversation,
+        &rows,
+        agent_available,
+    )
+    .await?;
     let chats = super::nyxbot::chats::thread_details(&state, &user_id, &[&conversation]).await?;
     let mut conversation = ConversationResponse::from(conversation)
         .with_agent(agent_id.as_deref(), &agents)
@@ -615,6 +665,9 @@ pub async fn history(
         .filter(|ack| ack.status == "pending")
         .count() as u32;
     let mut messages: Vec<MessageResponse> = rows.into_iter().map(Into::into).collect();
+    for message in &mut messages {
+        message.recovery = recovery.get(&message.id).cloned().map(Into::into);
+    }
     let ids: Vec<_> = messages.iter().map(|m| m.id.clone()).collect();
     let feedback =
         crate::services::assistant_feedback_service::states_for_messages(&state.db, &user_id, &ids)
@@ -651,6 +704,19 @@ pub async fn history(
         messages,
         before_seq,
     }))
+}
+
+/// Refresh one failed reply's recovery decision before any execution attempt.
+pub async fn recovery(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path((id, message_id)): Path<(String, String)>,
+) -> AppResult<Json<RecoveryResponse>> {
+    super::login_client_context::require_first_party_human(&auth)?;
+    let user_id = auth.user_id.to_string();
+    engine::require_enabled(&state.db, &user_id).await?;
+    let preview = engine::recovery_for_message(&state.db, &user_id, &id, &message_id).await?;
+    Ok(Json(preview.into()))
 }
 
 #[derive(Serialize)]
@@ -804,6 +870,8 @@ pub struct AcknowledgementResponse {
     kind: String,
     status: String,
     summary: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    link: Option<String>,
     /// `user` or `orchestrator` (a subagent's request its orchestrator decides).
     decider: String,
     decided_by: Option<String>,
@@ -830,6 +898,7 @@ impl From<crate::models::assistant_acknowledgement::AssistantAcknowledgement>
             kind: row.kind,
             status: row.status,
             summary: row.summary,
+            link: row.link,
             trigger_run_id: row.trigger_run_id,
             decider: row.decider,
             decided_by: row.decided_by,
@@ -854,6 +923,8 @@ pub enum Decision {
 #[serde(deny_unknown_fields)]
 pub struct AcknowledgementDecision {
     decision: Decision,
+    #[serde(default)]
+    accept_reduced_scope: bool,
 }
 
 pub async fn decide_acknowledgement(
@@ -867,7 +938,7 @@ pub async fn decide_acknowledgement(
     if let Some(card) = state.db.collection::<crate::models::assistant_acknowledgement::AssistantAcknowledgement>(crate::models::assistant_acknowledgement::COLLECTION_NAME)
         .find_one(doc! {"_id":&ack_id,"user_id":&user,"conversation_id":&id,"authored_skill":{"$ne":bson::Bson::Null}}).await? {
         super::login_client_context::require_first_party_human(&auth)?;
-        let card = Box::pin(super::assistant_agent_learning::decide_authored(&state, &auth, card, matches!(body.decision, Decision::Allow))).await?;
+        let card = Box::pin(super::assistant_agent_learning::decide_authored_with_scope(&state, &auth, card, matches!(body.decision, Decision::Allow), body.accept_reduced_scope)).await?;
         return Ok(Json(card.into()));
     }
     let row = acknowledgements::decide(
@@ -888,6 +959,12 @@ pub async fn decide_acknowledgement(
     if row.decider == "orchestrator" {
         super::assistant_team::permission_decided(&state, &user, &row).await;
     }
+    if matches!(body.decision, Decision::Deny) {
+        Box::pin(super::assistant_team::owner_denial_decided(
+            &state, &user, &row,
+        ))
+        .await;
+    }
     if matches!(body.decision, Decision::Allow)
         && let Some(action) = row.machine_context.as_ref()
     {
@@ -896,7 +973,7 @@ pub async fn decide_acknowledgement(
     Ok(Json(row.into()))
 }
 
-/// Retired: every chat runs with Full access. Kept so older clients get a
+/// Retired conversation consent mode. Kept so older clients get a
 /// stable, explicit answer instead of a 404.
 pub async fn change_access_mode(
     State(state): State<AppState>,
@@ -908,7 +985,7 @@ pub async fn change_access_mode(
         StatusCode::GONE,
         Json(json!({
             "error": "access_mode_retired",
-            "message": "Every NyxBot chat runs with Full access; the Ask/Full choice was removed.",
+            "message": "Conversation consent modes were retired. Change the permission mode in NyxBot settings or the composer.",
         })),
     )
         .into_response())
@@ -1095,6 +1172,30 @@ pub struct ModelResponse {
 type ModelCache = HashMap<String, (Instant, Vec<ModelResponse>)>;
 static MODELS: LazyLock<Mutex<ModelCache>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
+/// Keep upstream display metadata; the routing alias is not a model name.
+fn model_response(row: &Value) -> Option<ModelResponse> {
+    let id = row["id"].as_str().filter(|id| engine::valid_model(id))?;
+    let label = ["display_name", "label", "name"]
+        .into_iter()
+        .filter_map(|key| row[key].as_str())
+        .map(str::trim)
+        .find(|name| !name.is_empty());
+    Some(ModelResponse {
+        id: id.into(),
+        label: label
+            .unwrap_or_else(|| {
+                if id == engine::DEFAULT_MODEL {
+                    "Default model"
+                } else {
+                    id.trim_start_matches("nyxagent/")
+                }
+            })
+            .into(),
+        available: row["available"].as_bool() != Some(false),
+        description: row["description"].as_str().map(str::to_owned),
+    })
+}
+
 /// The models NyxAgent currently offers this owner, or `None` when its list
 /// cannot be read. Cached per owner for a minute: availability follows the
 /// owner's assistant credential, so owners never share an entry.
@@ -1145,18 +1246,8 @@ pub(crate) async fn live_models(
             .as_array()
             .into_iter()
             .flatten()
-            .filter(|row| row["id"].as_str().is_some_and(engine::valid_model))
+            .filter_map(model_response)
             .take(50)
-            .map(|row| {
-                let id = row["id"].as_str().unwrap_or_default();
-                ModelResponse {
-                    id: id.into(),
-                    label: id.trim_start_matches("nyxagent/").into(),
-                    // NyxAgent may list a profile it cannot serve right now.
-                    available: row["available"].as_bool() != Some(false),
-                    description: None,
-                }
-            })
             .collect();
         if rows.is_empty() {
             return Err(AppError::Internal("Assistant profiles unavailable".into()));
@@ -1205,7 +1296,7 @@ pub async fn models(
         live_models(&state, &auth, policy).await.unwrap_or_else(|| {
             vec![ModelResponse {
                 id: engine::DEFAULT_MODEL.into(),
-                label: "chat".into(),
+                label: "Default model".into(),
                 available: true,
                 description: None,
             }]
@@ -1399,20 +1490,23 @@ pub(crate) async fn start_turn_with_voice(
             .await?
             .ok_or_else(|| AppError::NotFound("Assistant credential not found".into()))?;
     let (sender, receiver) = broadcast::channel(256);
-    tokio::spawn(run_turn(
-        state.clone(),
-        auth,
-        row.clone(),
-        text,
-        credential,
-        policy,
-        permit,
-        Events {
-            sender,
-            cursor: 0,
-            reset_notified: false,
-        },
-    ));
+    tokio::spawn(
+        run_turn(
+            state.clone(),
+            auth,
+            row.clone(),
+            text,
+            credential,
+            policy,
+            permit,
+            Events {
+                sender,
+                cursor: 0,
+                reset_notified: false,
+            },
+        )
+        .in_current_span(),
+    );
     Ok((row, receiver))
 }
 
@@ -1551,6 +1645,7 @@ async fn run_turn(
         .clone();
     let message_id = Uuid::new_v4().to_string();
     let block_id = format!("{message_id}-text");
+    tracing::info!(turn_id = %turn_id, "Assistant turn started");
     let (heartbeat_stop, mut heartbeat_stop_rx) = oneshot::channel();
     let heartbeat_db = state.db.clone();
     let heartbeat_user = row.user_id.clone();
@@ -2004,7 +2099,12 @@ async fn execute_turn_inner(
     if recap {
         events.notice();
     }
-    let mut prompt = context.instructions(&history, recap);
+    let saved_recap = tokio::sync::OnceCell::new();
+    let load_recap = || engine::recap(&state.db, row, &history, turn_id);
+    let mut prompt = context
+        .session_instructions(recap, &saved_recap, load_recap)
+        .await
+        .map_err(|_| TurnError::new("assistant_unavailable"))?;
     let mut attachments = crate::services::assistant_upload_service::turn_attachments(
         &state.db,
         &row.user_id,
@@ -2289,6 +2389,10 @@ async fn execute_turn_inner(
             }
             match recovery.decide(status, code, binding.is_some()) {
                 RecoveryAction::Rebind => {
+                    events.emit(
+                        "turn.notice",
+                        json!({"code": "retrying", "message": "Retrying…"}),
+                    );
                     engine::clear_binding(
                         &state.db,
                         &row.user_id,
@@ -2300,10 +2404,17 @@ async fn execute_turn_inner(
                     .map_err(|_| TurnError::internal("assistant_unavailable", "recovery"))?;
                     binding = None;
                     context.fresh_session();
-                    prompt = context.instructions(&history, true);
+                    prompt = context
+                        .session_instructions(true, &saved_recap, load_recap)
+                        .await
+                        .map_err(|_| TurnError::new("assistant_unavailable"))?;
                     events.notice();
                 }
                 RecoveryAction::ReplaceCredential => {
+                    events.emit(
+                        "turn.notice",
+                        json!({"code": "retrying", "message": "Retrying…"}),
+                    );
                     *credential = credentials::replace(
                         &state.db,
                         &state.encryption_keys,
@@ -2315,10 +2426,17 @@ async fn execute_turn_inner(
                     .map_err(|_| TurnError::internal("agent_key_required", "recovery"))?;
                     binding = None;
                     context.fresh_session();
-                    prompt = context.instructions(&history, true);
+                    prompt = context
+                        .session_instructions(true, &saved_recap, load_recap)
+                        .await
+                        .map_err(|_| TurnError::new("assistant_unavailable"))?;
                     events.notice();
                 }
                 RecoveryAction::Backoff => {
+                    events.emit(
+                        "turn.notice",
+                        json!({"code": "retrying", "message": "Retrying…"}),
+                    );
                     let jitter = u64::from(rand::random::<u16>() % 500);
                     tokio::time::sleep(Duration::from_millis(
                         (1 << recovery.retries) * 1000 + jitter,
@@ -2420,14 +2538,14 @@ async fn execute_turn_inner(
                 if decoder.terminal.is_some() {
                     break;
                 }
-                // Hold a key-length suffix so a reflected key split across deltas
-                // cannot leak before the next fragment reveals the full match.
-                let mut safe_end = partial
-                    .len()
-                    .saturating_sub(credential.raw_key.len().max(context.reflection_window()));
-                while !partial.is_char_boundary(safe_end) {
-                    safe_end -= 1;
-                }
+                let held = engine::secret_prefix_suffix(
+                    partial,
+                    &[
+                        credential.raw_key.as_str(),
+                        context.binding.marker.as_deref().unwrap_or(""),
+                    ],
+                );
+                let safe_end = partial.len() - held.len();
                 emit_text_suffix(events, block_id, &mut emitted, &partial[..safe_end]);
             }
             Ok(())

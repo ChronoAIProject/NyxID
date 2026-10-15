@@ -653,6 +653,7 @@ fn delegated_read_denied_path(path: &str) -> bool {
                 | "remote-machine-entitlement"
                 | "remote-machine-operations"
                 | "machine-confirmations"
+                | "onboarding"
         )
     ) {
         return true;
@@ -2102,6 +2103,16 @@ mod tests {
             "/api/v1/assistant/wire-logs/7d6f176c-45c6-4efa-95b2-12dc58a7341f",
             "/api/v1/assistant/nyxagent/machines/node-id/desktop",
             "/api/v1/machines/setups/setup-id",
+            "/api/v1/remote-machines/machine-id",
+            "/api/v1/remote-machine-quotes",
+            "/api/v1/remote-machine-entitlement",
+            "/api/v1/remote-machine-operations/operation-id",
+            "/api/v1/machine-confirmations/confirmation-id/decision",
+            "/api/v1/api-keys/key-id/machine-grant",
+            "/api/v1/users/me/consents/consent-id/machine-grant",
+            "/api/v1/onboarding/setups/setup-id",
+            "//api/v1//onboarding/bindings/?page=2",
+            "/api/v1/remote-machines/?page=2",
             "/api/v1/saved-logins/login-id",
             "/api/v1/auth/social/github",
             "/api/v1/devices/code/poll",
@@ -2226,6 +2237,8 @@ mod tests {
             "/api/v1/keys/",
             "/api/v1/keys?include=all",
             "/api/v1/nodesXYZ",
+            "/api/v1/onboardingXYZ",
+            "/api/v1/remote-machinesXYZ",
             "/api/v1/administer",
         ] {
             assert!(
@@ -2653,6 +2666,20 @@ mod tests {
             )
             .await;
             assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        }
+        for path in [
+            "/api/v1/remote-machine-entitlement",
+            "/api/v1/remote-machines",
+            "/api/v1/remote-machines/machine-id",
+            "/api/v1/remote-machine-operations/operation-id",
+            "/api/v1/machine-confirmations",
+            "/api/v1/api-keys/key-id/machine-grant",
+            "/api/v1/users/me/consents/consent-id/machine-grant",
+            "/api/v1/onboarding/bindings",
+            "/api/v1/onboarding/setups",
+        ] {
+            let response = delegated_router_response(&app, Method::GET, path, &delegated).await;
+            assert_eq!(response.status(), StatusCode::FORBIDDEN, "GET {path}");
         }
         for path in [
             "/api/v1/assistant/nyxagent/voice/options",

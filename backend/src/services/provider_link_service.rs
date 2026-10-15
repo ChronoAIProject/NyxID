@@ -43,21 +43,58 @@ pub async fn list_linked(
 
 /// The service and its requirement change in one transaction. Repeating the
 /// same link is safe; replacing another provider requires a separate decision.
-pub async fn link(
+pub async fn link_with_authority(
     db: &mongodb::Database,
     provider_id: &str,
     service_id: &str,
     new_service: Option<&DownstreamService>,
+    authority: Option<(
+        &DownstreamService,
+        &super::catalog_mutation_service::Authority,
+    )>,
 ) -> AppResult<()> {
     let db = db.clone();
     let provider_id = provider_id.to_string();
     let service_id = service_id.to_string();
     let new_service = new_service.cloned();
+    let authority = authority.map(|(row, auth)| (row.clone(), auth.clone()));
     let mut session = db.client().start_session().await?;
     session
         .start_transaction()
         .and_run2(async move |session| {
-            transactions::transaction_result(
+            let result = async {
+                if let Some((observed, authority)) = &authority {
+                    if !authority.first_party_human {
+                        return Err(AppError::Forbidden(
+                            "Provider linking requires a first-party human".into(),
+                        ));
+                    }
+                    let admin = super::tools_manager_service::fence_role_authority(
+                        &db,
+                        session,
+                        &authority.actor.user_id,
+                        Some(crate::models::role::CATALOG_SERVICES_WRITE_PERMISSION),
+                    )
+                    .await?;
+                    super::catalog_mutation_service::fence(&db, session, observed, Some(authority))
+                        .await?;
+                    let provider = db
+                        .collection::<ProviderConfig>(PROVIDERS)
+                        .find_one(doc! {"_id":&provider_id,"is_active":true})
+                        .session(&mut *session)
+                        .await?
+                        .ok_or_else(|| AppError::NotFound("Provider not found".into()))?;
+                    if !admin && provider.created_by != authority.actor.user_id {
+                        return Err(AppError::Forbidden("Provider ownership changed".into()));
+                    }
+                    db.collection::<mongodb::bson::Document>(PROVIDERS)
+                        .update_one(
+                            doc! {"_id":&provider_id},
+                            doc! {"$inc":{"authority_fence":1_i64}},
+                        )
+                        .session(&mut *session)
+                        .await?;
+                }
                 link_in_session(
                     &db,
                     &provider_id,
@@ -65,11 +102,23 @@ pub async fn link(
                     new_service.as_ref(),
                     session,
                 )
-                .await,
-            )
+                .await
+            }
+            .await;
+            transactions::transaction_result(result)
         })
         .await
         .map_err(transactions::map_transaction_error)
+}
+
+#[cfg(test)]
+async fn link(
+    db: &mongodb::Database,
+    provider_id: &str,
+    service_id: &str,
+    new_service: Option<&DownstreamService>,
+) -> AppResult<()> {
+    link_with_authority(db, provider_id, service_id, new_service, None).await
 }
 
 /// Join a catalog creation transaction so provider validation, the catalog row,
@@ -105,6 +154,11 @@ pub(super) async fn link_in_session(
         .await?
         .ok_or_else(|| AppError::NotFound("Service not found".into()))?;
     retired_service_service::require_available(&service)?;
+    if service.offering_kind == crate::models::downstream_service::OfferingKind::Tool {
+        return Err(AppError::Forbidden(
+            "Tools must remain provider-less".into(),
+        ));
+    }
     if service.service_type != "http" || service.auth_method == "oidc" {
         return Err(AppError::ValidationError(
             "Only downstream HTTP services can be linked".into(),
@@ -175,7 +229,40 @@ pub(super) async fn link_in_session(
     Ok(())
 }
 
-pub async fn add_requirement(
+pub async fn add_requirement_with_authority(
+    db: &mongodb::Database,
+    requirement: &ServiceProviderRequirement,
+    observed: &DownstreamService,
+    authority: &super::catalog_mutation_service::Authority,
+) -> AppResult<()> {
+    mutate_requirement(
+        db,
+        &requirement.service_id,
+        Some(requirement),
+        &requirement.id,
+        Some((observed, authority)),
+    )
+    .await
+}
+
+pub async fn remove_requirement_with_authority(
+    db: &mongodb::Database,
+    requirement_id: &str,
+    observed: &DownstreamService,
+    authority: &super::catalog_mutation_service::Authority,
+) -> AppResult<()> {
+    mutate_requirement(
+        db,
+        &observed.id,
+        None,
+        requirement_id,
+        Some((observed, authority)),
+    )
+    .await
+}
+
+#[cfg(test)]
+async fn add_requirement(
     db: &mongodb::Database,
     requirement: &ServiceProviderRequirement,
 ) -> AppResult<()> {
@@ -184,16 +271,18 @@ pub async fn add_requirement(
         &requirement.service_id,
         Some(requirement),
         &requirement.id,
+        None,
     )
     .await
 }
 
-pub async fn remove_requirement(
+#[cfg(test)]
+async fn remove_requirement(
     db: &mongodb::Database,
     service_id: &str,
     requirement_id: &str,
 ) -> AppResult<()> {
-    mutate_requirement(db, service_id, None, requirement_id).await
+    mutate_requirement(db, service_id, None, requirement_id, None).await
 }
 
 async fn mutate_requirement(
@@ -201,7 +290,12 @@ async fn mutate_requirement(
     service_id: &str,
     addition: Option<&ServiceProviderRequirement>,
     requirement_id: &str,
+    authority: Option<(
+        &DownstreamService,
+        &super::catalog_mutation_service::Authority,
+    )>,
 ) -> AppResult<()> {
+    let authority = authority.map(|(row, auth)| (row.clone(), auth.clone()));
     let db = db.clone();
     let service_id = service_id.to_string();
     let requirement_id = requirement_id.to_string();
@@ -209,10 +303,16 @@ async fn mutate_requirement(
     let mut session = db.client().start_session().await?;
     session.start_transaction().and_run2(async move |session| {
         let result: AppResult<()> = async {
+            if let Some((observed, authority)) = &authority {
+                super::catalog_mutation_service::fence(&db, session, observed, Some(authority)).await?;
+            }
             let services = db.collection::<DownstreamService>(SERVICES);
             let service = services.find_one(doc! { "_id": &service_id }).session(&mut *session).await?
                 .ok_or_else(|| AppError::NotFound("Service not found".into()))?;
             retired_service_service::require_available(&service)?;
+            if service.offering_kind == crate::models::downstream_service::OfferingKind::Tool {
+                return Err(AppError::Forbidden("Tools cannot use provider requirements".into()));
+            }
             if service.provider_config_id.is_some() && service.auth_method != "none" {
                 return Err(AppError::Conflict("Direct-auth services cannot have provider requirements".into()));
             }

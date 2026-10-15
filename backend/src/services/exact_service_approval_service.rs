@@ -236,7 +236,14 @@ pub async fn create_request(
     )?
     .operation_descriptor();
     let approval_target = approval_target(state, caller, service).await?;
-    let pending = match approval_service::evaluate_and_check(
+    let chat = super::assistant_acknowledgement_service::for_key_with_access(
+        &state.db,
+        &caller.actor_user_id,
+        caller.api_key_id.as_deref(),
+        caller.org_agent_access.as_ref(),
+    )
+    .await?;
+    let (outcome, _) = approval_service::evaluate_for_chat(
         &state.db,
         &caller.approval_owner_user_id,
         &approval_target.service_owner_user_id,
@@ -246,9 +253,10 @@ pub async fn create_request(
         &caller.requester_id,
         false,
         approval_target.is_auto_connected,
+        chat.as_ref(),
     )
-    .await?
-    {
+    .await?;
+    let pending = match outcome {
         approval_service::ApprovalOutcome::NeedsApproval(pending)
             if pending.resolution.mode == ApprovalMode::PerRequest =>
         {

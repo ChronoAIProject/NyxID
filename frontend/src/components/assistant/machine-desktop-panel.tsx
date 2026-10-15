@@ -687,7 +687,7 @@ export function ConversationMachineDesktops({
   readonly conversationId: string;
   readonly turnActive?: boolean;
 }) {
-  const machines = useMachineDesktops(conversationId);
+  const machines = useMachineDesktops(conversationId, turnActive);
   const desktops = [
     ...new Map(
       (machines.data ?? []).map((machine) => [

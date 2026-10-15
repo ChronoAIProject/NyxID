@@ -37,6 +37,7 @@ import { ServiceIcon } from "@/components/service-icon";
 import { toast } from "sonner";
 import type { AgentServiceBinding } from "@/types/keys";
 import type { CredentialSource } from "@/schemas/orgs";
+import { connectionIconUrl } from "@/lib/connection-icon";
 
 /// True iff two credential sources point at the same owner. Used by the
 /// binding / scope pickers to filter the service list to options the
@@ -192,7 +193,7 @@ export function BindingsCard({
                   {availableServices.map((s) => (
                     <SelectItem key={s.id} value={s.id}>
                       <span className="inline-flex items-center gap-2">
-                        <ServiceIcon slug={s.catalog_service_slug} size="2xs" />
+                        <ServiceIcon slug={s.catalog_service_slug} iconUrl={connectionIconUrl(s)} size="2xs" />
                         <span>
                           {s.label}
                           {s.slug !== s.label ? ` (${s.slug})` : ""}
@@ -243,7 +244,11 @@ export function BindingsCard({
                 }
               >
                 <div className="flex items-center gap-2.5">
-                  <ServiceIcon slug={boundKey?.catalog_service_slug} size="sm" />
+                  <ServiceIcon
+                    slug={boundKey?.catalog_service_slug}
+                    iconUrl={connectionIconUrl(boundKey)}
+                    size="sm"
+                  />
                   <div className="space-y-0.5">
                   <p className="text-12 font-medium flex items-center gap-1.5">
                     {b.is_invalid && (

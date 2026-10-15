@@ -118,6 +118,21 @@ pub async fn require_transactions(db: &Database) -> Result<(), mongodb::error::E
 /// Uses `create_index` which is idempotent -- if the index already exists
 /// with the same specification it is a no-op.
 pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> {
+    db.collection::<crate::models::assistant_skill_draft_attempt::AssistantSkillDraftAttempt>(
+        crate::models::assistant_skill_draft_attempt::COLLECTION_NAME,
+    )
+    .create_index(
+        IndexModel::builder()
+            .keys(doc! {"created_at":1})
+            .options(
+                IndexOptions::builder()
+                    .name("assistant_skill_draft_attempts_ttl".to_owned())
+                    .expire_after(Duration::from_secs(86400))
+                    .build(),
+            )
+            .build(),
+    )
+    .await?;
     // Poll index groups and migrations sequentially without retaining the
     // large index-construction frame while a migration calls into MongoDB.
     Box::pin(ensure_core_indexes(db)).await?;
@@ -213,6 +228,7 @@ async fn ensure_core_indexes(db: &Database) -> Result<(), mongodb::error::Error>
     crate::services::assistant_nyxagent::ensure_indexes(db).await?;
     crate::services::assistant_agent_learning::ensure_indexes(db).await?;
     crate::services::assistant_voice::ensure_indexes(db).await?;
+    crate::services::channel_image_delivery::ensure_indexes(db).await?;
     crate::services::voice::session::ensure_indexes(db).await?;
     Box::pin(crate::services::machine_access_service::ensure_indexes(db))
         .await
@@ -243,6 +259,12 @@ async fn ensure_core_indexes(db: &Database) -> Result<(), mongodb::error::Error>
     }
     crate::services::coordination_service::ensure_indexes(db).await?;
     crate::services::service_concurrency_service::ensure_indexes(db).await?;
+    crate::services::platform_bot_config_service::ensure_indexes(db).await?;
+    crate::services::platform_setup_service::ensure_indexes(db).await?;
+    crate::services::platform_binding_service::ensure_indexes(db).await?;
+    crate::services::platform_provisioning_service::ensure_indexes(db).await?;
+    crate::services::platform_inference_service::ensure_indexes(db).await?;
+    crate::services::platform_native_receipt_service::ensure_indexes(db).await?;
 
     // ── assistant_wire_logs ──
     db.collection::<AssistantWireLog>(AssistantWireLog::COLLECTION_NAME)
@@ -2161,6 +2183,61 @@ async fn ensure_core_indexes(db: &Database) -> Result<(), mongodb::error::Error>
     Ok(())
 }
 
+async fn ensure_feature_flag_indexes(db: &Database) -> Result<(), mongodb::error::Error> {
+    // ── feature_flag_overrides ──
+    // One override per (org, flag definition, target scope). target_key is null for
+    // org-scope rows, the role string for role scope, the member_user_id for
+    // user scope — so the compound key uniquely identifies each override.
+    let feature_flag_overrides =
+        db.collection::<Document>(crate::models::feature_flag_override::COLLECTION_NAME);
+    feature_flag_overrides
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "org_user_id": 1, "flag_key": 1, "definition_id": 1, "target_kind": 1, "target_key": 1 })
+                .options(IndexOptions::builder().unique(true).build())
+                .build(),
+        )
+        .await?;
+
+    db.collection::<Document>(crate::models::feature_flag_definition::COLLECTION_NAME)
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "flag_key": 1 })
+                .options(IndexOptions::builder().unique(true).build())
+                .build(),
+        )
+        .await?;
+
+    // ── feature_flag_metadata ──
+    // Metadata belongs to one built-in or runtime definition.
+    let feature_flag_metadata =
+        db.collection::<Document>(crate::models::feature_flag_metadata::COLLECTION_NAME);
+    feature_flag_metadata
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "flag_key": 1, "definition_id": 1 })
+                .options(IndexOptions::builder().unique(true).build())
+                .build(),
+        )
+        .await?;
+
+    for (collection, name) in [
+        (
+            &feature_flag_overrides,
+            "org_user_id_1_flag_key_1_target_kind_1_target_key_1",
+        ),
+        (&feature_flag_metadata, "flag_key_1"),
+    ] {
+        if let Err(error) = collection.drop_index(name).await
+            && !matches!(error.kind.as_ref(), mongodb::error::ErrorKind::Command(command) if command.code == 27)
+        {
+            return Err(error);
+        }
+    }
+
+    Ok(())
+}
+
 async fn ensure_service_indexes(db: &Database) -> Result<(), mongodb::error::Error> {
     // Drop old sparse unique indexes that conflict with partial filter indexes
     // (MongoDB won't replace an index with different options on the same keys)
@@ -2759,33 +2836,7 @@ async fn ensure_service_indexes(db: &Database) -> Result<(), mongodb::error::Err
         )
         .await?;
 
-    // ── feature_flag_overrides ──
-    // One override per (org, flag, target scope). target_key is null for
-    // org-scope rows, the role string for role scope, the member_user_id for
-    // user scope — so the compound key uniquely identifies each override.
-    let feature_flag_overrides =
-        db.collection::<Document>(crate::models::feature_flag_override::COLLECTION_NAME);
-    feature_flag_overrides
-        .create_index(
-            IndexModel::builder()
-                .keys(doc! { "org_user_id": 1, "flag_key": 1, "target_kind": 1, "target_key": 1 })
-                .options(IndexOptions::builder().unique(true).build())
-                .build(),
-        )
-        .await?;
-
-    // ── feature_flag_metadata ──
-    // At most one admin-authored description/owner row per registry flag key.
-    let feature_flag_metadata =
-        db.collection::<Document>(crate::models::feature_flag_metadata::COLLECTION_NAME);
-    feature_flag_metadata
-        .create_index(
-            IndexModel::builder()
-                .keys(doc! { "flag_key": 1 })
-                .options(IndexOptions::builder().unique(true).build())
-                .build(),
-        )
-        .await?;
+    ensure_feature_flag_indexes(db).await?;
 
     // ── org_invites ──
     let org_invites = db.collection::<Document>("org_invites");
@@ -5160,6 +5211,75 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn feature_flag_indexes_upgrade_legacy_rows_and_allow_distinct_definitions() {
+        let db = crate::test_utils::connect_test_database("flag_index_upgrade")
+            .await
+            .expect("test database");
+        let overrides =
+            db.collection::<Document>(crate::models::feature_flag_override::COLLECTION_NAME);
+        let metadata =
+            db.collection::<Document>(crate::models::feature_flag_metadata::COLLECTION_NAME);
+        for (collection, keys) in [
+            (
+                &overrides,
+                doc! { "org_user_id": 1, "flag_key": 1, "target_kind": 1, "target_key": 1 },
+            ),
+            (&metadata, doc! { "flag_key": 1 }),
+        ] {
+            collection
+                .create_index(
+                    IndexModel::builder()
+                        .keys(keys)
+                        .options(IndexOptions::builder().unique(true).build())
+                        .build(),
+                )
+                .await
+                .unwrap();
+        }
+        let legacy_override = doc! { "flag_key": "example_ui", "target_kind": "global" };
+        let legacy_metadata = doc! { "flag_key": "example_ui", "description": "Legacy metadata" };
+        overrides.insert_one(legacy_override.clone()).await.unwrap();
+        metadata.insert_one(legacy_metadata.clone()).await.unwrap();
+        ensure_feature_flag_indexes(&db).await.unwrap();
+        ensure_feature_flag_indexes(&db).await.unwrap();
+
+        for (collection, legacy) in [(&overrides, legacy_override), (&metadata, legacy_metadata)] {
+            let indexes: Vec<_> = collection
+                .list_indexes()
+                .await
+                .unwrap()
+                .try_collect()
+                .await
+                .unwrap();
+            assert!(indexes.iter().all(|index| {
+                index
+                    .options
+                    .as_ref()
+                    .and_then(|options| options.name.as_deref())
+                    != Some(if collection.name() == overrides.name() {
+                        "org_user_id_1_flag_key_1_target_kind_1_target_key_1"
+                    } else {
+                        "flag_key_1"
+                    })
+            }));
+            let mut runtime = legacy.clone();
+            runtime.insert("definition_id", "runtime-id");
+            collection.insert_one(runtime.clone()).await.unwrap();
+            assert!(
+                collection.insert_one(runtime).await.is_err(),
+                "same definition must remain unique"
+            );
+            let mut builtin = legacy;
+            builtin.insert("definition_id", bson::Bson::Null);
+            assert!(
+                collection.insert_one(builtin).await.is_err(),
+                "missing identity remains the built-in identity"
+            );
+            assert_eq!(collection.count_documents(doc! {}).await.unwrap(), 2);
+        }
+    }
+
+    #[tokio::test]
     async fn usage_meter_pool_accounting_queries_examine_only_the_current_request() {
         let db =
             crate::test_utils::connect_transaction_test_database("pool_accounting_index").await;
@@ -5468,6 +5588,7 @@ mod tests {
             credential_encrypted: vec![],
             platform_key: None,
             auth_type: None,
+            auth_scheme: None,
             openapi_spec_url: None,
             asyncapi_spec_url: None,
             streaming_supported: false,
@@ -5478,6 +5599,9 @@ mod tests {
             is_active: true,
             created_by: "system".to_string(),
             catalog_manager_created: false,
+            tools_manager_created: false,
+            icon_url: None,
+            tools_credential_frozen: false,
             identity_propagation_mode: "both".to_string(),
             identity_include_user_id: true,
             identity_include_email: true,

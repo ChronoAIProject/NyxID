@@ -15,6 +15,9 @@ export interface ConnectorCardItem {
   /** Catalog slug for the shared ServiceIcon brand glyph; null = custom
    *  service with no catalog backing (tile falls back to the initial). */
   readonly iconSlug: string | null;
+  /** Uploaded icon (connection override, else catalog icon); preferred over
+   *  the slug glyph when present. */
+  readonly iconUrl?: string | null;
   readonly category: string;
   readonly description: string;
   /** Footer meta shown for not-yet-added items (e.g. "api key", "oauth"). */
@@ -118,6 +121,11 @@ function addedServiceItem(
     name,
     initial: connectorInitial(name),
     iconSlug: slug,
+    iconUrl:
+      (group.length === 1 ? first.icon_url : null) ||
+      first.catalog_icon_url ||
+      catalogEntry?.icon_url ||
+      null,
     category: categoryOf(first.service_type),
     description:
       catalogEntry?.description ??
@@ -142,6 +150,7 @@ function addedCustomItem(key: KeyInfo): ConnectorCardItem {
     name: key.label,
     initial: connectorInitial(key.label),
     iconSlug: null,
+    iconUrl: key.icon_url ?? null,
     category: categoryOf(key.service_type),
     description:
       key.description ??
@@ -159,6 +168,7 @@ function availableItem(entry: CatalogEntry): ConnectorCardItem {
     name: entry.name,
     initial: connectorInitial(entry.name),
     iconSlug: entry.slug,
+    iconUrl: entry.icon_url,
     category: categoryOf(entry.service_type),
     description: entry.description ?? `Proxy requests to ${entry.base_url}.`,
     meta: catalogMeta(entry),

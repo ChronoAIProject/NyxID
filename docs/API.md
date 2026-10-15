@@ -1347,6 +1347,7 @@ When `auth_type` (or `auth_method`) is set to `"oidc"`, NyxID automatically prov
 | `base_url`         | string | HTTP only | Downstream service base URL (max 2048 chars). Must not point to private/internal IPs. |
 | `auth_type`        | string | HTTP only | One of: `api_key`, `oauth2`/`bearer`, `basic`, `oidc`, `header`, `query`. Default: `header`. Alias: `auth_method`. |
 | `auth_key_name`    | string | HTTP only | Header or query param name. Defaults based on `auth_type`.                            |
+| `auth_scheme` | string | No | Catalog bearer authorization scheme: an RFC 9110 token of 1–64 ASCII bytes. Omitted means `Bearer`. Valid only with bearer auth (including the `oauth2` alias). No user-connection override. |
 | `credential`       | string | HTTP only | API key, token, or `user:password` for basic. Not needed for OIDC services.           |
 | `service_category` | string | No       | `"connection"` or `"internal"` for SSH services; `"connection"` (default), `"internal"`, or `"provider"` for HTTP. |
 | `ssh_config`       | object | SSH only | SSH target configuration with `host`, `port`, `certificate_auth_enabled`, `certificate_ttl_minutes`, and `allowed_principals` |
@@ -1555,6 +1556,7 @@ Update a downstream service. Only the provided fields are updated (partial updat
 | `name`         | string  | No       | New display name (1-200 chars)                                          |
 | `description`  | string  | No       | New description (max 500 chars)                                         |
 | `base_url`     | string  | No       | New base URL (max 2048 chars, SSRF-validated)                           |
+| `auth_scheme` | string or null | No | Replace the bearer scheme; `null` restores `Bearer`, omission preserves it. Catalog Managers follow own/shared row field rules; Tools Managers cannot set it. Admin Tool changes demote operations. |
 | `is_active`    | boolean | No       | Enable or disable the service                                           |
 | `openapi_spec_url` | string  | No       | URL to an OpenAPI/Swagger spec for endpoint discovery (max 2048 chars). The legacy alias `api_spec_url` is also accepted. |
 | `asyncapi_spec_url` | string  | No       | URL to an AsyncAPI spec for WebSocket or SSE documentation (max 2048 chars) |
@@ -3512,6 +3514,8 @@ List user's service bindings.
 | `auth_method` | string | Credential injection method |
 | `auth_key_name` | string | Header or parameter name used for credential injection |
 | `catalog_service_id` | UUID string, omitted | Source catalog service |
+| `icon_url` | URL string, omitted | Per-connection icon override set by the user |
+| `catalog_icon_url` | URL string, omitted | The catalog service's icon (its provider's uploaded icon, or a Tool's own icon); clients show it when there is no `icon_url` override |
 | `node_id` | UUID string, omitted | Selected credential node |
 | `node_priority` | integer | Node routing priority |
 | `ssh_auth_mode` | string | `cert`, `node_key`, or `proxy_only` |
@@ -5486,13 +5490,98 @@ behavior](ADMIN_FORM_SAFETY.md) for sparse updates and confirmation.
 
 ### Admin
 
-All admin endpoints require the authenticated user to have `is_admin = true`. Admin endpoints include self-protection: admins cannot change their own role, disable themselves, or delete themselves.
+Admin endpoints require the authenticated user to hold the applicable platform or scoped permission described for each route. Admin user management includes self-protection: admins cannot change their own role, disable themselves, or delete themselves.
+
+#### Feature flag roles and management
+
+The system roles `feature-flag-operator` and `feature-flag-admin` can be assigned
+to any user through the existing user role assignments or through a group.
+They grant only feature flag administration; neither role grants access to
+unrelated admin pages or the admin user directory.
+
+| Caller | List flags | Create flags | Edit rollout and metadata |
+| --- | --- | --- | --- |
+| Platform Admin | All | Yes | All |
+| Platform Operator | All | No | No |
+| `feature-flag-operator` | Flags they created | Yes | Flags they created |
+| `feature-flag-admin` | All | Yes | All |
+
+Permissions combine: a Platform Operator who also holds `feature-flag-operator`
+retains the platform-wide read permission but can write only their own flags.
+Feature flag admin access wins when both feature flag roles are held.
+Authorization resolves current direct and group roles on every API request.
+
+The roles carry `nyxid:feature_flags:own:write` and
+`nyxid:feature_flags:admin`, respectively. Startup seeds both as non-default,
+protected system roles. A pre-existing custom/client role with the same slug is
+left untouched so existing assignments never acquire permissions implicitly.
+
+`GET /api/v1/admin/feature-flags` merges built-in code definitions and runtime
+flags, filtering the list to the caller's read scope. Each flag includes additive
+`created_by` (null for built-ins) and `can_edit` fields. Runtime creator identity
+is immutable; changing or clearing the free-text `owner` does not change access.
+Built-in keys are reserved and cannot be claimed through creation.
+
+`POST /api/v1/admin/feature-flags` creates a runtime flag:
+
+```json
+{
+  "key": "my-team:new-feature",
+  "description": "Enables the new feature for our rollout.",
+  "default_enabled": false
+}
+```
+
+Keys are 1–128 ASCII lowercase letters, digits, colons, underscores or hyphens,
+starting with a letter or digit. Descriptions are required and limited to 512
+characters after trimming. `default_enabled` defaults to false. Unknown fields
+are rejected. The server binds `created_by` to the authenticated user, persists a
+UUID v4 definition in `feature_flag_definitions`, and returns 201 with `key` and
+`created_by`. Duplicate built-in or runtime keys return 409.
+
+Runtime flags use the existing global, organization, and personal override
+precedence and appear in resolved `enabled_features` on `/users/me` and org
+responses. Creating a flag makes it available for consumers to use its key;
+application behavior still requires a consumer for that key. Built-in definitions
+win if a later deployment introduces the same key. Overrides and metadata bind
+runtime definition UUIDs separately from built-ins, so old settings never carry
+across that boundary or from a retired built-in into a newly created flag.
+Replacement unique indexes include that identity and are created before the
+legacy indexes are retired.
+
+Deploy the backend before the frontend so `/admin/feature-flag-targets` is
+available when the updated rollout picker starts using it. Upgrade all backend
+replicas before creating runtime keys that match retired
+built-ins. Older binaries recreate the legacy unique indexes on startup. Before
+rolling back to such a binary, remove any rows split across definition identities
+for the same key and target. A runtime definition shadowed by a built-in remains
+stored and becomes visible again if that built-in is retired; retirement cleanup
+can remove the runtime definition and its identity-bound settings when needed.
+
+Existing `PUT /api/v1/admin/feature-flags/{flag_key}` and `DELETE` at the same
+path set and clear rollout overrides. Metadata PUT/PATCH retain their existing
+contracts. Every write checks the caller's permission and, for operators, the
+immutable creator. `DELETE` clears an override; it does not remove the definition.
+
+`GET /api/v1/admin/feature-flag-targets` supplies bounded rollout suggestions
+without granting access to `/admin/users`. It requires `flag_key` naming an
+editable flag and `kind=person|org`; optional `search` is a literal, case-insensitive
+email/name/slug match (max 128 bytes), and `limit` is clamped to 1–20. Results
+contain only active accounts with `id`, `email`, nullable `display_name`, and
+nullable `slug`. A caller who cannot edit the referenced flag receives 403.
+Successful searches emit metadata-only audit events containing the flag key and
+target kind. Creation and existing writes retain audit events.
+
+`GET /users/me` includes `capabilities.read_feature_flags`,
+`create_feature_flags`, and `manage_all_feature_flags`. The admin navigation and
+route guard expose `/admin/feature-flags` to these role holders without opening
+other admin pages. The page uses each flag's `can_edit` for write controls.
 
 #### PATCH /api/v1/admin/feature-flags/{flag_key}/metadata
 
 Update only the supplied metadata fields for a registered feature flag.
 
-**Auth:** Admin
+**Auth:** Platform Admin, feature flag Admin, or feature flag Operator for a flag they created
 
 | Field | Type | Required | Behavior |
 | --- | --- | --- | --- |
@@ -8462,8 +8551,19 @@ See [TOOLS.md](TOOLS.md) for the model, publication boundary, roles and CLI walk
 
 Tool service writes and publication require platform admin authority in Phase 1. `/keys` hides platform tool bindings and retains BYOK bindings with `offering_kind`; human `/catalog` excludes tools by default (`?offering_kind=tool` or `include_all=true` opts in). MCP discovery includes tools under unchanged `{service_slug}__{endpoint.name}` identities. Runtime overlay storage and editor scopes are Phase 2.
 
-`POST /api/v1/services` supports `twin_of_service_id` (catalog UUID or slug) with a required new `slug`. It clones allowed transport/spec/discovery metadata and all endpoint rows into an internal, provider-less `tool` with no credential, default enabled/public platform-key configuration, and `catalog_twin` provenance. Copied endpoints receive new UUIDs, generation 1 and inactive draft state in the catalog create transaction. Request metadata overrides copied fields. Source credentials and provider links are never copied; configure the credential after creation. Eligible existing rows can instead flip through `PUT /services/{id}` with `offering_kind=tool`, retaining existing published operations. See [Tools](TOOLS.md) for CLI examples and the idempotent `scripts/tools/add-tool-twin.sh` POC. No tool rows are seeded.
+`POST /api/v1/services` supports `twin_of_service_id` (catalog UUID or slug) with a required new `slug`. It clones allowed transport/spec/discovery metadata and all endpoint rows into an internal, provider-less `tool` with no credential, default enabled/public platform-key configuration, and `catalog_twin` provenance. Copied endpoints receive new UUIDs, generation 1 and inactive draft state in the catalog create transaction. Request metadata overrides copied fields. Source credentials and provider links are never copied; configure the credential after creation. Eligible existing rows can instead flip through `PUT /services/{id}` with `offering_kind=tool`, retaining existing published operations. Manager twins use sanitized inheritance, restricted empty audience and live creator/role fences. See [Tools](TOOLS.md) for supported `admin tools add|apply|validate|icon` workflows. No tool rows are seeded.
 
 Tools updates distinguish omission from JSON `null` for `supplier` and `import_source`: omit to retain, null to clear. `GET /api/v1/keys?include_tool_bindings=true` includes otherwise-hidden platform Tool bindings with the existing KeyResponse shape; default listing still hides them and includes BYOK rows. Owner, membership, restricted API-key and delegated read semantics are unchanged. Tools `limits` is null when `PLATFORM_SERVICE_RATE_LIMIT_PER_SECOND=0`, otherwise `{ rate_limit_per_second, burst }`.
 
 CLI catalog creation requires `--endpoint-url` or `--twin-of` (otherwise the local error is `Catalog creation requires --endpoint-url or --twin-of`). Catalog updates support `--clear-supplier`, conflicting with `--supplier`. Tools table output formats prices as `Free` or `<credits> credits / <metric>`, limits as `<n>/s, burst <b>` or `none`, and topics as a comma-separated list. `tools show` prints rows for each operation (name, method, path, risk, data scope, cost class). JSON output remains the raw response.
+
+## Channel media delivery substitutions
+
+`POST /api/v1/channel-relay/reply`, `/thread-reply` and `/send` accept the existing
+media request shape and may add `delivered_as` to a successful response. For
+Telegram and telegram-new, a narrowly classified photo-specific 400 refusal
+can send the same image once as a document under the
+[relay fallback rules](CHANNEL_BOT_RELAY.md#image-outcomes-and-telegram-document-fallback).
+A response with `"delivered_as": ["file"]` reports this actual transport kind,
+and the outbound message's `content_type` is `file`. The reply anchor, topic and
+caption are preserved. Other adapters can omit this field.

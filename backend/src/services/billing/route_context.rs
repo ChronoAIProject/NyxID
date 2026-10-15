@@ -73,6 +73,8 @@ pub struct BillingRouteContext {
     pub platform_components: Vec<ResaleSpec>,
     pub capture_tokens: bool,
     pub request_bytes: i64,
+    /// Purpose-confined public text execution reserves its bounded full response.
+    native_text_bound: Option<(i64, i64, i64)>,
     pub requested_images: i64,
     /// Duration reserved before forwarding a voice window. Ordinary routes use zero.
     pub requested_voice_seconds: i64,
@@ -203,6 +205,7 @@ impl BillingRouteContext {
                     })
                 }),
             request_bytes: 0,
+            native_text_bound: None,
             requested_images: 1,
             requested_voice_seconds: 0,
             voice_initial_window: false,
@@ -294,7 +297,35 @@ impl BillingRouteContext {
         )
     }
 
+    pub(crate) fn with_native_text_bound(
+        mut self,
+        input: i64,
+        output: i64,
+        response_bytes: i64,
+    ) -> Self {
+        self.native_text_bound = Some((input.max(1), output.max(1), response_bytes.max(1)));
+        self
+    }
+
+    pub(crate) fn has_native_text_bound(&self) -> bool {
+        self.native_text_bound.is_some()
+    }
+
     pub fn estimated_quantity(&self, metric: BillingMetric) -> i64 {
+        if let Some((input, output, response_bytes)) = self.native_text_bound {
+            return match metric {
+                BillingMetric::Tokens => input.saturating_add(output),
+                BillingMetric::InputTokens
+                | BillingMetric::CacheReadTokens
+                | BillingMetric::CacheWriteTokens => input,
+                BillingMetric::OutputTokens => output,
+                BillingMetric::Requests => 1,
+                BillingMetric::Bytes => self.request_bytes.saturating_add(response_bytes),
+                BillingMetric::Images | BillingMetric::VoiceSeconds => 0,
+                // Machine runtime is reserved only by dedicated admission.
+                BillingMetric::MachineRunningSeconds => 0,
+            };
+        }
         if self.requested_voice_seconds > 0 {
             return match metric {
                 BillingMetric::VoiceSeconds => self.requested_voice_seconds,
@@ -608,6 +639,30 @@ mod tests {
             BillingMetric::Images,
         ] {
             assert_eq!(ctx.estimated_quantity(metric), 1);
+        }
+    }
+
+    #[test]
+    fn native_text_bound_does_not_reserve_machine_runtime() {
+        let ctx = context_for(CredentialClass::UserOwned).with_request_body(Some(&[b'x'; 400]));
+        assert_eq!(
+            ctx.estimated_quantity(BillingMetric::MachineRunningSeconds),
+            0
+        );
+        let ctx = ctx.with_native_text_bound(320, 64, 4096);
+        for (metric, expected) in [
+            (BillingMetric::Tokens, 384),
+            (BillingMetric::InputTokens, 320),
+            (BillingMetric::OutputTokens, 64),
+            (BillingMetric::CacheReadTokens, 320),
+            (BillingMetric::CacheWriteTokens, 320),
+            (BillingMetric::Requests, 1),
+            (BillingMetric::Bytes, 4496),
+            (BillingMetric::Images, 0),
+            (BillingMetric::VoiceSeconds, 0),
+            (BillingMetric::MachineRunningSeconds, 0),
+        ] {
+            assert_eq!(ctx.estimated_quantity(metric), expected, "{metric:?}");
         }
     }
 

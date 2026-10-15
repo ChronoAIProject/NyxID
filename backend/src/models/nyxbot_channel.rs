@@ -200,6 +200,9 @@ pub struct NyxbotThread {
     pub platform_chat_id: Option<String>,
     #[serde(default)]
     pub platform_thread_id: Option<String>,
+    /// Outbound evidence; never changes partition, conversation or follow keys.
+    #[serde(default)]
+    pub telegram_topic: Option<super::channel_thread::TelegramTopic>,
     /// The agent this chat reaches instead of the channel's.
     #[serde(default)]
     pub agent_id: Option<String>,
@@ -236,6 +239,11 @@ pub struct NyxbotThread {
     /// Direct only: the newest inbound NyxID message ID, for asynchronous replies.
     #[serde(default)]
     pub last_message_id: Option<String>,
+    /// Newest inbound NyxID relay message ID, regardless of transport.
+    /// Kept separate from `last_message_id` so gateway text routing semantics
+    /// remain unchanged while image delivery can target the relay adapter.
+    #[serde(default)]
+    pub last_relay_message_id: Option<String>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
@@ -269,6 +277,10 @@ pub struct NyxbotEvent {
     pub user_id: String,
     pub partition: String,
     pub event_id: String,
+    /// NyxID relay message anchoring this event, when the gateway activity
+    /// originated from NyxID's own relay.
+    #[serde(default)]
+    pub relay_message_id: Option<String>,
     #[serde(with = "crate::models::bson_bytes::optional", default)]
     pub event_context_ciphertext: Option<Vec<u8>>,
     /// `running`, `completed`, `failed`, or `refused`.
@@ -328,6 +340,10 @@ pub struct NyxbotWatch {
     /// Stable code only, never upstream prose.
     #[serde(default)]
     pub last_error: Option<String>,
+    #[serde(default)]
+    pub report_to: Option<String>,
+    #[serde(default)]
+    pub report_provenance: u8,
     /// When the sweep last looked at it: sweeps take the least recently
     /// checked first, so old abandoned watches never starve new ones.
     #[serde(default, with = "crate::models::bson_datetime::optional")]

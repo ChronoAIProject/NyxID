@@ -73,6 +73,7 @@ export function ChannelBotSetup({
   prefill,
   onComplete,
   onContinue,
+  returnTo,
 }: {
   readonly open: boolean;
   readonly onOpenChange: (open: boolean) => void;
@@ -87,6 +88,7 @@ export function ChannelBotSetup({
   readonly prefill?: Readonly<Record<string, string>>;
   readonly onComplete?: () => void;
   readonly onContinue?: () => void | Promise<void>;
+  readonly returnTo?: string;
 }) {
   const navigate = useNavigate();
   const link = useChannelConnectLinkContext();
@@ -97,6 +99,7 @@ export function ChannelBotSetup({
   const [createdBot, setCreatedBot] = useState<CreateChannelBotResponse | null>(
     null,
   );
+  const [connectedBotLabel, setConnectedBotLabel] = useState<string>();
   const [connectedBotId, setConnectedBotId] = useState<string | null>(null);
   const completedId = createdBot?.id ?? connectedBotId;
   const dialogContentRef = useRef<HTMLDivElement>(null);
@@ -319,7 +322,9 @@ export function ChannelBotSetup({
                   {createdBot?.label || label || "Channel bot created"}
                 </p>
                 <p className="text-xs leading-relaxed text-muted-foreground">
-                  {createdBot?.webhook_secret
+                  {stayInPlace && connectedBotId
+                    ? `${connectedBotLabel || label || "Your bot"} is connected. NyxBot will continue in this chat.`
+                    : createdBot?.webhook_secret
                     ? "Save the verification secret below. It will not be shown again."
                     : "Your bot has been added to NyxID. Open it to review setup and assign an agent."}
                 </p>
@@ -346,7 +351,8 @@ export function ChannelBotSetup({
               ))}
             </ol>
           )}
-          <div className="flex justify-end">
+          <div className="flex justify-end gap-2">
+            {onContinue && fullPage ? <Button variant="outline" asChild><Link to="/channel-bots/$botId" params={{ botId: completedId }}>Open channel bot</Link></Button> : null}
             <Button
               variant="primary"
               className={fullPage ? "w-full" : undefined}
@@ -361,7 +367,9 @@ export function ChannelBotSetup({
                 }
               }}
             >
-              {onContinue ? "Continue" : fullPage ? "Open channel bot" : "Done"}
+              {stayInPlace && connectedBotId
+                ? "Back to chat"
+                : onContinue ? (returnTo ? "Back to chat" : "Continue") : fullPage ? "Open channel bot" : "Done"}
               {fullPage && <ArrowRight aria-hidden="true" />}
             </Button>
           </div>
@@ -374,8 +382,11 @@ export function ChannelBotSetup({
             orgId={targetOrgId}
             form={form}
             fullPage={fullPage}
+            stayInPlace={stayInPlace}
+            returnTo={returnTo}
             preferManual={Boolean(prefill && Object.keys(prefill).length)}
-            onConnected={(id, replace, result) => {
+            onConnected={(id, replace, result, botLabel) => {
+              setConnectedBotLabel(botLabel ?? result?.label);
               if (fullPage || stayInPlace) {
                 if (link && result) setCreatedBot(result);
                 setConnectedBotId(id);

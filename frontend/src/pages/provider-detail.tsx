@@ -4,6 +4,7 @@ import { useNavigate, useParams } from "@tanstack/react-router";
 import { useProvider, useDeleteProvider } from "@/hooks/use-providers";
 import { formatDate } from "@/lib/utils";
 import { PageHeader } from "@/components/shared/page-header";
+import { ServiceIcon } from "@/components/service-icon";
 import { useBreadcrumbLabel } from "@/components/layout/dashboard-layout";
 import { DetailSection } from "@/components/shared/detail-section";
 import { DetailRow } from "@/components/shared/detail-row";
@@ -86,6 +87,13 @@ export function ProviderDetailPage() {
       <PageHeader
         title={provider.name}
         description={provider.description ?? undefined}
+        leading={
+          <ServiceIcon
+            slug={provider.slug}
+            iconUrl={provider.icon_url}
+            size="md"
+          />
+        }
         actions={
           <>
             <Button
