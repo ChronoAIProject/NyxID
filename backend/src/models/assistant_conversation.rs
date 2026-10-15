@@ -149,6 +149,20 @@ pub struct PlatformTurnOrigin {
     pub source: PlatformOriginSource,
 }
 
+/// Delivery authority is independent of a later continuation's execution.
+/// Web-only watches must not acquire a destination from a newer link.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PlatformReplyRouting {
+    WebOnly,
+    Captured {
+        origin: PlatformTurnOrigin,
+        turn_id: String,
+        #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+        expires_at: DateTime<Utc>,
+    },
+}
+
 impl std::fmt::Debug for PlatformThread {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PlatformThread")
@@ -220,6 +234,8 @@ pub struct ToolProgress {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ActiveTurn {
+    #[serde(default)]
+    pub platform_reply: Option<PlatformReplyRouting>,
     /// One platform worker may execute an admitted turn. A lost worker is
     /// settled by orphan recovery; its execution claim is never reopened.
     #[serde(default)]

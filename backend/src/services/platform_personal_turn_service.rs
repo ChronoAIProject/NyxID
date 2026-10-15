@@ -91,6 +91,49 @@ pub(crate) fn contract_origin(
     })
 }
 
+pub(crate) async fn fresh_thread_event_origin_in_session(
+    db: &Database,
+    session: &mut ClientSession,
+    row: &AssistantConversation,
+    turn_id: &str,
+) -> AppResult<Option<model::PlatformTurnOrigin>> {
+    let Some(thread) = row.platform_thread.as_ref() else {
+        return Ok(None);
+    };
+    if thread.user_id != row.user_id
+        || row.agent_id.as_ref() != Some(&thread.nyxbot_agent_id)
+        || row.is_subagent()
+        || row.channel.is_some()
+        || row.group_id.is_some()
+    {
+        return Err(AppError::AssistantTurnRequired);
+    }
+    let resolved = super::platform_personal_binding_service::resolve_thread_in_session(
+        db,
+        session,
+        &row.user_id,
+        &thread.binding_id,
+        thread.binding_generation,
+        &row.id,
+        false,
+    )
+    .await?;
+    let contract::ThreadAuthorityResolution::Personal(authority) = resolved else {
+        return Ok(None);
+    };
+    let origin = model_origin(&contract::PlatformTurnOrigin {
+        authority,
+        nyxbot_agent_id: thread.nyxbot_agent_id.clone(),
+        source: contract::PlatformOriginSource::ThreadEvent {
+            admission_id: turn_id.to_owned(),
+        },
+    });
+    if origin.thread != *thread {
+        return Err(AppError::AssistantTurnRequired);
+    }
+    Ok(Some(origin))
+}
+
 /// A write on the exact conversation/key conflicts with Stop, rotation and
 /// deletion. Live consent is then fenced in the very same transaction.
 pub(crate) async fn fence_execution_in_session(

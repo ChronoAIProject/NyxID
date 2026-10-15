@@ -6,6 +6,13 @@ use crate::models::{
 use contract::PersonalTurnProducer;
 
 struct RefusedEgress;
+struct RecordingSettled(tokio::sync::mpsc::Sender<contract::ReplyRef>);
+#[async_trait::async_trait]
+impl runtime::OwnerTurnSettledHook for RecordingSettled {
+    async fn settled(&self, _: AssistantConversation, reply: contract::ReplyRef) {
+        self.0.send(reply).await.unwrap();
+    }
+}
 #[async_trait::async_trait]
 impl contract::NyxAgentEgress for RefusedEgress {
     async fn request(
@@ -104,6 +111,7 @@ pub(super) async fn fixture(name: &str) -> (AppState, contract::AdmittedPersonal
 
 fn personal(state: AppState) -> PersonalTurns {
     PersonalTurns {
+        settled_hook: crate::handlers::assistant_team::owner_turn_settled_hook(state.clone()),
         state,
         identity: Arc::new(super::super::platform_personal_binding_service::IdentityProducer),
         ingress: Arc::new(super::super::platform_manager_ingress_service::IngressTurnStore),
@@ -115,7 +123,9 @@ fn personal(state: AppState) -> PersonalTurns {
 async fn first_use_resolves_real_nyxbot_and_emits_only_durable_reply_reference() {
     let (state, admitted) = fixture("personal_first_start").await;
     let db = state.db.clone();
-    let service = personal(state);
+    let mut service = personal(state);
+    let (hook_sender, mut hook_receiver) = tokio::sync::mpsc::channel(4);
+    service.settled_hook = Arc::new(RecordingSettled(hook_sender));
     let (sender, mut receiver) = tokio::sync::mpsc::channel(4);
     let start = service
         .start_personal_turn(
@@ -142,6 +152,13 @@ async fn first_use_resolves_real_nyxbot_and_emits_only_durable_reply_reference()
         panic!("durable reply required");
     };
     assert_eq!(reply.turn, turn);
+    let hooked = tokio::time::timeout(Duration::from_secs(15), hook_receiver.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(hooked.reply_id, reply.reply_id);
+    assert_eq!(hooked.turn, reply.turn);
+    assert!(hook_receiver.try_recv().is_err());
     let message=db.collection::<crate::models::assistant_message::AssistantMessage>(crate::models::assistant_message::COLLECTION_NAME)
         .find_one(doc! {"_id":&reply.reply_id,"conversation_id":&turn.conversation_id,"turn_id":&turn.turn_id}).await.unwrap().unwrap();
     let origin = message.platform_origin.unwrap();
@@ -654,4 +671,239 @@ async fn execution_factory_selects_public_prepare_and_rejects_ordinary_context_b
         .await;
     assert!(matches!(result, Err(AppError::Conflict(_))));
     assert_eq!(egress.0.load(std::sync::atomic::Ordering::SeqCst), 0);
+}
+
+async fn claimed_input(
+    state: &AppState,
+    admitted: &contract::AdmittedPersonalUpdate,
+) -> engine::OwnerTurnClaim {
+    let agent =
+        super::super::assistant_team_service::ensure_nyxbot(&state.db, &admitted.authority.user_id)
+            .await
+            .unwrap();
+    let ids = engine::OwnerTurnIds {
+        conversation_id: format!("nyxa-{}", uuid::Uuid::new_v4().simple()),
+        turn_id: uuid::Uuid::new_v4().to_string(),
+        message_id: uuid::Uuid::new_v4().to_string(),
+    };
+    let start = engine::TurnStart::from(&engine::parse_turn(br#"{"text":"work"}"#).unwrap());
+    let mut session = state.db.client().start_session().await.unwrap();
+    session.start_transaction().await.unwrap();
+    let claim = claim_personal_turn_in_session(
+        &state.db,
+        &mut session,
+        &state.encryption_keys,
+        &super::super::platform_personal_binding_service::IdentityProducer,
+        &super::super::platform_manager_ingress_service::IngressTurnStore,
+        admitted,
+        &start,
+        &ids,
+        &agent,
+    )
+    .await
+    .unwrap();
+    session.commit_transaction().await.unwrap();
+    claim
+}
+
+async fn finish_claim(state: &AppState, claim: &engine::OwnerTurnClaim) -> String {
+    let id = uuid::Uuid::new_v4().to_string();
+    engine::finish_turn(
+        &state.db,
+        &claim.conversation,
+        &claim.credential.api_key_id,
+        &id,
+        &engine::TurnResult {
+            text: "saved".into(),
+            session_id: None,
+            response_id: None,
+            error: None,
+        },
+    )
+    .await
+    .unwrap();
+    id
+}
+
+fn event_start(id: &str) -> engine::TurnStart {
+    let mut start = engine::TurnStart::from(
+        &engine::parse_turn(
+            &serde_json::to_vec(&serde_json::json!({"text":"event", "conversation_id":id}))
+                .unwrap(),
+        )
+        .unwrap(),
+    );
+    start.origin = model::TurnOrigin::Event;
+    start.text.clear();
+    start
+}
+
+#[tokio::test]
+async fn personal_event_captures_fresh_authority_and_unlinked_events_remain_web_only() {
+    let (state, admitted) = fixture("personal_event_authority").await;
+    let initial = claimed_input(&state, &admitted).await;
+    finish_claim(&state, &initial).await;
+    let owner = &initial.conversation.user_id;
+    let id = &initial.conversation.id;
+    let initial_origin = initial
+        .conversation
+        .active_turn
+        .as_ref()
+        .unwrap()
+        .platform_origin
+        .clone();
+    for linked in [true, false] {
+        if !linked {
+            state
+                .db
+                .collection::<bson::Document>(BINDINGS)
+                .update_one(
+                    doc! {"_id":&admitted.authority.binding_id},
+                    doc! {"$set":{"state":"revoked"}},
+                )
+                .await
+                .unwrap();
+        }
+        engine::push_events(
+            &state.db,
+            owner,
+            id,
+            vec![super::super::assistant_team_service::event(
+                "task_finished",
+                "Independent work finished".into(),
+                None,
+            )],
+        )
+        .await
+        .unwrap();
+        let row = engine::begin_turn(&state.db, owner, event_start(id), &state.encryption_keys)
+            .await
+            .unwrap();
+        let turn = row.active_turn.as_ref().unwrap();
+        if linked {
+            let origin = turn.platform_origin.as_ref().unwrap();
+            assert!(
+                matches!(&origin.source, model::PlatformOriginSource::ThreadEvent { admission_id } if admission_id == &turn.turn_id)
+            );
+            assert_ne!(turn.platform_origin, initial_origin);
+            let binding = state
+                .db
+                .collection::<PlatformPersonalBinding>(BINDINGS)
+                .find_one(doc! {"_id":&admitted.authority.binding_id})
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(binding.active_turn.unwrap().turn_id, turn.turn_id);
+            assert!(
+                matches!(&turn.platform_reply, Some(model::PlatformReplyRouting::Captured { origin: reply_origin, turn_id, .. })
+                if reply_origin == origin && turn_id == &turn.turn_id)
+            );
+        } else {
+            assert!(turn.platform_origin.is_none());
+            assert!(turn.platform_reply.is_none());
+        }
+        let credential = super::super::assistant_agent_credential_service::load_for_conversation(
+            &state.db,
+            &state.encryption_keys,
+            owner,
+            id,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let reply = finish_claim(
+            &state,
+            &engine::OwnerTurnClaim {
+                conversation: row.clone(),
+                credential,
+            },
+        )
+        .await;
+        let message = state
+            .db
+            .collection::<crate::models::assistant_message::AssistantMessage>(
+                crate::models::assistant_message::COLLECTION_NAME,
+            )
+            .find_one(doc! {"_id":reply})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(message.platform_origin, turn.platform_origin);
+        assert_eq!(message.platform_reply, turn.platform_reply);
+        let binding = state
+            .db
+            .collection::<PlatformPersonalBinding>(BINDINGS)
+            .find_one(doc! {"_id":&admitted.authority.binding_id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(binding.active_turn.is_none());
+    }
+    state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn fresh_event_read_cannot_commit_after_concurrent_revocation() {
+    let (state, admitted) = fixture("personal_event_unlink_race").await;
+    let initial = claimed_input(&state, &admitted).await;
+    finish_claim(&state, &initial).await;
+    let owner = &initial.conversation.user_id;
+    let id = &initial.conversation.id;
+    engine::push_events(
+        &state.db,
+        owner,
+        id,
+        vec![super::super::assistant_team_service::event(
+            "task_finished",
+            "Independent work finished".into(),
+            None,
+        )],
+    )
+    .await
+    .unwrap();
+    let row = engine::get(&state.db, owner, id).await.unwrap();
+    let ids = engine::OwnerTurnIds {
+        conversation_id: id.clone(),
+        turn_id: uuid::Uuid::new_v4().to_string(),
+        message_id: uuid::Uuid::new_v4().to_string(),
+    };
+    let agent = super::super::assistant_team_service::ensure_nyxbot(&state.db, owner)
+        .await
+        .unwrap();
+    let mut session = state.db.client().start_session().await.unwrap();
+    session.start_transaction().await.unwrap();
+    assert!(
+        fresh_thread_event_origin_in_session(&state.db, &mut session, &row, &ids.turn_id)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    state
+        .db
+        .collection::<bson::Document>(BINDINGS)
+        .update_one(
+            doc! {"_id":&admitted.authority.binding_id},
+            doc! {"$set":{"state":"revoked"}},
+        )
+        .await
+        .unwrap();
+    let result = engine::begin_owner_turn_in_session(
+        &state.db,
+        &mut session,
+        &state.encryption_keys,
+        owner,
+        &event_start(id),
+        &ids,
+        &agent,
+        None,
+        None,
+        None,
+    )
+    .await;
+    assert!(result.is_err());
+    let _ = session.abort_transaction().await;
+    let saved = engine::get(&state.db, owner, id).await.unwrap();
+    assert!(saved.active_turn.is_none());
+    assert_eq!(saved.pending_events.len(), 1);
+    state.db.drop().await.unwrap();
 }

@@ -1720,9 +1720,21 @@ async fn run_turn(
     permit: DirectChatPermit,
     events: Events,
 ) {
+    let egress = if row
+        .active_turn
+        .as_ref()
+        .is_some_and(|turn| turn.platform_origin.is_some())
+    {
+        crate::services::assistant_nyxagent_egress::producer(
+            state.clone(),
+            crate::services::platform_personal_binding_service::producer(state.clone()),
+        )
+    } else {
+        http_egress(state.clone(), auth.clone())
+    };
     let settled = crate::services::assistant_nyxagent_runtime::run_owner_turn(
         state.clone(),
-        http_egress(state.clone(), auth.clone()),
+        egress,
         row.clone(),
         text,
         credential,

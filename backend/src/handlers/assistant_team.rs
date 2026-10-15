@@ -399,7 +399,7 @@ impl crate::services::assistant_nyxagent_runtime::OwnerTurnSettledHook for Owner
                 after_turn_boxed(self.state.clone(), row, message.text, error).await;
             }
             Ok(None) => {}
-            Err(error) => tracing::warn!(error = %error, "Personal after-turn reply read deferred"),
+            Err(_) => tracing::warn!("Personal after-turn reply read failed"),
         }
     }
 }

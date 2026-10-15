@@ -269,7 +269,13 @@ fn lifecycle(state: &AppState) -> bindings::LifecycleProducer {
         super::super::assistant_nyxagent_runtime::producer(state.clone(), egress.clone(), runtime);
     let ingress = Arc::new(super::super::platform_manager_ingress_service::IngressTurnStore);
     bindings::LifecycleProducer {
-        personal: producer(state.clone(), identity, ingress.clone(), egress),
+        personal: producer(
+            state.clone(),
+            identity,
+            ingress.clone(),
+            egress,
+            crate::handlers::assistant_team::owner_turn_settled_hook(state.clone()),
+        ),
         public: super::super::platform_public_agent_service::producer(
             state.clone(),
             execution,

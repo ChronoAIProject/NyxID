@@ -12,6 +12,8 @@ pub enum MessageAuthor {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct AssistantMessage {
+    #[serde(default)]
+    pub platform_reply: Option<super::assistant_conversation::PlatformReplyRouting>,
     /// Retained after settlement for exact transport delivery and recovery.
     #[serde(default)]
     pub platform_origin: Option<super::assistant_conversation::PlatformTurnOrigin>,

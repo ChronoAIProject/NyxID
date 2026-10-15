@@ -454,6 +454,12 @@ pub fn channel_note(row: &AssistantConversation) -> String {
     let Some(turn) = row.active_turn.as_ref() else {
         return prompt;
     };
+    if matches!(
+        turn.platform_reply,
+        Some(crate::models::assistant_conversation::PlatformReplyRouting::Captured { .. })
+    ) {
+        prompt.push_str("\n\nThis reply is saved in the owner's NyxID conversation and may be delivered to their private Telegram manager chat while its original link is live. Use concise plain text and full URLs. Pending actions include their existing confirmation codes: only when a tool supplies confirm_phrase, ask for that exact phrase (for example yes 4821), or no with the same code. Never approve an action yourself. If a tool supplies review_url, send that full URL and ask the owner to review the complete card in NyxID; a Telegram code cannot approve it. Tool images and files remain in the NyxID conversation: point the owner there and never claim Telegram received them. A later link cannot receive an earlier result.");
+    }
     let routing = answer_routing(row, turn);
     let chat_app = match &routing.primary {
         PrimaryDestination::ChannelEvent { origin } => {
@@ -1914,6 +1920,15 @@ pub(crate) async fn begin_owner_turn_in_session(
             "Send messages through the organization group".into(),
         ));
     }
+    let event_platform = if platform.is_none() && start.origin == TurnOrigin::Event {
+        super::platform_personal_turn_service::fresh_thread_event_origin_in_session(
+            db, session, &row, &turn_id,
+        )
+        .await?
+    } else {
+        None
+    };
+    let platform = platform.or(event_platform.as_ref());
     if let Some(origin) = platform {
         if origin.thread.user_id != user_id
             || origin.thread.nyxbot_agent_id != agent.id
@@ -2190,6 +2205,7 @@ pub(crate) async fn begin_owner_turn_in_session(
         let lost_turn = lost.clone();
         row.message_count += 1;
         let message = AssistantMessage {
+            platform_reply: lost.platform_reply.clone(),
             platform_origin: lost.platform_origin.clone(),
             retry_of: lost.retry_of.clone(),
             retry_claimed_by: None,
@@ -2314,6 +2330,16 @@ pub(crate) async fn begin_owner_turn_in_session(
         (None, None) => None,
     };
     row.active_turn = Some(ActiveTurn {
+        platform_reply: platform.map(|origin| {
+            crate::models::assistant_conversation::PlatformReplyRouting::Captured {
+                origin: origin.clone(),
+                turn_id: turn_id.clone(),
+                expires_at: bson::DateTime::from_chrono(
+                    now + chrono::Duration::seconds(ACTIVE_TURN_TTL_SECS),
+                )
+                .to_chrono(),
+            }
+        }),
         execution_started: false,
         machine_scopes: Vec::new(),
         platform_origin: platform.cloned(),
@@ -2421,6 +2447,22 @@ pub(crate) async fn begin_owner_turn_in_session(
     } else {
         collection.insert_one(&row).session(&mut *session).await?;
     }
+    // Private credential work is complete. The final shared write conflicts
+    // with unlink/manager stop before this event admission can commit.
+    if let Some(origin) = event_platform.as_ref() {
+        use super::platform_manager_contract::ManagerIdentityProducer;
+        super::platform_personal_binding_service::IdentityProducer
+            .claim_binding_turn(
+                db,
+                session,
+                &super::platform_personal_turn_service::contract_origin(origin)?,
+                &super::platform_manager_contract::TurnRef {
+                    conversation_id: row.id.clone(),
+                    turn_id: turn_id.clone(),
+                },
+            )
+            .await?;
+    }
     // An agent's first own thread becomes its home; a hidden group
     // member, channel or isolated automation thread never does.
     if row.group_id.is_none()
@@ -2480,6 +2522,10 @@ pub(crate) async fn begin_owner_turn_in_session(
         }
     }
     let message = AssistantMessage {
+        platform_reply: row
+            .active_turn
+            .as_ref()
+            .and_then(|turn| turn.platform_reply.clone()),
         platform_origin: platform.cloned(),
         retry_of: start.retry_of.clone(),
         retry_claimed_by: None,
@@ -3088,6 +3134,7 @@ async fn finish_turn_inner(
                     tracing::warn!(conversation_id = %row.id, turn_id = %turn_id, stage = %error.stage, http_status = ?error.http_status, upstream_request_id = ?error.upstream_request_id, response_id = ?error.response_id, continuations, upstream_error_code = error.upstream_code.as_deref().unwrap_or(error.code), "Assistant turn failed");
                 }
                 let message = AssistantMessage {
+                    platform_reply: settled_turn.as_ref().and_then(|turn| turn.platform_reply.clone()),
                     platform_origin: settled_turn.as_ref().and_then(|turn| turn.platform_origin.clone()),
                     retry_of: settled_turn.as_ref().and_then(|turn| turn.retry_of.clone()),
                     retry_claimed_by: None,

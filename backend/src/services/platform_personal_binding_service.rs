@@ -283,6 +283,49 @@ pub(crate) async fn validate_personal_origin_in_session(
     check_binding_in_session(db, session, &row, expected.personal_control_revision, false).await
 }
 
+/// Read validation and final admission use the same live policy predicates.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn resolve_thread_in_session(
+    db: &Database,
+    session: &mut ClientSession,
+    user: &str,
+    binding: &str,
+    generation: i64,
+    conversation: &str,
+    write_fence: bool,
+) -> AppResult<super::platform_manager_contract::ThreadAuthorityResolution> {
+    use super::platform_manager_contract::ThreadAuthorityResolution;
+    let Some(row) = db.collection::<PlatformPersonalBinding>(COLLECTION_NAME)
+        .find_one(doc! {"_id":binding,"user_id":user,"generation":generation,"conversation_id":conversation,"state":"active"})
+        .session(&mut *session).await? else {
+            return Ok(ThreadAuthorityResolution::WebOnly);
+        };
+    let Some(controls) = super::platform_bot_runtime_control_service::get_in_session(
+        db,
+        session,
+        &row.platform_config_id,
+    )
+    .await?
+    else {
+        return Ok(ThreadAuthorityResolution::WebOnly);
+    };
+    Ok(
+        if check_binding_in_session(
+            db,
+            session,
+            &row,
+            controls.personal_control_revision,
+            write_fence,
+        )
+        .await?
+        {
+            ThreadAuthorityResolution::Personal(authority(&row, controls.personal_control_revision))
+        } else {
+            ThreadAuthorityResolution::WebOnly
+        },
+    )
+}
+
 pub async fn claim_thread_in_session(
     db: &Database,
     session: &mut ClientSession,
@@ -1182,29 +1225,7 @@ impl super::platform_manager_contract::ManagerIdentityProducer for IdentityProdu
         generation: i64,
         conversation: &str,
     ) -> AppResult<super::platform_manager_contract::ThreadAuthorityResolution> {
-        use super::platform_manager_contract::ThreadAuthorityResolution;
-        let Some(row)=db.collection::<PlatformPersonalBinding>(COLLECTION_NAME).find_one(doc! {"_id":binding,"user_id":user,"generation":generation,"conversation_id":conversation,"state":"active"}).session(&mut *session).await? else {return Ok(ThreadAuthorityResolution::WebOnly);};
-        let Some(controls) = super::platform_bot_runtime_control_service::get_in_session(
-            db,
-            session,
-            &row.platform_config_id,
-        )
-        .await?
-        else {
-            return Ok(ThreadAuthorityResolution::WebOnly);
-        };
-        Ok(
-            if fence_binding_in_session(db, session, &row, controls.personal_control_revision)
-                .await?
-            {
-                ThreadAuthorityResolution::Personal(authority(
-                    &row,
-                    controls.personal_control_revision,
-                ))
-            } else {
-                ThreadAuthorityResolution::WebOnly
-            },
-        )
+        resolve_thread_in_session(db, session, user, binding, generation, conversation, true).await
     }
 }
 

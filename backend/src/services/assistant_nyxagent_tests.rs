@@ -264,6 +264,7 @@ fn insufficient_credits_is_a_stable_terminal_code() {
 fn recap_is_labeled_recent_and_bounded_without_splitting_unicode() {
     let messages: Vec<_> = (0..30)
         .map(|i| AssistantMessage {
+            platform_reply: None,
             platform_origin: None,
             author: None,
             activity_total: 0,
@@ -393,6 +394,7 @@ fn failure_matrix_maps_transport_failures_to_recoverable_classes() {
 fn recap_preserves_goal_head_and_tail_under_long_last_reply() {
     let rows = vec![
         AssistantMessage {
+            platform_reply: None,
             platform_origin: None,
             author: None,
             activity_total: 0,
@@ -423,6 +425,7 @@ fn recap_preserves_goal_head_and_tail_under_long_last_reply() {
             via: None,
         },
         AssistantMessage {
+            platform_reply: None,
             platform_origin: None,
             author: None,
             activity_total: 0,
@@ -464,6 +467,7 @@ fn recap_preserves_goal_head_and_tail_under_long_last_reply() {
 #[test]
 fn recap_caps_each_activity_list_and_reserves_bounded_total_budget() {
     let row = AssistantMessage {
+        platform_reply: None,
         platform_origin: None,
         author: None,
         activity_total: 0,
@@ -535,6 +539,7 @@ fn recap_caps_each_activity_list_and_reserves_bounded_total_budget() {
 #[test]
 fn recap_v2_keeps_action_status_and_attachment_checkpoint() {
     let row = AssistantMessage {
+        platform_reply: None,
         platform_origin: None,
         author: None,
         activity_total: 0,
@@ -592,6 +597,7 @@ fn recap_v2_keeps_action_status_and_attachment_checkpoint() {
 #[test]
 fn guest_recap_omits_owner_tool_metadata() {
     let row = AssistantMessage {
+        platform_reply: None,
         platform_origin: None,
         author: None,
         activity_total: 0,
@@ -649,6 +655,7 @@ fn guest_recap_omits_owner_tool_metadata() {
 #[test]
 fn retry_recap_lists_completed_activity_ids_for_no_duplicate_replay() {
     let row = AssistantMessage {
+        platform_reply: None,
         platform_origin: None,
         author: None,
         activity_total: 0,
@@ -923,6 +930,7 @@ fn stale_test_row(now: DateTime<Utc>) -> AssistantConversation {
         credential_api_key_id: "key".into(),
         message_count: 0,
         active_turn: Some(ActiveTurn {
+            platform_reply: None,
             execution_started: false,
             machine_scopes: Vec::new(),
             platform_origin: None,
@@ -1309,6 +1317,13 @@ async fn settlement_retains_platform_origin_after_active_turn_is_cleared() {
     let proof = platform_test_origin(&row);
     row.platform_thread = Some(proof.thread.clone());
     row.active_turn.as_mut().unwrap().platform_origin = Some(proof.clone());
+    let destination = crate::models::assistant_conversation::PlatformReplyRouting::Captured {
+        origin: proof.clone(),
+        turn_id: row.active_turn.as_ref().unwrap().turn_id.clone(),
+        expires_at: bson::DateTime::from_chrono(Utc::now() + chrono::Duration::minutes(30))
+            .to_chrono(),
+    };
+    row.active_turn.as_mut().unwrap().platform_reply = Some(destination.clone());
     db.collection::<AssistantConversation>(CONVERSATIONS)
         .replace_one(doc! {"_id": &row.id}, &row)
         .await
@@ -1344,6 +1359,7 @@ async fn settlement_retains_platform_origin_after_active_turn_is_cleared() {
         .unwrap();
     assert_platform_settled(&db, &proof, &reply.id).await;
     assert_eq!(reply.platform_origin, Some(proof));
+    assert_eq!(reply.platform_reply, Some(destination));
     let mut legacy = bson::to_document(&reply).unwrap();
     legacy.remove("platform_origin");
     assert!(
@@ -1384,6 +1400,12 @@ async fn stale_fence_is_reclaimed_with_lost_reply_and_late_settlement_is_a_noop(
     .await
     .unwrap();
     let proof = platform_test_origin(&old);
+    let destination = crate::models::assistant_conversation::PlatformReplyRouting::Captured {
+        origin: proof.clone(),
+        turn_id: old.active_turn.as_ref().unwrap().turn_id.clone(),
+        expires_at: bson::DateTime::from_chrono(Utc::now() + chrono::Duration::minutes(30))
+            .to_chrono(),
+    };
     seed_platform_execution(&db, &old, &proof).await;
     db.collection::<bson::Document>(CONVERSATIONS)
         .update_one(
@@ -1391,6 +1413,7 @@ async fn stale_fence_is_reclaimed_with_lost_reply_and_late_settlement_is_a_noop(
             doc! {"$set": {
                 "platform_thread": bson::to_bson(&proof.thread).unwrap(),
                 "active_turn.platform_origin": bson::to_bson(&proof).unwrap(),
+                "active_turn.platform_reply": bson::to_bson(&destination).unwrap(),
             }},
         )
         .await
@@ -1421,6 +1444,7 @@ async fn stale_fence_is_reclaimed_with_lost_reply_and_late_settlement_is_a_noop(
     assert_eq!(transcript.len(), 3);
     let lost = &transcript[1];
     assert_eq!(lost.platform_origin.as_ref(), Some(&proof));
+    assert_eq!(lost.platform_reply.as_ref(), Some(&destination));
     assert_platform_settled(&db, &proof, &lost.id).await;
     assert!(next.active_turn.as_ref().unwrap().platform_origin.is_none());
     assert_eq!(lost.turn_id, old.active_turn.as_ref().unwrap().turn_id);
@@ -3009,6 +3033,7 @@ async fn reset_context_is_fenced_and_drops_the_checkpoint() {
 #[test]
 fn recap_reserves_the_goal_before_long_recent_rows() {
     let row = |seq: i64, role: &str, text: String| AssistantMessage {
+        platform_reply: None,
         platform_origin: None,
         author: None,
         activity_total: 0,
@@ -4029,6 +4054,7 @@ fn production_recap_keeps_unrendered_tail_owners_in_requirements_and_omission_co
 #[test]
 fn recap_sections_keep_mid_history_owner_rules_tail_and_manifest_with_cjk() {
     let message = |i, text: String| AssistantMessage {
+        platform_reply: None,
         platform_origin: None,
         retry_claimed_by: None,
         activity_count: None,
@@ -4083,6 +4109,7 @@ fn recap_sections_keep_mid_history_owner_rules_tail_and_manifest_with_cjk() {
 #[test]
 fn recap_owner_overflow_points_to_history_tool() {
     let message = |i: i64| AssistantMessage {
+        platform_reply: None,
         platform_origin: None,
         retry_claimed_by: None,
         activity_count: None,
@@ -4939,6 +4966,14 @@ fn async_delivery_keeps_original_platform_proof_and_fresh_execution_origin_separ
     row.platform_thread = Some(fresh.thread.clone());
     row.active_turn.as_mut().unwrap().platform_origin = Some(fresh.clone());
     let delivery = DeliveryBinding {
+        platform_reply: Some(
+            crate::models::assistant_conversation::PlatformReplyRouting::Captured {
+                origin: original.clone(),
+                turn_id: "original-turn".into(),
+                expires_at: bson::DateTime::from_chrono(Utc::now() + chrono::Duration::minutes(30))
+                    .to_chrono(),
+            },
+        ),
         platform_origin: Some(original.clone()),
         origin: TurnOrigin::User,
         channel: None,
@@ -4984,7 +5019,27 @@ fn async_delivery_keeps_original_platform_proof_and_fresh_execution_origin_separ
         result_encrypted: None,
     };
     crate::services::async_service_operation::apply_delivery(&mut row, &watch);
-    assert_eq!(row.active_turn.unwrap().platform_origin, Some(fresh));
+    assert_eq!(
+        row.active_turn.as_ref().unwrap().platform_origin,
+        Some(fresh.clone())
+    );
+    assert_eq!(
+        row.active_turn.as_ref().unwrap().platform_reply,
+        watch.delivery.platform_reply
+    );
+    assert!(channel_note(&row).contains("private Telegram"));
+    let mut web_watch = watch.clone();
+    web_watch.delivery.platform_reply = None;
+    crate::services::async_service_operation::apply_delivery(&mut row, &web_watch);
+    assert_eq!(
+        row.active_turn.as_ref().unwrap().platform_origin,
+        Some(fresh)
+    );
+    assert_eq!(
+        row.active_turn.as_ref().unwrap().platform_reply,
+        Some(crate::models::assistant_conversation::PlatformReplyRouting::WebOnly)
+    );
+    assert!(!channel_note(&row).contains("private Telegram"));
     assert_eq!(watch.delivery.platform_origin, Some(original));
     assert_eq!(
         crate::models::assistant_conversation::carried_report_to(
