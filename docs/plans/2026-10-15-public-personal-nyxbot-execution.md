@@ -71,3 +71,21 @@ this new feature. Track actual completion in the
   two queued agents verified idle.
 - No product implementation, Rust build or feature acceptance result is claimed
   at this opening checkpoint.
+
+## Contract checkpoint
+
+- Part 5 produced contract candidate `1b5aea084`; the primary applied it as
+  `8e670134b` alongside the execution/acceptance records. It defines service
+  values and producer signatures and mounts no new route or runtime.
+- Full workspace `cargo +1.98.1 fmt --all -- --check` passed on that candidate.
+  No compile or runtime-test claim follows from formatting.
+- Part 2 started its engine/contract review. Parts 1 and 3 are reconciling their
+  proposals; Part 5 is idle after the candidate commit. Part 4 remains queued.
+- Some provider reloads emitted duplicate finish notifications while Parts 1
+  and 3 resumed their original work. The primary verified actual status and
+  stopped Part 4's just-started review to restore the three-worker limit. Future
+  slot changes require a confirmed idle state and a concrete handoff artifact.
+- Primary review identified the existing broad Stop cancellation, the optional
+  ordinary live-turn flag, first-use missing NyxBot identity, initial runtime
+  creation semantics and pre-router token scrubbing as concrete integration
+  points. These have been sent to the relevant owners.
