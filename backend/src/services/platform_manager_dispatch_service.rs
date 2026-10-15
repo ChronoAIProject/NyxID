@@ -128,9 +128,16 @@ pub async fn admit_manager_update(
     let mut session = db.client().start_session().await?;
     let result = session
         .start_transaction()
-        .and_run2(async |session| {
-            transaction_result(admit_in_session(db, session, identity, update, &claim).await)
-        })
+        .and_run(
+            (db, identity, update, claim),
+            |session, (db, identity, update, claim)| {
+                Box::pin(async move {
+                    transaction_result(
+                        admit_in_session(db, session, *identity, update, claim).await,
+                    )
+                })
+            },
+        )
         .await
         .map_err(map_transaction_error);
     if result.is_err() {

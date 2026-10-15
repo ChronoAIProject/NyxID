@@ -1432,60 +1432,66 @@ impl super::platform_manager_contract::ManagerLifecycleProducer for LifecyclePro
             let mut session = db.client().start_session().await?;
             session
                 .start_transaction()
-                .and_run2(async |session| {
-                    let result: AppResult<_> = async {
-                        let Some(current) = db
-                            .collection::<PlatformBotRuntimeControls>(CONTROLS)
-                            .find_one_and_update(
-                                doc! {"_id":&pending.id,"cleanup_pending":true},
-                                doc! {"$inc":{"effect_revision":1_i64}},
-                            )
-                            .session(&mut *session)
-                            .await?
-                        else {
-                            return Ok(());
-                        };
-                        let next = stop_manager_batch_in_session(
-                            &db,
-                            session,
-                            &current.platform_config_id,
-                            None,
-                            current.retired,
-                            self,
-                        )
-                        .await?;
-                        if !current.public_enabled || current.retired || current.emergency_stopped {
-                            let mut manager =
-                                super::platform_bot_runtime_control_service::policy(&current)
-                                    .manager;
-                            if current.retired {
-                                manager.manager_authority_epoch = manager
-                                    .manager_authority_epoch
-                                    .checked_sub(1)
-                                    .ok_or_else(conflict)?;
-                            }
-                            self.public
-                                .revoke_public_sessions_in_session(
-                                    &db,
-                                    session,
-                                    &PublicRevocationScope::Manager { manager },
-                                    PublicRevocationReason::ManagerRetired,
-                                )
-                                .await?;
-                        }
-                        if next.is_none() {
-                            db.collection::<PlatformBotRuntimeControls>(CONTROLS)
-                                .update_one(
-                                    doc! {"_id":&current.id},
-                                    doc! {"$set":{"cleanup_pending":false}},
+                .and_run((db, pending, self), |session, (db, pending, lifecycle)| {
+                    Box::pin(async move {
+                        let result: AppResult<_> = async {
+                            let Some(current) = db
+                                .collection::<PlatformBotRuntimeControls>(CONTROLS)
+                                .find_one_and_update(
+                                    doc! {"_id":&pending.id,"cleanup_pending":true},
+                                    doc! {"$inc":{"effect_revision":1_i64}},
                                 )
                                 .session(&mut *session)
-                                .await?;
+                                .await?
+                            else {
+                                return Ok(());
+                            };
+                            let next = stop_manager_batch_in_session(
+                                &db,
+                                session,
+                                &current.platform_config_id,
+                                None,
+                                current.retired,
+                                *lifecycle,
+                            )
+                            .await?;
+                            if !current.public_enabled
+                                || current.retired
+                                || current.emergency_stopped
+                            {
+                                let mut manager =
+                                    super::platform_bot_runtime_control_service::policy(&current)
+                                        .manager;
+                                if current.retired {
+                                    manager.manager_authority_epoch = manager
+                                        .manager_authority_epoch
+                                        .checked_sub(1)
+                                        .ok_or_else(conflict)?;
+                                }
+                                lifecycle
+                                    .public
+                                    .revoke_public_sessions_in_session(
+                                        &db,
+                                        session,
+                                        &PublicRevocationScope::Manager { manager },
+                                        PublicRevocationReason::ManagerRetired,
+                                    )
+                                    .await?;
+                            }
+                            if next.is_none() {
+                                db.collection::<PlatformBotRuntimeControls>(CONTROLS)
+                                    .update_one(
+                                        doc! {"_id":&current.id},
+                                        doc! {"$set":{"cleanup_pending":false}},
+                                    )
+                                    .session(&mut *session)
+                                    .await?;
+                            }
+                            Ok(())
                         }
-                        Ok(())
-                    }
-                    .await;
-                    super::api_key_mutation_service::transaction_result(result)
+                        .await;
+                        super::api_key_mutation_service::transaction_result(result)
+                    })
                 })
                 .await
                 .map_err(super::api_key_mutation_service::map_transaction_error)?;
