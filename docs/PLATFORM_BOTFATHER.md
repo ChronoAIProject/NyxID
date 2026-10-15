@@ -37,9 +37,12 @@ it separately checks that the owned specialist still exists.
    organization they can administer. Conversion starts paused, revokes old route
    and assistant keys, and queues exact old-turn/transport cleanup. It leaves the
    shared native creation webhook intact.
-2. Save a paused guide configuration in `/admin/platform-bots`, discover its live
-   advertised models, then explicitly validate and enable the selected exact
-   model. Readiness/discovery use sponsor funding and can consume sponsor credits.
+2. In `/admin/platform-bots`, choose the guide's AI service (Chrono LLM is
+   preselected) and model (discovered automatically; a cheap "mini" chat model
+   is preselected), then click **Turn on guide**. That one request saves the
+   configuration, validates the exact model with a tiny live call and enables
+   the guide; limits default to safe values under **Advanced limits**.
+   Discovery and readiness use sponsor funding and can consume sponsor credits.
 3. Clients enter `/onboarding` or the manager's bare `/start`, link their account
    using web approval plus same-private-chat confirmation, and resume or adopt
    their draft. Linking grants bounded onboarding authority only.

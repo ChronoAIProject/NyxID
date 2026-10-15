@@ -10,6 +10,11 @@ import {
   AdminPlatformBotsPage,
   GatewayCleanupControls,
 } from "./admin-platform-bots";
+import {
+  defaultGuideModel,
+  defaultGuideService,
+  guideChatModels,
+} from "@/lib/platform-onboarding";
 import type { PlatformProfile } from "@/schemas/platform-onboarding";
 const { profile, mutate, guideMutate, catalog, cleanup } = vi.hoisted(() => ({
   profile: {
@@ -75,19 +80,15 @@ it("requires rereview if retirement generation changes during confirmation", () 
   expect(mutate.mock.calls[0]![0].profile.generation).toBe(2);
 });
 
-it("bootstraps an empty guide through named service discovery, paused save and explicit validation", async () => {
-  const page = render(<AdminPlatformBotsPage />);
+it("sets up a guide with defaults: preselected service, auto-discovered cheap model, one enable click", async () => {
+  render(<AdminPlatformBotsPage />);
   const service = catalog[0]!;
-  fireEvent.change(screen.getByLabelText("Platform inference service"), {
-    target: { value: service.id },
-  });
-  fireEvent.click(
-    screen.getByRole("button", { name: "Discover sponsor-funded models" }),
+  await waitFor(() =>
+    expect(guideMutate.mock.calls[0]?.[0]).toMatchObject({
+      action: "discover",
+      model_service_id: service.id,
+    }),
   );
-  expect(guideMutate.mock.calls[0]![0]).toMatchObject({
-    action: "discover",
-    model_service_id: service.id,
-  });
   const callback = guideMutate.mock.calls[0]![1] as {
     onSuccess: (value: unknown) => void;
   };
@@ -95,34 +96,58 @@ it("bootstraps an empty guide through named service discovery, paused save and e
     callback.onSuccess({
       generation: 1,
       model_service_id: service.id,
-      models: ["live-model"],
+      models: ["codex-auto-review", "gpt-image-1", "large-model", "small-mini"],
     }),
   );
-  fireEvent.change(screen.getByLabelText("Exact advertised model"), {
-    target: { value: "live-model" },
-  });
+  expect(screen.getByLabelText("Model")).toHaveValue("small-mini");
+  expect(
+    screen.queryByRole("option", { name: "gpt-image-1" }),
+  ).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Turn on guide" }));
+  await waitFor(() =>
+    expect(guideMutate).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        action: "configure",
+        enabled: true,
+        profile: expect.objectContaining({ generation: 1 }),
+        guide: expect.objectContaining({
+          model_service_id: service.id,
+          model_id: "small-mini",
+          anonymous_daily_credits: "0.1",
+        }),
+      }),
+    ),
+  );
   fireEvent.click(
-    screen.getByRole("button", { name: "Save paused configuration" }),
+    screen.getByRole("button", { name: "Save without turning on" }),
   );
   await waitFor(() =>
-    expect(guideMutate.mock.calls[1]![0]).toMatchObject({
-      action: "configure",
-      enabled: false,
-      guide: { model_service_id: service.id, model_id: "live-model" },
-    }),
+    expect(guideMutate).toHaveBeenLastCalledWith(
+      expect.objectContaining({ action: "configure", enabled: false }),
+    ),
   );
-  profile.guide = guideMutate.mock.calls[1]![0].guide;
-  profile.generation = 2;
-  page.rerender(<AdminPlatformBotsPage />);
-  fireEvent.click(
-    screen.getByRole("button", { name: "Validate model and enable guide" }),
+});
+
+it("picks sensible guide defaults", () => {
+  expect(
+    defaultGuideService([
+      { id: "a", name: "OpenAI API" },
+      { id: "b", name: "Chrono LLM (public)" },
+    ]),
+  ).toBe("b");
+  expect(defaultGuideService([{ id: "a", name: "OpenAI API" }])).toBe("a");
+  expect(
+    defaultGuideModel([
+      "codex-auto-review",
+      "gpt-5.2",
+      "gpt-5.4-mini",
+      "gpt-image-1",
+    ]),
+  ).toBe("gpt-5.4-mini");
+  expect(defaultGuideModel(["codex-auto-review", "gpt-6"])).toBe("gpt-6");
+  expect(guideChatModels(["gpt-6", "gpt-image-2", "text-embedding-3"])).toEqual(
+    ["gpt-6"],
   );
-  expect(guideMutate.mock.calls[2]![0]).toMatchObject({
-    action: "configure",
-    enabled: true,
-    profile: { generation: 2 },
-    guide: { model_id: "live-model" },
-  });
 });
 
 it("requires exact gateway review and resets confirmation on profile drift", () => {

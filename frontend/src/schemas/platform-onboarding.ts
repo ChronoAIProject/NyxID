@@ -132,8 +132,8 @@ export const bindingPreviewSchema = z.object({
   scope: z.string(),
 });
 export const guideConfigurationSchema = z.object({
-  model_service_id: z.uuid(),
-  model_id: z.string().min(1).max(200),
+  model_service_id: z.uuid("Choose an AI service"),
+  model_id: z.string().min(1, "Choose a model").max(200),
   limits: setupLimitsSchema,
   anonymous_daily_credits: setupLimitsSchema.shape.daily_credits,
   platform_turns_per_hour: z.number().int().min(1).max(1000),
