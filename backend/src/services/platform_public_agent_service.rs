@@ -29,14 +29,22 @@ const MAX_REVOKE_SESSIONS: usize = 256;
 const CLEANUP_LEASE_SECS: i64 = 60;
 
 pub fn producer(
-    _state: AppState,
-    _execution: Arc<dyn NyxAgentExecutionProducer>,
-    _ingress: Arc<dyn ManagerIngressTurnStore>,
+    state: AppState,
+    execution: Arc<dyn NyxAgentExecutionProducer>,
+    ingress: Arc<dyn ManagerIngressTurnStore>,
 ) -> Arc<dyn PublicTurnProducer> {
     // No dependency can override the local absence of runtime proof.
-    Arc::new(PublicProducer)
+    Arc::new(PublicProducer {
+        state,
+        execution,
+        ingress,
+    })
 }
-struct PublicProducer;
+struct PublicProducer {
+    state: AppState,
+    execution: Arc<dyn NyxAgentExecutionProducer>,
+    ingress: Arc<dyn ManagerIngressTurnStore>,
+}
 
 pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
     // Draft versions used the deterministic scope identity as _id. Preserve
@@ -130,34 +138,87 @@ impl PublicTurnProducer for PublicProducer {
     async fn prepare_public_context(
         &self,
         _db: &Database,
-        _admitted: &PublicIngress,
+        admitted: &PublicIngress,
     ) -> AppResult<PublicExecutionContext> {
-        Err(policy::unavailable())
+        super::platform_public_credential_service::issue_context(
+            &self.state,
+            self.ingress.clone(),
+            admitted,
+        )
+        .await
     }
     async fn fence_public_execution(
         &self,
-        _db: &Database,
-        _session: &mut ClientSession,
-        _context: &PublicExecutionContext,
+        db: &Database,
+        session: &mut ClientSession,
+        context: &PublicExecutionContext,
     ) -> AppResult<FenceOutcome> {
-        Ok(FenceOutcome::Unavailable(UnavailableReason::PublicNotReady))
+        if policy::verified_context(context).is_err() {
+            return Ok(FenceOutcome::Unavailable(UnavailableReason::PublicNotReady));
+        }
+        let row = db
+            .collection::<PlatformPublicSession>(SESSIONS)
+            .find_one(doc! {"_id":&context.public_session_id})
+            .session(&mut *session)
+            .await?
+            .ok_or_else(changed)?;
+        super::platform_public_budget_service::fence_context(
+            db,
+            session,
+            context,
+            &row.credential_api_key_id,
+        )
+        .await?;
+        Ok(FenceOutcome::Authorized)
     }
     async fn run_public_turn(
         &self,
-        _db: &Database,
-        _context: PublicExecutionContext,
-        _input: TurnInput,
-        _events: mpsc::Sender<ExecutionEvent>,
+        db: &Database,
+        context: PublicExecutionContext,
+        input: TurnInput,
+        events: mpsc::Sender<ExecutionEvent>,
     ) -> AppResult<TurnRef> {
-        Err(policy::unavailable())
+        policy::verified_context(&context)?;
+        let turn = context.turn.clone();
+        self.execution
+            .execute_nyxagent_turn(db, NyxAgentExecutionContext::Public(context), input, events)
+            .await?;
+        Ok(turn)
     }
     async fn fence_public_reply(
         &self,
-        _db: &Database,
-        _session: &mut ClientSession,
-        _destination: &ReplyDestination,
+        db: &Database,
+        session: &mut ClientSession,
+        destination: &ReplyDestination,
     ) -> AppResult<FenceOutcome> {
-        Ok(FenceOutcome::Unavailable(UnavailableReason::PublicNotReady))
+        let Ok((_, evidence)) = policy::verified_readiness() else {
+            return Ok(FenceOutcome::Unavailable(UnavailableReason::PublicNotReady));
+        };
+        let ReplyAuthority::Public {
+            ingress,
+            public_session_id,
+            ..
+        } = &destination.authority
+        else {
+            return Err(changed());
+        };
+        let row = db
+            .collection::<PlatformPublicSession>(SESSIONS)
+            .find_one(doc! {"_id":public_session_id})
+            .session(&mut *session)
+            .await?
+            .ok_or_else(changed)?;
+        if evidence.manager != ingress.manager
+            || evidence.public_policy_revision != ingress.public_policy_revision
+            || evidence.policy_digest != row.policy_digest
+            || evidence.sponsor_owner_user_id != row.sponsor_owner_user_id
+            || evidence.nyxagent_profile != row.nyxagent_profile
+        {
+            return Err(changed());
+        }
+        super::platform_public_credential_service::fence_reply_in_session(db, session, destination)
+            .await?;
+        Ok(FenceOutcome::Authorized)
     }
     async fn revoke_public_sender(
         &self,
@@ -732,7 +793,11 @@ pub(crate) mod tests {
                 sender_daily_credits: crate::models::credits::Credits::from_whole(1),
             }),
         };
-        let public = PublicProducer;
+        let public = super::super::platform_manager_transport::compose(
+            crate::test_utils::test_app_state(db.clone()),
+        )
+        .public
+        .clone();
         for _ in 0..2 {
             let discovery = public
                 .discover_public_profiles(&db, &reviewed)

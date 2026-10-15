@@ -75,6 +75,78 @@ impl CallQuote {
     }
 }
 
+/// Preparation and dispatch quote the same sponsor-only catalog pricing route.
+pub(crate) async fn quote_operation(
+    state: &AppState,
+    proof: &VerifiedPublicContract,
+    context: &PublicExecutionContext,
+    key_id: &str,
+    operation: &PublicModelOperation,
+    call_id: &str,
+) -> AppResult<CallQuote> {
+    let service = state
+        .db
+        .collection::<crate::models::downstream_service::DownstreamService>(
+            crate::models::downstream_service::COLLECTION_NAME,
+        )
+        .find_one(doc! {"_id":&operation.service_id,"is_active":true})
+        .await?
+        .ok_or_else(denied)?;
+    let metric = billing::metric_resolution::platform_metric_for_request(&service, false);
+    let route = BillingRouteContext::new(
+        billing::BillingIngress::Proxy,
+        call_id.into(),
+        context.sponsor_owner_user_id.clone(),
+        context.sponsor_owner_user_id.clone(),
+        Some(key_id.into()),
+        None,
+        Some(service.id.clone()),
+        Some(service.slug.clone()),
+        billing::NodeIntent::Direct,
+        service.auth_method.clone(),
+        crate::models::usage_meter::CredentialClass::NyxidManagedMaster,
+        metric,
+        service.billing.as_ref(),
+        state.billing.resale_enabled(),
+    )
+    .with_operation(Some(&operation.operation));
+    quote_dispatch(state, proof, context, key_id, route, operation, call_id).await
+}
+
+/// Seed outside the caller transaction to absorb first-of-day unique-key races.
+pub(crate) async fn seed_buckets(db: &Database, context: &PublicExecutionContext) -> AppResult<()> {
+    let hello = db.run_command(doc! {"hello":1}).await?;
+    let now = hello
+        .get_datetime("localTime")
+        .map_err(|_| denied())?
+        .to_chrono();
+    let day = now
+        .date_naive()
+        .and_hms_opt(0, 0, 0)
+        .ok_or_else(denied)?
+        .and_utc();
+    for day in [day, day + chrono::Duration::days(1)] {
+        for scope in [
+            format!(
+                "total:{}:{}",
+                context.ingress.manager.profile_id,
+                day.timestamp()
+            ),
+            format!(
+                "sender:{}:{}:{}",
+                context.ingress.manager.profile_id,
+                context.ingress.sender_id,
+                day.timestamp()
+            ),
+        ] {
+            match db.collection::<PublicBudgetBucket>(BUCKETS).update_one(doc! {"scope_key":&scope},doc! {"$setOnInsert":{"_id":uuid::Uuid::new_v4().to_string(),"scope_key":&scope,"held":Credits::ZERO.decimal(),"spent":Credits::ZERO.decimal()}}).upsert(true).await {
+                Ok(_)=>{},Err(error) if super::assistant_team_service::is_duplicate(&error)=>{},Err(error)=>return Err(error.into()),
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Quote all active components and resale at the pinned model's exact rates.
 /// Only a verified contract may authorize this local helper for production.
 pub(crate) async fn quote_dispatch(
@@ -705,10 +777,10 @@ pub async fn sweep(db: &Database, limit: u32) -> AppResult<RecoveryBatch> {
         .try_collect()
         .await?;
     for call in calls {
-        if let Ok(id) = call.get_str("_id") {
-            if reconcile_call(db, id).await.is_err() {
-                recovery_backoff(db, CALLS, id).await;
-            }
+        if let Ok(id) = call.get_str("_id")
+            && reconcile_call(db, id).await.is_err()
+        {
+            recovery_backoff(db, CALLS, id).await;
         }
         processed += 1;
     }
@@ -992,6 +1064,37 @@ mod tests {
             input: 10,
             output: 5,
         }
+    }
+    #[tokio::test]
+    async fn first_day_seeding_allows_both_fitting_reservations_without_duplicate_abort() {
+        let db = crate::test_utils::connect_transaction_test_database("public_seed_race").await;
+        ensure_indexes(&db).await.unwrap();
+        let (a, key_a) = context(&db, 5, None).await;
+        let (b, key_b) = context(&db, 6, Some(&a.sponsor_owner_user_id)).await;
+        let (sa, sb) = tokio::join!(seed_buckets(&db, &a), seed_buckets(&db, &b));
+        sa.unwrap();
+        sb.unwrap();
+        let (left, right) = tokio::join!(
+            reserve(db.clone(), a, key_a, Credits::from_pico(4).unwrap()),
+            reserve(db.clone(), b, key_b, Credits::from_pico(4).unwrap())
+        );
+        left.unwrap();
+        right.unwrap();
+        let buckets: Vec<PublicBudgetBucket> = db
+            .collection::<PublicBudgetBucket>(BUCKETS)
+            .find(doc! {})
+            .await
+            .unwrap()
+            .try_collect()
+            .await
+            .unwrap();
+        assert!(
+            buckets
+                .iter()
+                .filter(|b| b.scope_key.starts_with("total:"))
+                .any(|b| b.held == Credits::from_pico(8).unwrap())
+        );
+        db.drop().await.unwrap();
     }
     #[tokio::test]
     async fn exact_total_cap_serializes_competing_senders_without_revision_reset() {
