@@ -139,8 +139,10 @@ recovery wiring rather than Part 1 patching `platform_setup_service.rs`.
 
 Every `_id` is a UUID v4 string. Telegram numeric identities are validated as
 checked positive `i64` values in service proofs and canonical decimal strings
-in HTTP DTOs to avoid JavaScript number rounding. Private chat requires `sender_id == chat_id`, non-bot sender, and no
-forwarded origin, as verified by Part 5. BSON dates use the project helpers,
+in HTTP DTOs to avoid JavaScript number rounding. Part 5 verifies private chat,
+`sender_id == chat_id`, and a non-bot sender. Forwarded-origin refusal applies
+to proof/control commands; ordinary linked messages may contain forwarded text.
+BSON dates use the project helpers,
 including `bson_datetime::optional` for optional dates. Models have no business
 logic and never become HTTP responses directly.
 
@@ -346,8 +348,9 @@ policy refusal, while storage, decoding, and transaction failures remain `Err`.
 A missing producer cannot fabricate successful authority or readiness.
 
 Part 5 owns ingress receipt/classification transactions and passes the session
-into `resolve_sender`. Private/non-forwarded/non-bot checks happen before this
-API; groups receive the deterministic private-chat handoff. Check common
+into `resolve_sender`. Private-chat and non-bot sender checks happen before this
+API; forwarded content does not change sender authority. Groups receive the
+deterministic private-chat handoff. Check common
 manager/mode/emergency authority first, resolve consent state next, and apply
 personal controls only to a personal-bound sender. A disabled public lane does
 not block personal; a paused personal lane does not block public for an unlinked
