@@ -1,6 +1,6 @@
 # Part 3 execution interfaces and security proposal
 
-Status: implementation checkpoint, 2026-10-15, through `c32ef6cb1` on
+Status: implementation checkpoint, 2026-10-15, through `ee439179c` on
 `nyxbot-manager/public`. The final checkpoint below supersedes historical
 first-stage and next-wave status statements. The initial investigation used
 `7ff461c9236bc87f65f8f89efd278a566d7ebce8` and candidate contract `1b5aea084`;
@@ -1428,3 +1428,41 @@ turn row exists and active-lease expiry. Targeted rustfmt and `git diff --check`
 passed. No Cargo/build/runtime test ran on this worker. Central CI, backend
 transaction execution and the independent bridge review remain primary-owned;
 this checkpoint does not claim they passed.
+
+## Final bounded settlement correction (`ee439179c`)
+
+The existing failed-turn settlement already revoked sessions with ambiguous
+upstream state. The final correction binds that action to the transaction's
+successful compare-clear of its own active conversation/turn/receipt/claim,
+retained credential ID, sponsor and policy. `settle_reply_in_session`
+(`platform_public_credential_service.rs:724`) returns whether that exact
+transition occurred. Only that transition may call
+`expire_ambiguous_session_in_session` (`:623`). A duplicate old settlement can
+still observe its saved reply and terminal receipt, but cannot revoke an idle
+successor, clear a newer active turn or revoke a replacement key.
+
+The transaction regression at `:1459` commits the actual outer-attempt marker,
+then calls the real runtime settlement producer with an error and no upstream
+handle. It checks saved encrypted safe text, terminal ingress, key revocation,
+pending cleanup, unchanged admitted call/cap evidence, and fresh-session
+admission for the same sender under the live-session unique index. It also
+aborts the settlement/revocation transaction to check rollback. The regression
+at `:1678` covers idle/active successors and retained-key mismatch. These local
+fixtures exercise durable primitives without constructing public readiness.
+
+`validate_reported_usage` (`platform_public_proxy_service.rs:559`) now rejects
+inconsistent normalized token totals and bounds input/output/total usage after
+truthful sponsor settlement and cap reconciliation. Separate Anthropic cache
+classes count toward the input bound; its shared extractor's synthesized total
+remains uncached prompt plus completion. The focused test at `:913` includes
+the actual Anthropic usage extractor, total inconsistency and output overrun.
+Targeted rustfmt and `git diff --check` passed. These new tests have not been
+executed by this worker. The primary reported a production Cargo check pass
+before this correction; that is not validation of this new commit. No module
+registration or shared-contract change is required by this correction.
+
+Public readiness still refuses activation. The upstream wire/profile,
+callback/compaction confinement, deployed hard bounds and exact cleanup proof
+gaps described above remain unresolved; this settlement correction supplies no
+new upstream evidence. Part 3 releases its implementation slot at this
+checkpoint; central integration, registration and CI remain with the primary.
