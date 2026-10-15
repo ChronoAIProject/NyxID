@@ -690,9 +690,8 @@ pub(crate) async fn decrypt_runtime_key(
     ciphertext: &[u8],
 ) -> AppResult<Zeroizing<String>> {
     let bytes = Zeroizing::new(keys.decrypt(ciphertext).await.map_err(|_| unavailable())?);
-    Ok(Zeroizing::new(
-        String::from_utf8(bytes.to_vec()).map_err(|_| unavailable())?,
-    ))
+    let raw = std::str::from_utf8(&bytes).map_err(|_| unavailable())?;
+    Ok(Zeroizing::new(raw.to_owned()))
 }
 
 /// Metadata and deletion never provision a key as a side effect. Models select

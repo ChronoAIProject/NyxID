@@ -1473,6 +1473,68 @@ async fn stale_fences_are_hidden_in_index_and_history_dtos() {
 }
 
 #[tokio::test]
+async fn settlement_recovers_the_actual_saved_reply_after_an_ambiguous_finish() {
+    let (state, _, server) = setup(None, Duration::ZERO).await;
+    let row = engine::begin_turn(
+        &state.db,
+        OWNER,
+        &engine::TurnRequest {
+            acknowledgement_id: None,
+            retry_of: None,
+            attachment_ids: Vec::new(),
+            agent_id: None,
+            conversation_id: None,
+            text: "question".into(),
+            model: None,
+            access_mode: None,
+        },
+        &state.encryption_keys,
+    )
+    .await
+    .unwrap();
+    let result = TurnResult {
+        text: "durable reply".into(),
+        session_id: None,
+        response_id: None,
+        error: None,
+    };
+    let saved_id = Uuid::new_v4().to_string();
+    engine::finish_turn(
+        &state.db,
+        &row,
+        &row.credential_api_key_id,
+        &saved_id,
+        &result,
+    )
+    .await
+    .unwrap();
+    let permit = state.direct_chat_limiter.try_acquire(OWNER).await.unwrap();
+    let (sender, _receiver) = broadcast::channel(256);
+    let settled = complete_turn(
+        &state.db,
+        &row,
+        &row.active_turn.as_ref().unwrap().turn_id,
+        "uncommitted-worker-message",
+        "block",
+        &result,
+        permit,
+        Events {
+            sender,
+            cursor: 0,
+            reset_notified: false,
+        },
+        Duration::from_secs(1),
+        || std::future::ready(Err(AppError::NotFound("turn already settled".into()))),
+    )
+    .await;
+    assert!(
+        matches!(settled, SettledExecution::Saved { message_id, error: None } if message_id == saved_id)
+    );
+    server.abort();
+    state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
 async fn settlement_failure_is_bounded_emits_terminal_error_and_releases_permit() {
     let (state, _, server) = setup(None, Duration::ZERO).await;
     let row = engine::begin_turn(
@@ -1503,7 +1565,7 @@ async fn settlement_failure_is_bounded_emits_terminal_error_and_releases_permit(
         error: None,
     };
     let attempts = AtomicUsize::new(0);
-    tokio::time::timeout(
+    let settled = tokio::time::timeout(
         Duration::from_secs(2),
         complete_turn(
             &state.db,
@@ -1529,6 +1591,7 @@ async fn settlement_failure_is_bounded_emits_terminal_error_and_releases_permit(
     )
     .await
     .unwrap();
+    assert!(matches!(settled, SettledExecution::Unconfirmed));
     assert!(attempts.load(Ordering::SeqCst) >= 2);
     assert!(limiter.try_acquire(OWNER).await.is_ok());
     let bytes = axum::body::to_bytes(response.into_body(), 10_000)
