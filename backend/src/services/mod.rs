@@ -151,6 +151,8 @@ pub(crate) mod platform_binding_service;
 pub(crate) mod platform_bot_authority;
 pub(crate) mod platform_bot_config_service;
 pub mod platform_credential_service;
+#[allow(dead_code)]
+pub(crate) mod platform_manager_contract;
 pub mod platform_settings_service;
 pub(crate) mod platform_setup_service;
 pub mod pool_failover;
