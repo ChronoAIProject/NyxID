@@ -62,3 +62,110 @@ pub(crate) async fn decide_owner_reply(
     }
     Ok(decided)
 }
+
+/// Original-command eligibility is transport authenticated. This transaction
+/// also compares its exact ingress provenance in the receipt producer.
+pub(crate) async fn decide_personal_reply_in_session(
+    db: &Database,
+    session: &mut mongodb::ClientSession,
+    identity: &dyn super::platform_manager_contract::ManagerIdentityProducer,
+    ingress: &dyn super::platform_manager_contract::ManagerIngressTurnStore,
+    admitted: &super::platform_manager_contract::AdmittedPersonalUpdate,
+    conversation_id: &str,
+    command: &super::platform_manager_contract::OriginalManagerCommand,
+) -> AppResult<super::platform_manager_contract::PlatformDecisionOutcome> {
+    use super::platform_manager_contract as contract;
+    use crate::errors::AppError;
+    use crate::models::{
+        assistant_conversation::AssistantConversation, assistant_message::AssistantMessage,
+    };
+    use mongodb::bson::doc;
+    let authority = &admitted.authority;
+    let update = command.update();
+    if update.chat_kind != contract::ManagerChatKind::Private
+        || update.command_eligibility != contract::ManagerCommandEligibility::OriginalPrivateMessage
+        || update.profile_id != authority.manager.profile_id
+        || update.manager_bot_id != authority.manager.manager_bot_id
+        || update.telegram_bot_id != authority.manager.telegram_bot_id
+        || update.sender_id != authority.sender_id
+        || update.chat_id != authority.chat_id
+    {
+        return Ok(contract::PlatformDecisionOutcome::Unavailable(
+            contract::UnavailableReason::OriginRevoked,
+        ));
+    }
+    if acks::parse_reply(command.text()).is_none() {
+        return Ok(contract::PlatformDecisionOutcome::NoPendingDecision);
+    }
+    if !matches!(
+        identity
+            .fence_personal_origin(db, session, authority)
+            .await?,
+        contract::FenceOutcome::Authorized
+    ) {
+        return Ok(contract::PlatformDecisionOutcome::Unavailable(
+            contract::UnavailableReason::OriginRevoked,
+        ));
+    }
+    // Conflicts with concurrent owner input/rotation/deletion while keeping
+    // the plain yes/no previous-message boundary in this same snapshot.
+    let row=db.collection::<AssistantConversation>(crate::models::assistant_conversation::COLLECTION_NAME)
+        .find_one_and_update(doc! {"_id":conversation_id,"user_id":&authority.user_id,
+            "platform_thread.binding_id":&authority.binding_id,"platform_thread.binding_generation":authority.binding_generation},
+            doc! {"$inc":{"authority_fence":1_i64}}).session(&mut *session).await?.ok_or(AppError::AssistantTurnRequired)?;
+    let messages =
+        db.collection::<AssistantMessage>(crate::models::assistant_message::COLLECTION_NAME);
+    let since=messages.find_one(doc! {"conversation_id":conversation_id,"user_id":&authority.user_id,"role":"user","execution_pending":{"$ne":true}})
+        .sort(doc! {"seq":-1}).session(&mut *session).await?.map(|message|message.created_at);
+    let Some((ack, allowed)) = acks::select_reply_in_session(
+        db,
+        session,
+        &authority.user_id,
+        &[conversation_id.to_owned()],
+        command.text(),
+        since,
+    )
+    .await?
+    else {
+        return Ok(contract::PlatformDecisionOutcome::NoPendingDecision);
+    };
+    let Some(requested_turn_id) = ack.requested_turn_id.as_ref().filter(|id| !id.is_empty()) else {
+        return Ok(contract::PlatformDecisionOutcome::NoPendingDecision);
+    };
+    if ack.authored_skill.is_some() || ack.api_key_id!=row.credential_api_key_id
+        || messages.find_one(doc! {"conversation_id":conversation_id,"user_id":&authority.user_id,"turn_id":requested_turn_id})
+            .session(&mut *session).await?.is_none() {
+        return Ok(contract::PlatformDecisionOutcome::NoPendingDecision);
+    }
+    let mut decision = contract::PlatformCardDecision {
+        acknowledgement_id: ack.id.clone(),
+        requested_turn: contract::TurnRef {
+            conversation_id: conversation_id.to_owned(),
+            turn_id: requested_turn_id.clone(),
+        },
+        allowed,
+        voice_request_id: ack.voice_request_id.clone(),
+        continuation_receipt_id: ack.continuation_receipt_id.clone(),
+        trigger_run_id: ack.trigger_run_id.clone(),
+    };
+    ingress
+        .claim_personal_decision(db, session, admitted, command, &decision)
+        .await?;
+    let ack = acks::decide_in_session(
+        db,
+        session,
+        &authority.user_id,
+        Some(conversation_id),
+        &ack.id,
+        allowed,
+        acks::Decider::User,
+        None,
+        None,
+    )
+    .await?;
+    decision.continuation_receipt_id = ack.continuation_receipt_id;
+    ingress
+        .settle_personal_decision(db, session, &admitted.ingress, &decision)
+        .await?;
+    Ok(contract::PlatformDecisionOutcome::Decided(decision))
+}

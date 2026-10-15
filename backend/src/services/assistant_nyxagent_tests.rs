@@ -916,6 +916,7 @@ fn stale_test_row(now: DateTime<Utc>) -> AssistantConversation {
         credential_api_key_id: "key".into(),
         message_count: 0,
         active_turn: Some(ActiveTurn {
+            machine_scopes: Vec::new(),
             platform_origin: None,
             activity_total: 0,
             retry_digests: Vec::new(),
@@ -4693,4 +4694,228 @@ fn channel_tool_image_filter_honors_explicit_policy_and_narrow_legacy_shim() {
     attachment.origin = "tool".into();
     attachment.content_type = "application/pdf".into();
     assert!(!chat_tool_image(&attachment));
+}
+
+#[tokio::test]
+async fn platform_stop_capture_is_exact_transactional_and_keeps_independent_work() {
+    use crate::models::machine_job::{COLLECTION_NAME as JOBS, MachineJob};
+    use crate::services::{
+        platform_manager_contract as contract, platform_personal_turn_service as personal,
+    };
+    let db = connect_transaction_test_database("nyxa_exact_platform_stop").await;
+    let mut row = stale_test_row(Utc::now());
+    let proof = platform_test_origin(&row);
+    row.platform_thread = Some(proof.thread.clone());
+    row.active_turn.as_mut().unwrap().platform_origin = Some(proof.clone());
+    row.active_turn.as_mut().unwrap().stop_requested = false;
+    row.active_turn.as_mut().unwrap().machine_scopes.push(
+        crate::models::assistant_conversation::MachineTurnScope {
+            node_id: "node".into(),
+            runtime_id: "issue-time-runtime".into(),
+        },
+    );
+    let origin = personal::contract_origin(&proof).unwrap();
+    assert_eq!(personal::model_origin(&origin), proof);
+    let turn = contract::TurnRef {
+        conversation_id: row.id.clone(),
+        turn_id: row.active_turn.as_ref().unwrap().turn_id.clone(),
+    };
+    db.collection::<AssistantConversation>(CONVERSATIONS)
+        .insert_one(&row)
+        .await
+        .unwrap();
+    let job = |id: &str, issuing_turn: Option<String>| MachineJob {
+        id: id.into(),
+        user_id: row.user_id.clone(),
+        conversation_id: row.id.clone(),
+        issuing_turn_id: issuing_turn,
+        node_id: "node".into(),
+        runtime_id: "runtime".into(),
+        api_key_id: row.credential_api_key_id.clone(),
+        agent_id: proof.thread.nyxbot_agent_id.clone(),
+        state: "running".into(),
+        services: Vec::new(),
+        created_at: Utc::now(),
+        expires_at: Utc::now() + chrono::Duration::hours(1),
+        finished_at: None,
+    };
+    db.collection::<MachineJob>(JOBS)
+        .insert_many([
+            job("exact-job", Some(turn.turn_id.clone())),
+            job("old-job", Some("older-turn".into())),
+            job("legacy-job", None),
+        ])
+        .await
+        .unwrap();
+    // Independent watches deliberately remain unchanged, including idle turns.
+    db.collection::<bson::Document>(crate::models::async_service_operation::COLLECTION_NAME)
+        .insert_one(
+            doc! {"_id":"watch","user_id":&row.user_id,"conversation_id":&row.id,"state":"waiting"},
+        )
+        .await
+        .unwrap();
+    let mut session = db.client().start_session().await.unwrap();
+    session.start_transaction().await.unwrap();
+    let mut wrong = origin.clone();
+    wrong.authority.binding_generation += 1;
+    assert!(matches!(
+        personal::capture_exact_stop_in_session(&db, &mut session, &wrong, &turn)
+            .await
+            .unwrap(),
+        contract::ExactStopOutcome::NoMatchingActiveTurn
+    ));
+    let captured = personal::capture_exact_stop_in_session(&db, &mut session, &origin, &turn)
+        .await
+        .unwrap();
+    let contract::ExactStopOutcome::Captured(captured) = captured else {
+        panic!("matching turn must be captured")
+    };
+    assert_eq!(captured.machine_scopes.len(), 1);
+    assert_eq!(captured.machine_scopes[0].runtime_id, "issue-time-runtime");
+    assert_eq!(captured.machine_jobs.len(), 1);
+    assert_eq!(captured.machine_jobs[0].job_id, "exact-job");
+    session.abort_transaction().await.unwrap();
+    assert!(
+        !get(&db, &row.user_id, &row.id)
+            .await
+            .unwrap()
+            .active_turn
+            .unwrap()
+            .stop_requested
+    );
+    session.start_transaction().await.unwrap();
+    personal::capture_exact_stop_in_session(&db, &mut session, &origin, &turn)
+        .await
+        .unwrap();
+    session.commit_transaction().await.unwrap();
+    assert!(
+        get(&db, &row.user_id, &row.id)
+            .await
+            .unwrap()
+            .active_turn
+            .unwrap()
+            .stop_requested
+    );
+    assert_eq!(
+        db.collection::<MachineJob>(JOBS)
+            .count_documents(doc! {"state":"running"})
+            .await
+            .unwrap(),
+        3
+    );
+    assert!(
+        db.collection::<bson::Document>(crate::models::async_service_operation::COLLECTION_NAME)
+            .find_one(doc! {"_id":"watch","state":"waiting"})
+            .await
+            .unwrap()
+            .is_some()
+    );
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn platform_thread_requires_live_turn_with_ordinary_rollout_disabled() {
+    use crate::services::assistant_acknowledgement_service::{
+        AssistantTurnFence, enforce_turn_gate,
+    };
+    let db = connect_transaction_test_database("nyxa_platform_gate_off").await;
+    let owner = Uuid::new_v4().to_string();
+    let mut fence = AssistantTurnFence {
+        conversation_id: Uuid::new_v4().to_string(),
+        turn_id: None,
+        turn_live: false,
+        turn_stopped: true,
+        platform_thread: false,
+        platform_origin: None,
+    };
+    // No rollout row: ordinary compatibility remains permissive.
+    enforce_turn_gate(&db, &fence, &owner, Some("key"), None, None, None, "test")
+        .await
+        .unwrap();
+    fence.platform_thread = true;
+    assert!(matches!(
+        enforce_turn_gate(&db, &fence, &owner, Some("key"), None, None, None, "test").await,
+        Err(AppError::AssistantTurnRequired)
+    ));
+    fence.turn_id = Some("turn".into());
+    fence.turn_live = true;
+    fence.turn_stopped = false;
+    // A fresh owner web turn carries no revoked transport authority.
+    enforce_turn_gate(&db, &fence, &owner, Some("key"), None, None, None, "test")
+        .await
+        .unwrap();
+    fence.turn_stopped = true;
+    assert!(matches!(
+        enforce_turn_gate(&db, &fence, &owner, Some("key"), None, None, None, "test").await,
+        Err(AppError::AssistantTurnRequired)
+    ));
+    db.drop().await.unwrap();
+}
+
+#[test]
+fn async_delivery_keeps_original_platform_proof_and_fresh_execution_origin_separate() {
+    use crate::models::async_service_operation::{AsyncServiceOperation, DeliveryBinding};
+    let mut row = stale_test_row(Utc::now());
+    let original = platform_test_origin(&row);
+    let mut fresh = original.clone();
+    fresh.source = crate::models::assistant_conversation::PlatformOriginSource::ThreadEvent {
+        admission_id: "fresh-event".into(),
+    };
+    row.platform_thread = Some(fresh.thread.clone());
+    row.active_turn.as_mut().unwrap().platform_origin = Some(fresh.clone());
+    let delivery = DeliveryBinding {
+        platform_origin: Some(original.clone()),
+        origin: TurnOrigin::User,
+        channel: None,
+        reply_channel: None,
+        group_id: None,
+        group_request_id: None,
+        voice_request_id: None,
+        trigger_run_id: None,
+        report_to: None,
+    };
+    let watch = AsyncServiceOperation {
+        id: "watch".into(),
+        user_id: row.user_id.clone(),
+        conversation_id: row.id.clone(),
+        agent_id: "agent".into(),
+        turn_id: "original-turn".into(),
+        api_key_id: "key".into(),
+        service_id: "service".into(),
+        submit_endpoint_id: "submit".into(),
+        contract: crate::models::async_service_operation::AsyncOperationContract {
+            status_operation: "status".into(),
+            result_operation: "result".into(),
+            cancel_operation: None,
+            id_field: "id".into(),
+            id_parameter: "id".into(),
+            status_field: "status".into(),
+            success_states: vec!["done".into()],
+            failure_states: vec!["failed".into()],
+            error_field: None,
+        },
+        delivery,
+        operation_id: Some("operation".into()),
+        state: "queued".into(),
+        reason: None,
+        attempts: 0,
+        lease_id: None,
+        lease_until: None,
+        created_at: Utc::now(),
+        deadline: Utc::now(),
+        poll_at: Utc::now(),
+        expires_at: Utc::now(),
+        result_encrypted: None,
+    };
+    crate::services::async_service_operation::apply_delivery(&mut row, &watch);
+    assert_eq!(row.active_turn.unwrap().platform_origin, Some(fresh));
+    assert_eq!(watch.delivery.platform_origin, Some(original));
+    let mut legacy = bson::to_document(&watch.delivery).unwrap();
+    legacy.remove("platform_origin");
+    assert!(
+        bson::from_document::<DeliveryBinding>(legacy)
+            .unwrap()
+            .platform_origin
+            .is_none()
+    );
 }

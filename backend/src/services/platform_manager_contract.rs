@@ -393,6 +393,13 @@ pub struct CapturedPlatformStop {
     pub turn: TurnRef,
     pub stop_requested_at: DateTime<Utc>,
     pub machine_jobs: Vec<ExactMachineJob>,
+    pub machine_scopes: Vec<ExactMachineScope>,
+}
+
+#[derive(Clone, Debug)]
+pub struct ExactMachineScope {
+    pub node_id: String,
+    pub runtime_id: String,
 }
 
 #[derive(Clone, Debug)]
@@ -406,6 +413,13 @@ pub struct ExactMachineJob {
 pub struct ExactStopProgress {
     pub settlement: ExactStopSettlement,
     pub machine_jobs: Vec<ExactMachineJobProgress>,
+    pub machine_scopes: Vec<ExactMachineScopeProgress>,
+}
+
+#[derive(Clone, Debug)]
+pub struct ExactMachineScopeProgress {
+    pub scope: ExactMachineScope,
+    pub outcome: ExactMachineCancelOutcome,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

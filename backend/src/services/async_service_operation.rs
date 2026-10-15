@@ -165,7 +165,7 @@ pub async fn reserve(
             let delivery = if let Some(parent) = event_id(&row) {
                 watches.find_one(doc!{"_id":parent,"user_id":&chat.user_id,"conversation_id":&row.id,"state":"queued"}).session(&mut *session).await?.ok_or(AppError::AssistantTurnRequired)?.delivery
             } else {
-                DeliveryBinding{origin:turn.origin,channel:turn.asked_from.clone().filter(|_|row.channel.is_some()).or_else(||row.channel.clone()),reply_channel:turn.asked_from.clone().filter(|_|row.channel.is_none()).or_else(||row.reply_channel.clone()),group_id:row.group_id.clone(),group_request_id:row.group_request_id.clone(),voice_request_id:turn.voice_request_id.clone(),trigger_run_id:turn.trigger_run_id.clone(),report_to:row.report_to.clone()}
+                DeliveryBinding{platform_origin:turn.platform_origin.clone(),origin:turn.origin,channel:turn.asked_from.clone().filter(|_|row.channel.is_some()).or_else(||row.channel.clone()),reply_channel:turn.asked_from.clone().filter(|_|row.channel.is_none()).or_else(||row.reply_channel.clone()),group_id:row.group_id.clone(),group_request_id:row.group_request_id.clone(),voice_request_id:turn.voice_request_id.clone(),trigger_run_id:turn.trigger_run_id.clone(),report_to:row.report_to.clone()}
             };
             if let Some(request) = &delivery.voice_request_id {
                 db.collection::<bson::Document>(crate::models::assistant_voice::REQUESTS)

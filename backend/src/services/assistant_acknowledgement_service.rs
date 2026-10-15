@@ -30,6 +30,8 @@ use crate::{
 /// never contains key material.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AssistantTurnFence {
+    pub platform_thread: bool,
+    pub platform_origin: Option<crate::models::assistant_conversation::PlatformTurnOrigin>,
     pub conversation_id: String,
     pub turn_id: Option<String>,
     pub turn_live: bool,
@@ -69,6 +71,57 @@ pub async fn enforce_turn_gate(
     user_agent: Option<&str>,
     route: &str,
 ) -> AppResult<()> {
+    // Platform execution is mandatory independently of the ordinary rollout.
+    // A later app turn on this thread remains usable without old consent.
+    if fence.platform_thread || fence.platform_origin.is_some() {
+        fence.require_live()?;
+        if let Some(origin) = &fence.platform_origin {
+            if !fence.platform_thread {
+                return Err(AppError::AssistantTurnRequired);
+            }
+            let expected = super::platform_personal_turn_service::contract_origin(origin)?;
+            let turn = super::platform_manager_contract::TurnRef {
+                conversation_id: fence.conversation_id.clone(),
+                turn_id: fence
+                    .turn_id
+                    .clone()
+                    .ok_or(AppError::AssistantTurnRequired)?,
+            };
+            let key_id = api_key_id.ok_or(AppError::AssistantTurnRequired)?;
+            let mut session = db.client().start_session().await?;
+            let fence_db = db.clone();
+            let fence_user = user_id.to_owned();
+            let key_id = key_id.to_owned();
+            session
+                .start_transaction()
+                .and_run2(async move |session| {
+                    let result: AppResult<()> = async {
+                        let outcome =
+                            super::platform_personal_turn_service::fence_execution_in_session(
+                                &fence_db,
+                                session,
+                                &super::platform_personal_binding_service::IdentityProducer,
+                                &fence_user,
+                                &key_id,
+                                &turn,
+                                &expected,
+                            )
+                            .await?;
+                        if !matches!(
+                            outcome,
+                            super::platform_manager_contract::FenceOutcome::Authorized
+                        ) {
+                            return Err(AppError::AssistantTurnRequired);
+                        }
+                        Ok(())
+                    }
+                    .await;
+                    mutations::transaction_result(result)
+                })
+                .await
+                .map_err(mutations::map_transaction_error)?;
+        }
+    }
     if !crate::services::feature_flag_service::personal_flag_enabled(
         db,
         user_id,
@@ -793,6 +846,8 @@ mod access_mode_tests {
     #[test]
     fn webhook_policy_floor_remains_independent_of_owner_mode() {
         let mut chat = ChatAuthority {
+            platform_thread: false,
+            platform_origin: None,
             org_agent_access: None,
             turn_id: None,
             turn_stopped: false,
@@ -818,6 +873,8 @@ mod access_mode_tests {
 
 #[derive(Clone)]
 pub struct ChatAuthority {
+    pub platform_thread: bool,
+    pub platform_origin: Option<crate::models::assistant_conversation::PlatformTurnOrigin>,
     pub org_agent_access: Option<std::sync::Arc<super::org_agent_service::RequestAccess>>,
     pub turn_id: Option<String>,
     pub turn_stopped: bool,
@@ -866,6 +923,8 @@ impl ChatAuthority {
 
     pub fn turn_fence(&self) -> AssistantTurnFence {
         AssistantTurnFence {
+            platform_thread: self.platform_thread,
+            platform_origin: self.platform_origin.clone(),
             conversation_id: self.conversation_id.clone(),
             turn_id: self.turn_id.clone(),
             turn_live: self.turn_live,
@@ -1133,6 +1192,11 @@ pub async fn for_key_with_access(
     };
     let turn_live = super::assistant_nyxagent::live_turn(&conversation, Utc::now()).is_some();
     Ok(Some(ChatAuthority {
+        platform_thread: conversation.platform_thread.is_some(),
+        platform_origin: conversation
+            .active_turn
+            .as_ref()
+            .and_then(|turn| turn.platform_origin.clone()),
         org_agent_access: access.cloned(),
         turn_id: conversation.active_turn.as_ref().map(|t| t.turn_id.clone()),
         turn_stopped: conversation
@@ -2056,15 +2120,16 @@ fn choose_reply(
     matches.next().is_none().then_some(first)
 }
 
-/// Selection and mutation share the caller's identity/receipt transaction.
-pub(crate) async fn decide_reply_in_session(
+/// Select a pending reply without mutating it. Platform callers validate
+/// issuing provenance and claim their receipt before deciding this exact row.
+pub(crate) async fn select_reply_in_session(
     db: &Database,
     session: &mut ClientSession,
     owner: &str,
     conversation_ids: &[String],
     text: &str,
     since: Option<DateTime<Utc>>,
-) -> AppResult<Option<AssistantAcknowledgement>> {
+) -> AppResult<Option<(AssistantAcknowledgement, bool)>> {
     let Some((allow, code)) = parse_reply(text) else {
         return Ok(None);
     };
@@ -2080,7 +2145,23 @@ pub(crate) async fn decide_reply_in_session(
     let Some(ack) = choose_reply(pending, code.as_deref(), since) else {
         return Ok(None);
     };
-    // The issuing turn is durable provenance; it need not still be active.
+    Ok(Some((ack, allow)))
+}
+
+/// Ordinary callers retain the shared selector and decision body.
+pub(crate) async fn decide_reply_in_session(
+    db: &Database,
+    session: &mut ClientSession,
+    owner: &str,
+    conversation_ids: &[String],
+    text: &str,
+    since: Option<DateTime<Utc>>,
+) -> AppResult<Option<AssistantAcknowledgement>> {
+    let Some((ack, allow)) =
+        select_reply_in_session(db, session, owner, conversation_ids, text, since).await?
+    else {
+        return Ok(None);
+    };
     decide_in_session(
         db,
         session,
@@ -2341,6 +2422,11 @@ pub(crate) async fn decide_in_session(
             .await?;
     }
     let chat = ChatAuthority {
+        platform_thread: target.platform_thread.is_some(),
+        platform_origin: target
+            .active_turn
+            .as_ref()
+            .and_then(|turn| turn.platform_origin.clone()),
         org_agent_access: None,
         turn_id: target.active_turn.as_ref().map(|t| t.turn_id.clone()),
         turn_stopped: target.active_turn.as_ref().is_none_or(|t| t.stop_requested),

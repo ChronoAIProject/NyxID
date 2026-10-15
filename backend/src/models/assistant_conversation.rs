@@ -191,6 +191,8 @@ pub struct ToolProgress {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ActiveTurn {
     #[serde(default)]
+    pub machine_scopes: Vec<MachineTurnScope>,
+    #[serde(default)]
     pub platform_origin: Option<PlatformTurnOrigin>,
     /// The failed turn this turn retries (owner Retry only).
     #[serde(default)]
@@ -264,6 +266,13 @@ pub struct ActiveTurn {
     /// answer is delivered to them too. Bounded.
     #[serde(default)]
     pub also_deliver: Vec<ChannelOrigin>,
+}
+
+/// Runtime identity captured before a machine operation is issued.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MachineTurnScope {
+    pub node_id: String,
+    pub runtime_id: String,
 }
 
 /// Absent on old rows: their existing title is final until the owner renames it.

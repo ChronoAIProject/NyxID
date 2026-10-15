@@ -7870,6 +7870,8 @@ mod skill_authoring_discovery_tests {
         auth.is_api_key = true;
         auth.api_key_id = Some("chat-key".into());
         auth.chat = Some(ChatAuthority {
+            platform_thread: false,
+            platform_origin: None,
             org_agent_access: None,
             turn_id: Some("turn".into()),
             turn_stopped: false,

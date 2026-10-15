@@ -863,6 +863,8 @@ mod tests {
         guest: bool,
     ) -> ChatAuthority {
         ChatAuthority {
+            platform_thread: false,
+            platform_origin: None,
             org_agent_access: None,
             turn_id: None,
             turn_stopped: false,

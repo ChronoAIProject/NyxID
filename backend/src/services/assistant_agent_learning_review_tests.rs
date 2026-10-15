@@ -740,6 +740,8 @@ async fn stale_evidence_never_deletes_an_effective_operation_body() {
 #[test]
 fn approval_refuses_non_owner_guest_and_non_orchestrator() {
     let mut chat = crate::services::assistant_acknowledgement_service::ChatAuthority {
+        platform_thread: false,
+        platform_origin: None,
         org_agent_access: None,
         turn_id: Some("turn".into()),
         turn_stopped: false,
