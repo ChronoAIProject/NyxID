@@ -8,22 +8,26 @@ or the external portion of A1/A15.
 
 Current checkpoint: identity, personal execution/settlement/Stop, ingress,
 Telegram transport, account lifecycle recovery and frontend slices are integrated
-through `f8f623a42` on [draft PR #1901](https://github.com/ChronoAIProject/NyxID/pull/1901).
+through `75fc04d4a` on [draft PR #1901](https://github.com/ChronoAIProject/NyxID/pull/1901).
 Seven integrated journey/regression tests are written, including real local
 consent and personal execution against mocked upstream/Telegram HTTP. They have
 not yet run. Public execution remains unavailable; exact budget/funding primitives
 are integrated, but their runtime consumers, FAQ tools and upstream proof remain
-incomplete. Personal event wakes,
-after-turn continuation and original delayed-result delivery also remain.
+incomplete. Fresh personal event admission, the durable saved-reply after-turn
+hook, card continuation scheduling and retained original result destinations
+are integrated. Their final Telegram delivery/card rendering and recovery
+consumers remain in progress.
 
-The latest CI run is [38715621808](https://github.com/ChronoAIProject/NyxID/actions/runs/38715621808)
-on `f8f623a42`. Formatting and CLI wizard freshness passed. Backend image/features
-failed on 56 unused-code diagnostics under `-D warnings`; the backend test target
-failed on 37 unused-code diagnostics before tests could execute. These include
-public paths awaiting real consumers and superseded contract interfaces. They
+The latest CI run is [38724108706](https://github.com/ChronoAIProject/NyxID/actions/runs/38724108706)
+on `457783115`. Formatting, frontend, CLI tests/coverage and CLI wizard freshness
+passed. The AWS feature build failed on 34 unused-code diagnostics under
+`-D warnings`; the backend test target failed on 19 unused-code diagnostics
+before tests could execute. Clippy also reported a collapsible conditional in
+public budget recovery. Remaining unused paths await public runtime consumers. They
 must be connected or removed, without blanket lint suppression or fabricated
-readiness. Frontend tests/coverage, CLI tests/coverage, wizard freshness and all
-four CodeQL language checks passed on that revision.
+readiness. Frontend coverage and Rust CodeQL were still running at this
+checkpoint. The preceding `f8f623a42` run passed frontend tests/coverage, CLI
+tests/coverage, wizard freshness and all four CodeQL language checks.
 
 Earlier missing webhook arguments, transaction callback `Send` diagnostics and
 four merge-related test-target errors have been corrected. Main `828009878` was
@@ -47,7 +51,13 @@ Main advanced again to `616a9131c`; merge `bf1ae6211` retains its inherited requ
 span and turn-start trace in the extracted runtime. Public budget recovery fixes
 and public-intent minting are integrated through `c06123c47`. Opus's follow-up
 source review found P3-1/P3-2 corrected; it does not replace executed regressions
-or real upstream proof. The final independent review will use Astra.
+or real upstream proof. Astra independently reviewed the integrated personal
+event/hook/card and public signup-send changes at `75fc04d4a`, plus budget fixes
+`cdfe61b12` and `457783115`, and found no high-confidence regression in that
+bounded source review. It did not run tests or endorse merging. Final delivery
+and public consumers still need review after integration. Captured delayed-result
+destinations currently expire with the original 2,100-second turn lease; later
+results remain in web history. This limit must be exercised by delivery tests.
 
 Frontend worker checkpoint `8ac676907`, integrated as `678409e8b`, passed 187
 tests across 12 files, focused ESLint, TypeScript checking, production and
