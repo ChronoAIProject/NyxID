@@ -9,6 +9,7 @@ use crate::{
     models::{
         assistant_conversation::{AssistantConversation, COLLECTION_NAME as CONVERSATIONS},
         assistant_message::{AssistantMessage, COLLECTION_NAME as MESSAGES},
+        platform_bot_config::{COLLECTION_NAME as PROFILES, PlatformBotConfig},
         platform_credential::PlatformCredential,
         platform_manager_delivery::{
             COLLECTION_NAME, DeliveryReference, DeliveryState, PlatformManagerDelivery as Delivery,
@@ -114,8 +115,13 @@ pub(crate) fn render_saved(message: &AssistantMessage, frontend: &str) -> String
     if let Ok(mut url) = reqwest::Url::parse(frontend) {
         url.set_path("/assistant");
         url.set_query(None);
+        url.query_pairs_mut()
+            .append_pair("c", &message.conversation_id);
         url.set_fragment(None);
-        text.push_str(&format!("\n\nOpen NyxID: {url}"));
+        let link = format!("\n\nReview actions and continue this conversation in NyxID: {url}");
+        if text.encode_utf16().count() + link.encode_utf16().count() <= 4096 {
+            text.push_str(&link);
+        }
     }
     text
 }
@@ -126,7 +132,10 @@ fn receipt_claim(
 ) -> AppResult<IngressClaim> {
     match (&destination.authority, delivery) {
         (ReplyAuthority::Personal { origin, turn }, DeliveryRef::Reply(reply))
-            if *turn == reply.turn =>
+            if *turn == reply.turn
+                && destination.manager == origin.authority.manager
+                && destination.sender_id == origin.authority.sender_id
+                && destination.chat_id == origin.authority.chat_id =>
         {
             match &origin.source {
                 PlatformOriginSource::Ingress(claim) => Ok(claim.clone()),
@@ -197,12 +206,23 @@ async fn enqueue(
             return Err(error.into());
         }
     }
-    state
+    let stored = state
         .db
         .collection::<Delivery>(COLLECTION_NAME)
         .find_one(doc! {"dedupe_key":dedupe_key})
         .await?
-        .ok_or_else(refused)
+        .ok_or_else(refused)?;
+    if matches!(stored.reference, DeliveryReference::Reply { .. }) {
+        state
+            .db
+            .collection::<PlatformManagerIngress>(INGRESS)
+            .update_one(
+                doc! {"_id":&ingress.receipt_id,"claim_id":&ingress.claim_id,"phase":"settled"},
+                doc! {"$set":{"delivery_recovery_queued":true}},
+            )
+            .await?;
+    }
+    Ok(stored)
 }
 
 async fn validate_in_session(
@@ -210,7 +230,8 @@ async fn validate_in_session(
     identity: &dyn ManagerIdentityProducer,
     session: &mut mongodb::ClientSession,
     row: &Delivery,
-) -> AppResult<()> {
+    body: &str,
+) -> AppResult<Option<String>> {
     if row.expires_at <= Utc::now() {
         return Err(refused());
     }
@@ -219,13 +240,44 @@ async fn validate_in_session(
         "manager_bot_id":&row.manager_bot_id,"telegram_bot_id":row.telegram_bot_id,
         "manager_authority_epoch":row.manager_authority_epoch,"sender_id":row.sender_id,"chat_id":row.chat_id,
     }).session(&mut *session).await?.ok_or_else(refused)?;
+    let profile=state.db.collection::<PlatformBotConfig>(PROFILES).find_one(doc! {"_id":&row.profile_id,"manager_bot_id":&row.manager_bot_id,"deleted_at":bson::Bson::Null}).session(&mut *session).await?.ok_or_else(refused)?;
+    let policy = controls::get_in_session(&state.db, session, &row.profile_id)
+        .await?
+        .ok_or_else(refused)?;
+    if policy.retired
+        || policy.manager_authority_epoch != row.manager_authority_epoch
+        || policy.telegram_bot_id != row.telegram_bot_id
+        || policy.manager_bot_id != row.manager_bot_id
+    {
+        return Err(refused());
+    }
+    let current = state
+        .db
+        .collection::<PlatformCredential>(crate::models::platform_credential::COLLECTION_NAME)
+        .find_one(doc! {"provider":"telegram-new"})
+        .session(&mut *session)
+        .await?;
+    if let Some(credential) = &current
+        && credential
+            .fields
+            .get("manager_bot_id")
+            .is_some_and(|id| id != &row.manager_bot_id)
+    {
+        return Err(refused());
+    }
+    if !current.as_ref().is_some_and(|credential| {
+        credential.fields.get("webhook_ready").map(String::as_str) == Some("true")
+            && credential.fields.get("observation_id") == Some(&profile.observation_id)
+    }) {
+        return Ok(None);
+    }
     let controls = controls::fence_manager_in_session(
         &state.db,
         session,
         &row.profile_id,
         &row.manager_bot_id,
         row.telegram_bot_id,
-        Some(&receipt.observation_id),
+        Some(&profile.observation_id),
     )
     .await?
     .ok_or_else(refused)?;
@@ -278,7 +330,14 @@ async fn validate_in_session(
                 return Err(refused());
             }
             let message=state.db.collection::<AssistantMessage>(MESSAGES).find_one(doc! {"_id":reply_id,"conversation_id":conversation_id,"turn_id":turn_id,"user_id":user_id,"role":"assistant"}).session(&mut *session).await?.ok_or_else(refused)?;
-            if message.platform_origin.as_ref() != row.origin.as_ref() {
+            if message.platform_origin.as_ref() != row.origin.as_ref()
+                || matches!(
+                    message.error_code.as_deref(),
+                    Some("cancelled" | "stopped" | "origin_revoked")
+                )
+                || matches!(message.status.as_str(), "cancelled" | "stopped")
+                || render_saved(&message, &state.config.frontend_url) != body
+            {
                 return Err(refused());
             }
             let thread = state
@@ -308,7 +367,13 @@ async fn validate_in_session(
             }
         }
     }
-    Ok(())
+    Ok(Some(profile.observation_id))
+}
+
+enum CapturedSend {
+    Duplicate,
+    Deferred,
+    Ready(Box<PlatformCredential>),
 }
 
 async fn send(
@@ -342,8 +407,22 @@ async fn send(
         std::time::Duration::from_secs(1),
     )
     .await?;
+    // Application lane budgets are shared across replicas. Status/public load
+    // cannot consume the personal reserve; provider 429 remains authoritative.
+    let manager_pacing = super::coordination_service::RateWindowStore::admit(
+        &state.db,
+        if personal {
+            "manager_personal_lane"
+        } else {
+            "manager_status_lane"
+        },
+        &row.manager_bot_id,
+        if personal { 24 } else { 4 },
+        std::time::Duration::from_secs(1),
+    )
+    .await?;
     let permit = permits.try_acquire();
-    if !pacing.allowed || permit.is_err() {
+    if !pacing.allowed || !manager_pacing.allowed || permit.is_err() {
         if matches!(row.reference, DeliveryReference::Command) {
             state
                 .db
@@ -372,17 +451,29 @@ async fn send(
     let captured = state.clone();
     let delivery = row.clone();
     let worker_claim = claim_id.clone();
-    let result=session.start_transaction().and_run((captured,identity,delivery,worker_claim),|session,(state,identity,row,claim)|Box::pin(async move {
+    let result=session.start_transaction().and_run((captured,identity,delivery,worker_claim,body.clone()),|session,(state,identity,row,claim,body)|Box::pin(async move {
         let result:AppResult<_>=async {
-            validate_in_session(state,identity.as_ref(),session,row).await?;
-            if state.db.collection::<Delivery>(COLLECTION_NAME).update_one(doc! {"_id":&row.id,"state":"pending","expires_at":{"$gt":bson::DateTime::now()}},doc! {"$set":{"state":"dispatching","claim_id":claim,"updated_at":bson::DateTime::now()}}).session(&mut *session).await?.matched_count!=1{return Ok(None);}
-            Ok(state.db.collection::<PlatformCredential>(crate::models::platform_credential::COLLECTION_NAME).find_one(doc! {"provider":"telegram-new","fields.manager_bot_id":&row.manager_bot_id,"fields.webhook_ready":"true"}).session(&mut *session).await?)
+            let Some(observation)=validate_in_session(state,identity.as_ref(),session,row,body.as_str()).await? else {return Ok(CapturedSend::Deferred);};
+            if state.db.collection::<Delivery>(COLLECTION_NAME).update_one(doc! {"_id":&row.id,"state":"pending","expires_at":{"$gt":bson::DateTime::now()}},doc! {"$set":{"state":"dispatching","claim_id":claim,"updated_at":bson::DateTime::now()}}).session(&mut *session).await?.matched_count!=1{return Ok(CapturedSend::Duplicate);}
+            let credential=state.db.collection::<PlatformCredential>(crate::models::platform_credential::COLLECTION_NAME).find_one(doc! {"provider":"telegram-new","fields.manager_bot_id":&row.manager_bot_id,"fields.observation_id":observation,"fields.webhook_ready":"true"}).session(&mut *session).await?.ok_or_else(refused)?;
+            Ok(CapturedSend::Ready(Box::new(credential)))
         }.await;
         tx::transaction_result(result)
     })).await.map_err(tx::map_transaction_error);
     let credential = match result {
-        Ok(Some(value)) => value,
-        Ok(None) => return Ok(DeliveryOutcome::Duplicate),
+        Ok(CapturedSend::Ready(value)) => value,
+        Ok(CapturedSend::Duplicate) => return Ok(DeliveryOutcome::Duplicate),
+        Ok(CapturedSend::Deferred) => {
+            if matches!(row.reference, DeliveryReference::Command) {
+                refuse_pending(state, &row).await?;
+                return Ok(DeliveryOutcome::Refused(
+                    UnavailableReason::TransportUnavailable,
+                ));
+            }
+            let retry_at = Utc::now() + Duration::seconds(5);
+            state.db.collection::<Delivery>(COLLECTION_NAME).update_one(doc! {"_id":&row.id,"state":"pending"},doc! {"$set":{"retry_at":bson::DateTime::from_chrono(retry_at),"updated_at":bson::DateTime::now()}}).await?;
+            return Ok(DeliveryOutcome::Deferred { retry_at });
+        }
         Err(error) => {
             if matches!(error, AppError::Conflict(_) | AppError::NotFound(_)) {
                 state
@@ -400,7 +491,7 @@ async fn send(
     };
     let values = super::platform_credential_service::decrypt_snapshot(
         &state.encryption_keys,
-        Some(&credential),
+        Some(credential.as_ref()),
     )
     .await?;
     let token = values
@@ -513,15 +604,45 @@ pub async fn deliver(
     api: &super::telegram_new_api::TelegramApi<'_>,
 ) -> AppResult<DeliveryOutcome> {
     let claim = receipt_claim(destination, reference)?;
-    let (stored,body,origin)=match (reference,content,&destination.authority) {
-        (DeliveryRef::Reply(reply),ReplyContent::Text(text),ReplyAuthority::Personal {origin,..})=>{
+    let (stored, body, origin) = match (reference, content, &destination.authority) {
+        (
+            DeliveryRef::Reply(reply),
+            ReplyContent::Text(text),
+            ReplyAuthority::Personal { origin, .. },
+        ) => {
             let message=state.db.collection::<AssistantMessage>(MESSAGES).find_one(doc! {"_id":&reply.reply_id,"conversation_id":&reply.turn.conversation_id,"turn_id":&reply.turn.turn_id,"user_id":&origin.authority.user_id,"role":"assistant"}).await?.ok_or_else(refused)?;
-            if message.platform_origin.as_ref()!=Some(&personal::model_origin(origin)) || text!=render_saved(&message,&state.config.frontend_url){return Err(refused());}
-            (DeliveryReference::Reply {conversation_id:reply.turn.conversation_id.clone(),turn_id:reply.turn.turn_id.clone(),reply_id:reply.reply_id.clone()},Zeroizing::new(text),message.platform_origin)
-        },
-        (DeliveryRef::Fixed {..},ReplyContent::Fixed(reason),ReplyAuthority::Fixed {..})=>(DeliveryReference::Fixed {reason:format!("{reason:?}")},Zeroizing::new(fixed_text(reason).into()),None),
-        (DeliveryRef::Fixed {..},ReplyContent::PrivateChatHandoff,ReplyAuthority::Fixed {..})=>(DeliveryReference::Handoff,Zeroizing::new("Open this manager's private chat to use your own NyxBot. Group chats cannot link or show personal replies.".into()),None),
-        _=>return Err(refused()),
+            if message.platform_origin.as_ref() != Some(&personal::model_origin(origin))
+                || text != render_saved(&message, &state.config.frontend_url)
+            {
+                return Err(refused());
+            }
+            (
+                DeliveryReference::Reply {
+                    conversation_id: reply.turn.conversation_id.clone(),
+                    turn_id: reply.turn.turn_id.clone(),
+                    reply_id: reply.reply_id.clone(),
+                },
+                Zeroizing::new(text),
+                message.platform_origin,
+            )
+        }
+        (DeliveryRef::Fixed { .. }, ReplyContent::Fixed(reason), ReplyAuthority::Fixed { .. }) => (
+            DeliveryReference::Fixed {
+                reason: format!("{reason:?}"),
+            },
+            Zeroizing::new(fixed_text(reason).into()),
+            None,
+        ),
+        (
+            DeliveryRef::Fixed { .. },
+            ReplyContent::PrivateChatHandoff,
+            ReplyAuthority::Fixed { .. },
+        ) => (
+            DeliveryReference::Handoff,
+            Zeroizing::new(handoff_text().into()),
+            None,
+        ),
+        _ => return Err(refused()),
     };
     let row = enqueue(state, destination, stored, &claim, origin).await?;
     send(state, identity, row, body, api).await
@@ -559,33 +680,111 @@ pub async fn sweep(
     identity: Arc<dyn ManagerIdentityProducer>,
     limit: u32,
 ) -> AppResult<RecoveryBatch> {
+    let batch = limit.min(100);
+    if batch == 0 {
+        return Ok(RecoveryBatch {
+            processed: 0,
+            has_more: false,
+        });
+    }
     let now = Utc::now();
-    // A process lost after claim may have sent. Never reset that claim to pending.
-    state.db.collection::<Delivery>(COLLECTION_NAME).update_many(doc! {"state":"dispatching","updated_at":{"$lte":bson::DateTime::from_chrono(now-Duration::minutes(2))}},doc! {"$set":{"state":"uncertain","updated_at":bson::DateTime::now()}}).await?;
-    state.db.collection::<Delivery>(COLLECTION_NAME).update_many(doc! {"state":"pending","$or":[{"expires_at":{"$lte":bson::DateTime::now()}},{"reference.kind":"command"}]},doc! {"$set":{"state":"refused","updated_at":bson::DateTime::now()}}).await?;
-    let mut rows=state.db.collection::<Delivery>(COLLECTION_NAME).find(doc! {"state":"pending","reference.kind":"reply","retry_at":{"$lte":bson::DateTime::now()},"expires_at":{"$gt":bson::DateTime::now()}}).limit(i64::from(limit.min(100))).await?;
+    let stale_before = bson::DateTime::from_chrono(now - Duration::minutes(2));
+    let due = bson::DateTime::from_chrono(now);
+    let mut rows = state
+        .db
+        .collection::<Delivery>(COLLECTION_NAME)
+        .find(doc! {"$or":[
+            {"state":"dispatching","updated_at":{"$lte":stale_before}},
+            {"state":"pending","retry_at":{"$lte":due}}
+        ]})
+        .sort(doc! {"updated_at":1,"_id":1})
+        .limit(i64::from(batch))
+        .await?;
     let mut processed = 0;
     while let Some(row) = rows.try_next().await? {
-        if let DeliveryReference::Reply { reply_id, .. } = &row.reference
-            && let Some(message) = state
-                .db
-                .collection::<AssistantMessage>(MESSAGES)
-                .find_one(doc! {"_id":reply_id})
-                .await?
-        {
-            let _ = send(
-                state,
-                identity.clone(),
-                row,
-                Zeroizing::new(render_saved(&message, &state.config.frontend_url)),
-                &super::telegram_new_api::TelegramApi::new(&state.http_client),
-            )
-            .await?;
+        // A process lost after claim may have sent. Never replay the attempt.
+        if row.state == DeliveryState::Dispatching {
+            state.db.collection::<Delivery>(COLLECTION_NAME).update_one(
+                doc! {"_id":&row.id,"state":"dispatching","claim_id":&row.claim_id,"updated_at":{"$lte":stale_before}},
+                doc! {"$set":{"state":"uncertain","updated_at":due}},
+            ).await?;
+        } else if row.expires_at <= now || matches!(row.reference, DeliveryReference::Command) {
+            refuse_pending(state, &row).await?;
+        } else {
+            let body = match &row.reference {
+                DeliveryReference::Reply { reply_id, .. } => state
+                    .db
+                    .collection::<AssistantMessage>(MESSAGES)
+                    .find_one(doc! {"_id":reply_id})
+                    .await?
+                    .map(|message| render_saved(&message, &state.config.frontend_url)),
+                DeliveryReference::Fixed { reason } => {
+                    fixed_reason(reason).map(|reason| fixed_text(reason).to_owned())
+                }
+                DeliveryReference::Handoff => Some(handoff_text().to_owned()),
+                DeliveryReference::Command => None,
+            };
+            if let Some(body) = body {
+                if let Err(error) = send(
+                    state,
+                    identity.clone(),
+                    row,
+                    Zeroizing::new(body),
+                    &super::telegram_new_api::TelegramApi::new(&state.http_client),
+                )
+                .await
+                {
+                    tracing::warn!(
+                        error_code = error.error_code(),
+                        "Manager delivery recovery remains pending"
+                    );
+                }
+            } else {
+                refuse_pending(state, &row).await?;
+            }
         }
         processed += 1;
     }
     Ok(RecoveryBatch {
         processed,
-        has_more: processed == limit.min(100),
+        has_more: processed == batch,
     })
+}
+
+async fn refuse_pending(state: &AppState, row: &Delivery) -> AppResult<()> {
+    state
+        .db
+        .collection::<Delivery>(COLLECTION_NAME)
+        .update_one(
+            doc! {"_id":&row.id,"state":"pending"},
+            doc! {"$set":{"state":"refused","updated_at":bson::DateTime::now()}},
+        )
+        .await?;
+    Ok(())
+}
+
+fn handoff_text() -> &'static str {
+    "Open this manager's private chat to use your own NyxBot. Group chats cannot link or show personal replies."
+}
+
+fn fixed_reason(reason: &str) -> Option<UnavailableReason> {
+    // Only fixed, bounded strings can be reconstructed; never an arbitrary body.
+    use UnavailableReason::*;
+    [
+        PersonalDisabled,
+        OwnerUnavailable,
+        OriginRevoked,
+        InsufficientFunds,
+        CapacityLimited,
+        EmergencyStopped,
+        ManagerUnavailable,
+        TransportUnavailable,
+        PublicDisabled,
+        PublicNotReady,
+        RuntimeUninitialized,
+        EngineUnavailable,
+        ModeDisabled,
+    ]
+    .into_iter()
+    .find(|candidate| format!("{candidate:?}") == reason)
 }

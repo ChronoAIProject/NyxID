@@ -24,6 +24,10 @@ pub struct PlatformManagerIngress {
     pub execution: Option<IngressExecution>,
     pub decision: Option<IngressDecision>,
     pub reply_id: Option<String>,
+    /// Delivery owns retry after its metadata-only row is durable. Legacy
+    /// receipts default to pending recovery; terminal tombstones are retained.
+    #[serde(default)]
+    pub delivery_recovery_queued: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub interrupted_reason: Option<String>,
     pub effect_revision: i64,

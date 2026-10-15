@@ -168,6 +168,7 @@ pub(crate) async fn dispatch_update(
         || (base == "/confirm" && commands::personal_command(text, &username).is_none())
     {
         if verified.command_eligibility != ManagerCommandEligibility::OriginalPrivateMessage {
+            refuse_control(state, &producers, &verified).await?;
             return Ok(true);
         }
         return Ok(false); // The HTTP adapter retains legacy setup command handling.
@@ -176,7 +177,7 @@ pub(crate) async fn dispatch_update(
         if let Some(command) =
             OriginalManagerCommand::from_verified(verified.clone(), TurnInput { text: text.into() })
         {
-            if let Some(output) = commands::execute(
+            let result = commands::execute(
                 &state.db,
                 state.auth_device_hmac_key.as_slice(),
                 state.audit_chain_hmac_key.as_slice(),
@@ -187,8 +188,20 @@ pub(crate) async fn dispatch_update(
                     public: producers.public.clone(),
                 },
             )
-            .await?
-            {
+            .await;
+            let output = match result {
+                Ok(output) => output,
+                Err(error) if expected_failure(&error).is_some() => {
+                    tracing::info!(
+                        error_code = error.error_code(),
+                        "Personal manager control refused"
+                    );
+                    refuse_control(state, &producers, &verified).await?;
+                    return Ok(true);
+                }
+                Err(error) => return Err(error),
+            };
+            if let Some(output) = output {
                 let _ = delivery::deliver_command(
                     state,
                     producers.identity.clone(),
@@ -265,7 +278,7 @@ pub(crate) async fn dispatch_update(
                 }
             }
             let (events, receiver) = tokio::sync::mpsc::channel(16);
-            match producers
+            let started = producers
                 .personal
                 .start_personal_turn(
                     &state.db,
@@ -273,8 +286,21 @@ pub(crate) async fn dispatch_update(
                     TurnInput { text: text.into() },
                     events,
                 )
-                .await?
-            {
+                .await;
+            let started = match started {
+                Ok(started) => started,
+                Err(error) => {
+                    let Some(reason) = expected_failure(&error) else {
+                        return Err(error);
+                    };
+                    tracing::info!(
+                        error_code = error.error_code(),
+                        "Personal manager turn admission refused"
+                    );
+                    PersonalTurnStart::Unavailable(reason)
+                }
+            };
+            match started {
                 PersonalTurnStart::Started { destination, .. } => {
                     let state = state.clone();
                     tokio::spawn(async move {
@@ -380,6 +406,25 @@ async fn refuse_control(
     Ok(())
 }
 
+fn expected_failure(error: &AppError) -> Option<UnavailableReason> {
+    Some(match error {
+        AppError::AssistantTurnActive
+        | AppError::ServiceConcurrencyLimited
+        | AppError::RateLimited => UnavailableReason::CapacityLimited,
+        AppError::InsufficientCredits | AppError::WalletSuspended => {
+            UnavailableReason::InsufficientFunds
+        }
+        AppError::Forbidden(_)
+        | AppError::ForbiddenWithGuidance { .. }
+        | AppError::PlanEntitlementRequired(_) => UnavailableReason::OwnerUnavailable,
+        AppError::ValidationError(_)
+        | AppError::BadRequest(_)
+        | AppError::AssistantModelUnavailable => UnavailableReason::EngineUnavailable,
+        AppError::Conflict(_) | AppError::NotFound(_) => UnavailableReason::OriginRevoked,
+        _ => return None,
+    })
+}
+
 pub(crate) async fn consume_events(
     state: AppState,
     producers: Arc<PlatformManagerProducers>,
@@ -436,6 +481,14 @@ pub fn spawn_sweeps(state: AppState, producers: Arc<PlatformManagerProducers>) {
         ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             ticks.tick().await;
+            if let Err(error) =
+                super::platform_personal_owner_lifecycle::recover_pending(&state.db, 32).await
+            {
+                tracing::warn!(
+                    error_code = error.error_code(),
+                    "Personal account retirement recovery failed"
+                );
+            }
             if let Err(error) = producers
                 .lifecycle
                 .recover_personal_lifecycle(&state.db, producers.personal.as_ref(), 100)
@@ -476,41 +529,84 @@ async fn recover_ingress(
     limit: u32,
 ) -> AppResult<()> {
     use futures::TryStreamExt;
-    let mut receipts=state.db.collection::<PlatformManagerIngress>(INGRESS).find(doc! {"phase":"settled","reply_id":{"$type":"string"},"settled_at":{"$gt":bson::DateTime::from_chrono(Utc::now()-Duration::hours(1))}}).sort(doc! {"settled_at":-1}).limit(i64::from(limit.min(100))).await?;
-    while let Some(receipt) = receipts.try_next().await? {
-        let Some(reply_id) = receipt.reply_id else {
-            continue;
-        };
-        let Some(message) = state
-            .db
-            .collection::<AssistantMessage>(MESSAGES)
-            .find_one(doc! {"_id":&reply_id})
-            .await?
-        else {
-            continue;
-        };
-        let Some(origin) = message.platform_origin.as_ref() else {
-            continue;
-        };
-        let origin = super::platform_personal_turn_service::contract_origin(origin)?;
-        let turn = TurnRef {
-            conversation_id: message.conversation_id,
-            turn_id: message.turn_id,
-        };
-        let destination = ReplyDestination {
-            manager: origin.authority.manager.clone(),
-            sender_id: origin.authority.sender_id,
-            chat_id: origin.authority.chat_id,
-            authority: ReplyAuthority::Personal {
-                origin,
-                turn: turn.clone(),
-            },
-            expires_at: receipt.admitted_at + Duration::minutes(30),
-        };
-        let reply = ReplyRef { turn, reply_id };
-        // Refusals are recorded by delivery and do not stop other owners' recovery.
-        let _ = deliver_saved(state, producers, &destination, &reply).await?;
+    let batch = limit.min(100);
+    if batch == 0 {
+        return Ok(());
     }
-    state.db.collection::<PlatformManagerIngress>(INGRESS).update_many(doc! {"phase":"admitted","start_before":{"$lte":bson::DateTime::now()}},doc! {"$set":{"phase":"interrupted","interrupted_reason":"admission_expired","settled_at":bson::DateTime::now()}}).await?;
+    let receipts_collection = state.db.collection::<PlatformManagerIngress>(INGRESS);
+    let mut receipts=receipts_collection.find(doc! {"phase":"settled","reply_id":{"$type":"string"},"delivery_recovery_queued":{"$ne":true}}).sort(doc! {"settled_at":1,"_id":1}).limit(i64::from(batch)).await?;
+    while let Some(receipt) = receipts.try_next().await? {
+        let result: AppResult<()> = async {
+            let reply_id = receipt
+                .reply_id
+                .as_ref()
+                .ok_or_else(|| AppError::Conflict("Missing reply reference".into()))?;
+            let message = state
+                .db
+                .collection::<AssistantMessage>(MESSAGES)
+                .find_one(doc! {"_id":reply_id})
+                .await?
+                .ok_or_else(|| AppError::NotFound("Retained reply unavailable".into()))?;
+            let origin = message
+                .platform_origin
+                .as_ref()
+                .ok_or_else(|| AppError::Conflict("Missing personal reply origin".into()))?;
+            let origin = super::platform_personal_turn_service::contract_origin(origin)?;
+            let turn = TurnRef {
+                conversation_id: message.conversation_id,
+                turn_id: message.turn_id,
+            };
+            let destination = ReplyDestination {
+                manager: origin.authority.manager.clone(),
+                sender_id: origin.authority.sender_id,
+                chat_id: origin.authority.chat_id,
+                authority: ReplyAuthority::Personal {
+                    origin,
+                    turn: turn.clone(),
+                },
+                expires_at: receipt.admitted_at + Duration::minutes(30),
+            };
+            let _ = deliver_saved(
+                state,
+                producers,
+                &destination,
+                &ReplyRef {
+                    turn,
+                    reply_id: reply_id.clone(),
+                },
+            )
+            .await?;
+            Ok(())
+        }
+        .await;
+        match result {
+            Ok(()) => {}
+            Err(AppError::NotFound(_) | AppError::Conflict(_)) => {
+                // Missing/deleted/altered proof is terminal, never reconstructed.
+                receipts_collection
+                    .update_one(
+                        doc! {"_id":&receipt.id,"claim_id":&receipt.claim_id,"phase":"settled"},
+                        doc! {"$set":{"delivery_recovery_queued":true}},
+                    )
+                    .await?;
+            }
+            Err(error) => tracing::warn!(
+                error_code = error.error_code(),
+                "Manager reply recovery remains pending"
+            ),
+        }
+    }
+    let mut expired = receipts_collection
+        .find(doc! {"phase":"admitted","start_before":{"$lte":bson::DateTime::now()}})
+        .sort(doc! {"start_before":1,"_id":1})
+        .limit(i64::from(batch))
+        .await?;
+    while let Some(receipt) = expired.try_next().await? {
+        receipts_collection.update_one(doc! {"_id":receipt.id,"phase":"admitted","start_before":{"$lte":bson::DateTime::now()}},doc! {"$set":{"phase":"interrupted","interrupted_reason":"admission_expired","settled_at":bson::DateTime::now()}}).await?;
+    }
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "platform_manager_journey_tests.rs"]
+mod journey_tests;

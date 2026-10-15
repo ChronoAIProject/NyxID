@@ -46,6 +46,13 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
         )
         .await?;
     // No TTL: unfinished execution and delivery recovery must retain their proof.
+    collection
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"phase":1,"delivery_recovery_queued":1,"settled_at":1,"_id":1})
+                .build(),
+        )
+        .await?;
     Ok(())
 }
 
@@ -157,6 +164,7 @@ pub async fn record_admission_in_session(
         execution: None,
         decision: None,
         reply_id: None,
+        delivery_recovery_queued: false,
         interrupted_reason: None,
         effect_revision: 0,
         admitted_at: now,

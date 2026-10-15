@@ -345,6 +345,7 @@ pub async fn webhook(
     .await
 }
 
+#[cfg(test)]
 pub(crate) async fn webhook_with_service(
     state: &AppState,
     service: &TelegramNewService<'_>,
@@ -354,7 +355,7 @@ pub(crate) async fn webhook_with_service(
     webhook_with_producers(state, service, headers, body, None).await
 }
 
-async fn webhook_with_producers(
+pub(crate) async fn webhook_with_producers(
     state: &AppState,
     service: &TelegramNewService<'_>,
     headers: &HeaderMap,
