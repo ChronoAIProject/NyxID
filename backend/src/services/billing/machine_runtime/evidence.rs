@@ -364,6 +364,7 @@ impl BillingService {
             .find_one(doc! {"_id":run_id,"owner_id":owner_id})
             .await?
             .ok_or_else(|| invalid("runtime contract not found"))?;
+        validate_run_binding(&run)?;
         if run.state != MachineRuntimeRunState::Stopped || !run.replacement_requested {
             return Err(conflict("runtime is not awaiting controlled replacement"));
         }
@@ -384,6 +385,10 @@ impl BillingService {
             .as_ref()
             .ok_or_else(|| invalid("replacement requires a contract"))?;
         let mut run = load_run(&self.db, session, &source.id).await?;
+        validate_run_binding(&run)?;
+        if !same_rate_contract(&run.rate, &p.rate) || run.terms != source.terms {
+            return Err(conflict("runtime replacement contract changed"));
+        }
         if let Some(window) = existing_window(&self.db, session, &run.id, p).await? {
             if run.runtime_generation != new_generation {
                 return Err(conflict("replacement retry generation changed"));

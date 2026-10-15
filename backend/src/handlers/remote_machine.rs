@@ -2,7 +2,7 @@
 //!
 //! This surface is intentionally a thin adapter over the durable lifecycle
 //! services.  It accepts no runtime commands, credentials, Kubernetes
-//! identifiers, or caller-selected profile fields.  Runtime effects are
+//! identifiers, or caller-selected resource dimensions.  Runtime effects are
 //! produced by the manager's durable outbox and reconciler.
 
 use axum::{
@@ -40,13 +40,21 @@ fn fixed_profile() -> MachineProfileSpec {
     machine::fixed_profile(image)
 }
 
-fn request_profile(state: &AppState) -> MachineProfileSpec {
+fn request_profile(state: &AppState, profile_version: &str) -> AppResult<MachineProfileSpec> {
+    machine::controlled_profile(profile_version)?;
     #[cfg(test)]
     if let Some(local) = &state.local_machine_platform {
-        return local.profile.clone();
+        machine::validate_fixed_profile(&local.profile)?;
+        return Ok(local.profile.clone());
     }
     let _ = state;
-    fixed_profile()
+    let profile = fixed_profile();
+    machine::validate_fixed_profile(&profile)?;
+    Ok(profile)
+}
+
+fn default_profile_version() -> String {
+    nyxid_machine::managed::PROFILE.into()
 }
 async fn request_platform(
     state: &AppState,
@@ -77,6 +85,8 @@ async fn request_platform(
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CreateRequest {
+    #[serde(default = "default_profile_version")]
+    pub profile_version: String,
     #[serde(default = "crate::models::remote_machine::default_name")]
     pub name: String,
     #[serde(default = "crate::models::remote_machine::default_capabilities")]
@@ -97,6 +107,8 @@ pub struct CreateRequest {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct QuoteRequest {
+    #[serde(default = "default_profile_version")]
+    pub profile_version: String,
     pub free_slot: bool,
     /// Optional owned, paused Machine whose retained workspace will be resumed.
     #[serde(default)]
@@ -176,6 +188,8 @@ fn require_policy_acceptance(body: &CreateRequest) -> AppResult<()> {
 #[derive(Debug, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct ActionRequest {
+    #[serde(default)]
+    pub profile_version: Option<String>,
     pub action: Option<LifecycleAction>,
     pub expected_revision: Option<i64>,
     #[serde(default)]
@@ -272,6 +286,7 @@ async fn require_platform_or_replay(
     action: LifecycleAction,
     key: &str,
     body: &serde_json::Value,
+    profile: &MachineProfileSpec,
 ) -> AppResult<()> {
     // A durable accepted intent is recoverable even if optional platform probes
     // are unavailable now. The service still checks the canonical body digest.
@@ -285,7 +300,8 @@ async fn require_platform_or_replay(
         } else {
             crate::services::remote_machine_quota::Operation::Create
         };
-        let quota = crate::services::remote_machine_quota::owner_preflight(operation).await;
+        let quota =
+            crate::services::remote_machine_quota::owner_preflight(operation, profile).await;
         if quota.status == "insufficient" {
             return Err(AppError::Conflict(
                 "managed_machine_quota_insufficient".into(),
@@ -324,6 +340,8 @@ pub async fn quote(
     Json(body): Json<QuoteRequest>,
 ) -> AppResult<Json<QuoteResponse>> {
     let owner_id = owner(&auth)?;
+    machine::require_remote_machines_enabled(&state.db, &owner_id).await?;
+    machine::controlled_profile(&body.profile_version)?;
     let platform = request_platform(&state, body.machine_id.is_none()).await;
     if !platform.configuration_ready {
         return Err(platform_error(&platform));
@@ -336,6 +354,11 @@ pub async fn quote(
                 .await?
                 .ok_or_else(|| AppError::NotFound("Remote Machine not found".into()))?;
             machine::validate_current_contract(&current)?;
+            if body.profile_version != current.profile.profile_version {
+                return Err(AppError::ValidationError(
+                    "resume profile must match the retained Machine".into(),
+                ));
+            }
             if current.resource_state != crate::models::remote_machine::ResourceState::Paused
                 || current.free_slot != body.free_slot
                 || current.pvc_uid.is_none()
@@ -352,7 +375,7 @@ pub async fn quote(
         } else {
             (
                 crate::services::remote_machine_quota::Operation::Create,
-                request_profile(&state),
+                request_profile(&state, &body.profile_version)?,
                 POLICY_VERSION.to_owned(),
             )
         };
@@ -365,16 +388,13 @@ pub async fn quote(
     let runtime_quote = if body.free_slot {
         None
     } else {
-        use crate::models::machine_runtime_billing::{MachineRuntimeRate, RATE_COLLECTION};
         let rate = state
-            .db
-            .collection::<MachineRuntimeRate>(RATE_COLLECTION)
-            .find_one(mongodb::bson::doc! {"retired":false,"sync_status":"synced"})
-            .sort(mongodb::bson::doc! {"created_at":-1,"_id":-1})
+            .billing
+            .latest_machine_runtime_rate(&profile.profile_version)
             .await?
             .ok_or_else(|| {
                 AppError::BillingProviderUnavailable(
-                    "no synchronized runtime rate is available".into(),
+                    "no synchronized runtime rate is available for the requested profile".into(),
                 )
             })?;
         Some(
@@ -390,13 +410,11 @@ pub async fn quote(
     };
     let billing_preflight = state
         .billing
-        .machine_runtime_preflight(
-            &owner_id,
-            runtime_quote.as_ref().map(|q| q.rate_version.as_str()),
-        )
+        .machine_runtime_preflight(&owner_id, &profile.profile_version, runtime_quote.as_ref())
         .await
         .ok();
-    let quota = crate::services::remote_machine_quota::owner_preflight(quota_operation).await;
+    let quota =
+        crate::services::remote_machine_quota::owner_preflight(quota_operation, &profile).await;
     let policy = policy_view();
     Ok(Json(QuoteResponse {
         policy_version,
@@ -439,12 +457,21 @@ pub async fn quote(
     }))
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EntitlementQuery {
+    #[serde(default = "default_profile_version")]
+    pub profile_version: String,
+}
+
 /// GET /api/v1/remote-machine-entitlement
 pub async fn entitlement(
     State(state): State<AppState>,
     auth: AuthUser,
+    axum::extract::Query(query): axum::extract::Query<EntitlementQuery>,
 ) -> AppResult<Json<EntitlementResponse>> {
     let owner_id = owner(&auth)?;
+    let profile = request_profile(&state, &query.profile_version)?;
     let result = machine::entitlement(&state.db, &owner_id).await?;
     Ok(Json(EntitlementResponse {
         eligible: result.eligible,
@@ -456,11 +483,12 @@ pub async fn entitlement(
         platform: request_platform(&state, true).await,
         billing_preflight: state
             .billing
-            .machine_runtime_preflight(&owner_id, None)
+            .machine_runtime_preflight(&owner_id, &profile.profile_version, None)
             .await
             .ok(),
         quota: crate::services::remote_machine_quota::owner_preflight(
             crate::services::remote_machine_quota::Operation::Create,
+            &profile,
         )
         .await,
     }))
@@ -474,8 +502,10 @@ pub async fn create(
     Json(body): Json<CreateRequest>,
 ) -> AppResult<(StatusCode, Json<CreateResponse>)> {
     let owner_id = owner(&auth)?;
+    machine::require_remote_machines_enabled(&state.db, &owner_id).await?;
     let idempotency_key = require_idempotency_key(&headers)?;
-    let mut request_body = json!({"name":body.name,"capabilities":body.capabilities,"specialist_id":body.specialist_id,"free_slot": body.free_slot, "policy_version": body.policy_version,
+    let profile = request_profile(&state, &body.profile_version)?;
+    let mut request_body = json!({"profile_version":body.profile_version,"name":body.name,"capabilities":body.capabilities,"specialist_id":body.specialist_id,"free_slot": body.free_slot, "policy_version": body.policy_version,
         "data_policy_version": body.data_policy_version, "acknowledge_shared_environment": body.acknowledge_shared_environment, "quote_id": body.quote_id, "accept_account_balance":body.accept_account_balance});
     crate::services::remote_machine_configuration::normalize_request(&mut request_body)?;
     require_policy_acceptance(&body)?;
@@ -486,6 +516,7 @@ pub async fn create(
         LifecycleAction::Create,
         &idempotency_key,
         &request_body,
+        &profile,
     )
     .await?;
     let result = machine::create_machine_with_billing(
@@ -493,7 +524,7 @@ pub async fn create(
         machine::CreateMachineInput {
             owner_id,
             free_slot: body.free_slot,
-            profile: request_profile(&state),
+            profile,
             sandbox_namespace: "nyxid-machine".into(),
             idempotency_key,
             request_body,
@@ -595,7 +626,7 @@ async fn lifecycle_action(
         }
     }
     let idempotency_key = require_idempotency_key(&headers)?;
-    let request_body = json!({
+    let mut request_body = json!({
         "action": action.as_str(),
         "expected_revision": expected_revision,
         "data_policy_version": body.data_policy_version,
@@ -604,11 +635,16 @@ async fn lifecycle_action(
         "acknowledge_shared_environment": body.acknowledge_shared_environment,
         "quote_id": body.quote_id, "accept_account_balance":body.accept_account_balance,
     });
+    if let Some(version) = body.profile_version {
+        request_body["profile_version"] = json!(version);
+    }
     if matches!(action, LifecycleAction::Resume | LifecycleAction::Rekey) {
+        machine::require_remote_machines_enabled(&state.db, &owner_id).await?;
         let saved = machine::get_machine(&state.db, &owner_id, &machine_id)
             .await?
             .ok_or_else(|| AppError::NotFound("managed machine not found".into()))?;
         machine::validate_current_contract(&saved)?;
+        machine::normalize_profile_request(&mut request_body, &saved.profile.profile_version)?;
         require_platform_or_replay(
             &state,
             &owner_id,
@@ -616,6 +652,7 @@ async fn lifecycle_action(
             action,
             &idempotency_key,
             &request_body,
+            &saved.profile,
         )
         .await?;
     }
@@ -759,6 +796,7 @@ mod tests {
     #[test]
     fn create_requires_explicit_current_policies_and_shared_environment_acknowledgement() {
         let mut body = CreateRequest {
+            profile_version: default_profile_version(),
             name: crate::models::remote_machine::default_name(),
             capabilities: crate::models::remote_machine::default_capabilities(),
             specialist_id: None,

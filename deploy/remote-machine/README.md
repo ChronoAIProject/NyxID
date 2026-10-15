@@ -184,14 +184,61 @@ a deployment runtime and does not claim VM isolation. Container resources,
 privileges, networks and supervisor/command identity separation remain enforced
 with either runtime selection.
 
-Configure `NYXID_REMOTE_MACHINE_KUBE_API`,
-`NYXID_REMOTE_MACHINE_KUBE_TOKEN_FILE`, optional
-`NYXID_REMOTE_MACHINE_KUBE_CA_FILE`, and
-`NYXID_REMOTE_MACHINE_BOOTSTRAP_BASE_URL` (or the configured server base URL).
-The manager’s protected rotating token has Sandbox writes plus read-only
-Pods/PVCs, direct Node/PV GET, read-only StorageClass GET/LIST and TokenReview. The workload ServiceAccount has
-no RoleBinding. The only projected workload token has audience
-`nyxid-remote-machine-v1`, mode 0400 and a 600-second lifetime.
+Configure `NYXID_REMOTE_MACHINE_KUBE_API` as the actual target Kubernetes API
+HTTPS origin, optional `NYXID_REMOTE_MACHINE_KUBE_CA_FILE` as a PEM trust root,
+and `NYXID_REMOTE_MACHINE_BOOTSTRAP_BASE_URL` (or the server base URL). TLS chain
+and hostname verification remain required. Never set the API to metadata.
+
+Select backend authentication with `NYXID_REMOTE_MACHINE_KUBE_AUTH_MODE`:
+
+- Unset or `token_file`: requires an absolute
+  `NYXID_REMOTE_MACHINE_KUBE_TOKEN_FILE`. The protected regular file is read
+  for every request, including projected-token symlink rotation. Empty, oversized,
+  malformed, group/world-writable or unreadable files fail closed.
+- `google_metadata`: no token file is required or consulted. The trusted backend
+  directly calls `GET http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token`
+  with `Metadata-Flavor: Google`. No production endpoint override, proxy,
+  redirect, ADC chain, sidecar or token exporter is used.
+- Blank, whitespace-padded or unknown modes are configuration errors. No mode
+  falls back to another source or sends an unauthenticated Kubernetes request.
+
+Both Sandbox manager and Kubernetes workload verifier use the same credential
+source. A process-lived metadata cache survives reconstruction of either
+client. Acquisition has a 1-second connect timeout, 3-second request timeout,
+and 5-second total budget including refresh wait. Responses are bounded to
+64 KiB, tokens to 16 KiB, and `expires_in` must be an integer from 1 to 86400
+seconds. Expiry starts before the request; refresh starts `min(60 seconds,
+10% of lifetime)` early. One refresh runs at a time; failures coalesce for one
+second, then the next caller may retry. Failure during early refresh also fails
+closed (no stale-token fallback). Secrets and credential paths are redacted;
+Google tokens remain only in backend memory and outgoing Kubernetes Bearer
+headers, never Machine/bootstrap material, logs, API results or persistence.
+
+Configuration readiness is mode-aware: metadata mode has no missing-file
+blocker. Configuration alone does not prove credentials or authorization.
+Existing async provisioning/storage and operator probes acquire credentials
+and exercise the actual API; unavailable metadata, TLS, 401/403 or inaccessible
+resources remain unavailable/unknown through those paths. Existing untrusted
+metadata/private-network URL and Machine egress restrictions are unchanged.
+
+The backend Pod's Google identity (`chrono-nyxid` in the intended deployment)
+is distinct from the Kubernetes ServiceAccount `nyxid-machine-manager` in the
+example RBAC. That binding does **not** establish access for a Google principal.
+Before environment acceptance, an operator must record the actual authenticated
+principal, its least-privilege Sandbox writes and required read-only Pod/PVC,
+direct Node/PV GET, StorageClass GET/LIST, TokenReview and diagnostic permissions,
+API reachability, trusted CA and hostname. Inventory the permissions in the
+existing manifests/probes against that principal. This change grants no IAM or
+RBAC roles and does not authorize modifying the target environment. Real Google
+metadata identity and target GKE authentication/authorization remain pending;
+local HTTP/TLS doubles cannot establish them.
+
+The workload ServiceAccount still has no RoleBinding. Its sole projected token
+has audience `nyxid-remote-machine-v1`, mode 0400 and a 600-second lifetime.
+This Pod-bound **Kubernetes** token authenticates managed bootstrap; the backend
+Google access token authorizes the TokenReview HTTP request only. It never
+substitutes for the workload token or its Pod/Sandbox UID, owner, runtime
+generation, credential epoch, writer-fence and grant checks.
 
 `managed-start --kubernetes` performs `/api/v1/machines/managed/prepare` and
 `/api/v1/machines/managed/bootstrap` with that Pod-bound identity and a protected

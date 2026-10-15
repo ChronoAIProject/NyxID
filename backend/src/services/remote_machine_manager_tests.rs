@@ -37,6 +37,10 @@ struct Fixture {
 }
 
 async fn fixture(label: &str) -> Fixture {
+    fixture_with_rollout(label, false).await
+}
+
+async fn fixture_with_rollout(label: &str, enabled: bool) -> Fixture {
     let db = connect_transaction_test_database(label).await;
     lifecycle::ensure_indexes(&db).await.unwrap();
     crate::services::remote_machine_events::ensure_indexes(&db)
@@ -47,6 +51,18 @@ async fn fixture(label: &str) -> Fixture {
         .insert_one(test_user(&owner, UserType::Person))
         .await
         .unwrap();
+    if enabled {
+        use crate::services::feature_flag_service::{self, FlagTarget, REMOTE_MACHINES_FLAG_KEY};
+        feature_flag_service::set_platform_override(
+            &db,
+            REMOTE_MACHINES_FLAG_KEY,
+            &FlagTarget::User(owner.clone()),
+            true,
+            &owner,
+        )
+        .await
+        .unwrap();
+    }
     let mut input = CreateMachineInput::fixed(
         &owner,
         true,
@@ -81,6 +97,28 @@ async fn fixture(label: &str) -> Fixture {
         machine: created.machine,
         effect,
     }
+}
+
+async fn disable_rollout(f: &Fixture) {
+    use crate::services::feature_flag_service::{self, FlagTarget, REMOTE_MACHINES_FLAG_KEY};
+    feature_flag_service::set_platform_override(
+        &f.db,
+        REMOTE_MACHINES_FLAG_KEY,
+        &FlagTarget::User(f.machine.owner_id.clone()),
+        false,
+        &f.machine.owner_id,
+    )
+    .await
+    .unwrap();
+    assert!(
+        !feature_flag_service::personal_flag_enabled(
+            &f.db,
+            &f.machine.owner_id,
+            REMOTE_MACHINES_FLAG_KEY
+        )
+        .await
+        .unwrap()
+    );
 }
 
 fn sandbox_path(machine: &ManagedMachine) -> String {
@@ -207,7 +245,8 @@ async fn assert_slot_retained(f: &Fixture) {
 
 #[tokio::test]
 async fn manager_lost_create_response_recovers_original_allocation_without_recreating() {
-    let f = fixture("mgr_lost_response").await;
+    let f = fixture_with_rollout("mgr_lost_response", true).await;
+    disable_rollout(&f).await;
     Mock::given(method("GET"))
         .and(path(sandbox_path(&f.machine)))
         .respond_with(ResponseTemplate::new(404))
@@ -1320,7 +1359,8 @@ async fn manager_pending_resume_cannot_repair_running_without_predecessor_stop()
 
 #[tokio::test]
 async fn manager_never_submitted_delete_finishes_without_external_requests() {
-    let f = fixture("mgr_unallocated_delete").await;
+    let f = fixture_with_rollout("mgr_unallocated_delete", true).await;
+    disable_rollout(&f).await;
     let deleting = delete_request(&f, &f.machine).await;
     let effect =
         f.db.collection::<MachineEffectOutbox>(OUTBOX)

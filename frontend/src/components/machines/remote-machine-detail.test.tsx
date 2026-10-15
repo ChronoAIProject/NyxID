@@ -1,4 +1,5 @@
 import {
+  act,
   cleanup,
   render,
   screen,
@@ -115,7 +116,14 @@ vi.mock("@/hooks/use-public-config", () => ({
 }));
 
 beforeEach(() => {
-  useAuthStore.setState({ user: { id: "owner" } as never });
+  useAuthStore.setState({
+    user: {
+      id: "owner",
+      capabilities: { enabled_features: ["experimental:remote-machines"] },
+    } as never,
+    isAuthenticated: true,
+    isLoading: false,
+  });
   sessionStorage.clear();
 });
 afterEach(() => {
@@ -624,11 +632,12 @@ it.each([
   },
 );
 
-
 it("discloses unknown temporary capacity and disk pressure in detail and policy views", async () => {
   render(<RemoteMachineDetail machineId={fixture.machine.node_id} />);
   expect(screen.getByText("No fixed capacity declared")).toBeInTheDocument();
-  expect(screen.getByText(/Disk pressure can evict the Pod/)).toBeInTheDocument();
+  expect(
+    screen.getByText(/Disk pressure can evict the Pod/),
+  ).toBeInTheDocument();
   await userEvent.click(screen.getByRole("tab", { name: "Policy and setup" }));
   expect(screen.getByText("No fixed capacity declared")).toBeInTheDocument();
 });
@@ -636,13 +645,28 @@ it("discloses unknown temporary capacity and disk pressure in detail and policy 
 it("shows the current profile with undeclared temporary capacity in both detail views", async () => {
   const oldProfile = fixture.machine.profile;
   const oldPolicy = fixture.machine.policy_version;
-  Object.assign(fixture.machine, { profile: { ...oldProfile, profile_version: "remote-machine", ephemeral_gib: null }, policy_version: "remote-machine-mvp" });
+  Object.assign(fixture.machine, {
+    profile: {
+      ...oldProfile,
+      profile_version: "remote-machine",
+      ephemeral_gib: null,
+    },
+    policy_version: "remote-machine-mvp",
+  });
   try {
     render(<RemoteMachineDetail machineId={fixture.machine.node_id} />);
     expect(screen.getByText("No fixed capacity declared")).toBeInTheDocument();
-    expect(screen.queryByText(/null GiB|undefined GiB|2 GiB temporary/)).not.toBeInTheDocument();
-    expect(screen.getByText(/Temporary storage is managed by the deployment environment/)).toBeInTheDocument();
-    await userEvent.click(screen.getByRole("tab", { name: "Policy and setup" }));
+    expect(
+      screen.queryByText(/null GiB|undefined GiB|2 GiB temporary/),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByText(
+        /Temporary storage is managed by the deployment environment/,
+      ),
+    ).toBeInTheDocument();
+    await userEvent.click(
+      screen.getByRole("tab", { name: "Policy and setup" }),
+    );
     expect(screen.getByText("No fixed capacity declared")).toBeInTheDocument();
   } finally {
     fixture.machine.profile = oldProfile;
@@ -652,14 +676,73 @@ it("shows the current profile with undeclared temporary capacity in both detail 
 
 it("resumes a current free Machine with explicit saved policy acceptance", async () => {
   fixture.action.mockResolvedValue({ operation: { id: "op-legacy-resume" } });
-  render(<RemoteMachineDetail machineId={fixture.machine.node_id} policy={remoteMachinePaidQuoteFixture.policy} />);
+  render(
+    <RemoteMachineDetail
+      machineId={fixture.machine.node_id}
+      policy={remoteMachinePaidQuoteFixture.policy}
+    />,
+  );
   await userEvent.click(screen.getByRole("button", { name: "Resume machine" }));
   const dialog = within(screen.getByRole("dialog"));
   expect(dialog.getByText(/remote-machine-mvp/)).toBeInTheDocument();
+  expect(fixture.quote).toHaveBeenCalledWith({
+    free_slot: true,
+    machine_id: fixture.machine.node_id,
+    profile_version: fixture.machine.profile.profile_version,
+  });
   await userEvent.click(dialog.getByRole("checkbox"));
   await userEvent.click(dialog.getByRole("button", { name: "Resume machine" }));
   await waitFor(() => expect(fixture.action).toHaveBeenCalledTimes(1));
   expect(fixture.action.mock.calls[0]![0].body).toMatchObject({
-    action: "resume", policy_version: "remote-machine-mvp" as const, data_policy_version: "remote-machine-data" as const,
+    action: "resume",
+    profile_version: "remote-machine",
+    policy_version: "remote-machine-mvp" as const,
+    data_policy_version: "remote-machine-data" as const,
   });
+});
+
+// useFeature still reads the actual auth store; its inactive org query is a double.
+vi.mock("@/hooks/use-orgs", () => ({ useOrg: () => ({ data: undefined }) }));
+
+it.each(["off", "loading", "account"])(
+  "closes a free resume review on %s and keeps delete available",
+  async (change) => {
+    render(<RemoteMachineDetail machineId={fixture.machine.node_id} />);
+    await userEvent.click(
+      screen.getByRole("button", { name: "Resume machine" }),
+    );
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+    expect(fixture.quote).toHaveBeenCalledTimes(1);
+    act(() =>
+      useAuthStore.setState(
+        change === "loading"
+          ? { isLoading: true }
+          : {
+              user: {
+                id: change === "account" ? "another-owner" : "owner",
+                capabilities: { enabled_features: [] },
+              } as never,
+            },
+      ),
+    );
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Resume machine" }),
+    ).toBeDisabled();
+    expect(
+      screen.getByRole("button", { name: "Delete machine" }),
+    ).toBeEnabled();
+    expect(fixture.quote).toHaveBeenCalledTimes(1);
+    expect(fixture.action).not.toHaveBeenCalled();
+  },
+);
+it("keeps owner pause and delete actionable when the flag is OFF", () => {
+  fixture.machine.resource_state = "ready";
+  useAuthStore.setState({
+    user: { id: "owner", capabilities: { enabled_features: [] } } as never,
+  });
+  render(<RemoteMachineDetail machineId={fixture.machine.node_id} />);
+  expect(screen.getByRole("button", { name: "Pause machine" })).toBeEnabled();
+  expect(screen.getByRole("button", { name: "Delete machine" })).toBeEnabled();
+  expect(fixture.quote).not.toHaveBeenCalled();
 });

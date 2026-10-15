@@ -5,6 +5,7 @@ use serde::Serialize;
 
 #[derive(Clone, Debug, Serialize)]
 pub struct RuntimeQuotePreflight {
+    pub profile_version: String,
     pub ready: bool,
     pub billing_enabled: bool,
     pub exact_ready: bool,
@@ -26,8 +27,15 @@ impl BillingService {
     pub async fn machine_runtime_preflight(
         &self,
         owner_id: &str,
-        rate_version: Option<&str>,
+        profile_version: &str,
+        quote: Option<&MachineRuntimeQuote>,
     ) -> AppResult<RuntimeQuotePreflight> {
+        crate::services::remote_machine_service::controlled_profile(profile_version)?;
+        if quote.is_some_and(|quote| {
+            quote.owner_id != owner_id || quote.terms.profile_version != profile_version
+        }) {
+            return Err(invalid("runtime preflight quote profile or owner mismatch"));
+        }
         ensure_person(&self.db, owner_id, None).await?;
         let now = Utc::now();
         let enabled = self.config.billing_enabled && !self.config.billing_fail_closed;
@@ -37,25 +45,21 @@ impl BillingService {
             .collection::<BillingWallet>(WALLETS)
             .find_one(doc! {"owner_id":owner_id})
             .await?;
-        let filter = rate_version.map_or_else(
-            || doc! {"retired":false,"sync_status":"synced"},
-            |id| doc! {"_id":id},
-        );
-        let rate = self
-            .db
-            .collection::<MachineRuntimeRate>(RATE_COLLECTION)
-            .find_one(filter)
-            .sort(doc! {"created_at":-1,"_id":-1})
-            .await?;
-        let rate = match rate {
-            Some(rate)
-                if !rate.retired
-                    && prices::validate_rate(&rate).is_ok()
-                    && rate.plan_code == self.config.lago_plan_code =>
-            {
-                Some(rate)
-            }
-            _ => None,
+        let rate = if let Some(quote) = quote {
+            // Existing quotes keep their exact rate, including after retirement.
+            // Never substitute a newer price when the pinned contract is invalid.
+            self.db
+                .collection::<MachineRuntimeRate>(RATE_COLLECTION)
+                .find_one(doc! {"_id": &quote.rate_version})
+                .await?
+                .filter(|rate| {
+                    validate_quote_rate(quote, rate).is_ok()
+                        && rate.plan_code == self.config.lago_plan_code
+                        && rate.sync_status == PricingSyncStatus::Synced
+                        && rate.verified_at.is_some()
+                })
+        } else {
+            self.latest_machine_runtime_rate(profile_version).await?
         };
         let wallet_status = match &wallet {
             None => "missing",
@@ -84,6 +88,7 @@ impl BillingService {
             "unverified"
         };
         let mut view = RuntimeQuotePreflight {
+            profile_version: profile_version.into(),
             ready: false,
             billing_enabled: enabled,
             exact_ready,
@@ -121,7 +126,7 @@ impl BillingService {
         } else if self.lago.is_none() {
             Some("provider_unconfigured")
         } else if view.pricing != "synced" {
-            Some("pricing_unavailable")
+            Some("profile_pricing_unavailable")
         } else {
             None
         };

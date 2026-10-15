@@ -1,5 +1,80 @@
 # Remote Machine source recovery and owner read contracts
 
+## Backend Kubernetes credentials (2026-10-15 scoped goal and acceptance)
+
+Add explicitly selected Google metadata access-token authentication for trusted
+NyxID backend calls to the target Kubernetes/GKE API. This is credential ingress
+only: native Agent Sandbox lifecycle, owner authorization, Billing, rollout and
+profile/rate contracts below remain authoritative.
+
+`NYXID_REMOTE_MACHINE_KUBE_AUTH_MODE` accepts exactly `token_file` (default only
+when unset) or `google_metadata`; blank/unknown values fail configuration.
+`token_file` requires an absolute `NYXID_REMOTE_MACHINE_KUBE_TOKEN_FILE` and
+protected rotating reads. `google_metadata` does not require or consult that
+file. There is no cross-mode fallback. Both consumers use one shared concrete
+credential implementation; backend factories reuse a process-lived metadata
+cache. `NYXID_REMOTE_MACHINE_KUBE_API` remains the actual HTTPS Kubernetes API,
+with verified TLS and optional `NYXID_REMOTE_MACHINE_KUBE_CA_FILE` trust root.
+
+The metadata source makes a fixed direct GET to
+`http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token`
+with `Metadata-Flavor: Google`, no proxy or redirect. Acquisition is bounded in
+bytes and time (including refresh wait), validates token/positive `expires_in`,
+uses conservative monotonic expiry and early refresh, serializes concurrent
+refresh and briefly coalesces failures. Failure rejects the operation, permits
+later retry, and never returns expired credentials or sends unauthenticated
+requests. Tokens stay zeroizing/redacted in trusted backend memory only; no
+logs, API responses, database, image, Machine, ordinary command user or caller
+receives them. Existing untrusted metadata/private-network restrictions remain.
+
+| Acceptance | Required local evidence |
+|---|---|
+| M1 configuration | Both modes/default; blank/unknown/API/CA errors; metadata without file; file rotation/protected reads |
+| M2 metadata protocol | Exact GET/path/header; valid response; bounded body; invalid token/TTL; cache, early/expired refresh, concurrent success/failure, timeout and retry |
+| M3 actual consumers | Sandbox API and workload verifier use Bearer, including separately reconstructed production factories sharing one cache; TLS/CA and selected-mode readiness |
+| M4 bootstrap boundary | Original Pod-bound Kubernetes token stays in TokenReview with audience `nyxid-remote-machine-v1`; Google token is only Kubernetes request authorization; UID/owner/generation/epoch/fence checks remain |
+| M5 disclosure and regression | Redacted diagnostics; existing metadata restrictions and relevant native lifecycle/bootstrap regression tests; identify real Rust paths versus HTTP/TLS doubles |
+| M6 environment pending | Verify actual Google `chrono-nyxid` principal, target Kubernetes permissions, API reachability and CA in target environment; existing `nyxid-machine-manager` Kubernetes ServiceAccount RBAC is not evidence of Google-principal authorization |
+
+Update these goal/MVP/acceptance contracts before implementation source. Local
+fixtures do not establish real metadata identity or GKE permissions. This task
+authorizes no live metadata/GKE call, IAM/RBAC/environment mutation, deployment,
+commit or push. Physical stop bounds, storage writer isolation and selected
+cluster acceptance remain deferred; this is not whole-MVP release acceptance.
+
+
+## Personal Remote Machine rollout admission (2026-10-15)
+
+The sole rollout key is `experimental:remote-machines`, default **false** in production and tests. Resolve it through the existing Feature Flag framework for the authenticated personal actor (`auth.user_id`), preserving existing override precedence. It grants no role, ownership, billing entitlement, or execution authority.
+
+| Operation | Flag requirement | Existing authority and safety |
+|---|---|---|
+| Hosted setup fourth choice/list create entry; direct hosted form | Current authenticated person's flag ON; absent/loading/OFF fail closed | Keep This computer, Remote VM and Docker available; account switches cannot reuse another person's flag or intent |
+| `POST /api/v1/remote-machine-quotes`, `POST /api/v1/remote-machines` | Personal actor ON before quote/funding/resource effects, including retries | First-party human, personal-owner and existing profile/consent/idempotency checks remain |
+| User Resume or Rekey, dedicated and generic action routes | Personal actor ON before platform, replay, funding or outbox effects | Rekey can restore a paused runtime, so it shares this admission gate; re-enabling preserves exact replay |
+| Runtime-rate stage/resync/retire writes | Personal actor ON after first-party human and platform-admin checks | Ordinary users, operators, external/delegated callers and API keys gain no write permission |
+| `GET /api/v1/admin/billing/runtime` | None | Existing first-party human admin/operator read authorization remains |
+| Existing owner list/get/entitlement/operations/history/billing, pause/delete | None | Existing ownership, policy, revision and consent checks remain |
+| Accepted manager/outbox work, renewal, metering, settlement, insufficient-funds protection, background rate resync and cleanup | None | Continue all existing accounting and lifecycle safeguards; OFF never automatically pauses or deletes a Machine |
+
+Flag denial uses the existing `forbidden` error (HTTP 403, numeric code 1002), with wire message `Forbidden: Remote Machines are not enabled for this account`. Existing role/credential denials retain their own errors. Free Machine `/billing` reads still return the existing 404 when no paid runtime contract exists; the flag does not change that read contract.
+
+Admission is checked narrowly at HTTP boundaries using one service helper. Do not gate the whole Remote Machine router, shared owner eligibility, or background services. Open create/resume dialogs must close or become ineligible when the flag, authenticated actor or auth readiness changes; quote/create/resume/rekey dispatch checks current eligibility and the actor against the captured intent owner. There is no hosted rekey button today; the existing rekey mutation hook enforces this gate.
+
+Local acceptance requires real mounted API tests with signed authentication, persisted flags and a new disposable transaction-capable MongoDB 8 replica set. Positive fixtures explicitly opt in; no registry test-default-on and no generic 4xx substitute for exact denial/profile validation. Cover absent/OFF/ON ordinary/admin users, personal isolation, rate-write role/auth boundaries, zero effects/provider calls on denial, successful free/paid admission, and OFF-after-establishment ongoing safety. Frontend component/hook and browser tests use disclosed HTTP doubles and do not establish backend enforcement. See `REMOTE_NYX_MACHINE_FEATURE_FLAG_VERIFICATION_20261015.md` for current-task evidence. No commit, push, deployment, live rollout/data/service mutation, image build or selected-cluster/runtime/CSI claim belongs to this task.
+
+## Controlled profile and runtime rate contract (2026-10-15)
+
+The existing `remote-machine` profile permanently means 2000 CPU millis, 2048 MiB memory and a 20 GiB workspace, with undeclared (`null`) ephemeral capacity. The server resolves this controlled spec for both free and paid creation; submitted dimensions cannot allocate resources. Only this profile and the approved new-sale price 0.000040 Credits/second are enabled. A later price requires a new immutable rate identity; existing rate IDs, metric codes, quote prices and settlement obligations remain stable.
+
+`GET /api/v1/admin/billing/runtime` adds `profile_version` and a safe `profile` resource projection to each rate, retaining exact prices, sync/retirement state and timestamps. `POST /api/v1/admin/billing/runtime/rates` requires `profile_version` and `credits_per_second`, resolved and validated by the service before staging and the existing Lago sync/readback/retry. Unknown or unavailable profiles and unapproved new-sale prices are rejected.
+
+Quote and billing-preflight requests accept the target `profile_version`; resume uses the saved Machine profile and rejects a conflicting assertion. The shared selector chooses the latest verified, synchronized, unretired rate for that profile and the current plan. No match returns an explicit unavailable reason and never uses another profile's rate. A quote-pinned preflight uses the quote's exact profile/rate/price even if a newer rate exists. Responses expose the safe spec and profile-bound estimate. The single-profile UI automatically sends and shows the selected/quoted/saved profile; no multi-size picker is introduced.
+
+Create requests accept `profile_version`. An accepted paid quote is authoritative for its profile, exact price and terms; explicit request mismatches are rejected before funds or resources. Free create uses the same controlled resolver. Full normalized intent, including profile, remains bound to idempotency. Exact accepted replays retain existing expiry/outage behavior. Prepare, transactional accept/live reread, run renewal and replay validate matching rate/profile/terms. Resource rendering and quota demand use the validated persisted spec, with no new PVC/disk demand on resume. Paused identity, original image, RuntimeClass and PVC UID remain unchanged; a failed resume cannot substitute a different profile or empty workspace.
+
+Compatibility is missing-only: historical top-level rates and embedded `MachineRuntimeRun.rate` snapshots without `profile_version` deserialize to literal `remote-machine`, established by the sole-profile historical stage constructor at `bde170f0`. Explicit null is invalid; unknown/mismatched bindings do not admit. The original profile selector alone may include absent-field rows. No current-default mapping, quote-term alias (`shell-files-v1` remains invalid), data rewrite, repricing or historical recharge occurs. No live inventory is claimed. Upgrade all backend replicas and billing workers before enabling rates for any additional profile. Current evidence is tracked separately in `REMOTE_NYX_MACHINE_PROFILE_RATE_VERIFICATION_20261015.md`.
+
 ## Optional StorageClass and hosted image amendment (2026-10-15)
 
 This owner-authorized amendment supersedes earlier explicit-only StorageClass and hosted Dockerfile paths. `NYXID_REMOTE_MACHINE_STORAGE_CLASS` is optional. A configured name must identify an existing, non-deleting StorageClass with a valid provisioner. When absent, omit `storageClassName` entirely and let Kubernetes select its cluster default; an empty string explicitly disables default selection and is not equivalent. Missing/unverifiable default, permission errors and provisioning failures remain visible failures or pending work. Existing PVC identity and retained templates remain authoritative across changed defaults; no replacement empty disk. Class-specific quota demand stays unknown until the class is known. Runtime/CSI capacity and cleanup remain real-environment acceptance.
@@ -31,6 +106,22 @@ The server-owned sticky `ApiKey.machine_external_grants_present` bit now travels
 Confirmations persist the original source authentication cutoff, protected consent and service ceiling. Human decisions reconstruct and live-admit that original source and exact child within the transaction, before any expiration sweep is required. Pending windows are at most 15 minutes; approved retry windows are at most 10 minutes and are additionally capped by original authentication and current runtime coverage. Consumption narrows the resulting authority to that original source and remains one-use. Legacy confirmations lacking the required original-source fields fail closed.
 
 Production external MCP discovery and dispatch are mounted and active in the current source. Admission still requires verified source identity, live original-source/grant authority, current Node v3/runtime and lifecycle/funding gates; there is no temporary coordinator-owned activation constant. The five public local journeys exercise these paths with stated fixture boundaries. The preceding single-current scope verification is recorded in `REMOTE_NYX_MACHINE_SINGLE_CURRENT_VERIFICATION_20261015.md`; real client and selected-environment acceptance remain pending.
+
+
+The public field contract is:
+
+| Route | Additive request / response contract |
+|---|---|
+| `GET /api/v1/admin/billing/runtime` | Each `rates[]` has `profile_version` and `profile: {profile_version,cpu_millis,memory_mib,workspace_gib,ephemeral_gib}`. `rate_version`, `metric`, exact `credits_per_second`, `sync_status`, `retired`, `verified_at`, `created_at` remain. |
+| `POST /api/v1/admin/billing/runtime/rates` | Required string `profile_version` and decimal-string `credits_per_second`; no resource dimension fields. Only `remote-machine` and exact 0.000040 accepted. The response is the same rate view, initially pending. |
+| `POST /api/v1/remote-machine-quotes` | `profile_version` defaults to literal `remote-machine` only when omitted; explicit null/unknown fails. Existing `free_slot` and optional `machine_id` remain. Response `profile` is the selected/saved safe spec; paid response freezes `quote_id`, `rate_version`, `credits_per_second`, policy and expiry. |
+| `GET /api/v1/remote-machine-entitlement?profile_version=remote-machine` | Optional query defaults to the original literal profile. `billing_preflight.profile_version` identifies the rate/estimate profile; absent matching rates report `pricing: unavailable` and `profile_pricing_unavailable` when other prerequisites are ready. |
+| `POST /api/v1/remote-machines` | Optional `profile_version` defaults to the original literal; it must match the accepted quote. Arbitrary CPU/memory/workspace fields are rejected. Existing quote, consent, capability and specialist fields remain. |
+| Existing resume action | Optional `profile_version` must equal the saved profile; the UI explicitly sends it. The resume quote uses `machine_id` plus saved profile. No new action or resize API exists. |
+
+Malformed decimal prices (including `NaN`) return a request validation error, with no staged rate. A paid quote with no matching available rate uses the existing `billing_provider_unavailable` response (HTTP 402) and a requested-profile explanation; it never falls back to a foreign rate. A quote whose retained resource/image/policy terms differ from a creation intent keeps the existing HTTP 409 conflict behavior. Preflight remains advisory and does not reserve funds.
+
+Exact pre-additive-profile retries retain the historical **full** normalized intent digest with only the newly introduced `profile_version` field absent, after validating the saved canonical Machine contract. Names, capabilities, specialist, policies, quote and every other bound field stay compared; no stripped-configuration fallback or obsolete profile alias is accepted. New writes bind the explicit normalized profile. Neither retry handling nor missing-field rate decoding rewrites stored history.
 
 ## Bounded reads
 
@@ -65,7 +156,7 @@ The existing first-party human admin/operator route `GET /api/v1/admin/remote-ma
 
 ## Billing diagnostics and service attribution
 
-`BillingService::machine_runtime_preflight(owner_id, rate_version)` reads existing wallet, exact-accounting readiness, synchronized runtime pricing and the existing strict provider/subscription checks. Quote callers select the actual offered rate; entitlement diagnostics use the latest synchronized rate. The diagnostic is not admission, does not create an account or allowance period, and does not reserve money. The handler may return null diagnostics without disabling free runtime; paid quote/admission remains strict.
+`BillingService::machine_runtime_preflight(owner_id, profile_version, quote)` reads existing wallet, exact-accounting readiness, synchronized runtime pricing and the existing strict provider/subscription checks. Quote callers select the actual offered rate; entitlement diagnostics use the latest synchronized rate for the requested profile. The diagnostic is not admission, does not create an account or allowance period, and does not reserve money. The handler may return null diagnostics without disabling free runtime; paid quote/admission remains strict.
 
 The estimate uses existing exact Credits and existing eligible grant/allowance rules. Available allowance seconds use the current definition minus consumed/reserved quantities without mutating a period. Active wallet/allowance settlement makes the estimate unknown. Estimates expose exact available/reserved/pending wallet values, matching allowance seconds, available grant Credits and whole runtime seconds. A 30-second observation is not a duration guarantee. The UI rejects an estimate belonging to another quote rate and shows stale or absent estimates as unknown.
 

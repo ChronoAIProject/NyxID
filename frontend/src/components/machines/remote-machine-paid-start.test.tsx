@@ -104,7 +104,15 @@ vi.mock("@/hooks/use-billing", () => ({
   }),
 }));
 beforeEach(() => {
-  useAuthStore.setState({ user: { ...auth.user!, id: "owner" } });
+  useAuthStore.setState({
+    user: {
+      ...auth.user!,
+      id: "owner",
+      capabilities: { enabled_features: ["experimental:remote-machines"] },
+    },
+    isAuthenticated: true,
+    isLoading: false,
+  });
   sessionStorage.clear();
   state.data = structuredClone(offer);
   state.error = null;
@@ -150,9 +158,16 @@ const submit = () =>
 
 it("shows the exact offered rate and requires explicit paid terms before real acceptance", async () => {
   show();
-  expect(screen.getByText(/Temporary storage is managed by the deployment environment/)).toBeInTheDocument();
+  expect(
+    screen.getByText(
+      /Temporary storage is managed by the deployment environment/,
+    ),
+  ).toBeInTheDocument();
   expect(screen.queryByText(/2 GiB temporary storage/)).not.toBeInTheDocument();
-  expect(state.quote).toHaveBeenCalledWith({ free_slot: false });
+  expect(state.quote).toHaveBeenCalledWith({
+    free_slot: false,
+    profile_version: "remote-machine",
+  });
   expect(screen.getByText(/0.000040000001 Credits per/)).toBeInTheDocument();
   expect(
     screen.getByText(/Account wallet available: 12.123456789012 Credits/),
@@ -170,6 +185,7 @@ it("shows the exact offered rate and requires explicit paid terms before real ac
       capabilities: ["shell", "files"],
       specialist_id: null,
       free_slot: false,
+      profile_version: "remote-machine",
       quote_id: "quote-one",
       accept_account_balance: true,
       policy_version: offer.policy.policy_version,
@@ -247,6 +263,7 @@ it("recovers a saved paid request after quote expiry without accepting the repla
     expect(state.create).toHaveBeenCalledWith({
       body: {
         ...saved.body,
+        profile_version: "remote-machine",
         name: "my-remote-machine",
         capabilities: ["shell", "files"],
         specialist_id: null,
@@ -296,6 +313,11 @@ it("resumes a paid paused Machine only with the accepted quote and revision", as
     free_slot: false,
     revision: 9,
   });
+  expect(state.quote).toHaveBeenCalledWith({
+    free_slot: false,
+    machine_id: "machine-1",
+    profile_version: "remote-machine",
+  });
   expect(screen.getByText(/Adding funds never resumes/)).toBeInTheDocument();
   expect(state.action).not.toHaveBeenCalled();
   await accept();
@@ -308,6 +330,7 @@ it("resumes a paid paused Machine only with the accepted quote and revision", as
     body: {
       action: "resume",
       expected_revision: 9,
+      profile_version: "remote-machine",
       quote_id: "quote-one",
       accept_account_balance: true,
     },
@@ -319,7 +342,13 @@ it("clears reviewed acceptance when the signed-in account changes", async () => 
   show();
   await accept();
   act(() =>
-    useAuthStore.setState({ user: { ...auth.user!, id: "another-owner" } }),
+    useAuthStore.setState({
+      user: {
+        ...auth.user!,
+        id: "another-owner",
+        capabilities: { enabled_features: ["experimental:remote-machines"] },
+      },
+    }),
   );
   expect(
     screen.getByRole("checkbox", { name: /I accept this exact rate/ }),
@@ -379,11 +408,134 @@ it("requires a fresh manual review after insufficient funds and never retries au
   expect(state.create).toHaveBeenCalledTimes(1);
 });
 
+it.each(["remote-machine-mvp-v1", "remote-machine-mvp-v2"])(
+  "rejects an obsolete paid resume quote %s before dispatch",
+  (policy_version) => {
+    const current = {
+      ...remoteMachineFixture,
+      resource_state: "paused" as const,
+      billing_state: "suspended" as const,
+    };
+    state.data = {
+      ...offer,
+      policy_version,
+      policy: { ...offer.policy, policy_version },
+    };
+    show(current);
+    expect(
+      screen.getByRole("button", { name: "Accept quote and resume" }),
+    ).toBeDisabled();
+    expect(state.action).not.toHaveBeenCalled();
+  },
+);
 
-it.each(["remote-machine-mvp-v1", "remote-machine-mvp-v2"])("rejects an obsolete paid resume quote %s before dispatch", (policy_version) => {
-  const current = { ...remoteMachineFixture, resource_state: "paused" as const, billing_state: "suspended" as const };
-  state.data = { ...offer, policy_version, policy: { ...offer.policy, policy_version } };
-  show(current);
-  expect(screen.getByRole("button", { name: "Accept quote and resume" })).toBeDisabled();
-  expect(state.action).not.toHaveBeenCalled();
-});
+it.each(["create", "resume"])(
+  "does not show a replacement quote estimate for a saved %s intent",
+  (operation) => {
+    const resume = operation === "resume";
+    getRemoteMachineIntent(
+      "owner",
+      resume ? "machine-1:resume" : "create-paid",
+      {
+        ...(resume
+          ? { action: "resume" as const, expected_revision: 9 }
+          : { free_slot: false }),
+        profile_version: "remote-machine",
+        quote_id: "original-quote",
+        accept_account_balance: true,
+        policy_version: "remote-machine-mvp",
+        data_policy_version: "remote-machine-data",
+        acknowledge_shared_environment: true,
+      },
+    );
+    state.data = {
+      ...offer,
+      billing_preflight: {
+        profile_version: "remote-machine",
+        ready: true,
+        billing_enabled: true,
+        exact_ready: true,
+        wallet: "ready",
+        subscription: "active",
+        provider: "ready",
+        pricing: "synced",
+        reason: null,
+        rate_version: offer.rate_version,
+        credits_per_second: offer.credits_per_second,
+        observed_at: "2099-01-01T00:00:00Z",
+        valid_until: "2099-01-01T00:00:30Z",
+        reservation_guarantee: false,
+        funds_reason: null,
+        funds: {
+          wallet_available: "2",
+          wallet_reserved: "0",
+          pending_debits: "0",
+          pending_expiry: "0",
+          matching_allowance_seconds: 0,
+          available_grants: "0",
+          estimated_seconds: "49999",
+          shared_account_estimate_only: true,
+        },
+      },
+    };
+    show(
+      resume
+        ? {
+            ...remoteMachineFixture,
+            resource_state: "paused",
+            billing_state: "suspended",
+            free_slot: false,
+            revision: 9,
+          }
+        : undefined,
+    );
+    expect(
+      screen.getByText(/Original quote: original-quote/),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/49999 seconds/)).not.toBeInTheDocument();
+  },
+);
+
+// useFeature still reads the actual auth store; its inactive org query is a double.
+vi.mock("@/hooks/use-orgs", () => ({ useOrg: () => ({ data: undefined }) }));
+
+it.each(["off", "loading", "account"])(
+  "closes an open paid resume on %s without quoting for a new actor",
+  async (change) => {
+    render(
+      <RemoteMachinePaidStart
+        open
+        onOpenChange={state.close}
+        machine={{
+          ...remoteMachineFixture,
+          resource_state: "paused",
+          free_slot: false,
+          billing_state: "suspended",
+        }}
+        onAccepted={state.accepted}
+      />,
+    );
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+    expect(state.quote).toHaveBeenCalledTimes(1);
+    act(() =>
+      useAuthStore.setState(
+        change === "loading"
+          ? { isLoading: true }
+          : {
+              user: {
+                id: change === "account" ? "another-owner" : "owner",
+                capabilities: {
+                  enabled_features:
+                    change === "account"
+                      ? ["experimental:remote-machines"]
+                      : [],
+                },
+              } as never,
+            },
+      ),
+    );
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(state.quote).toHaveBeenCalledTimes(1);
+    expect(state.action).not.toHaveBeenCalled();
+  },
+);

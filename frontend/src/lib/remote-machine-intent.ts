@@ -1,5 +1,6 @@
 import { z } from "zod";
 import {
+  REMOTE_MACHINE_PROFILE,
   REMOTE_MACHINE_POLICY,
   REMOTE_MACHINE_DATA_POLICY,
   remoteMachineNameSchema,
@@ -16,6 +17,7 @@ const version = z
 const bodySchema = z
   .object({
     free_slot: z.boolean().optional(),
+    profile_version: z.literal(REMOTE_MACHINE_PROFILE).optional(),
     name: remoteMachineNameSchema.optional(),
     capabilities: remoteMachineCapabilitiesSchema.optional(),
     specialist_id: z.string().min(1).nullable().optional(),

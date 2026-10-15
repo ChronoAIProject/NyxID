@@ -1,6 +1,7 @@
 //! Bounded ResourceQuota diagnostics. These are observations, never reservations
 //! or claims of schedulable cluster capacity. Quotas overlap conjunctively.
 use super::remote_machine_kubernetes_identity::KubernetesWorkloadVerifier;
+use crate::models::remote_machine::MachineProfileSpec;
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use serde_json::Value;
@@ -107,6 +108,7 @@ pub struct QuotaRow {
 }
 #[derive(Debug, Serialize)]
 pub struct Inventory {
+    pub profile_version: String,
     pub rows: Vec<QuotaRow>,
     pub complete: bool,
     pub observed_at: DateTime<Utc>,
@@ -126,15 +128,26 @@ pub struct OwnerQuotaView {
     pub quota_usage_freshness: &'static str,
 }
 
-fn demand(resource: &str, operation: Operation, storage_class: Option<&str>) -> Option<i128> {
+fn demand(
+    resource: &str,
+    operation: Operation,
+    storage_class: Option<&str>,
+    profile: &MachineProfileSpec,
+) -> Option<i128> {
     let create = matches!(operation, Operation::Create);
     let value = match resource {
         "pods" | "count/pods" => 1,
         "count/sandboxes.agents.x-k8s.io"
         | "persistentvolumeclaims"
         | "count/persistentvolumeclaims" => i128::from(create),
-        "cpu" | "requests.cpu" | "limits.cpu" => 2,
-        "memory" | "requests.memory" | "limits.memory" => 2 * 1024 * 1024 * 1024,
+        "cpu" | "requests.cpu" | "limits.cpu" => {
+            return i128::from(profile.cpu_millis)
+                .checked_mul(SCALE)?
+                .checked_div(1000);
+        }
+        "memory" | "requests.memory" | "limits.memory" => {
+            i128::from(profile.memory_mib) * 1024 * 1024
+        }
         // Namespace mutation and local disk pressure are deployment facts. An
         // undeclared temporary allocation is neither a 2Gi demand nor infinity.
         "ephemeral-storage" | "requests.ephemeral-storage" | "limits.ephemeral-storage" => {
@@ -142,7 +155,7 @@ fn demand(resource: &str, operation: Operation, storage_class: Option<&str>) -> 
         }
         "requests.storage" => {
             if create {
-                20 * 1024 * 1024 * 1024
+                i128::from(profile.workspace_gib) * 1024 * 1024 * 1024
             } else {
                 0
             }
@@ -163,7 +176,7 @@ fn demand(resource: &str, operation: Operation, storage_class: Option<&str>) -> 
                 _ => match key {
                     "requests.storage" => {
                         if create {
-                            20 * 1024 * 1024 * 1024
+                            i128::from(profile.workspace_gib) * 1024 * 1024 * 1024
                         } else {
                             0
                         }
@@ -178,7 +191,22 @@ fn demand(resource: &str, operation: Operation, storage_class: Option<&str>) -> 
     value.checked_mul(SCALE)
 }
 
+#[cfg(test)]
 fn project(value: &Value, operation: Operation, storage_class: Option<&str>) -> QuotaRow {
+    project_profile(
+        value,
+        operation,
+        storage_class,
+        &MachineProfileSpec::fixed("quota"),
+    )
+}
+
+fn project_profile(
+    value: &Value,
+    operation: Operation,
+    storage_class: Option<&str>,
+    profile: &MachineProfileSpec,
+) -> QuotaRow {
     let mut row = QuotaRow {
         name: value["metadata"]["name"]
             .as_str()
@@ -229,7 +257,7 @@ fn project(value: &Value, operation: Operation, storage_class: Option<&str>) -> 
             .get(resource)
             .and_then(Value::as_str)
             .and_then(quantity);
-        let d = demand(resource, operation, storage_class);
+        let d = demand(resource, operation, storage_class, profile);
         let remaining = h.zip(u).map(|(h, u)| (h - u).max(0));
         let reason = if h.is_none() {
             Some("hard_quantity_invalid_or_unsupported")
@@ -259,6 +287,7 @@ fn project(value: &Value, operation: Operation, storage_class: Option<&str>) -> 
 impl Inventory {
     fn unknown(reason: &'static str) -> Self {
         Self {
+            profile_version: nyxid_machine::managed::PROFILE.into(),
             rows: vec![],
             complete: false,
             observed_at: Utc::now(),
@@ -313,7 +342,7 @@ impl Inventory {
             status,
             reason,
             operation,
-            profile_version: nyxid_machine::managed::PROFILE.into(),
+            profile_version: self.profile_version.clone(),
             additional_profiles_upper_bound: if stale || uncertain || !overhead_verified {
                 None
             } else {
@@ -332,8 +361,30 @@ pub async fn observe(
     operation: Operation,
     storage_class: Option<&str>,
 ) -> Inventory {
+    observe_profile(
+        verifier,
+        operation,
+        storage_class,
+        &MachineProfileSpec::fixed("quota"),
+    )
+    .await
+}
+
+pub async fn observe_profile(
+    verifier: Option<&KubernetesWorkloadVerifier>,
+    operation: Operation,
+    storage_class: Option<&str>,
+    profile: &MachineProfileSpec,
+) -> Inventory {
+    if super::remote_machine_service::validate_fixed_profile(profile).is_err() {
+        let mut result = Inventory::unknown("managed_machine_profile_unavailable");
+        result.profile_version = profile.profile_version.clone();
+        return result;
+    }
     let Some(verifier) = verifier else {
-        return Inventory::unknown("quota_transport_unconfigured");
+        let mut result = Inventory::unknown("quota_transport_unconfigured");
+        result.profile_version = profile.profile_version.clone();
+        return result;
     };
     let result = tokio::time::timeout(Duration::from_secs(5), async {
         let mut rows = vec![];
@@ -374,7 +425,7 @@ pub async fn observe(
                 {
                     return Err("quota_inventory_identity_invalid");
                 };
-                rows.push(project(item, operation, storage_class));
+                rows.push(project_profile(item, operation, storage_class, profile));
             }
             next = response["metadata"]["continue"]
                 .as_str()
@@ -388,6 +439,7 @@ pub async fn observe(
             };
         }
         Ok(Inventory {
+            profile_version: profile.profile_version.clone(),
             rows,
             complete: true,
             observed_at: Utc::now(),
@@ -403,7 +455,7 @@ pub async fn observe(
     }
 }
 
-pub async fn owner_preflight(operation: Operation) -> OwnerQuotaView {
+pub async fn owner_preflight(operation: Operation, profile: &MachineProfileSpec) -> OwnerQuotaView {
     let verifier = KubernetesWorkloadVerifier::from_environment().ok();
     // A configured string is not verified evidence. For resume, today's
     // default/configuration does not identify the retained PVC's class; keep
@@ -415,7 +467,7 @@ pub async fn owner_preflight(operation: Operation) -> OwnerQuotaView {
     } else {
         None
     };
-    observe(verifier.as_ref(), operation, storage.as_deref())
+    observe_profile(verifier.as_ref(), operation, storage.as_deref(), profile)
         .await
         .owner(operation, Utc::now(), false)
 }
@@ -424,6 +476,43 @@ pub async fn owner_preflight(operation: Operation) -> OwnerQuotaView {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[tokio::test]
+    async fn profile_binding_quota_uses_validated_resources_and_retains_workspace() {
+        let profile = MachineProfileSpec::fixed("retained-image");
+        assert_eq!(
+            demand("requests.cpu", Operation::Create, None, &profile),
+            quantity("2000m")
+        );
+        assert_eq!(
+            demand("requests.memory", Operation::Create, None, &profile),
+            quantity("2048Mi")
+        );
+        assert_eq!(
+            demand("requests.storage", Operation::Create, None, &profile),
+            quantity("20Gi")
+        );
+        for resource in [
+            "requests.storage",
+            "persistentvolumeclaims",
+            "fast.storageclass.storage.k8s.io/requests.storage",
+        ] {
+            assert_eq!(
+                demand(
+                    resource,
+                    Operation::RetainedVolumeResume,
+                    Some("fast"),
+                    &profile
+                ),
+                Some(0)
+            );
+        }
+        let mut invalid = profile.clone();
+        invalid.workspace_gib = 50;
+        let rejected = observe_profile(None, Operation::Create, None, &invalid).await;
+        assert_eq!(rejected.reason, Some("managed_machine_profile_unavailable"));
+        assert!(!rejected.complete);
+    }
 
     #[tokio::test]
     async fn inventory_follows_all_pages_and_rejects_looping_continuation() {
@@ -501,6 +590,7 @@ mod tests {
     }
     fn inventory(rows: Vec<QuotaRow>) -> Inventory {
         Inventory {
+            profile_version: nyxid_machine::managed::PROFILE.into(),
             rows,
             complete: true,
             observed_at: Utc::now(),

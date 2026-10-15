@@ -1,14 +1,16 @@
 //! Kubernetes is the workload issuer: a projected, audience-bound Pod token is
 //! verified with TokenReview, then its live Pod and Sandbox owner are checked.
 //! This establishes bootstrap identity only, never physical writer exclusion.
-use std::{path::PathBuf, time::Duration};
+use nyxid_machine_updater::kubernetes_credentials::KubernetesCredentials;
+#[cfg(test)]
+use std::path::PathBuf;
+use std::time::Duration;
 
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::Utc;
 use nyxid_machine::managed::Binding;
 use reqwest::{Client, Method, Url};
 use serde_json::{Value, json};
-use tokio::io::AsyncReadExt;
 use zeroize::Zeroizing;
 
 use super::remote_machine_bootstrap::{BootstrapTicketVerifier, VerifiedBootstrapTicket};
@@ -21,7 +23,7 @@ const MAX_RESPONSE: usize = 256 * 1024;
 pub struct KubernetesWorkloadVerifier {
     client: Client,
     base: Url,
-    manager_token_file: PathBuf,
+    credentials: KubernetesCredentials,
     namespace: String,
 }
 
@@ -49,7 +51,7 @@ impl KubernetesWorkloadVerifier {
                 .build()
                 .unwrap(),
             base,
-            manager_token_file,
+            credentials: KubernetesCredentials::token_file(manager_token_file).unwrap(),
             namespace: "nyxid-machine".into(),
         }
     }
@@ -158,74 +160,32 @@ impl KubernetesWorkloadVerifier {
     }
 
     pub fn from_environment() -> AppResult<Self> {
-        let config_error = || {
-            AppError::ValidationError("invalid managed Kubernetes identity configuration".into())
-        };
-        let base: Url = std::env::var("NYXID_REMOTE_MACHINE_KUBE_API")
-            .map_err(|_| config_error())?
-            .parse()
-            .map_err(|_| config_error())?;
-        if base.scheme() != "https"
-            || base.host_str().is_none()
-            || !base.username().is_empty()
-            || base.password().is_some()
-            || base.query().is_some()
-            || base.fragment().is_some()
-        {
-            return Err(config_error());
-        }
-        let manager_token_file = PathBuf::from(
-            std::env::var("NYXID_REMOTE_MACHINE_KUBE_TOKEN_FILE").map_err(|_| config_error())?,
-        );
-        let mut builder = Client::builder()
-            .connect_timeout(Duration::from_secs(5))
-            .timeout(Duration::from_secs(15))
-            .redirect(reqwest::redirect::Policy::none());
-        if let Ok(path) = std::env::var("NYXID_REMOTE_MACHINE_KUBE_CA_FILE") {
-            let pem = std::fs::read(path).map_err(|_| config_error())?;
-            builder = builder.add_root_certificate(
-                reqwest::Certificate::from_pem(&pem).map_err(|_| config_error())?,
-            );
-        }
+        let connection =
+            super::remote_machine_kubernetes_auth::KubernetesConnection::from_environment(
+                Duration::from_secs(15),
+            )
+            .map_err(|_| {
+                AppError::ValidationError(
+                    "invalid managed Kubernetes identity configuration".into(),
+                )
+            })?;
         Ok(Self {
-            client: builder.build().map_err(|_| config_error())?,
-            base,
-            manager_token_file,
+            client: connection.client,
+            base: connection.base,
+            credentials: connection.credentials,
             namespace: "nyxid-machine".into(),
         })
     }
 
     async fn request(&self, method: Method, path: &str, body: Option<Value>) -> AppResult<Value> {
-        // Reload projected manager credentials so rotation never requires a restart.
-        // Kubernetes projected files may be symlinks. Validate the resolved
-        // target, bound the read before allocation, and never emit file data.
-        let file = tokio::fs::File::open(&self.manager_token_file)
-            .await
-            .map_err(|_| unavailable())?;
-        let metadata = file.metadata().await.map_err(|_| unavailable())?;
-        if !metadata.is_file() || metadata.len() > 64 * 1024 {
-            return Err(unavailable());
-        }
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            if metadata.permissions().mode() & 0o022 != 0 {
-                return Err(unavailable());
-            }
-        }
-        let mut bytes = Zeroizing::new(Vec::new());
-        file.take(64 * 1024 + 1)
-            .read_to_end(&mut bytes)
-            .await
-            .map_err(|_| unavailable())?;
-        if bytes.is_empty() || bytes.len() > 64 * 1024 {
-            return Err(unavailable());
-        }
-        let token = std::str::from_utf8(&bytes).map_err(|_| unavailable())?;
-        let mut request = self
+        let request = self
             .client
-            .request(method, self.base.join(path).map_err(|_| rejected())?)
-            .bearer_auth(token.trim());
+            .request(method, self.base.join(path).map_err(|_| rejected())?);
+        let mut request = self
+            .credentials
+            .authorize(request)
+            .await
+            .map_err(|_| unavailable())?;
         if let Some(body) = body {
             request = request.json(&body);
         }
@@ -449,7 +409,7 @@ mod tests {
         let verifier = KubernetesWorkloadVerifier {
             client: Client::new(),
             base: "https://kubernetes.test".parse().unwrap(),
-            manager_token_file: PathBuf::from("unused"),
+            credentials: KubernetesCredentials::token_file(PathBuf::from("/unused")).unwrap(),
             namespace: "nyxid-machine".into(),
         };
         let review = json!({"status":{"authenticated":true,"audiences":[AUDIENCE],"user":{
@@ -487,6 +447,9 @@ mod tests {
             "/metadata/uid",
             "/metadata/ownerReferences/0/uid",
             "/metadata/labels/nyxid.dev~1writer-fence",
+            "/metadata/labels/nyxid.dev~1machine-id",
+            "/metadata/labels/nyxid.dev~1runtime-generation",
+            "/metadata/labels/nyxid.dev~1credential-epoch",
             "/spec/serviceAccountName",
         ] {
             let mut changed = pod.clone();
@@ -592,7 +555,7 @@ mod tests {
                 .build()
                 .unwrap(),
             base: format!("http://{address}").parse().unwrap(),
-            manager_token_file: token_path.clone(),
+            credentials: KubernetesCredentials::token_file(token_path.clone()).unwrap(),
             namespace: "nyxid-machine".into(),
         };
         let public = recipient.public_key_b64u();

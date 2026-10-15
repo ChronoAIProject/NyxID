@@ -3015,6 +3015,12 @@ mod org_membership_tests;
 mod remote_machine_tests;
 
 #[cfg(test)]
+mod remote_machine_flag_tests;
+
+#[cfg(test)]
+mod runtime_profile_tests;
+
+#[cfg(test)]
 mod service_inventory_tests;
 
 #[cfg(test)]

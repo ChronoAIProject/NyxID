@@ -1,4 +1,8 @@
 import {
+  assertRemoteMachineAdmission,
+  useRemoteMachineAdmission,
+} from "@/hooks/use-remote-machine-admission";
+import {
   RemoteMachineBillingPreflight,
   RemoteMachineQuota,
 } from "./remote-machine-preflight";
@@ -70,9 +74,20 @@ export function RemoteMachinePaidStart({
   onAccepted,
 }: Props) {
   const ownerId = useAuthStore((state) => state.user?.id);
+  const enabled = useRemoteMachineAdmission();
+  const [review, setReview] = useState({
+    open,
+    ownerId: enabled ? ownerId : undefined,
+  });
+  if (review.open !== open) {
+    setReview({ open, ownerId: enabled ? ownerId : undefined });
+  } else if (review.ownerId && (!enabled || review.ownerId !== ownerId)) {
+    setReview({ open, ownerId: undefined });
+  }
+  const eligible = enabled && review.ownerId === ownerId;
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      {open ? (
+    <Dialog open={open && eligible} onOpenChange={onOpenChange}>
+      {open && eligible ? (
         <PaidStartContent
           key={`${ownerId}:${machine.node_id}`}
           machine={machine}
@@ -95,7 +110,10 @@ function PaidStartContent({
   const ownerId = useAuthStore((state) => state.user?.id);
   const scope = `${machine.node_id}:resume`;
   const quote = useRemoteMachineQuote();
-  const entitlement = useRemoteMachineEntitlement(Boolean(quote.error));
+  const entitlement = useRemoteMachineEntitlement(
+    Boolean(quote.error),
+    machine.profile.profile_version,
+  );
   const action = useRemoteMachineAction();
   const wallet = useBillingWallet();
   const [saved, setSaved] = useState<RemoteMachineIntent | null>(() => {
@@ -125,6 +143,7 @@ function PaidStartContent({
     requestQuote({
       free_slot: false,
       machine_id: machine.node_id,
+      profile_version: machine.profile.profile_version,
     });
   }, [requestQuote, machine]);
   useEffect(() => {
@@ -132,8 +151,14 @@ function PaidStartContent({
     return () => window.clearInterval(timer);
   }, []);
   const parsed = remoteMachinePaidQuoteSchema.safeParse(quote.data);
-  const offer = !quote.error && parsed.success ? parsed.data : undefined;
-  const acceptable = !quote.error && isRemoteMachinePaidQuote(quote.data, now);
+  const offer =
+    !quote.error &&
+    parsed.success &&
+    parsed.data.profile.profile_version === machine.profile.profile_version &&
+    (!saved || saved.body.quote_id === parsed.data.quote_id)
+      ? parsed.data
+      : undefined;
+  const acceptable = Boolean(offer && isRemoteMachinePaidQuote(offer, now));
   const expired = Boolean(offer && Date.parse(offer.valid_until) <= now);
   const busy = action.isPending;
   const available =
@@ -161,10 +186,12 @@ function PaidStartContent({
       return;
     setError(undefined);
     try {
+      assertRemoteMachineAdmission(ownerId);
       let intent = saved;
       if (!intent) {
         if (!isRemoteMachinePaidQuote(quote.data) || quote.error) return;
         const policies = {
+          profile_version: quote.data.profile.profile_version,
           policy_version: quote.data.policy.policy_version,
           data_policy_version: quote.data.policy.data_policy_version,
           acknowledge_shared_environment: true,
@@ -217,6 +244,7 @@ function PaidStartContent({
       requestQuote({
         free_slot: false,
         machine_id: machine.node_id,
+        profile_version: machine.profile.profile_version,
       });
     } catch (cause) {
       setError(
@@ -253,6 +281,9 @@ function PaidStartContent({
                 <p className="break-all">
                   Original quote: {saved.body.quote_id ?? "Unavailable"}
                 </p>
+                {saved.body.profile_version ? (
+                  <p>Original profile: {saved.body.profile_version}</p>
+                ) : null}
                 <p>
                   Original policies: {saved.body.policy_version} /{" "}
                   {saved.body.data_policy_version}
@@ -297,11 +328,12 @@ function PaidStartContent({
                   {offer.profile.workspace_gib} GiB /workspace.
                 </p>
                 <p>
-                  Temporary storage is managed by the deployment environment.
-                  No fixed capacity commitment, selectable size or extra storage charge.
-                  Temporary data may be lost after pause or Pod recreation.
-                  Full disks can cause writes to fail, and disk pressure can
-                  evict the Pod. Review Machine details for recovery guidance.
+                  Temporary storage is managed by the deployment environment. No
+                  fixed capacity commitment, selectable size or extra storage
+                  charge. Temporary data may be lost after pause or Pod
+                  recreation. Full disks can cause writes to fail, and disk
+                  pressure can evict the Pod. Review Machine details for
+                  recovery guidance.
                 </p>
                 <p>
                   Policy: {offer.policy.policy_version}. Data policy:{" "}
@@ -323,9 +355,16 @@ function PaidStartContent({
             <RemoteMachineBillingPreflight
               preflight={
                 offer?.billing_preflight ??
-                (quote.error ? entitlement.data?.billing_preflight : undefined)
+                (quote.error && !saved
+                  ? entitlement.data?.billing_preflight
+                  : undefined)
+              }
+              quoteProfile={
+                offer?.profile.profile_version ??
+                machine.profile.profile_version
               }
               quoteRate={offer?.rate_version}
+              quotePrice={offer?.credits_per_second}
               now={now}
             />
             <p>

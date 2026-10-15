@@ -7,6 +7,7 @@ import {
 import { remoteMachineBillingPreflightSchema } from "@/schemas/machines";
 
 const preflight = remoteMachineBillingPreflightSchema.parse({
+  profile_version: "remote-machine",
   ready: true,
   billing_enabled: true,
   exact_ready: true,
@@ -37,6 +38,7 @@ it("shows exact quote-specific funds and matching benefits without promising dur
   render(
     <RemoteMachineBillingPreflight
       preflight={preflight}
+      quoteProfile="remote-machine"
       quoteRate="accepted-rate"
       now={Date.parse("2099-01-01T00:00:10Z")}
     />,
@@ -113,4 +115,39 @@ it("does not turn unknown temporary quota demand into a Machine count", () => {
   expect(screen.getByText(/Namespace quota: unknown/)).toBeInTheDocument();
   expect(screen.queryByText(/additional fixed profiles/)).not.toBeInTheDocument();
   expect(screen.getByText(/Temporary disk capacity and per-Machine quota demand remain unknown/)).toBeInTheDocument();
+});
+
+
+it.each(["other-profile", "other-price"])(
+  "withholds a same-rate estimate bound to %s",
+  (mismatch) => {
+    render(
+      <RemoteMachineBillingPreflight
+        preflight={{
+          ...preflight,
+          profile_version:
+            mismatch === "other-profile" ? "fixture-other" : "remote-machine",
+        }}
+        quoteProfile="remote-machine"
+        quoteRate="accepted-rate"
+        quotePrice={mismatch === "other-price" ? "0.000041" : "0.00004"}
+        now={Date.parse("2099-01-01T00:00:10Z")}
+      />,
+    );
+    expect(screen.queryByText(/128146 seconds/)).not.toBeInTheDocument();
+    expect(screen.getByText(/Unknown for this quote/)).toBeInTheDocument();
+  },
+);
+
+it("compares exact price values without depending on decimal formatting", () => {
+  render(
+    <RemoteMachineBillingPreflight
+      preflight={preflight}
+      quoteProfile="remote-machine"
+      quoteRate="accepted-rate"
+      quotePrice="0.00004"
+      now={Date.parse("2099-01-01T00:00:10Z")}
+    />,
+  );
+  expect(screen.getByText(/128146 seconds/)).toBeInTheDocument();
 });

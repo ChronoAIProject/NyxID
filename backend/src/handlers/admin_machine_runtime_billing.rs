@@ -4,12 +4,14 @@ use crate::{
     errors::{AppError, AppResult},
     models::{
         machine_runtime_billing::MachineRuntimeRate,
+        remote_machine::SafeMachineProfileView,
         service_billing::{BillingMetric, PricingSyncStatus},
     },
     mw::auth::AuthUser,
     services::{
         audit_service::{self, AuditActor},
         billing::machine_runtime,
+        remote_machine_service,
     },
 };
 use axum::{
@@ -21,6 +23,8 @@ use serde::{Deserialize, Serialize};
 #[derive(Serialize)]
 pub struct RateView {
     rate_version: String,
+    profile_version: String,
+    profile: SafeMachineProfileView,
     metric: BillingMetric,
     credits_per_second: String,
     sync_status: PricingSyncStatus,
@@ -28,17 +32,22 @@ pub struct RateView {
     verified_at: Option<String>,
     created_at: String,
 }
-impl From<MachineRuntimeRate> for RateView {
-    fn from(rate: MachineRuntimeRate) -> Self {
-        Self {
+impl TryFrom<MachineRuntimeRate> for RateView {
+    type Error = AppError;
+    fn try_from(rate: MachineRuntimeRate) -> AppResult<Self> {
+        let profile =
+            crate::services::remote_machine_service::controlled_profile(&rate.profile_version)?;
+        Ok(Self {
             rate_version: rate.id,
+            profile_version: rate.profile_version,
+            profile,
             metric: rate.metric,
             credits_per_second: rate.credits_per_second.to_string(),
             sync_status: rate.sync_status,
             retired: rate.retired,
             verified_at: rate.verified_at.map(|v| v.to_rfc3339()),
             created_at: rate.created_at.to_rfc3339(),
-        }
+        })
     }
 }
 #[derive(Serialize)]
@@ -69,13 +78,14 @@ pub async fn get(
             .list_machine_runtime_rates()
             .await?
             .into_iter()
-            .map(Into::into)
-            .collect(),
+            .map(TryInto::try_into)
+            .collect::<AppResult<_>>()?,
     }))
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StageRequest {
+    pub profile_version: String,
     pub credits_per_second: String,
 }
 pub async fn stage(
@@ -85,18 +95,17 @@ pub async fn stage(
 ) -> AppResult<Json<RateView>> {
     super::login_client_context::require_first_party_human(&auth)?;
     super::admin_helpers::require_admin(&state, &auth).await?;
-    if body
-        .credits_per_second
-        .parse::<crate::models::credits::Credits>()?
-        != machine_runtime::INITIAL_CREDITS_PER_SECOND.parse()?
-    {
-        return Err(AppError::ValidationError(
-            "The approved fixed runtime price is 0.000040 Credits per second".into(),
-        ));
-    }
-    let rate = state.billing.stage_initial_machine_runtime_rate().await?;
+    remote_machine_service::require_remote_machines_enabled(&state.db, &auth.user_id.to_string())
+        .await?;
+    let credits_per_second = body.credits_per_second.parse().map_err(|_| {
+        AppError::ValidationError("credits_per_second must be an exact decimal price".into())
+    })?;
+    let rate = state
+        .billing
+        .stage_machine_runtime_rate(&body.profile_version, credits_per_second)
+        .await?;
     audit(&state, &auth, "machine_runtime_rate_staged", &rate.id).await;
-    Ok(Json(rate.into()))
+    Ok(Json(rate.try_into()?))
 }
 #[derive(Serialize)]
 pub struct SyncView {
@@ -110,6 +119,8 @@ pub async fn sync(
 ) -> AppResult<Json<SyncView>> {
     super::login_client_context::require_first_party_human(&auth)?;
     super::admin_helpers::require_admin(&state, &auth).await?;
+    remote_machine_service::require_remote_machines_enabled(&state.db, &auth.user_id.to_string())
+        .await?;
     let result = state.billing.sync_machine_runtime_rate(&id).await;
     audit(&state, &auth, "machine_runtime_rate_sync_requested", &id).await;
     result?;
@@ -125,6 +136,8 @@ pub async fn retire(
 ) -> AppResult<Json<serde_json::Value>> {
     super::login_client_context::require_first_party_human(&auth)?;
     super::admin_helpers::require_admin(&state, &auth).await?;
+    remote_machine_service::require_remote_machines_enabled(&state.db, &auth.user_id.to_string())
+        .await?;
     state.billing.retire_machine_runtime_rate(&id).await?;
     audit(&state, &auth, "machine_runtime_rate_retired", &id).await;
     Ok(Json(

@@ -1234,6 +1234,7 @@ mod tests {
         let db =
             crate::test_utils::connect_transaction_test_database("machine_provider_drift").await;
         let rate = MachineRuntimeRate {
+            profile_version: "remote-machine".into(),
             id: "11111111-1111-4111-8111-111111111111".into(),
             metric: BillingMetric::MachineRunningSeconds,
             lago_metric_code: "remote_machine_running_seconds_11111111111141118111111111111111"
@@ -1315,6 +1316,7 @@ mod tests {
             crate::test_utils::connect_transaction_test_database("machine_provider_retired").await;
         seed_machine_emission_wallet(&db).await;
         let rate = MachineRuntimeRate {
+            profile_version: "remote-machine".into(),
             id: "22222222-2222-4222-8222-222222222222".into(),
             metric: BillingMetric::MachineRunningSeconds,
             lago_metric_code: "remote_machine_running_seconds_22222222222242228222222222222222"
@@ -1412,6 +1414,7 @@ mod tests {
         seed_machine_emission_wallet(db).await;
         let id = Uuid::new_v4().to_string();
         let rate = MachineRuntimeRate {
+            profile_version: "remote-machine".into(),
             lago_metric_code: format!("remote_machine_running_seconds_{}", id.replace('-', "")),
             id,
             metric: BillingMetric::MachineRunningSeconds,

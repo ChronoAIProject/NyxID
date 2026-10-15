@@ -1,4 +1,5 @@
 import type { z } from "zod";
+import { assertRemoteMachineAdmission } from "@/hooks/use-remote-machine-admission";
 import {
   useMutation,
   useQuery,
@@ -11,6 +12,7 @@ import { useCallback } from "react";
 import { api, apiClient } from "@/lib/api-client";
 import { useAuthStore } from "@/stores/auth-store";
 import {
+  REMOTE_MACHINE_PROFILE,
   remoteMachineActionRequestSchema,
   remoteMachineCreateRequestSchema,
   remoteMachineCreateResponseSchema,
@@ -61,8 +63,13 @@ function assertRemoteMachineOwner(
   }
 }
 
-function remoteMachineAuthority(owner: string | undefined) {
-  return { authorityGuard: () => assertRemoteMachineOwner(owner) };
+function remoteMachineAuthority(owner: string | undefined, admission = false) {
+  return {
+    authorityGuard: () => {
+      assertRemoteMachineOwner(owner);
+      if (admission) assertRemoteMachineAdmission(owner);
+    },
+  };
 }
 
 function safeRemoteMachineQuery<Data>(query: UseQueryResult<Data, Error>) {
@@ -189,15 +196,18 @@ export function useRemoteMachine(id: string | undefined) {
   );
 }
 
-export function useRemoteMachineEntitlement(enabled = true) {
+export function useRemoteMachineEntitlement(
+  enabled = true,
+  profileVersion: string = REMOTE_MACHINE_PROFILE,
+) {
   const owner = useAuthStore((state) => state.user?.id);
   return safeRemoteMachineQuery(
     useQuery({
-      queryKey: ["remote-machine-entitlement", owner],
+      queryKey: ["remote-machine-entitlement", owner, profileVersion],
       queryFn: async () =>
         remoteMachineEntitlementSchema.parse(
           await api.get<unknown>(
-            "/remote-machine-entitlement",
+            `/remote-machine-entitlement?${new URLSearchParams({ profile_version: profileVersion })}`,
             remoteMachineAuthority(owner),
           ),
         ),
@@ -213,10 +223,12 @@ export function useRemoteMachineQuote() {
     mutationFn: async ({
       free_slot,
       machine_id,
+      profile_version,
       owner,
     }: {
       readonly free_slot: boolean;
       readonly machine_id?: string;
+      readonly profile_version?: typeof REMOTE_MACHINE_PROFILE;
       readonly owner: string;
     }) =>
       remoteMachineQuoteSchema.parse(
@@ -225,8 +237,9 @@ export function useRemoteMachineQuote() {
           body: remoteMachineQuoteRequestSchema.parse({
             free_slot,
             machine_id,
+            profile_version,
           }),
-          ...remoteMachineAuthority(owner),
+          ...remoteMachineAuthority(owner, true),
         }),
       ),
     retry: false,
@@ -250,7 +263,7 @@ export function useCreateRemoteMachine() {
           method: "POST",
           body: remoteMachineCreateRequestSchema.parse(body),
           headers: idempotencyHeaders(idempotencyKey),
-          ...remoteMachineAuthority(owner),
+          ...remoteMachineAuthority(owner, true),
         }),
       ),
     // A retry always reuses the caller-owned intent and reviewed body.
@@ -307,7 +320,10 @@ export function useRemoteMachineAction() {
           method: request.action === "delete" ? "DELETE" : "POST",
           body: request,
           headers: idempotencyHeaders(idempotencyKey),
-          ...remoteMachineAuthority(owner),
+          ...remoteMachineAuthority(
+            owner,
+            request.action === "resume" || request.action === "rekey",
+          ),
         }),
       );
     },

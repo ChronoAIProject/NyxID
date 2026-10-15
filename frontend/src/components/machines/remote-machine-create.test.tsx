@@ -102,7 +102,15 @@ vi.mock("@/hooks/use-billing", () => ({
 }));
 const auth = useAuthStore.getState();
 beforeEach(() => {
-  useAuthStore.setState({ user: { ...auth.user!, id: "owner" } });
+  useAuthStore.setState({
+    user: {
+      ...auth.user!,
+      id: "owner",
+      capabilities: { enabled_features: ["experimental:remote-machines"] },
+    },
+    isAuthenticated: true,
+    isLoading: false,
+  });
   sessionStorage.clear();
   Object.assign(state, {
     platformReady: true,
@@ -134,7 +142,16 @@ const accept = () =>
 
 it("requires policy acceptance and sends only explicit free-slot creation with durable intent", async () => {
   show();
-  expect(screen.getByText(/Temporary storage is managed by the deployment environment/)).toBeInTheDocument();
+  expect(state.quote).toHaveBeenCalledWith({
+    free_slot: true,
+    profile_version: "remote-machine",
+  });
+  expect(screen.getByText(/Profile: remote-machine/)).toBeInTheDocument();
+  expect(
+    screen.getByText(
+      /Temporary storage is managed by the deployment environment/,
+    ),
+  ).toBeInTheDocument();
   expect(screen.queryByText(/2 GiB temporary storage/)).not.toBeInTheDocument();
   expect(
     screen.getByRole("button", { name: "Create free remote machine" }),
@@ -156,6 +173,7 @@ it("requires policy acceptance and sends only explicit free-slot creation with d
       capabilities: ["shell", "files"],
       specialist_id: null,
       free_slot: true,
+      profile_version: "remote-machine",
       policy_version: "remote-machine-mvp",
       data_policy_version: "remote-machine-data",
       acknowledge_shared_environment: true,
@@ -202,6 +220,7 @@ it("can recover an existing intent after reload even if a slot is now occupied a
     expect(state.create).toHaveBeenCalledWith({
       body: {
         ...saved.body,
+        profile_version: "remote-machine",
         name: "my-remote-machine",
         capabilities: ["shell", "files"],
         specialist_id: null,
@@ -471,3 +490,48 @@ it("keeps selected configuration when a rejected intent is explicitly reset for 
     state.create.mock.calls[0]![0].idempotencyKey,
   );
 });
+
+it("does not mount the hosted form or request preflight while the personal flag is absent", () => {
+  useAuthStore.setState({
+    user: { id: "owner" } as never,
+    isAuthenticated: true,
+    isLoading: false,
+  });
+  show();
+  expect(
+    screen.queryByRole("form", { name: "NyxID hosted machine configuration" }),
+  ).not.toBeInTheDocument();
+  expect(state.quote).not.toHaveBeenCalled();
+  expect(state.create).not.toHaveBeenCalled();
+});
+
+// useFeature still reads the actual auth store; its inactive org query is a double.
+vi.mock("@/hooks/use-orgs", () => ({ useOrg: () => ({ data: undefined }) }));
+
+it.each(["off", "loading", "account"])(
+  "unmounts an open create form on %s without a new quote or create",
+  async (change) => {
+    show();
+    await accept();
+    expect(state.quote).toHaveBeenCalledTimes(1);
+    act(() =>
+      useAuthStore.setState(
+        change === "loading"
+          ? { isLoading: true }
+          : {
+              user: {
+                id: change === "account" ? "another-owner" : "owner",
+                capabilities: { enabled_features: [] },
+              } as never,
+            },
+      ),
+    );
+    expect(
+      screen.queryByRole("form", {
+        name: "NyxID hosted machine configuration",
+      }),
+    ).not.toBeInTheDocument();
+    expect(state.quote).toHaveBeenCalledTimes(1);
+    expect(state.create).not.toHaveBeenCalled();
+  },
+);

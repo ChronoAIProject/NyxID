@@ -71,11 +71,17 @@ pub async fn prepare_start(
     owner: &str,
     free: bool,
     request: &serde_json::Value,
+    profile: &MachineProfileSpec,
+    policy: &str,
     now: DateTime<Utc>,
 ) -> AppResult<Option<PreparedRuntimeWindow>> {
+    lifecycle::validate_fixed_profile(profile)?;
+    let mut normalized_request = request.clone();
+    lifecycle::normalize_profile_request(&mut normalized_request, &profile.profile_version)?;
     if free {
         return Ok(None);
     }
+    let expected_terms = terms(profile, policy)?;
     let quote = request
         .get("quote_id")
         .and_then(|v| v.as_str())
@@ -99,7 +105,7 @@ pub async fn prepare_start(
     // canonical before reserving so a later renewal uses exactly the same instant.
     let now = DateTime::from_timestamp_millis(now.timestamp_millis())
         .ok_or_else(|| AppError::ValidationError("runtime time out of range".into()))?;
-    billing
+    let prepared = billing
         .prepare_machine_start(
             owner,
             quote,
@@ -107,9 +113,44 @@ pub async fn prepare_start(
             now,
             now + Duration::seconds(window_seconds()),
         )
-        .await
-        .map(Some)
+        .await?;
+    if prepared.terms() != Some(&expected_terms) {
+        return Err(AppError::Conflict(
+            "runtime quote does not match the Machine profile and terms".into(),
+        ));
+    }
+    Ok(Some(prepared))
 }
+
+fn validate_run_profile(machine: &ManagedMachine, run: &MachineRuntimeRun) -> AppResult<()> {
+    if run.terms != terms(&machine.profile, &machine.policy_version)?
+        || run.rate.profile_version != machine.profile.profile_version
+        || run.node_id != machine.node_id
+        || run.owner_id != machine.owner_id
+    {
+        return Err(AppError::MachineNotAllowed);
+    }
+    Ok(())
+}
+/// Read-only admission fence for persisted resources and their current contract.
+/// Accounting can still settle its frozen snapshot independently of resource admission.
+pub async fn validate_saved_contract(db: &Database, machine: &ManagedMachine) -> AppResult<()> {
+    lifecycle::validate_current_contract(machine)?;
+    if machine.free_slot {
+        return Ok(());
+    }
+    let run_id = machine
+        .runtime_run_id
+        .as_deref()
+        .ok_or(AppError::MachineNotAllowed)?;
+    let run = db
+        .collection::<MachineRuntimeRun>(RUN_COLLECTION)
+        .find_one(doc! {"_id":run_id,"node_id":&machine.node_id,"owner_id":&machine.owner_id})
+        .await?
+        .ok_or(AppError::MachineNotAllowed)?;
+    validate_run_profile(machine, &run)
+}
+
 pub fn funding_is_live(machine: &ManagedMachine, now: DateTime<Utc>) -> bool {
     if machine.free_slot {
         return machine.billing_state == BillingState::Free
@@ -642,6 +683,7 @@ pub struct RuntimeFence {
     pub funding_cutoff: Option<DateTime<Utc>>,
 }
 fn execution_fence(machine: &ManagedMachine) -> AppResult<RuntimeFence> {
+    lifecycle::validate_current_contract(machine)?;
     if machine.resource_state != ResourceState::Ready
         || machine.authorization_state != crate::models::remote_machine::AuthorizationState::Active
         || !lifecycle::has_current_verified_runtime_evidence(machine)
@@ -697,6 +739,7 @@ pub fn fence_execution_in_session<'a>(
         lifecycle::ensure_owner_eligible_in_session(db, session, &machine.owner_id).await?;
         if !machine.free_slot {
             let run = db.collection::<MachineRuntimeRun>(RUN_COLLECTION).find_one(doc! {"_id": &machine.runtime_run_id, "node_id": &machine.node_id, "owner_id": &machine.owner_id, "runtime_generation": machine.runtime_generation, "state":"running"}).session(&mut *session).await?.ok_or(AppError::MachineNotAllowed)?;
+            validate_run_profile(&machine, &run)?;
             if run.covered_until_ns < Utc::now().timestamp_nanos_opt().unwrap_or(i64::MAX) {
                 return Err(AppError::MachineNotAllowed);
             }
@@ -1079,6 +1122,9 @@ pub async fn renew(
             cutoff + Duration::seconds(window_seconds()),
         )
         .await?;
+    if prepared.terms() != Some(&terms(&machine.profile, &machine.policy_version)?) {
+        return Err(AppError::MachineNotAllowed);
+    }
     let db_owned = db.clone();
     let machine = machine.clone();
     db_owned.client().start_session().await?.start_transaction().write_concern(mongodb::options::WriteConcern::majority()).and_run2(async move |session| {

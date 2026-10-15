@@ -174,6 +174,7 @@ async fn http(
 }
 async fn fixture_http(label: &str) -> Journey {
     let f = fixture(label).await;
+    personal_remote_flag(&f, true).await;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let mut config = crate::test_utils::test_app_config();

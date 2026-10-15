@@ -79,6 +79,15 @@ pub struct PreparedRuntimeWindow {
     seconds: i64,
 }
 
+impl PreparedRuntimeWindow {
+    pub(crate) fn terms(&self) -> Option<&MachineRuntimeTerms> {
+        self.quote
+            .as_ref()
+            .map(|quote| &quote.terms)
+            .or_else(|| self.run.as_ref().map(|run| &run.terms))
+    }
+}
+
 /// All fields must come from the owner-approved lifecycle intent. The quote
 /// binds the displayed account_balance/no-cap/retention contract.
 pub struct AcceptRuntimeQuote<'a> {
@@ -117,7 +126,7 @@ impl BillingService {
             .find_one(doc! {"_id":quote_id,"owner_id":input.owner_id})
             .await?
             .ok_or_else(|| invalid("runtime quote not found"))?;
-        let Some(run_id) = quote.accepted_run_id else {
+        let Some(run_id) = quote.accepted_run_id.as_ref() else {
             return Ok(None);
         };
         if quote.accepted_operation_id.as_deref() != Some(input.operation_id)
@@ -128,13 +137,17 @@ impl BillingService {
         let run = self
             .db
             .collection::<MachineRuntimeRun>(RUN_COLLECTION)
-            .find_one(doc! {"_id":&run_id,"owner_id":input.owner_id,"node_id":input.node_id})
+            .find_one(doc! {"_id":run_id,"owner_id":input.owner_id,"node_id":input.node_id})
             .await?
             .ok_or_else(|| conflict("runtime replay binding differs"))?;
+        validate_quote_rate(&quote, &run.rate)?;
+        if run.terms != quote.terms || run.operation_id != input.operation_id {
+            return Err(conflict("runtime replay contract differs"));
+        }
         let interval = self
             .db
             .collection::<MachineRuntimeInterval>(INTERVAL_COLLECTION)
-            .find_one(doc! {"run_id":&run_id,"interval_id":interval_id})
+            .find_one(doc! {"run_id":run_id,"interval_id":interval_id})
             .await?
             .ok_or_else(|| conflict("runtime replay window differs"))?;
         if interval.runtime_generation != input.runtime_generation
@@ -216,6 +229,9 @@ impl BillingService {
     ) -> AppResult<MachineRuntimeQuote> {
         validate_terms(&terms)?;
         let rate = self.runtime_rate(rate_version).await?;
+        if rate.profile_version != terms.profile_version {
+            return Err(invalid("runtime rate does not match requested profile"));
+        }
         if rate.retired {
             return Err(unavailable("runtime rate is retired for new quotes"));
         }
@@ -259,9 +275,7 @@ impl BillingService {
             .await?
             .ok_or_else(|| invalid("runtime quote not found"))?;
         let rate = self.runtime_rate(&quote.rate_version).await?;
-        if rate.credits_per_second != quote.credits_per_second {
-            return Err(unavailable("runtime quote rate mismatch"));
-        }
+        validate_quote_rate(&quote, &rate)?;
         let mut prepared = self
             .prepare_runtime_window(owner_id, rate, interval_id, from, until)
             .await?;
@@ -285,6 +299,7 @@ impl BillingService {
             .find_one(doc! {"_id":run_id,"owner_id":owner_id})
             .await?
             .ok_or_else(|| invalid("runtime contract not found"))?;
+        validate_run_binding(&run)?;
         if run.state != MachineRuntimeRunState::Running {
             return Err(conflict(
                 "runtime is not running; owner acceptance is required to resume",
@@ -367,6 +382,7 @@ impl BillingService {
             .session(&mut *session)
             .await?
             .ok_or_else(|| invalid("runtime quote not found"))?;
+        validate_quote_rate(&quote, &prepared.rate)?;
         if &quote.terms != input.terms
             || quote.rate_version != prepared.rate.id
             || quote.credits_per_second != prepared.rate.credits_per_second
@@ -381,9 +397,13 @@ impl BillingService {
                 .session(&mut *session)
                 .await?
                 .ok_or_else(|| conflict("accepted runtime contract missing"))?;
+            validate_quote_rate(&quote, &run.rate)?;
             if quote.accepted_operation_id.as_deref() != Some(input.operation_id)
                 || run.node_id != input.node_id
                 || run.runtime_generation != input.runtime_generation
+                || run.owner_id != input.owner_id
+                || run.operation_id != input.operation_id
+                || run.terms != quote.terms
             {
                 return Err(conflict("runtime quote already accepted by another intent"));
             }
@@ -514,6 +534,10 @@ impl BillingService {
             .session(&mut *session)
             .await?
             .ok_or_else(|| invalid("runtime contract not found"))?;
+        validate_run_binding(&run)?;
+        if !same_rate_contract(&run.rate, &prepared.rate) || run.terms != source.terms {
+            return Err(conflict("runtime renewal contract changed"));
+        }
         if let Some(window) = existing_window(&self.db, session, &run.id, prepared).await? {
             return Ok(window);
         }
@@ -603,9 +627,10 @@ impl BillingService {
             .session(&mut *session)
             .await?
             .ok_or_else(|| unavailable("runtime rate missing"))?;
-        if rate.credits_per_second != prepared.rate.credits_per_second
-            || rate.lago_metric_code != prepared.rate.lago_metric_code
+        if prices::validate_rate(&rate).is_err()
+            || !same_rate_contract(&rate, &prepared.rate)
             || rate.sync_status != PricingSyncStatus::Synced
+            || rate.verified_at.is_none()
         {
             return Err(unavailable("runtime price is not synchronized"));
         }
@@ -739,8 +764,7 @@ impl BillingService {
 }
 
 fn validate_terms(terms: &MachineRuntimeTerms) -> AppResult<()> {
-    if terms.profile_version.is_empty()
-        || terms.profile_version.len() > 128
+    if crate::services::remote_machine_service::controlled_profile(&terms.profile_version).is_err()
         || terms.policy_version.is_empty()
         || terms.policy_version.len() > 128
         || !terms.image_digest.starts_with("sha256:")
@@ -750,6 +774,36 @@ fn validate_terms(terms: &MachineRuntimeTerms) -> AppResult<()> {
             .all(|c| c.is_ascii_hexdigit())
     {
         return Err(invalid("invalid runtime quote profile/image/policy"));
+    }
+    Ok(())
+}
+
+fn same_rate_contract(left: &MachineRuntimeRate, right: &MachineRuntimeRate) -> bool {
+    left.id == right.id
+        && left.profile_version == right.profile_version
+        && left.metric == right.metric
+        && left.lago_metric_code == right.lago_metric_code
+        && left.plan_code == right.plan_code
+        && left.credits_per_second == right.credits_per_second
+}
+
+fn validate_quote_rate(quote: &MachineRuntimeQuote, rate: &MachineRuntimeRate) -> AppResult<()> {
+    validate_terms(&quote.terms)?;
+    prices::validate_rate(rate)?;
+    if quote.rate_version != rate.id
+        || quote.terms.profile_version != rate.profile_version
+        || quote.credits_per_second != rate.credits_per_second
+    {
+        return Err(conflict("runtime quote profile or rate mismatch"));
+    }
+    Ok(())
+}
+
+fn validate_run_binding(run: &MachineRuntimeRun) -> AppResult<()> {
+    validate_terms(&run.terms)?;
+    prices::validate_rate(&run.rate)?;
+    if run.terms.profile_version != run.rate.profile_version {
+        return Err(conflict("runtime contract profile and rate mismatch"));
     }
     Ok(())
 }
@@ -828,12 +882,21 @@ async fn existing_window(
         .session(session)
         .await?
         .ok_or_else(|| conflict("runtime missing"))?;
+    validate_run_binding(&run)?;
+    if !same_rate_contract(&run.rate, &p.rate) || p.terms().is_none_or(|terms| terms != &run.terms)
+    {
+        return Err(conflict("runtime interval contract differs from retry"));
+    }
     funded_window(&run, &interval).map(Some)
 }
 fn funded_window(
     run: &MachineRuntimeRun,
     interval: &MachineRuntimeInterval,
 ) -> AppResult<FundedRuntimeWindow> {
+    validate_run_binding(run)?;
+    if interval.rate_version != run.rate.id {
+        return Err(conflict("runtime interval rate binding differs"));
+    }
     Ok(FundedRuntimeWindow {
         run_id: run.id.clone(),
         interval_id: interval.interval_id.clone(),
@@ -866,6 +929,10 @@ pub async fn ensure_indexes(db: &Database) -> AppResult<()> {
             .await?;
     }
     for (collection, keys) in [
+        (
+            RATE_COLLECTION,
+            doc! {"profile_version":1,"plan_code":1,"sync_status":1,"retired":1,"created_at":-1,"_id":-1},
+        ),
         (INTERVAL_COLLECTION, doc! {"run_id":1,"covered_from_ns":1}),
         (
             INTERVAL_COLLECTION,

@@ -1,3 +1,7 @@
+import {
+  assertRemoteMachineAdmission,
+  useRemoteMachineAdmission,
+} from "@/hooks/use-remote-machine-admission";
 import { useEffect, useState } from "react";
 import { z } from "zod";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -39,6 +43,7 @@ import {
   clearRemoteMachineIntent,
 } from "@/lib/remote-machine-intent";
 import {
+  REMOTE_MACHINE_PROFILE,
   remoteMachineCreateRequestSchema,
   remoteMachineHostedConfigurationSchema,
   remoteMachinePaidQuoteSchema,
@@ -72,6 +77,11 @@ type Props = {
 /** The single hosted creation form, mounted by the fourth machine setup option. */
 export function RemoteMachineCreate(props: Props) {
   const ownerId = useAuthStore((state) => state.user?.id);
+  const enabled = useRemoteMachineAdmission();
+  if (!enabled)
+    return (
+      <p role="status">Remote Machines are not enabled for this account.</p>
+    );
   return <HostedCreateForm key={ownerId} {...props} />;
 }
 
@@ -122,7 +132,10 @@ function HostedCreateForm({ onCreated, initialFreeSlot = true }: Props) {
   });
   const requestQuote = quote.mutate;
   useEffect(() => {
-    requestQuote({ free_slot: freeSlot });
+    requestQuote({
+      free_slot: freeSlot,
+      profile_version: REMOTE_MACHINE_PROFILE,
+    });
   }, [requestQuote, freeSlot]);
   useEffect(() => {
     const timer = window.setInterval(() => setNow(Date.now()), 1000);
@@ -131,7 +144,12 @@ function HostedCreateForm({ onCreated, initialFreeSlot = true }: Props) {
   const preflight = !quote.error ? quote.data : undefined;
   const policy = preflight?.policy;
   const paid = remoteMachinePaidQuoteSchema.safeParse(preflight);
-  const offer = !freeSlot && paid.success ? paid.data : undefined;
+  const offer =
+    !freeSlot &&
+    paid.success &&
+    (!saved || saved.body.quote_id === paid.data.quote_id)
+      ? paid.data
+      : undefined;
   const expired = Boolean(
     preflight && Date.parse(preflight.valid_until) <= now,
   );
@@ -183,11 +201,13 @@ function HostedCreateForm({ onCreated, initialFreeSlot = true }: Props) {
       return;
     setError(undefined);
     try {
+      assertRemoteMachineAdmission(ownerId);
       const intent =
         saved ??
         getRemoteMachineIntent(ownerId, stored.scope, {
           ...remoteMachineHostedConfigurationSchema.parse(values),
           free_slot: freeSlot,
+          profile_version: preflight!.profile.profile_version,
           policy_version: policy!.policy_version,
           data_policy_version: policy!.data_policy_version,
           acknowledge_shared_environment: true,
@@ -219,7 +239,10 @@ function HostedCreateForm({ onCreated, initialFreeSlot = true }: Props) {
   function refresh() {
     form.setValue("acknowledged", false);
     void entitlement.refetch();
-    requestQuote({ free_slot: freeSlot });
+    requestQuote({
+      free_slot: freeSlot,
+      profile_version: REMOTE_MACHINE_PROFILE,
+    });
   }
   function reviewAgain() {
     if (!ownerId || create.isPending) return;
@@ -384,6 +407,9 @@ function HostedCreateForm({ onCreated, initialFreeSlot = true }: Props) {
           {saved?.body.quote_id ? (
             <p>Original quote: {saved.body.quote_id}</p>
           ) : null}
+          {saved?.body.profile_version ? (
+            <p>Original profile: {saved.body.profile_version}</p>
+          ) : null}
           {entitlement.error ? (
             <ErrorBanner
               message={`Eligibility is unavailable. ${entitlement.error.message}`}
@@ -427,7 +453,12 @@ function HostedCreateForm({ onCreated, initialFreeSlot = true }: Props) {
           {quote.isPending ? <p role="status">Refreshing preflight…</p> : null}
           {!freeSlot ? (
             <>
-              {offer ? (
+              {saved && !offer ? (
+                <p>
+                  The original quoted price remains bound to the saved request.
+                  Its runtime estimate is unavailable here.
+                </p>
+              ) : offer ? (
                 <>
                   <p>
                     Offered rate:{" "}
@@ -453,9 +484,13 @@ function HostedCreateForm({ onCreated, initialFreeSlot = true }: Props) {
               <RemoteMachineBillingPreflight
                 preflight={
                   offer?.billing_preflight ??
-                  entitlement.data?.billing_preflight
+                  (!saved ? entitlement.data?.billing_preflight : undefined)
+                }
+                quoteProfile={
+                  offer?.profile.profile_version ?? REMOTE_MACHINE_PROFILE
                 }
                 quoteRate={offer?.rate_version}
+                quotePrice={offer?.credits_per_second}
                 now={now}
               />
               <p>
@@ -481,10 +516,19 @@ function HostedCreateForm({ onCreated, initialFreeSlot = true }: Props) {
             </p>
           ) : null}
           <p>
-            New Machine fixed specification: 2 vCPU · 2 GiB memory · 20 GiB
-            /workspace. Memory includes the supervisor, browser, desktop and
-            output cache. Workspace expansion and automatic upgrades are not
-            available. Bandwidth and IOPS are not unlimited.
+            {preflight ? (
+              <>
+                Profile: {preflight.profile.profile_version}. New Machine fixed
+                specification: {preflight.profile.cpu_millis / 1000} vCPU ·{" "}
+                {preflight.profile.memory_mib / 1024} GiB memory ·{" "}
+                {preflight.profile.workspace_gib} GiB /workspace.{" "}
+              </>
+            ) : (
+              "Machine specification is unavailable until preflight succeeds. "
+            )}
+            Memory includes the supervisor, browser, desktop and output cache.
+            Workspace expansion and automatic upgrades are not available.
+            Bandwidth and IOPS are not unlimited.
           </p>
           <p>
             Temporary storage is managed by the deployment environment, with no

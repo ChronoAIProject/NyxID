@@ -790,6 +790,7 @@ async fn remote_machine_ineligible_owner_and_paid_creation_leave_no_resources() 
     assert!(lifecycle::entitlement(&db, &owner).await.unwrap().eligible);
     let mut paid = creation(&owner, "paid-missing-quote");
     paid.free_slot = false;
+    paid.profile.image_digest = format!("registry.test/nyxid@sha256:{}", "a".repeat(64));
     paid.request_body = json!({"free_slot":false,"accept_account_balance":true,"policy_version":crate::models::remote_machine::POLICY_VERSION,"data_policy_version":crate::models::remote_machine::DATA_POLICY_VERSION,"acknowledge_shared_environment":true,"acknowledge_data_loss":true});
     assert!(matches!(
         Box::pin(lifecycle::create_machine(&db, paid.clone())).await,
@@ -1927,6 +1928,101 @@ async fn individual_delete_requires_current_owner_ack_and_preserves_original_bas
     assert_eq!(
         db.collection::<Document>(OPERATIONS)
             .count_documents(doc! {"action":"delete"})
+            .await
+            .unwrap(),
+        1
+    );
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn profile_binding_rejects_body_tampering_before_machine_or_outbox() {
+    let (db, owner) = lifecycle_fixture("profile_binding_body").await;
+    for (field, value) in [
+        ("profile_version", json!("test-foreign-profile")),
+        ("profile_version", serde_json::Value::Null),
+        ("cpu_millis", json!(4000)),
+        ("memory_mib", json!(8192)),
+        ("workspace_gib", json!(50)),
+    ] {
+        let mut input = creation(&owner, &format!("invalid-{field}-{value}"));
+        input.request_body[field] = value;
+        assert!(
+            matches!(
+                lifecycle::create_machine(&db, input).await,
+                Err(crate::errors::AppError::ValidationError(_))
+            ),
+            "untrusted {field} must fail before durable allocation"
+        );
+        assert_eq!(
+            db.collection::<Document>(MACHINES)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            db.collection::<Document>(OUTBOX)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
+        );
+    }
+    db.drop().await.unwrap();
+}
+
+#[test]
+fn controlled_profile_has_stable_resource_meaning_and_rejects_aliases() {
+    let profile = lifecycle::controlled_profile("remote-machine").unwrap();
+    assert_eq!(
+        (
+            profile.cpu_millis,
+            profile.memory_mib,
+            profile.workspace_gib,
+            profile.ephemeral_gib
+        ),
+        (2000, 2048, 20, None)
+    );
+    for invalid in [
+        "",
+        "remote-machine-4c8g",
+        "remote-shell-files-v1",
+        "remote-shell-files-v2",
+    ] {
+        assert!(lifecycle::controlled_profile(invalid).is_err());
+    }
+    let mut accepted = lifecycle::resolve_profile("remote-machine", "accepted-image").unwrap();
+    accepted.runtime_class = Some("retained-runtime".into());
+    lifecycle::validate_fixed_profile(&accepted).unwrap();
+    accepted.memory_mib = 8192;
+    assert!(lifecycle::validate_fixed_profile(&accepted).is_err());
+}
+
+#[tokio::test]
+async fn profile_binding_normalizes_omitted_selection_and_rejects_changed_replay() {
+    let (db, owner) = lifecycle_fixture("profile_binding_replay").await;
+    let input = creation(&owner, "profile-replay");
+    let created = lifecycle::create_machine(&db, input.clone()).await.unwrap();
+    let mut explicit = input;
+    explicit.request_body["profile_version"] = json!("remote-machine");
+    let replay = lifecycle::create_machine(&db, explicit.clone())
+        .await
+        .unwrap();
+    assert!(replay.replayed);
+    assert_eq!(created.machine.node_id, replay.machine.node_id);
+    explicit.request_body["profile_version"] = json!("other-profile");
+    assert!(lifecycle::create_machine(&db, explicit).await.is_err());
+    assert_eq!(
+        db.collection::<Document>(MACHINES)
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        db.collection::<Document>(OUTBOX)
+            .count_documents(doc! {})
             .await
             .unwrap(),
         1

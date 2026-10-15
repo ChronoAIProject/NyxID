@@ -66,7 +66,10 @@ vi.mock("@/hooks/use-machines", () => ({
       profile: remoteMachineFixture.profile,
       platform: remoteMachinePlatformFixture,
       valid_until: "2099-01-01T00:00:00Z",
-      policy: { policy_version: "remote-machine-mvp", data_policy_version: "remote-machine-data" },
+      policy: {
+        policy_version: "remote-machine-mvp",
+        data_policy_version: "remote-machine-data",
+      },
     },
   }),
   useCreateRemoteMachine: () => ({ mutateAsync: mock.createRemote }),
@@ -209,7 +212,13 @@ it("renders a browser-only setup without broad computer access", () => {
 
 it("renders the actual fourth hosted option with its creation form and no installation command", async () => {
   useAuthStore.setState({
-    user: { ...useAuthStore.getState().user!, id: "owner" },
+    user: {
+      ...useAuthStore.getState().user!,
+      id: "owner",
+      capabilities: { enabled_features: ["experimental:remote-machines"] },
+    },
+    isAuthenticated: true,
+    isLoading: false,
   });
   mock.search = { where: "hosted" };
   mock.createRemote.mockResolvedValue({
@@ -273,6 +282,48 @@ it.each(["This computer", "Remote VM", "Docker"])(
         mode === "Docker" ? /docker run -d/ : /command -v nyxid/,
       ),
     ).toBeInTheDocument();
+    expect(mock.createRemote).not.toHaveBeenCalled();
+  },
+);
+
+// useFeature still reads the actual auth store; its inactive org query is a double.
+vi.mock("@/hooks/use-orgs", () => ({ useOrg: () => ({ data: undefined }) }));
+
+it.each(["absent", "off", "loading"])(
+  "direct hosted URL cannot mount or quote when %s; self-host choices remain",
+  (mode) => {
+    useAuthStore.setState({
+      user: {
+        id: "owner",
+        ...(mode === "absent"
+          ? {}
+          : {
+              capabilities: {
+                enabled_features:
+                  mode === "loading" ? ["experimental:remote-machines"] : [],
+              },
+            }),
+      } as never,
+      isAuthenticated: true,
+      isLoading: mode === "loading",
+    });
+    mock.search = { where: "hosted" };
+    render(<MachineSetupPage />);
+    expect(screen.getAllByRole("tab")).toHaveLength(3);
+    for (const name of ["This computer", "Remote VM", "Docker"])
+      expect(screen.getByRole("tab", { name })).toBeInTheDocument();
+    expect(
+      screen.queryByRole("tab", { name: "NyxID hosted" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("form", {
+        name: "NyxID hosted machine configuration",
+      }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Create my setup command" }),
+    ).toBeInTheDocument();
+    expect(mock.quote).not.toHaveBeenCalled();
     expect(mock.createRemote).not.toHaveBeenCalled();
   },
 );

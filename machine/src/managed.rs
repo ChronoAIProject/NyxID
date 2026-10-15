@@ -2,6 +2,10 @@
 use serde::{Deserialize, Serialize};
 
 pub const PROFILE: &str = "remote-machine";
+/// Immutable resource meaning of PROFILE; deployment configuration cannot resize it.
+pub const PROFILE_CPU_MILLIS: u32 = 2_000;
+pub const PROFILE_MEMORY_MIB: u32 = 2_048;
+pub const PROFILE_WORKSPACE_GIB: u32 = 20;
 
 pub fn is_supported_profile(profile: &str) -> bool {
     profile == PROFILE

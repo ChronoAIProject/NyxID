@@ -159,3 +159,24 @@ it.each(["create", "machine:resume", "machine:delete"])("rejects obsolete stored
     expect(readRemoteMachineIntent("owner", scope)).toBeNull();
   }
 });
+
+
+it("retains the accepted profile with the original quote and rejects replacement profile identities", () => {
+  const paid = {
+    free_slot: false,
+    profile_version: "remote-machine" as const,
+    quote_id: "quote-one",
+    accept_account_balance: true,
+  };
+  const first = getRemoteMachineIntent("owner", "create", paid);
+  expect(readRemoteMachineIntent("owner", "create")?.body.profile_version).toBe(
+    "remote-machine",
+  );
+  expect(() =>
+    getRemoteMachineIntent("owner", "create", {
+      ...paid,
+      profile_version: "foreign-profile",
+    } as unknown as typeof paid),
+  ).toThrow();
+  expect(readRemoteMachineIntent("owner", "create")).toEqual(first);
+});

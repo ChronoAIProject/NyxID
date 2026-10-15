@@ -1,3 +1,4 @@
+import { useRemoteMachineAdmission } from "@/hooks/use-remote-machine-admission";
 import {
   MachineIsolationBadge,
   MachineSharingBadge,
@@ -114,6 +115,7 @@ function MachineCard({
 }
 
 export function MachinesPage() {
+  const remoteAdmission = useRemoteMachineAdmission();
   const navigate = useNavigate();
   const search = parseMachinesSearch(
     useSearch({ strict: false }) as Record<string, unknown>,
@@ -187,15 +189,17 @@ export function MachinesPage() {
             description="Remote and self-hosted computers for authorized agents and clients."
             actions={
               <div className="flex flex-wrap gap-2">
-                <AddCtaButton
-                  label="Create remote machine"
-                  onClick={() =>
-                    void navigate({
-                      to: "/assistant/machines/new",
-                      search: { where: "hosted" },
-                    })
-                  }
-                />
+                {remoteAdmission && (
+                  <AddCtaButton
+                    label="Create remote machine"
+                    onClick={() =>
+                      void navigate({
+                        to: "/assistant/machines/new",
+                        search: { where: "hosted" },
+                      })
+                    }
+                  />
+                )}
                 <AddCtaButton
                   label="Add a machine"
                   onClick={() =>

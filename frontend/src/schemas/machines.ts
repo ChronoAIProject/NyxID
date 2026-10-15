@@ -192,6 +192,7 @@ export const remoteMachineFundsSchema = z.object({
   shared_account_estimate_only: z.literal(true),
 });
 export const remoteMachineBillingPreflightSchema = z.object({
+  profile_version: z.string().min(1),
   ready: z.boolean(),
   billing_enabled: z.boolean(),
   exact_ready: z.boolean(),
@@ -270,12 +271,18 @@ export function isRemoteMachinePaidQuote(
   );
 }
 export const remoteMachineQuoteRequestSchema = z.strictObject({
+  profile_version: z
+    .literal(REMOTE_MACHINE_PROFILE)
+    .default(REMOTE_MACHINE_PROFILE),
   free_slot: z.boolean(),
   machine_id: machineIdSchema.optional(),
 });
 export const remoteMachineCreateRequestSchema = z
   .strictObject({
     ...remoteMachineHostedConfigurationSchema.shape,
+    profile_version: z
+      .literal(REMOTE_MACHINE_PROFILE)
+      .default(REMOTE_MACHINE_PROFILE),
     free_slot: z.boolean(),
     policy_version: z.literal(REMOTE_MACHINE_POLICY),
     data_policy_version: z.literal(REMOTE_MACHINE_DATA_POLICY),
@@ -314,6 +321,7 @@ export const remoteMachineCreateRequestSchema = z
 export const remoteMachineActionRequestSchema = z
   .strictObject({
     action: z.enum(["pause", "resume", "rekey", "delete"]),
+    profile_version: z.literal(REMOTE_MACHINE_PROFILE).optional(),
     expected_revision: machineRevisionSchema,
     data_policy_version: z.literal(REMOTE_MACHINE_DATA_POLICY).optional(),
     acknowledge_data_loss: z.boolean().optional(),

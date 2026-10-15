@@ -5,13 +5,13 @@
 //! controller's observations. It never creates Pods/PVCs, calls Kubernetes
 //! exec, or treats an API response as proof of physical process termination.
 
+use crate::kubernetes_credentials::KubernetesCredentials;
 use anyhow::{Context, Result, anyhow, ensure};
 use reqwest::{Client, Method, StatusCode, Url, header};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{fmt, path::PathBuf};
-use tokio::io::AsyncReadExt;
 
 pub const API_GROUP: &str = "agents.x-k8s.io";
 pub const API_VERSION: &str = "v1beta1";
@@ -262,12 +262,12 @@ impl SandboxIntent {
                         ],
                         "resources": {
                             "requests": {
-                                "cpu": "2",
-                                "memory": "2Gi"
+                                "cpu": (nyxid_machine::managed::PROFILE_CPU_MILLIS / 1000).to_string(),
+                                "memory": format!("{}Gi", nyxid_machine::managed::PROFILE_MEMORY_MIB / 1024)
                             },
                             "limits": {
-                                "cpu": "2",
-                                "memory": "2Gi"
+                                "cpu": (nyxid_machine::managed::PROFILE_CPU_MILLIS / 1000).to_string(),
+                                "memory": format!("{}Gi", nyxid_machine::managed::PROFILE_MEMORY_MIB / 1024)
                             }
                         },
                         "securityContext": {
@@ -862,8 +862,7 @@ fn validate_resource_segment(value: &str) -> Result<()> {
 pub struct SandboxApi {
     client: Client,
     base_url: Url,
-    bearer_token: Option<zeroize::Zeroizing<String>>,
-    bearer_token_file: Option<PathBuf>,
+    credentials: Option<KubernetesCredentials>,
     field_manager: String,
 }
 
@@ -872,15 +871,8 @@ impl fmt::Debug for SandboxApi {
         formatter
             .debug_struct("SandboxApi")
             .field("base_url", &self.base_url)
-            .field(
-                "bearer_token",
-                &self.bearer_token.as_ref().map(|_| "[REDACTED]"),
-            )
+            .field("credentials", &self.credentials)
             .field("field_manager", &self.field_manager)
-            .field(
-                "bearer_token_file",
-                &self.bearer_token_file.as_ref().map(|_| "[REDACTED]"),
-            )
             .finish()
     }
 }
@@ -913,8 +905,7 @@ impl SandboxApi {
                 .timeout(std::time::Duration::from_secs(20))
                 .build()?,
             base_url,
-            bearer_token: bearer_token.map(zeroize::Zeroizing::new),
-            bearer_token_file: None,
+            credentials: bearer_token.map(KubernetesCredentials::static_token),
             field_manager: "nyxid-machine-manager".to_string(),
         })
     }
@@ -928,8 +919,7 @@ impl SandboxApi {
         Ok(Self {
             client,
             base_url,
-            bearer_token: bearer_token.map(zeroize::Zeroizing::new),
-            bearer_token_file: None,
+            credentials: bearer_token.map(KubernetesCredentials::static_token),
             field_manager: "nyxid-machine-manager".to_string(),
         })
     }
@@ -941,60 +931,32 @@ impl SandboxApi {
         token_file: PathBuf,
         client: Client,
     ) -> Result<Self> {
+        Self::with_credentials_client(
+            base_url,
+            KubernetesCredentials::token_file(token_file)?,
+            client,
+        )
+    }
+
+    pub fn with_credentials_client(
+        base_url: Url,
+        credentials: KubernetesCredentials,
+        client: Client,
+    ) -> Result<Self> {
         Self::validate_endpoint(&base_url)?;
-        ensure!(
-            token_file.is_absolute(),
-            "Kubernetes credential file requires an absolute path"
-        );
         Ok(Self {
             client,
             base_url,
-            bearer_token: None,
-            bearer_token_file: Some(token_file),
+            credentials: Some(credentials),
             field_manager: "nyxid-machine-manager".to_string(),
         })
     }
 
     async fn authorize(&self, request: reqwest::RequestBuilder) -> Result<reqwest::RequestBuilder> {
-        if let Some(path) = &self.bearer_token_file {
-            const MAX_TOKEN: usize = 64 * 1024;
-            let rejected = || anyhow!("Kubernetes credential file unavailable or invalid");
-            // Projected token symlinks are valid: inspect the opened target.
-            let file = tokio::fs::File::open(path).await.map_err(|_| rejected())?;
-            let metadata = file.metadata().await.map_err(|_| rejected())?;
-            ensure!(
-                metadata.is_file() && metadata.len() > 0 && metadata.len() <= MAX_TOKEN as u64,
-                "Kubernetes credential file unavailable or invalid"
-            );
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                ensure!(
-                    metadata.permissions().mode() & 0o022 == 0,
-                    "Kubernetes credential file unavailable or invalid"
-                );
-            }
-            let mut bytes = zeroize::Zeroizing::new(Vec::new());
-            file.take(MAX_TOKEN as u64 + 1)
-                .read_to_end(&mut bytes)
-                .await
-                .map_err(|_| rejected())?;
-            ensure!(
-                !bytes.is_empty() && bytes.len() <= MAX_TOKEN,
-                "Kubernetes credential file unavailable or invalid"
-            );
-            let token = std::str::from_utf8(&bytes).map_err(|_| rejected())?.trim();
-            ensure!(
-                !token.is_empty() && token.bytes().all(|byte| byte.is_ascii_graphic()),
-                "Kubernetes credential file unavailable or invalid"
-            );
-            return Ok(request.bearer_auth(token));
+        match &self.credentials {
+            Some(credentials) => credentials.authorize(request).await,
+            None => Ok(request),
         }
-        Ok(if let Some(token) = &self.bearer_token {
-            request.bearer_auth(token.as_str())
-        } else {
-            request
-        })
     }
 
     fn resource_url(&self, namespace: &str, name: Option<&str>) -> Result<Url> {

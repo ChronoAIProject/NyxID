@@ -97,6 +97,7 @@ async fn remote_machine_full_router_indexes_unconfigured_admission_replay_and_ow
         .insert_one(test_utils::test_user(&user.to_string(), UserType::Person))
         .await
         .unwrap();
+    super::remote_machine_flag_tests::set_enabled(&db, &user.to_string(), true).await;
     let state = test_utils::test_app_state(db.clone());
     let token = jwt::generate_access_token(
         &state.jwt_keys,
@@ -370,6 +371,7 @@ async fn hosted_create_http_validates_and_preserves_choices_through_idempotent_r
         .insert_one(test_utils::test_user(&owner.to_string(), UserType::Person))
         .await
         .unwrap();
+    super::remote_machine_flag_tests::set_enabled(&db, &owner.to_string(), true).await;
     let mut state = test_utils::test_app_state(db.clone());
     state.local_machine_platform = Some(std::sync::Arc::new(test_utils::LocalMachinePlatform {
         profile: lifecycle::fixed_profile(format!("registry.test/full@sha256:{}", "a".repeat(64))),
@@ -402,12 +404,27 @@ async fn hosted_create_http_validates_and_preserves_choices_through_idempotent_r
         json!({"capabilities":["computer"]}),
         json!({"name":"invalid name"}),
         json!({"owner_id":Uuid::new_v4().to_string()}),
+        json!({"profile_version":"test-foreign-profile"}),
+        json!({"profile_version":null}),
+        json!({"cpu_millis":4000}),
+        json!({"memory_mib":8192}),
+        json!({"workspace_gib":50}),
     ] {
         let mut candidate = body.clone();
         for (k, v) in invalid.as_object().unwrap() {
             candidate[k] = v.clone();
         }
-        let (status, _) = request(
+        let expected = if invalid.get("owner_id").is_some()
+            || invalid.get("cpu_millis").is_some()
+            || invalid.get("memory_mib").is_some()
+            || invalid.get("workspace_gib").is_some()
+            || invalid.get("profile_version").is_some_and(Value::is_null)
+        {
+            StatusCode::UNPROCESSABLE_ENTITY
+        } else {
+            StatusCode::BAD_REQUEST
+        };
+        let (status, value) = request(
             &app,
             "POST",
             "/api/v1/remote-machines",
@@ -416,7 +433,7 @@ async fn hosted_create_http_validates_and_preserves_choices_through_idempotent_r
             Some("hosted-create-request"),
         )
         .await;
-        assert!(status.is_client_error());
+        assert_eq!(status, expected, "{invalid}: {value}");
     }
     let (status, created) = request(
         &app,
@@ -440,6 +457,7 @@ async fn hosted_create_http_validates_and_preserves_choices_through_idempotent_r
     );
     let mut reordered = body.clone();
     reordered["capabilities"] = json!(["files", "computer", "browser"]);
+    reordered["profile_version"] = json!("remote-machine");
     let (status, replay) = request(
         &app,
         "POST",
@@ -498,6 +516,7 @@ async fn obsolete_create_contract_rejects_even_with_saved_request_and_keeps_tele
         .insert_one(test_utils::test_user(&user.to_string(), UserType::Person))
         .await
         .unwrap();
+    super::remote_machine_flag_tests::set_enabled(&db, &user.to_string(), true).await;
     let state = test_utils::test_app_state(db.clone());
     let token = jwt::generate_access_token(
         &state.jwt_keys,

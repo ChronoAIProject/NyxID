@@ -40,6 +40,24 @@ use crate::{
 
 use super::{api_key_mutation_service, remote_machine_operation_service};
 
+/// Require the acting person's rollout flag for new HTTP admission only.
+/// Callers retain their human, role and owner checks. Shared lifecycle and
+/// billing consumers must remain usable for accepted work after flag disable.
+pub async fn require_remote_machines_enabled(db: &Database, actor_id: &str) -> AppResult<()> {
+    if !super::feature_flag_service::personal_flag_enabled(
+        db,
+        actor_id,
+        super::feature_flag_service::REMOTE_MACHINES_FLAG_KEY,
+    )
+    .await?
+    {
+        return Err(AppError::Forbidden(
+            "Remote Machines are not enabled for this account".into(),
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) async fn append_owner_audit(
     db: &Database,
     session: &mut mongodb::ClientSession,
@@ -350,19 +368,44 @@ fn request_digest(body: &Value) -> String {
 }
 
 fn request_digest_matches(existing: &str, body: &Value) -> bool {
-    existing == request_digest(body)
+    if existing == request_digest(body) {
+        return true;
+    }
+    // Only the additive profile field may be absent from a historical full
+    // intent. All choices, accepted quote and policies remain digest-bound.
+    // Callers also validate the saved canonical Machine before returning replay.
+    if body.get("profile_version").and_then(Value::as_str) != Some(nyxid_machine::managed::PROFILE)
+    {
+        return false;
+    }
+    let mut historical = body.clone();
+    historical
+        .as_object_mut()
+        .expect("profile field requires an object")
+        .remove("profile_version");
+    existing == request_digest(&historical)
 }
 
 /// Owner acceptance is required at the Remote boundary, including exact retries.
 /// The generic Billing service continues to own financial contract validation.
 fn validate_request_acceptance(action: LifecycleAction, body: &Value) -> AppResult<()> {
     use crate::models::remote_machine::{DATA_POLICY_VERSION, POLICY_VERSION};
-    if body
-        .get("profile")
-        .is_some_and(|profile| profile.as_str() != Some(nyxid_machine::managed::PROFILE))
+    for field in ["profile", "profile_version"] {
+        if let Some(value) = body.get(field) {
+            let version = value.as_str().ok_or_else(|| {
+                AppError::ValidationError(
+                    "profile_version must name a controlled Machine profile".into(),
+                )
+            })?;
+            controlled_profile(version)?;
+        }
+    }
+    if ["cpu_millis", "memory_mib", "workspace_gib", "ephemeral_gib"]
+        .iter()
+        .any(|field| body.get(field).is_some())
     {
         return Err(AppError::ValidationError(
-            "unsupported managed-machine profile".into(),
+            "Machine resources must come from the controlled profile".into(),
         ));
     }
     if matches!(
@@ -413,6 +456,15 @@ pub async fn has_recorded_request(
     idempotency_key: &str,
     body: &Value,
 ) -> AppResult<bool> {
+    let mut normalized_body = body.clone();
+    if matches!(
+        action,
+        LifecycleAction::Create | LifecycleAction::Resume | LifecycleAction::Rekey
+    ) {
+        validate_request_acceptance(action, &normalized_body)?;
+        normalize_profile_request(&mut normalized_body, nyxid_machine::managed::PROFILE)?;
+    }
+    let body = &normalized_body;
     let mut filter = doc! {"owner_id":owner_id,"action":action.as_str(),"idempotency_key_hash":idempotency_key_hash(idempotency_key)};
     if let Some(id) = machine_id {
         filter.insert("machine_id", id);
@@ -428,6 +480,15 @@ pub async fn has_recorded_request(
         return Err(AppError::Conflict(
             "idempotency_key_reused_with_different_request".into(),
         ));
+    }
+    if existing.request_digest != request_digest(body) {
+        let id = existing.machine_id.as_deref().ok_or_else(|| {
+            AppError::Conflict("historical Machine intent has no resource binding".into())
+        })?;
+        let saved = get_machine(db, owner_id, id)
+            .await?
+            .ok_or_else(|| AppError::NotFound("managed machine not found".into()))?;
+        super::remote_machine_runtime::validate_saved_contract(db, &saved).await?;
     }
     Ok(true)
 }
@@ -554,6 +615,12 @@ async fn create_machine_inner(
     let choices = super::remote_machine_configuration::normalize_request(&mut input.request_body)?;
     validate_request_acceptance(LifecycleAction::Create, &input.request_body)?;
     validate_fixed_profile(&input.profile)?;
+    normalize_profile_request(&mut input.request_body, &input.profile.profile_version)?;
+    if input.request_body.get("free_slot").and_then(Value::as_bool) != Some(input.free_slot) {
+        return Err(AppError::ValidationError(
+            "Machine funding intent mismatch".into(),
+        ));
+    }
     if input.sandbox_namespace != "nyxid-machine" {
         return Err(AppError::ValidationError(
             "unsupported managed-machine namespace".into(),
@@ -591,7 +658,7 @@ async fn create_machine_inner(
             .ok_or_else(|| {
                 AppError::Internal("idempotent machine operation lost its machine".into())
             })?;
-        validate_current_contract(&machine)?;
+        super::remote_machine_runtime::validate_saved_contract(db, &machine).await?;
         return Ok(CreateMachineResult {
             machine,
             operation: existing,
@@ -634,6 +701,8 @@ async fn create_machine_inner(
         &input.owner_id,
         input.free_slot,
         &input.request_body,
+        &input.profile,
+        crate::models::remote_machine::POLICY_VERSION,
         now,
     )
     .await?;
@@ -850,10 +919,60 @@ async fn create_machine_inner(
     }
 }
 
+/// Resolve the one currently saleable profile without deployment defaults.
+/// New resource tuples must get a distinct identity; this mapping never changes.
+pub fn controlled_profile(profile_version: &str) -> AppResult<SafeMachineProfileView> {
+    if !nyxid_machine::managed::is_supported_profile(profile_version) {
+        return Err(AppError::ValidationError(
+            "managed_machine_profile_unavailable".into(),
+        ));
+    }
+    Ok(SafeMachineProfileView {
+        profile_version: profile_version.into(),
+        cpu_millis: nyxid_machine::managed::PROFILE_CPU_MILLIS,
+        memory_mib: nyxid_machine::managed::PROFILE_MEMORY_MIB,
+        workspace_gib: nyxid_machine::managed::PROFILE_WORKSPACE_GIB,
+        ephemeral_gib: None,
+    })
+}
+
+pub fn resolve_profile(
+    profile_version: &str,
+    image_digest: impl Into<String>,
+) -> AppResult<MachineProfileSpec> {
+    let controlled = controlled_profile(profile_version)?;
+    Ok(MachineProfileSpec {
+        profile_version: controlled.profile_version,
+        image_digest: image_digest.into(),
+        runtime_class: None,
+        cpu_millis: controlled.cpu_millis,
+        memory_mib: controlled.memory_mib,
+        workspace_gib: controlled.workspace_gib,
+        ephemeral_gib: controlled.ephemeral_gib,
+    })
+}
+
+/// Normalize only the current controlled profile, never obsolete quote identities.
+/// This value participates in the full durable intent digest.
+pub fn normalize_profile_request(body: &mut Value, expected: &str) -> AppResult<()> {
+    controlled_profile(expected)?;
+    if let Some(value) = body.get("profile_version") {
+        if value.as_str() != Some(expected) {
+            return Err(AppError::ValidationError(
+                "Machine request profile does not match the accepted profile".into(),
+            ));
+        }
+    }
+    body.as_object_mut()
+        .ok_or_else(|| AppError::ValidationError("Invalid Machine request".into()))?
+        .insert("profile_version".into(), json!(expected));
+    Ok(())
+}
+
 /// Internal callers have the same fixed-profile boundary as HTTP callers.
 /// Allocation knobs cannot be smuggled through a custom DTO or replay body.
 pub fn validate_fixed_profile(profile: &MachineProfileSpec) -> AppResult<()> {
-    let mut expected = MachineProfileSpec::fixed(&profile.image_digest);
+    let mut expected = resolve_profile(&profile.profile_version, &profile.image_digest)?;
     // A retained current Machine binds its own RuntimeClass, not today's default.
     expected.runtime_class = profile.runtime_class.clone();
     if profile != &expected
@@ -880,7 +999,8 @@ pub fn validate_fixed_profile(profile: &MachineProfileSpec) -> AppResult<()> {
 }
 
 pub fn fixed_profile(image_digest: impl Into<String>) -> MachineProfileSpec {
-    let mut profile = MachineProfileSpec::fixed(image_digest);
+    let mut profile = resolve_profile(nyxid_machine::managed::PROFILE, image_digest)
+        .expect("the compiled Machine profile exists");
     profile.runtime_class = std::env::var("NYXID_REMOTE_MACHINE_RUNTIME_CLASS")
         .ok()
         .filter(|value| !value.trim().is_empty());
@@ -899,7 +1019,7 @@ pub async fn request_action_with_billing(
 }
 async fn request_action_inner(
     db: &Database,
-    input: LifecycleRequest,
+    mut input: LifecycleRequest,
     billing: Option<Arc<super::billing::BillingService>>,
 ) -> AppResult<LifecycleResult> {
     if input.owner_id.trim().is_empty()
@@ -920,6 +1040,12 @@ async fn request_action_inner(
         ));
     }
     validate_request_acceptance(input.action, &input.request_body)?;
+    if matches!(
+        input.action,
+        LifecycleAction::Resume | LifecycleAction::Rekey
+    ) {
+        normalize_profile_request(&mut input.request_body, nyxid_machine::managed::PROFILE)?;
+    }
     let body_digest = request_digest(&input.request_body);
     let key_hash = idempotency_key_hash(&input.idempotency_key);
     if let Some(existing) = db
@@ -927,11 +1053,11 @@ async fn request_action_inner(
         .find_one(doc! {"owner_id": &input.owner_id, "machine_id": &input.machine_id, "action": input.action.as_str(), "idempotency_key_hash": &key_hash})
         .await?
     {
-        if existing.request_digest != body_digest {
+        if !request_digest_matches(&existing.request_digest, &input.request_body) {
             return Err(AppError::Conflict("idempotency_key_reused_with_different_request".into()));
         }
         let machine = get_machine(db, &input.owner_id, &input.machine_id).await?.ok_or_else(|| AppError::NotFound("managed machine not found".into()))?;
-        validate_current_contract(&machine)?;
+        super::remote_machine_runtime::validate_saved_contract(db, &machine).await?;
         return Ok(LifecycleResult { machine, operation: existing, replayed: true });
     }
     let now = input.now.unwrap_or_else(Utc::now);
@@ -947,6 +1073,8 @@ async fn request_action_inner(
             &input.owner_id,
             prior.free_slot,
             &input.request_body,
+            &prior.profile,
+            &prior.policy_version,
             now,
         )
         .await?

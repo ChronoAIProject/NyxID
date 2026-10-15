@@ -253,6 +253,7 @@ pub mod remote_machine_bootstrap;
 pub mod remote_machine_bootstrap_verifier;
 pub mod remote_machine_controller_health;
 pub mod remote_machine_fence;
+mod remote_machine_kubernetes_auth;
 pub mod remote_machine_kubernetes_identity;
 pub mod remote_machine_runtime;
 pub mod remote_machine_usage;
@@ -298,10 +299,10 @@ pub mod assistant_voice;
 mod org_group_tests;
 
 pub mod machine_access_service;
+pub mod remote_machine_configuration;
 pub mod remote_machine_operation_service;
 #[cfg(test)]
 mod remote_machine_operation_tests;
-pub mod remote_machine_configuration;
 pub mod remote_machine_service;
 #[cfg(test)]
 mod remote_machine_service_tests;

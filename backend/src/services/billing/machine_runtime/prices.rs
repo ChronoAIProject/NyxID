@@ -2,6 +2,48 @@ use super::super::lago_client::{LagoApi, ServicePriceSync};
 use super::*;
 
 impl BillingService {
+    /// One new-sale selector shared by quotes and their Billing preflight.
+    /// Historical absent fields belong only to the original fixed profile;
+    /// explicit null and foreign profiles never enter this candidate set.
+    pub async fn latest_machine_runtime_rate(
+        &self,
+        profile_version: &str,
+    ) -> AppResult<Option<MachineRuntimeRate>> {
+        crate::services::remote_machine_service::controlled_profile(profile_version)?;
+        let mut filter = doc! {
+            "plan_code": &self.config.lago_plan_code,
+            "retired": false,
+            "sync_status": "synced",
+            "verified_at": {"$type": "date"},
+        };
+        if profile_version == HISTORICAL_PROFILE_VERSION {
+            filter.insert(
+                "$or",
+                bson::bson!([
+                    {"profile_version": profile_version},
+                    {"profile_version": {"$exists": false}},
+                ]),
+            );
+        } else {
+            filter.insert("profile_version", profile_version);
+        }
+        let mut candidates = self
+            .db
+            .collection::<Document>(RATE_COLLECTION)
+            .find(filter)
+            .sort(doc! {"created_at": -1, "_id": -1})
+            .max_time(std::time::Duration::from_secs(5))
+            .await?;
+        while let Some(candidate) = candidates.try_next().await? {
+            if let Ok(rate) = bson::from_document::<MachineRuntimeRate>(candidate) {
+                if validate_rate(&rate).is_ok() && rate.profile_version == profile_version {
+                    return Ok(Some(rate));
+                }
+            }
+        }
+        Ok(None)
+    }
+
     pub async fn list_machine_runtime_rates(&self) -> AppResult<Vec<MachineRuntimeRate>> {
         self.db
             .collection::<MachineRuntimeRate>(RATE_COLLECTION)
@@ -55,13 +97,32 @@ impl BillingService {
     /// Administrative configuration only. A draft never admits paid runtime.
     /// Nothing seeds a synchronized price at startup.
     pub async fn stage_initial_machine_runtime_rate(&self) -> AppResult<MachineRuntimeRate> {
+        self.stage_machine_runtime_rate(
+            nyxid_machine::managed::PROFILE,
+            INITIAL_CREDITS_PER_SECOND.parse()?,
+        )
+        .await
+    }
+
+    pub async fn stage_machine_runtime_rate(
+        &self,
+        profile_version: &str,
+        credits_per_second: Credits,
+    ) -> AppResult<MachineRuntimeRate> {
+        let profile = crate::services::remote_machine_service::controlled_profile(profile_version)?;
+        if credits_per_second != INITIAL_CREDITS_PER_SECOND.parse()? {
+            return Err(invalid(
+                "The approved fixed runtime price is 0.000040 Credits per second",
+            ));
+        }
         let id = Uuid::new_v4().to_string();
         let row = MachineRuntimeRate {
             id: id.clone(),
+            profile_version: profile.profile_version,
             metric: BillingMetric::MachineRunningSeconds,
             lago_metric_code: format!("remote_machine_running_seconds_{}", id.replace('-', "")),
             plan_code: self.config.lago_plan_code.clone(),
-            credits_per_second: INITIAL_CREDITS_PER_SECOND.parse()?,
+            credits_per_second,
             sync_status: PricingSyncStatus::Pending,
             retired: false,
             verified_at: None,
@@ -150,7 +211,8 @@ impl BillingService {
 
 pub(super) fn validate_rate(rate: &MachineRuntimeRate) -> AppResult<()> {
     uuid(&rate.id)?;
-    if rate.metric != BillingMetric::MachineRunningSeconds
+    if crate::services::remote_machine_service::controlled_profile(&rate.profile_version).is_err()
+        || rate.metric != BillingMetric::MachineRunningSeconds
         || rate.credits_per_second <= Credits::ZERO
         || rate.credits_per_second.pico() > i128::from(i64::MAX)
         || rate.plan_code.is_empty()

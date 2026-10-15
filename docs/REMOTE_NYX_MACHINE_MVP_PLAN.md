@@ -1,6 +1,69 @@
 # Remote Nyx Machine MVP：Agent Sandbox 托管方案
 
-状态：2026-10-15 可选 StorageClass 与 hosted 镜像整理已完成本轮本地验证（0d 为本轮优先合同，保留 0c 单一当前实现）；本文及当前 read/deployment 合同先于源码修订。当前源码 arm64 镜像及验收结果见 [HOSTED_STORAGE_VERIFICATION_20261015](REMOTE_NYX_MACHINE_HOSTED_STORAGE_VERIFICATION_20261015.md)；此前证据保留各自阶段范围，真实集群验收待完成。
+## Backend Kubernetes credentials (2026-10-15 scoped goal and acceptance)
+
+Add explicitly selected Google metadata access-token authentication for trusted
+NyxID backend calls to the target Kubernetes/GKE API. This is credential ingress
+only: native Agent Sandbox lifecycle, owner authorization, Billing, rollout and
+profile/rate contracts below remain authoritative.
+
+`NYXID_REMOTE_MACHINE_KUBE_AUTH_MODE` accepts exactly `token_file` (default only
+when unset) or `google_metadata`; blank/unknown values fail configuration.
+`token_file` requires an absolute `NYXID_REMOTE_MACHINE_KUBE_TOKEN_FILE` and
+protected rotating reads. `google_metadata` does not require or consult that
+file. There is no cross-mode fallback. Both consumers use one shared concrete
+credential implementation; backend factories reuse a process-lived metadata
+cache. `NYXID_REMOTE_MACHINE_KUBE_API` remains the actual HTTPS Kubernetes API,
+with verified TLS and optional `NYXID_REMOTE_MACHINE_KUBE_CA_FILE` trust root.
+
+The metadata source makes a fixed direct GET to
+`http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token`
+with `Metadata-Flavor: Google`, no proxy or redirect. Acquisition is bounded in
+bytes and time (including refresh wait), validates token/positive `expires_in`,
+uses conservative monotonic expiry and early refresh, serializes concurrent
+refresh and briefly coalesces failures. Failure rejects the operation, permits
+later retry, and never returns expired credentials or sends unauthenticated
+requests. Tokens stay zeroizing/redacted in trusted backend memory only; no
+logs, API responses, database, image, Machine, ordinary command user or caller
+receives them. Existing untrusted metadata/private-network restrictions remain.
+
+| Acceptance | Required local evidence |
+|---|---|
+| M1 configuration | Both modes/default; blank/unknown/API/CA errors; metadata without file; file rotation/protected reads |
+| M2 metadata protocol | Exact GET/path/header; valid response; bounded body; invalid token/TTL; cache, early/expired refresh, concurrent success/failure, timeout and retry |
+| M3 actual consumers | Sandbox API and workload verifier use Bearer, including separately reconstructed production factories sharing one cache; TLS/CA and selected-mode readiness |
+| M4 bootstrap boundary | Original Pod-bound Kubernetes token stays in TokenReview with audience `nyxid-remote-machine-v1`; Google token is only Kubernetes request authorization; UID/owner/generation/epoch/fence checks remain |
+| M5 disclosure and regression | Redacted diagnostics; existing metadata restrictions and relevant native lifecycle/bootstrap regression tests; identify real Rust paths versus HTTP/TLS doubles |
+| M6 environment pending | Verify actual Google `chrono-nyxid` principal, target Kubernetes permissions, API reachability and CA in target environment; existing `nyxid-machine-manager` Kubernetes ServiceAccount RBAC is not evidence of Google-principal authorization |
+
+Update these goal/MVP/acceptance contracts before implementation source. Local
+fixtures do not establish real metadata identity or GKE permissions. This task
+authorizes no live metadata/GKE call, IAM/RBAC/environment mutation, deployment,
+commit or push. Physical stop bounds, storage writer isolation and selected
+cluster acceptance remain deferred; this is not whole-MVP release acceptance.
+
+
+## Personal Remote Machine rollout admission (2026-10-15)
+
+The sole rollout key is `experimental:remote-machines`, default **false** in production and tests. Resolve it through the existing Feature Flag framework for the authenticated personal actor (`auth.user_id`), preserving existing override precedence. It grants no role, ownership, billing entitlement, or execution authority.
+
+| Operation | Flag requirement | Existing authority and safety |
+|---|---|---|
+| Hosted setup fourth choice/list create entry; direct hosted form | Current authenticated person's flag ON; absent/loading/OFF fail closed | Keep This computer, Remote VM and Docker available; account switches cannot reuse another person's flag or intent |
+| `POST /api/v1/remote-machine-quotes`, `POST /api/v1/remote-machines` | Personal actor ON before quote/funding/resource effects, including retries | First-party human, personal-owner and existing profile/consent/idempotency checks remain |
+| User Resume or Rekey, dedicated and generic action routes | Personal actor ON before platform, replay, funding or outbox effects | Rekey can restore a paused runtime, so it shares this admission gate; re-enabling preserves exact replay |
+| Runtime-rate stage/resync/retire writes | Personal actor ON after first-party human and platform-admin checks | Ordinary users, operators, external/delegated callers and API keys gain no write permission |
+| `GET /api/v1/admin/billing/runtime` | None | Existing first-party human admin/operator read authorization remains |
+| Existing owner list/get/entitlement/operations/history/billing, pause/delete | None | Existing ownership, policy, revision and consent checks remain |
+| Accepted manager/outbox work, renewal, metering, settlement, insufficient-funds protection, background rate resync and cleanup | None | Continue all existing accounting and lifecycle safeguards; OFF never automatically pauses or deletes a Machine |
+
+Flag denial uses the existing `forbidden` error (HTTP 403, numeric code 1002), with wire message `Forbidden: Remote Machines are not enabled for this account`. Existing role/credential denials retain their own errors. Free Machine `/billing` reads still return the existing 404 when no paid runtime contract exists; the flag does not change that read contract.
+
+Admission is checked narrowly at HTTP boundaries using one service helper. Do not gate the whole Remote Machine router, shared owner eligibility, or background services. Open create/resume dialogs must close or become ineligible when the flag, authenticated actor or auth readiness changes; quote/create/resume/rekey dispatch checks current eligibility and the actor against the captured intent owner. There is no hosted rekey button today; the existing rekey mutation hook enforces this gate.
+
+Local acceptance requires real mounted API tests with signed authentication, persisted flags and a new disposable transaction-capable MongoDB 8 replica set. Positive fixtures explicitly opt in; no registry test-default-on and no generic 4xx substitute for exact denial/profile validation. Cover absent/OFF/ON ordinary/admin users, personal isolation, rate-write role/auth boundaries, zero effects/provider calls on denial, successful free/paid admission, and OFF-after-establishment ongoing safety. Frontend component/hook and browser tests use disclosed HTTP doubles and do not establish backend enforcement. See `REMOTE_NYX_MACHINE_FEATURE_FLAG_VERIFICATION_20261015.md` for current-task evidence. No commit, push, deployment, live rollout/data/service mutation, image build or selected-cluster/runtime/CSI claim belongs to this task.
+
+状态：2026-10-15 规格与费率绑定实现及定向本地验证完成（0e 为当前优先合同；独立评审与真实集群验收待完成）。此前可选 StorageClass 与 hosted 镜像整理已完成本轮本地验证（0d 为本轮优先合同，保留 0c 单一当前实现）；本文及当前 read/deployment 合同先于源码修订。当前源码 arm64 镜像及验收结果见 [HOSTED_STORAGE_VERIFICATION_20261015](REMOTE_NYX_MACHINE_HOSTED_STORAGE_VERIFICATION_20261015.md)；此前证据保留各自阶段范围，真实集群验收待完成。
 
 **MVP 目标：用户在现有 `/assistant/machines/new` 的第四项 NyxID hosted 配置个人 Machine 名称、Commands/Files/Browser/Computer 能力及可选 specialist，确认固定规格和费用后创建完整 Machine 镜像的 Kubernetes 托管机器。NyxBot/specialist 复用已有浏览器、桌面和授权路径；OAuth / Agent Key 外部工具仍限定原八项 shell/files 工具。完成免费权益、账户余额付费、余额不足暂停和资源清理旅程。** 首版限定个人账号、一种固定规格和八个基础工具，以 NyxBot、Codex、Claude Code 验证三条实际使用路径；产品名称不构成权限类型。
 
@@ -8,6 +71,23 @@
 
 本轮授权设计已确定：复用现有 MCP 认证、OAuth Client/Consent、Agent Key 与登录子凭据，不增加 Machine 专属客户端注册或认证凭据体系。OAuth grant 按 `user_id + oauth_client_id` 绑定，Agent Key grant 按 `user_id + parent_api_key_id` 绑定；同一父 Key 的子凭据共享 grant，但可以单独撤销子凭据及其任务。新增的 `MachineExternalGrant` 只保存 Machine 资源授权；external principal 从已验证认证结果派生，NyxBot 继续使用现有 owner-turn 授权。
 
+
+## 0e. 受控规格与运行费率绑定（2026-10-15，当前优先合同）
+
+本轮目标是将现有 `profile_version` / `MachineProfileSpec` 与不可变的运行费率、报价、预检查、免费/付费创建、配额、Kubernetes 资源和暂停恢复明确关联。继续只售卖 `remote-machine`：`cpu_millis=2000`、`memory_mib=2048`、`workspace_gib=20`、`ephemeral_gib=null`，新费率价格固定为 **0.000040 Credits/second**。这些资源由受控规格解析，不能随部署默认值改变。同规格以后改价须创建新 `rate_version`；本次不开放其他生产规格、4C8G、50 GiB、升降配、扩盘或迁移。
+
+| 验收 | 本轮必须实现 | 新鲜本地验证覆盖 |
+|---|---|---|
+| P1 规格和费率 | `MachineRuntimeRate.profile_version` 不可变；管理查询包含规格标识和安全资源视图，保留价格、同步/停售和时间字段；stage 在服务层校验可售规格和批准价格。 | 管理 API、非法规格/价格、稳定 rate ID/metric code。 |
+| P2 报价和预检查 | 一个服务层 selector 按目标规格、当前 plan、同步/验证/未停售条件选最新费率；无匹配明确说明；已报价预检查钉住原规格/费率/精确价格。 | 其他规格、未同步、停售、plan 不符和无匹配；新费率不替换已接受价格。 |
+| P3 创建一致性 | 报价绑定规格、费率、价格、条款；付费资源取自已接受 owner 报价，免费同一解析器；客户端额外标识和资源值必须一致。完整规范化 intent 保持幂等；仅新增 profile 字段前的完整请求可按原 digest 精确重放，所有既有参数仍须一致。 | 真 Mongo 事务下篡改在 funds/rows/outbox 前拒绝；相同重试和规格冲突；免费/付费一致。 |
+| P4 运行与恢复 | 持久规格、run 快照、terms、renderer、配额/准入一致；恢复按原规格报价，保留 image、RuntimeClass、原 PVC UID；恢复配额不再申请盘。 | 准入与续费/结算、原 PVC/规格及部署默认变化回归、Rust Sandbox 和真实 CEL。 |
+| P5 最小存量兼容 | 仅缺少 rate 字段按历史构造规则映射字面量 `remote-machine`，适用于顶层与 run.rate；显式 null、未知及不一致拒绝准入。无旧报价规格别名。 | 缺字段 BSON/嵌入快照、null/unknown 拒绝、冻结价格/停售已接受报价。 |
+| P6 页面与证据 | 自动选择唯一规格、发送 profile_version、展示响应 CPU/RAM/GiB 与对应估算；保留原三项 setup 与能力/specialist 流程。 | Vitest/typecheck/lint；一次性 Mongo；记录真实组件/替身和待集群验收边界。 |
+
+本节优先于 0c 中过宽的“不保留历史…兼容”描述：仅保留必需的财务记录可读性。源码 `bde170f0` 的 stage 构造只能生成原固定规格的费率，故缺失字段可映射历史字面量，绝不映射可变默认规格；不假定线上无记录，不进行 live inventory、数据重置、迁移、重新扣费或账本重写。多副本全部后端及后台任务完成按规格读取/选价升级之前，不可启用其他规格的有效费率。
+
+P1–P6 已通过本轮定向本地验证：304 项后端、38 项共享 Machine、39 项 Sandbox、232 项前端及 12 条浏览器旅程，共 625 项自动化测试，另有 262 项真实 CEL 验证；所选测试无失败或跳过。完整命令、替身边界、warnings、历史文档哈希和一次性 Mongo 清理见 [PROFILE_RATE_VERIFICATION_20261015](REMOTE_NYX_MACHINE_PROFILE_RATE_VERIFICATION_20261015.md)。文档/验收先行里程碑已记录。保持 19 份预存历史 Markdown 原字节。原生生命周期、授权/撤销、原子精确资金、免费权益、同意/有效期、数据保留、可选 Runtime/StorageClass 和平台延期不变。无 commit/push/deploy/在用服务或数据操作；独立评审由 caller 完成。镜像和 Node 源码不变时无需重建。真实 Kubernetes/runtime/CSI、独立物理 cutoff/强 writer 隔离继续待验收/延期。
 
 ## 0d. 可选 StorageClass 与独立 hosted Dockerfile（2026-10-15，本轮优先合同）
 

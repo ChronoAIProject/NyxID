@@ -57,17 +57,15 @@ pub fn platform_readiness(base_url: &str) -> PlatformReadiness {
     if configured_storage_class().is_err() {
         blockers.push("storage_class_configuration_invalid");
     }
-    if super::remote_machine_kubernetes_identity::KubernetesWorkloadVerifier::from_environment()
-        .is_err()
-    {
-        blockers.push("kubernetes_identity_configuration_invalid");
-    }
-    let readable_token = std::env::var("NYXID_REMOTE_MACHINE_KUBE_TOKEN_FILE")
-        .ok()
-        .and_then(|path| std::fs::metadata(path).ok())
-        .is_some_and(|meta| meta.is_file() && meta.len() > 0 && meta.len() <= 64 * 1024);
-    if !readable_token {
-        blockers.push("manager_credential_file_unavailable");
+    match super::remote_machine_kubernetes_auth::KubernetesConnection::from_environment(
+        Duration::from_secs(15),
+    ) {
+        Ok(connection) => {
+            if !connection.credentials.credential_file_available() {
+                blockers.push("manager_credential_file_unavailable");
+            }
+        }
+        Err(_) => blockers.push("kubernetes_identity_configuration_invalid"),
     }
     let bootstrap = std::env::var("NYXID_REMOTE_MACHINE_BOOTSTRAP_BASE_URL")
         .unwrap_or_else(|_| base_url.to_owned());
@@ -112,18 +110,10 @@ pub(crate) fn configured_storage_class() -> anyhow::Result<Option<String>> {
 }
 
 fn sandbox_api_from_environment() -> anyhow::Result<SandboxApi> {
-    let base = std::env::var("NYXID_REMOTE_MACHINE_KUBE_API")?;
-    let token_file =
-        std::path::PathBuf::from(std::env::var("NYXID_REMOTE_MACHINE_KUBE_TOKEN_FILE")?);
-    let mut client = reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(5))
-        .timeout(Duration::from_secs(20))
-        .redirect(reqwest::redirect::Policy::none());
-    if let Ok(path) = std::env::var("NYXID_REMOTE_MACHINE_KUBE_CA_FILE") {
-        client =
-            client.add_root_certificate(reqwest::Certificate::from_pem(&std::fs::read(path)?)?);
-    }
-    SandboxApi::with_token_file_client(base.parse()?, token_file, client.build()?)
+    let connection = super::remote_machine_kubernetes_auth::KubernetesConnection::from_environment(
+        Duration::from_secs(20),
+    )?;
+    SandboxApi::with_credentials_client(connection.base, connection.credentials, connection.client)
 }
 
 /// Read-only API validity, not CSI readiness. Used only by hosted provisioning
@@ -504,6 +494,7 @@ impl Manager {
             || (effect.kind == EffectKind::RekeySandbox
                 && operation.desired_runtime_generation == Some(machine.runtime_generation));
         if running {
+            super::remote_machine_runtime::validate_saved_contract(&self.db, &machine).await?;
             self.require_workspace(&machine).await?;
             machine = super::remote_machine_runtime::mark_submission(&self.db, &machine).await?;
         }
@@ -1895,3 +1886,7 @@ mod tests;
 #[cfg(test)]
 #[path = "remote_machine_native_tests.rs"]
 mod native_tests;
+
+#[cfg(test)]
+#[path = "remote_machine_kubernetes_auth_tests.rs"]
+mod kubernetes_auth_tests;

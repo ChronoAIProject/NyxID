@@ -17,3 +17,6 @@ pub mod runtime_provider;
 /// through Kubernetes. The Agent Sandbox controller remains the sole
 /// reconciler for those resources.
 pub mod sandbox;
+
+/// Backend-only Kubernetes request credentials, distinct from Pod identity.
+pub mod kubernetes_credentials;

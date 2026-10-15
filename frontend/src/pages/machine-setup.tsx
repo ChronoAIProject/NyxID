@@ -1,3 +1,4 @@
+import { useRemoteMachineAdmission } from "@/hooks/use-remote-machine-admission";
 import { RemoteMachineCreate } from "@/components/machines/remote-machine-create";
 import { useVerifiedUpdaterImage } from "@/hooks/use-machines";
 import { useEffect, useRef, useState } from "react";
@@ -71,9 +72,11 @@ export function MachineSetupPage() {
     where?: "hosted";
   };
   const navigate = useNavigate();
-  const [hosted, setHosted] = useState(
+  const remoteAdmission = useRemoteMachineAdmission();
+  const [hostedSelected, setHosted] = useState(
     search.where === "hosted" && !search.setup,
   );
+  const hosted = hostedSelected && remoteAdmission;
   const [id, setId] = useState(search.setup);
   const setup = useMachineSetup(id);
   const create = useCreateMachineSetup();
@@ -207,13 +210,15 @@ export function MachineSetupPage() {
           >
             Docker
           </TabsTrigger>
-          <TabsTrigger
-            value="hosted"
-            disabled={locked}
-            className="px-2 sm:px-3"
-          >
-            NyxID hosted
-          </TabsTrigger>
+          {remoteAdmission && (
+            <TabsTrigger
+              value="hosted"
+              disabled={locked}
+              className="px-2 sm:px-3"
+            >
+              NyxID hosted
+            </TabsTrigger>
+          )}
         </TabsList>
       </Tabs>
       {hosted ? (

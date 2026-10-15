@@ -8,6 +8,7 @@ import {
   remoteMachineCreateRequestSchema,
   remoteMachineActionRequestSchema,
   remoteMachineQuoteSchema,
+  remoteMachineQuoteRequestSchema,
   remoteMachineRuntimeBillingSchema,
   remoteMachineBillingRunsSchema,
   isRemoteMachinePaidQuote,
@@ -499,6 +500,43 @@ it("rejects invalid hosted names, empty or unknown capabilities and desktop with
     expect(
       remoteMachineCreateRequestSchema.safeParse({ ...hostedCreate, ...patch })
         .success,
+    ).toBe(false);
+  }
+});
+
+
+it("binds request schemas to the sole controlled profile and rejects arbitrary dimensions", () => {
+  const body = {
+    free_slot: true,
+    profile_version: "remote-machine",
+    policy_version: "remote-machine-mvp",
+    data_policy_version: "remote-machine-data",
+    acknowledge_shared_environment: true,
+  };
+  expect(remoteMachineCreateRequestSchema.parse(body).profile_version).toBe(
+    "remote-machine",
+  );
+  expect(
+    remoteMachineQuoteRequestSchema.parse({
+      free_slot: false,
+      profile_version: "remote-machine",
+    }).profile_version,
+  ).toBe("remote-machine");
+  for (const patch of [
+    { profile_version: "foreign-profile" },
+    { profile_version: null },
+    { cpu_millis: 4000 },
+    { workspace_gib: 50 },
+  ]) {
+    expect(
+      remoteMachineCreateRequestSchema.safeParse({ ...body, ...patch }).success,
+    ).toBe(false);
+    expect(
+      remoteMachineQuoteRequestSchema.safeParse({
+        free_slot: false,
+        profile_version: "remote-machine",
+        ...patch,
+      }).success,
     ).toBe(false);
   }
 });

@@ -1,3 +1,7 @@
+import {
+  assertRemoteMachineAdmission,
+  useRemoteMachineAdmission,
+} from "@/hooks/use-remote-machine-admission";
 import { RemoteMachineServiceUsage } from "@/components/machines/remote-machine-service-usage";
 import { useEffect, useState } from "react";
 import { RemoteMachineQuota } from "./remote-machine-preflight";
@@ -148,10 +152,20 @@ export function RemoteMachineDetail({
   readonly accessPanel?: React.ReactNode;
 }) {
   const userId = useAuthStore((state) => state.user?.id);
+  const remoteAdmission = useRemoteMachineAdmission();
   const query = useRemoteMachine(machineId);
   const machine = query.error ? undefined : (query.data ?? initialMachine);
+  const [reviewOwner, setReviewOwner] = useState(userId);
   const [reviewAction, setReviewAction] = useState<OwnerAction | null>(null);
   const [paidResumeOpen, setPaidResumeOpen] = useState(false);
+  if (
+    reviewOwner !== userId ||
+    (!remoteAdmission && (reviewAction === "resume" || paidResumeOpen))
+  ) {
+    setReviewOwner(userId);
+    setReviewAction(null);
+    setPaidResumeOpen(false);
+  }
   const [selectedOperationId, setSelectedOperationId] = useState<string | null>(
     linkedOperationId ?? null,
   );
@@ -308,7 +322,10 @@ export function RemoteMachineDetail({
         <Badge variant={statusVariant(machine.resource_state)}>
           {readable(machine.resource_state)}
         </Badge>
-        <Badge variant="secondary">2 vCPU · 2 GiB RAM</Badge>
+        <Badge variant="secondary">
+          {machine.profile.cpu_millis / 1000} vCPU ·{" "}
+          {machine.profile.memory_mib / 1024} GiB RAM
+        </Badge>
         <div
           role="group"
           aria-label="Enabled capability badges"
@@ -350,7 +367,12 @@ export function RemoteMachineDetail({
           onClick={() =>
             freeSlot ? setReviewAction("resume") : setPaidResumeOpen(true)
           }
-          disabled={!canResume || transitioning || Boolean(query.error)}
+          disabled={
+            !remoteAdmission ||
+            !canResume ||
+            transitioning ||
+            Boolean(query.error)
+          }
         >
           <Play className="size-3" />
           {freeSlot ? "Resume machine" : "Review quote to resume"}
@@ -361,6 +383,12 @@ export function RemoteMachineDetail({
           </Button>
         )}
       </div>
+      {!remoteAdmission && machine.resource_state === "paused" && (
+        <p role="status" className="text-12 text-muted-foreground">
+          Remote Machines are not enabled for this account. Resume is
+          unavailable.
+        </p>
+      )}
       {machine.resource_state === "paused" && !freeSlot && (
         <p role="status" className="text-12 text-muted-foreground">
           Paid resume requires explicit acceptance of a new quote and a finite
@@ -370,7 +398,7 @@ export function RemoteMachineDetail({
         </p>
       )}
       <RemoteMachinePaidStart
-        open={paidResumeOpen}
+        open={paidResumeOpen && remoteAdmission && reviewOwner === userId}
         onOpenChange={setPaidResumeOpen}
         machine={machine}
         onAccepted={(_machineId, nextOperationId) => {
@@ -481,18 +509,18 @@ export function RemoteMachineDetail({
               value="No fixed capacity declared"
             />
             <p className="px-4 py-3 text-12 text-muted-foreground">
-              Temporary storage is managed by the deployment environment.
-              No fixed capacity is promised. Temporary data may be lost after pause or Pod recreation.
+              Temporary storage is managed by the deployment environment. No
+              fixed capacity is promised. Temporary data may be lost after pause
+              or Pod recreation.
             </p>
             <RemoteMachineUsage machineId={machineId} />
             <p className="px-4 py-3 text-12 text-muted-foreground">
               If a disk fills, writes and jobs may fail. Disk pressure can evict
-              the Pod. Use an authorized file
-              or shell client to remove unneeded files when the runtime is
-              available, then retry the failed work. This fixed profile cannot
-              be expanded. If recovery tools cannot run, review the operation
-              and contact the platform operator before choosing irreversible
-              deletion.
+              the Pod. Use an authorized file or shell client to remove unneeded
+              files when the runtime is available, then retry the failed work.
+              This fixed profile cannot be expanded. If recovery tools cannot
+              run, review the operation and contact the platform operator before
+              choosing irreversible deletion.
             </p>
           </DetailSection>
           <DetailSection title="Resource binding">
@@ -650,21 +678,23 @@ export function RemoteMachineDetail({
           </CardContent>
         </Card>
       )}
-      {reviewAction && (
-        <LifecycleActionDialog
-          key={`${machineId}:${reviewAction}`}
-          action={reviewAction}
-          machine={machine}
-          policy={policy}
-          onClose={() => setReviewAction(null)}
-          onAccepted={(id) => {
-            setSelectedOperationId(id);
-            setReviewAction(null);
-            void query.refetch();
-          }}
-          onReload={() => void query.refetch()}
-        />
-      )}
+      {reviewAction &&
+        reviewOwner === userId &&
+        (reviewAction !== "resume" || remoteAdmission) && (
+          <LifecycleActionDialog
+            key={`${machineId}:${reviewAction}`}
+            action={reviewAction}
+            machine={machine}
+            policy={policy}
+            onClose={() => setReviewAction(null)}
+            onAccepted={(id) => {
+              setSelectedOperationId(id);
+              setReviewAction(null);
+              void query.refetch();
+            }}
+            onReload={() => void query.refetch()}
+          />
+        )}
     </div>
   );
 }
@@ -799,6 +829,7 @@ function LifecycleActionDialog({
         : {}),
       ...(action === "resume"
         ? {
+            profile_version: machine.profile.profile_version,
             policy_version: machine.policy_version,
             data_policy_version: machine.data_policy_version,
             acknowledge_shared_environment: true,
@@ -806,6 +837,7 @@ function LifecycleActionDialog({
         : {}),
     };
     try {
+      if (action === "resume") assertRemoteMachineAdmission(ownerId);
       setError(null);
       const intent = getRemoteMachineIntent(ownerId, scope, body);
       const result = await mutation.mutateAsync({
@@ -842,9 +874,7 @@ function LifecycleActionDialog({
         <Form {...form}>
           <form onSubmit={form.handleSubmit(submit)} className="space-y-4">
             <div className="space-y-3 text-12 text-muted-foreground">
-              {action === "resume" && (
-                <FreeResumePreflight machineId={machine.node_id} />
-              )}
+              {action === "resume" && <FreeResumePreflight machine={machine} />}
               {action === "delete" ? (
                 <>
                   <p>
@@ -895,14 +925,14 @@ function LifecycleActionDialog({
                     It will never silently switch to paid.
                   </p>
                   <p>
-                    Retained profile: {machine.profile.profile_version}.
-                    Policy: {machine.policy_version}. Data policy:{" "}
+                    Retained profile: {machine.profile.profile_version}. Policy:{" "}
+                    {machine.policy_version}. Data policy:{" "}
                     {machine.data_policy_version}. Resume preserves the saved
                     specification and workspace.
                   </p>
                   <p>
-                    Temporary storage has no fixed capacity commitment.
-                    {" "}Temporary data may be lost after pause or Pod recreation.
+                    Temporary storage has no fixed capacity commitment.{" "}
+                    Temporary data may be lost after pause or Pod recreation.
                     All granted clients share the OS user and workspace. File
                     roots do not isolate shell commands.
                   </p>
@@ -1009,12 +1039,18 @@ function LifecycleActionDialog({
   );
 }
 
-function FreeResumePreflight({ machineId }: { readonly machineId: string }) {
+function FreeResumePreflight({ machine }: { readonly machine: RemoteMachine }) {
+  const machineId = machine.node_id;
+  const profileVersion = machine.profile.profile_version;
   const quote = useRemoteMachineQuote();
   const request = quote.mutate;
   useEffect(() => {
-    request({ free_slot: true, machine_id: machineId });
-  }, [request, machineId]);
+    request({
+      free_slot: true,
+      machine_id: machineId,
+      profile_version: profileVersion,
+    });
+  }, [request, machineId, profileVersion]);
   return (
     <section aria-label="Retained workspace resume preflight">
       {quote.error && (

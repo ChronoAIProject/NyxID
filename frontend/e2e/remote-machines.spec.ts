@@ -43,6 +43,7 @@ async function machineApi(
   page: Page,
   initiallyEmpty = false,
   configuration: Partial<RemoteMachine> = {},
+  featureMode: "absent" | "off" | "on" = "on",
 ) {
   const writes: { body: unknown; key: string | undefined }[] = [];
   let created = !initiallyEmpty;
@@ -68,7 +69,16 @@ async function machineApi(
         created_at: "2026-10-01T00:00:00Z",
         capabilities: {
           billing_available: true,
-          enabled_features: ["experimental:ai-assistant"],
+          ...(featureMode === "absent"
+            ? {}
+            : {
+                enabled_features: [
+                  "experimental:ai-assistant",
+                  ...(featureMode === "on"
+                    ? ["experimental:remote-machines"]
+                    : []),
+                ],
+              }),
         },
       },
     }),
@@ -208,8 +218,9 @@ for (const width of [1440, 390]) {
           },
         }),
       );
-      await page.route("**/api/v1/assistant/nyxagent/machines/*/contexts", (route) =>
-        route.fulfill({ json: [] }),
+      await page.route(
+        "**/api/v1/assistant/nyxagent/machines/*/contexts",
+        (route) => route.fulfill({ json: [] }),
       );
       const desktopRequests: string[] = [];
       await page.routeWebSocket(
@@ -368,7 +379,11 @@ for (const width of [1440, 390]) {
     await expect(
       page.getByRole("button", { name: "Create my setup command" }),
     ).toHaveCount(0);
-    await expect(create.getByText(/Temporary storage is managed by the deployment environment/)).toBeVisible();
+    await expect(
+      create.getByText(
+        /Temporary storage is managed by the deployment environment/,
+      ),
+    ).toBeVisible();
     await expect(create.getByText(/2 GiB temporary storage/)).toHaveCount(0);
     await create.getByLabel("Machine name").fill("remote-research");
     await create.getByRole("checkbox", { name: /^Browser/ }).check();
@@ -402,6 +417,7 @@ for (const width of [1440, 390]) {
       capabilities: ["shell", "files", "browser"],
       specialist_id: null,
       free_slot: true,
+      profile_version: "remote-machine",
       policy_version: policy.policy_version,
       data_policy_version: policy.data_policy_version,
       acknowledge_shared_environment: true,
@@ -423,7 +439,9 @@ for (const width of [1440, 390]) {
     await expect(
       page.getByRole("heading", { name: "remote-research", exact: true }),
     ).toBeVisible();
-    await expect(page.getByText("No fixed capacity declared", { exact: true })).toBeVisible();
+    await expect(
+      page.getByText("No fixed capacity declared", { exact: true }),
+    ).toBeVisible();
     await noHorizontalOverflow(page);
   });
 }
@@ -728,5 +746,46 @@ for (const width of [1440, 390]) {
       },
     ]);
     await noHorizontalOverflow(page);
+  });
+}
+
+for (const featureMode of ["absent", "off"] as const) {
+  test(`personal flag ${featureMode} blocks direct hosted URL and creation CTA but keeps management`, async ({
+    page,
+  }) => {
+    const admissions: string[] = [];
+    page.on("request", (request) => {
+      const path = new URL(request.url()).pathname;
+      if (request.method() !== "GET" && path.includes("/remote-machine"))
+        admissions.push(path);
+    });
+    await machineApi(page, false, {}, featureMode);
+    await page.goto("/assistant/machines/new?where=hosted");
+    await expect(
+      page.getByRole("heading", { name: "Add a machine" }),
+    ).toBeVisible();
+    await expect(page.getByRole("tab", { name: "NyxID hosted" })).toHaveCount(
+      0,
+    );
+    for (const name of ["This computer", "Remote VM", "Docker"])
+      await expect(page.getByRole("tab", { name })).toBeVisible();
+    await expect(
+      page.getByRole("form", { name: "NyxID hosted machine configuration" }),
+    ).toHaveCount(0);
+    await page.goto("/assistant/machines");
+    await expect(
+      page.getByRole("button", { name: "Create remote machine", exact: true }),
+    ).toHaveCount(0);
+    await expect(
+      page.getByRole("button", { name: "Add a machine", exact: true }),
+    ).toBeVisible();
+    await page.goto(`/assistant/machines?machine=${machine.node_id}`);
+    await expect(
+      page.getByRole("button", { name: "Resume machine", exact: true }),
+    ).toBeDisabled();
+    await expect(
+      page.getByRole("button", { name: "Delete machine", exact: true }),
+    ).toBeEnabled();
+    expect(admissions).toEqual([]);
   });
 }

@@ -50,9 +50,9 @@ impl MachineProfileSpec {
             profile_version: nyxid_machine::managed::PROFILE.into(),
             image_digest: image_digest.into(),
             runtime_class: None,
-            cpu_millis: 2_000,
-            memory_mib: 2_048,
-            workspace_gib: 20,
+            cpu_millis: nyxid_machine::managed::PROFILE_CPU_MILLIS,
+            memory_mib: nyxid_machine::managed::PROFILE_MEMORY_MIB,
+            workspace_gib: nyxid_machine::managed::PROFILE_WORKSPACE_GIB,
             ephemeral_gib: None,
         }
     }

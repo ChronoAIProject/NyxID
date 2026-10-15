@@ -11,10 +11,13 @@ import type { User } from "@/types/api";
 import {
   remoteMachineFixture,
   remoteMachineOperationFixture,
+  remoteMachinePaidQuoteFixture,
 } from "@/test/remote-machine-fixture";
 import {
   readRemoteMachineJobOutput,
   useCreateRemoteMachine,
+  useRemoteMachineQuote,
+  useRemoteMachineEntitlement,
   useRemoteMachineAction,
   useRemoteMachineJobs,
   useRemoteMachineEvents,
@@ -37,6 +40,7 @@ const createBody = {
   )[],
   specialist_id: "specialist-1",
   free_slot: true,
+  profile_version: "remote-machine" as const,
   policy_version: "remote-machine-mvp" as const,
   data_policy_version: "remote-machine-data" as const,
   acknowledge_shared_environment: true,
@@ -60,7 +64,14 @@ function makeClient() {
 beforeEach(() => {
   transport.mockReset();
   vi.stubGlobal("fetch", transport);
-  useAuthStore.setState({ user: { id: "owner-one" } as User });
+  useAuthStore.setState({
+    user: {
+      id: "owner-one",
+      capabilities: { enabled_features: ["experimental:remote-machines"] },
+    } as unknown as User,
+    isAuthenticated: true,
+    isLoading: false,
+  });
 });
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -687,3 +698,222 @@ it("passes global confirmation seek positions to the mounted owner endpoint", as
   unmount();
   client.clear();
 });
+
+it("sends the selected quote profile and keys entitlement preflight by that profile", async () => {
+  transport.mockImplementation(async (url) =>
+    String(url).includes("remote-machine-entitlement")
+      ? json({
+          eligible: true,
+          free_slot_available: true,
+          machine_id: null,
+          reason: null,
+          policy_version: "remote-machine-mvp",
+          policy: remoteMachinePaidQuoteFixture.policy,
+        })
+      : json(remoteMachinePaidQuoteFixture),
+  );
+  const client = makeClient();
+  const { result, unmount } = renderHook(
+    () => ({
+      quote: useRemoteMachineQuote(),
+      entitlement: useRemoteMachineEntitlement(true, "remote-machine"),
+    }),
+    { wrapper: wrapper(client) },
+  );
+  await waitFor(() => expect(result.current.entitlement.isSuccess).toBe(true));
+  await act(async () => {
+    await result.current.quote.mutateAsync({
+      free_slot: false,
+      profile_version: "remote-machine",
+    });
+  });
+  expect(
+    transport.mock.calls.some(
+      ([url]) =>
+        url ===
+        "/api/v1/remote-machine-entitlement?profile_version=remote-machine",
+    ),
+  ).toBe(true);
+  const quoteCall = transport.mock.calls.find(
+    ([url]) => url === "/api/v1/remote-machine-quotes",
+  );
+  expect(JSON.parse(quoteCall![1]!.body as string)).toEqual({
+    free_slot: false,
+    profile_version: "remote-machine",
+  });
+  expect(
+    client.getQueryData([
+      "remote-machine-entitlement",
+      "owner-one",
+      "remote-machine",
+    ]),
+  ).toBeDefined();
+  unmount();
+  client.clear();
+});
+
+describe("personal Remote Machine flag admission", () => {
+  it.each(["absent", "off", "loading", "signed-out"])(
+    "denies quote, create, resume and rekey before HTTP when %s",
+    async (mode) => {
+      useAuthStore.setState({
+        user: {
+          id: "owner-one",
+          ...(mode !== "absent"
+            ? {
+                capabilities: {
+                  enabled_features:
+                    mode === "off" ? [] : ["experimental:remote-machines"],
+                },
+              }
+            : {}),
+        } as unknown as User,
+        isLoading: mode === "loading",
+        isAuthenticated: mode !== "signed-out",
+      });
+      const client = makeClient();
+      const { result, unmount } = renderHook(
+        () => ({
+          quote: useRemoteMachineQuote(),
+          create: useCreateRemoteMachine(),
+          action: useRemoteMachineAction(),
+        }),
+        { wrapper: wrapper(client) },
+      );
+      await expect(
+        result.current.quote.mutateAsync({ free_slot: true }),
+      ).rejects.toThrow("Remote Machines are not enabled for this account.");
+      await expect(
+        result.current.create.mutateAsync({
+          body: createBody,
+          idempotencyKey: "flag-create",
+        }),
+      ).rejects.toThrow("Remote Machines are not enabled for this account.");
+      for (const action of ["resume", "rekey"] as const) {
+        await expect(
+          result.current.action.mutateAsync({
+            machineId: "machine-1",
+            body: {
+              action,
+              expected_revision: 1,
+              profile_version: "remote-machine",
+              policy_version: "remote-machine-mvp",
+              data_policy_version: "remote-machine-data",
+              acknowledge_shared_environment: true,
+            },
+            idempotencyKey: `flag-${action}`,
+          }),
+        ).rejects.toThrow("Remote Machines are not enabled for this account.");
+      }
+      expect(transport).not.toHaveBeenCalled();
+      unmount();
+      client.clear();
+    },
+  );
+});
+
+it.each(["quote", "create", "resume", "rekey"])(
+  "rechecks personal flag for queued %s dispatch",
+  async (admission) => {
+    let release!: () => void;
+    const barrier = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const client = new QueryClient({
+      mutationCache: new MutationCache({ onMutate: () => barrier }),
+    });
+    const { result, unmount } = renderHook(
+      () => ({
+        quote: useRemoteMachineQuote(),
+        create: useCreateRemoteMachine(),
+        action: useRemoteMachineAction(),
+      }),
+      { wrapper: wrapper(client) },
+    );
+    let request!: Promise<unknown>;
+    act(() => {
+      request =
+        admission === "quote"
+          ? result.current.quote.mutateAsync({ free_slot: false })
+          : admission === "create"
+            ? result.current.create.mutateAsync({
+                body: createBody,
+                idempotencyKey: "queued-create",
+              })
+            : result.current.action.mutateAsync({
+                machineId: "machine-1",
+                body: {
+                  action: admission as "resume" | "rekey",
+                  expected_revision: 1,
+                  profile_version: "remote-machine",
+                  policy_version: "remote-machine-mvp",
+                  data_policy_version: "remote-machine-data",
+                  acknowledge_shared_environment: true,
+                },
+                idempotencyKey: `queued-${admission}`,
+              });
+    });
+    const rejected = expect(request).rejects.toThrow(
+      "Remote Machines are not enabled for this account.",
+    );
+    act(() =>
+      useAuthStore.setState({
+        user: {
+          id: "owner-one",
+          capabilities: { enabled_features: [] },
+        } as unknown as User,
+      }),
+    );
+    await act(async () => {
+      release();
+      await rejected;
+    });
+    expect(transport).not.toHaveBeenCalled();
+    unmount();
+    client.clear();
+  },
+);
+
+it.each(["pause", "delete"] as const)(
+  "keeps %s HTTP dispatch available when the flag is off",
+  async (action) => {
+    useAuthStore.setState({
+      user: {
+        id: "owner-one",
+        capabilities: { enabled_features: [] },
+      } as unknown as User,
+    });
+    transport.mockResolvedValueOnce(
+      json({
+        operation: { ...remoteMachineOperationFixture, action },
+        replayed: false,
+      }),
+    );
+    const client = makeClient();
+    const { result, unmount } = renderHook(useRemoteMachineAction, {
+      wrapper: wrapper(client),
+    });
+    await act(async () => {
+      await result.current.mutateAsync({
+        machineId: "machine-1",
+        body: {
+          action,
+          expected_revision: 1,
+          ...(action === "delete"
+            ? {
+                data_policy_version: "remote-machine-data",
+                acknowledge_data_loss: true,
+              }
+            : {}),
+        },
+        idempotencyKey: `flag-off-${action}`,
+      });
+    });
+    expect(transport).toHaveBeenCalledTimes(1);
+    expect(transport.mock.calls[0]?.[1]?.method).toBe(
+      action === "delete" ? "DELETE" : "POST",
+    );
+    unmount();
+    client.clear();
+  },
+);

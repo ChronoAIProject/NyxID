@@ -196,7 +196,7 @@ async fn fixture(label: &str) -> Fixture {
         owner,
         rate,
         terms: MachineRuntimeTerms {
-            profile_version: "shell-files-v1".into(),
+            profile_version: "remote-machine".into(),
             image_digest: format!("sha256:{}", "a".repeat(64)),
             policy_version: "account-balance-v1".into(),
         },
@@ -1759,7 +1759,7 @@ async fn quote_preflight_reports_live_prerequisites_without_funding_or_account_m
             .unwrap();
     let exact = f
         .billing
-        .machine_runtime_preflight(&f.owner, None)
+        .machine_runtime_preflight(&f.owner, "remote-machine", None)
         .await
         .unwrap();
     assert!(!exact.ready);
@@ -1772,7 +1772,7 @@ async fn quote_preflight_reports_live_prerequisites_without_funding_or_account_m
     let before_wallet = bson::to_document(&wallet(&f).await).unwrap();
     let view = f
         .billing
-        .machine_runtime_preflight(&f.owner, Some(&f.rate.id))
+        .machine_runtime_preflight(&f.owner, "remote-machine", None)
         .await
         .unwrap();
     assert!(view.ready);
@@ -1802,7 +1802,7 @@ async fn quote_preflight_reports_live_prerequisites_without_funding_or_account_m
     f.lago.available.store(false, Ordering::SeqCst);
     let unavailable = f
         .billing
-        .machine_runtime_preflight(&f.owner, None)
+        .machine_runtime_preflight(&f.owner, "remote-machine", None)
         .await
         .unwrap();
     assert!(!unavailable.ready);
@@ -1813,7 +1813,7 @@ async fn quote_preflight_reports_live_prerequisites_without_funding_or_account_m
         .unwrap();
     let missing = f
         .billing
-        .machine_runtime_preflight(&f.owner, None)
+        .machine_runtime_preflight(&f.owner, "remote-machine", None)
         .await
         .unwrap();
     assert_eq!(missing.wallet, "missing");
@@ -1827,3 +1827,31 @@ async fn quote_preflight_reports_live_prerequisites_without_funding_or_account_m
     );
     f.db.drop().await.unwrap();
 }
+
+#[tokio::test]
+async fn runtime_profile_rate_binding_rejects_foreign_quote_before_writes() {
+    let f = fixture("runtime_profile_quote_mismatch").await;
+    let before = bson::to_document(&wallet(&f).await).unwrap();
+    let mut foreign = f.terms.clone();
+    foreign.profile_version = "test-only-foreign-profile".into();
+    assert!(
+        f.billing
+            .quote_machine_runtime(&f.owner, foreign, &f.rate.id)
+            .await
+            .is_err()
+    );
+    assert_eq!(bson::to_document(&wallet(&f).await).unwrap(), before);
+    for collection in [QUOTE_COLLECTION, RUN_COLLECTION, INTERVAL_COLLECTION] {
+        assert_eq!(
+            f.db.collection::<Document>(collection)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
+        );
+    }
+    f.db.drop().await.unwrap();
+}
+
+#[path = "profile_binding_tests.rs"]
+mod profile_binding;

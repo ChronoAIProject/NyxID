@@ -12,10 +12,19 @@ pub const RUN_COLLECTION: &str = "machine_runtime_runs";
 pub const INTERVAL_COLLECTION: &str = "machine_runtime_intervals";
 pub const HEAD_COLLECTION: &str = "machine_runtime_heads";
 
+/// Historical rates could only describe this original fixed profile. This
+/// serde default must never follow the deployment's selected/default profile.
+pub const HISTORICAL_PROFILE_VERSION: &str = "remote-machine";
+fn historical_profile_version() -> String {
+    HISTORICAL_PROFILE_VERSION.into()
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MachineRuntimeRate {
     #[serde(rename = "_id")]
     pub id: String,
+    #[serde(default = "historical_profile_version")]
+    pub profile_version: String,
     pub metric: BillingMetric,
     pub lago_metric_code: String,
     pub plan_code: String,

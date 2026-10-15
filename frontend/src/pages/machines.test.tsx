@@ -80,6 +80,7 @@ const remoteMachines = [
 ];
 vi.mock("@/hooks/use-nodes", () => ({ useNodes: () => ({ data: nodes }) }));
 vi.mock("@/hooks/use-orgs", () => ({
+  useOrg: () => ({ data: undefined }),
   useOrgs: () => ({
     data: [
       { id: "org-admin", your_role: "admin" },
@@ -156,8 +157,18 @@ afterEach(() => {
   state.machine = undefined;
   vi.clearAllMocks();
 });
-function show() {
-  useAuthStore.setState({ user: { ...auth.user!, id: "me" } });
+function show(enabled = true) {
+  useAuthStore.setState({
+    user: {
+      ...auth.user!,
+      id: "me",
+      capabilities: {
+        enabled_features: enabled ? ["experimental:remote-machines"] : [],
+      },
+    },
+    isAuthenticated: true,
+    isLoading: false,
+  });
   return render(
     <TooltipProvider>
       <MachinesPage />
@@ -279,4 +290,20 @@ it("navigates the hosted shortcut to the shared setup form", async () => {
   expect(
     screen.queryByText("Review remote machine preflight"),
   ).not.toBeInTheDocument();
+});
+
+it("hides hosted creation when OFF while existing hosted and self-hosted management remains", async () => {
+  show(false);
+  expect(
+    screen.queryByRole("button", { name: "Create remote machine" }),
+  ).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Add a machine" })).toBeEnabled();
+  expect(screen.getAllByText("Remote work").length).toBeGreaterThan(0);
+  expect(screen.getByText("My VM")).toBeInTheDocument();
+  await userEvent.click(
+    screen.getByRole("button", { name: "View Remote work" }),
+  );
+  expect(
+    screen.getByText("Hosted details for hosted-machine"),
+  ).toBeInTheDocument();
 });

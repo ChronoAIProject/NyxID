@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import type { z } from "zod";
+import { parseCredits } from "@/lib/credits";
 import type {
   remoteMachineBillingPreflightSchema,
   remoteMachineQuotaSchema,
@@ -59,17 +60,26 @@ export function RemoteMachineQuota({
 
 export function RemoteMachineBillingPreflight({
   preflight,
+  quoteProfile,
   quoteRate,
+  quotePrice,
   now,
 }: {
   readonly preflight?: z.infer<
     typeof remoteMachineBillingPreflightSchema
   > | null;
+  readonly quoteProfile?: string | null;
   readonly quoteRate?: string | null;
+  readonly quotePrice?: string | null;
   readonly now?: number;
 }) {
   const observedNow = useObservationTime();
-  const matches = !quoteRate || preflight?.rate_version === quoteRate;
+  const matches =
+    (!quoteProfile || preflight?.profile_version === quoteProfile) &&
+    (!quoteRate || preflight?.rate_version === quoteRate) &&
+    (!quotePrice ||
+      (preflight?.credits_per_second != null &&
+        parseCredits(preflight.credits_per_second) === parseCredits(quotePrice)));
   const fresh = Boolean(
     preflight && Date.parse(preflight.valid_until) > (now ?? observedNow),
   );

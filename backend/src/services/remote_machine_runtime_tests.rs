@@ -199,6 +199,25 @@ async fn fixture(label: &str) -> Fixture {
         rate,
     }
 }
+async fn personal_remote_flag(f: &Fixture, enabled: bool) {
+    use crate::services::feature_flag_service::{self, FlagTarget, REMOTE_MACHINES_FLAG_KEY};
+    feature_flag_service::set_platform_override(
+        &f.db,
+        REMOTE_MACHINES_FLAG_KEY,
+        &FlagTarget::User(f.owner.clone()),
+        enabled,
+        &f.owner,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        feature_flag_service::personal_flag_enabled(&f.db, &f.owner, REMOTE_MACHINES_FLAG_KEY)
+            .await
+            .unwrap(),
+        enabled
+    );
+}
+
 async fn input(f: &Fixture) -> CreateMachineInput {
     let mut input = CreateMachineInput::fixed(
         &f.owner,
@@ -640,6 +659,10 @@ async fn pause_fences_execution_retains_liability_until_stop_and_manual_resume()
     .machine;
     assert_ne!(resumed.runtime_run_id, machine.runtime_run_id);
     assert_eq!(resumed.node_id, machine.node_id);
+    assert_eq!(resumed.profile, machine.profile);
+    assert_eq!(resumed.pvc_uid, machine.pvc_uid);
+    assert_eq!(resumed.pvc_name, machine.pvc_name);
+    assert!(resumed.pvc_uid.is_some());
     assert!(resumed.funded_until.unwrap() > Utc::now());
     f.db.drop().await.unwrap();
 }
@@ -1241,3 +1264,522 @@ mod journeys;
 
 #[path = "remote_machine_runtime_tests/native.rs"]
 mod native;
+
+#[tokio::test]
+async fn profile_binding_paid_tampering_has_no_hold_machine_or_outbox() {
+    let f = fixture("profile_binding_paid_tampering").await;
+    let accepted = input(&f).await;
+    let before = wallet(&f).await.reserved_credits;
+    for (field, value) in [
+        ("profile_version", json!("test-foreign-profile")),
+        ("profile_version", serde_json::Value::Null),
+        ("cpu_millis", json!(4000)),
+        ("memory_mib", json!(8192)),
+        ("workspace_gib", json!(50)),
+    ] {
+        let mut altered = accepted.clone();
+        altered.request_body[field] = value;
+        assert!(
+            lifecycle::create_machine_with_billing(&f.db, altered, f.billing.clone())
+                .await
+                .is_err()
+        );
+    }
+    let mut wrong_spec = accepted.clone();
+    wrong_spec.profile.workspace_gib = 50;
+    assert!(
+        lifecycle::create_machine_with_billing(&f.db, wrong_spec, f.billing.clone())
+            .await
+            .is_err()
+    );
+    let mut wrong_image = accepted.clone();
+    wrong_image.profile.image_digest = format!("registry.test/node@sha256:{}", "b".repeat(64));
+    assert!(
+        lifecycle::create_machine_with_billing(&f.db, wrong_image, f.billing.clone())
+            .await
+            .is_err()
+    );
+    let quote_id = accepted.request_body["quote_id"].as_str().unwrap();
+    f.db.collection::<Document>(crate::models::machine_runtime_billing::QUOTE_COLLECTION)
+        .update_one(
+            doc! {"_id":quote_id},
+            doc! {"$set":{"terms.profile_version":"test-foreign-profile"}},
+        )
+        .await
+        .unwrap();
+    assert!(
+        lifecycle::create_machine_with_billing(&f.db, accepted.clone(), f.billing.clone())
+            .await
+            .is_err()
+    );
+    assert_eq!(wallet(&f).await.reserved_credits, before);
+    for collection in [
+        MACHINES,
+        crate::models::remote_machine_outbox::COLLECTION_NAME,
+        RUN_COLLECTION,
+        INTERVAL_COLLECTION,
+    ] {
+        assert_eq!(
+            f.db.collection::<Document>(collection)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0,
+            "{collection}"
+        );
+    }
+    f.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn profile_binding_free_and_paid_creation_allocate_identical_controlled_resources() {
+    let f = fixture("profile_binding_paid_free").await;
+    let paid_input = input(&f).await;
+    let paid = lifecycle::create_machine_with_billing(&f.db, paid_input.clone(), f.billing.clone())
+        .await
+        .unwrap()
+        .machine;
+    let mut free_input = CreateMachineInput::fixed(&f.owner, true, &paid.profile.image_digest);
+    free_input.idempotency_key = Uuid::new_v4().to_string();
+    free_input.request_body["profile_version"] = json!("remote-machine");
+    let free = lifecycle::create_machine_with_billing(&f.db, free_input, f.billing.clone())
+        .await
+        .unwrap()
+        .machine;
+    assert_eq!(paid.profile, free.profile);
+    assert_eq!(
+        (
+            paid.profile.cpu_millis,
+            paid.profile.memory_mib,
+            paid.profile.workspace_gib,
+            paid.profile.ephemeral_gib
+        ),
+        (2000, 2048, 20, None)
+    );
+    let run =
+        f.db.collection::<MachineRuntimeRun>(RUN_COLLECTION)
+            .find_one(doc! {"_id":&paid.runtime_run_id})
+            .await
+            .unwrap()
+            .unwrap();
+    assert_eq!(run.terms.profile_version, paid.profile.profile_version);
+    assert_eq!(run.rate.profile_version, paid.profile.profile_version);
+    let before = wallet(&f).await.reserved_credits;
+    let mut replay = paid_input;
+    replay.request_body["profile_version"] = json!("remote-machine");
+    replay.profile.image_digest = format!("changed-default@sha256:{}", "b".repeat(64));
+    assert!(
+        lifecycle::create_machine_with_billing(&f.db, replay.clone(), f.billing.clone())
+            .await
+            .unwrap()
+            .replayed
+    );
+    assert_eq!(wallet(&f).await.reserved_credits, before);
+    f.db.collection::<Document>(RUN_COLLECTION)
+        .update_one(
+            doc! {"_id":&paid.runtime_run_id},
+            doc! {"$set":{"rate.profile_version":"test-foreign-profile"}},
+        )
+        .await
+        .unwrap();
+    assert!(
+        lifecycle::create_machine_with_billing(&f.db, replay, f.billing.clone())
+            .await
+            .is_err()
+    );
+    assert_eq!(wallet(&f).await.reserved_credits, before);
+    f.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn mounted_profile_quote_and_preflight_exclude_foreign_rates_and_bind_resources() {
+    use axum::{
+        Router,
+        body::{Body, to_bytes},
+        http::{Request, StatusCode},
+    };
+    use tower::ServiceExt;
+    async fn send(
+        app: &Router,
+        token: &str,
+        method: &str,
+        path: &str,
+        body: serde_json::Value,
+    ) -> (StatusCode, serde_json::Value) {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(path)
+                    .header("authorization", format!("Bearer {token}"))
+                    .header("content-type", "application/json")
+                    .header("idempotency-key", "profile-http-intent")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
+        )
+    }
+    let f = fixture("profile_binding_mounted_quote").await;
+    personal_remote_flag(&f, true).await;
+    let mut foreign = f.rate.clone();
+    foreign.id = Uuid::new_v4().to_string();
+    foreign.profile_version = "test-only-foreign-profile".into();
+    foreign.created_at = Utc::now() + Duration::seconds(5);
+    foreign.lago_metric_code = format!(
+        "remote_machine_running_seconds_{}",
+        foreign.id.replace('-', "")
+    );
+    f.db.collection::<MachineRuntimeRate>(RATE_COLLECTION)
+        .insert_one(&foreign)
+        .await
+        .unwrap();
+    let mut state = crate::test_utils::test_app_state(f.db.clone());
+    state.billing = f.billing.clone();
+    state.local_machine_platform = Some(Arc::new(crate::test_utils::LocalMachinePlatform {
+        profile: lifecycle::fixed_profile(format!("registry.test/node@sha256:{}", "a".repeat(64))),
+        readiness: crate::services::remote_machine_manager::PlatformReadiness {
+            configuration_ready: true,
+            manager_started: true,
+            namespace: "nyxid-machine",
+            blockers: vec![],
+            physical_acceptance: "native_state_only_no_physical_guarantee",
+            lifecycle_basis: "agent_sandbox_native_observation",
+        },
+    }));
+    let token = crate::crypto::jwt::generate_access_token(
+        &state.jwt_keys,
+        &state.config,
+        &Uuid::parse_str(&f.owner).unwrap(),
+        "read write",
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+    let (_, private) = crate::routes::build_router_with_state(state.clone());
+    let app = private.with_state(state);
+    let (status, quoted) = send(
+        &app,
+        &token,
+        "POST",
+        "/api/v1/remote-machine-quotes",
+        json!({"free_slot":false,"profile_version":"remote-machine"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{quoted}");
+    assert_eq!(quoted["rate_version"], f.rate.id);
+    assert_eq!(quoted["profile"]["profile_version"], "remote-machine");
+    assert_eq!(quoted["profile"]["cpu_millis"], 2000);
+    assert_eq!(quoted["profile"]["memory_mib"], 2048);
+    assert_eq!(quoted["profile"]["workspace_gib"], 20);
+    assert_eq!(
+        quoted["billing_preflight"]["profile_version"],
+        quoted["profile"]["profile_version"]
+    );
+    assert_eq!(
+        quoted["billing_preflight"]["rate_version"],
+        quoted["rate_version"]
+    );
+    let (status, entitlement) = send(
+        &app,
+        &token,
+        "GET",
+        "/api/v1/remote-machine-entitlement?profile_version=remote-machine",
+        serde_json::Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{entitlement}");
+    assert_eq!(
+        entitlement["billing_preflight"]["rate_version"],
+        quoted["rate_version"]
+    );
+    assert!(
+        quoted["billing_preflight"]["funds"]["estimated_seconds"].is_string(),
+        "{quoted}"
+    );
+    assert_eq!(
+        entitlement["billing_preflight"]["funds"]["estimated_seconds"],
+        quoted["billing_preflight"]["funds"]["estimated_seconds"]
+    );
+    let create = json!({"free_slot":false,"profile_version":"test-only-foreign-profile","quote_id":quoted["quote_id"],"accept_account_balance":true,
+        "policy_version":"remote-machine-mvp","data_policy_version":"remote-machine-data","acknowledge_shared_environment":true});
+    let (status, _) = send(&app, &token, "POST", "/api/v1/remote-machines", create).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(wallet(&f).await.reserved_credits, Credits::ZERO);
+    assert_eq!(
+        f.db.collection::<Document>(MACHINES)
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        0
+    );
+    f.db.collection::<Document>(RATE_COLLECTION)
+        .update_one(doc! {"_id":&f.rate.id}, doc! {"$set":{"retired":true}})
+        .await
+        .unwrap();
+    let (status, error) = send(
+        &app,
+        &token,
+        "POST",
+        "/api/v1/remote-machine-quotes",
+        json!({"free_slot":false,"profile_version":"remote-machine"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::PAYMENT_REQUIRED, "{error}");
+    assert_eq!(error["error"], "billing_provider_unavailable");
+    assert!(
+        error["message"]
+            .as_str()
+            .unwrap()
+            .contains("requested profile")
+    );
+    let (status, entitlement) = send(
+        &app,
+        &token,
+        "GET",
+        "/api/v1/remote-machine-entitlement?profile_version=remote-machine",
+        serde_json::Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{entitlement}");
+    assert_eq!(
+        entitlement["billing_preflight"]["rate_version"],
+        serde_json::Value::Null
+    );
+    assert_eq!(entitlement["billing_preflight"]["ready"], false);
+    assert_eq!(
+        entitlement["billing_preflight"]["reason"],
+        "profile_pricing_unavailable"
+    );
+    f.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn profile_binding_pre_additive_full_intent_replays_after_expiry_and_outage() {
+    use sha2::{Digest, Sha256};
+    let f = fixture("profile_binding_historical_intent").await;
+    let mut intent = input(&f).await;
+    crate::services::remote_machine_configuration::normalize_request(&mut intent.request_body)
+        .unwrap();
+    let created = lifecycle::create_machine_with_billing(&f.db, intent.clone(), f.billing.clone())
+        .await
+        .unwrap();
+    let prior_full_body: std::collections::BTreeMap<_, _> =
+        intent.request_body.as_object().unwrap().iter().collect();
+    assert!(intent.request_body.get("profile_version").is_none());
+    let digest = hex::encode(Sha256::digest(
+        serde_json::to_vec(&prior_full_body).unwrap(),
+    ));
+    f.db.collection::<Document>(OPERATIONS)
+        .update_one(
+            doc! {"_id":&created.operation.id},
+            doc! {"$set":{"request_digest":digest}},
+        )
+        .await
+        .unwrap();
+    f.db.collection::<Document>(QUOTE_COLLECTION).update_one(doc!{"_id":intent.request_body["quote_id"].as_str().unwrap()},doc!{"$set":{"accept_before":bson::DateTime::from_chrono(Utc::now()-Duration::minutes(1))}}).await.unwrap();
+    let before = wallet(&f).await.reserved_credits;
+    f.lago.available.store(false, Ordering::SeqCst);
+    intent.request_body["profile_version"] = json!("remote-machine");
+    intent.profile.image_digest = format!("changed-default@sha256:{}", "b".repeat(64));
+    assert!(
+        lifecycle::has_recorded_request(
+            &f.db,
+            &f.owner,
+            None,
+            LifecycleAction::Create,
+            &intent.idempotency_key,
+            &intent.request_body
+        )
+        .await
+        .unwrap()
+    );
+    let replay = lifecycle::create_machine_with_billing(&f.db, intent.clone(), f.billing.clone())
+        .await
+        .unwrap();
+    assert!(replay.replayed);
+    assert_eq!(replay.machine.profile, created.machine.profile);
+    assert_eq!(replay.machine.node_id, created.machine.node_id);
+    for (key, value) in [
+        ("profile_version", json!("foreign-profile")),
+        ("name", json!("changed-machine")),
+        ("quote_id", json!(Uuid::new_v4().to_string())),
+        ("capabilities", json!(["files"])),
+    ] {
+        let mut changed = intent.clone();
+        changed.request_body[key] = value;
+        assert!(
+            lifecycle::create_machine_with_billing(&f.db, changed, f.billing.clone())
+                .await
+                .is_err()
+        );
+    }
+    assert_eq!(wallet(&f).await.reserved_credits, before);
+    assert_eq!(
+        f.db.collection::<Document>(MACHINES)
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        f.db.collection::<Document>(RUN_COLLECTION)
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        1
+    );
+    f.db.drop().await.unwrap();
+}
+
+// Real lifecycle, exact billing, Mongo transactions and manager funding tick;
+// only external Lago and native Kubernetes observations are local doubles.
+#[tokio::test]
+async fn remote_flag_off_keeps_established_renewal_metering_settlement_and_delete() {
+    let f = fixture("remote_flag_off_paid_safety").await;
+    personal_remote_flag(&f, true).await;
+    let machine = start_ready_with_age(&f, window_seconds() - renewal_margin_seconds() + 5).await;
+    let before = bson::to_document(&current(&f, &machine.node_id).await).unwrap();
+    personal_remote_flag(&f, false).await;
+    assert_eq!(
+        bson::to_document(&current(&f, &machine.node_id).await).unwrap(),
+        before,
+        "changing only the personal rollout override cannot stop or rewrite a runtime"
+    );
+    let held = wallet(&f).await.reserved_credits;
+    renew(&f.db, f.billing.clone(), &machine).await.unwrap();
+    let renewed = current(&f, &machine.node_id).await;
+    assert_eq!(renewed.resource_state, ResourceState::Ready);
+    assert!(renewed.funded_until > machine.funded_until);
+    assert!(wallet(&f).await.reserved_credits > held);
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    let (observed, running) = native_fixture(&f, &renewed, true, false).await;
+    native_observe_and_settle(&f.db, f.billing.clone(), &observed, &running)
+        .await
+        .unwrap();
+    let run: MachineRuntimeRun =
+        f.db.collection(RUN_COLLECTION)
+            .find_one(doc! {"_id":&observed.runtime_run_id})
+            .await
+            .unwrap()
+            .unwrap();
+    assert_eq!(
+        run.proven_until_ns,
+        running.observed_at.timestamp_nanos_opt()
+    );
+    let paused = action(
+        &f,
+        &current(&f, &machine.node_id).await,
+        LifecycleAction::Pause,
+        json!({"action":"pause"}),
+    )
+    .await
+    .unwrap()
+    .machine;
+    let (paused, stopped) = native_fixture(&f, &paused, false, true).await;
+    native_observe_and_settle(&f.db, f.billing.clone(), &paused, &stopped)
+        .await
+        .unwrap();
+    let paused = remote_machine_native::finalize_stop(&f.db, &paused, None)
+        .await
+        .unwrap();
+    assert_eq!(paused.resource_state, ResourceState::Paused);
+    require_accounting_final(&f.db, &paused).await.unwrap();
+    let run: MachineRuntimeRun =
+        f.db.collection(RUN_COLLECTION)
+            .find_one(doc! {"_id":&paused.runtime_run_id})
+            .await
+            .unwrap()
+            .unwrap();
+    assert_eq!(run.state, MachineRuntimeRunState::Closed);
+    assert!(run.cumulative_seconds >= 1);
+    assert_eq!(wallet(&f).await.reserved_credits, Credits::ZERO);
+    assert_eq!(
+        wallet(&f).await.pending_lago_debits,
+        f.rate
+            .credits_per_second
+            .checked_mul(run.cumulative_seconds)
+            .unwrap(),
+        "settled usage accrues an exact debit before provider balance refresh"
+    );
+    let deleted = action(
+        &f,
+        &paused,
+        LifecycleAction::Delete,
+        json!({"action":"delete"}),
+    )
+    .await
+    .unwrap()
+    .machine;
+    let (deleted, _) = native_fixture(&f, &deleted, false, true).await;
+    let deleted =
+        remote_machine_native::finalize_stop(&f.db, &deleted, Some("task-owned-cleanup-double"))
+            .await
+            .unwrap();
+    assert_eq!(deleted.resource_state, ResourceState::Deleted);
+    assert!(
+        lifecycle::get_machine(&f.db, &Uuid::new_v4().to_string(), &deleted.node_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    f.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn remote_flag_off_manager_still_protects_insufficient_funds() {
+    let f = fixture("remote_flag_off_funding_protection").await;
+    personal_remote_flag(&f, true).await;
+    let machine = start_ready_with_age(&f, window_seconds() - renewal_margin_seconds() + 5).await;
+    personal_remote_flag(&f, false).await;
+    let held = wallet(&f).await.reserved_credits;
+    // Disposable fixture exhausts spendable funds without releasing existing holds.
+    f.db.collection::<Document>(WALLETS)
+        .update_one(
+            doc! {"owner_id":&f.owner},
+            doc! {"$set":{"balance_credits":held}},
+        )
+        .await
+        .unwrap();
+    let api = wiremock::MockServer::start().await;
+    let manager = crate::services::remote_machine_manager::Manager {
+        db: f.db.clone(),
+        billing: Some(f.billing.clone()),
+        api: nyxid_machine_updater::sandbox::SandboxApi::new(api.uri().parse().unwrap(), None)
+            .unwrap(),
+        storage_class: Some("local-fixture-csi".into()),
+        namespace: "nyxid-machine".into(),
+        bootstrap_base_url: "https://nyxid.test".into(),
+    };
+    manager.funding_tick().await.unwrap();
+    let stopped = current(&f, &machine.node_id).await;
+    assert_eq!(stopped.resource_state, ResourceState::Stopping);
+    assert_eq!(
+        stopped.stop_reason.as_deref(),
+        Some("runtime_funding_unavailable")
+    );
+    assert_eq!(stopped.funded_until, machine.funded_until);
+    assert_eq!(wallet(&f).await.reserved_credits, held);
+    assert!(!stopped.writer_admitted);
+    let (stopped, observation) = native_fixture(&f, &stopped, false, true).await;
+    native_observe_and_settle(&f.db, f.billing.clone(), &stopped, &observation)
+        .await
+        .unwrap();
+    let paused = remote_machine_native::finalize_stop(&f.db, &stopped, None)
+        .await
+        .unwrap();
+    assert_eq!(paused.resource_state, ResourceState::Paused);
+    require_accounting_final(&f.db, &paused).await.unwrap();
+    assert_eq!(wallet(&f).await.reserved_credits, Credits::ZERO);
+    f.db.drop().await.unwrap();
+}
