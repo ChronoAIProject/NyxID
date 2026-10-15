@@ -120,3 +120,42 @@ were building. The primary verified no compiler used this checkout's target,
 then removed only its disposable `target/debug/incremental` cache, recovering
 approximately 5 GiB. Other build artifacts/processes were not touched. Rust
 builds remain serialized and subject to a fresh capacity check.
+
+
+## Integrated implementation checkpoint — 2026-10-15
+
+Production slices are integrated on `nyxbot-manager/base`; the opening schedule
+above is historical. The current active workers are Parts 2, 3 and 4, with Parts
+1 and 5 idle. The primary owns shared registration, ingress, and Telegram wiring.
+
+- Part 1: durable personal consent, original-chat confirmation, runtime controls,
+  exact-stop recovery records, lifecycle services, and human-only HTTP handlers.
+- Part 2: persisted thread/turn/reply origins and home exclusions, ordinary key
+  confinement, transactional turn and card admission, and the shared NyxAgent
+  loop. Its ordinary HTTP adapter captures the real incoming authentication
+  context. Settlement/deletion integration and the personal producer are ongoing.
+- Part 3: personal typed egress and shared metered response handling; immutable
+  public key purpose denied across ordinary authentication, key management,
+  MCP, proxy and LLM entry points. Public runtime producers remain in progress.
+- Part 4: implementing the simple source/budget/quota setup, personal consent,
+  binding inventory and Telegram thread display against the frozen HTTP contract.
+- Primary: durable ingress receipts, exact execution/decision claims and reply
+  linkage; audience classification before execution, duplicate detection before
+  current-sender resolution, and original-private command provenance.
+
+The frozen contract is integrated as `89636d152`, followed by the command-proof
+argument on card claims and captured machine runtime scopes. Unlink must cover
+non-job machine operations with exact node/runtime/conversation/turn cancellation,
+as well as exact jobs. Public activation still requires real upstream proof.
+The pinned upstream source findings are in the
+[upstream evidence](2026-10-15-public-personal-nyxbot-upstream-evidence.md).
+Authorization to edit that separate repository is pending.
+
+Validation remains incomplete. Workspace formatting passed at `e7567a325`.
+One all-target Clippy attempt was interrupted during host paging and produced no
+result. The production-bin attempt at that snapshot reported unused consent
+imports and a missing response-stream import; fixes are integrated, and the
+attempt is still collecting diagnostics. No feature runtime tests, acceptance
+gates, CI run, browser validation, deployment, or live Telegram flow has passed.
+The dedicated MongoDB test instance passed only its transaction-capability probe.
+All A1–A17 acceptance gates remain Open.
