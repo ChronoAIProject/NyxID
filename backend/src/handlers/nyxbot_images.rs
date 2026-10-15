@@ -864,6 +864,5 @@ pub(super) async fn report_or_failure_with_stop(
 
 pub fn append_failure(text: &str, report: &ImageReport) -> String {
     let note = failure_note(report);
-    let budget = super::MAX_CHANNEL_REPLY_CHARS.saturating_sub(note.chars().count());
-    format!("{}{note}", super::excerpt(text, budget))
+    format!("{text}{note}")
 }

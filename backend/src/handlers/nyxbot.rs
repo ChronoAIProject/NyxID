@@ -56,7 +56,6 @@ pub const GATEWAY_SLUG: &str = "cmaeg";
 pub const PROVIDER_SLUG: &str = "nyxbot";
 pub const LINK_CODE_TTL_HOURS: i64 = 24;
 pub const EVENT_RETENTION_HOURS: i64 = 24;
-pub const MAX_CHANNEL_REPLY_CHARS: usize = 8000;
 
 fn canonical_platform(platform: &str) -> &str {
     match platform {
@@ -2684,38 +2683,16 @@ async fn reply_decision(
     conversation_id: &str,
     text: &str,
 ) -> AppResult<Option<(bool, bool)>> {
-    use crate::services::assistant_acknowledgement_service as acks;
-    if acks::parse_reply(text).is_none() {
-        return Ok(None);
-    }
-    // The owner's previous message: only cards raised after it are answered
-    // by a plain yes/no.
-    let since = engine::previous_user_message(&state.db, &row.user_id, conversation_id, None)
-        .await?
-        .map(|message| message.created_at);
-    let Some(decided) = acks::decide_reply(
+    let Some(decided) = crate::services::assistant_platform_reply_decision::decide_owner_reply(
         &state.db,
         &row.user_id,
-        &[conversation_id.to_owned()],
+        conversation_id,
         text,
-        since,
     )
     .await?
     else {
         return Ok(None);
     };
-    acks::audit_decision(
-        &state.db,
-        &crate::services::audit_service::AuditActor {
-            user_id: row.user_id.clone(),
-            ip_address: None,
-            user_agent: None,
-            api_key_id: None,
-            api_key_name: None,
-        },
-        &decided,
-    )
-    .await;
     Ok(Some((
         decided.status == "allowed",
         decided.trigger_run_id.is_some(),
@@ -2736,7 +2713,9 @@ async fn owner_thread(
     if let Some(home) = agent.home_conversation_id.as_deref() {
         match engine::get(&state.db, &row.user_id, home).await {
             Ok(conversation)
-                if conversation.group_id.is_none() && conversation.channel.is_none() =>
+                if conversation.group_id.is_none()
+                    && conversation.channel.is_none()
+                    && conversation.platform_thread.is_none() =>
             {
                 return Ok((home.to_owned(), true));
             }
@@ -3187,11 +3166,10 @@ async fn final_reply(mut receiver: broadcast::Receiver<Value>) -> Result<String,
 }
 
 fn bounded_reply(text: &str) -> String {
-    let text = text.trim();
-    if text.is_empty() {
+    if text.trim().is_empty() {
         "Done.".into()
     } else {
-        excerpt(text, MAX_CHANNEL_REPLY_CHARS)
+        text.into()
     }
 }
 

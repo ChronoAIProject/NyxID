@@ -127,7 +127,7 @@ pub(crate) async fn fence_admin(
     let user = db
         .collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
         .find_one_and_update(
-            doc! {"_id": actor, "is_active": true, "user_type": "person"},
+            doc! {"_id":actor,"is_active":true,"$or":[{"user_type":"person"},{"user_type":{"$exists":false}}]},
             doc! {"$inc": {"platform_admin_authority_revision": 1_i64}},
         )
         .return_document(mongodb::options::ReturnDocument::After)
@@ -369,6 +369,7 @@ pub(crate) async fn disable(
                         doc! {"$set": {"is_active": false, "status": "deleted", "updated_at": bson::DateTime::now()}, "$inc": {"route_revision": 1_i64}})
                     .session(&mut *session).await?;
             }
+            super::platform_bot_runtime_control_service::emergency_stop_in_session(&db, session, &id, delete).await?;
             Ok(row)
         }.await;
         transaction_result(result)
@@ -1189,6 +1190,14 @@ pub(crate) async fn configure_guide(
     guide: crate::models::platform_bot_config::GuideConfiguration,
     enabled: bool,
 ) -> AppResult<PlatformBotConfig> {
+    if super::platform_bot_runtime_control_service::get(&state.db, id)
+        .await?
+        .is_some()
+    {
+        return Err(AppError::Conflict(
+            "Use manager runtime controls for this profile".into(),
+        ));
+    }
     super::platform_setup_service::validate_limits(&guide.limits)?;
     if guide.anonymous_daily_credits <= crate::models::credits::Credits::ZERO
         || guide.anonymous_daily_credits > guide.limits.daily_credits
@@ -1232,6 +1241,10 @@ pub(crate) async fn configure_guide(
     session.start_transaction().and_run2(async move |session| {
         let result: AppResult<_> = async {
             fence_admin(&db, &actor, session).await?;
+            if db.collection::<Document>(crate::models::platform_bot_runtime_controls::COLLECTION_NAME)
+                .find_one(doc! {"platform_config_id": &profile.id}).session(&mut *session).await?.is_some() {
+                return Err(AppError::Conflict("Use manager runtime controls for this profile".into()));
+            }
             let live_service = db.collection::<crate::models::downstream_service::DownstreamService>(crate::models::downstream_service::COLLECTION_NAME)
                 .find_one(doc! {"_id": &reviewed_service.id}).session(&mut *session).await?
                 .ok_or_else(|| AppError::Conflict("Inference service is unavailable".into()))?;

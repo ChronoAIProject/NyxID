@@ -5,60 +5,14 @@ use crate::{
     models::{
         assistant_conversation::{AssistantConversation, COLLECTION_NAME as CONVERSATIONS},
         machine_job::{COLLECTION_NAME as JOBS, MachineJob},
-        node::{COLLECTION_NAME as NODES, Node},
     },
 };
 use futures::StreamExt;
-use mongodb::{
-    bson::{DateTime, doc},
-    options::ReturnDocument,
-};
+use mongodb::bson::{DateTime, doc};
 use serde_json::json;
-use std::{collections::HashSet, time::Duration};
 
 pub async fn conversation(state: &AppState, user: &str, id: &str) -> AppResult<()> {
-    let row = state
-        .db
-        .collection::<AssistantConversation>(CONVERSATIONS)
-        .find_one_and_update(
-            doc! {"_id":id,"user_id":user,"active_turn":{"$ne":null}},
-            doc! {"$set":{"active_turn.stop_requested":true}},
-        )
-        .return_document(ReturnDocument::After)
-        .await?;
-    let mut nodes: HashSet<String> = row
-        .as_ref()
-        .and_then(|r| r.active_turn.as_ref())
-        .map(|t| t.machine_node_ids.iter().cloned().collect())
-        .unwrap_or_default();
-    let mut jobs = state
-        .db
-        .collection::<MachineJob>(JOBS)
-        .find(doc! {"conversation_id":id,"user_id":user,"state":"running"})
-        .await?;
-    while let Some(job) = jobs.next().await {
-        nodes.insert(job?.node_id);
-    }
-    state
-        .db
-        .collection::<MachineJob>(JOBS)
-        .update_many(
-            doc! {"conversation_id":id,"user_id":user,"state":"running"},
-            doc! {"$set":{"state":"finished","finished_at":DateTime::now()}},
-        )
-        .await?;
-    // Cancelling every job in this conversation also covers background jobs
-    // started by an earlier turn. New turns have new node admission scopes.
-    let args = json!({"conversation_id":id,"turn_id":row.as_ref().and_then(|r|r.active_turn.as_ref()).map(|t|t.turn_id.as_str()).unwrap_or_default()});
-    futures::stream::iter(nodes)
-        .for_each_concurrent(16, |node| {
-            let args = args.clone();
-            async move {
-                send(state, &node, args).await;
-            }
-        })
-        .await;
-    Ok(())
+    crate::services::machine_service::cancel_conversation(state, user, id).await
 }
 
 pub async fn machine(state: &AppState, node: &str) -> AppResult<()> {
@@ -91,30 +45,7 @@ pub async fn machine(state: &AppState, node: &str) -> AppResult<()> {
             scopes.push(json!({"conversation_id":row.id,"turn_id":turn.turn_id}));
         }
     }
-    send(state, node, json!({"all":true,"scopes":scopes})).await;
+    crate::services::machine_service::send_cancel(state, node, json!({"all":true,"scopes":scopes}))
+        .await;
     Ok(())
-}
-
-async fn send(state: &AppState, id: &str, args: serde_json::Value) {
-    let work = async {
-        if let Some(node) = state
-            .db
-            .collection::<Node>(NODES)
-            .find_one(doc! {"_id":id})
-            .await?
-        {
-            super::machine_tools::dispatch(state, &node, nyxid_machine::Operation::Cancel, args)
-                .await?;
-        }
-        AppResult::Ok(())
-    };
-    if !tokio::time::timeout(Duration::from_millis(800), work)
-        .await
-        .is_ok_and(|r| r.is_ok())
-    {
-        tracing::warn!(
-            node_id = id,
-            "Machine stop delivery pending or node offline"
-        );
-    }
 }

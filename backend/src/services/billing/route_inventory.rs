@@ -109,6 +109,11 @@ pub struct BillingRouteSpec {
 #[cfg(test)]
 pub const BILLING_ROUTE_INVENTORY: &[BillingRouteSpec] = &[
     BillingRouteSpec {
+        handler: "handlers::platform_public_model::dispatch",
+        route: "/api/v1/public-nyxbot/models/{service_id}/{*path}",
+        policy: BillingRoutePolicy::Metered(BillingIngress::Proxy),
+    },
+    BillingRouteSpec {
         handler: "handlers::permission_keys::rest",
         route: "/api/v1/permission-execution/rest/{*path}",
         policy: BillingRoutePolicy::Metered(BillingIngress::Proxy),

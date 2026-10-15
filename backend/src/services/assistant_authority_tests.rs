@@ -309,6 +309,8 @@ pub(crate) async fn chat_for_row(
 
 fn orchestrator_chat() -> acks::ChatAuthority {
     acks::ChatAuthority {
+        platform_thread: false,
+        platform_origin: None,
         org_agent_access: None,
         turn_id: None,
         turn_stopped: false,

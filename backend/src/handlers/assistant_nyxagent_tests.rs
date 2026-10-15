@@ -1,4 +1,5 @@
 use super::*;
+use crate::services::assistant_nyxagent::TurnResult;
 use crate::{
     models::{
         assistant_message::{AssistantErrorDetail, AssistantMessage},
@@ -57,6 +58,9 @@ fn stream_timeout_is_the_earlier_of_transport_idle_and_no_progress() {
 fn failed_message_response_serializes_error_detail_as_rfc3339() {
     let occurred_at = Utc::now();
     let response = MessageResponse::from(AssistantMessage {
+        platform_delivery_recovery_queued: false,
+        platform_reply: None,
+        platform_origin: None,
         author: None,
         activity_total: 0,
         report_to: None,
@@ -1473,6 +1477,68 @@ async fn stale_fences_are_hidden_in_index_and_history_dtos() {
 }
 
 #[tokio::test]
+async fn settlement_recovers_the_actual_saved_reply_after_an_ambiguous_finish() {
+    let (state, _, server) = setup(None, Duration::ZERO).await;
+    let row = engine::begin_turn(
+        &state.db,
+        OWNER,
+        &engine::TurnRequest {
+            acknowledgement_id: None,
+            retry_of: None,
+            attachment_ids: Vec::new(),
+            agent_id: None,
+            conversation_id: None,
+            text: "question".into(),
+            model: None,
+            access_mode: None,
+        },
+        &state.encryption_keys,
+    )
+    .await
+    .unwrap();
+    let result = TurnResult {
+        text: "durable reply".into(),
+        session_id: None,
+        response_id: None,
+        error: None,
+    };
+    let saved_id = Uuid::new_v4().to_string();
+    engine::finish_turn(
+        &state.db,
+        &row,
+        &row.credential_api_key_id,
+        &saved_id,
+        &result,
+    )
+    .await
+    .unwrap();
+    let permit = state.direct_chat_limiter.try_acquire(OWNER).await.unwrap();
+    let (sender, _receiver) = broadcast::channel(256);
+    let settled = complete_turn(
+        &state.db,
+        &row,
+        &row.active_turn.as_ref().unwrap().turn_id,
+        "uncommitted-worker-message",
+        "block",
+        &result,
+        permit,
+        Events {
+            sender,
+            cursor: 0,
+            reset_notified: false,
+        },
+        Duration::from_secs(1),
+        || std::future::ready(Err(AppError::NotFound("turn already settled".into()))),
+    )
+    .await;
+    assert!(
+        matches!(settled, SettledExecution::Saved { message_id, error: None } if message_id == saved_id)
+    );
+    server.abort();
+    state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
 async fn settlement_failure_is_bounded_emits_terminal_error_and_releases_permit() {
     let (state, _, server) = setup(None, Duration::ZERO).await;
     let row = engine::begin_turn(
@@ -1503,7 +1569,7 @@ async fn settlement_failure_is_bounded_emits_terminal_error_and_releases_permit(
         error: None,
     };
     let attempts = AtomicUsize::new(0);
-    tokio::time::timeout(
+    let settled = tokio::time::timeout(
         Duration::from_secs(2),
         complete_turn(
             &state.db,
@@ -1529,6 +1595,7 @@ async fn settlement_failure_is_bounded_emits_terminal_error_and_releases_permit(
     )
     .await
     .unwrap();
+    assert!(matches!(settled, SettledExecution::Unconfirmed));
     assert!(attempts.load(Ordering::SeqCst) >= 2);
     assert!(limiter.try_acquire(OWNER).await.is_ok());
     let bytes = axum::body::to_bytes(response.into_body(), 10_000)
@@ -3440,7 +3507,14 @@ async fn optional_image_preparation_read_failure_does_not_start_a_round() {
     let mut images = images::ToolImages::default();
     assert!(
         !images
-            .prepare(&state, &test_auth_user(OWNER), &row, &credential, None)
+            .prepare(
+                &state,
+                http_egress(state.clone(), test_auth_user(OWNER)).as_ref(),
+                &crate::services::assistant_nyxagent_runtime::owner_context(&row).unwrap(),
+                &row,
+                &credential,
+                None
+            )
             .await
             .unwrap()
     );

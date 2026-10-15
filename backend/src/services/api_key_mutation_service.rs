@@ -11,10 +11,11 @@ use crate::{
     models::api_key::{ApiKey, COLLECTION_NAME as API_KEYS},
 };
 
-const AUTHORITY_FIELDS: [&str; 5] = [
+const AUTHORITY_FIELDS: [&str; 6] = [
     "rotation_predecessor_id",
     "state_version",
     "updated_at",
+    "purpose",
     "machine_external_fence",
     "machine_external_grants_present",
 ];
@@ -470,6 +471,11 @@ mod tests {
     fn authoritative_update_rejects_authority_overrides() {
         for update in [
             doc! { "$set": { "updated_at": bson::DateTime::now() } },
+            doc! { "$set": { "purpose": "general" } },
+            doc! { "$set": { "purpose.kind": "general" } },
+            doc! { "$unset": { "purpose": "" } },
+            doc! { "$rename": { "legacy_purpose": "purpose" } },
+            doc! { "$rename": { "legacy_purpose": "purpose.kind" } },
             doc! { "$inc": { "state_version": 10 } },
             doc! { "$unset": { "rotation_predecessor_id": "" } },
             doc! { "$rename": { "legacy_version": "state_version" } },

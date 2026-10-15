@@ -348,3 +348,16 @@ describe("before_send privacy hook", () => {
     expect(getBeforeSend()(event)).toBe(event);
   });
 });
+
+it("suppresses personal linking telemetry and strips bearer fragments from other URLs", () => {
+  initTelemetry(validArgs);
+  const options = mockPosthog.init.mock.calls.at(-1)![1] as { before_send: (event: unknown) => unknown };
+  window.history.replaceState(null, "", "/nyxbot/link");
+  expect(isTelemetryActive()).toBe(false);
+  expect(options.before_send({ properties: { $current_url: location.href } })).toBeNull();
+  window.history.replaceState(null, "", "/");
+  expect(options.before_send({ properties: { $referrer: "http://localhost/nyxbot/link#intent_token=private" } })).toBeNull();
+  const event = { properties: { $current_url: "http://localhost/services#intent_token=private" } };
+  options.before_send(event);
+  expect(event.properties.$current_url).toBe("http://localhost/services");
+});

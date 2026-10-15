@@ -20,6 +20,10 @@ pub struct MachineJob {
     pub runtime_generation: Option<u64>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub conversation_id: String,
+    /// Exact assistant turn that issued this job. Legacy rows have no turn
+    /// authority and are never selected by transport-only cancellation.
+    #[serde(default)]
+    pub issuing_turn_id: Option<String>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub api_key_id: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]

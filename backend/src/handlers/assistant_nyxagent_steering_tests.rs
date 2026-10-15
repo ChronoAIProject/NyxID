@@ -1,5 +1,6 @@
 use super::*;
 use crate::models::assistant_conversation::{COLLECTION_NAME as CONVERSATIONS, RunningResponse};
+use crate::services::assistant_nyxagent::TurnResult;
 use crate::services::assistant_steering as steering_service;
 
 struct Fixture {

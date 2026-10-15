@@ -51,6 +51,8 @@ pub struct BillingRouteContext {
     pub ingress: BillingIngress,
     pub pool_attempt: Option<crate::models::usage_meter::PoolAttemptAccounting>,
     pub machine_usage: Option<crate::models::usage_meter::MachineUsageAttribution>,
+    /// An internal durable public call reservation; never accepted from HTTP.
+    pub(crate) public_admission: Option<PublicBillingAdmission>,
     pub billing_request_id: String,
     pub billing_owner_id: String,
     pub actor_user_id: String,
@@ -85,6 +87,13 @@ pub struct BillingRouteContext {
     lane_pricing_configured: bool,
     pub(crate) platform_metered: bool,
     pub(crate) platform_billable: bool,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct PublicBillingAdmission {
+    pub call_id: String,
+    pub model_id: String,
+    pub expires_at: chrono::DateTime<chrono::Utc>,
 }
 
 impl BillingRouteContext {
@@ -168,6 +177,7 @@ impl BillingRouteContext {
             service_platform_billable = false;
         }
         Self {
+            public_admission: None,
             ingress,
             pool_attempt: None,
             machine_usage: None,

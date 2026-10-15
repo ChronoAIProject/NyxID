@@ -1,3 +1,4 @@
+import { platformThreadSchema, platformTurnOriginSchema } from "./platform-personal";
 import { DEFAULT_SCHEDULE_MINIMUM_MINUTES } from "@/lib/automation-limits";
 import { z } from "zod";
 import { machineReceiptSchema } from "./machine-activity";
@@ -78,6 +79,7 @@ export type NyxAgentChannelOrigin = z.infer<typeof nyxAgentChannelOriginSchema>;
 export const nyxAgentConversationSchema = z.object({
   id: conversationId,
   title: z.string(),
+  platform_thread: platformThreadSchema.nullish(),
   title_source: z.enum(["provisional", "generated", "user"]).optional(),
   model: z.string(),
   created_at: z.string(),
@@ -86,6 +88,7 @@ export const nyxAgentConversationSchema = z.object({
   pending_acknowledgements: z.number().int().nonnegative().default(0),
   active_turn: z
     .object({
+      platform_origin: platformTurnOriginSchema.nullish(),
       turn_id: z.string(),
       response_id: z.string().nullish(),
       steering_allowed: z.boolean().optional(),
@@ -131,6 +134,7 @@ export const nyxAgentRecoverySchema = z.object({
 });
 export type NyxAgentRecovery = z.infer<typeof nyxAgentRecoverySchema>;
 export const nyxAgentMessageSchema = z.object({
+  platform_origin: platformTurnOriginSchema.nullish(),
   recovery: nyxAgentRecoverySchema.nullable().optional(),
   feedback: z.object({ vote: z.enum(["up", "down"]), comment: z.string().nullish(), updated_at: z.string().optional() }).nullish(),
   steering: nyxAgentSteeringSchema.nullish(),

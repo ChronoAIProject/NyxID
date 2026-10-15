@@ -110,6 +110,73 @@ pub struct ChannelOrigin {
     pub platform: String,
 }
 
+/// Stable ownership of a personal manager thread. Retained after transport
+/// unlink so the owner can continue the thread in NyxID.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlatformThread {
+    pub platform: String,
+    pub profile_id: String,
+    pub manager_bot_id: String,
+    pub telegram_bot_id: i64,
+    pub binding_id: String,
+    pub binding_generation: i64,
+    pub user_id: String,
+    pub nyxbot_agent_id: String,
+}
+
+/// An event receives fresh admission; it never reuses an ingress receipt.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PlatformOriginSource {
+    Ingress {
+        receipt_id: String,
+        claim_id: String,
+    },
+    ThreadEvent {
+        admission_id: String,
+    },
+}
+
+/// Exact server-authored execution and delivery proof. Never accepted from an
+/// owner request or projected wholesale into an HTTP response.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlatformTurnOrigin {
+    pub thread: PlatformThread,
+    pub manager_authority_epoch: i64,
+    pub personal_control_revision: i64,
+    pub sender_id: i64,
+    pub chat_id: i64,
+    pub source: PlatformOriginSource,
+}
+
+/// Delivery authority is independent of a later continuation's execution.
+/// Web-only watches must not acquire a destination from a newer link.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PlatformReplyRouting {
+    WebOnly,
+    Captured {
+        origin: Box<PlatformTurnOrigin>,
+        turn_id: String,
+        #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+        expires_at: DateTime<Utc>,
+    },
+}
+
+impl std::fmt::Debug for PlatformThread {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PlatformThread")
+            .field("platform", &self.platform)
+            .finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Debug for PlatformTurnOrigin {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PlatformTurnOrigin").finish_non_exhaustive()
+    }
+}
+
 /// One tool call made with the chat's key during a live turn. Metadata only:
 /// the label is a tool identifier, never arguments, results, or secrets.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -167,6 +234,16 @@ pub struct ToolProgress {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ActiveTurn {
+    #[serde(default)]
+    pub platform_reply: Option<PlatformReplyRouting>,
+    /// One platform worker may execute an admitted turn. A lost worker is
+    /// settled by orphan recovery; its execution claim is never reopened.
+    #[serde(default)]
+    pub execution_started: bool,
+    #[serde(default)]
+    pub machine_scopes: Vec<MachineTurnScope>,
+    #[serde(default)]
+    pub platform_origin: Option<PlatformTurnOrigin>,
     /// The failed turn this turn retries (owner Retry only).
     #[serde(default)]
     pub retry_of: Option<String>,
@@ -249,6 +326,13 @@ pub struct ActiveTurn {
     pub also_deliver: Vec<ChannelOrigin>,
 }
 
+/// Runtime identity captured before a machine operation is issued.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MachineTurnScope {
+    pub node_id: String,
+    pub runtime_id: String,
+}
+
 /// Absent on old rows: their existing title is final until the owner renames it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -261,6 +345,8 @@ pub enum TitleSource {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct AssistantConversation {
+    #[serde(default)]
+    pub platform_thread: Option<PlatformThread>,
     /// Internal conversion fence; typed settlement must preserve it until exact cleanup completes.
     #[serde(default)]
     pub platform_cleanup_pending: bool,

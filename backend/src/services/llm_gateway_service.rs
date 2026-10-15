@@ -14,6 +14,12 @@ use crate::models::user_provider_token::{
 };
 use crate::services::{org_service, proxy_service, user_service_service};
 
+pub(crate) fn require_ordinary_purpose(
+    purpose: crate::models::api_key::ApiKeyPurpose,
+) -> AppResult<()> {
+    super::key_service::require_ordinary_purpose(purpose)
+}
+
 pub(crate) fn credential_class(
     resolved_via_user_service: bool,
     master_credential: bool,

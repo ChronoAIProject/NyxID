@@ -2699,6 +2699,7 @@ async fn telegram_new_manager_channel_acknowledges_before_callback_and_routes_on
         crate::handlers::telegram_new::webhook(
             axum::extract::State(state.clone()),
             headers(&state).await,
+            None,
             axum::body::Bytes::from(
                 serde_json::to_vec(&message(json!({
                     "text": "hello agent",
@@ -2723,6 +2724,7 @@ async fn telegram_new_manager_channel_acknowledges_before_callback_and_routes_on
         crate::handlers::telegram_new::webhook(
             axum::extract::State(state.clone()),
             auth_headers.clone(),
+            None,
             axum::body::Bytes::from(serde_json::to_vec(&unmatched).unwrap()),
         )
         .await
@@ -2730,6 +2732,7 @@ async fn telegram_new_manager_channel_acknowledges_before_callback_and_routes_on
         crate::handlers::telegram_new::webhook(
             axum::extract::State(state.clone()),
             auth_headers,
+            None,
             axum::body::Bytes::from(serde_json::to_vec(&json!({"managed_bot": {}})).unwrap()),
         )
         .await

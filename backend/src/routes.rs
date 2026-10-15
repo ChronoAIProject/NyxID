@@ -73,6 +73,22 @@ macro_rules! llm_billing_routes {
     };
 }
 
+macro_rules! public_nyxbot_model_billing_routes {
+    ($apply:ident, $router:expr) => {
+        $apply!($router;
+            (
+                "/public-nyxbot/models/{service_id}/{*path}",
+                "/api/v1/public-nyxbot/models/{service_id}/{*path}",
+                "handlers::platform_public_model::dispatch",
+                post(handlers::platform_public_model::dispatch),
+                crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
+                    crate::services::billing::BillingIngress::Proxy
+                )
+            ),
+        )
+    };
+}
+
 macro_rules! proxy_billing_routes {
     ($apply:ident, $router:expr) => {
         $apply!($router;
@@ -465,6 +481,10 @@ pub(crate) fn mounted_billing_route_inventory()
         ()
     ));
     routes.extend(proxy_billing_routes!(collect_billing_route_specs, ()));
+    routes.extend(public_nyxbot_model_billing_routes!(
+        collect_billing_route_specs,
+        ()
+    ));
     routes.extend(assistant_direct_billing_routes!(
         collect_billing_route_specs,
         ()
@@ -950,6 +970,28 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         );
 
     let admin_routes = Router::new()
+        .merge(if router_state.is_some() {
+            Router::new()
+                .route(
+                    "/platform-bots/{id}/runtime",
+                    get(handlers::platform_bots::get_runtime)
+                        .put(handlers::platform_bots::put_runtime),
+                )
+                .route(
+                    "/platform-bots/{id}/runtime/clear-emergency-stop",
+                    post(handlers::platform_bots::clear_runtime_emergency_stop),
+                )
+                .route(
+                    "/platform-bots/{id}/public/profiles",
+                    post(handlers::platform_bots::discover_public_profiles),
+                )
+                .route(
+                    "/platform-bots/{id}/public/readiness",
+                    post(handlers::platform_bots::probe_public_readiness),
+                )
+        } else {
+            Router::new()
+        })
         .route("/channel-bots", get(handlers::channel_bots::admin_list))
         .route(
             "/channel-bots/webhook-rejections",
@@ -1857,8 +1899,8 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         )
         .route(
             "/reply",
-            post(handlers::channel_relay::async_reply).layer(DefaultBodyLimit::max(
-                crate::services::channel_media_service::request_body_limit(
+            post(handlers::channel_relay_request::reply).layer(DefaultBodyLimit::max(
+                handlers::channel_relay_request::request_body_limit(
                     router_state
                         .as_ref()
                         .map_or(crate::config::DEFAULT_CHANNEL_MEDIA_MAX_BYTES, |state| {
@@ -1869,8 +1911,8 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         )
         .route(
             "/thread-reply",
-            post(handlers::channel_relay::async_thread_reply).layer(DefaultBodyLimit::max(
-                crate::services::channel_media_service::request_body_limit(
+            post(handlers::channel_relay_request::thread_reply).layer(DefaultBodyLimit::max(
+                handlers::channel_relay_request::request_body_limit(
                     router_state
                         .as_ref()
                         .map_or(crate::config::DEFAULT_CHANNEL_MEDIA_MAX_BYTES, |state| {
@@ -1989,6 +2031,18 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .route("/{id}/deny", post(handlers::login_approval::deny));
 
     let api_v1_public = Router::new()
+        .merge(public_nyxbot_model_billing_routes!(
+            register_billing_routes,
+            Router::new()
+        ))
+        .merge(if router_state.is_some() {
+            Router::new().route(
+                "/platform-personal-links/preview",
+                post(handlers::platform_personal_bindings::preview),
+            )
+        } else {
+            Router::new()
+        })
         .route(
             "/machines/managed/prepare",
             post(handlers::remote_machine_bootstrap::prepare)
@@ -2750,6 +2804,35 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
                 .delete(handlers::saved_logins::delete),
         )
         .route("/options/{option_set}", get(handlers::options::get_options))
+        .merge(if router_state.is_some() {
+            Router::new()
+                .route(
+                    "/platform-personal-links/review",
+                    post(handlers::platform_personal_bindings::review),
+                )
+                .route(
+                    "/platform-personal-links/approve",
+                    post(handlers::platform_personal_bindings::approve),
+                )
+                .route(
+                    "/platform-personal-links/deny",
+                    post(handlers::platform_personal_bindings::deny),
+                )
+                .route(
+                    "/platform-personal-links/status",
+                    post(handlers::platform_personal_bindings::status),
+                )
+                .route(
+                    "/platform-personal-bindings",
+                    get(handlers::platform_personal_bindings::list),
+                )
+                .route(
+                    "/platform-personal-bindings/{id}/revoke",
+                    post(handlers::platform_personal_bindings::revoke),
+                )
+        } else {
+            Router::new()
+        })
         .route(
             "/channel-bots/telegram-new/claims/preview",
             post(handlers::telegram_new::preview_claim),
@@ -3135,6 +3218,16 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
     let public_mcp_routes = public_mcp_billing_routes!(register_billing_routes, Router::new())
         .layer(DefaultBodyLimit::disable());
     let private = private.merge(mcp_transport_routes).merge(public_mcp_routes);
+    let private = if let Some(state) = router_state.as_ref() {
+        private.layer(axum::Extension(
+            crate::services::platform_manager_transport::compose(
+                state.clone(),
+                crate::handlers::assistant_team::owner_turn_settled_hook(state.clone()),
+            ),
+        ))
+    } else {
+        private
+    };
 
     (
         public_oauth.layer(middleware::from_fn(

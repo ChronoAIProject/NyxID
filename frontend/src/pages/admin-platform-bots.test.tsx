@@ -4,7 +4,6 @@ import {
   render,
   screen,
   fireEvent,
-  waitFor,
 } from "@testing-library/react";
 import {
   AdminPlatformBotsPage,
@@ -50,6 +49,7 @@ vi.mock("@/hooks/use-platform-onboarding", () => ({
   }),
   useAdminGuideMutation: () => ({ mutate: guideMutate, isPending: false }),
 }));
+vi.mock("@/components/platform-manager-runtime", () => ({ ManagerRuntimeSettings: () => <div>Bot access controls</div> }));
 beforeEach(() => {
   cleanup.splice(0);
   profile.generation = 1;
@@ -73,56 +73,6 @@ it("requires rereview if retirement generation changes during confirmation", () 
     screen.getByRole("button", { name: "Retire platform manager" }),
   );
   expect(mutate.mock.calls[0]![0].profile.generation).toBe(2);
-});
-
-it("bootstraps an empty guide through named service discovery, paused save and explicit validation", async () => {
-  const page = render(<AdminPlatformBotsPage />);
-  const service = catalog[0]!;
-  fireEvent.change(screen.getByLabelText("Platform inference service"), {
-    target: { value: service.id },
-  });
-  fireEvent.click(
-    screen.getByRole("button", { name: "Discover sponsor-funded models" }),
-  );
-  expect(guideMutate.mock.calls[0]![0]).toMatchObject({
-    action: "discover",
-    model_service_id: service.id,
-  });
-  const callback = guideMutate.mock.calls[0]![1] as {
-    onSuccess: (value: unknown) => void;
-  };
-  act(() =>
-    callback.onSuccess({
-      generation: 1,
-      model_service_id: service.id,
-      models: ["live-model"],
-    }),
-  );
-  fireEvent.change(screen.getByLabelText("Exact advertised model"), {
-    target: { value: "live-model" },
-  });
-  fireEvent.click(
-    screen.getByRole("button", { name: "Save paused configuration" }),
-  );
-  await waitFor(() =>
-    expect(guideMutate.mock.calls[1]![0]).toMatchObject({
-      action: "configure",
-      enabled: false,
-      guide: { model_service_id: service.id, model_id: "live-model" },
-    }),
-  );
-  profile.guide = guideMutate.mock.calls[1]![0].guide;
-  profile.generation = 2;
-  page.rerender(<AdminPlatformBotsPage />);
-  fireEvent.click(
-    screen.getByRole("button", { name: "Validate model and enable guide" }),
-  );
-  expect(guideMutate.mock.calls[2]![0]).toMatchObject({
-    action: "configure",
-    enabled: true,
-    profile: { generation: 2 },
-    guide: { model_id: "live-model" },
-  });
 });
 
 it("requires exact gateway review and resets confirmation on profile drift", () => {

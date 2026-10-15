@@ -371,41 +371,43 @@ pub async fn set_user_active(
         ));
     }
 
-    let _target = db
+    let target = db
         .collection::<User>(USERS)
         .find_one(doc! { "_id": target_user_id })
         .await?
         .ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
 
-    apply_user_security_state(db, target_user_id, is_active, false).await?;
+    if is_active && !target.is_active {
+        super::platform_personal_owner_lifecycle::retire(db, target_user_id, false).await?;
+    }
+    apply_user_security_state(db, target_user_id, is_active, false, target.is_active).await?;
 
-    // Revoke all sessions and deactivate API keys when disabling a user
     if !is_active {
-        revoke_all_user_sessions(db, target_user_id).await?;
-
-        key_mutations::update_many(
-            db,
-            doc! { "user_id": target_user_id, "is_active": true },
-            doc! { "$set": { "is_active": false } },
-            None,
-        )
-        .await?;
-        super::assistant_agent_credential_service::invalidate_for_owner(db, target_user_id).await?;
-        super::platform_setup_service::retire_owner(db, target_user_id, false).await?;
+        super::platform_personal_owner_lifecycle::retire(db, target_user_id, false).await?;
     }
 
     Ok(())
 }
 
-/// Source state and Machine source-epoch/outbox fence commit together. The
-/// epoch remains after re-enable, so an unswept old grant cannot revive.
+/// Account state, personal-retirement markers and Machine source-epoch/outbox
+/// fences commit together. The epoch remains after re-enable, so an unswept old
+/// grant cannot revive.
 async fn apply_user_security_state(
     db: &mongodb::Database,
     user_id: &str,
     active: bool,
     deleting: bool,
+    expected_active: bool,
 ) -> AppResult<()> {
-    apply_user_security_state_with_deletion_policy(db, user_id, active, deleting, None).await
+    apply_user_security_state_with_deletion_policy(
+        db,
+        user_id,
+        active,
+        deleting,
+        None,
+        Some(expected_active),
+    )
+    .await
 }
 
 async fn apply_user_security_state_with_deletion_policy(
@@ -414,6 +416,7 @@ async fn apply_user_security_state_with_deletion_policy(
     active: bool,
     deleting: bool,
     owner_deletion_policy: Option<&str>,
+    expected_active: Option<bool>,
 ) -> AppResult<()> {
     if let Some(policy) = owner_deletion_policy {
         validate_account_deletion_policy(policy)?;
@@ -448,9 +451,21 @@ async fn apply_user_security_state_with_deletion_policy(
                         "Account deletion has already been accepted".into(),
                     ));
                 }
+                let mut filter = doc! {"_id":&user_id};
+                if let Some(expected_active) = expected_active {
+                    filter.insert("is_active", expected_active);
+                }
+                if active {
+                    filter.insert("platform_personal_retirement_pending", doc! {"$ne":true});
+                    filter.insert("platform_personal_deleting", doc! {"$ne":true});
+                }
                 let now = bson::DateTime::now();
                 let mut set = doc! {"is_active":active,"updated_at":now};
+                if !active {
+                    set.insert("platform_personal_retirement_pending", true);
+                }
                 if deleting {
+                    set.insert("platform_personal_deleting", true);
                     let requested = current
                         .get("deletion_requested_at")
                         .filter(|value| !matches!(value, bson::Bson::Null))
@@ -460,11 +475,16 @@ async fn apply_user_security_state_with_deletion_policy(
                 }
                 let changed = db
                     .collection::<bson::Document>(USERS)
-                    .update_one(doc! {"_id":&user_id}, doc! {"$set":set})
+                    .update_one(
+                        filter,
+                        doc! {"$set":set,"$inc":{"platform_personal_effect_revision":1_i64}},
+                    )
                     .session(&mut *session)
                     .await?;
                 if changed.matched_count != 1 {
-                    return Err(AppError::NotFound("User not found".into()));
+                    return Err(AppError::Conflict(
+                        "Account state changed; refresh before retrying".into(),
+                    ));
                 }
                 if let Some(policy) = &owner_deletion_policy {
                     // Same transaction as the account/source fence. These
@@ -637,10 +657,11 @@ async fn delete_user_cascade_internal(
         false,
         true,
         owner_deletion_policy,
+        None,
     )
     .await?;
 
-    super::platform_setup_service::retire_owner(db, target_user_id, true).await?;
+    super::platform_personal_owner_lifecycle::retire(db, target_user_id, true).await?;
 
     // Org bots the user linked to their NyxBot keep an org-owned route and
     // route key; remove them so the org's bot is free for its admins.
@@ -784,7 +805,9 @@ async fn delete_user_cascade_internal(
     // Phase 3: delete the user document itself
     let user_delete_result = db
         .collection::<User>(USERS)
-        .delete_one(doc! { "_id": target_user_id })
+        .delete_one(doc! { "_id": target_user_id, "is_active": false,
+        "platform_personal_deleting": true,
+        "platform_personal_retirement_pending": {"$ne": true} })
         .await?;
 
     if user_delete_result.deleted_count != 1 {
@@ -1224,7 +1247,8 @@ mod tests {
                 &user,
                 false,
                 true,
-                Some(ACCOUNT_DELETION_POLICY_VERSION)
+                Some(ACCOUNT_DELETION_POLICY_VERSION),
+                None,
             )
             .await
             .is_err()
@@ -1238,6 +1262,16 @@ mod tests {
         assert!(unchanged.get_bool("is_active").unwrap());
         assert!(!unchanged.contains_key("deletion_requested_at"));
         assert!(!unchanged.contains_key("machine_external_security_revision"));
+        for field in [
+            "platform_personal_retirement_pending",
+            "platform_personal_deleting",
+            "platform_personal_effect_revision",
+        ] {
+            assert!(
+                !unchanged.contains_key(field),
+                "aborted source fence must also abort {field}"
+            );
+        }
         let machine = db
             .collection::<bson::Document>(machines)
             .find_one(doc! {"_id":&machine_id})
@@ -1278,6 +1312,7 @@ mod tests {
             false,
             true,
             Some(ACCOUNT_DELETION_POLICY_VERSION),
+            None,
         )
         .await
         .unwrap();
@@ -1288,6 +1323,18 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(requested.get_datetime("deletion_requested_at").is_ok());
+        assert!(
+            requested
+                .get_bool("platform_personal_retirement_pending")
+                .unwrap()
+        );
+        assert!(requested.get_bool("platform_personal_deleting").unwrap());
+        assert_eq!(
+            requested
+                .get_i64("platform_personal_effect_revision")
+                .unwrap(),
+            1
+        );
         let first_machine = db
             .collection::<bson::Document>(machines)
             .find_one(doc! {"_id":&machine_id})
@@ -1319,6 +1366,7 @@ mod tests {
             false,
             true,
             Some(ACCOUNT_DELETION_POLICY_VERSION),
+            None,
         )
         .await
         .unwrap();
