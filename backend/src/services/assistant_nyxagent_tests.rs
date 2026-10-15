@@ -1717,9 +1717,16 @@ async fn b4_retry_fences_completed_calls_carries_attachments_and_chains() {
     assert_eq!(preview.text.as_deref(), Some("send the brief"));
     assert_eq!(preview.attachments[0].id, upload.id);
     let row = get(&db, &user, &first.id).await.unwrap();
-    let page = recovery_previews(&db, &user, &first.id, &row, &[failed_reply.clone()], true)
-        .await
-        .unwrap();
+    let page = recovery_previews(
+        &db,
+        &user,
+        &first.id,
+        &row,
+        std::slice::from_ref(&failed_reply),
+        true,
+    )
+    .await
+    .unwrap();
     assert_eq!(
         page.get(&failed_reply.id).unwrap().text.as_deref(),
         Some("send the brief")
