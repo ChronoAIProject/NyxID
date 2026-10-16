@@ -45,6 +45,11 @@ pub struct ApiKey {
     #[serde(default)]
     pub state_version: i64,
 
+    /// Sticky server-owned discovery hint, set with the first Machine grant.
+    /// Never grants execution authority. New and rotated keys start false.
+    #[serde(default)]
+    pub machine_external_grants_present: bool,
+
     /// Authoritative timestamp of the latest committed mutation. Legacy rows
     /// without the field deserialize as `None`.
     #[serde(default, with = "bson_datetime::optional")]
@@ -148,6 +153,7 @@ mod tests {
             is_active: true,
             created_at: Utc::now(),
             rotation_predecessor_id: None,
+            machine_external_grants_present: false,
             state_version: 1,
             updated_at: Some(Utc::now()),
             description: None,
@@ -217,6 +223,7 @@ mod tests {
         doc.remove("scheduled_write_enabled");
         doc.remove("rotation_predecessor_id");
         doc.remove("state_version");
+        doc.remove("machine_external_grants_present");
         doc.remove("updated_at");
         let restored: ApiKey = bson::from_document(doc).expect("deserialize");
         assert_eq!(restored.rate_limit_per_second, None);
@@ -228,6 +235,7 @@ mod tests {
         assert!(!restored.scheduled_write_enabled);
         assert_eq!(restored.rotation_predecessor_id, None);
         assert_eq!(restored.state_version, 0);
+        assert!(!restored.machine_external_grants_present);
         assert_eq!(restored.updated_at, None);
     }
 

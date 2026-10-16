@@ -1,0 +1,206 @@
+# syntax=docker/dockerfile:1
+# Complete hosted Machine from current sources; cma is a named build context.
+# Ordinary self-hosted builds remain in Dockerfile.machine.
+FROM rust:1.98.1-bookworm AS builder
+ARG DEBIAN_MIRROR=deb.debian.org
+
+# libdbus-1-dev is required at compile time by the keyring crate
+RUN sed -i "s|http://deb.debian.org/|https://${DEBIAN_MIRROR}/|g; s|https://deb.debian.org/|https://${DEBIAN_MIRROR}/|g" /etc/apt/sources.list.d/debian.sources \
+    && apt-get -o Acquire::Retries=3 -o Acquire::https::Timeout=30 -o Acquire::CompressionTypes::Order::=gz update \
+    && apt-get -o Acquire::Retries=3 -o Acquire::https::Timeout=30 install -y --no-install-recommends pkg-config libdbus-1-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+
+# Copy entire workspace (needed for workspace dependency resolution).
+# `cloud-auth/` (NyxID#716) and `nyxid-crypto/` (NyxID#773) are workspace
+# members depended on by the node agent via `cli/Cargo.toml`; missing
+# either makes the workspace refuse to resolve.
+COPY Cargo.toml Cargo.lock ./
+COPY backend/ backend/
+COPY cli/ cli/
+COPY cloud-auth/ cloud-auth/
+COPY service-adapters/ service-adapters/
+COPY permissions/ permissions/
+COPY mcp-demo/ mcp-demo/
+COPY nyxid-crypto/ nyxid-crypto/
+COPY machine/ machine/
+COPY machine-updater/ machine-updater/
+COPY docs/AI_AGENT_PLAYBOOK.md docs/AI_AGENT_PLAYBOOK.md
+
+# Build only the CLI binary (includes node agent subcommand)
+ARG TARGETARCH
+# An optional snapshot-only seed contains public registry archives and index
+# metadata, never host Cargo configuration, credentials, sources, or binaries.
+ARG NYXID_CARGO_OFFLINE=0
+ARG CARGO_BUILD_JOBS=4
+RUN --mount=type=cache,id=nyxid-machine-target-${TARGETARCH},target=/build/target,sharing=locked \
+    --mount=type=cache,id=nyxid-machine-registry,target=/usr/local/cargo/registry,sharing=locked \
+    if [ "$NYXID_CARGO_OFFLINE" = 1 ]; then \
+      cp -a cli/container/public-cargo-cache/cache cli/container/public-cargo-cache/index /usr/local/cargo/registry/ \
+      && printf '%s\n' '{"dl":"https://static.crates.io/crates","api":"https://crates.io"}' \
+        > /usr/local/cargo/registry/index/index.crates.io-1949cf8c6b5b557f/config.json \
+      && cargo build --locked --offline --release -p nyxid-cli --bin nyxid; \
+    else cargo build --locked --release -p nyxid-cli --bin nyxid; fi \
+    && mkdir -p /out && cp target/release/nyxid /out/nyxid
+
+
+# Ubuntu LTS with signed Debian Chromium packages (Ubuntu's chromium is a snap).
+# Debian bookworm packages use an older glibc ABI compatible with Ubuntu noble.
+FROM ubuntu:24.04 AS desktop
+ARG TARGETARCH
+ENV DEBIAN_FRONTEND=noninteractive
+RUN --mount=type=cache,id=nyxid-machine-apt-${TARGETARCH},target=/var/cache/apt,sharing=locked \
+    rm -f /etc/apt/apt.conf.d/docker-clean \
+    && apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update \
+    && apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 install -y --no-install-recommends \
+    ca-certificates curl git gh python3 nodejs npm ripgrep build-essential pkg-config \
+    xvfb xauth x11-utils openbox dbus-x11 bubblewrap at-spi2-core fonts-liberation libdbus-1-3 openssl tini util-linux libasound2t64 libgbm1 \
+    debian-archive-keyring && rm -rf /var/lib/apt/lists/*
+ARG DEBIAN_MIRROR=deb.debian.org
+ARG DEBIAN_SECURITY_MIRROR=security.debian.org
+RUN --mount=type=cache,id=nyxid-machine-apt-${TARGETARCH},target=/var/cache/apt,sharing=locked \
+    printf '%s\n' \
+    "deb [signed-by=/usr/share/keyrings/debian-archive-keyring.gpg] https://${DEBIAN_MIRROR}/debian bookworm main" \
+    "deb [signed-by=/usr/share/keyrings/debian-archive-keyring.gpg] https://${DEBIAN_SECURITY_MIRROR}/debian-security bookworm-security main" \
+    > /etc/apt/sources.list.d/nyxid-chromium.list \
+    && printf '%s\n' 'Package: *' 'Pin: release o=Debian' 'Pin-Priority: 50' '' \
+    'Package: chromium chromium-common chromium-sandbox' 'Pin: release o=Debian' 'Pin-Priority: 990' \
+    > /etc/apt/preferences.d/nyxid-chromium \
+    && apt-get -o Acquire::Retries=3 -o Acquire::https::Timeout=30 update \
+    && apt-get -o Acquire::Retries=3 -o Acquire::https::Timeout=30 install -y --no-install-recommends chromium \
+    && rm -f /usr/lib/chromium/chrome-sandbox \
+    && rm -rf /var/lib/apt/lists/*
+RUN userdel -r ubuntu 2>/dev/null || true
+RUN useradd --uid 1000 --create-home --shell /bin/sh agent \
+    && useradd --uid 1001 --create-home --shell /usr/sbin/nologin browser \
+    && useradd --uid 1002 --create-home --shell /usr/sbin/nologin devbrowser \
+    && chmod 0700 /home/browser /home/devbrowser \
+    && mkdir -p /workspace /var/lib/nyxid-machine/desktop \
+    && chown agent:agent /workspace \
+    && chmod 0711 /var/lib/nyxid-machine /var/lib/nyxid-machine/desktop
+
+COPY cli/resources/cua/release.json /opt/nyxid/cua-release.json
+RUN python3 - <<'INSTALL'
+import hashlib,json,os,platform,tarfile,tempfile,urllib.request
+release=json.load(open('/opt/nyxid/cua-release.json'))
+arch={'aarch64':'arm64','x86_64':'x86_64'}[platform.machine()]
+asset=next(a for a in release['assets'] if a['name'].endswith('linux-'+arch+'.tar.gz'))
+with tempfile.TemporaryDirectory() as directory:
+    archive=os.path.join(directory,'driver.tar.gz')
+    digest=hashlib.sha256()
+    with urllib.request.urlopen(asset['url'],timeout=120) as response,open(archive,'wb') as output:
+        while chunk:=response.read(65536):
+            digest.update(chunk)
+            output.write(chunk)
+    assert digest.hexdigest()==asset['sha256'], 'cua release checksum mismatch'
+    with tarfile.open(archive) as tar:
+        tar.extractall(directory,filter='data')
+    os.makedirs('/opt/nyxid/cua',exist_ok=True)
+    extracted=os.path.join(directory,asset['name'].removesuffix('.tar.gz'))
+    for name in os.listdir(extracted):
+        os.rename(os.path.join(extracted,name),os.path.join('/opt/nyxid/cua',name))
+INSTALL
+COPY --from=builder /out/nyxid /usr/local/bin/nyxid
+COPY cli/resources/remote-machine/fixed-machine.profile /usr/share/nyxid/remote-machine/
+COPY cli/container/hosted-entrypoint.sh /usr/local/bin/nyxid-machine-entrypoint
+COPY cli/container/desktop-session.sh /usr/local/bin/nyxid-desktop-session
+COPY cli/container/desktop-start.sh /usr/local/bin/nyxid-machine-desktop-start
+COPY cli/container/healthcheck.sh /usr/local/bin/nyxid-machine-healthcheck
+ENV DISPLAY=:99 XAUTHORITY=/var/lib/nyxid-machine/desktop/Xauthority \
+    NYXID_DEV_DISPLAY=:100 NYXID_DEV_XAUTHORITY=/var/lib/nyxid-machine/desktop/dev-Xauthority \
+    CUA_DRIVER_RS_TELEMETRY_ENABLED=false CUA_DRIVER_RS_UPDATE_CHECK=false
+RUN chmod 0755 /usr/local/bin/nyxid-machine-entrypoint /usr/local/bin/nyxid-desktop-session \
+        /usr/local/bin/nyxid-machine-desktop-start /usr/local/bin/nyxid-machine-healthcheck \
+    && NYXID_MACHINE_CONTAINER=1 /usr/local/bin/nyxid node machine-browser-install --port 32248
+VOLUME ["/workspace", "/var/lib/nyxid-machine"]
+WORKDIR /workspace
+ENTRYPOINT ["/usr/bin/tini", "-g", "--", "/usr/local/bin/nyxid-machine-entrypoint"]
+
+HEALTHCHECK --interval=10s --timeout=5s --start-period=90s --retries=3 CMD ["/usr/local/bin/nyxid-machine-healthcheck"]
+
+# Override this empty stage with --build-context public-heca-archive=/path/to/public-archive.
+FROM scratch AS public-heca-archive
+
+FROM desktop AS tools
+USER root
+ARG TARGETARCH
+
+# Match CMA's reviewed Node and provider artifacts. The bundled npm is used
+# only in this stage; the final image keeps the base image's package manager.
+ARG NODE_VERSION=24.19.0
+RUN set -eu; \
+    case "$TARGETARCH" in \
+      amd64) arch=x64; sha=14b342e71204f811bde6153be8e04b62aef63c236fef92b55f9c83154b409647 ;; \
+      arm64) arch=arm64; sha=01443c1e1a29e531ccad5a46fefa6df490d2189c49f7955904aecdbb0fe86fdc ;; \
+      *) echo "Unsupported architecture: $TARGETARCH" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL --retry 3 --connect-timeout 15 --max-time 600 \
+      "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${arch}.tar.xz" -o /tmp/node.tar.xz; \
+    printf '%s  %s\n' "$sha" /tmp/node.tar.xz | sha256sum -c -; \
+    mkdir -p /opt/cma-node; \
+    tar -xJf /tmp/node.tar.xz -C /opt/cma-node --strip-components=1; \
+    rm /tmp/node.tar.xz
+ENV PATH=/opt/cma-node/bin:$PATH
+ARG CODEX_VERSION=0.147.0
+ARG CODEX_ACP_VERSION=1.4.0
+RUN set -eu; \
+    npm install --global --prefix /usr/local --no-audit --no-fund \
+      "@openai/codex@${CODEX_VERSION}" "@agentclientprotocol/codex-acp@${CODEX_ACP_VERSION}"; \
+    test "$(node --version)" = "v${NODE_VERSION}"; \
+    test "$(codex --version)" = "codex-cli ${CODEX_VERSION}"; \
+    test "$(node -p "require('/usr/local/lib/node_modules/@agentclientprotocol/codex-acp/package.json').version")" = "$CODEX_ACP_VERSION"; \
+    printf '%s\n' \
+      '134063e133f0b4244fa3b251acf973d4fe4b4aeeacbdc135211bf480f59f1477  /usr/local/lib/node_modules/@openai/codex/bin/codex.js' \
+      'ba74f54f7c89ba61858e544eb3afefbb0c1b90f2b23a136664828816a8430dbf  /usr/local/lib/node_modules/@agentclientprotocol/codex-acp/dist/index.js' | sha256sum -c -; \
+    case "$TARGETARCH" in \
+      amd64) package=codex-linux-x64; triple=x86_64-unknown-linux-musl; sha=cb0a15567e9a60a5820d54b0f6ae86d504dc3805c1eab21a47f70e3eb7b73a40 ;; \
+      arm64) package=codex-linux-arm64; triple=aarch64-unknown-linux-musl; sha=e23d0be344d2496986c985cd3db61e6f649b1ddd900e6afc1b5aaabbffcbb4e2 ;; \
+    esac; \
+    printf '%s  %s\n' "$sha" \
+      "/usr/local/lib/node_modules/@openai/codex/node_modules/@openai/$package/vendor/$triple/bin/codex" | sha256sum -c -
+
+# Reuse CMA's exact patches, in their enforced order. Source is a read-only
+# build mount, never a runtime copy of the private repository or host HOME.
+RUN --mount=type=bind,from=cma,source=api/crates/layer3-adapter/src/codex,target=/tmp/cma-codex-source,readonly \
+    node /tmp/cma-codex-source/persist_conversations.cjs \
+    && node /tmp/cma-codex-source/subscription_auth.cjs \
+    && node /tmp/cma-codex-source/managed_model_catalog.cjs \
+    && printf '%s\n' 'af393f07cda5fcea0c89b2659440094ebe31ca1c65b1920457b4126de4b7d602  /usr/local/lib/node_modules/@agentclientprotocol/codex-acp/dist/index.js' | sha256sum -c -
+
+ARG HECA_VERSION=0.1.0-nightly-20260929-1
+# Optional public release archive input; both paths use the same checksum below.
+RUN --mount=type=bind,from=public-heca-archive,source=/,target=/tmp/nyxid-public-heca-archive,readonly \
+    set -eu; \
+    case "$TARGETARCH" in \
+      amd64) arch=x86_64; sha=5048918d5e61c9745dbee6fc72b01dfdefb238ac2ab2ea209c7797c4c293ff37 ;; \
+      arm64) arch=aarch64; sha=06d0e26ce595d3000574e27b62eec82eb056f979739c604ceb6047d04afde298 ;; \
+    esac; \
+    if [ -f /tmp/nyxid-public-heca-archive/heca.tar.gz ]; then \
+      cp /tmp/nyxid-public-heca-archive/heca.tar.gz /tmp/heca.tar.gz; \
+    else \
+      curl -fsSL --retry 3 --connect-timeout 15 --max-time 600 \
+        "https://github.com/getheca/heca-artifacts/releases/download/${HECA_VERSION}/heca-cli-${HECA_VERSION}-linux-${arch}.tar.gz" -o /tmp/heca.tar.gz; \
+    fi; \
+    printf '%s  %s\n' "$sha" /tmp/heca.tar.gz | sha256sum -c -; \
+    mkdir -p /tmp/heca /opt/heca; \
+    tar -xzf /tmp/heca.tar.gz -C /tmp/heca; \
+    for binary in heca heca-daemon heca-mcp-server; do \
+      install -m 0755 "/tmp/heca/$binary" "/opt/heca/$binary"; \
+    done; \
+    rm -rf /tmp/heca /tmp/heca.tar.gz
+
+FROM desktop AS hosted
+# Inherit the full Machine entrypoint, healthcheck, volumes and security users.
+# These are on-demand command-user tools, not a second Machine supervisor.
+COPY --from=tools /opt/cma-node/bin/node /usr/local/bin/node
+COPY --from=tools /usr/local/lib/node_modules/@openai /usr/local/lib/node_modules/@openai
+COPY --from=tools /usr/local/lib/node_modules/@agentclientprotocol /usr/local/lib/node_modules/@agentclientprotocol
+COPY --from=tools /opt/heca/ /usr/local/bin/
+RUN ln -s ../lib/node_modules/@openai/codex/bin/codex.js /usr/local/bin/codex \
+    && ln -s ../lib/node_modules/@agentclientprotocol/codex-acp/dist/index.js /usr/local/bin/codex-acp \
+    && test "$(node --version)" = 'v24.19.0' \
+    && test "$(codex --version)" = 'codex-cli 0.147.0' \
+    && test "$(heca --version)" = 'heca 0.1.0-nightly-20260929-1' \
+    && heca-daemon --help > /dev/null \
+    && heca-mcp-server --help > /dev/null

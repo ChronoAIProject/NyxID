@@ -1,3 +1,4 @@
+import { MachineGrantConsent } from "@/components/shared/machine-grant-consent";
 import { useEffect, useState } from "react";
 import { AlertTriangle, ArrowRight, Check, ChevronDown } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
@@ -53,6 +54,8 @@ export function OAuthIncrementalConsentPage({
   const email = useAuthStore((state) => state.user?.email);
   const { data: services, isLoading, isError } = useUserServices();
   const [optionalIds, setOptionalIds] = useState<readonly string[]>([]);
+  const [preparedMachineRequest, setPreparedMachineRequest] = useState<string | null>(null);
+  const machineScope = Boolean(request?.scope.split(/\s+/).includes("machine"));
   const [expired, setExpired] = useState(() =>
     request ? request.exp * 1000 <= Date.now() : false,
   );
@@ -97,6 +100,7 @@ export function OAuthIncrementalConsentPage({
   const blocked = Boolean(
     error ||
     expired ||
+    (machineScope && !preparedMachineRequest) ||
     (needsServiceInventory && (isLoading || isError || unavailable.length)),
   );
   const errorMessage =
@@ -391,6 +395,7 @@ export function OAuthIncrementalConsentPage({
                     />
                   </div>
                 </details>
+                {machineScope && <MachineGrantConsent consentRequest={request.token} onPrepared={setPreparedMachineRequest} disabled={expired} allowedServiceIds={snapshot.allow_all_services ? undefined : [...new Set([...currentIds, ...additions])]} />}
                 <form
                   method="POST"
                   action="/oauth/authorize/incremental/decision"
@@ -399,7 +404,7 @@ export function OAuthIncrementalConsentPage({
                   <input
                     type="hidden"
                     name="consent_request"
-                    value={request.token}
+                    value={preparedMachineRequest ?? request.token}
                   />
                   <input
                     type="hidden"

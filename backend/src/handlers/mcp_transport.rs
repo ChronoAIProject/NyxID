@@ -633,6 +633,9 @@ fn untracked_discovery_allowed(name: Option<&str>) -> bool {
 /// limits, and audit attribution.
 #[derive(Debug, Clone)]
 struct McpAuthContext {
+    /// Derived only from verified OAuth claims or a live authenticated key.
+    /// No source lookup occurs for unrelated tools; Machine admission is live.
+    machine_source: Option<crate::services::machine_external_grant_service::VerifiedExternalSource>,
     caller_token: Option<proxy_service::CallerToken>,
     chat: Option<crate::services::assistant_acknowledgement_service::ChatAuthority>,
     account_acknowledged: bool,
@@ -672,6 +675,7 @@ struct McpAuthContext {
 impl McpAuthContext {
     fn user(user_id: String, auth_method: AuthMethod) -> Self {
         Self {
+            machine_source: None,
             caller_token: None,
             chat: None,
             account_acknowledged: false,
@@ -816,21 +820,31 @@ fn mcp_extract_user_agent(headers: &HeaderMap) -> Option<String> {
 /// without the flag, return 401 so the client re-presents its token.
 ///
 /// On failure returns an MCP-formatted 401 response with `WWW-Authenticate`.
-#[allow(clippy::result_large_err)]
 enum McpAuthentication {
     Ordinary(Box<McpAuthContext>),
     Public(Box<crate::services::platform_public_tools::PublicMcpAuthority>),
 }
 
-#[allow(clippy::result_large_err)]
 async fn authenticate_mcp(
     state: &AppState,
     headers: &HeaderMap,
     session_fallback: bool,
-) -> Result<McpAuthContext, Response> {
-    match authenticate_mcp_or_public(state, headers, session_fallback, false).await? {
+) -> Result<McpAuthContext, Box<Response>> {
+    authenticate_mcp_for_method(state, headers, session_fallback, axum::http::Method::POST).await
+}
+
+async fn authenticate_mcp_for_method(
+    state: &AppState,
+    headers: &HeaderMap,
+    session_fallback: bool,
+    method: axum::http::Method,
+) -> Result<McpAuthContext, Box<Response>> {
+    match authenticate_mcp_or_public(state, headers, session_fallback, false, method)
+        .await
+        .map_err(Box::new)?
+    {
         McpAuthentication::Ordinary(auth) => Ok(*auth),
-        McpAuthentication::Public(_) => Err(mcp_403_api_key_insufficient_scope()),
+        McpAuthentication::Public(_) => Err(Box::new(mcp_403_api_key_insufficient_scope())),
     }
 }
 
@@ -840,6 +854,7 @@ async fn authenticate_mcp_or_public(
     headers: &HeaderMap,
     session_fallback: bool,
     allow_public: bool,
+    method: axum::http::Method,
 ) -> Result<McpAuthentication, Response> {
     let request_ip = mcp_extract_ip(headers);
     let request_ua = mcp_extract_user_agent(headers);
@@ -916,6 +931,14 @@ async fn authenticate_mcp_or_public(
                     .await
                     .map_err(axum::response::IntoResponse::into_response)?;
                 return Ok(McpAuthentication::Ordinary(Box::new(McpAuthContext {
+                    machine_source: if chat.is_none()
+                        && !auth::is_assistant_conversation_key_candidate(&api_key)
+                    {
+                        crate::services::machine_external_grant_service::VerifiedExternalSource::from_verified_api_key(
+                            &api_key, credential_id.as_deref()).ok()
+                    } else {
+                        None
+                    },
                     caller_token: proxy_service::caller_bearer_token_for_downstream(headers, false),
                     scope: api_key.scopes.clone(),
                     resource_uris: None,
@@ -962,7 +985,10 @@ async fn authenticate_mcp_or_public(
     let token = headers
         .get("authorization")
         .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.strip_prefix("Bearer "));
+        .and_then(|s| {
+            s.strip_prefix("Bearer ")
+                .or_else(|| s.strip_prefix("DPoP "))
+        });
 
     // A raw API key must never acquire an unrelated stored MCP session via
     // bearer/JWT fallback. Public-purpose keys have no session authority.
@@ -991,6 +1017,27 @@ async fn authenticate_mcp_or_public(
     if let Some(token) = token {
         match jwt::verify_token(&state.jwt_keys, &state.config, token) {
             Ok(claims) if claims.token_type == "access" => {
+                // Manual MCP authentication preserves the same sender-bound
+                // proof checks as the REST extractor. It never turns a bound
+                // token into an ordinary bearer for Machine execution.
+                if let Some(cnf) = claims.cnf.as_ref() {
+                    let request = axum::http::Request::builder()
+                        .method(method.clone())
+                        .uri("/mcp")
+                        .body(())
+                        .map_err(|_| mcp_401(&state.config.base_url))?;
+                    let (mut parts, _) = request.into_parts();
+                    parts.headers = headers.clone();
+                    if let Some(jkt) = cnf.jkt.as_deref() {
+                        auth::validate_dpop_bound_access(&parts, state, jkt)
+                            .await
+                            .map_err(|_| mcp_401(&state.config.base_url))?;
+                    }
+                    if let Some(x5t) = cnf.x5t_s256.as_deref() {
+                        auth::validate_mtls_bound_access(&parts, state, x5t)
+                            .map_err(|_| mcp_401(&state.config.base_url))?;
+                    }
+                }
                 if !auth::scope_allows_rest_proxy(&claims.scope) {
                     return Err(mcp_403_insufficient_scope());
                 }
@@ -1050,6 +1097,20 @@ async fn authenticate_mcp_or_public(
                 };
 
                 let mut ctx = McpAuthContext::user(user_id, auth_method);
+                if claims.resources.as_ref().is_none_or(|resources| {
+                    // Existing OAuth issuance serializes an omitted RFC 8707
+                    // resource as Some([]). Only a nonempty list narrows the
+                    // audience; Machine scope and protected consent still apply.
+                    resources.is_empty()
+                        || resources.iter().any(|resource| {
+                            crate::services::oauth_resource_service::is_mcp_resource(
+                                &state.config,
+                                resource,
+                            )
+                        })
+                }) {
+                    ctx.machine_source = crate::services::machine_external_grant_service::VerifiedExternalSource::from_verified_oauth(&claims).ok();
+                }
                 ctx.caller_token =
                     proxy_service::caller_bearer_token_for_downstream(headers, false);
                 if matches!(
@@ -1266,6 +1327,44 @@ fn mcp_service_scope(auth: &McpAuthContext) -> mcp_service::ServiceScope<'_> {
 }
 
 #[cfg(test)]
+pub(crate) async fn external_machine_source_for_test(
+    state: &AppState,
+    raw_key: &str,
+) -> crate::errors::AppResult<crate::services::machine_external_grant_service::VerifiedExternalSource>
+{
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "x-api-key",
+        axum::http::HeaderValue::from_str(raw_key)
+            .map_err(|_| crate::errors::AppError::MachineNotAllowed)?,
+    );
+    authenticate_mcp(state, &headers, false)
+        .await
+        .map_err(|_| crate::errors::AppError::MachineNotAllowed)?
+        .machine_source
+        .ok_or(crate::errors::AppError::MachineNotAllowed)
+}
+
+#[cfg(test)]
+pub(crate) async fn external_machine_oauth_source_for_test(
+    state: &AppState,
+    bearer: &str,
+) -> crate::errors::AppResult<crate::services::machine_external_grant_service::VerifiedExternalSource>
+{
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        axum::http::header::AUTHORIZATION,
+        axum::http::HeaderValue::from_str(&format!("Bearer {bearer}"))
+            .map_err(|_| crate::errors::AppError::MachineNotAllowed)?,
+    );
+    authenticate_mcp(state, &headers, false)
+        .await
+        .map_err(|_| crate::errors::AppError::MachineNotAllowed)?
+        .machine_source
+        .ok_or(crate::errors::AppError::MachineNotAllowed)
+}
+
+#[cfg(test)]
 pub(super) async fn assert_oauth_service_scope(
     state: &AppState,
     access_token: &str,
@@ -1400,7 +1499,15 @@ pub async fn mcp_post(
     // `initialize` requires a valid JWT or API key (no session exists yet).
     // All other methods allow session-based auth fallback.
     let is_initialize = request.method == "initialize";
-    let auth = match authenticate_mcp_or_public(&state, &headers, !is_initialize, true).await {
+    let auth = match authenticate_mcp_or_public(
+        &state,
+        &headers,
+        !is_initialize,
+        true,
+        axum::http::Method::POST,
+    )
+    .await
+    {
         Ok(McpAuthentication::Ordinary(a)) => *a,
         Ok(McpAuthentication::Public(a)) => {
             return handle_public_rpc(&state, &headers, &body, &request, &a).await;
@@ -1642,10 +1749,11 @@ async fn resolve_session(
 // ---------------------------------------------------------------------------
 
 pub async fn mcp_get(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    let auth = match authenticate_mcp(&state, &headers, true).await {
-        Ok(a) => a,
-        Err(resp) => return resp,
-    };
+    let auth =
+        match authenticate_mcp_for_method(&state, &headers, true, axum::http::Method::GET).await {
+            Ok(a) => a,
+            Err(resp) => return *resp,
+        };
 
     if let Err(e) = crate::mw::rate_limit::check_agent_rate_limit_raw(
         &state.per_agent_limiter,
@@ -1730,9 +1838,11 @@ pub async fn mcp_get(State(state): State<AppState>, headers: HeaderMap) -> Respo
 // ---------------------------------------------------------------------------
 
 pub async fn mcp_delete(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    let auth = match authenticate_mcp(&state, &headers, true).await {
+    let auth = match authenticate_mcp_for_method(&state, &headers, true, axum::http::Method::DELETE)
+        .await
+    {
         Ok(a) => a,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
 
     if let Err(e) = crate::mw::rate_limit::check_agent_rate_limit_raw(
@@ -1999,6 +2109,14 @@ async fn handle_tools_list(
         tool_defs.push(crate::services::assistant_upload_service::definition());
         tool_defs.push(crate::services::assistant_upload_service::list_definition());
         tool_defs.push(crate::services::assistant_nyxagent::conversation_history_definition());
+    } else if auth.chat.is_none()
+        && let Some(source) = auth.machine_source.as_ref()
+        && let Ok(tools) = Box::pin(crate::services::machine_external_service::definitions(
+            state, source,
+        ))
+        .await
+    {
+        tool_defs.extend(tools);
     }
 
     let tools_json: Vec<serde_json::Value> = tool_defs
@@ -3699,48 +3817,72 @@ async fn handle_attachment_read(
     }
 }
 
-async fn handle_machine_tool(
-    state: &AppState,
-    auth: &McpAuthContext,
-    tool_name: &str,
+fn handle_machine_tool<'a>(
+    state: &'a AppState,
+    auth: &'a McpAuthContext,
+    tool_name: &'a str,
     arguments: serde_json::Value,
     request_id: Option<serde_json::Value>,
-) -> Response {
-    let Some(chat) = auth.chat.as_ref().filter(|chat| !chat.guest) else {
-        return tool_result(
-            request_id,
-            "Machines require an assistant chat key on an owner turn",
-            true,
-        );
-    };
-    // Keep the machine adapter's dispatch/confirmation future off the common
-    // MCP router stack. Unrelated callers do not allocate or enter this branch.
-    match Box::pin(super::machine_tools::call(
-        state, chat, tool_name, arguments,
-    ))
-    .await
-    {
-        Ok(value) => tool_result(
-            request_id,
-            &crate::services::assistant_access_policy::with_frontend(
-                value.clone(),
-                &state.config.frontend_url,
-            )
-            .to_string(),
-            value.get("error").is_some() || value["isError"] == true,
-        ),
-        Err(error) => tool_result(
-            request_id,
-            &crate::services::assistant_account_tools::error_result_for(
-                error,
-                Some(chat),
-                &state.config.frontend_url,
-            )
-            .value
-            .to_string(),
-            true,
-        ),
-    }
+) -> futures::future::BoxFuture<'a, Response> {
+    Box::pin(async move {
+        if auth.chat.is_none()
+            && let Some(source) = auth.machine_source.as_ref()
+        {
+            return match Box::pin(crate::services::machine_external_service::dispatch(
+                state, source, tool_name, arguments,
+            ))
+            .await
+            {
+                Ok(value) => tool_result(
+                    request_id,
+                    &value.to_string(),
+                    value.get("error").is_some() || value["isError"] == true,
+                ),
+                Err(error) => tool_result(
+                    request_id,
+                    &crate::services::assistant_account_tools::error_result(error)
+                        .value
+                        .to_string(),
+                    true,
+                ),
+            };
+        }
+        let Some(chat) = auth.chat.as_ref().filter(|chat| !chat.guest) else {
+            return tool_result(
+                request_id,
+                "Machines require an assistant chat key on an owner turn",
+                true,
+            );
+        };
+        // Keep the machine adapter's dispatch/confirmation future off the common
+        // MCP router stack. Unrelated callers do not allocate or enter this branch.
+        match Box::pin(super::machine_tools::call(
+            state, chat, tool_name, arguments,
+        ))
+        .await
+        {
+            Ok(value) => tool_result(
+                request_id,
+                &crate::services::assistant_access_policy::with_frontend(
+                    value.clone(),
+                    &state.config.frontend_url,
+                )
+                .to_string(),
+                value.get("error").is_some() || value["isError"] == true,
+            ),
+            Err(error) => tool_result(
+                request_id,
+                &crate::services::assistant_account_tools::error_result_for(
+                    error,
+                    Some(chat),
+                    &state.config.frontend_url,
+                )
+                .value
+                .to_string(),
+                true,
+            ),
+        }
+    })
 }
 
 /// `nyx__call_tool` -- universal proxy that lets clients invoke any connected
@@ -4204,6 +4346,14 @@ async fn handle_meta_search(
     if let Some(chat) = auth.chat.as_ref().filter(|chat| !chat.guest) {
         candidates.extend(Box::pin(machine_discovery_definitions(state, chat)).await);
         candidates.push(crate::services::assistant_upload_service::definition());
+    } else if auth.chat.is_none()
+        && let Some(source) = auth.machine_source.as_ref()
+        && let Ok(tools) = Box::pin(crate::services::machine_external_service::definitions(
+            state, source,
+        ))
+        .await
+    {
+        candidates.extend(tools);
     }
     let results: Vec<_> = mcp_service::rank_search_candidates(candidates, query)
         .into_iter()
@@ -5746,10 +5896,11 @@ mod tests {
             let mut headers = HeaderMap::new();
             headers.insert(name, value.parse().unwrap());
             headers.insert("mcp-session-id", "unrelated-owner-session".parse().unwrap());
-            let failure = authenticate_mcp_or_public(&state, &headers, true, true)
-                .await
-                .err()
-                .expect("unproven public runtime denied");
+            let failure =
+                authenticate_mcp_or_public(&state, &headers, true, true, axum::http::Method::POST)
+                    .await
+                    .err()
+                    .expect("unproven public runtime denied");
             assert_eq!(failure.status(), StatusCode::CONFLICT);
             assert!(authenticate_mcp(&state, &headers, true).await.is_err());
         }
@@ -5828,6 +5979,7 @@ mod tests {
 
     fn api_key_auth(allowed_service_ids: Vec<String>) -> McpAuthContext {
         McpAuthContext {
+            machine_source: None,
             caller_token: None,
             chat: None,
             account_acknowledged: false,

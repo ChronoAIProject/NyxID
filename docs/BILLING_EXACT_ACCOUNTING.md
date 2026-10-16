@@ -276,6 +276,8 @@ unchanged.
 
 ## D6. API and clients
 
+Remote Machine runtime rates additionally bind immutable `profile_version` to the controlled resource spec. New staging accepts only the approved `remote-machine` profile and exact 0.000040 Credits/second; historical settlement reads retain their accepted exact prices. Quote and preflight share the profile/plan/sync/verification/retirement selector, while pinned quotes and active runs validate their original rate/profile/price/terms without repricing. Missing `profile_version` only in historical rates (including embedded run snapshots) means literal `remote-machine`, established by the original sole-profile constructor; explicit null and unknown bindings do not admit. No migration, ledger rewrite or recharge is performed. Upgrade every backend replica and runtime billing worker before enabling any additional profile's rates. See [Remote Machine API contracts](REMOTE_NYX_MACHINE_FINAL_READ_CONTRACTS.md#controlled-profile-and-runtime-rate-contract-2026-10-15).
+
 Exact API amounts are additive Credits fields encoded as decimal strings. Wallets
 expose balance, reserved, pending debits/expiry, available, available with overdraft
 and overdraft cap. Usage exposes estimated, wallet, grant and allowance credits.

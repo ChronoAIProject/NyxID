@@ -1181,6 +1181,10 @@ pub async fn delete_node(
     Path(node_id): Path<String>,
 ) -> AppResult<impl IntoResponse> {
     let user_id_str = auth_user.user_id.to_string();
+    crate::services::remote_machine_service::guard_legacy_node_mutation(
+        &state.db, &node_id, "delete",
+    )
+    .await?;
     let node = node_service::get_node(&state.db, &user_id_str, &node_id).await?;
 
     node_service::delete_node(&state.db, &user_id_str, &node_id).await?;
@@ -1222,6 +1226,10 @@ pub async fn rotate_token(
     Path(node_id): Path<String>,
 ) -> AppResult<Json<RotateTokenResponse>> {
     let user_id_str = auth_user.user_id.to_string();
+    crate::services::remote_machine_service::guard_legacy_node_mutation(
+        &state.db, &node_id, "rotate",
+    )
+    .await?;
     let node = node_service::get_node(&state.db, &user_id_str, &node_id).await?;
 
     let (raw_token, raw_signing_secret) =
@@ -1282,6 +1290,10 @@ pub async fn transfer_node(
     Json(body): Json<TransferNodeRequest>,
 ) -> AppResult<Json<TransferNodeResponse>> {
     let user_id_str = auth_user.user_id.to_string();
+    crate::services::remote_machine_service::guard_legacy_node_mutation(
+        &state.db, &node_id, "transfer",
+    )
+    .await?;
     let node = node_service::get_node(&state.db, &user_id_str, &node_id).await?;
     let previous_owner = node_service::owner_info_for_node(&state.db, &node).await?;
 
@@ -6338,6 +6350,10 @@ pub async fn machine_settings(
     Json(input): Json<MachineSettingsRequest>,
 ) -> AppResult<StatusCode> {
     super::login_client_context::require_first_party_human(&auth)?;
+    crate::services::remote_machine_service::guard_legacy_node_mutation(
+        &state.db, &node_id, "update",
+    )
+    .await?;
     let node = node_service::get_node_by_id(&state.db, &node_id)
         .await?
         .ok_or_else(|| AppError::NodeNotFound("Machine not found".into()))?;

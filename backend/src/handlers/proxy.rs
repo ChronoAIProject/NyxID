@@ -3546,6 +3546,17 @@ async fn resolve_proxy_execution_inner(
         )
     };
 
+    if request
+        .extensions()
+        .get::<crate::services::machine_gateway_service::MachineUsageAttribution>()
+        .is_some_and(|origin| matches!(origin.principal_kind, "oauth" | "api_key"))
+        && (target.service.forward_access_token || target.service.inject_delegation_token)
+    {
+        return Err(AppError::Forbidden(
+            "This Machine gateway request has no compatible source bearer for token forwarding or delegation".into(),
+        ));
+    }
+
     Ok((
         ResolvedProxyExecution {
             machine_ingress,
@@ -4002,7 +4013,7 @@ async fn execute_resolved_proxy_inner(
         Some(_) => crate::services::billing::NodeIntent::Node,
         None => crate::services::billing::NodeIntent::Direct,
     };
-    let billing_ctx = crate::services::billing::BillingRouteContext::new(
+    let mut billing_ctx = crate::services::billing::BillingRouteContext::new(
         if request.extensions().get::<PoolGatewayIngress>().is_some() {
             crate::services::billing::BillingIngress::LlmGateway
         } else {
@@ -4022,6 +4033,21 @@ async fn execute_resolved_proxy_inner(
         target.service.billing.as_ref(),
         state.billing.resale_enabled(),
     );
+    // Only the signed gateway handler can install this extension. Ordinary
+    // request headers/body cannot author Machine billing identity.
+    billing_ctx.machine_usage = request
+        .extensions()
+        .get::<crate::services::machine_gateway_service::MachineUsageAttribution>()
+        .map(
+            |origin| crate::models::usage_meter::MachineUsageAttribution {
+                node_id: origin.node_id.clone(),
+                job_id: origin.job_id.clone(),
+                runtime_id: origin.runtime_id.clone(),
+                runtime_generation: origin.runtime_generation,
+                grant_id: origin.grant_id.clone(),
+                principal_kind: origin.principal_kind.to_string(),
+            },
+        );
     // Price operations on the path the caller requested, before any
     // destination or scope rewrite of the forwarding path.
     let priced_operation =
@@ -5102,6 +5128,7 @@ async fn execute_resolved_proxy_inner(
                         .map_or(state.config.proxy_max_body_size, |meter| meter.limit)
                 );
                 let mut signed = nyxid_machine::Request {
+                    external_authority: None,
                     version: 1,
                     authority: None,
                     request_id: attempt_request.request_id,

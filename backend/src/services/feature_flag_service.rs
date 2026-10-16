@@ -70,6 +70,16 @@ const BILLING_FLAG_TEST: FeatureFlagDef = FeatureFlagDef {
     default_enabled: true,
 };
 
+/// Personal rollout for new hosted Machine admission and runtime-rate writes.
+/// Existing management, runtime accounting and cleanup remain available.
+pub const REMOTE_MACHINES_FLAG_KEY: &str = "experimental:remote-machines";
+
+const REMOTE_MACHINES_FLAG: FeatureFlagDef = FeatureFlagDef {
+    key: REMOTE_MACHINES_FLAG_KEY,
+    description: "Enable hosted Remote Machine creation, resume/rekey and administrative runtime-rate writes for the acting person; existing management and accounting continue when off.",
+    default_enabled: false,
+};
+
 /// Operator gate for the Aevatar chat wire-log diagnostic. Off by default and
 /// toggled at runtime (platform-global, org cohort, or per user) so enabling a
 /// browser-side capture of raw assistant payloads never needs a redeploy.
@@ -268,6 +278,7 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     VOICE_GROK_PLATFORM_FLAG,
     AI_ASSISTANT_FLAG,
     BILLING_FLAG,
+    REMOTE_MACHINES_FLAG,
     AEVATAR_CHAT_WIRE_LOG_FLAG,
     DIRECT_CHAT_ENGINE_FLAG,
     NYXBOT_GATEWAY_FLAG_DEFS[0],
@@ -300,6 +311,7 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     VOICE_GROK_PLATFORM_FLAG,
     AI_ASSISTANT_FLAG,
     BILLING_FLAG_TEST,
+    REMOTE_MACHINES_FLAG,
     AEVATAR_CHAT_WIRE_LOG_FLAG,
     DIRECT_CHAT_ENGINE_FLAG,
     NYXBOT_GATEWAY_FLAG_DEFS[0],
@@ -1556,6 +1568,42 @@ mod tests {
         }
     }
 
+    #[test]
+    fn remote_machines_defaults_off_and_personal_overrides_stay_actor_scoped() {
+        let flag = find_flag("experimental:remote-machines")
+            .expect("Remote Machines flag is registered in test builds");
+        assert!(!flag.default_enabled);
+        assert!(
+            !resolve_personal_from_overrides(&[], &[], &[], "owner")
+                .iter()
+                .any(|key| key == flag.key)
+        );
+        let personal = [override_row(
+            None,
+            flag.key,
+            FlagTargetKind::User,
+            Some("owner"),
+            true,
+        )];
+        for (actor, expected) in [("owner", true), ("other-owner", false)] {
+            assert_eq!(
+                resolve_personal_from_overrides(&personal, &[], &[], actor)
+                    .iter()
+                    .any(|key| key == flag.key),
+                expected,
+                "personal flag must resolve for the authenticated actor"
+            );
+        }
+        let global = override_row(None, flag.key, FlagTargetKind::Global, None, true);
+        let personal_off = override_row(None, flag.key, FlagTargetKind::User, Some("owner"), false);
+        assert!(
+            !resolve_personal_from_overrides(&[global, personal_off], &[], &[], "owner")
+                .iter()
+                .any(|key| key == flag.key),
+            "the existing personal override must retain precedence over global rollout"
+        );
+    }
+
     #[tokio::test]
     async fn invitation_code_gate_defaults_on_and_uses_only_global_override() {
         let Some(db) = connect_test_database("invitation_code_flag").await else {
@@ -1716,7 +1764,7 @@ mod tests {
     #[test]
     fn precedence_matrix_matches_in_personal_and_org_contexts() {
         // Exercise absent, disabled, and enabled overrides over both defaults.
-        for flag in ["example_ui", BILLING_FLAG_KEY] {
+        for flag in ["example_ui", BILLING_FLAG_KEY, REMOTE_MACHINES_FLAG_KEY] {
             for global in [None, Some(false), Some(true)] {
                 for org in [None, Some(false), Some(true)] {
                     for user in [None, Some(false), Some(true)] {
@@ -2436,6 +2484,7 @@ mod tests {
                 "assistant:voice-grok-platform",
                 "experimental:ai-assistant",
                 "experimental:billing",
+                "experimental:remote-machines",
                 "experimental:aevatar-chat-wire-log",
                 "experimental:direct-chat-engine",
                 "nyxbot:gateway-lark",

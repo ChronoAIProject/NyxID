@@ -233,6 +233,23 @@ async fn ensure_core_indexes(db: &Database) -> Result<(), mongodb::error::Error>
     Box::pin(crate::services::machine_access_service::ensure_indexes(db))
         .await
         .map_err(|_| mongodb::error::Error::custom("Machine authority index migration failed"))?;
+    crate::services::remote_machine_service::ensure_indexes(db).await?;
+    crate::services::remote_machine_events::ensure_indexes(db).await?;
+    crate::services::remote_machine_bootstrap::ensure_indexes(db).await?;
+    crate::services::billing::machine_runtime::ensure_indexes(db)
+        .await
+        .map_err(|error| mongodb::error::Error::custom(error.to_string()))?;
+    crate::services::machine_external_grant_service::create_indexes(db)
+        .await
+        .map_err(|error| mongodb::error::Error::custom(error.to_string()))?;
+    crate::services::machine_external_service::ensure_indexes(db)
+        .await
+        .map_err(|error| mongodb::error::Error::custom(error.to_string()))?;
+    db.collection::<mongodb::bson::Document>(
+        crate::models::machine_oauth_consent_request::COLLECTION_NAME,
+    )
+    .create_indexes(crate::services::machine_oauth_consent_service::indexes())
+    .await?;
     // Best effort: a failure only leaves bad home pointers for lazy repair.
     if let Err(error) = crate::services::assistant_nyxagent::repair_channel_homes(db).await {
         tracing::warn!(%error, "NyxBot home repair deferred");
@@ -1634,21 +1651,31 @@ async fn ensure_core_indexes(db: &Database) -> Result<(), mongodb::error::Error>
                 .build(),
         ])
         .await?;
-    db.collection::<bson::Document>(crate::models::machine_job::COLLECTION_NAME)
-        .create_indexes([
+    let machine_jobs = db.collection::<bson::Document>(crate::models::machine_job::COLLECTION_NAME);
+    machine_jobs
+        .create_index(
             IndexModel::builder()
                 .keys(doc! {"user_id":1,"conversation_id":1,"state":1})
                 .build(),
-            IndexModel::builder()
-                .keys(doc! {"expires_at":1})
-                .options(
-                    IndexOptions::builder()
-                        .expire_after(Duration::from_secs(3600))
-                        .build(),
-                )
-                .build(),
-        ])
+        )
         .await?;
+    // External startup above creates the terminal retain_until index first.
+    // Execution expiry cannot be a history TTL: it previously removed rows an
+    // hour after execution, including active cleanup and 30-day metadata.
+    let job_indexes: Vec<IndexModel> = machine_jobs.list_indexes().await?.try_collect().await?;
+    for index in job_indexes {
+        if index.keys == doc! {"expires_at":1}
+            && let Some(options) = index.options
+            && options.expire_after.is_some()
+            && let Some(name) = options.name
+            && let Err(error) = machine_jobs.drop_index(name).await
+        {
+            match error.kind.as_ref() {
+                mongodb::error::ErrorKind::Command(command) if command.code == 27 => {}
+                _ => return Err(error),
+            }
+        }
+    }
     db.collection::<bson::Document>(crate::models::saved_login::COLLECTION_NAME)
         .create_index(
             IndexModel::builder()

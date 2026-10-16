@@ -27,6 +27,11 @@ use super::route_context::BillingRouteContext;
 const FUNDING_CLAIM_LEASE_SECS: i64 = 60;
 const RESOURCE_LOCK_RETRIES: usize = 4;
 
+mod machine;
+pub use machine::{
+    MachineFundingCandidates, prepare_machine_window_funding, reserve_machine_window_in_session,
+};
+
 /// Pool admission has a cancellation deadline. Commit every funding hold and
 /// its recoverable meter row together, including allowance and grant funding.
 pub(super) async fn reserve_and_open_pool(
@@ -424,6 +429,13 @@ pub async fn release_layer_reservations(
     db: &mongodb::Database,
     layers: &[LayerReservation],
 ) -> AppResult<()> {
+    if layers.iter().any(|layer| {
+        layer.metric == crate::models::service_billing::BillingMetric::MachineRunningSeconds
+    }) {
+        return Err(AppError::BillingProviderUnavailable(
+            "Machine holds require evidence-backed settlement".into(),
+        ));
+    }
     for layer in layers {
         for reservation in &layer.allowance_reservations {
             release_allowance_reservation(db, reservation).await?;
@@ -439,6 +451,11 @@ pub async fn release_usage_reservations(
     db: &mongodb::Database,
     row: &UsageMeterRow,
 ) -> AppResult<()> {
+    if machine::is_machine_runtime(row) {
+        return Err(AppError::BillingProviderUnavailable(
+            "Machine liability requires evidence-backed settlement, including zero usage".into(),
+        ));
+    }
     let Some(funding) = row.funding.as_ref() else {
         return Ok(());
     };
@@ -640,6 +657,7 @@ pub async fn settle_usage_funding(
     db: &mongodb::Database,
     row: &UsageMeterRow,
 ) -> AppResult<FundingSettlement> {
+    machine::validate_machine_settlement(row)?;
     if let Some(funding) = row.funding.as_ref()
         && funding.settled
     {
@@ -725,6 +743,9 @@ pub async fn settle_usage_funding(
         )));
     };
 
+    machine::validate_machine_settlement(&claimed)?;
+    let reserved_only = machine::is_machine_runtime(&claimed);
+
     let quantity = claimed.quantity.unwrap_or(0).max(0);
     let rate = if let Some(rate) = claimed.funding.as_ref().and_then(|f| f.settlement_rate) {
         rate.pico()
@@ -786,11 +807,19 @@ pub async fn settle_usage_funding(
         {
             allowance_covered = allowance_covered.saturating_add(consume).min(quantity);
             refresh_claimed_funding(db, &mut claimed).await?;
+        } else if reserved_only {
+            return Err(AppError::BillingProviderUnavailable(
+                "Reserved Machine allowance requires reconciliation".into(),
+            ));
         }
     }
 
     let wallet_only = claimed.funding.as_ref().is_some_and(|f| f.wallet_only);
-    if !wallet_only && claimed.layer == BillingLayer::Platform && allowance_covered < quantity {
+    if !reserved_only
+        && !wallet_only
+        && claimed.layer == BillingLayer::Platform
+        && allowance_covered < quantity
+    {
         let definitions = super::allowances::applicable_allowances(
             db,
             &claimed.billing_owner_id,
@@ -890,10 +919,14 @@ pub async fn settle_usage_funding(
                 .checked_add(consume)?
                 .min(charge_after_allowance);
             refresh_claimed_funding(db, &mut claimed).await?;
+        } else if reserved_only {
+            return Err(AppError::BillingProviderUnavailable(
+                "Reserved Machine grant requires reconciliation".into(),
+            ));
         }
     }
 
-    if !wallet_only && grant_covered < charge_after_allowance {
+    if !reserved_only && !wallet_only && grant_covered < charge_after_allowance {
         let now = Utc::now();
         let mut grants =
             super::grants::list_active_for_user(db, &claimed.billing_owner_id, now).await?;
@@ -942,6 +975,11 @@ pub async fn settle_usage_funding(
     }
 
     let wallet = charge_after_allowance.checked_sub(grant_covered)?;
+    if reserved_only && wallet > claimed.reserved_credits {
+        return Err(AppError::BillingProviderUnavailable(
+            "Machine settlement exceeds its funded wallet window".into(),
+        ));
+    }
     let wallet_charge_credits = wallet;
     // Grant- and allowance-funded usage is deliberately absent from Lago's
     // charging stream. Only the wallet-funded fraction is emitted, so Lago's
@@ -1597,6 +1635,7 @@ mod tests {
             pending_resale_quantity: None,
             pending_platform_usage: None,
             pool_attempt: None,
+            machine_usage: None,
             status: UsageStatus::Finalized,
             forwarded: true,
             released: false,

@@ -1322,11 +1322,11 @@ impl super::platform_manager_contract::ManagerLifecycleProducer for LifecyclePro
         {
             return Err(unavailable());
         }
-        if !command
+        if command
             .text()
             .split_whitespace()
             .next()
-            .is_some_and(|word| word.split('@').next() == Some("/unlink"))
+            .is_none_or(|word| word.split('@').next() != Some("/unlink"))
         {
             return Err(unavailable());
         }
