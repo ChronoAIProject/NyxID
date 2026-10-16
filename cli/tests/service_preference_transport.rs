@@ -214,7 +214,7 @@ async fn hidden_release_rejects_remote_cleartext_before_any_request() {
         let output = command(home.path(), url, false).output().await.unwrap();
         assert!(!output.status.success(), "{url}");
         let error = String::from_utf8_lossy(&output.stderr);
-        assert!(error.contains("Credential DELETE"), "{error}");
+        assert!(error.contains("Credential request"), "{error}");
         assert!(!error.contains("explicit-fixture-access"), "{error}");
     }
 }

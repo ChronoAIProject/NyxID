@@ -1086,9 +1086,13 @@ async fn aurinko_owner_deletion_removes_bot_secrets_and_cannot_recreate_ingress_
             .await
             .unwrap();
     }
-    crate::services::admin_user_service::delete_current_user_cascade(&f.state.db, &f.bot.user_id)
-        .await
-        .unwrap();
+    crate::services::admin_user_service::delete_current_user_cascade(
+        &f.state.db,
+        &f.bot.user_id,
+        crate::services::admin_user_service::ACCOUNT_DELETION_POLICY_VERSION,
+    )
+    .await
+    .unwrap();
     assert!(f.event(&["two"]).await.is_err());
     for collection in [
         crate::models::channel_bot::COLLECTION_NAME,
@@ -1497,7 +1501,8 @@ async fn aurinko_owner_deletion_fences_delayed_ingress_and_reply() {
             assert!(
                 crate::services::admin_user_service::delete_current_user_cascade(
                     &f.state.db,
-                    &f.bot.user_id
+                    &f.bot.user_id,
+                    crate::services::admin_user_service::ACCOUNT_DELETION_POLICY_VERSION,
                 )
                 .await
                 .is_err()
@@ -1517,6 +1522,7 @@ async fn aurinko_owner_deletion_fences_delayed_ingress_and_reply() {
         crate::services::admin_user_service::delete_current_user_cascade(
             &f.state.db,
             &f.bot.user_id,
+            crate::services::admin_user_service::ACCOUNT_DELETION_POLICY_VERSION,
         )
         .await
         .unwrap();

@@ -111,6 +111,7 @@ pub mod llm_usage_service;
 pub mod login_approval_service;
 pub mod login_client_context;
 pub mod login_code_service;
+pub mod machine_external_source_service;
 pub mod mcp_approval;
 pub mod mcp_service;
 pub mod mfa_service;
@@ -283,6 +284,17 @@ pub mod machine_update_service;
 pub mod saved_login_service;
 
 pub mod machine_setup_service;
+pub mod remote_machine_adapter;
+pub mod remote_machine_bootstrap;
+pub mod remote_machine_bootstrap_verifier;
+pub mod remote_machine_controller_health;
+// Deferred signed-provider contracts are exercised by fixtures only.
+#[cfg(test)]
+pub mod remote_machine_fence;
+mod remote_machine_kubernetes_auth;
+pub mod remote_machine_kubernetes_identity;
+pub mod remote_machine_runtime;
+pub mod remote_machine_usage;
 
 #[cfg(test)]
 pub(crate) mod machine_integration_tests;
@@ -326,6 +338,13 @@ pub mod assistant_voice;
 mod org_group_tests;
 
 pub mod machine_access_service;
+pub mod remote_machine_configuration;
+pub mod remote_machine_operation_service;
+#[cfg(test)]
+mod remote_machine_operation_tests;
+pub mod remote_machine_service;
+#[cfg(test)]
+mod remote_machine_service_tests;
 pub mod voice;
 
 #[cfg(test)]
@@ -346,7 +365,24 @@ pub mod tool_twin_service;
 
 pub mod catalog_icon_service;
 
+pub mod machine_oauth_consent_service;
+
+pub mod machine_external_grant_service;
+pub mod machine_external_service;
+
+pub mod remote_machine_events;
+pub mod remote_machine_manager;
+pub mod remote_machine_native;
+
+#[cfg(test)]
+pub mod remote_machine_provider;
+
+pub mod remote_machine_quota;
+
+pub mod remote_machine_storage_telemetry;
+
 pub mod platform_provisioning_service;
+pub mod remote_machine_reclamation;
 
 pub mod platform_inference_service;
 

@@ -870,7 +870,7 @@ mod tests {
         state
             .db
             .collection::<Document>(crate::models::api_key::COLLECTION_NAME)
-            .insert_one(doc! {"_id": &standalone_key, "is_active": true})
+            .insert_one(doc! {"_id": &standalone_key, "user_id": &actor, "is_active": true})
             .await
             .unwrap();
         state.db.collection::<Document>(crate::models::channel_conversation::COLLECTION_NAME).insert_one(doc! {"_id": uuid::Uuid::new_v4().to_string(), "channel_bot_id": &bot, "agent_api_key_id": &standalone_key, "is_active": true}).await.unwrap();

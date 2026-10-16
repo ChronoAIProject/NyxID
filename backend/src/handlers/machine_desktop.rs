@@ -305,6 +305,7 @@ pub async fn upgrade(
 
 fn signed(node: &str, operation: Operation, parameters: Value, secret: &[u8]) -> Request {
     let mut request = Request {
+        external_authority: None,
         version: 1,
         authority: None,
         request_id: uuid::Uuid::new_v4().to_string(),

@@ -1907,3 +1907,89 @@ async fn machine_watches_and_jobs_carry_validated_report_provenance() {
     assert_eq!(ReportProvenance::from_chat(&live), assigned);
     f.state.db.drop().await.unwrap();
 }
+
+/// Job issuance combines the hosted runtime fence and assistant binding with
+/// the upstream report snapshot, without widening report authority after Stop.
+#[tokio::test]
+async fn hosted_machine_jobs_keep_runtime_binding_and_live_report_provenance() {
+    use crate::models::{
+        assistant_conversation::REPORT_PROVENANCE_V1,
+        machine_job::{COLLECTION_NAME as JOBS, MachineJob, MachineJobBinding},
+        remote_machine::{COLLECTION_NAME as MACHINES, ManagedMachine},
+    };
+    let f = orchestrator_fixture("hosted_machine_job_provenance").await;
+    let mut machine = node(&f, &f.owner).await;
+    machine.metadata =
+        Some(serde_json::from_value(json!({"provisioning_source":"managed_machine"})).unwrap());
+    let mut managed = super::remote_machine_service::CreateMachineInput::fixed(
+        &f.owner,
+        true,
+        "sha256:job-provenance-fixture",
+    )
+    .preview(&machine.id, chrono::Utc::now());
+    managed.runtime_generation = 7;
+    f.state
+        .db
+        .collection::<ManagedMachine>(MACHINES)
+        .insert_one(&managed)
+        .await
+        .unwrap();
+    let mut chat = f.chat.clone();
+    chat.report_to = Some("nyxa-assigning".into());
+    for (turn_live, turn_stopped) in [(true, false), (true, true), (false, false)] {
+        chat.turn_live = turn_live;
+        chat.turn_stopped = turn_stopped;
+        let issued = machines::issue_job(&f.state.db, &chat, &machine, 30, Vec::new())
+            .await
+            .unwrap();
+        let stored = machines::job(&f.state.db, &chat, &machine.id, &issued.id)
+            .await
+            .unwrap();
+        assert_eq!(stored.runtime_generation, Some(7));
+        assert_eq!(
+            stored.runtime_id,
+            machine.machine.as_ref().unwrap().runtime_id,
+        );
+        if turn_live && !turn_stopped {
+            assert_eq!(stored.report_to.as_deref(), Some("nyxa-assigning"));
+            assert_eq!(stored.report_provenance, REPORT_PROVENANCE_V1);
+            assert!(matches!(
+                &stored.binding,
+                Some(MachineJobBinding::Assistant {
+                    version: 1,
+                    conversation_id,
+                    turn_id,
+                    api_key_id,
+                    agent_id,
+                }) if conversation_id == &chat.conversation_id
+                    && Some(turn_id) == chat.turn_id.as_ref()
+                    && api_key_id == &chat.api_key_id
+                    && agent_id == &chat.agent_id
+            ));
+        } else {
+            assert_eq!(stored.report_to, None);
+            assert_eq!(stored.report_provenance, 0);
+        }
+        if turn_stopped {
+            assert!(stored.binding.is_none());
+        }
+        assert!(stored.retain_until.is_none());
+    }
+    for timeout in [0, 3601] {
+        assert!(matches!(
+            machines::issue_job(&f.state.db, &chat, &machine, timeout, Vec::new()).await,
+            Err(AppError::ValidationError(_))
+        ));
+    }
+    // Each admitted issuance inserts once; invalid hosted timeouts insert none.
+    assert_eq!(
+        f.state
+            .db
+            .collection::<MachineJob>(JOBS)
+            .count_documents(doc! {"node_id": &machine.id})
+            .await
+            .unwrap(),
+        3,
+    );
+    f.state.db.drop().await.unwrap();
+}

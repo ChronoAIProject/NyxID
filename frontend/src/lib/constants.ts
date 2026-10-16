@@ -75,6 +75,12 @@ export const OAUTH_SCOPE_META: Readonly<Record<string, OAuthScopeMeta>> = {
       "Lets the app send requests through NyxID to the services you authorize below.",
     risk: "high",
   },
+  machine: {
+    title: "Use selected Machines",
+    description:
+      "Lets the app use commands and files only on the Machines you explicitly approve. It cannot purchase, pause, resume or delete resources.",
+    risk: "high",
+  },
   offline_access: {
     title: "Long-lived access",
     description:

@@ -217,6 +217,18 @@ pub enum PoolAttemptOutcome {
     Reported,
 }
 
+/// Verified Machine gateway origin. It attributes an existing service charge;
+/// it does not create a runtime charge or carry credential material.
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct MachineUsageAttribution {
+    pub node_id: String,
+    pub job_id: String,
+    pub runtime_id: String,
+    pub runtime_generation: Option<u64>,
+    pub grant_id: Option<String>,
+    pub principal_kind: String,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
 pub struct UsageMeterRow {
     #[serde(rename = "_id")]
@@ -276,6 +288,8 @@ pub struct UsageMeterRow {
     pub pending_platform_usage: Option<crate::models::service_billing::PlatformUsage>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pool_attempt: Option<PoolAttemptAccounting>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub machine_usage: Option<MachineUsageAttribution>,
     pub status: UsageStatus,
     pub forwarded: bool,
     pub released: bool,

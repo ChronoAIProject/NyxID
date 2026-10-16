@@ -3,10 +3,12 @@ import { isTelemetryActive } from "@/lib/telemetry";
 import {
   assignAssistantResponseConversation,
   assistantHttp,
+  assistantJson,
 } from "@/lib/assistant/assistant-http";
 import { ApiError } from "@/lib/api-client";
 import { useAssistantWireLogStore } from "@/stores/assistant-wire-log-store";
 import { useAuthStore } from "@/stores/auth-store";
+import type { User } from "@/types/api";
 
 vi.mock("@/lib/telemetry", async (importOriginal) => {
   const original = await importOriginal<typeof import("@/lib/telemetry")>();
@@ -201,5 +203,142 @@ describe("assistantHttp", () => {
       expect(call[1]?.headers).not.toHaveProperty("X-NyxID-Debug-Upstream");
     }
     expect(useAssistantWireLogStore.getState().entries).toEqual([]);
+  });
+});
+
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => { resolve = done; });
+  return { promise, resolve };
+}
+
+function ownerAuthority() {
+  useAuthStore.setState({ user: { id: "owner-one" } as User });
+  const accountChanged = new Error(
+    "Your account changed. Reload before managing this Machine.",
+  );
+  return {
+    accountChanged,
+    authorityGuard: () => {
+      if (useAuthStore.getState().user?.id !== "owner-one") throw accountChanged;
+    },
+    switchAccount: () => {
+      useAuthStore.setState({ user: { id: "owner-two" } as User });
+    },
+  };
+}
+
+describe("assistant transport authority", () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+    globalThis.__nyxidAssistantHttpMock = undefined;
+    useAssistantWireLogStore.setState({ featureEnabled: false, captureEnabled: false });
+  });
+
+  it("rejects stale authority before calling either transport", async () => {
+    const { authorityGuard, accountChanged, switchAccount } = ownerAuthority();
+    const mocked = vi.fn();
+    const transport = vi.fn();
+    globalThis.__nyxidAssistantHttpMock = mocked;
+    vi.stubGlobal("fetch", transport);
+    switchAccount();
+
+    await expect(assistantHttp("/assistant/test", { authorityGuard })).rejects.toBe(accountChanged);
+
+    expect(mocked).not.toHaveBeenCalled();
+    expect(transport).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])(
+    "rejects an account switch during the mock seam without sending a fetch (mocked: %s)",
+    async (hasMockResponse) => {
+      const { authorityGuard, accountChanged, switchAccount } = ownerAuthority();
+      const response = deferred<Response | undefined>();
+      globalThis.__nyxidAssistantHttpMock = () => response.promise;
+      const transport = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
+      vi.stubGlobal("fetch", transport);
+      const pending = assistantHttp("/assistant/test", { authorityGuard });
+      const rejected = expect(pending).rejects.toBe(accountChanged);
+
+      switchAccount();
+      response.resolve(hasMockResponse ? new Response(null, { status: 204 }) : undefined);
+
+      await rejected;
+      expect(transport).not.toHaveBeenCalled();
+    },
+  );
+
+  it("rejects a successful HTTP response after the account switches during fetch", async () => {
+    const { authorityGuard, accountChanged, switchAccount } = ownerAuthority();
+    const response = deferred<Response>();
+    const transport = vi.fn().mockReturnValue(response.promise);
+    vi.stubGlobal("fetch", transport);
+    const pending = assistantHttp("/assistant/test", { authorityGuard });
+    const rejected = expect(pending).rejects.toBe(accountChanged);
+    await vi.waitFor(() => expect(transport).toHaveBeenCalledOnce());
+
+    switchAccount();
+    response.resolve(new Response(null, { status: 204 }));
+
+    await rejected;
+  });
+
+  it("rejects parsed JSON after the account switches during body parsing", async () => {
+    const { authorityGuard, accountChanged, switchAccount } = ownerAuthority();
+    const body = deferred<unknown>();
+    const response = new Response("{}", { status: 200 });
+    const parse = vi.spyOn(response, "json").mockReturnValue(body.promise);
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response));
+    const pending = assistantJson("/assistant/test", { authorityGuard });
+    const rejected = expect(pending).rejects.toBe(accountChanged);
+    await vi.waitFor(() => expect(parse).toHaveBeenCalledOnce());
+
+    switchAccount();
+    body.resolve({ private: "owner-one" });
+
+    await rejected;
+  });
+
+  it("does not clear the new account when an old request returns a late 401", async () => {
+    const { authorityGuard, accountChanged, switchAccount } = ownerAuthority();
+    const response = deferred<Response>();
+    const transport = vi.fn().mockReturnValue(response.promise);
+    const setUser = vi.fn();
+    useAuthStore.setState({ setUser });
+    vi.stubGlobal("fetch", transport);
+    const pending = assistantHttp("/assistant/test", { authorityGuard });
+    const rejected = expect(pending).rejects.toBe(accountChanged);
+    await vi.waitFor(() => expect(transport).toHaveBeenCalledOnce());
+
+    switchAccount();
+    response.resolve(new Response(JSON.stringify({
+      error: "session_dead", error_code: 1001, message: "Sign in again",
+    }), { status: 401 }));
+
+    await rejected;
+    expect(setUser).not.toHaveBeenCalled();
+    expect(useAuthStore.getState().user?.id).toBe("owner-two");
+  });
+
+  it("does not clear the new account when it switches during 401 body parsing", async () => {
+    const { authorityGuard, accountChanged, switchAccount } = ownerAuthority();
+    const body = deferred<unknown>();
+    const response = new Response("{}", { status: 401 });
+    const parse = vi.spyOn(response, "json").mockReturnValue(body.promise);
+    const setUser = vi.fn();
+    useAuthStore.setState({ setUser });
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response));
+    const pending = assistantHttp("/assistant/test", { authorityGuard });
+    const rejected = expect(pending).rejects.toBe(accountChanged);
+    await vi.waitFor(() => expect(parse).toHaveBeenCalledOnce());
+
+    switchAccount();
+    body.resolve({ error: "session_dead", error_code: 1001, message: "Sign in again" });
+
+    await rejected;
+    expect(setUser).not.toHaveBeenCalled();
+    expect(useAuthStore.getState().user?.id).toBe("owner-two");
   });
 });

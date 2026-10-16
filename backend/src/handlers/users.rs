@@ -500,8 +500,14 @@ pub async fn delete_me(
     State(state): State<AppState>,
     auth_user: AuthUser,
     tele: TelemetryContext,
-    _headers: HeaderMap,
+    headers: HeaderMap,
 ) -> AppResult<Json<DeleteAccountResponse>> {
+    super::login_client_context::require_first_party_human(&auth_user)?;
+    let deletion_policy = headers
+        .get(admin_user_service::ACCOUNT_DELETION_POLICY_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("");
+    admin_user_service::validate_account_deletion_policy(deletion_policy)?;
     let user_id = auth_user.user_id.to_string();
 
     // GDPR erasure: when telemetry is on, enqueue the PostHog
@@ -531,7 +537,7 @@ pub async fn delete_me(
             })?;
     }
 
-    admin_user_service::delete_current_user_cascade(&state.db, &user_id).await?;
+    admin_user_service::delete_current_user_cascade(&state.db, &user_id, deletion_policy).await?;
 
     let deleted_at = chrono::Utc::now().to_rfc3339();
     audit_service::log_for_user(
@@ -1462,3 +1468,7 @@ mod tests {
         assert_eq!(obj.len(), expected_keys.len());
     }
 }
+
+#[cfg(test)]
+#[path = "account_deletion_policy_tests.rs"]
+mod account_deletion_policy_tests;

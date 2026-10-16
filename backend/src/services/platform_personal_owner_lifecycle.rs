@@ -749,9 +749,13 @@ mod tests {
             retired.revocation_reason,
             Some(crate::models::platform_personal_binding::PersonalRevocationReason::OwnerDeleted)
         );
-        super::super::admin_user_service::delete_current_user_cascade(&db, &owner)
-            .await
-            .unwrap();
+        super::super::admin_user_service::delete_current_user_cascade(
+            &db,
+            &owner,
+            super::super::admin_user_service::ACCOUNT_DELETION_POLICY_VERSION,
+        )
+        .await
+        .unwrap();
         assert!(
             db.collection::<Document>(crate::models::user::COLLECTION_NAME)
                 .find_one(doc! {"_id": &owner})

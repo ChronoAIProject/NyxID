@@ -604,6 +604,16 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         )
         .route("/me/consents", get(handlers::consent::list_my_consents))
         .route(
+            "/me/oauth-machine-consent-requests",
+            post(handlers::oauth::prepare_machine_consent),
+        )
+        .route(
+            "/me/consents/{client_id}/machine-grant",
+            get(handlers::machine_external_grant::get_oauth)
+                .put(handlers::machine_external_grant::put_oauth)
+                .delete(handlers::machine_external_grant::revoke_oauth),
+        )
+        .route(
             "/me/oauth-consent-requests/{handle}",
             get(handlers::oauth::get_consent_request),
         )
@@ -617,6 +627,12 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         );
 
     let api_key_routes = Router::new()
+        .route(
+            "/{key_id}/machine-grant",
+            get(handlers::machine_external_grant::get_key)
+                .put(handlers::machine_external_grant::put_key)
+                .delete(handlers::machine_external_grant::revoke_key),
+        )
         .route(
             "/{key_id}/credentials",
             get(handlers::auth_agent_key::list_credentials),
@@ -1185,6 +1201,26 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             get(handlers::admin_billing::get_config).put(handlers::admin_billing::put_config),
         )
         .route("/billing/rates", get(handlers::admin_billing::get_rates))
+        .route(
+            "/remote-machines/platform",
+            get(handlers::admin_remote_machine_platform::get),
+        )
+        .route(
+            "/billing/runtime",
+            get(handlers::admin_machine_runtime_billing::get),
+        )
+        .route(
+            "/billing/runtime/rates",
+            post(handlers::admin_machine_runtime_billing::stage),
+        )
+        .route(
+            "/billing/runtime/rates/{id}/resync",
+            post(handlers::admin_machine_runtime_billing::sync),
+        )
+        .route(
+            "/billing/runtime/rates/{id}/retire",
+            post(handlers::admin_machine_runtime_billing::retire),
+        )
         .route(
             "/billing/overview",
             get(handlers::admin_billing::get_overview),
@@ -2008,6 +2044,16 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             Router::new()
         })
         .route(
+            "/machines/managed/prepare",
+            post(handlers::remote_machine_bootstrap::prepare)
+                .layer(DefaultBodyLimit::max(72 * 1024)),
+        )
+        .route(
+            "/machines/managed/bootstrap",
+            post(handlers::remote_machine_bootstrap::bootstrap)
+                .layer(DefaultBodyLimit::max(72 * 1024)),
+        )
+        .route(
             "/onboarding/link/preview",
             post(handlers::platform_binding::preview),
         )
@@ -2534,6 +2580,86 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
 
     // Routes that BLOCK service account tokens (human-only endpoints)
     let api_v1_human_only = Router::new()
+        .route(
+            "/remote-machine-entitlement",
+            get(handlers::remote_machine::entitlement),
+        )
+        .route(
+            "/remote-machine-quotes",
+            post(handlers::remote_machine::quote),
+        )
+        .route(
+            "/remote-machines",
+            get(handlers::remote_machine::list).post(handlers::remote_machine::create),
+        )
+        .route(
+            "/remote-machines/{machine_id}",
+            get(handlers::remote_machine::get).delete(handlers::remote_machine::delete),
+        )
+        .route(
+            "/remote-machines/{machine_id}/events",
+            get(handlers::remote_machine::events),
+        )
+        .route(
+            "/remote-machines/{machine_id}/billing",
+            get(handlers::remote_machine::billing),
+        )
+        .route(
+            "/remote-machines/{machine_id}/usage",
+            get(handlers::remote_machine_usage::get),
+        )
+        .route(
+            "/remote-machines/{machine_id}/jobs",
+            get(handlers::machine_external_execution::jobs),
+        )
+        .route(
+            "/remote-machines/{machine_id}/grants",
+            get(handlers::machine_external_grant::list_machine),
+        )
+        .route(
+            "/remote-machines/{machine_id}/jobs/{job_id}/output",
+            get(handlers::machine_external_execution::output),
+        )
+        .route(
+            "/remote-machines/{machine_id}/jobs/{job_id}/cancel",
+            post(handlers::machine_external_execution::cancel),
+        )
+        .route(
+            "/remote-machines/{machine_id}/confirmations/{id}/decision",
+            post(handlers::machine_external_execution::decide_bound),
+        )
+        .route(
+            "/machines/{node_id}/jobs",
+            get(handlers::machine_external_execution::jobs),
+        )
+        .route(
+            "/machine-confirmations",
+            get(handlers::machine_external_execution::confirmations),
+        )
+        .route(
+            "/machine-confirmations/{id}/decision",
+            post(handlers::machine_external_execution::decide),
+        )
+        .route(
+            "/remote-machines/{machine_id}/billing/runs",
+            get(handlers::remote_machine::billing_runs),
+        )
+        .route(
+            "/remote-machines/{machine_id}/operations",
+            get(handlers::remote_machine::operations),
+        )
+        .route(
+            "/remote-machines/{machine_id}/rekey",
+            post(handlers::remote_machine::rekey),
+        )
+        .route(
+            "/remote-machines/{machine_id}/actions",
+            post(handlers::remote_machine::action),
+        )
+        .route(
+            "/remote-machine-operations/{operation_id}",
+            get(handlers::remote_machine::operation),
+        )
         .route(
             "/onboarding/setups/{id}/binding",
             post(handlers::platform_setups::attach_binding),
@@ -3117,6 +3243,15 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
 mod org_membership_tests;
 
 #[cfg(test)]
+mod remote_machine_tests;
+
+#[cfg(test)]
+mod remote_machine_flag_tests;
+
+#[cfg(test)]
+mod runtime_profile_tests;
+
+#[cfg(test)]
 mod service_inventory_tests;
 
 #[cfg(test)]
@@ -3164,3 +3299,6 @@ mod retirement_tests {
         db.drop().await.unwrap();
     }
 }
+
+#[cfg(test)]
+mod machine_external_runtime_tests;

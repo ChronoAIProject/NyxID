@@ -10,6 +10,8 @@ use crate::org_resolver::resolve_org_id;
 
 pub async fn run(command: NodeCommands) -> Result<()> {
     match command {
+        NodeCommands::ManagedPrepare(args) => crate::node::managed_runtime::prepare(args).await,
+        NodeCommands::ManagedStart(args) => crate::node::managed_runtime::run(args).await,
         NodeCommands::Setup(args) => crate::node::machine::setup::run(args).await,
         NodeCommands::MachineBrowserInstall { port } => {
             crate::node::machine::setup::install_browser(port)
@@ -19,6 +21,13 @@ pub async fn run(command: NodeCommands) -> Result<()> {
             config,
             profile,
         } => {
+            if !matches!(command, crate::node::machine::commands::Commands::Status) {
+                let directory = crate::node::config::resolve_config_dir_with_profile(
+                    config.as_deref(),
+                    profile.as_deref(),
+                )?;
+                crate::node::managed_runtime::require_self_hosted_mutation(&directory)?;
+            }
             crate::node::machine::commands::run(command, config.as_deref(), profile.as_deref())
                 .await
         }
@@ -476,6 +485,9 @@ pub async fn run(command: NodeCommands) -> Result<()> {
             profile,
         } => {
             let effective_config = resolve_effective_config(config.as_deref(), profile.as_deref())?;
+            crate::node::managed_runtime::require_self_hosted_mutation(
+                &crate::node::config::resolve_config_dir(effective_config.as_deref()),
+            )?;
             crate::node::agent::cmd_register(
                 &token,
                 url.as_deref(),
@@ -509,6 +521,9 @@ pub async fn run(command: NodeCommands) -> Result<()> {
             profile,
         } => {
             let effective_config = resolve_effective_config(config.as_deref(), profile.as_deref())?;
+            crate::node::managed_runtime::require_self_hosted_mutation(
+                &crate::node::config::resolve_config_dir(effective_config.as_deref()),
+            )?;
             crate::node::agent::cmd_rekey(&auth_token, &signing_secret, effective_config.as_deref())
                 .map_err(anyhow::Error::from)
         }

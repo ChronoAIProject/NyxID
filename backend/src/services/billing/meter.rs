@@ -593,6 +593,7 @@ pub(super) fn reserved_row(
         pending_resale_quantity: None,
         pending_platform_usage: None,
         pool_attempt: ctx.pool_attempt.clone(),
+        machine_usage: ctx.machine_usage.clone(),
         status: UsageStatus::Reserved,
         forwarded: false,
         released: false,
@@ -829,6 +830,7 @@ pub(crate) fn platform_metric_code(metric: BillingMetric) -> &'static str {
         BillingMetric::CacheWriteTokens => "platform_cache_write_tokens",
         BillingMetric::Images => "platform_images",
         BillingMetric::VoiceSeconds => "platform_voice_seconds",
+        BillingMetric::MachineRunningSeconds => "remote_machine_running_seconds",
     }
 }
 
@@ -843,6 +845,8 @@ fn platform_quantity(metric: BillingMetric, usage: &PlatformUsage) -> i64 {
         BillingMetric::CacheWriteTokens => usage.cache_write_tokens.max(0),
         BillingMetric::Images => usage.images.max(0),
         BillingMetric::VoiceSeconds => usage.voice_seconds.max(0),
+        // Machine runtime is measured by its evidence-bound interval path.
+        BillingMetric::MachineRunningSeconds => 0,
     }
 }
 
@@ -2332,5 +2336,40 @@ mod tests {
             false,
         )
         .with_platform_metering(true)
+    }
+    #[tokio::test]
+    async fn machine_origin_attributes_one_existing_service_meter_without_runtime_charge() {
+        let db =
+            crate::test_utils::connect_transaction_test_database("machine_service_origin").await;
+        create_usage_transaction_index(&db).await;
+        let mut ctx = platform_context("gateway-request", "owner");
+        let origin = crate::models::usage_meter::MachineUsageAttribution {
+            node_id: Uuid::new_v4().to_string(),
+            job_id: Uuid::new_v4().to_string(),
+            runtime_id: Uuid::new_v4().to_string(),
+            runtime_generation: Some(3),
+            grant_id: Some(Uuid::new_v4().to_string()),
+            principal_kind: "api_key".into(),
+        };
+        ctx.machine_usage = Some(origin.clone());
+        let meter = open(&db, &ctx, None).await.unwrap();
+        open(&db, &ctx, None).await.unwrap();
+        mark_forwarded(&db, &meter).await.unwrap();
+        settle(&db, &meter, PlatformUsage::single_request(9), None, None)
+            .await
+            .unwrap();
+        let rows: Vec<UsageMeterRow> = db
+            .collection::<UsageMeterRow>(super::USAGE_METER)
+            .find(doc! {"billing_request_id":"gateway-request"})
+            .await
+            .unwrap()
+            .try_collect()
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].machine_usage.as_ref(), Some(&origin));
+        assert_eq!(rows[0].metric, BillingMetric::Requests);
+        assert_eq!(rows[0].quantity, Some(1));
+        db.drop().await.unwrap();
     }
 }

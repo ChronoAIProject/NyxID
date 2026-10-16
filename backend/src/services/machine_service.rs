@@ -191,67 +191,105 @@ pub fn metadata(node: &Node) -> Value {
     })
 }
 
-pub async fn issue_job(
-    db: &Database,
-    chat: &ChatAuthority,
-    node: &Node,
+pub fn issue_job<'a>(
+    db: &'a Database,
+    chat: &'a ChatAuthority,
+    node: &'a Node,
     timeout: u64,
     services: Vec<crate::models::machine_job::DeclaredService>,
-) -> AppResult<MachineJob> {
-    caller(chat)?;
-    let now = Utc::now();
-    let runtime_id = node
-        .machine
-        .as_ref()
-        .map(|profile| profile.runtime_id.clone())
-        .filter(|id| uuid::Uuid::parse_str(id).is_ok())
-        .ok_or_else(|| AppError::NodeOffline("Machine runtime has not connected".into()))?;
-    let job = MachineJob {
-        id: uuid::Uuid::new_v4().to_string(),
-        user_id: chat.user_id.clone(),
-        node_id: node.id.clone(),
-        runtime_id,
-        conversation_id: chat.conversation_id.clone(),
-        issuing_turn_id: chat.turn_id.clone(),
-        api_key_id: chat.api_key_id.clone(),
-        agent_id: chat.agent_id.clone(),
-        state: "running".into(),
-        services,
-        report_to: chat
-            .report_to
-            .clone()
-            .filter(|_| chat.turn_live && !chat.turn_stopped),
-        report_provenance: if chat.turn_live && !chat.turn_stopped {
-            crate::models::assistant_conversation::REPORT_PROVENANCE_V1
-        } else {
-            0
-        },
-        created_at: now,
-        expires_at: now + Duration::seconds(timeout.min(86400) as i64 + 15),
-        finished_at: None,
-    };
-    // Job publication and Stop contend on the exact active-turn write. A
-    // revocation capturing jobs cannot miss a concurrent admitted publication.
-    let mut session = db.client().start_session().await?;
-    let db = db.clone();
-    let chat = chat.clone();
-    let node = node.clone();
-    session
-        .start_transaction()
-        .and_run2(async move |session| {
-            let result: AppResult<_> = async {
-                fence_turn_operation_in_session(&db, session, &chat, &node).await?;
-                db.collection::<MachineJob>(JOBS)
-                    .insert_one(&job)
-                    .session(&mut *session)
-                    .await?;
-                Ok(job.clone())
+) -> futures::future::BoxFuture<'a, AppResult<MachineJob>> {
+    Box::pin(async move {
+        caller(chat)?;
+        let now = Utc::now();
+        let runtime_id = node
+            .machine
+            .as_ref()
+            .map(|profile| profile.runtime_id.clone())
+            .filter(|id| uuid::Uuid::parse_str(id).is_ok())
+            .ok_or_else(|| AppError::NodeOffline("Machine runtime has not connected".into()))?;
+        let runtime_generation = if super::remote_machine_runtime::is_managed(node) {
+            if timeout == 0 || timeout > 3600 {
+                return Err(AppError::ValidationError(
+                    "Managed command timeout must be 1 to 3600 seconds".into(),
+                ));
             }
-            .await;
-            super::api_key_mutation_service::transaction_result(result)
-        })
-        .await
-        .map_err(super::api_key_mutation_service::map_transaction_error)
+            let machine = super::remote_machine_service::managed_machine_for_node(db, &node.id)
+                .await?
+                .ok_or(AppError::MachineNotAllowed)?;
+            Some(
+                u64::try_from(machine.runtime_generation)
+                    .map_err(|_| AppError::MachineAuthorityStale)?,
+            )
+        } else {
+            None
+        };
+        let job = MachineJob {
+            id: uuid::Uuid::new_v4().to_string(),
+            user_id: chat.user_id.clone(),
+            node_id: node.id.clone(),
+            runtime_id,
+            binding: chat
+                .turn_id
+                .as_ref()
+                .filter(|_| !chat.turn_stopped)
+                .map(
+                    |turn_id| crate::models::machine_job::MachineJobBinding::Assistant {
+                        version: 1,
+                        conversation_id: chat.conversation_id.clone(),
+                        turn_id: turn_id.clone(),
+                        api_key_id: chat.api_key_id.clone(),
+                        agent_id: chat.agent_id.clone(),
+                    },
+                ),
+            runtime_generation,
+            conversation_id: chat.conversation_id.clone(),
+            issuing_turn_id: chat.turn_id.clone(),
+            api_key_id: chat.api_key_id.clone(),
+            agent_id: chat.agent_id.clone(),
+            state: "running".into(),
+            exit_code: None,
+            stop_reason: None,
+            duration_ms: None,
+            cancellation_requested_by: None,
+            cancellation_requested_at: None,
+            services,
+            report_to: chat
+                .report_to
+                .clone()
+                .filter(|_| chat.turn_live && !chat.turn_stopped),
+            report_provenance: if chat.turn_live && !chat.turn_stopped {
+                crate::models::assistant_conversation::REPORT_PROVENANCE_V1
+            } else {
+                0
+            },
+            created_at: now,
+            expires_at: now + Duration::seconds(timeout.min(86400) as i64 + 15),
+            finished_at: None,
+            retain_until: None,
+        };
+        // Job publication and Stop contend on the exact active-turn write. A
+        // revocation capturing jobs cannot miss a concurrent admitted publication.
+        let mut session = db.client().start_session().await?;
+        let db = db.clone();
+        let chat = chat.clone();
+        let node = node.clone();
+        session
+            .start_transaction()
+            .and_run2(async move |session| {
+                let result: AppResult<_> = async {
+                    fence_turn_operation_in_session(&db, session, &chat, &node).await?;
+                    db.collection::<MachineJob>(JOBS)
+                        .insert_one(&job)
+                        .session(&mut *session)
+                        .await?;
+                    Ok(job.clone())
+                }
+                .await;
+                super::api_key_mutation_service::transaction_result(result)
+            })
+            .await
+            .map_err(super::api_key_mutation_service::map_transaction_error)
+    })
 }
 
 pub async fn job(
@@ -280,16 +318,29 @@ pub async fn gateway_job(
     conversation: &str,
     id: &str,
 ) -> AppResult<MachineJob> {
-    db.collection::<MachineJob>(JOBS).find_one(doc!{"_id":id,"node_id":node,"runtime_id":runtime,
-        "conversation_id":conversation,"state":"running","expires_at":{"$gt":bson::DateTime::now()}})
-        .await?.ok_or_else(||AppError::Forbidden("Machine service call has no live server-issued job".into()))
+    let job = db
+        .collection::<MachineJob>(JOBS)
+        .find_one(doc! {"_id":id,"node_id":node,"runtime_id":runtime,
+        "state":"running","expires_at":{"$gt":bson::DateTime::now()}})
+        .await?
+        .ok_or_else(|| {
+            AppError::Forbidden("Machine service call has no live server-issued job".into())
+        })?;
+    if !matches!(
+        job.binding,
+        Some(crate::models::machine_job::MachineJobBinding::External { .. })
+    ) && (conversation.is_empty() || job.conversation_id != conversation)
+    {
+        return Err(AppError::MachinePermissionRevoked);
+    }
+    Ok(job)
 }
 
 pub async fn finish(db: &Database, id: &str) -> AppResult<()> {
     db.collection::<MachineJob>(JOBS)
         .update_one(
             doc! {"_id":id,"state":"running"},
-            doc! {"$set":{"state":"finished","finished_at":bson::DateTime::now()}},
+            doc! {"$set":{"state":"finished","finished_at":bson::DateTime::now(),"retain_until":bson::DateTime::from_chrono(Utc::now()+Duration::days(30))}},
         )
         .await?;
     Ok(())
@@ -454,6 +505,7 @@ pub(crate) async fn signed_request(
     capable(node, operation)?;
     let secret = node_service::signing_secret_from_node(&state.encryption_keys, node).await?;
     let mut request = Request {
+        external_authority: None,
         version: if authority.is_some() { 2 } else { 1 },
         authority,
         request_id: uuid::Uuid::new_v4().to_string(),

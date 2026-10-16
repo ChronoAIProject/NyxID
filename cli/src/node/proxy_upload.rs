@@ -190,6 +190,7 @@ mod tests {
         let mut request = Request {
             version: 1,
             authority: None,
+            external_authority: None,
             request_id: Uuid::new_v4().to_string(),
             node_id: "credential-node".into(),
             operation: Operation::ProxyUpload,

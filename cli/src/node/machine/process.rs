@@ -152,8 +152,19 @@ impl Identity {
             }
         }
         #[cfg(target_os = "linux")]
-        if let Ok(address) =
+        if let Some(address) =
             std::fs::read_to_string(self.home.join(".nyxid-desktop/session-bus.address"))
+                .ok()
+                .or_else(|| {
+                    (self.name == "browser"
+                        && std::env::var_os("NYXID_MACHINE_CONTAINER").is_some())
+                    .then(|| {
+                        protected_desktop_bus(std::path::Path::new(
+                            "/var/lib/nyxid-machine/desktop/session-bus.address",
+                        ))
+                    })
+                    .flatten()
+                })
         {
             let address = address.trim();
             if address.starts_with("unix:") && !address.contains(['\n', '\r', '\0']) {
@@ -219,6 +230,35 @@ impl Identity {
         command.process_group(0).kill_on_drop(true);
         Ok(())
     }
+}
+
+/// The full image copies only the browser's session address into this
+/// supervisor-owned handoff. No DAC override is needed to traverse a browser
+/// home, and the command user cannot replace the handoff or inherit its value.
+#[cfg(any(target_os = "linux", test))]
+fn protected_desktop_bus(path: &std::path::Path) -> Option<String> {
+    use std::{
+        io::Read,
+        os::unix::fs::{MetadataExt, OpenOptionsExt},
+    };
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(path)
+        .ok()?;
+    let metadata = file.metadata().ok()?;
+    if !metadata.is_file()
+        || metadata.uid() != unsafe { libc::geteuid() }
+        || metadata.mode() & 0o077 != 0
+        || metadata.len() > 4096
+    {
+        return None;
+    }
+    let mut address = String::new();
+    (&mut file).take(4097).read_to_string(&mut address).ok()?;
+    let address = address.trim();
+    (address.len() <= 4096 && address.starts_with("unix:") && !address.contains(['\n', '\r', '\0']))
+        .then(|| address.to_owned())
 }
 
 #[cfg(target_os = "linux")]
@@ -342,6 +382,29 @@ pub fn pin_cwd(command: &mut Command, directories: Vec<std::fs::File>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn desktop_bus_handoff_requires_private_regular_supervisor_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("bus");
+        std::fs::write(&path, "unix:path=/tmp/fixture-bus\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(
+            protected_desktop_bus(&path).as_deref(),
+            Some("unix:path=/tmp/fixture-bus")
+        );
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
+        assert!(protected_desktop_bus(&path).is_none());
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let link = directory.path().join("link");
+        std::os::unix::fs::symlink(&path, &link).unwrap();
+        assert!(protected_desktop_bus(&link).is_none());
+        std::fs::write(&path, "tcp:host=untrusted").unwrap();
+        assert!(protected_desktop_bus(&path).is_none());
+        std::fs::write(&path, "unix:path=/tmp/first\nunix:path=/tmp/second").unwrap();
+        assert!(protected_desktop_bus(&path).is_none());
+    }
 
     #[tokio::test]
     async fn own_uid_is_never_reported_as_command_isolated() {

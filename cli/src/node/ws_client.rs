@@ -343,6 +343,17 @@ pub async fn run_with_shutdown(
     credential_sender: Arc<SharedCredentialsSender>,
     backend: Arc<SecretBackend>,
 ) {
+    if let Some(binding) = &config.managed_runtime
+        && (super::managed_runtime::validate_existing_config(&config, binding).is_err()
+            || signing_secret
+                .as_ref()
+                .is_none_or(|secret| secret.is_empty()))
+    {
+        tracing::error!(
+            "Managed node startup refused invalid profile, endpoint, or signing material"
+        );
+        return;
+    }
     let in_flight = Arc::new(AtomicUsize::new(0));
     let in_flight_shutdown = in_flight.clone();
     let signing_secret = signing_secret.map(|secret| Arc::new(Zeroizing::new(secret)));
@@ -352,6 +363,8 @@ pub async fn run_with_shutdown(
         .unwrap_or(std::path::Path::new("."))
         .to_path_buf();
     let storage_backend = config.storage_backend.clone();
+    let managed_binding = config.managed_runtime.clone();
+    let managed_directory = config_dir.clone();
     let pending_poll_shutdown_rx = shutdown_rx.clone();
     let connection_shutdown_rx = shutdown_rx;
     let pending_poll_server_url = config.server.url.clone();
@@ -401,7 +414,12 @@ pub async fn run_with_shutdown(
                 tracing::error!(%error, "Pending credential poll loop terminated unexpectedly");
             }
         }
-        _ = shutdown_signal() => {
+        _ = async {
+            tokio::select! {
+                _ = shutdown_signal() => {},
+                _ = super::managed_runtime::wait_for_runtime_end(&managed_directory, managed_binding.as_ref()) => {},
+            }
+        } => {
             tracing::info!("Shutdown signal received, draining in-flight requests and SSH tunnels...");
             let _ = shutdown_tx.send(true);
             let deadline = tokio::time::Instant::now()
@@ -817,10 +835,11 @@ async fn run_connection_loop(
     // runtime's receipt ledger then returns its original outcome without
     // executing the operation twice.
     let replay_guard = Arc::new(tokio::sync::Mutex::new(ReplayGuard::new()));
-    let machine = if config.machine.shell
-        || config.machine.files
-        || config.machine.computer
-        || config.machine.browser_enabled()
+    let mut machine = if config.managed_runtime.is_none()
+        && (config.machine.shell
+            || config.machine.files
+            || config.machine.computer
+            || config.machine.browser_enabled())
     {
         match super::machine::Runtime::new(&config.machine, &config.node.id, config_dir) {
             Ok(runtime) => Some(runtime),
@@ -851,7 +870,7 @@ async fn run_connection_loop(
             credential_sender,
             in_flight.clone(),
             shutdown.clone(),
-            machine.clone(),
+            &mut machine,
             proxy_uploads.clone(),
             replay_guard.clone(),
         )
@@ -896,7 +915,7 @@ async fn connect_and_serve(
     credential_sender: &Arc<SharedCredentialsSender>,
     in_flight: Arc<AtomicUsize>,
     mut shutdown: watch::Receiver<bool>,
-    machine: Option<Arc<super::machine::Runtime>>,
+    machine_state: &mut Option<Arc<super::machine::Runtime>>,
     proxy_uploads: Arc<super::proxy_upload::Uploads>,
     replay_guard: Arc<tokio::sync::Mutex<ReplayGuard>>,
 ) -> Result<Option<Duration>> {
@@ -906,7 +925,7 @@ async fn connect_and_serve(
     let connect = tokio_tungstenite::connect_async_tls_with_config(
         &config.server.url,
         Some(ws_config),
-        machine.is_some(),
+        machine_state.is_some() || config.managed_runtime.is_some(),
         Some(tokio_tungstenite::Connector::Rustls(
             crate::tls::shared_config()?,
         )),
@@ -922,11 +941,17 @@ async fn connect_and_serve(
     let (mut ws_sink, mut ws_stream) = ws_stream.split();
 
     // 2. Authenticate
-    let auth_msg = serde_json::json!({
+    let mut auth_msg = serde_json::json!({
         "type": "auth",
         "node_id": config.node.id,
         "token": auth_token,
     });
+    if let Some(binding) = &config.managed_runtime {
+        binding
+            .validate()
+            .map_err(|reason| Error::Config(reason.into()))?;
+        auth_msg["managed_runtime"] = serde_json::to_value(binding)?;
+    }
     tokio::select! {
         result = ws_sink.send(Message::Text(auth_msg.to_string().into())) => {
             result.map_err(|e| Error::WebSocket(format!("Failed to send auth: {e}")))?;
@@ -966,6 +991,16 @@ async fn connect_and_serve(
     };
     let (use_binary_proxy_chunks, server_heartbeat_interval_secs) = match parsed["type"].as_str() {
         Some("auth_ok") => {
+            if let Some(binding) = &config.managed_runtime {
+                let accepted = parsed.get("managed_runtime").cloned().and_then(|value| {
+                    serde_json::from_value::<nyxid_machine::managed::Binding>(value).ok()
+                });
+                if accepted.as_ref() != Some(binding) {
+                    return Err(Error::AuthFailed(
+                        "Managed runtime fence was not acknowledged".into(),
+                    ));
+                }
+            }
             let enabled = parsed["capabilities"]["proxy_binary_chunks"]
                 .as_bool()
                 .unwrap_or(false);
@@ -997,7 +1032,65 @@ async fn connect_and_serve(
         }
     };
 
+    // Managed runtimes may touch the workspace while initializing. Wait for
+    // the backend's exact live generation/epoch acknowledgement before even
+    // constructing them, including a restart with a persisted config. Keep
+    // the admitted runtime across reconnects so existing bounded jobs retain
+    // the ordinary signed-lease behavior.
+    let managed_window = if let Some(binding) = &config.managed_runtime {
+        let window: nyxid_machine::managed::SignedRuntimeWindow = serde_json::from_value(
+            parsed
+                .get("managed_runtime_window")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null),
+        )
+        .map_err(|_| Error::AuthFailed("Managed runtime deadline missing".into()))?;
+        let secret = signing_secret
+            .as_ref()
+            .ok_or_else(|| Error::AuthFailed("Managed runtime signing key missing".into()))?;
+        let bytes = zeroize::Zeroizing::new(
+            hex::decode(secret.as_str())
+                .map_err(|_| Error::AuthFailed("Managed runtime signing key invalid".into()))?,
+        );
+        window
+            .verify(binding, &bytes, chrono::Utc::now().timestamp_millis())
+            .map_err(|_| Error::AuthFailed("Managed runtime deadline invalid".into()))?;
+        super::managed_deadline::install_deadline_marker(config_dir, &window.window)
+            .map_err(|_| Error::AuthFailed("Managed runtime deadline is terminal".into()))?;
+        Some(window)
+    } else {
+        None
+    };
+    if config.managed_runtime.is_some() && machine_state.is_none() {
+        super::managed_runtime::admit_workspace()
+            .map_err(|_| Error::Config("Managed workspace admission setup refused".into()))?;
+        *machine_state = Some(
+            super::machine::Runtime::new(&config.machine, &config.node.id, config_dir)
+                .map_err(|_| Error::Config("Managed machine runtime refused startup".into()))?,
+        );
+    }
+    let machine = machine_state.clone();
     if let Some(machine) = &machine {
+        if let Some(binding) = &config.managed_runtime {
+            machine
+                .bind_managed_runtime(binding)
+                .map_err(|_| Error::Config("Managed runtime fence mismatch".into()))?;
+            let bytes = zeroize::Zeroizing::new(
+                hex::decode(
+                    signing_secret
+                        .as_ref()
+                        .expect("managed key checked")
+                        .as_str(),
+                )
+                .map_err(|_| Error::AuthFailed("Managed runtime signing key invalid".into()))?,
+            );
+            machine
+                .apply_managed_window(
+                    managed_window.as_ref().expect("managed window checked"),
+                    &bytes,
+                )
+                .map_err(|_| Error::AuthFailed("Managed runtime deadline fenced".into()))?;
+        }
         machine.report_connected();
     }
 
@@ -1078,6 +1171,35 @@ async fn connect_and_serve(
         "capabilities": capabilities,
     });
     let _ = send_ws_message(&tx, caps_msg.to_string()).await;
+
+    let usage_task = machine
+        .as_ref()
+        .filter(|_| config.managed_runtime.is_some())
+        .map(|machine| {
+            let machine = machine.clone();
+            let sender = tx.clone();
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(Duration::from_secs(30));
+                interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                loop {
+                    interval.tick().await;
+                    let machine = machine.clone();
+                    let sample = tokio::task::spawn_blocking(move || machine.managed_usage()).await;
+                    if let Ok(Ok(sample)) = sample
+                        && let Ok(mut value) = serde_json::to_value(sample)
+                    {
+                        value["type"] = serde_json::json!("managed_machine_usage");
+                        if sender
+                            .try_send(NodeWsMessage::Text(value.to_string()))
+                            .is_err()
+                            && sender.is_closed()
+                        {
+                            break;
+                        }
+                    }
+                }
+            })
+        });
 
     // Shared state for the reader loop
     let metrics = Arc::new(NodeMetrics::new());
@@ -1180,6 +1302,24 @@ async fn connect_and_serve(
                     break false;
                 }
             }
+            Some("managed_runtime_window") => {
+                if let (Some(machine), Some(secret)) = (&machine, &signing_secret) {
+                    let accepted = serde_json::from_value::<
+                        nyxid_machine::managed::SignedRuntimeWindow,
+                    >(parsed["window"].clone())
+                    .ok()
+                    .is_some_and(|window| {
+                        let bytes = zeroize::Zeroizing::new(
+                            hex::decode(secret.as_str()).unwrap_or_default(),
+                        );
+                        machine.apply_managed_window(&window, &bytes).is_ok()
+                    });
+                    if !accepted {
+                        machine.shutdown().await;
+                        break false;
+                    }
+                }
+            }
             Some("machine_service_response") => {
                 if let Some(machine) = &machine {
                     machine
@@ -1197,7 +1337,7 @@ async fn connect_and_serve(
                         .await;
                 }
             }
-            Some("machine_request" | "machine_request_v2") => {
+            Some("machine_request" | "machine_request_v2" | "machine_request_v3") => {
                 if let (Some(machine), Some(secret)) = (machine.clone(), signing_secret.clone())
                     && let Ok(request) =
                         serde_json::from_value::<nyxid_machine::Request>(parsed.clone())
@@ -1209,6 +1349,9 @@ async fn connect_and_serve(
                         let mut parameters = request.parameters.clone();
                         parameters["_signed_authority"] = serde_json::to_value(&request.authority)
                             .unwrap_or(serde_json::Value::Null);
+                        parameters["_signed_external_authority"] =
+                            serde_json::to_value(&request.external_authority)
+                                .unwrap_or(serde_json::Value::Null);
                         let revision = machine.control_revision(operation, &parameters).await;
                         let signing_bytes = zeroize::Zeroizing::new(
                             hex::decode(secret.as_str()).unwrap_or_default(),
@@ -1554,6 +1697,9 @@ async fn connect_and_serve(
     proxy_uploads.disconnect().await;
     if let Some(machine) = &machine {
         machine.disconnect().await;
+    }
+    if let Some(task) = usage_task {
+        task.abort();
     }
     writer_task.abort();
     Ok(Some(served_for))
@@ -4707,6 +4853,82 @@ mod tests {
         NodeConfig::new(server_url, "node-1".to_string(), "file".to_string())
     }
 
+    #[tokio::test]
+    async fn managed_handshake_refuses_missing_or_stale_fence_before_runtime_start() {
+        for stale in [false, true] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let binding = nyxid_machine::managed::Binding {
+                node_id: uuid::Uuid::new_v4().to_string(),
+                sandbox_uid: uuid::Uuid::new_v4().to_string(),
+                pod_uid: uuid::Uuid::new_v4().to_string(),
+                runtime_generation: 1,
+                credential_epoch: 1,
+                writer_fence: uuid::Uuid::new_v4().to_string(),
+                operation_id: uuid::Uuid::new_v4().to_string(),
+                delivery_id: uuid::Uuid::new_v4().to_string(),
+            };
+            let mut config = NodeConfig::new(
+                format!("ws://{}/api/v1/nodes/ws", listener.local_addr().unwrap()),
+                binding.node_id.clone(),
+                "file".into(),
+            );
+            config.managed_runtime = Some(binding.clone());
+            let server = tokio::spawn(async move {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+                let auth = socket.next().await.unwrap().unwrap();
+                let auth: serde_json::Value =
+                    serde_json::from_str(auth.to_text().unwrap()).unwrap();
+                assert_eq!(
+                    auth["managed_runtime"],
+                    serde_json::to_value(&binding).unwrap()
+                );
+                let mut response = serde_json::json!({"type":"auth_ok"});
+                if stale {
+                    let mut old = binding;
+                    old.credential_epoch += 1;
+                    response["managed_runtime"] = serde_json::to_value(old).unwrap();
+                }
+                socket
+                    .send(Message::Text(response.to_string().into()))
+                    .await
+                    .unwrap();
+            });
+            let dir = tempfile::tempdir().unwrap();
+            let encryption = LocalEncryption::load_or_generate(dir.path()).unwrap();
+            let (sender, credentials) =
+                SharedCredentials::new(CredentialStore::from_config(&config, &encryption).unwrap());
+            let (_shutdown, receiver) = watch::channel(false);
+            let mut machine = None;
+            let result = tokio::time::timeout(
+                Duration::from_secs(3),
+                connect_and_serve(
+                    &config,
+                    &dir.path().join("config.toml"),
+                    dir.path(),
+                    "file",
+                    "fixture-auth",
+                    Some(shared_signing_secret(&"a".repeat(64))),
+                    &credentials,
+                    &Arc::new(sender),
+                    Arc::new(AtomicUsize::new(0)),
+                    receiver,
+                    &mut machine,
+                    Arc::new(super::super::proxy_upload::Uploads::default()),
+                    replay_guard(),
+                ),
+            )
+            .await
+            .unwrap();
+            assert!(matches!(result, Err(Error::AuthFailed(_))));
+            assert!(
+                machine.is_none(),
+                "unacknowledged binding must not construct a runtime"
+            );
+            server.await.unwrap();
+        }
+    }
+
     fn rci_metadata(pending_id: &str) -> rci_crypto::PendingCredentialCryptoMetadata {
         rci_crypto::PendingCredentialCryptoMetadata {
             pending_id: pending_id.to_string(),
@@ -5072,6 +5294,7 @@ mod tests {
             let mut opening = Request {
                 version: 1,
                 authority: None,
+                external_authority: None,
                 request_id: id.to_string(),
                 node_id: config.node.id.clone(),
                 operation: Operation::ProxyUpload,

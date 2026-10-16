@@ -107,23 +107,10 @@ impl Session {
         if request.operation == nyxid_machine::Operation::JobFinished {
             if verify(state.clone(), self, node_id, &request).await.is_ok() {
                 let job_id = request.parameters["job_id"].as_str().unwrap_or_default();
-                let result = state.db.collection::<MachineJob>(JOBS).update_one(
-                    doc! {
-                        "_id": job_id,
-                         "node_id": node_id,
-                         "runtime_id": request.parameters["runtime_id"].as_str().unwrap_or_default(),
-                         "conversation_id": request.parameters["conversation_id"].as_str().unwrap_or_default()
-                    },
-                    doc! {
-                        "$set":{
-                            "state":"finished",
-                            "finished_at":mongodb::bson::DateTime::now()
-                        }
-                    },
-                ).await;
-                // Acknowledge only a durable update. A lost acknowledgement is
-                // retried with a fresh nonce, so this transition is idempotent.
-                if result.is_ok_and(|update| update.matched_count == 1) {
+                let result = finish_request(&state.db, node_id, &request).await;
+                // Late completion never overwrites revoked/stopped state. A
+                // replay gets an acknowledgement only for its exact binding.
+                if result.is_ok() {
                     for call in self
                         .calls
                         .lock()
@@ -395,7 +382,7 @@ async fn authorize_and_execute(
         .db
         .collection::<mongodb::bson::Document>(JOBS)
         .find_one(doc! {"_id":&job.id})
-        .projection(doc! {"machine_authority":1})
+        .projection(doc! {"machine_authority":1,"external_authority":1})
         .await?;
     if let Some(authority) = binding
         .as_ref()
@@ -406,6 +393,15 @@ async fn authorize_and_execute(
         return Err(AppError::MachineAuthorityStale);
     }
 
+    if let Some(authority) = binding
+        .as_ref()
+        .and_then(|r| r.get_document("external_authority").ok())
+    {
+        let expected = json!({"kind":"external","context_id":authority.get_str("context_id").unwrap_or_default(),"grant_id":authority.get_str("grant_id").unwrap_or_default(),"grant_revision":authority.get_i64("grant_revision").unwrap_or_default(),"assignment_revision":authority.get_i64("assignment_revision").unwrap_or_default(),"lease_id":authority.get_str("lease_id").unwrap_or_default()});
+        if p["authority_binding"] != expected {
+            return Err(AppError::MachineAuthorityStale);
+        }
+    }
     crate::services::machine_desktop_service::agent_allowed(&state.db, node_id).await?;
     let raw_path = p["path"]
         .as_str()
@@ -414,12 +410,20 @@ async fn authorize_and_execute(
         return Err(AppError::ValidationError("Gateway path too long".into()));
     }
     let method = p["method"].as_str().unwrap_or("GET");
-    let available = crate::services::machine_gateway_service::services(
-        &state.db,
-        &job.user_id,
-        &job.api_key_id,
-    )
-    .await?;
+    let available = if matches!(
+        job.binding,
+        Some(crate::models::machine_job::MachineJobBinding::External { .. })
+    ) {
+        crate::services::machine_gateway_service::external_services(
+            &state.db,
+            &job.user_id,
+            &auth.allowed_service_ids,
+        )
+        .await?
+    } else {
+        crate::services::machine_gateway_service::services(&state.db, &job.user_id, &job.api_key_id)
+            .await?
+    };
     let is_declared = |row: &&crate::services::machine_gateway_service::AvailableService| {
         job.services
             .iter()
@@ -554,6 +558,34 @@ async fn authorize_and_execute(
             declared_id: selected.id.clone(),
             git,
         });
+    let (grant_id, principal_kind) = match &job.binding {
+        Some(crate::models::machine_job::MachineJobBinding::External {
+            grant_id,
+            principal,
+            ..
+        }) => (
+            Some(grant_id.clone()),
+            match principal {
+                crate::models::machine_external_grant::ExternalPrincipalRef::OAuth { .. } => {
+                    "oauth"
+                }
+                crate::models::machine_external_grant::ExternalPrincipalRef::ApiKey { .. } => {
+                    "api_key"
+                }
+            },
+        ),
+        _ => (None, "assistant"),
+    };
+    request.extensions_mut().insert(
+        crate::services::machine_gateway_service::MachineUsageAttribution {
+            node_id: job.node_id.clone(),
+            job_id: job.id.clone(),
+            runtime_id: job.runtime_id.clone(),
+            runtime_generation: job.runtime_generation,
+            grant_id,
+            principal_kind,
+        },
+    );
     let path_only = path.split('?').next().unwrap_or_default();
     super::proxy::proxy_request_by_slug_inner(
         state,
@@ -570,6 +602,49 @@ pub(crate) async fn job_auth(state: &AppState, job: &MachineJob) -> AppResult<Au
     Box::pin(crate::services::machine_gateway_service::job_auth(
         &state.db, job,
     ))
+    .await
+}
+
+async fn finish_request(
+    db: &mongodb::Database,
+    node_id: &str,
+    request: &nyxid_machine::Request,
+) -> AppResult<()> {
+    let p = &request.parameters;
+    let job=db.collection::<MachineJob>(JOBS).find_one(doc!{"_id":p["job_id"].as_str().unwrap_or_default(),"node_id":node_id,"runtime_id":p["runtime_id"].as_str().unwrap_or_default()}).await?.ok_or(AppError::MachineJobNotFound)?;
+    if let Some(crate::models::machine_job::MachineJobBinding::External {
+        grant_id,
+        grant_revision,
+        assignment_revision,
+        lease_id,
+        ..
+    }) = &job.binding
+    {
+        let stored = db
+            .collection::<mongodb::bson::Document>(JOBS)
+            .find_one(doc! {"_id":&job.id})
+            .await?
+            .ok_or(AppError::MachineJobNotFound)?;
+        let authority = stored
+            .get_document("external_authority")
+            .map_err(|_| AppError::MachineAuthorityStale)?;
+        if p["authority_binding"]
+            != json!({"kind":"external","context_id":authority.get_str("context_id").unwrap_or_default(),"grant_id":grant_id,"grant_revision":grant_revision,"assignment_revision":assignment_revision,"lease_id":lease_id})
+        {
+            return Err(AppError::MachineAuthorityStale);
+        }
+    } else if job.conversation_id.is_empty()
+        || p["conversation_id"].as_str() != Some(&job.conversation_id)
+    {
+        return Err(AppError::MachineAuthorityStale);
+    }
+    crate::services::machine_external_service::finish_observed(
+        db,
+        &job.id,
+        node_id,
+        &job.runtime_id,
+        p,
+    )
     .await
 }
 

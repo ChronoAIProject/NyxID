@@ -110,6 +110,7 @@ tempfile = "3.27.0"
 axum-extra = { version = "0.12.6", features = ["form", "query"] }
 
 [dev-dependencies]
+nyxid-machine-updater = { path = "../machine-updater", features = ["test-support"] }
 flate2 = "1"
 # TLS echo proxy for multi-origin routing and redirect acceptance tests.
 rcgen = "0.14"
