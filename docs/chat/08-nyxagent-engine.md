@@ -1627,6 +1627,16 @@ hold per-day counts and up to 100 recent rows with their comment and context;
 rows written before the snapshot existed have `context: null`. Message text is
 never included.
 
+Native channel guest authority also covers positively addressed foreign
+Telegram/Lark/Feishu bot actors in owner-enabled groups. The receiving bot's
+existing channel/chat agent answers; native mention names do not select arbitrary
+app-group members. These turns need no sender OAuth and retain guest service,
+privacy and approval restrictions, including delayed image/text delivery. They
+cannot link or impersonate owners, queue owner work or renew thread following.
+Durable per-chat and owner-hourly handoff limits bound automated exchanges; only
+admitted authenticated human messages reset the chat budget. See the
+[channel relay contract and gateway rollout](../CHANNEL_BOT_RELAY.md).
+
 ### Model failure attribution and capacity admission
 
 Only explicit pre-acceptance status/code pairs above prove a capacity refusal.

@@ -393,7 +393,13 @@ pub(super) fn unnamed_sender(platform: &str, sender_id: &str) -> String {
 /// first), so the agent reads who was addressed. Other payloads are left as
 /// they are.
 pub(super) fn named_mentions(text: &str, raw: &Value) -> String {
-    let Some(mentions) = raw["event"]["message"]["mentions"].as_array() else {
+    if text.len() > 64 * 1024 {
+        return text.to_owned();
+    }
+    let Some(mentions) = raw["event"]["message"]["mentions"]
+        .as_array()
+        .filter(|m| m.len() <= crate::services::channel_native_mentions::MAX_ENTITIES)
+    else {
         return text.to_owned();
     };
     let mut named: Vec<(&str, String)> = mentions
@@ -401,21 +407,37 @@ pub(super) fn named_mentions(text: &str, raw: &Value) -> String {
         .filter_map(|mention| {
             let key = mention["key"]
                 .as_str()
-                .filter(|key| key.starts_with("@_"))?;
-            let name = plain_name(mention["name"].as_str()?)?;
+                .filter(|key| key.starts_with("@_user_") && key.len() <= 64)?;
+            let name = plain_name(mention["name"].as_str().filter(|name| name.len() <= 1024)?)?;
             Some((key, name.chars().take(60).collect()))
         })
         .collect();
     if named.is_empty() {
         return text.to_owned();
     }
+    let conflicting: Vec<&str> = named
+        .iter()
+        .filter_map(|(key, name)| {
+            named
+                .iter()
+                .any(|(other, label)| key == other && name != label)
+                .then_some(*key)
+        })
+        .collect();
+    named.retain(|(key, _)| !conflicting.contains(key));
     named.sort_by_key(|(key, _)| std::cmp::Reverse(key.len()));
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
     while let Some(at) = rest.find("@_") {
         out.push_str(&rest[..at]);
         rest = &rest[at..];
-        match named.iter().find(|(key, _)| rest.starts_with(key)) {
+        match named.iter().find(|(key, _)| {
+            rest.starts_with(key)
+                && rest[key.len()..]
+                    .chars()
+                    .next()
+                    .is_none_or(|c| !c.is_alphanumeric() && c != '_')
+        }) {
             Some((key, name)) => {
                 out.push('@');
                 out.push_str(name);
@@ -516,20 +538,6 @@ pub(super) fn spawn_title_lookup(state: &AppState, row: &NyxbotChannel, chat: &N
     });
 }
 
-fn mentions_username(text: &str, username: &str) -> bool {
-    if username.is_empty() {
-        return false;
-    }
-    let text = text.to_lowercase();
-    let needle = format!("@{}", username.to_lowercase());
-    text.match_indices(&needle).any(|(at, _)| {
-        text[at + needle.len()..]
-            .chars()
-            .next()
-            .is_none_or(|next| !(next.is_ascii_alphanumeric() || next == '_'))
-    })
-}
-
 /// Whether a direct message in a group mentions the bot or replies to it,
 /// read from the platform's payload. `None` when the payload does not say:
 /// then only the owner is answered (as before chats had settings).
@@ -542,44 +550,21 @@ pub(super) fn raw_addressed(
 ) -> Option<bool> {
     match canonical_platform(&bot.platform) {
         "telegram" => {
-            let message = ["message", "edited_message", "channel_post"]
-                .iter()
-                .find_map(|key| raw.get(*key))?;
+            let message = native_message(raw)?;
             let bot_id = bot.platform_bot_id.as_str();
             let is_bot = |user: &Value| {
                 user["id"].as_i64().map(|id| id.to_string()).as_deref() == Some(bot_id)
             };
-            let text = message["text"]
-                .as_str()
-                .or_else(|| message["caption"].as_str())
-                .unwrap_or_default();
-            let entities = message["entities"]
-                .as_array()
-                .or_else(|| message["caption_entities"].as_array());
             Some(
                 is_bot(&message["reply_to_message"]["from"])
-                    || mentions_username(text, bot.platform_bot_username.trim_start_matches('@'))
-                    || entities.is_some_and(|entities| {
-                        entities.iter().any(|entity| {
-                            entity["type"] == "text_mention" && is_bot(&entity["user"])
-                        })
-                    }),
+                    || crate::services::channel_native_mentions::telegram(message, bot).bot,
             )
         }
-        // Only a mention of the bot itself counts: apps granted every group
-        // message also get mentions of other people. Without the bot's own
-        // ID (its lookup failed), any mention counts, as Lark then delivers
-        // only messages that mention the bot to most apps.
-        "lark" | "feishu" => Some(raw["event"]["message"]["mentions"].as_array().is_some_and(
-            |mentions| {
-                match bot_user_id {
-                    Some(bot_id) => mentions
-                        .iter()
-                        .any(|mention| mention["id"]["open_id"].as_str() == Some(bot_id)),
-                    None => !mentions.is_empty(),
-                }
-            },
-        )),
+        "lark" | "feishu" => Some(
+            crate::services::channel_native_mentions::lark(&raw["event"]["message"], bot_user_id)
+                .bot,
+        ),
+
         // Slack says so with its own event type; other channel messages
         // cannot be told apart here.
         "slack" => (raw["event"]["type"] == "app_mention").then_some(true),
@@ -597,6 +582,17 @@ pub(super) fn raw_addressed(
         }
         _ => None,
     }
+}
+
+/// Select the same authenticated native message variant used by Telegram
+/// parsing and sender classification. Telegram adapters accept these three
+/// update variants in this order; edited channel posts are not part of the
+/// NyxID Telegram ingress contract.
+pub(super) fn native_message(raw: &Value) -> Option<&Value> {
+    ["message", "edited_message", "channel_post"]
+        .into_iter()
+        .filter_map(|key| raw.get(key))
+        .next()
 }
 
 /// Whether `reply_to` (a platform message ID in `chat_id`) is one the bot sent.
@@ -785,11 +781,19 @@ pub(super) async fn sync_gateway_groups(
     }
     // Compare with the stored admission as of now, not the caller's copy.
     let mut current = load_channel(state, &row.user_id, &row.id).await?;
-    super::gateway_threads::discover(state, &mut current).await?;
-    let row = &current;
-    if row.status != "active" {
+    if current.status != "active" || current.transport != "gateway" {
         return Ok(None);
     }
+    let prior_identity = current.gateway_bot_id.clone();
+    super::gateway_bot_mentions::discover(state, &mut current).await?;
+    let identity_changed = prior_identity != current.gateway_bot_id;
+    super::gateway_threads::discover(state, &mut current).await?;
+    let row = &current;
+    if row.status != "active" || row.transport != "gateway" {
+        return Ok(None);
+    }
+    let bot = channel_bot_service::get_bot(&state.db, &row.channel_bot_id).await?;
+    let bots = super::gateway_bot_mentions::desired(row, &bot);
     let wanted = wanted_groups(state, row).await?;
     let threads = super::gateway_threads::desired(state, row).await?;
     if row
@@ -798,6 +802,8 @@ pub(super) async fn sync_gateway_groups(
         .unwrap_or(GATEWAY_GROUPS_DEFAULT)
         == wanted
         && threads == row.gateway_threads
+        && bots == row.gateway_bot_mentions.enabled
+        && !identity_changed
     {
         return Ok(None);
     }
@@ -808,7 +814,7 @@ pub(super) async fn sync_gateway_groups(
     {
         return Ok(Some("gateway_retry_pending"));
     }
-    let code = push_gateway_groups(state, row, wanted, &threads).await?;
+    let code = push_gateway_groups(state, row, wanted, &threads, identity_changed).await?;
     let update = match code {
         None => doc! {"$unset": {"gateway_groups_retry_at": ""}},
         Some(_) => doc! {"$set": {"gateway_groups_retry_at": bson::DateTime::from_chrono(
@@ -827,8 +833,9 @@ async fn push_gateway_groups(
     row: &NyxbotChannel,
     wanted: &'static str,
     threads: &crate::models::nyxbot_channel::GatewayThreadSupport,
+    identity_changed: bool,
 ) -> AppResult<Option<&'static str>> {
-    let (Some(channel_id), Some(version), Some(route_id)) = (
+    let (Some(channel_id), Some(expected_version), Some(route_id)) = (
         row.gateway_channel_id.as_deref(),
         row.gateway_version,
         row.route_id.as_deref(),
@@ -837,13 +844,20 @@ async fn push_gateway_groups(
     };
     let bot = channel_bot_service::get_bot(&state.db, &row.channel_bot_id).await?;
     let creator = creator_bearer(state, &row.user_id)?;
+    let bots = super::gateway_bot_mentions::desired(row, &bot);
+    let reconciliation = GatewayReconciliation {
+        wanted,
+        threads,
+        bots,
+        identity_changed,
+    };
     let mut update = gateway_policy(state, row, &bot, &[route_id.to_owned()], wanted);
     if threads.version == Some(1) {
         update["reply"]["thread_contract"] = super::gateway_threads::policy(threads);
     } else if let Some(reply) = update["reply"].as_object_mut() {
         reply.remove("thread_contract");
     }
-    update["expected_version"] = json!(version);
+    update["expected_version"] = json!(expected_version);
     let response = gateway_call(
         state,
         reqwest::Method::PUT,
@@ -855,29 +869,211 @@ async fn push_gateway_groups(
     .await;
     match response {
         Ok(response) if response.status == 200 => {
-            if threads.version == Some(1)
-                && response
-                    .body
-                    .pointer("/definition/reply/thread_contract/version")
-                    != Some(&json!(1))
-            {
-                return Ok(Some("gateway_thread_contract_unavailable"));
-            }
-            let version = response.body["version"].as_i64().unwrap_or(version + 1);
-            state
-                .db
-                .collection::<NyxbotChannel>(CHANNELS)
-                .update_one(
-                    doc! {"_id": &row.id},
-                    doc! {"$set": {"gateway_version": version, "gateway_groups": wanted,
-                    "gateway_threads": bson::to_bson(threads).map_err(|_| crate::services::channel_thread_follow_service::not_found())?,
-                    "updated_at": bson::DateTime::now()}},
+            if !gateway_policy_acknowledged(&response.body, &update) {
+                // A successful PUT without a trustworthy echo is an
+                // uncertain write. Read the authenticated record before
+                // retrying so an accepted update cannot leave our CAS version
+                // permanently stale.
+                return reconcile_gateway_groups(
+                    state,
+                    row,
+                    reconciliation,
+                    creator.as_str(),
+                    &update,
                 )
-                .await?;
-            Ok(None)
+                .await;
+            }
+            let Some(version) = response.body["version"].as_i64().filter(|value| *value > 0) else {
+                return reconcile_gateway_groups(
+                    state,
+                    row,
+                    reconciliation,
+                    creator.as_str(),
+                    &update,
+                )
+                .await;
+            };
+            persist_gateway_groups(state, row, expected_version, wanted, threads, bots, version)
+                .await
+        }
+        Ok(response) if response.status == 409 => {
+            // A concurrent writer may already have applied the desired
+            // definition. Reconcile the fresh CAS version before deciding
+            // whether another PUT is needed.
+            reconcile_gateway_groups(state, row, reconciliation, creator.as_str(), &update).await
         }
         Ok(response) => Ok(Some(gateway_error_code(&response))),
         Err(_) => Ok(Some("gateway_unavailable")),
+    }
+}
+
+struct GatewayReconciliation<'a> {
+    wanted: &'static str,
+    threads: &'a crate::models::nyxbot_channel::GatewayThreadSupport,
+    bots: bool,
+    identity_changed: bool,
+}
+
+/// Compare only the provider fields that NyxID authored. Gateways may add
+/// harmless definition metadata, but identity, admission and route scope must
+/// echo exactly before NyxID enables bot delivery.
+fn gateway_policy_acknowledged(body: &Value, requested: &Value) -> bool {
+    let Some(definition) = body.get("definition") else {
+        return false;
+    };
+    let Some(actual_sources) = definition.get("sources").and_then(Value::as_array) else {
+        return false;
+    };
+    let Some(expected_sources) = requested.get("sources").and_then(Value::as_array) else {
+        return false;
+    };
+    if actual_sources.len() != 1 || expected_sources.len() != 1 {
+        return false;
+    }
+    let Some(actual) = definition.pointer("/sources/0") else {
+        return false;
+    };
+    let Some(expected) = requested.pointer("/sources/0") else {
+        return false;
+    };
+    if actual.get("trust_normalized").and_then(Value::as_bool) == Some(true) {
+        return false;
+    }
+    [
+        "/type",
+        "/issuer",
+        "/key_id",
+        "/platform",
+        "/route_ids",
+        "/bot_id",
+        "/bot_username",
+        "/admission",
+    ]
+    .iter()
+    .all(|pointer| actual.pointer(pointer) == expected.pointer(pointer))
+        && definition.pointer("/reply/thread_contract")
+            == requested.pointer("/reply/thread_contract")
+}
+
+async fn persist_gateway_groups(
+    state: &AppState,
+    row: &NyxbotChannel,
+    expected_version: i64,
+    wanted: &'static str,
+    threads: &crate::models::nyxbot_channel::GatewayThreadSupport,
+    bots: bool,
+    version: i64,
+) -> AppResult<Option<&'static str>> {
+    let Some(filter) = gateway_local_cas_filter(row, expected_version) else {
+        return Ok(Some("gateway_reconcile_conflict"));
+    };
+    let updated = state
+        .db
+        .collection::<NyxbotChannel>(CHANNELS)
+        .update_one(
+            filter,
+            doc! {"$set": {"gateway_version": version, "gateway_groups": wanted,
+            "gateway_bot_mentions.enabled": bots,
+            "gateway_bot_id": &row.gateway_bot_id,
+            "gateway_threads": bson::to_bson(threads).map_err(|_| crate::services::channel_thread_follow_service::not_found())?,
+            "updated_at": bson::DateTime::now()}},
+        )
+        .await?;
+    Ok((updated.matched_count != 1).then_some("gateway_reconcile_conflict"))
+}
+
+/// Fence local gateway state updates against the same live transport binding
+/// that was used for the remote request. A reconnect or route switch must
+/// win over a late acknowledgement from the old channel.
+pub(super) fn gateway_local_cas_filter(
+    row: &NyxbotChannel,
+    expected_version: i64,
+) -> Option<mongodb::bson::Document> {
+    let (Some(channel_id), Some(route_id)) =
+        (row.gateway_channel_id.as_deref(), row.route_id.as_deref())
+    else {
+        return None;
+    };
+    (row.transport == "gateway" && row.status == "active").then(|| {
+        doc! {
+            "_id": &row.id,
+            "status": "active",
+            "transport": "gateway",
+            "gateway_version": expected_version,
+            "gateway_channel_id": channel_id,
+            "route_id": route_id,
+            "route_api_key_id": &row.route_api_key_id,
+        }
+    })
+}
+
+async fn reconcile_gateway_groups(
+    state: &AppState,
+    row: &NyxbotChannel,
+    policy: GatewayReconciliation<'_>,
+    creator: &str,
+    requested: &Value,
+) -> AppResult<Option<&'static str>> {
+    let Some(channel_id) = row.gateway_channel_id.as_deref() else {
+        return Ok(Some("gateway_channel_missing"));
+    };
+    let fresh = gateway_call(
+        state,
+        reqwest::Method::GET,
+        &format!("/channels/{}", urlencode(channel_id)),
+        creator,
+        None,
+        None,
+    )
+    .await;
+    let Ok(fresh) = fresh else {
+        return Ok(Some("gateway_unavailable"));
+    };
+    if fresh.status != 200 {
+        return Ok(Some(gateway_error_code(&fresh)));
+    }
+    let Some(version) = fresh.body["version"].as_i64().filter(|value| *value > 0) else {
+        return Ok(Some("gateway_version_unavailable"));
+    };
+    let acknowledged = gateway_policy_acknowledged(&fresh.body, requested);
+    if acknowledged {
+        return persist_gateway_groups(
+            state,
+            row,
+            row.gateway_version.unwrap_or_default(),
+            policy.wanted,
+            policy.threads,
+            policy.bots,
+            version,
+        )
+        .await;
+    }
+    // Persist a fresh CAS version even when the policy echo is unsafe. The
+    // next scheduled reconciliation can retry against the accepted write;
+    // bot enablement remains disabled until a complete echo is observed.
+    let Some(filter) = gateway_local_cas_filter(row, row.gateway_version.unwrap_or_default())
+    else {
+        return Ok(Some("gateway_reconcile_conflict"));
+    };
+    let updated = state
+        .db
+        .collection::<NyxbotChannel>(CHANNELS)
+        .update_one(
+            filter,
+            doc! {"$set": {"gateway_version": version, "updated_at": bson::DateTime::now()}},
+        )
+        .await?;
+    if updated.matched_count != 1 {
+        return Ok(Some("gateway_reconcile_conflict"));
+    }
+    if policy.identity_changed {
+        Ok(Some("gateway_receiving_identity_unavailable"))
+    } else if policy.bots {
+        Ok(Some("gateway_native_bot_mentions_unavailable"))
+    } else if policy.threads.version == Some(1) {
+        Ok(Some("gateway_thread_contract_unavailable"))
+    } else {
+        Ok(Some("gateway_policy_unavailable"))
     }
 }
 
@@ -2175,5 +2371,154 @@ mod automation_reply_tests {
             automation_reply("discord", "All done", "https://nyx.id"),
             "All done"
         );
+    }
+}
+
+/// Native actor kind from authenticated provider data, never a display name.
+pub(super) fn native_sender_kind(
+    platform: &str,
+    raw: &Value,
+) -> crate::models::channel_thread::ThreadSenderKind {
+    use crate::models::channel_thread::ThreadSenderKind::*;
+    match canonical_platform(platform) {
+        "telegram" => {
+            let m = native_message(raw);
+            match m {
+                // Telegram channel posts have no user `from`; preserve their
+                // authenticated legacy guest delivery. `native_owner_eligible`
+                // below keeps them away from owner and bot-budget privileges.
+                Some(m) if raw.get("channel_post").is_some() && m.get("from").is_none() => Human,
+                Some(m) if m.get("sender_chat").is_none() => match m["from"]["is_bot"].as_bool() {
+                    Some(false) => Human,
+                    Some(true) => Bot,
+                    None => Unknown,
+                },
+                _ => Unknown,
+            }
+        }
+        "lark" | "feishu" => {
+            if raw["header"]["event_type"].as_str() == Some("card.action.trigger") {
+                let operator = &raw["event"]["operator"];
+                let valid_operator = operator["open_id"]
+                    .as_str()
+                    .is_some_and(|id| id.starts_with("ou_") && (4..=128).contains(&id.len()));
+                return if valid_operator { Human } else { Unknown };
+            }
+            match raw["event"]["sender"]["sender_type"].as_str() {
+                Some("user") => Human,
+                Some("app") => Bot,
+                _ => Unknown,
+            }
+        }
+        // Existing adapter-specific admission remains unchanged outside this feature.
+        _ => Human,
+    }
+}
+
+/// A Telegram channel post has an authenticated provider envelope but no
+/// user actor. It keeps legacy guest handling without owner linking/presence
+/// or replenishing the automated group-hop allowance.
+pub(super) fn native_owner_eligible(platform: &str, raw: &Value) -> bool {
+    !(canonical_platform(platform) == "telegram"
+        && raw.get("channel_post").is_some()
+        && native_message(raw).is_some_and(|message| message.get("from").is_none()))
+}
+
+/// A native bot can address only the authenticated receiving installation.
+/// Identity namespaces are explicit; an app ID or display name cannot stand
+/// in for a Lark open_id. Missing identity closes automated admission.
+pub(super) fn foreign_bot(bot: &ChannelBot, own_open_id: Option<&str>, sender: &str) -> bool {
+    let own = match canonical_platform(&bot.platform) {
+        "telegram" => bot
+            .platform_bot_id
+            .parse::<i64>()
+            .ok()
+            .filter(|n| *n > 0)
+            .map(|_| bot.platform_bot_id.as_str()),
+        "lark" | "feishu" => own_open_id.filter(|id| id.starts_with("ou_")),
+        _ => None,
+    };
+    own.is_some_and(|own| {
+        sender != own
+            && match canonical_platform(&bot.platform) {
+                "telegram" => sender
+                    .parse::<i64>()
+                    .is_ok_and(|id| id > 0 && id.to_string() == sender),
+                "lark" | "feishu" => {
+                    sender.starts_with("ou_") && sender.len() > 3 && sender.len() <= 128
+                }
+                _ => false,
+            }
+    })
+}
+
+pub(super) fn bot_guest_allowed(chat: &NyxbotThread, addressed: Option<bool>) -> bool {
+    matches!(chat.kind.as_deref(), Some("group"))
+        && addressed == Some(true)
+        && members_may_talk(chat)
+}
+
+pub(super) async fn existing_bot_chat(
+    state: &AppState,
+    row: &NyxbotChannel,
+    partition: &str,
+) -> AppResult<Option<NyxbotThread>> {
+    Ok(state.db.collection::<NyxbotThread>(THREADS).find_one(doc! {
+        "user_id":&row.user_id,"channel_id":&row.id,"partition":partition,
+        "record_scope":{"$ne":crate::services::channel_thread_follow_service::SCOPE},"kind":"group"
+    }).await?.filter(members_may_talk))
+}
+
+#[cfg(test)]
+mod gateway_policy_tests {
+    use super::gateway_policy_acknowledged;
+    use serde_json::{Value, json};
+
+    fn requested() -> Value {
+        json!({
+            "sources": [{
+                "type": "nyxid_relay",
+                "issuer": "https://nyx.example",
+                "key_id": "route-key",
+                "platform": "lark",
+                "route_ids": ["route-1"],
+                "bot_id": "ou_receiver",
+                "admission": {"type": "scoped", "groups": "mention_or_reply_to_bot"}
+            }],
+            "reply": {"thread_contract": null}
+        })
+    }
+
+    #[test]
+    fn acknowledged_gateway_policy_requires_one_raw_verified_source() {
+        let requested = requested();
+        assert!(gateway_policy_acknowledged(
+            &json!({"version": 2, "definition": requested}),
+            &requested,
+        ));
+
+        let mut normalized = requested.clone();
+        normalized["sources"][0]["trust_normalized"] = json!(true);
+        assert!(!gateway_policy_acknowledged(
+            &json!({"version": 2, "definition": normalized}),
+            &requested,
+        ));
+
+        let mut extra_source = requested.clone();
+        extra_source["sources"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"type": "unexpected"}));
+        assert!(!gateway_policy_acknowledged(
+            &json!({"version": 2, "definition": extra_source}),
+            &requested,
+        ));
+
+        let mut changed_route = requested.clone();
+        changed_route["sources"][0]["route_ids"] = json!(["other-route"]);
+        assert!(!gateway_policy_acknowledged(
+            &json!({"version": 2, "definition": changed_route}),
+            &requested,
+        ));
     }
 }

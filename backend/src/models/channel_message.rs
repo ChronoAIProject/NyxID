@@ -62,6 +62,11 @@ pub struct ChannelMessage {
     /// Platform-assigned message identifier
     #[serde(default)]
     pub platform_message_id: Option<String>,
+    /// Authenticated provider update/event identity used for relay redelivery
+    /// fencing. Telegram's update ID is distinct from its message ID because
+    /// edited messages retain the latter. This is routing metadata only.
+    #[serde(default)]
+    pub native_event_id: Option<String>,
     /// Platform-native sender identifier
     #[serde(default)]
     pub sender_platform_id: Option<String>,
@@ -139,6 +144,7 @@ mod tests {
             direction: "inbound".to_string(),
             platform: "telegram".to_string(),
             platform_message_id: Some("msg_123".to_string()),
+            native_event_id: Some("telegram-update-123".to_string()),
             sender_platform_id: Some("user_456".to_string()),
             sender_display_name: Some("Alice".to_string()),
             content_type: "text".to_string(),

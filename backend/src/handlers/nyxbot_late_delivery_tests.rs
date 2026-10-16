@@ -93,6 +93,7 @@ async fn fixture(name: &str) -> Fixture {
             .unwrap(),
     );
     event.delivery = Some(ChannelTurnDelivery {
+        sender_kind: None,
         version: 1,
         state: "waiting".into(),
         origin: ChannelOrigin {
@@ -660,6 +661,45 @@ async fn event_binding_rolls_back_with_admission_and_stale_claim_cannot_finish()
         .await
         .unwrap();
     assert_eq!(status(&f).await, "sent");
+}
+
+#[tokio::test]
+async fn external_bot_delayed_answer_keeps_guest_authority_despite_owner_id_overlap() {
+    let f = fixture("external_bot_delayed_guest").await;
+    // This ID is intentionally already present in owner_sender_ids. The
+    // authenticated bot actor classification must survive stream detachment.
+    f.state.db.collection::<bson::Document>(THREADS).update_one(
+        doc! {"channel_id":&f.channel.id},
+        doc! {"$set":{"kind":"group","members":"everyone","owner_seen":false,"owner_chat":false}},
+    ).await.unwrap();
+    patch(
+        &f,
+        doc! {"delivery.guest":true,"delivery.sender_kind":"bot","delivery.state":"pending"},
+    )
+    .await;
+    f.state
+        .db
+        .collection::<bson::Document>(CONVERSATIONS)
+        .update_one(
+            doc! {"_id":&f.event.conversation_id},
+            doc! {"$set":{"guest_turn":true}},
+        )
+        .await
+        .unwrap();
+    settled(&f, false).await;
+    late_delivery::sweep(&f.state).await.unwrap();
+    late_delivery::sweep(&f.state).await.unwrap();
+    assert_eq!(
+        status(&f).await,
+        "sent",
+        "a bot stays an admitted guest through delayed delivery"
+    );
+    assert_eq!(
+        sends(&f).await.len(),
+        1,
+        "settlement cannot duplicate an effect"
+    );
+    f.state.db.drop().await.unwrap();
 }
 
 #[tokio::test]
