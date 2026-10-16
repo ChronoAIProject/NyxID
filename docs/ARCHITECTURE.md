@@ -214,6 +214,17 @@ Handlers are thin HTTP boundary functions. They:
 
 The service layer contains all business logic. Services receive database connections and domain objects -- they never interact with HTTP types.
 
+Oracle pool lifecycle preserves the polymorphic `oracle_pools.user_id` owner.
+`oracle_mutation_service` serializes Oracle writers through the existing pool
+enrollment fence in MongoDB transactions; lifecycle versions reject stale
+snapshots, and installation epochs invalidate credentials on ownership changes.
+Transfer and deletion commit their hash-chained audit entries atomically.
+Deletion retains a slug-reserving tombstone and a durable cleanup marker;
+bounded background transactions remove credentials and login material and close
+idle sessions while retaining task history under its existing TTL. This requires
+transaction-capable MongoDB and a coordinated upgrade/drain of old replicas
+before lifecycle operations are used. See [Oracle lifecycle](ORACLE_RELAY.md#pool-ownership-and-deletion-unreleased-1527-1542).
+
 | Module              | Responsibility                                            |
 |---------------------|-----------------------------------------------------------|
 | `auth_service.rs`   | User registration (email uniqueness, password hashing), credential verification |
