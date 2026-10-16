@@ -17,6 +17,7 @@ import { onlineManager, QueryClient, QueryClientProvider } from "@tanstack/react
 import NetInfo from "@react-native-community/netinfo";
 import {
   NavigationContainer,
+  StackActions,
   NavigationState,
   PartialState,
   useNavigationContainerRef,
@@ -37,6 +38,8 @@ import { JetBrainsMono_400Regular } from "@expo-google-fonts/jetbrains-mono";
 import { AppErrorBoundary } from "./AppErrorBoundary";
 import { AppNavigator, RootStackParamList } from "./AppNavigator";
 import { appLinking, extractChallengeIdFromNotificationResponse } from "./linking";
+import { challengeNavigationAction, workspaceNavigateAction } from "./navigationHierarchy";
+import type { WorkspaceNavigationGuardChange } from "./WorkspaceHeader";
 import {
   consumePendingPushSyncSignal,
   initializeNotificationRuntime,
@@ -46,13 +49,12 @@ import {
 } from "../lib/notifications/pushNotifications";
 import { ToastOverlay, type ToastState } from "../components/ToastOverlay";
 import { signalApprovalStateMayHaveChanged } from "../lib/notifications/approvalRefreshSignal";
-import { AuthSessionProvider } from "../features/auth/AuthSessionContext";
+import { AuthSessionProvider, useAuthSession } from "../features/auth/AuthSessionContext";
 import { MobileConsentProvider } from "../lib/consent";
 import { capture } from "../lib/telemetry";
 import type { PushType } from "../lib/telemetry-schema";
 import { GestureHandlerRootView } from "react-native-gesture-handler";
-import type { BottomNavV2Tab } from "../components/BottomNavV2";
-// import { NyxSheet } from "../features/nyx/NyxSheet"; // TODO: re-enable when chat is ready
+import { WorkspaceDrawer, type WorkspaceRoute } from "../components/workspace/WorkspaceDrawer";
 import { ThemeProvider, useTheme } from "../theme/ThemeContext";
 
 // Wire TanStack Query's online state to NetInfo so queries pause when offline
@@ -111,8 +113,9 @@ function getActiveRouteName(
 export default function App() {
   const navigationRef = useNavigationContainerRef<RootStackParamList>();
   const [currentRouteName, setCurrentRouteName] = useState<string | undefined>(undefined);
-  const [isNyxOpen, setIsNyxOpen] = useState(false);
   const pendingChallengeFromTapRef = useRef<string | null>(null);
+  const navigationGuardsRef = useRef(new Set<symbol>());
+  const [navigationGuardRevision, setNavigationGuardRevision] = useState(0);
   const lastAppStateRef = useRef(AppState.currentState);
   const [pushToast, setPushToast] = useState<ToastState | null>(null);
 
@@ -122,14 +125,36 @@ export default function App() {
     const pendingChallengeId = pendingChallengeFromTapRef.current;
     if (!pendingChallengeId) return;
 
-    const rootState = navigationRef.getRootState();
-    if (!rootState?.routeNames?.includes("Activity")) {
-      return;
-    }
+    const action = challengeNavigationAction(
+      navigationRef.getRootState(),
+      pendingChallengeId,
+      navigationGuardsRef.current.size > 0,
+    );
+    if (!action) return;
 
     pendingChallengeFromTapRef.current = null;
-    navigationRef.navigate("Activity", { challengeId: pendingChallengeId });
+    navigationRef.dispatch(action);
   }, [navigationRef]);
+
+  const onNavigationGuardChange = useCallback<WorkspaceNavigationGuardChange>(
+    (id, blocked) => {
+      const guards = navigationGuardsRef.current;
+      if (blocked) {
+        if (guards.has(id)) return;
+        guards.add(id);
+      } else if (!guards.delete(id)) {
+        return;
+      }
+      setNavigationGuardRevision((value) => value + 1);
+    },
+    [],
+  );
+
+  // Guard cleanup schedules a normal effect; it never dispatches during the
+  // header's layout effect or re-enters an in-progress navigation transition.
+  useEffect(() => {
+    flushPendingChallengeTapNavigation();
+  }, [navigationGuardRevision, flushPendingChallengeTapNavigation]);
 
   // Tapping the in-app toast resolves to exactly the same navigation as
   // tapping an OS notification, including the "Activity route not mounted
@@ -365,8 +390,7 @@ export default function App() {
                     currentRouteName={currentRouteName}
                     setCurrentRouteName={setCurrentRouteName}
                     flushPendingChallengeTapNavigation={flushPendingChallengeTapNavigation}
-                    isNyxOpen={isNyxOpen}
-                    setIsNyxOpen={setIsNyxOpen}
+                    onNavigationGuardChange={onNavigationGuardChange}
                     pushToast={pushToast}
                   />
                 </AuthSessionProvider>
@@ -384,20 +408,33 @@ function ThemedAppShell({
   currentRouteName,
   setCurrentRouteName,
   flushPendingChallengeTapNavigation,
-  isNyxOpen,
-  setIsNyxOpen,
+  onNavigationGuardChange,
   pushToast,
 }: {
   navigationRef: ReturnType<typeof useNavigationContainerRef<RootStackParamList>>;
   currentRouteName: string | undefined;
   setCurrentRouteName: (name: string | undefined) => void;
   flushPendingChallengeTapNavigation: () => void;
-  isNyxOpen: boolean;
-  setIsNyxOpen: (open: boolean) => void;
+  onNavigationGuardChange: WorkspaceNavigationGuardChange;
   pushToast: ToastState | null;
 }) {
   const { mode } = useTheme();
   const insets = useSafeAreaInsets();
+  const { isAuthenticated } = useAuthSession();
+  const [drawerOpen, setDrawerOpen] = useState(false);
+  useEffect(() => { if (!isAuthenticated) setDrawerOpen(false); }, [isAuthenticated]);
+  const navigateFromDrawer = (route: WorkspaceRoute) => {
+    setDrawerOpen(false);
+    if (!navigationRef.isReady()) return;
+    const workspace = navigationRef.getRootState().routes.find(
+      (item) => item.name === "Workspace",
+    );
+    if (!workspace?.state?.key) return;
+    navigationRef.dispatch({
+      ...workspaceNavigateAction(route),
+      target: workspace.state.key,
+    });
+  };
 
   return (
     <>
@@ -417,17 +454,8 @@ function ThemedAppShell({
       >
         <StatusBar style={mode === "dark" ? "light" : "dark"} />
         <AppNavigator
-          currentRouteName={currentRouteName}
-          onMainTabPress={(tab: BottomNavV2Tab) => {
-            if (!navigationRef.isReady()) return;
-            capture({
-              name: "ui.mobile_nav_target_opened",
-              props: { target: tab, source: "tab" },
-            });
-            if (tab === "activity") navigationRef.navigate("Activity");
-            if (tab === "account") navigationRef.navigate("AccountSettings");
-          }}
-          // onNyxPress={() => setIsNyxOpen(true)} // TODO: re-enable when chat is ready
+          onOpenMenu={() => setDrawerOpen(true)}
+          onNavigationGuardChange={onNavigationGuardChange}
         />
       </NavigationContainer>
       {/* ToastOverlay anchors to `top: 0` of its parent and relies on the
@@ -439,7 +467,14 @@ function ThemedAppShell({
       >
         <ToastOverlay toast={pushToast} duration={6000} />
       </View>
-      {/* <NyxSheet isOpen={isNyxOpen} onClose={() => setIsNyxOpen(false)} /> */}{/* TODO: re-enable when chat is ready */}
+      {isAuthenticated ? <WorkspaceDrawer
+        visible={drawerOpen}
+        currentRoute={currentRouteName}
+        onClose={() => setDrawerOpen(false)}
+        onNavigate={navigateFromDrawer}
+        onScan={() => { setDrawerOpen(false); navigationRef.dispatch(StackActions.push("DeviceLogin", { start_scanner: true })); }}
+        onLoginCode={() => { setDrawerOpen(false); navigationRef.dispatch(StackActions.push("AgentKeyLogin", { mint: true })); }}
+      /> : null}
     </>
   );
 }

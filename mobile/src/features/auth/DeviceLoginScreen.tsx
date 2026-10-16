@@ -484,8 +484,10 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
   const handleBack = () => {
     if (navigation.canGoBack()) {
       navigation.goBack();
+    } else if (isAuthenticated) {
+      navigation.navigate("Workspace", { screen: "Activity" });
     } else {
-      navigation.navigate(isAuthenticated ? "Activity" : "Auth");
+      navigation.navigate("Auth");
     }
   };
 

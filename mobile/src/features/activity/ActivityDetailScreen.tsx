@@ -11,6 +11,7 @@ import { ToastOverlay, type ToastState } from "../../components/ToastOverlay";
 import { setActiveChallengeId } from "../../lib/notifications/pushNotifications";
 import { StatusBadge } from "../../components/StatusBadge";
 import { PrimaryButton } from "../../components/PrimaryButton";
+import { ApprovalEvidence } from "./ApprovalEvidence";
 import { mobileApi } from "../../lib/api/mobileApi";
 import { createIdempotencyKey } from "../../lib/api/idempotency";
 import {
@@ -248,7 +249,11 @@ export function ActivityDetailScreen({ navigation, route }: Props) {
       void queryClient.invalidateQueries({ queryKey: ["challenge", challengeId] });
       setToast({ message: decision === "APPROVE" ? "Approved" : "Denied", kind: "success" });
       setTimeout(() => {
-        navigation.replace("Activity");
+        if (navigation.canGoBack()) {
+          navigation.goBack();
+        } else {
+          navigation.replace("Workspace", { screen: "Activity" });
+        }
       }, 600);
     },
     onError: (err) => {
@@ -277,7 +282,7 @@ export function ActivityDetailScreen({ navigation, route }: Props) {
 
   const actionState = getChallengeActionState(data);
   const grantDurationLabel = formatGrantDuration(settingsQuery.data?.grant_expiry_days);
-  const riskColorMap = { high: colors.riskHigh.text, medium: colors.riskMedium.text, low: colors.riskLow.text };
+  const riskColorMap = { high: colors.riskHigh.text, medium: colors.riskMedium.text, low: colors.riskLow.text, unknown: colors.textSecondary };
   const riskColor = riskColorMap[data.risk_level];
   const isGrantMode = data.approval_mode === "grant";
 
@@ -324,7 +329,8 @@ export function ActivityDetailScreen({ navigation, route }: Props) {
               flowStyles={flowStyles}
             />
           ) : null}
-          <DetailRow label="Location" value={data.request_context.location} isLast flowStyles={flowStyles} />
+          <DetailRow label="Requester" value={data.request_context.requester} isLast flowStyles={flowStyles} />
+          <ApprovalEvidence challenge={data} />
         </View>
 
         {actionState.reason ? (

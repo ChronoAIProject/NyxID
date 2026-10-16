@@ -1,17 +1,21 @@
 import Constants from "expo-constants";
+import { fetch as expoFetch } from "expo/fetch";
+import { executeAuthenticatedRequest, type RequestOptions } from "./authenticatedTransport";
+import { mapBackendRequestToChallenge, mapChallengeStatus, type BackendApprovalRequestItem } from "./approvalAdapter";
+import { getAuthEpoch } from "../auth/authEpoch";
+import { readBoundedBytes } from "./readBoundedBytes";
 
 import { ApiError } from "./ApiError";
 import {
   clearStoredAuthSession,
   loadStoredAuthSession,
-  persistAuthSession,
+  persistRefreshedAuthSession,
 } from "../auth/sessionStore";
 import {
   ApprovalMode,
   AccountProfile,
   ApprovalItem,
   ChallengeDetail,
-  ChallengeStatus,
   DeleteAccountResponse,
   NotificationSettings,
   PageResponse,
@@ -22,7 +26,6 @@ import {
 } from "./types";
 
 const DEFAULT_API_BASE_URL = "http://localhost:3001/api/v1";
-const DEFAULT_CHALLENGE_DURATION_SEC = 24 * 60 * 60;
 const ACTIVITY_PAGE_SIZE = 20;
 const REFRESH_CONFLICT_RETRY_COUNT = 1;
 const REFRESH_CONFLICT_RETRY_DELAY_MS = 160;
@@ -38,14 +41,6 @@ let onSessionInvalidated: SessionInvalidationListener | null = null;
 export function setSessionInvalidationListener(listener: SessionInvalidationListener | null) {
   onSessionInvalidated = listener;
 }
-
-type RequestOptions = {
-  method?: "GET" | "POST" | "PATCH" | "PUT" | "DELETE";
-  body?: unknown;
-  requiresAuth?: boolean;
-  headers?: Record<string, string>;
-  retryOnAuthFailure?: boolean;
-};
 
 type LoginRequest = {
   email: string;
@@ -85,28 +80,6 @@ type SubmitDecisionResponse = {
 
 type RevokeApprovalResponse = {
   message: string;
-};
-
-type BackendApprovalRequestItem = {
-  id: string;
-  service_name: string;
-  service_slug: string;
-  requester_type: string;
-  requester_label?: string | null;
-  operation_summary: string;
-  action_description?: string | null;
-  http_method?: string | null;
-  resource?: string | null;
-  verb?: string | null;
-  approval_mode: ApprovalMode;
-  status: string;
-  created_at: string;
-  // Org context — optional so responses from older backends still
-  // parse. `from_org_policy` is the authoritative flag; `org_id` and
-  // `org_name` are only set when the flag is true.
-  from_org_policy?: boolean;
-  org_id?: string | null;
-  org_name?: string | null;
 };
 
 type BackendApprovalRequestsResponse = {
@@ -196,7 +169,7 @@ function buildApiError(payload: unknown, status: number): ApiError | Error {
         ? obj.message
         : errorKey;
 
-    return new ApiError({ errorKey, errorCode, statusCode: status, message });
+    return new ApiError({ errorKey, errorCode, statusCode: status, message, details: obj.details });
   }
 
   if (typeof payload === "string" && payload.length > 0) {
@@ -246,22 +219,6 @@ function resolveAccessTokenExpiresAt(session: {
   return decodeJwtExpiryMs(session.accessToken);
 }
 
-function parseOperationSummary(summary: string): { action: string; resource: string } {
-  const normalized = summary.replace(/^proxy:/i, "").trim();
-  const matched = normalized.match(/^([A-Z]+)\s+(.+)$/);
-  if (matched) {
-    return {
-      action: matched[1] ?? "Request",
-      resource: matched[2] ?? normalized,
-    };
-  }
-
-  return {
-    action: "Request",
-    resource: normalized || "Unknown resource",
-  };
-}
-
 function isIpv4Address(value: string): boolean {
   const parts = value.split(".");
   if (parts.length !== 4) return false;
@@ -292,65 +249,6 @@ function sanitizeOptionalDisplayValue(value: string | null | undefined): string 
   if (!trimmed) return null;
   if (isIpv4Address(trimmed) || isIpv6Address(trimmed)) return "Hidden";
   return trimmed;
-}
-
-function mapChallengeStatus(status: string): ChallengeStatus {
-  if (status === "approved") return "APPROVED";
-  if (status === "rejected") return "DENIED";
-  if (status === "expired") return "EXPIRED";
-  return "PENDING";
-}
-
-function deriveRiskLevel(action: string): "low" | "medium" | "high" {
-  if (action === "DELETE" || action === "PUT" || action === "PATCH") return "high";
-  if (action === "POST") return "medium";
-  return "low";
-}
-
-function deriveChallengeExpiry(createdAt: string): string {
-  const createdTime = Date.parse(createdAt);
-  if (!Number.isFinite(createdTime)) {
-    return new Date(Date.now() + DEFAULT_CHALLENGE_DURATION_SEC * 1000).toISOString();
-  }
-  return new Date(createdTime + DEFAULT_CHALLENGE_DURATION_SEC * 1000).toISOString();
-}
-
-function mapBackendRequestToChallenge(item: BackendApprovalRequestItem): ChallengeDetail {
-  const summary = item.action_description ?? item.operation_summary;
-  const parsed = parseOperationSummary(summary);
-  const action = sanitizeDisplayValue(item.http_method ?? item.verb, parsed.action);
-  const resource = sanitizeDisplayValue(item.resource, parsed.resource);
-
-  // Only surface org fields when the backend flags the request as
-  // created under an org policy. Falsy / missing `from_org_policy`
-  // yields the pre-existing personal-approval shape.
-  const fromOrgPolicy = item.from_org_policy === true;
-  const orgId = fromOrgPolicy ? item.org_id ?? null : undefined;
-  const orgName = fromOrgPolicy ? item.org_name ?? null : undefined;
-
-  return {
-    id: item.id,
-    title: sanitizeDisplayValue(item.service_name, "Unknown Service"),
-    action,
-    resource,
-    approval_mode: item.approval_mode,
-    risk_level: deriveRiskLevel(action),
-    status: mapChallengeStatus(item.status),
-    created_at: item.created_at,
-    expires_at: deriveChallengeExpiry(item.created_at),
-    summary,
-    request_context: {
-      client: sanitizeDisplayValue(item.requester_type, "Unknown"),
-      location: sanitizeDisplayValue(
-        item.requester_label ?? item.service_slug,
-        "Unknown"
-      ),
-    },
-    from_org_policy: fromOrgPolicy,
-    org_id: orgId,
-    org_name: orgName,
-    service_slug: item.service_slug,
-  };
 }
 
 function toBackendPushPlatform(platform: PushTokenRegisterRequest["platform"]): "apns" | "fcm" {
@@ -450,6 +348,7 @@ async function refreshAccessTokenWithSingleFlight(): Promise<RefreshResponse | n
   }
 
   inFlightRefreshRequest = (async () => {
+    const epoch = getAuthEpoch();
     const session = await loadStoredAuthSession();
     if (!session?.refreshToken) {
       return null;
@@ -460,12 +359,21 @@ async function refreshAccessTokenWithSingleFlight(): Promise<RefreshResponse | n
       return null;
     }
 
+    // An old refresh must never restore credentials after logout or replace
+    // a newly signed-in account while its network request was in flight.
+    const currentSession = await loadStoredAuthSession();
+    if (!currentSession || currentSession.refreshToken !== session.refreshToken || epoch !== getAuthEpoch()) {
+      return null;
+    }
+
     const nextRefreshToken = refreshed.refresh_token || session.refreshToken;
-    await persistAuthSession({
+    const persisted = await persistRefreshedAuthSession({
       accessToken: refreshed.access_token,
       refreshToken: nextRefreshToken,
       accessTokenExpiresAt: computeAccessTokenExpiresAt(refreshed.expires_in),
-    });
+      userId: session.userId,
+    }, epoch, session.refreshToken);
+    if (!persisted) return null;
 
     return {
       ...refreshed,
@@ -498,75 +406,147 @@ export async function refreshAccessTokenIfNeeded(): Promise<boolean> {
   return Boolean(refreshed);
 }
 
-export async function requestJson<T>(path: string, options: RequestOptions = {}): Promise<T> {
-  const method = options.method ?? "GET";
-  const requiresAuth = options.requiresAuth ?? true;
-  const retryOnAuthFailure = options.retryOnAuthFailure ?? true;
-
-  // Surface identification for server-side telemetry. Sent on every
-  // request regardless of the mobile client's own telemetry config:
-  // the header identifies the calling app, not the telemetry state.
-  // Backend may be opted in for analytics even when the mobile client
-  // is opted out locally, and the surface attribution still needs to
-  // read "mobile" for those backend-emitted events -- otherwise
-  // mobile-driven auth / approval / device funnels collapse into
-  // `surface="backend"` in the hosted deploy.
-  const telemetryHeaders: Record<string, string> = {
+function clientHeaders(): Record<string, string> {
+  return {
     "X-NyxID-Client": "mobile",
-    "X-NyxID-Client-Version":
-      (Constants.expoConfig?.version as string | undefined) ?? "dev",
+    "X-NyxID-Client-Version": Constants.expoConfig?.version ?? "dev",
   };
+}
 
-  const headers: Record<string, string> = {
-    Accept: "application/json",
-    ...telemetryHeaders,
-    ...options.headers,
-  };
+async function invalidateSession() {
+  if (onSessionInvalidated) onSessionInvalidated();
+  else await clearStoredAuthSession();
+}
 
-  if (options.body !== undefined) {
-    headers["Content-Type"] = "application/json";
-  }
+/** Expo's native fetch exposes a ReadableStream on iOS/Android; RN's global
+ * fetch can buffer the entire response. Both paths share secure admission. */
+export async function requestAuthenticatedResponse(path: string, options: RequestOptions = {}) {
+  const { response } = await executeAuthenticatedRequest({
+    url: buildUrl(path), options, clientHeaders: clientHeaders(),
+    transport: expoFetch, loadSession: loadStoredAuthSession,
+    refresh: refreshAccessTokenWithSingleFlight, invalidate: invalidateSession,
+    toError: buildApiError, getAuthEpoch,
+  });
+  return response;
+}
 
-  const session = requiresAuth ? await loadStoredAuthSession() : null;
-
-  if (requiresAuth) {
-    if (!session?.accessToken) {
-      throw new Error("auth_session_missing");
-    }
-    headers.Authorization = `Bearer ${session.accessToken}`;
-  }
-
-  const send = () =>
-    fetch(buildUrl(path), {
-      method,
-      headers,
-      body: options.body === undefined ? undefined : JSON.stringify(options.body),
-    });
-
-  let response = await send();
-  let payload = await readJsonSafely(response);
-
-  if (response.status === 401 && requiresAuth && retryOnAuthFailure) {
-    const refreshed = await refreshAccessTokenWithSingleFlight();
-    if (refreshed) {
-      headers.Authorization = `Bearer ${refreshed.access_token}`;
-      response = await send();
-      payload = await readJsonSafely(response);
-    }
-  }
-
-  if (!response.ok) {
-    if (response.status === 401 && requiresAuth) {
-      if (onSessionInvalidated) {
-        onSessionInvalidated();
-      } else {
-        await clearStoredAuthSession();
-      }
-    }
-    throw buildApiError(payload, response.status);
-  }
-
+export async function requestJson<T>(path: string, options: RequestOptions = {}): Promise<T> {
+  const { response, assertOwner } = await executeAuthenticatedRequest({
+    url: buildUrl(path), options, clientHeaders: clientHeaders(),
+    transport: fetch, loadSession: loadStoredAuthSession,
+    refresh: refreshAccessTokenWithSingleFlight, invalidate: invalidateSession,
+    toError: buildApiError, getAuthEpoch,
+  });
+  const payload = await readJsonSafely(response);
+  await assertOwner();
   return payload as T;
+}
+
+/** Raw upload shares the same secure admission and single 401 refresh as JSON. */
+export async function requestBinaryJson<T>(
+  path: string,
+  bytes: Uint8Array,
+  options: {
+    headers?: Record<string, string>;
+    signal?: AbortSignal;
+    onProgress?: (percent: number) => void;
+  } = {},
+): Promise<T> {
+  const { response, assertOwner } = await executeAuthenticatedRequest({
+    url: buildUrl(path),
+    options: {
+      method: "POST",
+      headers: options.headers,
+      signal: options.signal,
+      rawBody: new Uint8Array(bytes).buffer,
+    },
+    clientHeaders: clientHeaders(),
+    transport: (url, init) =>
+      new Promise<{ ok: boolean; status: number; text: () => Promise<string> }>(
+        (resolve, reject) => {
+          const xhr = new XMLHttpRequest();
+          const abort = () => xhr.abort();
+          const cleanup = () =>
+            init.signal?.removeEventListener("abort", abort);
+          xhr.open(init.method, url);
+          xhr.timeout = 60_000;
+          for (const [name, value] of Object.entries(init.headers))
+            xhr.setRequestHeader(name, value);
+          xhr.upload.onprogress = (event) => {
+            if (event.lengthComputable)
+              options.onProgress?.(
+                Math.min(99, Math.round((event.loaded / event.total) * 100)),
+              );
+          };
+          xhr.onerror = () => {
+            cleanup();
+            reject(
+              new Error("Upload failed. Check your connection and try again."),
+            );
+          };
+          xhr.ontimeout = () => {
+            cleanup();
+            reject(new Error("Upload timed out. Try a smaller file."));
+          };
+          xhr.onabort = () => {
+            cleanup();
+            reject(
+              Object.assign(new Error("Upload cancelled."), {
+                name: "AbortError",
+              }),
+            );
+          };
+          xhr.onload = () => {
+            cleanup();
+            resolve({
+              ok: xhr.status >= 200 && xhr.status < 300,
+              status: xhr.status,
+              text: async () => xhr.responseText,
+            });
+          };
+          if (init.signal?.aborted) {
+            cleanup();
+            reject(
+              Object.assign(new Error("Upload cancelled."), {
+                name: "AbortError",
+              }),
+            );
+            return;
+          }
+          init.signal?.addEventListener("abort", abort, { once: true });
+          xhr.send(init.body);
+        },
+      ),
+    loadSession: loadStoredAuthSession,
+    refresh: refreshAccessTokenWithSingleFlight,
+    invalidate: invalidateSession,
+    toError: buildApiError,
+    getAuthEpoch,
+  });
+  const text = await response.text();
+  await assertOwner();
+  return JSON.parse(text) as T;
+}
+
+/** Bytes are consumed before the owner fence, so a late account response cannot be saved. */
+export async function requestAuthenticatedBytes(
+  path: string,
+  signal?: AbortSignal,
+): Promise<Uint8Array> {
+  const { response, assertOwner } = await executeAuthenticatedRequest({
+    url: buildUrl(path),
+    options: { signal },
+    clientHeaders: clientHeaders(),
+    transport: expoFetch,
+    loadSession: loadStoredAuthSession,
+    refresh: refreshAccessTokenWithSingleFlight,
+    invalidate: invalidateSession,
+    toError: buildApiError,
+    getAuthEpoch,
+  });
+  const bytes = await readBoundedBytes(response.body, 20 * 1024 * 1024);
+  await assertOwner();
+  return bytes;
 }
 
 async function listPendingApprovalRequests(
@@ -796,8 +776,8 @@ export async function unregisterPushTokenRequest(
   });
 }
 
-export async function getCurrentUserProfileRequest(): Promise<AccountProfile> {
-  return requestJson<AccountProfile>("/users/me");
+export async function getCurrentUserProfileRequest(signal?: AbortSignal): Promise<AccountProfile> {
+  return requestJson<AccountProfile>("/users/me", { signal });
 }
 
 export async function deleteCurrentUserAccountRequest(): Promise<DeleteAccountResponse> {

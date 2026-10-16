@@ -1,8 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { NativeStackScreenProps } from "@react-navigation/native-stack";
 import { Alert, Image, Linking, Pressable, ScrollView, StyleSheet, Switch, Text, View } from "react-native";
 import Svg, { Circle, Path } from "react-native-svg";
-import { RootStackParamList } from "../../app/AppNavigator";
+import type { WorkspaceScreenProps } from "../../app/navigationTypes";
 
 import { PrimaryButton } from "../../components/PrimaryButton";
 import { ScreenContainer } from "../../components/ScreenContainer";
@@ -19,10 +18,10 @@ import { activatePushAfterLogin } from "../../lib/notifications/pushNotification
 import { useTheme } from "../../theme/ThemeContext";
 import type { ThemeColors } from "../../theme/mobileTheme";
 import { createFlowStyles } from "../../theme/flowStyles";
-import { BOTTOM_NAV_CLEARANCE, radius, spacing, typeScale } from "../../theme/designTokens";
+import { radius, spacing, typeScale } from "../../theme/designTokens";
 import { useEffect, useMemo, useState } from "react";
 
-type Props = NativeStackScreenProps<RootStackParamList, "AccountSettings">;
+type Props = WorkspaceScreenProps<"AccountSettings">;
 
 // Push-register failure modes are surfaced as a tagged error so the
 // caller can branch on `reason` (e.g. iOS denial → Alert + Linking
@@ -457,7 +456,7 @@ export function AccountSettingsScreen({ navigation }: Props) {
     <ScreenContainer>
       <ScrollView
         style={flowStyles.content}
-        contentContainerStyle={[flowStyles.scrollContent, { paddingHorizontal: spacing.xxl, paddingBottom: BOTTOM_NAV_CLEARANCE }]}
+        contentContainerStyle={[flowStyles.scrollContent, { paddingHorizontal: spacing.xxl, paddingBottom: spacing.huge }]}
         showsVerticalScrollIndicator={false}
       >
         {isOffline && <OfflineBanner subtitle="Some features unavailable" onRetry={async () => {
@@ -657,8 +656,10 @@ export function AccountSettingsScreen({ navigation }: Props) {
 
         {/* Actions */}
         <View style={styles.actionsWrap}>
+          <PrimaryButton label="Profile & account security" kind="ghost"
+            onPress={() => navigation.push("AccountSecurity")} />
           <PrimaryButton label="Generate terminal login code" kind="ghost" disabled={isOffline}
-            onPress={() => navigation.navigate("AgentKeyLogin", { mint: true })} />
+            onPress={() => navigation.push("AgentKeyLogin", { mint: true })} />
           <PrimaryButton
             label="Sign Out"
             kind="ghost"
@@ -681,7 +682,7 @@ export function AccountSettingsScreen({ navigation }: Props) {
                 name: "ui.mobile_legal_page_opened",
                 props: { page: "terms" },
               });
-              navigation.navigate("TermsOfService");
+              navigation.push("TermsOfService");
             }}
           >
             <Text style={styles.legalLink}>Terms of Service</Text>
@@ -693,7 +694,7 @@ export function AccountSettingsScreen({ navigation }: Props) {
                 name: "ui.mobile_legal_page_opened",
                 props: { page: "privacy" },
               });
-              navigation.navigate("PrivacyPolicy");
+              navigation.push("PrivacyPolicy");
             }}
           >
             <Text style={styles.legalLink}>Privacy Policy</Text>

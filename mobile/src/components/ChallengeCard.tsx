@@ -1,6 +1,11 @@
 import { useMemo } from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
-import { TOUCH_TARGET, radius, spacing, typeScale } from "../theme/designTokens";
+import {
+  TOUCH_TARGET,
+  radius,
+  spacing,
+  typeScale,
+} from "../theme/designTokens";
 import { useTheme } from "../theme/ThemeContext";
 import type { ThemeColors } from "../theme/mobileTheme";
 import { StatusBadge } from "./StatusBadge";
@@ -10,6 +15,7 @@ type ChallengeCardProps = {
   challenge: ChallengeDetail;
   grantDurationLabel?: string;
   isMutating?: boolean;
+  decisionsDisabled?: boolean;
   onPress?: () => void;
   onApprove?: () => void;
   onDeny?: () => void;
@@ -30,6 +36,7 @@ export function ChallengeCard({
   challenge,
   grantDurationLabel = "30 days",
   isMutating = false,
+  decisionsDisabled = false,
   onPress,
   onApprove,
   onDeny,
@@ -37,12 +44,40 @@ export function ChallengeCard({
   const { colors } = useTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
 
-  const riskVariant = challenge.risk_level === "high" ? "riskHigh" : challenge.risk_level === "medium" ? "riskMedium" : "riskLow";
+  const riskVariant =
+    challenge.risk_level === "high"
+      ? "riskHigh"
+      : challenge.risk_level === "medium"
+        ? "riskMedium"
+        : challenge.risk_level === "low"
+          ? "riskLow"
+          : "orgChip";
   // DESIGN.md §Interaction Rules: status badges always Title Case.
-  const riskLabel = challenge.risk_level.charAt(0).toUpperCase() + challenge.risk_level.slice(1);
-  const modeLabel = challenge.approval_mode === "grant" ? "Grant mode" : "Per-request";
-  const durationLabel = challenge.approval_mode === "grant" ? ` · ${grantDurationLabel}` : "";
+  const riskLabel =
+    challenge.risk_level.charAt(0).toUpperCase() +
+    challenge.risk_level.slice(1);
+  const summary =
+    challenge.summary.trim() ||
+    `${challenge.action} ${challenge.resource}`.trim();
+  const requester = challenge.request_context.requester.trim();
+  const showRequester =
+    requester && requester !== "Unspecified" && requester !== "Unknown";
+  const modeLabel =
+    challenge.approval_mode === "grant" ? "Grant mode" : "Per-request";
   const timeAgo = formatTimeAgo(challenge.created_at);
+  const expiresAt = Date.parse(challenge.expires_at);
+  const remainingMs = expiresAt - Date.now();
+  const expired = !Number.isFinite(expiresAt) || remainingMs <= 0;
+  const expiryLabel = !Number.isFinite(expiresAt)
+    ? "Expiry unavailable — refresh before deciding"
+    : remainingMs <= 0
+      ? "Expired"
+      : `Expires in ${Math.max(1, Math.ceil(remainingMs / 60_000))} min`;
+  const blocked =
+    decisionsDisabled ||
+    isMutating ||
+    expired ||
+    challenge.status !== "PENDING";
   // Render an org chip when the backend marks the request as
   // created under an org approval policy. The label falls back to
   // a generic "Org" when the server omitted the name, so old
@@ -53,35 +88,50 @@ export function ChallengeCard({
     : "Org";
 
   return (
-    <Pressable style={styles.card} onPress={onPress} disabled={isMutating}>
+    <Pressable
+      style={styles.card}
+      onPress={onPress}
+      disabled={isMutating}
+      accessibilityRole={onPress ? "button" : undefined}
+      accessibilityLabel={summary}
+      accessibilityHint={onPress ? "View approval request details" : undefined}
+    >
       <View style={styles.chipRow}>
         {showOrgChip ? (
           <StatusBadge variant="orgChip" label={orgChipLabel} />
         ) : null}
-        <StatusBadge variant={riskVariant} label={riskLabel} />
+        {challenge.risk_level !== "unknown" ? (
+          <StatusBadge variant={riskVariant} label={`${riskLabel} risk`} />
+        ) : null}
         <StatusBadge variant="modeChip" label={modeLabel} />
       </View>
-      <Text style={styles.title} numberOfLines={1}>
-        {challenge.action} {challenge.resource}
-      </Text>
-      <Text style={styles.resource} numberOfLines={1}>
-        {challenge.title}
+      <Text style={styles.title}>{summary}</Text>
+      <Text style={styles.resource}>{challenge.title}</Text>
+      {showRequester ? (
+        <Text style={styles.meta}>Requested by {requester}</Text>
+      ) : null}
+      <Text style={styles.meta}>
+        {timeAgo} · {expiryLabel}
       </Text>
       <Text style={styles.meta}>
-        {durationLabel ? grantDurationLabel : ""}{durationLabel ? " · " : ""}{timeAgo}
+        {challenge.approval_mode === "grant"
+          ? `Approving allows matching requests for ${grantDurationLabel}.`
+          : "Approval applies only to this request."}
       </Text>
       <View style={styles.actions}>
         <Pressable
-          style={[styles.approveBtn, isMutating && styles.btnDisabled]}
+          style={[styles.approveBtn, blocked && styles.btnDisabled]}
           onPress={onApprove}
-          disabled={isMutating}
+          disabled={blocked}
+          accessibilityRole="button"
         >
           <Text style={styles.approveBtnText}>Approve</Text>
         </Pressable>
         <Pressable
-          style={[styles.denyBtn, isMutating && styles.btnDisabled]}
+          style={[styles.denyBtn, blocked && styles.btnDisabled]}
           onPress={onDeny}
-          disabled={isMutating}
+          disabled={blocked}
+          accessibilityRole="button"
         >
           <Text style={styles.denyBtnText}>Deny</Text>
         </Pressable>
@@ -112,6 +162,7 @@ const createStyles = (c: ThemeColors) =>
     },
     chipRow: {
       flexDirection: "row",
+      flexWrap: "wrap",
       gap: spacing.xs,
     },
     resource: {

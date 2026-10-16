@@ -1,35 +1,48 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import FontAwesome from "@expo/vector-icons/FontAwesome";
 import * as WebBrowser from "expo-web-browser";
+import { useIsFocused } from "@react-navigation/native";
+import { useQuery } from "@tanstack/react-query";
 import { NativeStackScreenProps } from "@react-navigation/native-stack";
-import { ActivityIndicator, Linking, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
+import {
+  ActivityIndicator,
+  AppState,
+  Linking,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TextInput,
+  View,
+} from "react-native";
 import Svg, { Path, Defs, LinearGradient, Stop } from "react-native-svg";
 import { LinearGradient as ExpoLinearGradient } from "expo-linear-gradient";
 import type { RootStackParamList } from "../../app/AppNavigator";
 
 import { ScreenContainer } from "../../components/ScreenContainer";
-import { ToastKind, ToastOverlay, ToastState } from "../../components/ToastOverlay";
+import {
+  ToastKind,
+  ToastOverlay,
+  ToastState,
+} from "../../components/ToastOverlay";
 import { mobileApi } from "../../lib/api/mobileApi";
 import { resolveErrorMessage } from "../../lib/api/errorMessages";
 import { useAuthSession } from "./AuthSessionContext";
+import { passwordLoginInput, requiresTotp } from "./emailLogin";
+import { getPublicAuthConfig } from "../../lib/api/publicAuthApi";
+import { requireSocialProvider } from "./publicAuthConfig";
+import {
+  parseSocialCallback,
+  SOCIAL_CALLBACK_URL,
+  type SocialProvider,
+} from "./socialCallback";
 import { capture } from "../../lib/telemetry";
 import { useTheme } from "../../theme/ThemeContext";
 import type { ThemeColors } from "../../theme/mobileTheme";
 import { createFlowStyles } from "../../theme/flowStyles";
 import { radius, spacing, typeScale } from "../../theme/designTokens";
 
-type SocialProvider = "google" | "github" | "apple";
 type Props = NativeStackScreenProps<RootStackParamList, "Auth">;
-const SOCIAL_CALLBACK_URL = "nyxid://auth/social/callback";
-
-type SocialCallback = {
-  status: "success" | "error";
-  accessToken?: string;
-  refreshToken?: string;
-  expiresIn?: number;
-  error?: string;
-  provider?: SocialProvider;
-};
 
 function resolveAuthError(error: unknown): string {
   if (!(error instanceof Error)) return "Sign-in failed. Please try again.";
@@ -58,54 +71,6 @@ function resolveSocialAuthError(error: string | undefined): string {
   }
 }
 
-function parseSocialCallback(url: string): SocialCallback | null {
-  if (!url.startsWith(SOCIAL_CALLBACK_URL)) {
-    return null;
-  }
-
-  try {
-    const parsed = new URL(url);
-    const statusRaw = parsed.searchParams.get("status");
-    const providerRaw = parsed.searchParams.get("provider");
-    const provider: SocialProvider | undefined =
-      providerRaw === "google" || providerRaw === "github" || providerRaw === "apple"
-        ? providerRaw
-        : undefined;
-    if (statusRaw !== "success" && statusRaw !== "error") {
-      return {
-        status: "error",
-        error: "social_auth_unknown",
-        provider,
-      };
-    }
-
-    if (statusRaw === "error") {
-      return {
-        status: "error",
-        error: parsed.searchParams.get("error") ?? parsed.searchParams.get("message") ?? undefined,
-        provider,
-      };
-    }
-
-    const expiresInRaw = parsed.searchParams.get("expires_in");
-    const expiresInParsed = expiresInRaw ? Number(expiresInRaw) : NaN;
-
-    return {
-      status: "success",
-      accessToken: parsed.searchParams.get("access_token") ?? undefined,
-      refreshToken: parsed.searchParams.get("refresh_token") ?? undefined,
-      expiresIn:
-        Number.isFinite(expiresInParsed) && expiresInParsed > 0 ? expiresInParsed : undefined,
-      provider,
-    };
-  } catch (e) {
-    return {
-      status: "error",
-      error: e instanceof Error ? e.message : "social_auth_unknown",
-    };
-  }
-}
-
 // Inline render of mobile/assets/sources/app_icon.svg
 // (kept in sync by hand — if the source changes, regenerate the PNG icons
 // AND update this JSX so the login screen matches the launcher icon)
@@ -113,15 +78,36 @@ function PortalMarkLogo({ size = 96 }: { size?: number }) {
   return (
     <Svg width={size} height={size} viewBox="0 0 702 702" fill="none">
       <Defs>
-        <LinearGradient id="ai_bg" x1="351" y1="0" x2="351" y2="702" gradientUnits="userSpaceOnUse">
+        <LinearGradient
+          id="ai_bg"
+          x1="351"
+          y1="0"
+          x2="351"
+          y2="702"
+          gradientUnits="userSpaceOnUse"
+        >
           <Stop offset="0" stopColor="#221250" />
           <Stop offset="1" stopColor="#070707" />
         </LinearGradient>
-        <LinearGradient id="ai_n" x1="351" y1="140.062" x2="351" y2="561.933" gradientUnits="userSpaceOnUse">
+        <LinearGradient
+          id="ai_n"
+          x1="351"
+          y1="140.062"
+          x2="351"
+          y2="561.933"
+          gradientUnits="userSpaceOnUse"
+        >
           <Stop offset="0" stopColor="#A672FB" />
           <Stop offset="1" stopColor="#5E00F5" />
         </LinearGradient>
-        <LinearGradient id="ai_hl" x1="351" y1="140.062" x2="351" y2="561.933" gradientUnits="userSpaceOnUse">
+        <LinearGradient
+          id="ai_hl"
+          x1="351"
+          y1="140.062"
+          x2="351"
+          y2="561.933"
+          gradientUnits="userSpaceOnUse"
+        >
           <Stop offset="0" stopColor="#FFFFFF" stopOpacity={0.5} />
           <Stop offset="1" stopColor="#FFFFFF" stopOpacity={0} />
         </LinearGradient>
@@ -162,36 +148,71 @@ function SocialAuthButton({
 }) {
   const { colors } = useTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
-  const iconName = provider === "google" ? "google" : provider === "github" ? "github" : "apple";
+  const iconName =
+    provider === "google"
+      ? "google"
+      : provider === "github"
+        ? "github"
+        : "apple";
   const iconColor = colors.textPrimary;
 
   return (
-    <Pressable onPress={onPress} disabled={disabled} style={[styles.socialAuthButton, disabled && !loading && styles.socialAuthButtonDisabled]}>
+    <Pressable
+      onPress={onPress}
+      disabled={disabled}
+      style={[
+        styles.socialAuthButton,
+        disabled && !loading && styles.socialAuthButtonDisabled,
+      ]}
+    >
       <View style={styles.socialAuthContent}>
         {loading ? (
           <ActivityIndicator size="small" color={iconColor} />
         ) : (
           <FontAwesome name={iconName} size={16} color={iconColor} />
         )}
-        <Text style={styles.socialAuthText}>{loading ? "Connecting..." : label}</Text>
+        <Text style={styles.socialAuthText}>
+          {loading ? "Connecting..." : label}
+        </Text>
       </View>
     </Pressable>
   );
 }
 
 export function AuthHomeScreen({ navigation }: Props) {
+  const focused = useIsFocused();
+  const focusedRef = useRef(focused);
+  focusedRef.current = focused;
+  const [foreground, setForeground] = useState(
+    AppState.currentState === "active",
+  );
+  const publicConfig = useQuery({
+    queryKey: ["public-auth-config"],
+    queryFn: ({ signal }) => getPublicAuthConfig(signal),
+    enabled: focused && foreground,
+    staleTime: 30_000,
+    refetchInterval: focused && foreground ? 30_000 : false,
+    retry: false,
+    networkMode: "always",
+  });
+  const loginConfig = publicConfig.isError ? undefined : publicConfig.data;
   const { colors } = useTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
   const flowStyles = useMemo(() => createFlowStyles(colors), [colors]);
   const [isSocialAuthPending, setIsSocialAuthPending] = useState(false);
-  const [pendingSocialProvider, setPendingSocialProvider] = useState<SocialProvider | null>(null);
+  const [pendingSocialProvider, setPendingSocialProvider] =
+    useState<SocialProvider | null>(null);
   const [toast, setToast] = useState<ToastState | null>(null);
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [mfaRequired, setMfaRequired] = useState(false);
+  const [mfaCode, setMfaCode] = useState("");
   const [isEmailAuthPending, setIsEmailAuthPending] = useState(false);
+  const socialLoginLock = useRef(false);
   const [loginError, setLoginError] = useState<string | null>(null);
   const { signInWithSession } = useAuthSession();
   const isMountedRef = useRef(true);
+  const emailLoginLock = useRef(false);
   const lastHandledSocialUrlRef = useRef<string | null>(null);
 
   const showToast = (message: string, kind: ToastKind) => {
@@ -199,6 +220,7 @@ export function AuthHomeScreen({ navigation }: Props) {
   };
 
   useEffect(() => {
+    isMountedRef.current = true;
     return () => {
       isMountedRef.current = false;
     };
@@ -210,6 +232,17 @@ export function AuthHomeScreen({ navigation }: Props) {
     return () => clearTimeout(timer);
   }, [toast]);
 
+  useEffect(() => {
+    const subscription = AppState.addEventListener("change", (state) => {
+      setForeground(state === "active");
+      if (state === "background") {
+        setPassword("");
+        setMfaCode("");
+      }
+    });
+    return () => subscription.remove();
+  }, []);
+
   const resetSocialState = useCallback(() => {
     if (isMountedRef.current) {
       setIsSocialAuthPending(false);
@@ -219,22 +252,14 @@ export function AuthHomeScreen({ navigation }: Props) {
 
   const handleSocialCallback = useCallback(
     async (url: string) => {
+      const callback = parseSocialCallback(url);
+      if (!callback) return;
       if (lastHandledSocialUrlRef.current === url) {
         return;
       }
       lastHandledSocialUrlRef.current = url;
 
-      const callback = parseSocialCallback(url);
-      if (__DEV__) console.log(`[auth] Parsed callback:`, JSON.stringify(callback));
-
-      if (!callback) {
-        setLoginError("Unable to complete social sign-in.");
-        resetSocialState();
-        return;
-      }
-
       if (callback.status === "error") {
-        if (__DEV__) console.log(`[auth] Social auth error:`, callback.error);
         setLoginError(resolveSocialAuthError(callback.error));
         resetSocialState();
         return;
@@ -261,7 +286,7 @@ export function AuthHomeScreen({ navigation }: Props) {
         resetSocialState();
       }
     },
-    [signInWithSession, resetSocialState]
+    [signInWithSession, resetSocialState],
   );
 
   useEffect(() => {
@@ -280,14 +305,10 @@ export function AuthHomeScreen({ navigation }: Props) {
   }, [handleSocialCallback]);
 
   const startSocialLogin = async (provider: SocialProvider) => {
-    if (isSocialAuthPending) {
+    if (socialLoginLock.current || emailLoginLock.current) {
       return;
     }
-
-    capture({
-      name: "ui.mobile_provider_connect_initiated",
-      props: { provider, method: "oauth" },
-    });
+    socialLoginLock.current = true;
 
     // Reset the dedup ref so a fresh attempt can re-process a callback URL
     // that matches a previous attempt's URL. The backend's mobile error
@@ -306,18 +327,30 @@ export function AuthHomeScreen({ navigation }: Props) {
     }
 
     try {
-      const authorizeUrl = mobileApi.getSocialAuthorizeUrl(provider, SOCIAL_CALLBACK_URL);
-      if (__DEV__) console.log(`[auth] Opening ${provider} auth: ${authorizeUrl}`);
+      const available = await publicConfig.refetch();
+      if (
+        !isMountedRef.current ||
+        !focusedRef.current ||
+        AppState.currentState !== "active"
+      )
+        return;
+      if (available.error) throw available.error;
+      requireSocialProvider(available.data, provider);
+      capture({
+        name: "ui.mobile_provider_connect_initiated",
+        props: { provider, method: "oauth" },
+      });
+      const authorizeUrl = mobileApi.getSocialAuthorizeUrl(
+        provider,
+        SOCIAL_CALLBACK_URL,
+      );
 
       const result = await WebBrowser.openAuthSessionAsync(
         authorizeUrl,
-        SOCIAL_CALLBACK_URL
+        SOCIAL_CALLBACK_URL,
       );
 
-      if (__DEV__) console.log(`[auth] Browser result:`, JSON.stringify(result));
-
       if (result.type === "success") {
-        if (__DEV__) console.log(`[auth] Callback URL: ${result.url}`);
         await handleSocialCallback(result.url);
         return;
       }
@@ -329,9 +362,9 @@ export function AuthHomeScreen({ navigation }: Props) {
 
       setLoginError(`Social sign-in failed: ${result.type}`);
     } catch (error) {
-      if (__DEV__) console.log(`[auth] startSocialLogin error:`, error);
       setLoginError(resolveErrorMessage(error));
     } finally {
+      socialLoginLock.current = false;
       if (isMountedRef.current) {
         setIsSocialAuthPending(false);
         setPendingSocialProvider(null);
@@ -340,19 +373,41 @@ export function AuthHomeScreen({ navigation }: Props) {
   };
 
   const handleEmailLogin = async () => {
-    if (isEmailAuthPending || !email.trim() || !password) return;
+    if (
+      emailLoginLock.current ||
+      socialLoginLock.current ||
+      !email.trim() ||
+      !password
+    )
+      return;
+    if (!loginConfig?.emailAuthEnabled) {
+      setLoginError(
+        "Email and password sign-in is not available on this server.",
+      );
+      return;
+    }
+    emailLoginLock.current = true;
     setIsEmailAuthPending(true);
     setLoginError(null);
     try {
-      const result = await mobileApi.loginWithPassword({ email: email.trim(), password });
+      const result = await mobileApi.loginWithPassword(
+        passwordLoginInput(email, password, mfaRequired, mfaCode),
+      );
       await signInWithSession({
         accessToken: result.accessToken,
         refreshToken: result.refreshToken,
         accessTokenExpiresAt: Date.now() + Math.floor(result.expiresIn * 1000),
       });
     } catch (error) {
-      setLoginError(resolveErrorMessage(error));
+      if (requiresTotp(error)) {
+        setMfaRequired(true);
+        setLoginError(null);
+      } else {
+        setLoginError(resolveErrorMessage(error));
+      }
+      setMfaCode("");
     } finally {
+      emailLoginLock.current = false;
       if (isMountedRef.current) {
         setIsEmailAuthPending(false);
       }
@@ -365,87 +420,206 @@ export function AuthHomeScreen({ navigation }: Props) {
     <ScreenContainer>
       <ScrollView
         style={flowStyles.content}
-        contentContainerStyle={[flowStyles.scrollContent, styles.scrollContentExtra, { paddingHorizontal: spacing.xxl }]}
+        contentContainerStyle={[
+          flowStyles.scrollContent,
+          styles.scrollContentExtra,
+          { paddingHorizontal: spacing.xxl },
+        ]}
         showsVerticalScrollIndicator={false}
       >
         {/* Hero branding */}
         <View style={styles.heroWrap}>
           <PortalMarkLogo />
           <Text style={styles.heroTitle}>NyxID</Text>
-          <Text style={styles.heroTagline}>Your companion for approvals and notifications</Text>
+          <Text style={styles.heroTagline}>
+            Your conversations, connections and approvals
+          </Text>
         </View>
 
         {/* Email login */}
         <View style={flowStyles.card}>
-          <TextInput
-            style={styles.input}
-            placeholder="Email"
-            placeholderTextColor={colors.textMuted}
-            value={email}
-            onChangeText={(v) => { setEmail(v); setLoginError(null); }}
-            keyboardType="email-address"
-            autoCapitalize="none"
-            autoComplete="email"
-          />
-          <TextInput
-            style={styles.input}
-            placeholder="Password"
-            placeholderTextColor={colors.textMuted}
-            value={password}
-            onChangeText={(v) => { setPassword(v); setLoginError(null); }}
-            secureTextEntry
-            autoComplete="current-password"
-          />
-          {/* DESIGN.md §Buttons: primary CTA uses `nyx-gradient-vivid`. */}
-          <Pressable
-            onPress={() => void handleEmailLogin()}
-            disabled={isEmailAuthPending || !email.trim() || !password}
-            style={[styles.signInButtonWrap, (isEmailAuthPending || !email.trim() || !password) && styles.buttonDisabled]}
-          >
-            <ExpoLinearGradient
-              colors={[colors.gradientStart, colors.gradientEnd]}
-              start={{ x: 0, y: 0 }}
-              end={{ x: 1, y: 0 }}
-              style={styles.signInButton}
-            >
-              <View style={styles.socialAuthContent}>
-                {isEmailAuthPending ? (
-                  <ActivityIndicator size="small" color={colors.onPrimary} />
-                ) : null}
-                <Text style={styles.signInButtonText}>{isEmailAuthPending ? "Signing in..." : "Sign In"}</Text>
-              </View>
-            </ExpoLinearGradient>
-          </Pressable>
+          {publicConfig.isPending ? (
+            <View style={styles.socialAuthContent}>
+              <ActivityIndicator size="small" color={colors.primary} />
+              <Text
+                style={{ ...typeScale.caption, color: colors.textSecondary }}
+              >
+                Loading sign-in methods...
+              </Text>
+            </View>
+          ) : publicConfig.isError ? (
+            <View style={{ gap: spacing.md }}>
+              <Text
+                style={{ ...typeScale.caption, color: colors.textSecondary }}
+              >
+                Could not load sign-in methods. Check your connection and try
+                again.
+              </Text>
+              <Pressable
+                accessibilityRole="button"
+                disabled={publicConfig.isFetching}
+                onPress={() => void publicConfig.refetch()}
+                style={styles.socialAuthButton}
+              >
+                <Text style={styles.socialAuthText}>
+                  {publicConfig.isFetching
+                    ? "Retrying..."
+                    : "Retry sign-in methods"}
+                </Text>
+              </Pressable>
+            </View>
+          ) : null}
+          {loginConfig?.emailAuthEnabled ? (
+            <>
+              <TextInput
+                style={styles.input}
+                accessibilityLabel="Email"
+                editable={!isAnyPending}
+                placeholder="Email"
+                placeholderTextColor={colors.textMuted}
+                value={email}
+                onChangeText={(v) => {
+                  setEmail(v);
+                  setMfaRequired(false);
+                  setMfaCode("");
+                  setLoginError(null);
+                }}
+                keyboardType="email-address"
+                autoCapitalize="none"
+                autoComplete="email"
+              />
+              <TextInput
+                style={styles.input}
+                accessibilityLabel="Password"
+                editable={!isAnyPending}
+                placeholder="Password"
+                placeholderTextColor={colors.textMuted}
+                value={password}
+                onChangeText={(v) => {
+                  setPassword(v);
+                  setLoginError(null);
+                }}
+                secureTextEntry
+                autoComplete="current-password"
+              />
+              {mfaRequired ? (
+                <>
+                  <Text
+                    style={{
+                      ...typeScale.caption,
+                      color: colors.textSecondary,
+                    }}
+                  >
+                    Enter the six-digit code from your authenticator.
+                  </Text>
+                  <TextInput
+                    style={styles.input}
+                    accessibilityLabel="Authenticator code"
+                    placeholder="000000"
+                    placeholderTextColor={colors.textMuted}
+                    value={mfaCode}
+                    onChangeText={(value) =>
+                      setMfaCode(value.replace(/\D/g, "").slice(0, 6))
+                    }
+                    keyboardType="number-pad"
+                    autoComplete="one-time-code"
+                    maxLength={6}
+                    editable={!isAnyPending}
+                    autoFocus
+                  />
+                </>
+              ) : null}
+              {/* DESIGN.md §Buttons: primary CTA uses `nyx-gradient-vivid`. */}
+              <Pressable
+                onPress={() => void handleEmailLogin()}
+                accessibilityRole="button"
+                disabled={
+                  isAnyPending ||
+                  !email.trim() ||
+                  !password ||
+                  (mfaRequired && !/^\d{6}$/.test(mfaCode))
+                }
+                style={[
+                  styles.signInButtonWrap,
+                  (isEmailAuthPending || !email.trim() || !password) &&
+                    styles.buttonDisabled,
+                ]}
+              >
+                <ExpoLinearGradient
+                  colors={[colors.gradientStart, colors.gradientEnd]}
+                  start={{ x: 0, y: 0 }}
+                  end={{ x: 1, y: 0 }}
+                  style={styles.signInButton}
+                >
+                  <View style={styles.socialAuthContent}>
+                    {isEmailAuthPending ? (
+                      <ActivityIndicator
+                        size="small"
+                        color={colors.onPrimary}
+                      />
+                    ) : null}
+                    <Text style={styles.signInButtonText}>
+                      {isEmailAuthPending
+                        ? "Signing in..."
+                        : mfaRequired
+                          ? "Verify & sign in"
+                          : "Sign In"}
+                    </Text>
+                  </View>
+                </ExpoLinearGradient>
+              </Pressable>
+            </>
+          ) : null}
 
           {/* Divider */}
-          <View style={styles.dividerRow}>
-            <View style={styles.dividerLine} />
-            <Text style={styles.dividerText}>or</Text>
-            <View style={styles.dividerLine} />
-          </View>
+          {loginConfig?.emailAuthEnabled &&
+          loginConfig.socialProviders.length > 0 ? (
+            <View style={styles.dividerRow}>
+              <View style={styles.dividerLine} />
+              <Text style={styles.dividerText}>or</Text>
+              <View style={styles.dividerLine} />
+            </View>
+          ) : null}
 
           {/* Social login */}
-          <SocialAuthButton
-            label="Continue with Google"
-            provider="google"
-            disabled={isAnyPending}
-            loading={isSocialAuthPending && pendingSocialProvider === "google"}
-            onPress={() => void startSocialLogin("google")}
-          />
-          <SocialAuthButton
-            label="Continue with GitHub"
-            provider="github"
-            disabled={isAnyPending}
-            loading={isSocialAuthPending && pendingSocialProvider === "github"}
-            onPress={() => void startSocialLogin("github")}
-          />
-          <SocialAuthButton
-            label="Continue with Apple"
-            provider="apple"
-            disabled={isAnyPending}
-            loading={isSocialAuthPending && pendingSocialProvider === "apple"}
-            onPress={() => void startSocialLogin("apple")}
-          />
+          {loginConfig?.socialProviders.includes("google") ? (
+            <SocialAuthButton
+              label="Continue with Google"
+              provider="google"
+              disabled={isAnyPending}
+              loading={
+                isSocialAuthPending && pendingSocialProvider === "google"
+              }
+              onPress={() => void startSocialLogin("google")}
+            />
+          ) : null}
+          {loginConfig?.socialProviders.includes("github") ? (
+            <SocialAuthButton
+              label="Continue with GitHub"
+              provider="github"
+              disabled={isAnyPending}
+              loading={
+                isSocialAuthPending && pendingSocialProvider === "github"
+              }
+              onPress={() => void startSocialLogin("github")}
+            />
+          ) : null}
+          {loginConfig?.socialProviders.includes("apple") ? (
+            <SocialAuthButton
+              label="Continue with Apple"
+              provider="apple"
+              disabled={isAnyPending}
+              loading={isSocialAuthPending && pendingSocialProvider === "apple"}
+              onPress={() => void startSocialLogin("apple")}
+            />
+          ) : null}
+          {loginConfig && loginConfig.socialProviders.length === 0 ? (
+            <Text style={{ ...typeScale.caption, color: colors.textSecondary }}>
+              {loginConfig.emailAuthEnabled
+                ? "Social sign-in is not enabled on this server. Use your email and password."
+                : "No sign-in methods are enabled on this server. Contact your administrator."}
+            </Text>
+          ) : null}
 
           {/* Legal */}
           <Text style={styles.legal}>
@@ -487,11 +661,13 @@ export function AuthHomeScreen({ navigation }: Props) {
                   Registration is invite-only.{" "}
                   <Text
                     style={styles.errorLink}
-                    onPress={() => void Linking.openURL("https://nyx.chrono-ai.fun")}
+                    onPress={() =>
+                      void Linking.openURL("https://nyx.chrono-ai.fun")
+                    }
                   >
                     Join the waitlist
-                  </Text>
-                  {" "}to get access.
+                  </Text>{" "}
+                  to get access.
                 </Text>
               </>
             ) : (
@@ -505,127 +681,128 @@ export function AuthHomeScreen({ navigation }: Props) {
   );
 }
 
-const createStyles = (c: ThemeColors) => StyleSheet.create({
-  scrollContentExtra: {
-    paddingBottom: spacing.xxxl,
-  },
-  heroWrap: {
-    alignItems: "center",
-    gap: spacing.sm,
-    marginBottom: spacing.sm,
-    paddingTop: spacing.huge,
-  },
-  // DESIGN.md §PageHeader: mobile page titles ship at text-[22px] font-bold.
-  heroTitle: {
-    ...typeScale.pageHeader,
-    color: c.textPrimary,
-    marginTop: spacing.sm,
-  },
-  heroTagline: {
-    ...typeScale.caption,
-    color: c.textMuted,
-    textAlign: "center",
-  },
-  // DESIGN.md §Inputs: rounded-lg (8px) with 50%-opacity chrome.
-  input: {
-    backgroundColor: c.cardSoft,
-    borderColor: c.borderSoft,
-    borderWidth: 1,
-    borderRadius: radius.md,
-    paddingVertical: spacing.md,
-    paddingHorizontal: spacing.lg,
-    color: c.textPrimary,
-    ...typeScale.description,
-  },
-  signInButtonWrap: {
-    borderRadius: radius.md,
-    overflow: "hidden",
-    // Soft purple ambient matching the web `shadow-[0_0_12px_rgba(90,42,241,0.25)]`.
-    shadowColor: c.primary,
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.3,
-    shadowRadius: 12,
-    elevation: 6,
-  },
-  signInButton: {
-    borderRadius: radius.md,
-    paddingVertical: spacing.lg,
-    minHeight: 44,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  signInButtonText: {
-    color: c.onPrimary,
-    ...typeScale.label,
-  },
-  buttonDisabled: {
-    opacity: 0.5,
-  },
-  // DESIGN.md §Banners & callouts: rounded-xl with theme-aware destructive tint.
-  errorBanner: {
-    backgroundColor: c.dangerTone.bg,
-    borderWidth: 1,
-    borderColor: c.dangerTone.border,
-    borderRadius: radius.lg,
-    paddingVertical: spacing.lg,
-    paddingHorizontal: spacing.lg,
-  },
-  errorText: {
-    color: c.danger,
-    ...typeScale.caption,
-    lineHeight: 18,
-  },
-  errorLink: {
-    color: c.primary,
-    textDecorationLine: "underline" as const,
-  },
-  dividerRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    marginVertical: spacing.xs,
-  },
-  dividerLine: {
-    flex: 1,
-    height: 1,
-    backgroundColor: c.border,
-  },
-  dividerText: {
-    color: c.textMuted,
-    ...typeScale.small,
-    marginHorizontal: spacing.sm,
-  },
-  socialAuthButton: {
-    backgroundColor: c.cardSoft,
-    borderColor: c.borderSoft,
-    borderWidth: 1,
-    borderRadius: radius.md,
-    paddingVertical: spacing.md,
-    paddingHorizontal: spacing.lg,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  socialAuthButtonDisabled: {
-    opacity: 0.5,
-  },
-  socialAuthContent: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "center",
-    gap: spacing.sm,
-  },
-  socialAuthText: {
-    color: c.textPrimary,
-    ...typeScale.label,
-  },
-  legal: {
-    color: c.textMuted,
-    ...typeScale.small,
-    marginTop: spacing.sm,
-    textAlign: "center",
-  },
-  legalLink: {
-    color: c.textSecondary,
-    ...typeScale.small,
-    textDecorationLine: "underline",
-  },
-});
+const createStyles = (c: ThemeColors) =>
+  StyleSheet.create({
+    scrollContentExtra: {
+      paddingBottom: spacing.xxxl,
+    },
+    heroWrap: {
+      alignItems: "center",
+      gap: spacing.sm,
+      marginBottom: spacing.sm,
+      paddingTop: spacing.huge,
+    },
+    // DESIGN.md §PageHeader: mobile page titles ship at text-[22px] font-bold.
+    heroTitle: {
+      ...typeScale.pageHeader,
+      color: c.textPrimary,
+      marginTop: spacing.sm,
+    },
+    heroTagline: {
+      ...typeScale.caption,
+      color: c.textMuted,
+      textAlign: "center",
+    },
+    // DESIGN.md §Inputs: rounded-lg (8px) with 50%-opacity chrome.
+    input: {
+      backgroundColor: c.cardSoft,
+      borderColor: c.borderSoft,
+      borderWidth: 1,
+      borderRadius: radius.md,
+      paddingVertical: spacing.md,
+      paddingHorizontal: spacing.lg,
+      color: c.textPrimary,
+      ...typeScale.description,
+    },
+    signInButtonWrap: {
+      borderRadius: radius.md,
+      overflow: "hidden",
+      // Soft purple ambient matching the web `shadow-[0_0_12px_rgba(90,42,241,0.25)]`.
+      shadowColor: c.primary,
+      shadowOffset: { width: 0, height: 4 },
+      shadowOpacity: 0.3,
+      shadowRadius: 12,
+      elevation: 6,
+    },
+    signInButton: {
+      borderRadius: radius.md,
+      paddingVertical: spacing.lg,
+      minHeight: 44,
+      alignItems: "center",
+      justifyContent: "center",
+    },
+    signInButtonText: {
+      color: c.onPrimary,
+      ...typeScale.label,
+    },
+    buttonDisabled: {
+      opacity: 0.5,
+    },
+    // DESIGN.md §Banners & callouts: rounded-xl with theme-aware destructive tint.
+    errorBanner: {
+      backgroundColor: c.dangerTone.bg,
+      borderWidth: 1,
+      borderColor: c.dangerTone.border,
+      borderRadius: radius.lg,
+      paddingVertical: spacing.lg,
+      paddingHorizontal: spacing.lg,
+    },
+    errorText: {
+      color: c.danger,
+      ...typeScale.caption,
+      lineHeight: 18,
+    },
+    errorLink: {
+      color: c.primary,
+      textDecorationLine: "underline" as const,
+    },
+    dividerRow: {
+      flexDirection: "row",
+      alignItems: "center",
+      marginVertical: spacing.xs,
+    },
+    dividerLine: {
+      flex: 1,
+      height: 1,
+      backgroundColor: c.border,
+    },
+    dividerText: {
+      color: c.textMuted,
+      ...typeScale.small,
+      marginHorizontal: spacing.sm,
+    },
+    socialAuthButton: {
+      backgroundColor: c.cardSoft,
+      borderColor: c.borderSoft,
+      borderWidth: 1,
+      borderRadius: radius.md,
+      paddingVertical: spacing.md,
+      paddingHorizontal: spacing.lg,
+      alignItems: "center",
+      justifyContent: "center",
+    },
+    socialAuthButtonDisabled: {
+      opacity: 0.5,
+    },
+    socialAuthContent: {
+      flexDirection: "row",
+      alignItems: "center",
+      justifyContent: "center",
+      gap: spacing.sm,
+    },
+    socialAuthText: {
+      color: c.textPrimary,
+      ...typeScale.label,
+    },
+    legal: {
+      color: c.textMuted,
+      ...typeScale.small,
+      marginTop: spacing.sm,
+      textAlign: "center",
+    },
+    legalLink: {
+      color: c.textSecondary,
+      ...typeScale.small,
+      textDecorationLine: "underline",
+    },
+  });

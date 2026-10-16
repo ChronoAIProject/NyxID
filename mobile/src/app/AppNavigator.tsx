@@ -1,175 +1,459 @@
-import { createNativeStackNavigator } from "@react-navigation/native-stack";
-import { StyleSheet, View } from "react-native";
-import { LinearGradient } from "expo-linear-gradient";
+import { useContext } from "react";
+import { createBottomTabNavigator } from "@react-navigation/bottom-tabs";
+import {
+  createNativeStackNavigator,
+  type NativeStackScreenProps,
+} from "@react-navigation/native-stack";
 import { AuthHomeScreen } from "../features/auth/AuthHomeScreen";
 import { DeviceLoginScreen } from "../features/auth/DeviceLoginScreen";
 import { AgentKeyLoginScreen } from "../features/auth/AgentKeyLoginScreen";
 import { useAuthSession } from "../features/auth/AuthSessionContext";
 import { AccountSettingsScreen } from "../features/account/AccountSettingsScreen";
+import { AccountSecurityScreen } from "../features/account/AccountSecurityScreen";
 import { ActivityScreen } from "../features/activity/ActivityScreen";
 import { ActivityDetailScreen } from "../features/activity/ActivityDetailScreen";
+import { AssistantScreen } from "../features/assistant/AssistantScreen";
+import { ServicesScreen } from "../features/services/ServicesScreen";
+import { AgentsScreen } from "../features/agents/AgentsScreen";
+import { AgentsGroupsScreen } from "../features/agents/AgentsGroupsScreen";
+import { GroupChatScreen } from "../features/groups/GroupChatScreen";
+import { GroupEditorScreen } from "../features/groups/GroupEditorScreen";
+import {
+  AutomationsScreen,
+  AutomationDetailScreen,
+  AutomationEditorScreen,
+  AutomationRunsScreen,
+  AutomationPreferencesScreen,
+} from "../features/automations/AutomationsScreen";
+import {
+  PluginsScreen,
+  AgentSkillsScreen,
+} from "../features/plugins/PluginsScreen";
 import { TermsOfServiceScreen } from "../features/legal/TermsOfServiceScreen";
 import { PrivacyPolicyScreen } from "../features/legal/PrivacyPolicyScreen";
 import { FullScreenLoading } from "../components/FullScreenLoading";
-import { BottomNavV2, type BottomNavV2Tab } from "../components/BottomNavV2";
-// import { NyxFAB } from "../components/NyxFAB"; // TODO: re-enable when chat is ready
 import { useTheme } from "../theme/ThemeContext";
-import { spacing } from "../theme/designTokens";
+import { fonts } from "../theme/designTokens";
+import {
+  WorkspaceMenuContext,
+  WorkspaceNavigationGuardContext,
+  type WorkspaceNavigationGuardChange,
+  workspaceHeaderOptions,
+} from "./WorkspaceHeader";
+import { workspaceRouterOptions } from "./navigationHierarchy";
+import type {
+  RootStackParamList,
+  WorkspaceParamList,
+  WorkspaceScreenProps,
+} from "./navigationTypes";
 
-export type RootStackParamList = {
-  Auth: undefined;
-  Activity: { challengeId?: string } | undefined;
-  ActivityDetail: { challengeId: string };
-  AccountSettings: undefined;
-  TermsOfService: undefined;
-  PrivacyPolicy: undefined;
-  DeviceLogin: { user_code?: string; start_scanner?: boolean } | undefined;
-  AgentKeyLogin: { user_code?: string; flow?: "agent-key" | "device"; mint?: boolean } | undefined;
-};
+export type {
+  RootStackParamList,
+  WorkspaceParamList,
+  WorkspaceScreenProps,
+  WorkspaceNavigationProp,
+} from "./navigationTypes";
 
 const Stack = createNativeStackNavigator<RootStackParamList>();
+const Tabs = createBottomTabNavigator<WorkspaceParamList>();
+const hideTabBar = () => null;
 
-type AppNavigatorProps = {
-  currentRouteName?: string;
-  onMainTabPress?: (tab: BottomNavV2Tab) => void;
-  onNyxPress?: () => void;
-};
-
-function resolveActiveMainTab(routeName?: string): BottomNavV2Tab {
-  if (!routeName) return "activity";
-  if (routeName === "Activity") return "activity";
-  if (routeName === "ActivityDetail") return "activity";
-  if (routeName === "AccountSettings") return "account";
-  if (routeName === "TermsOfService") return "account";
-  if (routeName === "PrivacyPolicy") return "account";
-  return "activity";
+function AgentsRoute({ navigation, route }: WorkspaceScreenProps<"Agents">) {
+  return (
+    <AgentsGroupsScreen
+      tab={route.params?.tab === "groups" ? "groups" : "agents"}
+      onTabChange={(tab) => navigation.setParams({ tab })}
+      onOpenGroup={(groupId) => navigation.push("GroupChat", { groupId })}
+      onCreateGroup={() => navigation.push("GroupEditor")}
+      onOpenChat={(params) => navigation.push("AssistantContext", params)}
+      onOpenSkills={(agentId) => navigation.push("AgentSkills", { agentId })}
+      onOpenAutomations={(agentId) =>
+        navigation.navigate({
+          name: "Automations",
+          params: { agentId, setup: undefined },
+          merge: true,
+        })
+      }
+    />
+  );
 }
 
-export function AppNavigator({ currentRouteName, onMainTabPress, onNyxPress }: AppNavigatorProps) {
+function GroupChatRoute({
+  navigation,
+  route,
+}: NativeStackScreenProps<RootStackParamList, "GroupChat">) {
+  return (
+    <GroupChatScreen
+      key={route.params.groupId}
+      groupId={route.params.groupId}
+      onBack={() => navigation.goBack()}
+      onSettings={() =>
+        navigation.push("GroupEditor", { groupId: route.params.groupId })
+      }
+      onOpenConversation={(params) =>
+        navigation.push("AssistantContext", params)
+      }
+      onOpenAgent={(agentId) => navigation.push("AgentDetail", { agentId })}
+    />
+  );
+}
+
+function GroupEditorRoute({
+  navigation,
+  route,
+}: NativeStackScreenProps<RootStackParamList, "GroupEditor">) {
+  return (
+    <GroupEditorScreen
+      key={route.params?.groupId ?? "new"}
+      groupId={route.params?.groupId}
+      onBack={() => navigation.goBack()}
+      onSaved={(groupId) => {
+        if (route.params?.groupId) navigation.goBack();
+        else navigation.replace("GroupChat", { groupId });
+      }}
+      onRemoved={() =>
+        navigation.popTo(
+          "Workspace",
+          { screen: "Agents", params: { tab: "groups" } },
+          { merge: true },
+        )
+      }
+    />
+  );
+}
+
+function AgentDetailRoute({
+  navigation,
+  route,
+}: NativeStackScreenProps<RootStackParamList, "AgentDetail">) {
+  return (
+    <AgentsScreen
+      agentId={route.params.agentId}
+      onClose={() => navigation.goBack()}
+      onOpenChat={(params) => navigation.push("AssistantContext", params)}
+      onOpenSkills={(agentId) => navigation.push("AgentSkills", { agentId })}
+      onOpenAutomations={(agentId) =>
+        navigation.popTo(
+          "Workspace",
+          { screen: "Automations", params: { agentId, setup: undefined } },
+          { merge: true },
+        )
+      }
+    />
+  );
+}
+
+function AssistantContextRoute({
+  route,
+}: NativeStackScreenProps<RootStackParamList, "AssistantContext">) {
+  return <AssistantScreen contextual route={route} />;
+}
+
+function PluginsRoute({ route }: WorkspaceScreenProps<"Plugins">) {
+  return (
+    <PluginsScreen
+      initialTab={route.params?.tab}
+      agentId={route.params?.agentId}
+    />
+  );
+}
+
+function ServiceSetupRoute({
+  navigation,
+  route,
+}: NativeStackScreenProps<RootStackParamList, "ServiceSetup">) {
+  return (
+    <ServicesScreen
+      key={route.key}
+      initialConnectionId={route.params.connectionId}
+      initialCatalogSlug={route.params.catalogSlug}
+      onClose={() => navigation.goBack()}
+    />
+  );
+}
+
+function AgentSkillsRoute({
+  route,
+}: NativeStackScreenProps<RootStackParamList, "AgentSkills">) {
+  return (
+    <AgentSkillsScreen
+      key={route.params.agentId}
+      agentId={route.params.agentId}
+    />
+  );
+}
+
+/** The drawer selects siblings; the outer native stack owns detail history. */
+function WorkspaceNavigator() {
+  const onOpenMenu = useContext(WorkspaceMenuContext);
+  const { colors } = useTheme();
+  const header = workspaceHeaderOptions({ role: "menu", onOpenMenu });
+  return (
+    <Tabs.Navigator
+      {...workspaceRouterOptions}
+      tabBar={hideTabBar}
+      screenOptions={{
+        headerShown: true,
+        headerLeft: () => header.headerLeft?.({ canGoBack: false }),
+        headerLeftContainerStyle: { paddingLeft: 16 },
+        headerRight: () => null,
+        headerStyle: { backgroundColor: colors.bg },
+        headerTintColor: colors.textPrimary,
+        headerTitleStyle: { fontFamily: fonts.displaySemi, fontSize: 18 },
+        headerTitleAlign: "center",
+        headerShadowVisible: false,
+        sceneStyle: { backgroundColor: colors.bg },
+        // Mounted screens retain drafts, filters and scroll position on selection.
+        lazy: true,
+      }}
+    >
+      <Tabs.Screen
+        name="Assistant"
+        component={AssistantScreen}
+        options={{ title: "NyxID" }}
+      />
+      <Tabs.Screen
+        name="Automations"
+        component={AutomationsScreen}
+        options={{ title: "Automations" }}
+      />
+      <Tabs.Screen
+        name="Agents"
+        component={AgentsRoute}
+        options={{ title: "Agents & Groups" }}
+      />
+      <Tabs.Screen
+        name="Plugins"
+        component={PluginsRoute}
+        options={{
+          title: "Plugins",
+          headerTitleStyle: { fontFamily: fonts.bodySemi, fontSize: 19 },
+        }}
+      />
+      <Tabs.Screen
+        name="Services"
+        component={ServicesScreen}
+        options={{ title: "Services" }}
+      />
+      <Tabs.Screen
+        name="Activity"
+        component={ActivityScreen}
+        options={{ title: "Approvals" }}
+      />
+      <Tabs.Screen
+        name="AccountSettings"
+        component={AccountSettingsScreen}
+        options={{ title: "Settings" }}
+      />
+    </Tabs.Navigator>
+  );
+}
+
+export function AppNavigator({
+  onOpenMenu,
+  onNavigationGuardChange,
+}: {
+  onOpenMenu: () => void;
+  onNavigationGuardChange: WorkspaceNavigationGuardChange;
+}) {
   const { isAuthenticated, isRestoring } = useAuthSession();
   const { colors } = useTheme();
-  const activeMainTab = resolveActiveMainTab(currentRouteName);
-  const isLegalRoute = currentRouteName === "TermsOfService" || currentRouteName === "PrivacyPolicy";
-  const isDetailRoute = currentRouteName === "ActivityDetail";
-  const isDeviceLoginRoute = currentRouteName === "DeviceLogin" || currentRouteName === "AgentKeyLogin";
-  const showGlobalBottomNav =
-    isAuthenticated &&
-    Boolean(onMainTabPress) &&
-    !isLegalRoute &&
-    !isDetailRoute &&
-    !isDeviceLoginRoute;
-
-  if (isRestoring) {
-    return <FullScreenLoading title="Restoring session..." subtitle="Validating local secure session" />;
-  }
-
+  if (isRestoring)
+    return (
+      <FullScreenLoading
+        title="Restoring session..."
+        subtitle="Validating local secure session"
+      />
+    );
   return (
-    <View style={[styles.container, { backgroundColor: colors.bg }]}>
-      <View style={styles.stackWrap}>
+    <WorkspaceMenuContext.Provider value={onOpenMenu}>
+      <WorkspaceNavigationGuardContext.Provider value={onNavigationGuardChange}>
         <Stack.Navigator
-          initialRouteName={isAuthenticated ? "Activity" : "Auth"}
+          initialRouteName={isAuthenticated ? "Workspace" : "Auth"}
           screenOptions={{
             headerShown: false,
             headerStyle: { backgroundColor: colors.bg },
             headerTintColor: colors.textPrimary,
+            headerTitleStyle: { fontFamily: fonts.displaySemi, fontSize: 18 },
+            headerShadowVisible: false,
             contentStyle: { backgroundColor: colors.bg },
+            headerBackButtonDisplayMode: "minimal",
           }}
         >
           {isAuthenticated ? (
-            <>
+            <Stack.Group navigationKey="workspace">
+              <Stack.Screen name="Workspace" component={WorkspaceNavigator} />
               <Stack.Screen
-                name="Activity"
-                component={ActivityScreen}
-                options={{ title: "Activity", animation: "slide_from_left" }}
+                name="AssistantContext"
+                component={AssistantContextRoute}
+                options={({ navigation }) => ({
+                  ...workspaceHeaderOptions({
+                    role: "back",
+                    onOpenMenu,
+                    onBack: navigation.goBack,
+                  }),
+                  title: "NyxID",
+                })}
+              />
+              <Stack.Screen
+                name="AgentDetail"
+                component={AgentDetailRoute}
+                options={({ navigation }) => ({
+                  ...workspaceHeaderOptions({
+                    role: "back",
+                    onOpenMenu,
+                    onBack: navigation.goBack,
+                  }),
+                  title: "Agent",
+                })}
+              />
+              <Stack.Screen
+                name="GroupChat"
+                component={GroupChatRoute}
+                options={({ navigation }) => ({
+                  ...workspaceHeaderOptions({
+                    role: "back",
+                    onOpenMenu,
+                    onBack: navigation.goBack,
+                  }),
+                  title: "Group",
+                })}
+              />
+              <Stack.Screen
+                name="GroupEditor"
+                component={GroupEditorRoute}
+                options={({ navigation, route }) => ({
+                  ...workspaceHeaderOptions({
+                    role: "back",
+                    onOpenMenu,
+                    onBack: navigation.goBack,
+                  }),
+                  title: route.params?.groupId
+                    ? "Group settings"
+                    : "Create group",
+                })}
+              />
+              <Stack.Screen
+                name="ServiceSetup"
+                component={ServiceSetupRoute}
+                options={({ navigation, route }) => ({
+                  ...workspaceHeaderOptions({
+                    role: "back",
+                    onOpenMenu,
+                    onBack: navigation.goBack,
+                  }),
+                  title: route.params.catalogSlug
+                    ? "Connect service"
+                    : "Manage connection",
+                })}
+              />
+              <Stack.Screen
+                name="AgentSkills"
+                component={AgentSkillsRoute}
+                options={({ navigation }) => ({
+                  ...workspaceHeaderOptions({
+                    role: "back",
+                    onOpenMenu,
+                    onBack: navigation.goBack,
+                  }),
+                  title: "Agent skills",
+                })}
+              />
+              <Stack.Screen
+                name="AutomationDetail"
+                component={AutomationDetailScreen}
+                options={({ navigation }) => ({
+                  ...workspaceHeaderOptions({
+                    role: "back",
+                    onOpenMenu,
+                    onBack: navigation.goBack,
+                  }),
+                  title: "Automation",
+                })}
+              />
+              <Stack.Screen
+                name="AutomationEditor"
+                component={AutomationEditorScreen}
+                options={({ navigation, route }) => ({
+                  ...workspaceHeaderOptions({
+                    role: "back",
+                    onOpenMenu,
+                    onBack: navigation.goBack,
+                  }),
+                  title: route.params?.id
+                    ? "Edit automation"
+                    : "Create automation",
+                })}
+              />
+              <Stack.Screen
+                name="AutomationRuns"
+                component={AutomationRunsScreen}
+                options={({ navigation }) => ({
+                  ...workspaceHeaderOptions({
+                    role: "back",
+                    onOpenMenu,
+                    onBack: navigation.goBack,
+                  }),
+                  title: "Run history",
+                })}
+              />
+              <Stack.Screen
+                name="AutomationPreferences"
+                component={AutomationPreferencesScreen}
+                options={({ navigation }) => ({
+                  ...workspaceHeaderOptions({
+                    role: "back",
+                    onOpenMenu,
+                    onBack: navigation.goBack,
+                  }),
+                  title: "Automation preferences",
+                })}
               />
               <Stack.Screen
                 name="ActivityDetail"
                 component={ActivityDetailScreen}
-                options={{ title: "Approval Detail", animation: "none" }}
+                options={{ title: "Approval detail", animation: "none" }}
               />
               <Stack.Screen
-                name="AccountSettings"
-                component={AccountSettingsScreen}
-                options={{ title: "Account Settings", animation: "slide_from_right" }}
+                name="AccountSecurity"
+                component={AccountSecurityScreen}
+                options={{ headerShown: true, title: "Account & security" }}
               />
-            </>
+            </Stack.Group>
           ) : (
-            <>
-              <Stack.Screen name="Auth" component={AuthHomeScreen} options={{ title: "NyxID Sign In" }} />
-            </>
+            <Stack.Screen
+              name="Auth"
+              navigationKey="auth"
+              component={AuthHomeScreen}
+              options={{ title: "NyxID Sign In" }}
+            />
           )}
-          <Stack.Screen
-            name="TermsOfService"
-            component={TermsOfServiceScreen}
-            options={{ title: "Terms of Service", animation: "slide_from_left" }}
-          />
-          <Stack.Screen
-            name="PrivacyPolicy"
-            component={PrivacyPolicyScreen}
-            options={{ title: "Privacy Policy", animation: "slide_from_left" }}
-          />
-          <Stack.Screen
-            name="DeviceLogin"
-            component={DeviceLoginScreen}
-            options={{ title: "Approve Device Login", animation: "slide_from_right" }}
-          />
-          <Stack.Screen name="AgentKeyLogin" component={AgentKeyLoginScreen} options={{ title: "Agent Key Login", animation: "slide_from_right" }} />
+          <Stack.Group
+            navigationKey={isAuthenticated ? "signed-in" : "signed-out"}
+          >
+            <Stack.Screen
+              name="TermsOfService"
+              component={TermsOfServiceScreen}
+              options={{ title: "Terms of Service" }}
+            />
+            <Stack.Screen
+              name="PrivacyPolicy"
+              component={PrivacyPolicyScreen}
+              options={{ title: "Privacy Policy" }}
+            />
+            <Stack.Screen
+              name="DeviceLogin"
+              component={DeviceLoginScreen}
+              options={{ title: "Approve Device Login" }}
+            />
+            <Stack.Screen
+              name="AgentKeyLogin"
+              component={AgentKeyLoginScreen}
+              options={{ title: "Agent Key Login" }}
+            />
+          </Stack.Group>
         </Stack.Navigator>
-      </View>
-      {showGlobalBottomNav ? (
-        <View style={styles.bottomOverlay} pointerEvents="box-none">
-          <LinearGradient
-            colors={[colors.bg + "00", colors.bg]}
-            locations={[0, 1]}
-            style={styles.fadeGradient}
-            pointerEvents="none"
-          />
-          <View style={[styles.bottomWrap, { backgroundColor: colors.bg }]}>
-            <View style={styles.navContainer}>
-              <BottomNavV2 active={activeMainTab} onTabPress={(tab) => onMainTabPress?.(tab)} />
-              {/* TODO: re-enable when chat is ready
-              <View style={styles.fabPosition}>
-                <NyxFAB onPress={onNyxPress} />
-              </View>
-              */}
-            </View>
-          </View>
-        </View>
-      ) : null}
-    </View>
+      </WorkspaceNavigationGuardContext.Provider>
+    </WorkspaceMenuContext.Provider>
   );
 }
-
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-  },
-  stackWrap: {
-    flex: 1,
-  },
-  bottomOverlay: {
-    position: "absolute",
-    left: 0,
-    right: 0,
-    bottom: 0,
-  },
-  fadeGradient: {
-    height: 40,
-  },
-  bottomWrap: {
-    paddingHorizontal: spacing.xxl,
-    paddingBottom: spacing.xxxl,
-  },
-  navContainer: {
-    position: "relative",
-  },
-  fabPosition: {
-    position: "absolute",
-    top: -41.5,
-    left: "50%",
-    marginLeft: -28.5,
-    overflow: "visible",
-    height: 77,
-    justifyContent: "flex-end",
-  } as const,
-});

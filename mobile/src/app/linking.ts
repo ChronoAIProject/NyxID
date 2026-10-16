@@ -1,7 +1,12 @@
-import type { LinkingOptions } from "@react-navigation/native";
+import {
+  getStateFromPath,
+  type LinkingOptions,
+} from "@react-navigation/native";
 import * as Notifications from "expo-notifications";
 import { Linking } from "react-native";
-import type { RootStackParamList } from "./AppNavigator";
+import type { RootStackParamList } from "./navigationTypes";
+import { navigationLinkingConfig } from "./navigationLinking";
+import { withWorkspaceFallback } from "./navigationHierarchy";
 import { capture } from "../lib/telemetry";
 import type { LinkType } from "../lib/telemetry-schema";
 
@@ -70,7 +75,10 @@ function extractUrlFromNotificationData(data: unknown): string | null {
       return buildChallengeUrl(challengeId);
     }
 
-    if (typeof payload.dataString === "string" && payload.dataString.length > 0) {
+    if (
+      typeof payload.dataString === "string" &&
+      payload.dataString.length > 0
+    ) {
       try {
         pending.push(JSON.parse(payload.dataString));
       } catch {
@@ -106,7 +114,7 @@ function extractUrlFromNotificationData(data: unknown): string | null {
 }
 
 export function extractUrlFromNotificationResponse(
-  response: Notifications.NotificationResponse | null
+  response: Notifications.NotificationResponse | null,
 ): string | null {
   if (!response) return null;
 
@@ -134,7 +142,9 @@ export function extractUrlFromNotificationResponse(
       return pushPayloadUrl;
     }
 
-    const remoteMessageUrl = extractUrlFromNotificationData(pushTrigger.remoteMessage?.data);
+    const remoteMessageUrl = extractUrlFromNotificationData(
+      pushTrigger.remoteMessage?.data,
+    );
     if (remoteMessageUrl) {
       return remoteMessageUrl;
     }
@@ -144,7 +154,7 @@ export function extractUrlFromNotificationResponse(
 }
 
 export function extractChallengeIdFromNotificationResponse(
-  response: Notifications.NotificationResponse | null
+  response: Notifications.NotificationResponse | null,
 ): string | null {
   const url = extractUrlFromNotificationResponse(response);
   if (!url) return null;
@@ -281,26 +291,9 @@ function rewriteChallengeUrl(url: string): string {
 
 export const appLinking: LinkingOptions<RootStackParamList> = {
   prefixes: ["nyxid://"],
-  config: {
-    screens: {
-      Auth: "auth",
-      Activity: {
-        path: "activity",
-        parse: { challengeId: String },
-      },
-      AccountSettings: "account",
-      DeviceLogin: {
-        path: "login/device",
-        parse: { user_code: String },
-      },
-      AgentKeyLogin: {
-        path: "login/agent-key",
-        parse: { user_code: String },
-      },
-      TermsOfService: "terms",
-      PrivacyPolicy: "privacy",
-    },
-  },
+  config: navigationLinkingConfig,
+  getStateFromPath: (path, options) =>
+    withWorkspaceFallback(getStateFromPath(path, options)),
   async getInitialURL() {
     try {
       const directUrl = await Linking.getInitialURL();
@@ -313,7 +306,8 @@ export const appLinking: LinkingOptions<RootStackParamList> = {
     }
 
     try {
-      const lastNotificationResponse = await Notifications.getLastNotificationResponseAsync();
+      const lastNotificationResponse =
+        await Notifications.getLastNotificationResponseAsync();
       const url = extractUrlFromNotificationResponse(lastNotificationResponse);
       if (url) {
         reportDeepLinkOpened(url);
@@ -322,7 +316,10 @@ export const appLinking: LinkingOptions<RootStackParamList> = {
       return null;
     } catch (error) {
       if (__DEV__) {
-        console.warn("[linking] getLastNotificationResponseAsync failed", error);
+        console.warn(
+          "[linking] getLastNotificationResponseAsync failed",
+          error,
+        );
       }
       return null;
     }
@@ -350,7 +347,8 @@ export const appLinking: LinkingOptions<RootStackParamList> = {
           }
         });
     } catch (error) {
-      if (__DEV__) console.warn("[linking] notification subscription failed", error);
+      if (__DEV__)
+        console.warn("[linking] notification subscription failed", error);
     }
 
     return () => {

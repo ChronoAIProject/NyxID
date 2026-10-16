@@ -1,17 +1,17 @@
 # NyxID Mobile
 
-The mobile authenticator companion for the [NyxID](../) auth/SSO platform. Receives push notifications when a sign-in or sensitive action needs your approval, lets you approve or deny it with one tap, and persists the granted permissions for any policies you've opted into.
+The native workspace for the [NyxID](../) auth/SSO platform, built around persisted assistant conversations, service connections, agents, and approvals. It uses the existing NyxID backend and retains the mobile QR login, push notification, and secure session flows.
 
-Think Duo Mobile, Microsoft Authenticator, or Authy — but bound to your own self-hosted NyxID backend.
+The first Web-to-RN increment and remaining migration work are documented in [RN Web parity scope](docs/RN_WEB_PARITY.md).
 
 ## What it does
 
-- **Approves auth challenges.** When a service requests access (login, OAuth grant, MFA step-up, admin action), the backend pushes a notification to this app. You see the request details — who, what, when, where — and tap approve or deny.
-- **Manages granted permissions.** View every grant you've issued (per-service, per-scope), and revoke any of them.
-- **Acts as an MFA factor.** When MFA is enabled on a NyxID account, this app's approval is the second factor.
-- **Stays signed in securely.** Tokens persist in the OS secure enclave (iOS Keychain via `expo-secure-store`, Android EncryptedSharedPreferences).
-
-For end users this is a companion app to whatever website / service uses NyxID as its identity provider. For NyxID operators this is what your tenants install.
+- **Chats with NyxBot and specialists.** Open saved conversations, receive streaming responses, review scoped confirmations, stop work, and recover history after a connection interruption.
+- **Connects services.** Browse the catalog, connect supported API-key, token-exchange, OAuth, or platform-key services, and manage existing connections under the server's permissions.
+- **Manages agents.** Create personal specialists, edit authorized profiles and grants, manage memory, and open agent conversations.
+- **Reviews approvals.** Receive push notifications, scan login QR codes, inspect the server's tool arguments and expiry, approve or deny requests, and revoke granted permissions.
+- **Manages account security.** Edit profile information, revoke sessions, set up TOTP, and sign in with a password and authenticator code.
+- **Stays signed in securely.** Tokens persist in OS-secure storage through `expo-secure-store`; refresh and account changes fence stale responses and queued credential writes.
 
 ## Tech stack
 
@@ -267,11 +267,14 @@ mobile/
 │  ├─ app/                        # Navigator, root, deep-link routing
 │  ├─ features/
 │  │  ├─ auth/                    # Login, auth session context, MFA verify
-│  │  ├─ activity/                # Challenge list + detail (the main "what to approve" screen)
+│  │  ├─ assistant/               # Persisted chats, native SSE, scoped confirmations
+│  │  ├─ services/                # Catalog and service connections
+│  │  ├─ agents/                  # Specialist profiles, grants, memory, lifecycle
+│  │  ├─ activity/                # Challenge list + detail
 │  │  ├─ approvals/               # Granted permissions, revoke flow
-│  │  ├─ account/                 # Profile, settings, account deletion
+│  │  ├─ account/                 # Profile, sessions, TOTP, settings, account deletion
 │  │  └─ legal/                   # Privacy, terms
-│  ├─ components/                 # Reusable UI primitives
+│  ├─ components/                 # Reusable UI primitives and workspace drawer
 │  ├─ hooks/                      # useNetworkStatus, useNyxChat, etc.
 │  ├─ lib/
 │  │  ├─ api/                     # HTTP client (mobileApi.ts, http.ts), error mapping
@@ -287,7 +290,7 @@ mobile/
 
 ## Backend endpoints this app talks to
 
-All under `/api/v1` on the configured `*_API_BASE_URL`:
+All under `/api/v1` on the configured `*_API_BASE_URL`. The workspace API families and supported operations are listed in [RN Web parity scope](docs/RN_WEB_PARITY.md); the retained mobile auth and approval paths include:
 
 | Endpoint | Used by |
 | --- | --- |
@@ -315,7 +318,7 @@ All under `/api/v1` on the configured `*_API_BASE_URL`:
 ## Session
 
 - Access + refresh tokens persist in `SecureStore` (iOS Keychain / Android EncryptedSharedPreferences).
-- Cold start restores the session and routes to `Dashboard` if valid, `Auth` otherwise.
+- Cold start restores the session and routes to `Assistant` if valid, `Auth` otherwise.
 - 401 after refresh failure triggers a full sign-out (state + storage + push deregistration).
 
 ## Key source files
