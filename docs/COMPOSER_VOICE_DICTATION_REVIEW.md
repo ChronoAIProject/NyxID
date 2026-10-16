@@ -1,5 +1,258 @@
 # Composer voice and dictation personal review
 
+## Overlay resize and dictation mouse-out — October 16
+
+The primary assistant implemented and reviewed both refinements directly.
+The complete composer surface now stretches to 90% of the visible viewport,
+including toolbar, attachments and padding, bounded below the chat header.
+Its measured band stops at half the visible viewport or 480px. Additional
+height grows upward over the transcript; its opaque background and fade move
+with it. Below that threshold normal chat spacing resumes. The existing
+height preference, one-line collapse, keyboard resize/reset and internal draft
+scrolling remain. Layout observation includes changing surrounding controls and
+the chat container, so software-keyboard and viewport changes recalculate the
+limit without putting the grip behind the header.
+
+Dictation settings close 200ms after leaving the combined trigger/popup area.
+Entering either cancels the timer, allowing the pointer to cross the portal gap.
+Closing releases the microphone preview. Navigation, eligibility loss,
+unmounting and starting dictation cancel pending dismissal. Keyboard opening,
+switch operation and Escape remain usable; existing touch activation is retained.
+
+Personal review includes desktop/mobile screenshots and the media lifecycle.
+All 26 browser cases in composer-settings and composer-voice pass (46.1s).
+The new cases use a fixture transcript and verify 90vh, unchanged message
+position/padding above the overlay threshold, shrinking, Home/End/reset,
+short viewports, simulated software-keyboard changes, retained drafts and
+internal scrolling. Hover checks cover popup entry/exit, microphone cleanup
+and subsequent keyboard use. All 111 component tests in chat-composer,
+composer-dictation and upload-composer pass. TypeScript, scoped ESLint with
+zero warnings, and diff checks pass.
+
+Receipts: `target/composer-overlay-browser-final.log`,
+`target/composer-overlay-unit-final.log`, `target/composer-overlay-types.log`,
+`target/composer-overlay-lint.log`. Final source hashes and reviewed screenshots
+are under `target/composer-voice-live/overlay-*`.
+
+The production-connected frontend at http://127.0.0.1:4615/assistant returns
+HTTP 200 and serves this worktree. Browser cases use explicit fixtures and do
+not establish live provider availability. No CI updates, commits, pushes,
+PR edits, deployments or production configuration changes were made.
+
+## Shared action slot and collapsed chevron — October 16
+
+The latest user correction supersedes the reserved-chevron and adjacent-voice
+behavior below. Hidden chevrons now occupy zero width. Revealing the chevron
+expands the mic control; settings open on actual pointer movement onto the
+chevron, not an enter event caused by layout shifting beneath a stationary
+pointer. Keyboard activation and touch controls remain available.
+
+Voice and Send now share a single action slot. Text or any attachment replaces
+Voice with Send, including a disabled Send for pending uploads. Clearing the
+draft restores Voice when eligible. Active assistant Stop and in-composer call
+controls retain their existing behavior.
+
+Personally reviewed the final screenshots and diff. All 24 affected Chromium
+cases pass, including 320/390/1280px hidden-width, replacement and hover checks,
+permission/credit recovery, dictation and resize. All 109 component tests pass;
+TypeScript, scoped lint and diff checks pass. Receipts:
+`target/composer-shared-action-{browser,unit,types,lint}.log`.
+The local production-connected preview remains on port 4615, with no CI, Git
+publication, PR or deployment changes.
+
+## Composer polish follow-up — October 16
+
+The primary assistant directly implemented and personally reviewed the user's
+four UI corrections. The live local frontend remains at
+http://127.0.0.1:4615/assistant against production. No agents, CI updates,
+commits, pushes, PR edits, backend runtime changes or deployments were used.
+
+- Send is absent for an empty or whitespace-only draft independently of voice
+  availability. Typed text and attachments reveal it; pending uploads retain a
+  disabled Send button. Stop remains available for active work.
+- The microphone and waveform icons both render at 20px. Settings open from
+  the compact right-hand chevron only, including keyboard/touch activation;
+  mic hover/focus does not open the popup. The popup aligns to the chevron's
+  right edge, with viewport collision handling on narrow screens.
+- Personal browser review reproduced a subtle hover regression with a
+  collapsing chevron: the mic moved from x=1012 to x=984, moving the chevron
+  under a stationary pointer and opening settings. A fixed 20px chevron width
+  eliminates that movement. Browser coverage now checks horizontal stability
+  as well as menu visibility. On the user's subsequent refinement, the chevron
+  fades in only on hover/keyboard focus, while preserving that reserved width.
+  It stays visible for open settings and touch devices. The main and preview
+  mic now use a slimmer rounded capsule outline without a flat stand base.
+- The aura breathes smoothly over 3.2 seconds while active, retaining measured
+  audio strength/size. Entry uses a 450ms opacity transition; stopping pauses
+  the cycle and fades it out over 800ms. Reduced-motion mode uses a steady
+  aura. Real browser samples show the breathing multiplier rising above 0.95
+  and falling below 0.05; stop reaches zero opacity. This visual verification
+  uses explicit test audio, not a production provider session.
+
+Latest icon/hover refinement verification: 11 dictation component tests and
+four Chromium settings/responsive cases pass, including hidden-at-rest,
+visible-on-hover, hidden-on-leave and stable horizontal control bounds at
+320/390/1280px. TypeScript, scoped lint (zero warnings) and diff checks pass.
+Receipts: `target/composer-mic-refinement-{unit,browser,types,lint}.log`.
+The earlier broader verification below remains unchanged.
+
+Earlier polish verification:
+
+- 143 component tests passed across six files: 126 in
+  `target/composer-polish-unit-final.log` and 17 in
+  `target/composer-polish-voice-unit.log`.
+- All 29 affected Chromium cases are verified across the final suite and
+  focused recheck: the suite passed 27 cases, with two layout assertions
+  sampling entrance/collapse animations too early. Their corrected assertions
+  wait for popup alignment and check horizontal hover stability independently
+  of an earlier newline's vertical collapse. All four responsive/settings
+  cases then passed. Logs: `target/composer-polish-browser-verified.log` and
+  `target/composer-polish-layout-verified.log`. The suite also covers native
+  permission recovery, credit retry, attachments, rich drafts and multiline
+  drag resize.
+- TypeScript, scoped ESLint and `git diff --check` pass. TypeScript found five
+  unsupported `exact` options in the prior retry test; removing them retains
+  Testing Library's default exact string matching, and all voice-panel tests
+  pass. Logs: `target/composer-polish-typecheck-final.log`,
+  `target/composer-polish-lint-final.log` and
+  `target/composer-polish-layout-lint.log`.
+- Light/dark and 320/390/1280px screenshots were inspected. The visual script
+  also verifies keyboard opening, the fade cycle, stop and reduced motion,
+  with zero page errors: `target/composer-voice-live/polish-visual-results.json`.
+  Dark review images are `polish-dark-empty.png`, `polish-dark-settings.png`
+  and `polish-dark-glow.png` in the same directory.
+
+## Current local UI revision (October 16)
+
+This revision starts from published commit `405eca72`. The user requested a
+production-connected local frontend and no CI updates pending UI review. All
+changes in this revision remain local: no commit, push, PR update, CI trigger,
+merge or deployment. The implementation plan and per-step acceptance criteria
+are in [COMPOSER_VOICE_DICTATION_PLAN.md](COMPOSER_VOICE_DICTATION_PLAN.md).
+
+The current review URL is **http://127.0.0.1:4615/assistant**. Its loopback-only
+Vite proxy forwards HTTP and voice WebSocket traffic to the production backend
+using normal authentication. It contains no sample API responses, fake media,
+feature overrides or embedded credentials. Configuration and launch instructions
+are in ignored `target/composer-voice-live/`. The former sample preview on
+4612/4613 has been retired.
+
+Production probes returned 200 for health/runtime configuration, 401 for
+unauthenticated voice options and WebSocket upgrade, and 404 for dictation
+options. The production dictation route is not yet deployed. Browser login
+redirects normally; no authenticated paid-provider or physical microphone
+success is inferred from the local checks.
+
+Personal review and local verification are complete. Current-revision execution receipts are recorded
+at the end of this document. All older full-suite, backend, build and wizard
+receipts below describe `405eca72` or its predecessors, not this UI revision.
+
+## Permission and credit recovery follow-up — October 16
+
+The parent's personal review confirms the permission call already originates
+in the main dictation/voice gesture, before draft preparation, settings writes,
+provider creation or billing reservation. Hover only reads devices/options.
+The follow-up adds an explicit compact **Retry voice** action and recovery
+guidance for HTTP 402 `insufficient_credits`. It keeps the selected paid source,
+requests fresh capture, and creates a fresh request identity only on the next
+gesture. The action is unavailable during active/preparing/conflicting calls or
+when source/preferences cannot be used. Error classification no longer labels
+an unrelated HTTP 404 as insufficient credits merely because it shares code
+11300. The stable error symbol also handles the screenshot's code 1300.
+
+Further personal review found that a direct retry without prepared capture
+would use the default microphone, unlike the initial waveform's saved device.
+The hook now reads the current actor's selected device for each attempt and
+passes it into fresh client capture. Already-prepared capture remains unchanged
+and is never requested twice. Hook/client and integrated retry regressions cover
+the selected device as well as the selected paid voice source.
+
+Independent browser cases cover both first activations with pending permission,
+zero metered connections before grant, late grant followed by dictation 404,
+capture release, unchanged draft, voice credit refusal and successful explicit
+retry. Native Chromium denial → grant cases exercise the actual Permissions and
+`getUserMedia` APIs with virtual audio hardware. A standalone native probe on
+the actual local preview also confirmed capture support. These are browser
+permission checks, not physical microphone or paid-provider validation.
+
+The default Playwright `chrome-headless-shell` returned `NotSupportedError`
+for both denied and granted capture; full `channel: chromium` returned the
+expected `NotAllowedError` for denial and captured with a grant. The browser
+tests therefore use the full Chromium binary. No production workaround was
+added for the test driver's missing capture support. The dictation alert can
+move between its main surface and hover popup; the native-permission assertion
+checks the visible matching alert through that transition.
+
+Backend review found no cache of grant balances or a frontend credit gate.
+Every 30-second reservation reads current applicable allowances/grants and
+available wallet funds. Platform voice selects the acting person's payer.
+Grant eligibility requires active status, a matching recipient and service,
+unexpired available funds and `issued_ledgered_at`. A newly created grant still
+awaiting its journal cannot yet fund a call. The checked voice reservation,
+grant eligibility and payer code matches production commit `897a89c2b092`.
+The 0.00084 credits/second screenshot implies a 0.0252-credit duration hold,
+plus any separately configured start fee. A reservation is not consumption.
+
+Two new local backend regressions exercise immediate retry after real grant
+issuance, provider invocation ordering, and release of duration/request-fee
+holds with zero confirmed usage. Personal review corrected a vacuous ledger
+assertion: v2 entries use `event_type: accounting_v2` with a `movement` field,
+so the test must check `movement: usage_settled` / `grant_consumed`.
+No backend runtime, live account balance or production configuration changed.
+
+Live account diagnosis remains bounded: the parent's browser has no signed-in
+production account. The screenshot proves reservation refusal, but does not
+identify whether that person's funds are insufficient, scoped elsewhere,
+already reserved, or awaiting grant journaling. Production dictation still
+requires the route deployment; this local frontend cannot make a missing
+server endpoint transcribe. No paid provider traffic was used in this review.
+
+Fresh frontend receipts:
+
+- **137 tests passed across 9 files**, including capture, dictation, voice,
+  settings, page ownership and error recovery:
+  `target/composer-permission-credit-unit-final-device.log`.
+- **29 browser tests passed** in a clean final run, including native permission
+  denial/grant, first activation, credit retry, rich drafts, responsive controls
+  and multiline drag resize:
+  `target/composer-permission-credit-e2e-verified.log`.
+- After the selected-microphone repair, the expanded integrated retry case
+  passed again (`target/composer-retry-device-browser.log`). It selects the
+  microphone through the dynamic menu, observes it on preview/initial start/
+  retry, verifies cleanup and a fresh request identity, then ends the call.
+- `npx tsc -b`, focused ESLint and `git diff --check` passed:
+  `target/composer-permission-credit-typecheck.log` and
+  `target/composer-permission-credit-lint.log`.
+- The initial concurrent unit run timed out one existing page-lifecycle test
+  while Rust and browser work ran. The final run used two Vitest workers and
+  passed with the same assertions and timeouts. The initial new browser probes
+  also exposed driver and alert-location assumptions described above; the
+  final full browser run passes with zero retries.
+
+Backend funding verification completed against the explicit local replica-set
+URI, with no skipped cases:
+
+- **2 new regressions passed**, 3.16 seconds, from the rebuilt binary:
+  `target/voice-funding-new-regressions.log`. A real empty-wallet refusal invokes
+  no provider; an actual personal grant then funds the next call immediately
+  using the same billing service. Zero observed usage releases both grant and
+  wallet holds, including the authored request fee, and repeated finalization
+  creates no debit or consumption posting.
+- Existing rollout/ACL/tariff/wallet gates passed, and the actual batch issuance
+  journal-recovery case passed:
+  `target/voice-funding-existing-gates.log` and
+  `target/voice-funding-journal-gate.log`.
+- The new tests use MongoDB 8.0.16, FakeLago and a loopback provider. Production
+  Rust is unchanged. The initial private-method compiler error in a test was
+  corrected to exercise public HTTP response mapping before the successful
+  rebuild and test execution.
+
+The local implementation and personal review are complete. CI, draft PR #1907,
+commits and deployment remain untouched; account-specific production funding
+and paid-provider verification are not claimed.
+
+## Previous implementation review
+
 Personal review of the composer expansion of PR #1907. The primary assistant
 reviews the implementation directly; the existing Heca `gpt-6.1-sol` implementer
 uses xhigh reasoning and full access. No additional agents or delegated reviewers.
@@ -191,13 +444,14 @@ to a separate port, the unchanged command passed. No product/test gate changed.
 Logs: `target/composer-voice-integrated-{test,lint,build}.log` and
 `target/composer-voice-integrated-e2e-recheck.log`.
 
-An interactive user preview is available on loopback port 4612, backed by a
-separate Vite server on 4613 and the same explicit test fixtures. Its private
+The previous interactive sample preview ran on loopback port 4612, backed by a
+separate Vite server on 4613 and explicit test fixtures. Its private
 adapter blocks backend API forwarding, supplies sample transcripts/synthetic
 audio and labels the page as a silent UI preview. An independent browser smoke
 verified dictation start/stop/review/cancel and voice/pending captions with no page
 errors. No production source or package change is needed for this preview.
-Parent deliberately leaves these two processes running for the user's review.
+These sample-preview processes were stopped when the user requested a local
+frontend connected to production. The active review URL is recorded above.
 
 Final integrated Rust compilation and strict lint passed. Executable regression
 and generated-file receipts follow below.
@@ -256,3 +510,51 @@ command. Final input hashes are retained separately in
 and covered by the recorded checks. No additional reviewer agents were used.
 The final source includes both required upstream PRs. The explicit local-fixture
 versus paid-provider/physical-device evidence boundary remains unchanged.
+
+
+## Current UI revision: final personal review and local verification
+
+The Heca implementer repaired the voice/dictation findings and is idle with
+source frozen. The primary assistant personally reviewed those changes and
+implemented/reviewed the additional multiline drag-resize repair. No additional
+agent or delegated reviewer was created. HEAD remains `405eca72`; this revision
+is uncommitted and unpublished as requested.
+
+| Finding | Resolution and acceptance evidence |
+| --- | --- |
+| Dictation settings were static and indirect | Dynamic split microphone/chevron, live device list, exact device selection, explicit input test, immediate persisted Hold switch. Hover requests no permission. Desktop/mobile light/dark probes pass. |
+| Failed no-text dictation left an empty review and listening aura | Return to editable idle with accessible server-unavailable/error message and working configuration; retain real partial text for review without a listening aura. Unit/browser checks pass. |
+| Unplugged selected device could close its replacement test through an old callback | Validate the current selected device and reject superseded enumeration results. Red component/browser reproduction becomes green; replacement preview continues measuring. |
+| Stop during PCM startup dropped the last transcript | Ignore late encoder setup failure after intentional Stop while keeping bounded transcript drain. Deterministic regression and rich-editor browser insertion/undo pass with the full `first second world` result. |
+| Voice permission/default/layout did not follow the requested interaction | Acquire permission/AudioContext from waveform activation before asynchronous work; default OpenAI to Automatic; integrated composer controls and primary icon; measured input/output aura and provider fragment captions. Input forwarding still requires provider readiness and server authority. |
+| Closing/reopening voice lost chosen source/mode | Typed confirmed settings update the original actor’s cache; late account changes cannot update either actor incorrectly. Browser End → Close → reopen preserves Hold; source/cache regressions pass. |
+| Loading failure had no usable retry | Explicit read-only retry and hydration edit guard. Failed source/preferences loads recover without starting media or selecting another paid source. |
+| Short multiline drag had no visible effect | Previously a three-line draft stayed 71px tall after an upward 160px drag because only its maximum changed. Manual sizing now controls visible multiline height; keyboard, reset, compact single-line mode, viewport bounds and scrolling pass. |
+| Type errors in new terminal-caption and Grok preparation paths | Explicit null guard and erasable field declaration/assignment. Final TypeScript build check exits zero. |
+
+Final local checks (all on the current UI source):
+
+| Check | Result | Receipt |
+| --- | --- | --- |
+| Voice/dictation/page/media tests, 8 files | 122 passed | `target/composer-ui-targeted-repaired-final.log` |
+| Composer/editor/settings tests, 2 files | 47 passed | `target/composer-resize-unit.log` |
+| Chromium composer voice/pills/settings | 24 passed | `target/composer-ui-parent-e2e-verified.log` |
+| Independent desktop/mobile light/dark probes | 10 passed, no page errors | `target/composer-voice-live/ui-results.json` |
+| TypeScript `npx tsc -b` | Passed | `target/composer-ui-parent-typecheck-final.log` |
+| Changed-path ESLint and whitespace | Passed | `target/composer-ui-repaired-lint.log`, `target/composer-resize-lint.log` |
+
+The first parent browser run (22/23) exposed the real PCM Stop race. Its trace is
+retained as `target/composer-voice-live/dictation-stop-race.zip`. A later run
+(23/24) clicked the resize handle’s stale coordinates during its auto-growth
+transition. The diagnostic probe forced four animation frames between measuring
+and clicking, recording pointerdown on a paragraph; the corrected action waits
+for the locator to stabilize and records pointerdown on `Resize composer`.
+No assertion, timeout or retry gate was weakened. This also preserves the new
+short-multiline regression, which failed deterministically before the product fix.
+
+Visual inspection covers the current device popover in both themes and mobile
+voice controls inside the composer. Read-only production connectivity is proven
+through the local proxy; actual paid-provider and physical acoustic success are
+not claimed. The dictation production route remains 404 until backend deployment.
+The live port 4615 preview is left running. The previous sample preview and the
+parent’s isolated test-only server are stopped.

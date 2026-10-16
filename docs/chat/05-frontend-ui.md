@@ -188,7 +188,7 @@ send; the composer is freed without restoring duplicate text.
 
 ## Composer
 
-The composer is anchored at the bottom of the chat surface. The thread reserves its measured height and fades content behind it rather than clipping messages against a hard boundary.
+The composer is anchored at the bottom of the chat surface. The thread reserves its measured height up to half the visible viewport or 480px, whichever is smaller. Beyond that threshold, manual expansion overlays the chat without increasing its bottom inset. The opaque composer surface and fade move with the top edge.
 
 NyxAgent uses one settings menu in the composer footer. By default, it contains
 only **Thinking** (a toggle) and **Permissions**; the trigger shows the effective
@@ -221,8 +221,11 @@ again when the text fits. In the expanded composer, the text occupies the full
 upper row. Attachments sit
 at the bottom left; the single settings trigger, optional voice action, and
 Send/Stop sit at the bottom right. When enabled by `assistant:voice`, the voice
-waveform occupies the send slot for an empty idle draft. Non-whitespace text or
-attachments switch that slot to the send arrow; an active turn keeps Stop available.
+waveform remains available for an empty idle draft. Send is absent for empty or
+whitespace-only drafts, regardless of voice availability. Non-whitespace text or
+attachments replace Voice with the send arrow in the same action slot; pending
+uploads keep Send disabled. Clearing the draft restores Voice. An active turn
+keeps Stop available, and an active voice call retains its in-composer call controls.
 The menu is bounded by the viewport and scrolls long model lists.
 
 For flagged users, the Reasoning row is visible but marked **Unavailable** and
@@ -239,7 +242,7 @@ supported effort field. Do not infer supported effort levels from model names.
 - Enter during IME composition does not send; both composition state and key code 229 are guarded.
 - The composer uses a minimal Tiptap/ProseMirror editor with atomic inline mention pills. Agent pills show display names; attachment pills show numbered handles: `image-1`, `file-1`, and `text-1` for long pasted text. Autocomplete, plain-text paste, copy, undo/redo, and Shift+Enter are supported. Serialization preserves the existing `@handle` text contract; attachment handles still resolve before sending. Draft storage remains plain text. Undo history resets across conversation/owner changes, after sending, and when removing an upload so deleted references cannot return. Formatting controls are not enabled in this first iteration.
 - Composer attachments occupy one horizontally scrollable row: square image previews and compact document cards with filename, type, and size. Long pastes show a text excerpt. Corner controls remove individual files; upload progress and errors remain within the fixed card height. Attachment mention handles remain available through autocomplete and card hover text. Adding attachments scrolls the row to the newest card; upload progress and removal preserve manual scrolling. Edge fades indicate additional cards offscreen.
-- The text editor grows from one through four rows by default, then scrolls internally. The expanded composer has a top-edge resize handle that changes the maximum text height (64px minimum, up to half the visible viewport or 480px). Short drafts still collapse to one row; the chosen maximum is retained within the mounted composer. Arrow keys adjust it, Home/End select its limits, and double-click resets it. A persistent, draggable thumb appears while text overflows, including after viewport resizing. Expanded controls sit 2px below the editor.
+- The text editor grows from one through four rows by default, then scrolls internally. Dragging the expanded composer’s top-edge handle changes its visible height even for short multiline drafts. The complete surface, including controls, attachments and padding, can reach 90% of the visible viewport, bounded below the chat header. Chat space stops growing at half the viewport or 480px; further expansion overlays the transcript. Shrinking below that threshold restores measured spacing. Short single-line drafts still collapse; the chosen height is retained within the mounted composer. Arrow keys adjust it, Home/End select its limits, and double-click resets it. Window and software-keyboard viewport changes recalculate the limit, keeping the grip and controls reachable. A persistent, draggable thumb appears while text overflows. Expanded controls sit 2px below the editor.
 - A long one-line draft switches controls to the multiline layout before text overlaps the button.
 
 The idle placeholder is `Message NyxID Assistant...`. During an active turn it is `Assistant is working...` and the textbox is disabled.

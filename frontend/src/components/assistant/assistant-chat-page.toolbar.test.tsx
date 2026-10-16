@@ -9,7 +9,7 @@ import {
   within,
   waitFor,
 } from "@testing-library/react";
-import { beforeEach, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { AssistantChatPage, NyxAgentAssistantChatPage } from "./assistant-chat-page";
 import { useAuthStore } from "@/stores/auth-store";
 import { useAssistantDraftStore } from "@/stores/assistant-draft-store";
@@ -87,12 +87,29 @@ vi.mock("./chat-message", () => ({ ChatMessageList: ({ session, renderMessage }:
 }) => session?.messages.filter((message) => message.id.startsWith("nyxagent-acknowledgement:"))
   .map((message) => <div key={message.id}>{renderMessage?.(message)}</div>) ?? null }));
 vi.mock("./assistant-link-modals", () => ({ AssistantLinkModalHost: ({ children }: { children: ReactNode }) => children }));
+afterEach(() => vi.unstubAllGlobals());
 beforeEach(() => {
+  const track = Object.assign(new EventTarget(), { stop: vi.fn() });
+  Object.defineProperty(navigator, "mediaDevices", {
+    configurable: true,
+    value: {
+      getUserMedia: vi
+        .fn()
+        .mockResolvedValue({
+          getTracks: () => [track],
+          getAudioTracks: () => [track],
+        }),
+    },
+  });
   state.voice = false;
   state.voiceMounts = 0;
   state.voiceEnds = 0;
-  state.search = {}; state.streaming = false; state.destroyed = false;
-  state.mode = "nyxmode"; state.override = null; state.staleCard = false;
+  state.search = {};
+  state.streaming = false;
+  state.destroyed = false;
+  state.mode = "nyxmode";
+  state.override = null;
+  state.staleCard = false;
   useAssistantDraftStore.setState({ ownerUserId: null, drafts: {} });
 });
 function mount() {
@@ -206,6 +223,7 @@ it("parent keeps one mounted call on repeated opens and clears media across clos
     fireEvent.click(screen.getByRole("button", { name: "Open voice call" }));
   open();
   await waitFor(() => expect(state.voiceMounts).toBe(1));
+  expect(screen.getByLabelText("Mock voice session").closest(".composer-audio-surface")).not.toBeNull();
   open();
   open();
   await act(async () => {});

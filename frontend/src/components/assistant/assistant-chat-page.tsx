@@ -1,3 +1,4 @@
+import type { PreparedMicrophone } from "@/lib/microphone-capture";
 import { navigateWithBuildUpdate } from "@/lib/build-update-navigation";
 import { AssistantErrorNotice } from "./assistant-error-notice";
 import { assistantErrorSummary, withAssistantTrace } from "@/lib/assistant/request-error";
@@ -549,19 +550,54 @@ function NyxAgentThreadPage() {
     threadId: string;
     actorId?: string;
     token: string;
+    preparation?: PreparedMicrophone;
+    settingsRequest?: number;
   } | null>(null);
   const voiceBindingRef = useRef(voiceBinding);
+  const voicePageMounted = useRef(false);
+  useEffect(() => {
+    voicePageMounted.current = true;
+    return () => {
+      voicePageMounted.current = false;
+      queueMicrotask(() => {
+        if (!voicePageMounted.current)
+          voiceBindingRef.current?.preparation?.close();
+      });
+    };
+  }, []);
   const voicePanelRef = useRef<HTMLDivElement>(null);
-  function setVoiceThread(id?: string) {
+  function setVoiceThread(id?: string, preparation?: PreparedMicrophone) {
     const existing = voiceBindingRef.current;
     if (id && existing?.threadId === id && existing.actorId === user?.id) {
+      if (preparation) {
+        existing.preparation?.close();
+        preparation.handoff();
+        const binding = { ...existing, preparation };
+        voiceBindingRef.current = binding;
+        setVoiceBinding(binding);
+      } else if (!voiceView?.active) {
+        const binding = {
+          ...existing,
+          settingsRequest: (existing.settingsRequest ?? 0) + 1,
+        };
+        voiceBindingRef.current = binding;
+        setVoiceBinding(binding);
+      }
       voicePanelRef.current
         ?.querySelector<HTMLButtonElement>("button")
         ?.focus();
       return;
     }
+    preparation?.handoff();
+    existing?.preparation?.close();
     const binding = id
-      ? { threadId: id, actorId: user?.id, token: crypto.randomUUID() }
+      ? {
+          threadId: id,
+          actorId: user?.id,
+          token: crypto.randomUUID(),
+          preparation,
+          settingsRequest: preparation ? 0 : 1,
+        }
       : null;
     voiceBindingRef.current = binding;
     setVoiceBinding(binding);
@@ -607,7 +643,28 @@ function NyxAgentThreadPage() {
     selection.current = selectedId;
   }, [selectedId]);
   const receiveVoiceView = useCallback((view: VoiceView) => {
-    if (voiceBindingRef.current?.token === view.panelId) setVoiceView(view);
+    if (voiceBindingRef.current?.token !== view.panelId) return;
+    setVoiceView((previous) => {
+      // End clears the client, while durable history may still be catching up.
+      if (
+        !view.active &&
+        !view.snapshot &&
+        previous &&
+        previous.panelId === view.panelId
+      )
+        return {
+          ...view,
+          snapshot: previous.snapshot,
+          activity: {
+            ...view.activity,
+            playbackMs: Math.max(
+              view.activity.playbackMs,
+              previous.activity.playbackMs,
+            ),
+          },
+        };
+      return view;
+    });
   }, []);
   const voiceThread =
     voiceBinding?.actorId === user?.id ? voiceBinding?.threadId : undefined;
@@ -626,6 +683,7 @@ function NyxAgentThreadPage() {
           selectedId !== binding.threadId) ||
         !onChatRoute)
     ) {
+      voiceBindingRef.current?.preparation?.close();
       voiceBindingRef.current = null;
       setVoiceBinding(null);
     }
@@ -766,6 +824,7 @@ function NyxAgentThreadPage() {
   const channelPlatform = selectedId ? (conversation?.channel?.platform ?? null) : null;
   useEffect(() => {
     if (!voiceEnabled || destroyed || channelPlatform) {
+      voiceBindingRef.current?.preparation?.close();
       voiceBindingRef.current = null;
       setVoiceBinding(null);
       setVoiceView(null);
@@ -856,9 +915,11 @@ function NyxAgentThreadPage() {
     <AssistantShell
       title={showHome ? "Home" : chat.session.title}
       titleKey={selectedId}
-      onRenameTitle={selectedId && !destroyed
-        ? (title) => chat.renameConversation(selectedId, title)
-        : undefined}
+      onRenameTitle={
+        selectedId && !destroyed
+          ? (title) => chat.renameConversation(selectedId, title)
+          : undefined
+      }
       headerActions={<NyxBotSettingsButton />}
       sidebar={
         <AssistantEngineSidebar
@@ -872,7 +933,15 @@ function NyxAgentThreadPage() {
       }
     >
       <div className="relative flex h-full min-h-0 flex-col bg-background">
-        <AssistantErrorNotice message={chat.error ?? (requestError?.scope === errorScope ? requestError.message : undefined) ?? turnError} />
+        <AssistantErrorNotice
+          message={
+            chat.error ??
+            (requestError?.scope === errorScope
+              ? requestError.message
+              : undefined) ??
+            turnError
+          }
+        />
         {threadPanels}
         <AgentDetailsSheet
           agentId={openDetailsAgentId}
@@ -885,7 +954,12 @@ function NyxAgentThreadPage() {
               setDetailsAgentId(undefined);
               // Closing a linked sheet drops its URL state (push, like the
               // account panels, so Back after an explicit close reopens it).
-              if (linkedDetails) navigateTo({ c: search.c, agent: search.agent, draft: search.draft ? true : undefined });
+              if (linkedDetails)
+                navigateTo({
+                  c: search.c,
+                  agent: search.agent,
+                  draft: search.draft ? true : undefined,
+                });
             }
           }}
           onDeleted={() => {
@@ -942,7 +1016,12 @@ function NyxAgentThreadPage() {
           </div>
         ) : (
           <AssistantLinkModalHost>
-            {chat.session.conversationId ? <ConversationMachineDesktops conversationId={chat.session.conversationId} turnActive={chat.isStreaming} /> : null}
+            {chat.session.conversationId ? (
+              <ConversationMachineDesktops
+                conversationId={chat.session.conversationId}
+                turnActive={chat.isStreaming}
+              />
+            ) : null}
             <NyxAgentThreadMessageList
               session={voiceSession}
               renderMessage={(message) => {
@@ -956,21 +1035,39 @@ function NyxAgentThreadPage() {
                       playbackMs={currentVoice?.activity?.playbackMs ?? 0}
                     />
                   );
-                if (message.continuation_of) return <p role="status" className="ml-[30px] px-[7px] text-11 text-muted-foreground">Continuing after your decision</p>;
-                if (message.role === "event") return <NyxBotEventNotice message={message} />;
+                if (message.continuation_of)
+                  return (
+                    <p
+                      role="status"
+                      className="ml-[30px] px-[7px] text-11 text-muted-foreground"
+                    >
+                      Continuing after your decision
+                    </p>
+                  );
+                if (message.role === "event")
+                  return <NyxBotEventNotice message={message} />;
                 if (message.role === "orchestrator") {
                   return <NyxBotOrchestratorMessage message={message} />;
                 }
-                const via = message.role === "user" ? (message.via ?? channelPlatform) : null;
+                const via =
+                  message.role === "user"
+                    ? (message.via ?? channelPlatform)
+                    : null;
                 if (via) {
                   return <ChannelUserEntry message={message} platform={via} />;
                 }
                 if (message.role === "assistant") {
                   return (
                     <NyxAgentAssistantEntry
-                      message={turnError && message.id === lastReply?.id
-                        ? { ...message, error: undefined, errorDetail: undefined }
-                        : message}
+                      message={
+                        turnError && message.id === lastReply?.id
+                          ? {
+                              ...message,
+                              error: undefined,
+                              errorDetail: undefined,
+                            }
+                          : message
+                      }
                       conversationId={chat.session.conversationId}
                       retry={retryFailedMessage}
                       checkRecovery={checkFailedMessage}
@@ -996,25 +1093,33 @@ function NyxAgentThreadPage() {
                         decision: null,
                         decision_channel: null,
                       }}
-                      onDecide={(approved) => chat.decideApproval(approval.id, approved)}
+                      onDecide={(approved) =>
+                        chat.decideApproval(approval.id, approved)
+                      }
                     />
                   );
                 }
-                const acknowledgement = chat.acknowledgements.find((row) =>
-                  message.id === `nyxagent-acknowledgement:${row.id}`,
+                const acknowledgement = chat.acknowledgements.find(
+                  (row) => message.id === `nyxagent-acknowledgement:${row.id}`,
                 );
                 if (!acknowledgement) return undefined;
                 return (
-                  <ReviewCardTarget selected={search.card === acknowledgement.id}>
-                  <NyxAgentAcknowledgementCard
-                    acknowledgement={acknowledgement}
-                    accessMode={accessMode}
-                    deciding={Boolean(chat.decidingAcknowledgement)}
-                    onDecision={async (choice, acceptReducedScope) => {
-                      await chat.decideAcknowledgement({ id: acknowledgement.id, choice, acceptReducedScope });
-                      setFocusRequest((value) => value + 1);
-                    }}
-                  />
+                  <ReviewCardTarget
+                    selected={search.card === acknowledgement.id}
+                  >
+                    <NyxAgentAcknowledgementCard
+                      acknowledgement={acknowledgement}
+                      accessMode={accessMode}
+                      deciding={Boolean(chat.decidingAcknowledgement)}
+                      onDecision={async (choice, acceptReducedScope) => {
+                        await chat.decideAcknowledgement({
+                          id: acknowledgement.id,
+                          choice,
+                          acceptReducedScope,
+                        });
+                        setFocusRequest((value) => value + 1);
+                      }}
+                    />
                   </ReviewCardTarget>
                 );
               }}
@@ -1026,12 +1131,18 @@ function NyxAgentThreadPage() {
                 `channel:${channelPlatform ?? ""}`,
                 `mode:${accessMode}`,
                 `voice:${voiceDeliveryRevision(liveCaptions, currentVoice?.activity.playbackMs ?? 0)}`,
-                ...chat.acknowledgements.map((row) => `${row.id}:${row.status}`),
+                ...chat.acknowledgements.map(
+                  (row) => `${row.id}:${row.status}`,
+                ),
                 ...chat.approvals.map((row) => `approval:${row.id}`),
               ].join(",")}
               bottomInset={composerHeight}
               // A linked review card may sit outside the mounted window.
-              focusMessageId={search.card ? `nyxagent-acknowledgement:${search.card}` : undefined}
+              focusMessageId={
+                search.card
+                  ? `nyxagent-acknowledgement:${search.card}`
+                  : undefined
+              }
               emptyDescription={
                 headerAgent?.kind === "specialist"
                   ? `Talk to ${agentName} directly. It handles your request itself, remembers across its threads, and tells you if it needs access you have not granted.`
@@ -1042,39 +1153,60 @@ function NyxAgentThreadPage() {
           </AssistantLinkModalHost>
         )}
         <div ref={composerRef} className="absolute inset-x-0 bottom-0 z-10">
-          {voiceEnabled &&
-            voiceThread &&
-            voiceThread === selectedId &&
-            !destroyed &&
-            !channelPlatform && (
-              <div
-                ref={voicePanelRef}
-                className="mx-auto mb-2 w-full max-w-[758px] px-4 sm:pl-[46px]"
-              >
-                <VoicePanel
-                  key={voiceBinding!.token}
-                  panelId={voiceBinding!.token}
-                  threadId={voiceThread}
-                  savedPreferences={nyxBotSettings.data?.voice}
-                  onViewChange={receiveVoiceView}
-                  onClose={() => {
-                    setVoiceThread(undefined);
-                    setFocusRequest((n) => n + 1);
-                  }}
-                />
-              </div>
-            )}
           <NyxAgentComposer
+            voiceControls={
+              voiceEnabled &&
+              voiceThread &&
+              voiceThread === selectedId &&
+              !destroyed &&
+              !channelPlatform && (
+                <div ref={voicePanelRef} className="pb-2">
+                  <VoicePanel
+                    key={voiceBinding!.token}
+                    panelId={voiceBinding!.token}
+                    preparation={voiceBinding!.preparation}
+                    settingsRequest={voiceBinding!.settingsRequest}
+                    preferencesReady={
+                      !nyxBotSettings.isPending && !nyxBotSettings.isFetching
+                    }
+                    preferencesError={nyxBotSettings.isError}
+                    onRetryPreferences={() => nyxBotSettings.refetch()}
+                    threadId={voiceThread}
+                    savedPreferences={nyxBotSettings.data?.voice}
+                    onViewChange={receiveVoiceView}
+                    onClose={() => {
+                      setVoiceThread(undefined);
+                      setFocusRequest((n) => n + 1);
+                    }}
+                  />
+                </div>
+              )
+            }
             conversation={chat.conversation}
             voiceActive={voiceMounted && currentVoice?.active}
             voiceActivity={voiceMounted ? currentVoice?.activity : undefined}
             key={`${user?.id}:${selectedId ?? headerAgent?.id ?? "draft"}`}
-            onVoice={voiceEnabled && !destroyed && !channelPlatform ? async (id) => {
-              if (selection.current !== selectedId) return;
-              setVoiceThread(id);
-              adopt(id);
-            } : undefined}
-            scope={{ kind: "conversations", id: selectedId, agentId: headerAgent?.id }}
+            onVoice={
+              voiceEnabled && !destroyed && !channelPlatform
+                ? async (id, preparation) => {
+                    if (
+                      preparation?.isClosed ||
+                      selection.current !== selectedId ||
+                      useAuthStore.getState().user?.id !== user?.id
+                    ) {
+                      preparation?.close();
+                      return;
+                    }
+                    setVoiceThread(id, preparation);
+                    adopt(id);
+                  }
+                : undefined
+            }
+            scope={{
+              kind: "conversations",
+              id: selectedId,
+              agentId: headerAgent?.id,
+            }}
             active={chat.isStreaming}
             sending={chat.isStreaming}
             disabled={Boolean(selectedId && chat.error) || destroyed}
@@ -1096,14 +1228,23 @@ function NyxAgentThreadPage() {
               try {
                 await chat.send(text, uploads, model);
               } catch (error) {
-                const message = error instanceof Error ? error.message : "NyxBot is temporarily unavailable. Try again shortly.";
+                const message =
+                  error instanceof Error
+                    ? error.message
+                    : "NyxBot is temporarily unavailable. Try again shortly.";
                 setRequestError({ scope: sending.scope, message });
-                toast.error(isAdmittedSendError(error) ? "Live reply interrupted" : "Could not send your message", {
-                  description: assistantErrorSummary(message),
-                });
+                toast.error(
+                  isAdmittedSendError(error)
+                    ? "Live reply interrupted"
+                    : "Could not send your message",
+                  {
+                    description: assistantErrorSummary(message),
+                  },
+                );
                 throw error;
               } finally {
-                if (pendingSend.current === sending) pendingSend.current = undefined;
+                if (pendingSend.current === sending)
+                  pendingSend.current = undefined;
               }
             }}
             onStop={async () => {
@@ -1111,7 +1252,10 @@ function NyxAgentThreadPage() {
               try {
                 await chat.stop();
               } catch (error) {
-                const message = error instanceof Error ? error.message : "Could not stop NyxBot. Try again shortly.";
+                const message =
+                  error instanceof Error
+                    ? error.message
+                    : "Could not stop NyxBot. Try again shortly.";
                 setRequestError({ scope: errorScope, message });
                 toast.error("Could not stop NyxBot", {
                   description: assistantErrorSummary(message),

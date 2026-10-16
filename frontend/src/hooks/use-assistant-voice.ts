@@ -1,5 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { silentActivity } from "@/lib/microphone-capture";
+import {
+  microphoneDevice,
+  silentActivity,
+  type PreparedMicrophone,
+} from "@/lib/microphone-capture";
 import { AssistantVoiceClient } from "@/lib/assistant-voice-client";
 import { api } from "@/lib/api-client";
 import { useAuthStore } from "@/stores/auth-store";
@@ -20,8 +24,9 @@ export function useAssistantVoice(thread: string) {
   const [speakerMuted, setSpeakerMuted] = useState(false);
   const [starting, setStarting] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [conflictSession, setConflictSession] =
-    useState<VoiceSession | null>(null);
+  const [conflictSession, setConflictSession] = useState<VoiceSession | null>(
+    null,
+  );
   useEffect(
     () => () => {
       generation.current++;
@@ -36,6 +41,7 @@ export function useAssistantVoice(thread: string) {
       preferences: VoicePreferences,
       protocol?: "openai_live" | "xai_realtime",
       beforeProvider?: () => Promise<void>,
+      preparation?: PreparedMicrophone,
     ) => {
       if (client.current) return;
       const ticket = ++generation.current;
@@ -75,13 +81,19 @@ export function useAssistantVoice(thread: string) {
         },
       );
       client.current = next;
-      await next.start(preferences, protocol, beforeProvider);
+      await next.start(
+        preferences,
+        protocol,
+        beforeProvider,
+        preparation,
+        microphoneDevice(actor ?? ""),
+      );
       if (generation.current === ticket) {
         if (protocol !== "xai_realtime" || next.isClosed) setStarting(false);
         if (next.isClosed) client.current = null;
       }
     },
-    [thread],
+    [actor, thread],
   );
   const end = useCallback(async () => {
     const previous = client.current;

@@ -43,9 +43,9 @@ export function NyxAgentComposer({ conversation, agentOverride, ...props }: Prop
       active={props.active || props.sending || submitting}
       disabled={props.disabled}
     />}
-    onVoice={props.onVoice ? async (id) => {
+    onVoice={props.onVoice ? async (id, preparation) => {
       if (!conversation && draftModel) await nyxBotApi.changeModel(id, draftModel);
-      await props.onVoice!(id);
+      await props.onVoice!(id, preparation);
     } : undefined}
     allowActiveInput={canSteer}
     sending={submitting || (props.sending && !canSteer)}

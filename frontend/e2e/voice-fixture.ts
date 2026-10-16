@@ -12,6 +12,7 @@ export async function installVoiceFixture(
       const f = {
         requests: 0,
         stopped: 0,
+        captureDevices: [] as (string | null)[],
         grant: () => {},
         deny: () => {},
         revoked: () => {},
@@ -46,8 +47,27 @@ export async function installVoiceFixture(
       Object.defineProperty(navigator, "mediaDevices", {
         configurable: true,
         value: {
-          getUserMedia: () => {
+          enumerateDevices: async () => [
+            {
+              kind: "audioinput",
+              deviceId: "built-in",
+              groupId: "input",
+              label: "MacBook Air Microphone",
+            },
+          ],
+          addEventListener() {},
+          removeEventListener() {},
+          getUserMedia: (constraints: MediaStreamConstraints) => {
             f.requests++;
+            const device =
+              typeof constraints.audio === "object"
+                ? constraints.audio.deviceId
+                : undefined;
+            const exact =
+              typeof device === "object" && !Array.isArray(device)
+                ? device.exact
+                : device;
+            f.captureDevices.push(typeof exact === "string" ? exact : null);
             if (permission === "denied")
               return Promise.reject(
                 new DOMException(
@@ -73,18 +93,26 @@ export async function installVoiceFixture(
           streams: MediaStream[];
           track: MediaStreamTrack;
         }) => void;
+        channel = {
+          onmessage: null as null | ((event: { data: string }) => void),
+          send() {},
+          close() {},
+        };
         addTrack() {}
         addEventListener() {}
         removeEventListener() {}
         close() {}
         createDataChannel() {
-          return { onmessage: null, send() {}, close() {} };
+          return this.channel;
         }
         async createOffer() {
           return this.localDescription;
         }
         async setLocalDescription() {}
         async setRemoteDescription() {
+          this.channel.onmessage?.({
+            data: JSON.stringify({ type: "session.started" }),
+          });
           const audio = stream();
           this.ontrack?.({ streams: [audio], track: audio.getTracks()[0]! });
         }
@@ -135,9 +163,19 @@ export async function installVoiceFixture(
       json: { options: [{ ...priced, model_label: "Fixture Live" }] },
     }),
   );
-  await page.route("**/api/v1/assistant/nyxagent/settings", (route) =>
-    route.fulfill({ json: {} }),
-  );
+  let settings = {
+    access_mode: "nyxmode",
+    skip_destructive_confirmation: false,
+    max_live_subagents: 4,
+    max_concurrent_subagent_turns: 2,
+    max_live_subagents_limit: 8,
+    max_concurrent_subagent_turns_limit: 4,
+  };
+  await page.route("**/api/v1/assistant/nyxagent/settings", (route) => {
+    if (route.request().method() === "PUT")
+      settings = { ...settings, ...route.request().postDataJSON() };
+    return route.fulfill({ json: settings });
+  });
   await page.route("**/voice-sessions/active", (route) =>
     route.fulfill({ json: { session: null } }),
   );

@@ -63,7 +63,14 @@ export class AssistantDictationClient {
   constructor(callbacks: AssistantDictationClient["callbacks"]) {
     this.callbacks = callbacks;
   }
-  async start(thread: string, preferences: VoicePreferences) {
+  async start(
+    target:
+      | string
+      | (() => Promise<{ thread: string; preferences: VoicePreferences }>),
+    preferences?: VoicePreferences,
+    deviceId?: string,
+  ) {
+    let microphoneReady = false;
     try {
       this.callbacks.state("requesting");
       this.capture = new MicrophoneCapture(() => {
@@ -71,7 +78,7 @@ export class AssistantDictationClient {
           "Microphone permission ended. Review the text already captured.",
         );
         this.stop();
-      });
+      }, deviceId);
       // Observe cancellation rejection even if later gesture-time setup throws.
       void this.capture.ready.catch(() => {});
       this.pcm = new DictationPcm();
@@ -79,7 +86,14 @@ export class AssistantDictationClient {
       const stream = await this.capture.ready;
       if (this.finishing || this.closed) return;
       this.meter.watch(stream, "input");
+      microphoneReady = true;
       this.callbacks.state("connecting");
+      const prepared =
+        typeof target === "string"
+          ? { thread: target, preferences: preferences! }
+          : await target();
+      if (this.finishing || this.closed) return;
+      const { thread } = prepared;
       const url = new URL(
         apiUrl(`/assistant/nyxagent/conversations/${thread}/dictation`),
         location.href,
@@ -99,7 +113,7 @@ export class AssistantDictationClient {
         socket.send(
           JSON.stringify({
             client_request_id: crypto.randomUUID(),
-            preferences,
+            preferences: prepared.preferences,
           }),
         );
       };
@@ -134,11 +148,14 @@ export class AssistantDictationClient {
                 if (!this.finishing && !this.closed)
                   this.callbacks.state("capturing");
               })
-              .catch(() =>
-                this.fail(
-                  "Audio capture is unavailable. Use text or try another browser.",
-                ),
-              );
+              .catch(() => {
+                // Stop closes the encoder even when its worklet is still
+                // starting. Keep the socket draining final transcripts.
+                if (!this.finishing && !this.closed)
+                  this.fail(
+                    "Audio capture is unavailable. Use text or try another browser.",
+                  );
+              });
           } else if (event.type === "delta" || event.type === "completed") {
             const previous = this.items.get(event.item_id);
             if (!previous?.complete)
@@ -195,7 +212,11 @@ export class AssistantDictationClient {
         );
     } catch (error) {
       if (this.finishing || this.closed) return;
-      this.fail(microphoneError(error));
+      this.fail(
+        microphoneReady
+          ? "Dictation options could not be prepared. Check your source and billing settings."
+          : microphoneError(error),
+      );
     }
   }
   stop() {

@@ -34,6 +34,8 @@ describe("ChatComposer drafts", () => {
       <ChatComposer {...baseProps} draftKey="steer" active allowActiveInput activePlaceholder="Guide this running reply…" />,
     );
     expect(container.querySelector("[data-steering-hint]")).toHaveTextContent("steers this reply");
+    expect(screen.queryByRole("button", { name: "Send steering instruction" })).not.toBeInTheDocument();
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "Focus on this" } });
     expect(screen.getByRole("button", { name: "Send steering instruction" })).toHaveTextContent("Steer");
     expect(screen.getByRole("button", { name: "Stop assistant turn" })).toBeInTheDocument();
   });
@@ -153,7 +155,7 @@ describe("ChatComposer drafts", () => {
       "placeholder",
       "This conversation is read-only.",
     );
-    expect(screen.getByRole("button", { name: "Send message" })).toBeDisabled();
+    expect(screen.queryByRole("button", { name: "Send message" })).not.toBeInTheDocument();
   });
 
   it("restores the typed text and draft when the send rejects [guard]", async () => {
@@ -679,6 +681,7 @@ function renderMeasuredComposer() {
   );
 
   const textarea = screen.getByRole("textbox");
+  fireEvent.change(textarea, { target: { value: "Draft" } });
   const button = screen.getByRole("button", { name: "Send message" });
   const controls = button.parentElement;
   const composer = textarea.closest<HTMLElement>("[data-composer-editor]");
@@ -936,7 +939,7 @@ describe("ChatComposer @mentions (group chats)", () => {
   });
 });
 
-it("offers voice beside a draft and retains the active call control beside Stop", () => {
+it("replaces voice with Send for a draft and retains the active call control beside Stop when empty", () => {
   useAssistantDraftStore.setState({ ownerUserId: null, drafts: {} });
   const onVoice = vi.fn();
   const { rerender } = render(
@@ -950,7 +953,7 @@ it("offers voice beside a draft and retains the active call control beside Stop"
   fireEvent.change(screen.getByRole("textbox"), {
     target: { value: "An unsent draft" },
   });
-  expect(screen.getByRole("button", { name: "Open voice call" })).toBeEnabled();
+  expect(screen.queryByRole("button", { name: "Open voice call" })).not.toBeInTheDocument();
   expect(screen.getByRole("button", { name: "Send message" })).toBeEnabled();
   fireEvent.change(screen.getByRole("textbox"), { target: { value: "" } });
   rerender(
@@ -964,6 +967,9 @@ it("offers voice beside a draft and retains the active call control beside Stop"
   expect(
     screen.queryByRole("button", { name: "Open voice call" }),
   ).not.toBeInTheDocument();
+  expect(
+    screen.queryByRole("button", { name: "Send message" }),
+  ).not.toBeInTheDocument();
   rerender(
     <ChatComposer
       {...baseProps}
@@ -973,6 +979,7 @@ it("offers voice beside a draft and retains the active call control beside Stop"
     />,
   );
   expect(screen.getByRole("button", { name: "Send message" })).toBeEnabled();
+  expect(screen.queryByRole("button", { name: "Open voice call" })).not.toBeInTheDocument();
   rerender(
     <ChatComposer
       {...baseProps}

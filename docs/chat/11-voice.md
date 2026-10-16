@@ -1477,9 +1477,33 @@ The composer offers separate **Dictate a message** (microphone) and **Voice mode
 voice action stays available while attachments or delegated text work change.
 Opening the same actor/thread voice control reveals the existing panel/session;
 it does not restart the call. The active panel is a compact composer control bar
-with status, microphone mute, speaker mute and End. Settings, source/pricing,
-tasks, resume, conflict/rejoin and Grok Hold to talk remain accessible. Setup
-continues to disclose source, payer and applicable prices before provider start.
+inside the same composer surface with status, microphone mute, speaker mute and
+End. Settings, source/pricing,
+tasks, resume, conflict/rejoin and Grok Hold to talk remain accessible. The waveform intentionally requests microphone permission and starts the exact
+available saved/default configuration after source, payer and applicable prices
+(including per-start fees) render. OpenAI defaults to Automatic hands-free input;
+an explicit saved mode remains authoritative and Grok requires Hold to talk. An
+unavailable saved source never silently selects another paid provider. The
+secondary Voice settings action in the microphone popup opens configuration
+without microphone permission or a provider start. End retains that panel's
+next-call settings; a later waveform start preserves them on the same binding.
+Before a provider start, the typed settings save updates the original actor's
+settings cache only after server confirmation. Close/reopen therefore retains
+the confirmed source and input mode; a save completing after an account change
+cannot update either account's cache or authorize that start. Settings controls
+wait for initial saved-preference loading, and subsequent hydration does not
+overwrite next-call edits. If source discovery or saved settings fail, **Retry
+voice loading** refetches the failed read without acquiring media or choosing
+another source. Once loading succeeds, a new waveform gesture starts the selected
+configuration; the failed preparation remains closed.
+
+After a startup error, **Retry voice** intentionally reacquires capture and
+submits a fresh request for the same selected source. It is hidden while a call
+is active/preparing/conflicting or its preferences/source are unusable. Credit
+errors retain safe stage/code diagnostics and explain recovery; they are never
+automatically retried. Each attempt reads current applicable funding, including
+newly journaled grants. Granting microphone permission itself uses no credits;
+the requested call can proceed to reservation after permission succeeds.
 
 Microphone capture begins only from an intentional activation, including a
 keyboard or touch press. Hovering configuration or reading options never requests
@@ -1493,10 +1517,38 @@ resumed during activation; autoplay rejection offers an explicit resume path.
 
 ### Dictation review and draft integrity
 
-Configuration is available by hovering the microphone or activating its adjacent
-Configure button with pointer, keyboard or touch. The saved non-sensitive control
+The microphone uses a rounded capsule outline without a flat stand base. Its
+compact right chevron is hidden at rest and revealed by hovering the control or
+keyboard focus. It stays visible while settings are open and on touch devices.
+The hidden chevron has zero width and reserves no space. Revealing it expands
+the control; hovering or focusing the microphone does not open settings.
+Only actual pointer movement onto the chevron opens the hover popup, so a
+layout change beneath a stationary pointer does not open it.
+Configuration opens only by hovering or activating that
+Configure button with pointer, keyboard or touch. The popup aligns to the
+chevron's right edge, opens below when space allows and flips at viewport
+boundaries. Leaving the trigger and popup closes settings after a 200ms grace
+period; entering either region cancels dismissal so crossing the 8px gap keeps
+settings usable. Closing releases any microphone test, including a late
+permission grant. Draft/account changes, starting capture and unmounting cancel
+pending dismissal. Keyboard activation and Escape remain supported. The microphone and voice waveform icons both render at 20px. It lists current real
+audio input devices and labels, marks the selected device, updates on
+`devicechange`, and applies selections immediately using an exact device constraint.
+The intentional Test microphone/Enable action owns its local analyser stream;
+hovering never acquires it. Closing/dismissing the popup, losing window focus,
+unplugging the selected device or navigation releases that stream. An unavailable
+selected device is reported rather than silently marked selected elsewhere.
+After unplugging a device, selecting an available replacement keeps that new
+preview and its meter alive. Device enumeration validates the current selected
+identity and ignores superseded requests, including callbacks from the old
+preview.
+
+The current Hold to record switch updates and persists immediately without
+Save/Start forms. The saved non-sensitive device and control
 preference is scoped to the account: click-toggle starts/stops, while Hold to
 dictate stops capture on release, pointer cancellation, key release or blur.
+Main-mic activation works directly on first use; capture/encoding contexts are
+created during the gesture before asynchronous thread/options preparation.
 Release tracking survives React updates and pending permission. Hold release
 opens review; it never confirms or sends. Interim provider text is muted and the
 waveform measures actual microphone samples. Cancel/Escape leaves the original
@@ -1504,7 +1556,12 @@ draft intact; Check inserts the reviewed transcript at the saved Tiptap selectio
 through one undoable editor transaction, preserving surrounding mentions and
 attachments. Both actions restore editor focus/selection. If the original draft
 has changed, insertion refuses to overwrite it. No dictation transcript is sent
-as a chat message or persisted in chat history by the relay.
+as a chat message or persisted in chat history by the relay. A startup failure
+with no captured text returns to the editable draft with an accessible error
+and usable settings. Existing partial text remains in review. A server without
+the dictation route (404) is identified as unavailable on the connected server;
+device selection/testing stays usable and there is no fake transcript or
+browser-only fallback.
 
 ### Bounded transcription transport and accounting
 
@@ -1572,9 +1629,14 @@ voice stream/control paths and do not produce a conversational call receipt.
 
 ### Real audio activity, caption timing and verification
 
-The aurora and waveform derive from live microphone/playback analysers; there is
-no random amplitude or always-running animation. Semantic theme tokens work in
-light/dark; reduced motion removes spatial animation, while the usable mobile
+The waveform derives from live microphone/playback analysers, without fabricated
+amplitude. During an open/preparing voice or dictation capture, the aurora gently
+fades in and out over 3.2 seconds; measured amplitude changes its strength and
+size. Starting fades it in over 450ms, and stopping pauses the breathing cycle
+and fades the remaining glow out over 800ms. Stopped dictation review/finalization
+has no listening aura after that fade. Active
+audio controls stay primary on hover, focus and press. Semantic theme tokens work in
+light/dark; reduced motion uses a steady aura and removes transitions and spatial animation, while the usable mobile
 text row and full-width toolbar retain visible control bounds at 320 px.
 
 Conversational user speech is projected live. Assistant narration preserves exact

@@ -105,7 +105,7 @@ it("applies the selected model to an upload draft before sending and blocks dupl
     expect(change).toHaveBeenCalledWith(id, "nyxagent/research"),
   );
   expect(onSend).not.toHaveBeenCalled();
-  expect(screen.getByRole("button", { name: "Send message" })).toBeDisabled();
+  expect(screen.queryByRole("button", { name: "Send message" })).not.toBeInTheDocument();
   await act(async () => complete());
   await waitFor(() =>
     expect(onSend).toHaveBeenCalledWith(

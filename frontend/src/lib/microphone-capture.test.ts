@@ -1,5 +1,9 @@
 import { afterEach, expect, it, vi } from "vitest";
-import { MicrophoneCapture, microphoneError } from "./microphone-capture";
+import {
+  MicrophoneCapture,
+  PreparedMicrophone,
+  microphoneError,
+} from "./microphone-capture";
 afterEach(() => vi.unstubAllGlobals());
 function media() {
   const track = new EventTarget() as EventTarget & {
@@ -78,4 +82,23 @@ it("sync and async permission failures release ownership and sanitize messages",
   expect(
     microphoneError(new DOMException("secret", "NotFoundError")),
   ).toContain("No microphone");
+});
+
+it("selected microphone uses exact device and prepared ownership transfers without a second capture", async () => {
+  const m = media();
+  const get = vi.fn().mockResolvedValue(m.stream);
+  vi.stubGlobal("navigator", { mediaDevices: { getUserMedia: get } });
+  const prepared = new PreparedMicrophone("usb-device");
+  expect(get).toHaveBeenCalledWith(
+    expect.objectContaining({
+      audio: expect.objectContaining({ deviceId: { exact: "usb-device" } }),
+    }),
+  );
+  await prepared.ready;
+  prepared.handoff();
+  expect(prepared.isTransferred).toBe(true);
+  prepared.close();
+  prepared.close();
+  expect(m.track.stop).toHaveBeenCalledOnce();
+  expect(prepared.isClosed).toBe(true);
 });

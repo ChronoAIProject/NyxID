@@ -4,6 +4,7 @@ import {
   AudioActivityMeter,
   microphoneError,
   type AudioActivity,
+  type PreparedMicrophone,
 } from "./microphone-capture";
 import { GrokAudio } from "./grok-audio";
 import { api, apiClient, apiUrl, ApiError } from "./api-client";
@@ -68,52 +69,61 @@ export class AssistantVoiceClient {
   private path() {
     return `/assistant/nyxagent/conversations/${this.thread}/voice-sessions`;
   }
+  private preparation?: PreparedMicrophone;
   async start(
     preferences: VoicePreferences,
     protocol: "openai_live" | "xai_realtime" = "openai_live",
     beforeProvider?: () => Promise<void>,
+    preparation?: PreparedMicrophone,
+    deviceId?: string,
   ) {
     this.preferences = preferences;
+    this.preparation = preparation;
     let step: VoiceStartStep = "microphone";
     try {
       this.audio = document.createElement("audio");
       this.audio.autoplay = true;
       this.audio.setAttribute("playsinline", "");
-      this.capture = new MicrophoneCapture(() => {
+      const revoked = () => {
         this.onError(
           "Microphone access ended. Start a new call when it is available.",
         );
         void this.end();
-      });
-      this.meter = new AudioActivityMeter(
-        (value) => {
-          const playing = !!this.audio && !this.audio.paused;
-          const audible =
-            playing && !this.audio!.muted && this.audio!.volume > 0;
-          // Caption progression follows the media timeline, including speaker mute.
-          // It is not proof of audible delivery; paused/closed media retain progress.
-          if (playing)
-            this.lastPlaybackMs = Math.max(
-              this.lastPlaybackMs,
-              value.playbackMs,
-            );
-          this.onActivity({
-            ...value,
-            output: audible ? value.output : 0,
-            playbackMs: this.lastPlaybackMs,
-          });
-        },
-        () =>
-          this.grok?.watermark() ??
-          Math.max(0, Math.floor((this.audio?.currentTime ?? 0) * 1000)),
-      );
-      const media = await this.capture.ready;
+      };
+      if (preparation?.isClosed)
+        throw new DOMException("Cancelled", "AbortError");
+      this.capture =
+        preparation?.capture ?? new MicrophoneCapture(revoked, deviceId);
+      const activity = (value: AudioActivity) => {
+        const playing = !!this.audio && !this.audio.paused;
+        const audible = playing && !this.audio!.muted && this.audio!.volume > 0;
+        // Caption progression follows the media timeline, including speaker mute.
+        // It is not proof of audible delivery; paused/closed media retain progress.
+        if (playing)
+          this.lastPlaybackMs = Math.max(this.lastPlaybackMs, value.playbackMs);
+        this.onActivity({
+          ...value,
+          output: audible ? value.output : 0,
+          playbackMs: this.lastPlaybackMs,
+        });
+      };
+      const playback = () =>
+        this.grok?.watermark() ??
+        Math.max(0, Math.floor((this.audio?.currentTime ?? 0) * 1000));
+      if (preparation) {
+        this.meter = preparation.meter;
+        this.meter.playbackFrom(playback);
+        preparation.listen(activity, revoked);
+      } else this.meter = new AudioActivityMeter(activity, playback);
+      const media = await (preparation?.ready ?? this.capture.ready);
       if (this.closed) {
         this.capture?.close();
         return;
       }
       this.media = media;
-      this.meter.watch(media, "input");
+      if (preparation?.isClosed)
+        throw new DOMException("Cancelled", "AbortError");
+      if (!preparation) this.meter.watch(media, "input");
       if (beforeProvider) {
         step = "settings";
         await beforeProvider();
@@ -152,6 +162,7 @@ export class AssistantVoiceClient {
             }
           },
           (stream) => this.meter?.watch(stream, "output"),
+          this.meter.audioContext,
         );
         await this.grok.start(media);
         if (this.closed) return;
@@ -359,16 +370,20 @@ export class AssistantVoiceClient {
           return;
         }
         const snapshot = voiceSnapshotSchema.parse(event);
-        if (this.closed || snapshot.session.id !== this.session?.id)
-          return;
+        if (this.closed || snapshot.session.id !== this.session?.id) return;
         this.controlsReady = true;
         this.reconnectAttempt = 0;
         this.session = snapshot.session;
         this.onSnapshot(snapshot);
         this.updateInput();
-        if (snapshot.session.state === "closed" || snapshot.session.state === "failed") {
+        if (
+          snapshot.session.state === "closed" ||
+          snapshot.session.state === "failed"
+        ) {
           if (snapshot.session.end_reason === "server_update")
-            this.onError("The call ended during a server update; start a new call");
+            this.onError(
+              "The call ended during a server update; start a new call",
+            );
           this.dispose();
         }
       } catch {
@@ -392,7 +407,11 @@ export class AssistantVoiceClient {
       }, delay);
     };
     this.heartbeat = setInterval(() => {
-      if (socket.readyState === WebSocket.OPEN && this.session && this.controlsReady)
+      if (
+        socket.readyState === WebSocket.OPEN &&
+        this.session &&
+        this.controlsReady
+      )
         socket.send(
           JSON.stringify({
             type: "heartbeat",
@@ -491,8 +510,11 @@ export class AssistantVoiceClient {
   async end() {
     this.closed = true;
     this.abort.abort();
-    this.capture?.close();
-    this.meter?.close();
+    this.preparation?.close();
+    if (!this.preparation) {
+      this.capture?.close();
+      this.meter?.close();
+    }
     this.onClosed();
     this.media?.getTracks().forEach((t) => {
       t.enabled = false;
@@ -521,8 +543,11 @@ export class AssistantVoiceClient {
     this.onClosed();
     this.closed = true;
     this.abort.abort();
-    this.capture?.close();
-    this.meter?.close();
+    this.preparation?.close();
+    if (!this.preparation) {
+      this.capture?.close();
+      this.meter?.close();
+    }
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     this.reconnectTimer = undefined;
     if (this.heartbeat) clearInterval(this.heartbeat);

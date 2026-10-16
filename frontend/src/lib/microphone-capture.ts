@@ -19,7 +19,7 @@ export class MicrophoneCapture {
   private closed = false;
   private stream?: MediaStream;
   private revoked: () => void;
-  constructor(revoked: () => void = () => {}) {
+  constructor(revoked: () => void = () => {}, deviceId?: string) {
     this.revoked = revoked;
     if (owner) throw new Error("End the current microphone session first.");
     if (!navigator.mediaDevices?.getUserMedia)
@@ -36,6 +36,7 @@ export class MicrophoneCapture {
           echoCancellation: true,
           noiseSuppression: true,
           autoGainControl: true,
+          ...(deviceId ? { deviceId: { exact: deviceId } } : {}),
         },
         video: false,
       });
@@ -75,6 +76,69 @@ export class MicrophoneCapture {
     });
     this.stream = undefined;
     if (owner === this.identity) owner = undefined;
+  }
+}
+
+export function microphoneDevice(ownerId: string): string | undefined {
+  try {
+    return (
+      localStorage.getItem(`nyxid:microphone-device:${ownerId}`) || undefined
+    );
+  } catch {
+    return undefined;
+  }
+}
+
+/** Created by the original gesture, then transferred to a voice client after
+ * thread/options preparation. No provider work or microphone monitoring. */
+export class PreparedMicrophone {
+  readonly capture: MicrophoneCapture;
+  readonly meter: AudioActivityMeter;
+  readonly ready: Promise<MediaStream>;
+  private closed = false;
+  private transferred = false;
+  handoff() {
+    this.transferred = true;
+  }
+  get isTransferred() {
+    return this.transferred;
+  }
+  private activity = silentActivity();
+  private update: (value: AudioActivity) => void = () => {};
+  private revoked: () => void = () => {};
+  get isClosed() {
+    return this.closed;
+  }
+  constructor(deviceId?: string) {
+    this.capture = new MicrophoneCapture(() => {
+      this.close();
+      this.revoked();
+    }, deviceId);
+    this.meter = new AudioActivityMeter((value) => {
+      this.activity = value;
+      this.update(value);
+    });
+    this.ready = this.capture.ready
+      .then((stream) => {
+        if (!this.closed) this.meter.watch(stream, "input");
+        return stream;
+      })
+      .catch((error: unknown) => {
+        this.close();
+        throw error;
+      });
+    void this.ready.catch(() => {});
+  }
+  listen(update: (value: AudioActivity) => void, revoked: () => void) {
+    this.update = update;
+    this.revoked = revoked;
+    update(this.activity);
+  }
+  close() {
+    if (this.closed) return;
+    this.closed = true;
+    this.capture.close();
+    this.meter.close();
   }
 }
 
@@ -141,6 +205,12 @@ export class AudioActivityMeter {
   }
   resume() {
     return this.context?.resume();
+  }
+  playbackFrom(playback: () => number) {
+    this.playback = playback;
+  }
+  get audioContext() {
+    return this.context;
   }
   close() {
     clearInterval(this.timer);

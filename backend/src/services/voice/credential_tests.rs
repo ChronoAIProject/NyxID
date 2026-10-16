@@ -834,3 +834,122 @@ async fn specialist_platform_voice_live_revalidation_closes_revoked_key_and_bill
         server.abort();
     }).await;
 }
+
+/// Real duration/request reservations and grant issuance; the provider is a
+/// loopback server, never an OpenAI endpoint.
+#[tokio::test]
+async fn specialist_platform_voice_funding_new_personal_grant_immediately_allows_retry() {
+    Box::pin(async {
+        use axum::{Json, Router, extract::{WebSocketUpgrade, ws::Message}, routing::{get, post}};
+        use axum::response::IntoResponse;
+        use crate::models::{
+            assistant_voice_session::{VoiceSession, COLLECTION_NAME as CALLS},
+            billing_target::BillingTargetKind,
+            billing_wallet::{BillingWallet, COLLECTION_NAME as WALLETS},
+            credit_grant::{CreditGrant, COLLECTION_NAME as GRANTS},
+            credits::Credits,
+            usage_meter::{UsageMeterRow, COLLECTION_NAME as USAGE},
+        };
+        use crate::services::billing::{grants, voice};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let (mut f, service) = fixture("voice_grant_immediate_retry").await;
+        f.state.billing = Arc::new(billing_service(&f.state.db,
+            Arc::new(FakeLago::with_wallet_balance(Credits::ZERO)), 0));
+        f.state.db.collection::<bson::Document>(SERVICES).update_one(doc! {"_id":&service.id},
+            doc! {"$push":{"billing.platform_key_pricing.components":{
+                "metric":"requests","credits_per_unit":"2","lago_metric_code":"voice-test-start","sync_status":"synced"
+            }}}).await.unwrap();
+        let mut start_rate = rate("voice-test-start", chrono::Utc::now());
+        start_rate.credits_per_unit_micros = 2_000_000;
+        f.state.db.collection::<crate::models::billing_rate_cache::BillingRateCache>(
+            crate::models::billing_rate_cache::COLLECTION_NAME).insert_one(start_rate).await.unwrap();
+        let p = platform(&service);
+        // Exercise the upfront owner/credential resolver with an actual empty
+        // wallet too. Platform use still selects the acting person's funding.
+        f.state.billing.ensure_wallet(&f.owner).await.unwrap();
+        let resolved = credentials::resolve(&f.state, &f.owner, &f.row.id, &p).await.unwrap();
+        assert_eq!(resolved.billing.billing_owner_id, f.owner);
+        let creates = Arc::new(AtomicUsize::new(0));
+        let attempts = creates.clone();
+        let provider_db = f.state.db.clone();
+        let provider_owner = f.owner.clone();
+        let app = Router::new().route("/v1/live/sessions", post(move || {
+            let attempts = attempts.clone(); let db = provider_db.clone(); let owner = provider_owner.clone();
+            async move {
+                attempts.fetch_add(1, Ordering::SeqCst);
+                let grant = db.collection::<CreditGrant>(GRANTS).find_one(doc! {"recipient_user_id":owner}).await.unwrap().unwrap();
+                assert_eq!(grant.reserved, Credits::from_whole(32), "30 seconds plus the configured start fee must be held before provider creation");
+                assert_eq!(grant.remaining, Credits::from_whole(100));
+                Json(json!({"session":{"id":"live_funding"},"transport":{"sdp":"v=0\r\nm=audio"}}))
+            }
+        })).route("/v1/live/sessions/live_funding/attach", get(|ws:WebSocketUpgrade| async move {
+            ws.on_upgrade(|mut socket| async move {
+                socket.send(Message::Text(json!({"type":"session.closed","usage":{"seconds":0}}).to_string().into())).await.unwrap();
+            })
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let rejected_request = Uuid::new_v4().to_string();
+        let rejected = super::runtime::start_with_provider(&f.state, super::runtime::StartInput {
+            user:&f.owner, conversation:&f.row.id, client_request_id:&rejected_request,
+            preferences:p.clone(), sdp:"v=0\r\nm=audio",
+        }, resolved.identity, resolved.billing, super::openai::OpenAi::fixture(resolved.key,address), None).await;
+        let error = rejected.err().expect("zero wallet without benefits must refuse startup");
+        assert_eq!(error.error_key(), "insufficient_credits");
+        assert_eq!(error.into_response().status(), axum::http::StatusCode::PAYMENT_REQUIRED);
+        assert_eq!(creates.load(Ordering::SeqCst), 0, "funding refusal must precede every provider invocation");
+        let wallet = f.state.db.collection::<BillingWallet>(WALLETS).find_one(doc! {"owner_id":&f.owner}).await.unwrap().unwrap();
+        assert_eq!(wallet.balance_credits, Credits::ZERO);
+        assert_eq!(wallet.reserved_credits, Credits::ZERO);
+        assert_eq!(wallet.pending_lago_debits, Credits::ZERO);
+        assert_eq!(f.state.db.collection::<UsageMeterRow>(USAGE).count_documents(doc! {}).await.unwrap(), 0);
+        let failed = f.state.db.collection::<VoiceSession>(CALLS).find_one(doc! {"client_request_id":&rejected_request}).await.unwrap().unwrap();
+        assert!(!failed.live_slot && failed.billing_finalized);
+        assert!(failed.provider_session_id.is_none());
+
+        let grant = grants::issue_grants(&f.state.db, grants::IssueCreditGrantInput {
+            amount_credits:100, target_kind:BillingTargetKind::SelectedUsers,
+            target_user_ids:vec![f.owner.clone()], target_org_ids:vec![], target_group_ids:vec![],
+            all_services:false, service_refs:vec![service.id.clone()], expires_at:None,
+            reason:Some("local voice funding regression".into()), granted_by:f.owner.clone(),
+        }).await.unwrap().remove(0);
+        assert!(grant.issued_ledgered_at.is_some(), "issuance must be durably journaled before spend");
+        assert_eq!(f.state.db.collection::<bson::Document>("billing_ledger").count_documents(
+            doc! {"dedupe_key":format!("grant-issued:{}",grant.id)}).await.unwrap(), 1);
+        // No reconcile, TTL wait, cache invalidation or BillingService rebuild.
+        let resolved = credentials::resolve(&f.state, &f.owner, &f.row.id, &p).await.unwrap();
+        let started = super::runtime::start_with_provider(&f.state, super::runtime::StartInput {
+            user:&f.owner, conversation:&f.row.id, client_request_id:&Uuid::new_v4().to_string(),
+            preferences:p, sdp:"v=0\r\nm=audio",
+        }, resolved.identity, resolved.billing, super::openai::OpenAi::fixture(resolved.key,address), None).await.unwrap();
+        assert_eq!(creates.load(Ordering::SeqCst), 1);
+        let closed = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let row = super::session::get(&f.state.db,&f.owner,&f.row.id,&started.session.id).await.unwrap();
+                if !row.live_slot { break row; }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        }).await.expect("provider-confirmed zero-usage close must settle locally");
+        assert!(closed.billing_finalized && closed.final_usage_confirmed);
+        let request_id = voice::window_id(&closed.id, 0).unwrap();
+        voice::finalize(&f.state.db,&request_id,false).await.unwrap();
+        let grant = f.state.db.collection::<CreditGrant>(GRANTS).find_one(doc! {"_id":&grant.id}).await.unwrap().unwrap();
+        assert_eq!(grant.remaining, Credits::from_whole(100));
+        assert_eq!(grant.reserved, Credits::ZERO);
+        assert_eq!(f.state.db.collection::<bson::Document>("billing_ledger").count_documents(
+            doc! {"event_type":"accounting_v2","movement":{"$in":["grant_consumed","usage_settled"]}}).await.unwrap(), 0,
+            "zero observed usage must not consume grants or create a wallet charge");
+        for metric in ["voice_seconds", "requests"] {
+            let row = f.state.db.collection::<UsageMeterRow>(USAGE).find_one(doc! {"billing_request_id":&request_id,"metric":metric}).await.unwrap().unwrap();
+            assert_eq!(row.quantity, Some(0));
+            assert!(row.released);
+        }
+        let wallet = f.state.db.collection::<BillingWallet>(WALLETS).find_one(doc! {"owner_id":&f.owner}).await.unwrap().unwrap();
+        assert_eq!(wallet.balance_credits, Credits::ZERO);
+        assert_eq!(wallet.reserved_credits, Credits::ZERO);
+        assert_eq!(wallet.pending_lago_debits, Credits::ZERO);
+        server.abort();
+        f.state.db.drop().await.unwrap();
+    }).await;
+}

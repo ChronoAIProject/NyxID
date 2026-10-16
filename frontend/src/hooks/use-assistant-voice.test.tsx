@@ -7,17 +7,19 @@ import type {
 } from "@/schemas/assistant-voice";
 
 const fixture = vi.hoisted(() => ({
+  actor: "actor",
   snapshot: undefined as undefined | ((value: VoiceSnapshot) => void),
+  start: vi.fn(async () => {}),
   end: vi.fn(),
 }));
 vi.mock("@/stores/auth-store", () => ({
   useAuthStore: (select: (state: { user: { id: string } }) => unknown) =>
-    select({ user: { id: "actor" } }),
+    select({ user: { id: fixture.actor } }),
 }));
 vi.mock("@/lib/assistant-voice-client", () => ({
   AssistantVoiceClient: class {
     isClosed = false;
-    start = vi.fn(async () => {}); // POST resolves before the upstream relay is ready.
+    start = fixture.start; // POST resolves before the upstream relay is ready.
     end = fixture.end;
     constructor(_thread: string, snapshot: (value: VoiceSnapshot) => void) {
       fixture.snapshot = snapshot;
@@ -26,7 +28,49 @@ vi.mock("@/lib/assistant-voice-client", () => ({
 }));
 afterEach(() => {
   vi.clearAllMocks();
+  fixture.actor = "actor";
+  localStorage.removeItem("nyxid:microphone-device:actor");
+  localStorage.removeItem("nyxid:microphone-device:other-actor");
 });
+it.each(["openai_live", "xai_realtime"] as const)(
+  "keeps the acting person's selected microphone on direct %s starts and retries",
+  async (protocol) => {
+    localStorage.setItem("nyxid:microphone-device:actor", "usb");
+    localStorage.setItem("nyxid:microphone-device:other-actor", "built-in");
+    const preferences = {} as VoicePreferences;
+    const { result, rerender } = renderHook(() => useAssistantVoice("thread"));
+    await act(() => result.current.start(preferences, protocol));
+    expect(fixture.start).toHaveBeenLastCalledWith(
+      preferences,
+      protocol,
+      undefined,
+      undefined,
+      "usb",
+    );
+    await act(() => result.current.end());
+    localStorage.setItem("nyxid:microphone-device:actor", "replacement-usb");
+    await act(() => result.current.start(preferences, protocol));
+    expect(fixture.start).toHaveBeenLastCalledWith(
+      preferences,
+      protocol,
+      undefined,
+      undefined,
+      "replacement-usb",
+    );
+    await act(() => result.current.end());
+    fixture.actor = "other-actor";
+    rerender();
+    await act(() => result.current.start(preferences, protocol));
+    expect(fixture.start).toHaveBeenLastCalledWith(
+      preferences,
+      protocol,
+      undefined,
+      undefined,
+      "built-in",
+    );
+    await act(() => result.current.end());
+  },
+);
 it("keeps Grok connecting and cancellable until the server reports an active relay", async () => {
   const { result } = renderHook(() => useAssistantVoice("thread"));
   await act(() => result.current.start({} as VoicePreferences, "xai_realtime"));
