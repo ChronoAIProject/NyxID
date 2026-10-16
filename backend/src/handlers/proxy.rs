@@ -1007,19 +1007,42 @@ pub(crate) async fn proxy_request_inner(
         )));
     }
 
-    // Try new UserService path first (lookup by catalog_service_id)
-    if let Some(resolved) = Box::pin(proxy_service::resolve_proxy_target_from_user_service(
-        &state.db,
-        &state.encryption_keys,
-        &state.node_ws_manager,
-        &user_id_str,
-        None,
-        Some(service_id),
-        proxy_service::ProxyExecutionContext::new(
-            Some(&state.connection_expiry_notifier),
-            state.platform_user_rate_limit,
+    // Catalog inference resolves by saved eligible connection order.
+    let (request, implicit_body) =
+        if auth_user.assistant_chat.is_some() && !is_ws_upgrade_request(&request) {
+            let (parts, body) = request.into_parts();
+            let bytes = axum::body::to_bytes(body, state.config.proxy_max_body_size)
+                .await
+                .map_err(|_| AppError::RequestBodyTooLarge {
+                    max_bytes: state.config.proxy_max_body_size,
+                    context: "Proxy".into(),
+                })?;
+            (
+                Request::from_parts(parts, Body::from(bytes.clone())),
+                Some(bytes),
+            )
+        } else {
+            (request, None)
+        };
+    let implicit_projection =
+        crate::services::assistant_service_execution::HttpProjection::default();
+    if let Some(resolved) = Box::pin(
+        crate::services::assistant_service_execution::resolve_implicit_for_request(
+            state,
+            auth_user,
+            service_id,
+            implicit_body.as_ref().map(|body| {
+                (
+                    request.method().as_str(),
+                    path,
+                    request.uri().query(),
+                    body.as_ref(),
+                    request.headers(),
+                    &implicit_projection,
+                )
+            }),
         ),
-    ))
+    )
     .await?
     {
         let effective_service_id = resolved.target.service.id.clone();
@@ -1241,7 +1264,8 @@ fn encode_pool_attempt_error(
     error: crate::services::proxy_service::ForwardRequestError,
 ) -> AppError {
     match error {
-        crate::services::proxy_service::ForwardRequestError::Application(error) => error,
+        crate::services::proxy_service::ForwardRequestError::Application(error)
+        | crate::services::proxy_service::ForwardRequestError::PreDispatchRejected(error) => error,
         crate::services::proxy_service::ForwardRequestError::OutcomeUnknown => AppError::Conflict(
             "Provider outcome is unknown; check the provider before retrying".into(),
         ),
@@ -1549,7 +1573,12 @@ async fn proxy_request_through_pool(
         .extensions()
         .get::<crate::downstream_disconnect::ClientConnectionCancellation>()
         .cloned();
-    let policy = pool.failover.clone().unwrap_or_default();
+    let mut policy = pool.failover.clone().unwrap_or_default();
+    if auth_user.assistant_chat.is_some() {
+        // A local opt-in cannot establish reconciliation/idempotency for an
+        // assistant write whose dispatch outcome is unknown.
+        policy.retry_ambiguous_dispatch = false;
+    }
     let request_started_at = started_at
         .map(|started| started.0)
         .unwrap_or_else(std::time::Instant::now);
@@ -1615,6 +1644,21 @@ async fn proxy_request_through_pool(
         return Err(AppError::BadRequest(
             "Gateway pool aliases require an AI chat priority pool".into(),
         ));
+    }
+    if let Some(pinned) = crate::services::assistant_service_execution::pinned_pool_member(
+        &state.db,
+        &state.node_ws_manager,
+        auth_user.assistant_chat.as_deref(),
+        &pool.id,
+        headers
+            .get(crate::services::assistant_service_execution::ACK_HEADER)
+            .and_then(|value| value.to_str().ok()),
+    )
+    .await?
+    {
+        plan.candidates
+            .retain(|candidate| candidate.member.user_service_id == pinned);
+        plan.max_attempts = 1;
     }
     if plan.candidates.is_empty() {
         *resolved_slug = slug.to_string();
@@ -2299,9 +2343,15 @@ pub(crate) async fn proxy_request_by_slug_inner(
     } else {
         auth_user.ensure_rest_proxy_access()?;
     }
-    auth_user
-        .ensure_live_assistant_turn(&state.db, "proxy.slug")
-        .await?;
+    if request
+        .extensions()
+        .get::<crate::services::machine_gateway_service::Ingress>()
+        .is_none_or(|ingress| ingress.job_id.is_none())
+    {
+        auth_user
+            .ensure_live_assistant_turn(&state.db, "proxy.slug")
+            .await?;
+    }
 
     if auth_user.auth_method == AuthMethod::ServiceAccount {
         let sa = crate::services::service_account_service::get_service_account(
@@ -2395,13 +2445,42 @@ pub(crate) async fn proxy_request_by_slug_inner(
         }
         // Reserve legacy balancing exactly once before policy preflight. This
         // request carries the selected identity through every remaining gate.
-        let (member, selection) = Box::pin(service_pool_service::resolve_member(
+        let (mut member, mut selection) = Box::pin(service_pool_service::resolve_member(
             &state.db,
             &pool.user_id,
             slug,
         ))
         .await?
         .ok_or_else(|| AppError::ServicePoolNoViableMember(slug.into()))?;
+        if let Some(pinned) = crate::services::assistant_service_execution::pinned_pool_member(
+            &state.db,
+            &state.node_ws_manager,
+            auth_user.assistant_chat.as_deref(),
+            &pool.id,
+            request
+                .headers()
+                .get(crate::services::assistant_service_execution::ACK_HEADER)
+                .and_then(|value| value.to_str().ok()),
+        )
+        .await?
+        {
+            if !pool
+                .members
+                .iter()
+                .any(|entry| entry.enabled && entry.user_service_id == pinned)
+            {
+                return Err(AppError::Conflict(
+                    "Confirmed member is no longer in this pool".into(),
+                ));
+            }
+            member = crate::services::user_service_service::get_user_service(
+                &state.db,
+                &pool.user_id,
+                &pinned,
+            )
+            .await?;
+            selection.selected_member_id = pinned;
+        }
         let (mut parts, body) = request.into_parts();
         let query = parts
             .uri
@@ -3625,6 +3704,9 @@ fn execute_resolved_proxy<'a>(
             &auth_user.user_id.to_string(),
         )
         .await?;
+        let mut assistant_decision = None;
+        let mut assistant_approval = None;
+        let receipt_method = request.method().clone();
         let execution = execute_resolved_proxy_boxed(
             state,
             auth_user,
@@ -3635,13 +3717,30 @@ fn execute_resolved_proxy<'a>(
             resolved_slug,
             resolved,
             lease.clone(),
+            &mut assistant_decision,
+            &mut assistant_approval,
         );
-        match lease {
-            Some(lease) => {
-                let response = lease.run(execution).await?;
-                Ok(lease.hold_response(response))
+        let response = match &lease {
+            Some(lease) => lease.run(execution).await?,
+            None => execution.await?,
+        };
+        let response = match assistant_decision {
+            Some(decision) => {
+                decision
+                    .finish_http(
+                        response,
+                        state.db.clone(),
+                        auth_user.assistant_chat.as_deref().cloned(),
+                        receipt_method.as_str(),
+                        assistant_approval,
+                    )
+                    .await
             }
-            None => execution.await,
+            None => response,
+        };
+        match lease {
+            Some(lease) => Ok(lease.hold_response(response)),
+            None => Ok(response),
         }
     })
 }
@@ -3658,6 +3757,10 @@ fn execute_resolved_proxy_boxed<'a>(
     resolved_slug: &'a mut String,
     resolved: ResolvedProxyExecution,
     service_lease: Option<crate::services::service_concurrency_service::Lease>,
+    assistant_decision: &'a mut Option<crate::services::assistant_service_execution::Decision>,
+    assistant_approval: &'a mut Option<
+        crate::services::assistant_service_execution::HttpApprovalReceipt,
+    >,
 ) -> futures::future::BoxFuture<'a, AppResult<Response>> {
     Box::pin(execute_resolved_proxy_inner(
         state,
@@ -3669,6 +3772,8 @@ fn execute_resolved_proxy_boxed<'a>(
         resolved_slug,
         resolved,
         service_lease,
+        assistant_decision,
+        assistant_approval,
     ))
 }
 
@@ -3683,6 +3788,10 @@ async fn execute_resolved_proxy_inner(
     resolved_slug: &mut String,
     resolved: ResolvedProxyExecution,
     service_lease: Option<crate::services::service_concurrency_service::Lease>,
+    assistant_decision_slot: &mut Option<crate::services::assistant_service_execution::Decision>,
+    assistant_approval_slot: &mut Option<
+        crate::services::assistant_service_execution::HttpApprovalReceipt,
+    >,
 ) -> AppResult<Response> {
     let permission_ingress = request.extensions().get::<PermissionIngress>().cloned();
     let ornn_preflight = request
@@ -4119,7 +4228,9 @@ async fn execute_resolved_proxy_inner(
     // Structured adapters inspect bounded JSON for approval, signing and billing.
     // Opaque machine uploads (including git packfiles) retain backpressure all
     // the way to the upstream connection instead of materializing the body.
-    let stream_upload = machine_ingress.is_some()
+    let stream_upload = machine_ingress
+        .as_ref()
+        .is_some_and(|ingress| ingress.job_id.is_some())
         && !is_ws
         && crate::services::machine_gateway_service::can_stream(&target, &all_headers, machine_git);
     let (body_bytes, ws_request, mut streaming_body, upload_meter) = if is_ws {
@@ -4229,6 +4340,63 @@ async fn execute_resolved_proxy_inner(
         operation.verb = crate::models::service_approval_config::ApprovalVerb::Read;
     }
 
+    let assistant_ack = all_headers
+        .remove(crate::services::assistant_service_execution::ACK_HEADER)
+        .and_then(|value| value.to_str().ok().map(str::to_owned));
+    *assistant_decision_slot = Some(
+        if let Some(job) = machine_ingress
+            .as_ref()
+            .and_then(|ingress| ingress.job_id.as_deref())
+        {
+            crate::services::assistant_service_execution::check_job_http(
+                state,
+                job,
+                resolved_user_service_id.as_deref(),
+                effective_owner_for_approval.as_deref(),
+                &target,
+                &method_str,
+                path,
+            )
+            .await?
+        } else {
+            crate::services::assistant_service_execution::check_http(
+                state,
+                auth_user,
+                resolved_user_service_id.as_deref(),
+                effective_owner_for_approval.as_deref(),
+                &target,
+                &method_str,
+                path,
+                query.as_deref(),
+                &body_bytes,
+                assistant_ack.as_deref(),
+                pool_authority
+                    .as_ref()
+                    .map(|authority| authority.pool_id.as_str()),
+                &all_headers,
+            )
+            .await?
+        },
+    );
+    let assistant_decision = assistant_decision_slot
+        .as_ref()
+        .expect("service decision was just installed");
+    if let Some(refusal) = assistant_decision.refusal.as_ref() {
+        return Ok((axum::http::StatusCode::CONFLICT, axum::Json(refusal)).into_response());
+    }
+    if let (Some(chat), Some(id)) = (
+        auth_user.assistant_chat.as_deref(),
+        resolved_user_service_id.as_deref(),
+    ) {
+        crate::services::assistant_service_execution::verify_node_route(
+            &state.db,
+            chat,
+            id,
+            node_route.as_ref(),
+            &target,
+        )
+        .await?;
+    }
     // Resolve approval policy with org-cascade. The "service owner" (the
     // user_id that owns the resolved UserService) determines whether an
     // org policy applies. For the legacy DownstreamService fallback path
@@ -4250,6 +4418,14 @@ async fn execute_resolved_proxy_inner(
         auth_user.assistant_chat.as_deref(),
     ))
     .await?;
+
+    *assistant_approval_slot =
+        crate::services::assistant_service_execution::HttpApprovalReceipt::new(
+            approval_auto,
+            service_id,
+            &target.service.name,
+            &operation,
+        );
 
     crate::services::agent_operation_scope_service::check_guest_approval(
         operation_guest,
@@ -4894,10 +5070,54 @@ async fn execute_resolved_proxy_inner(
             }
         };
 
+        if let (Some(chat), Some(admission), Some(id)) = (
+            auth_user.assistant_chat.as_deref(),
+            assistant_decision.admission.as_ref(),
+            resolved_user_service_id.as_deref(),
+        ) {
+            let validation = async {
+                crate::services::assistant_service_execution::verify_resolved(
+                    &state.db,
+                    &state.encryption_keys,
+                    chat,
+                    id,
+                    &target,
+                    method.as_str(),
+                    path,
+                )
+                .await?;
+                admission.revalidate(&state.db, id, Some(&target)).await?;
+                crate::services::assistant_service_execution::verify_node_route(
+                    &state.db,
+                    chat,
+                    id,
+                    node_route.as_ref(),
+                    &target,
+                )
+                .await
+            }
+            .await;
+            if let Err(error) = validation {
+                if let Some(reservation) = durable_reservation.as_ref() {
+                    durable_operation_grant_service::mark_pre_dispatch_rejected(
+                        &state.db,
+                        reservation,
+                        "assistant authority changed before WebSocket connect",
+                    )
+                    .await;
+                }
+                state
+                    .billing
+                    .reject_before_send(&metered, "assistant_authority_changed", false)
+                    .await?;
+                return Err(error);
+            }
+        }
+
         // Node-routed WS passthrough: tunnel through the management WS.
         if let Some(ref node_route) = node_route {
             let proxy_actor_user_id = auth_user.proxy_resolution_user_id();
-            return Box::pin(handle_ws_passthrough_via_node(
+            let result = Box::pin(handle_ws_passthrough_via_node(
                 ws_upgrade,
                 state,
                 auth_user,
@@ -4915,13 +5135,29 @@ async fn execute_resolved_proxy_inner(
                 metered.clone(),
                 billing_egress_permit,
                 service_lease,
+                assistant_decision
+                    .admission
+                    .as_ref()
+                    .map(|admission| {
+                        admission
+                            .http_egress(
+                                &state.db,
+                                &state.encryption_keys,
+                                &target,
+                                method.as_str(),
+                                path,
+                            )
+                            .routed(Some(node_route))
+                    })
+                    .as_ref(),
             ))
             .await
             .inspect(|response| request_audit.response(response.status().as_u16()));
+            return result;
         }
 
         // Direct WS passthrough: connect to downstream directly.
-        return Box::pin(handle_ws_passthrough(
+        let result = Box::pin(handle_ws_passthrough(
             ws_upgrade,
             state,
             auth_user,
@@ -4937,15 +5173,32 @@ async fn execute_resolved_proxy_inner(
             metered.clone(),
             billing_egress_permit,
             service_lease,
+            assistant_decision
+                .admission
+                .as_ref()
+                .map(|admission| {
+                    admission
+                        .http_egress(
+                            &state.db,
+                            &state.encryption_keys,
+                            &target,
+                            method.as_str(),
+                            path,
+                        )
+                        .routed(node_route.as_ref())
+                })
+                .as_ref(),
         ))
         .await
         .inspect(|response| request_audit.response(response.status().as_u16()));
+        return result;
     }
 
     // === Node Proxy Routing (v2: failover + streaming + metrics + HMAC signing) ===
     // node_route was resolved earlier (before credential check) to allow node-backed
     // users to bypass credential requirements.
-    if let Some(node_route) = node_route {
+    let mut had_dispatched_failure = false;
+    if let Some(ref node_route) = node_route {
         crate::services::destination_routing::validate_node_outbound_destination(
             &target,
             method.as_str(),
@@ -4992,7 +5245,8 @@ async fn execute_resolved_proxy_inner(
 
         let mut last_error: Option<AppError> = None;
         let mut first_dispatch_admission_ms = None;
-        let mut had_dispatched_failure = false;
+        let mut node_failure_evidence =
+            crate::services::assistant_service_execution::NodeFailureEvidence::default();
         for node_id in &all_node_ids {
             // Generate a new request_id for each attempt to avoid correlation conflicts
             let mut attempt_request = node_request.clone();
@@ -5011,10 +5265,13 @@ async fn execute_resolved_proxy_inner(
                 {
                     Ok(secret) => Some(secret),
                     Err(AppError::NodeNotFound(message)) => {
+                        node_failure_evidence.disqualify();
                         last_error = Some(AppError::NodeNotFound(message));
                         continue;
                     }
                     Err(AppError::NodeOffline(message)) => {
+                        // Missing signing authority is not a provider outage.
+                        node_failure_evidence.disqualify();
                         tracing::warn!(
                             node_id = %node_id,
                             "Skipping node route because signing secret is missing"
@@ -5055,6 +5312,83 @@ async fn execute_resolved_proxy_inner(
                 return Err(error);
             }
             let start = std::time::Instant::now();
+            if resolved_user_service_id.is_none() {
+                if let Some(job) = machine_ingress.as_ref().and_then(|i| i.job_id.as_deref()) {
+                    if let Err(error) =
+                        crate::services::assistant_job_service_use::validate_catalog(
+                            &state.db,
+                            job,
+                            &target.service.id,
+                        )
+                        .await
+                    {
+                        state
+                            .billing
+                            .fail(&metered, "machine_authority_changed")
+                            .await?;
+                        if let Some(reservation) = durable_reservation.as_ref() {
+                            durable_operation_grant_service::mark_pre_dispatch_rejected(
+                                &state.db,
+                                reservation,
+                                "machine authority changed before dispatch",
+                            )
+                            .await;
+                        }
+                        return Err(error);
+                    }
+                }
+            }
+            if let Some(admission) = assistant_decision.admission.as_ref() {
+                let revalidation = async {
+                    let id = resolved_user_service_id
+                        .as_deref()
+                        .ok_or(AppError::AssistantTurnRequired)?;
+                    if let Some(chat) = auth_user.assistant_chat.as_deref() {
+                        crate::services::assistant_service_execution::verify_resolved(
+                            &state.db,
+                            &state.encryption_keys,
+                            chat,
+                            id,
+                            &target,
+                            method.as_str(),
+                            path,
+                        )
+                        .await?;
+                    }
+                    admission.revalidate(&state.db, id, Some(&target)).await?;
+                    if let Some(chat) = auth_user.assistant_chat.as_deref() {
+                        crate::services::assistant_service_execution::verify_node_route(
+                            &state.db,
+                            chat,
+                            id,
+                            Some(node_route),
+                            &target,
+                        )
+                        .await?;
+                    }
+                    Ok::<_, AppError>(())
+                }
+                .await;
+                if let Err(error) = revalidation {
+                    if let Some(reservation) = durable_reservation.as_ref() {
+                        durable_operation_grant_service::mark_pre_dispatch_rejected(
+                            &state.db,
+                            reservation,
+                            "assistant authority changed before dispatch",
+                        )
+                        .await;
+                    }
+                    state
+                        .billing
+                        .reject_before_send(
+                            &metered,
+                            "assistant_authority_changed",
+                            had_dispatched_failure,
+                        )
+                        .await?;
+                    return Err(error);
+                }
+            }
             if let Err(error) = state.billing.mark_forwarded(&metered).await {
                 if let Some(reservation) = durable_reservation.as_ref() {
                     durable_operation_grant_service::mark_pre_dispatch_rejected(
@@ -5073,6 +5407,34 @@ async fn execute_resolved_proxy_inner(
                     Some(node_id),
                 )
                 .await?;
+            }
+            if let Some(admission) = assistant_decision.admission.as_ref() {
+                if let Err(error) = admission
+                    .http_egress(
+                        &state.db,
+                        &state.encryption_keys,
+                        &target,
+                        method.as_str(),
+                        path,
+                    )
+                    .routed(Some(node_route))
+                    .revalidate()
+                    .await
+                {
+                    if let Some(reservation) = durable_reservation.as_ref() {
+                        durable_operation_grant_service::mark_send_rejected(&state.db, reservation)
+                            .await;
+                    }
+                    state
+                        .billing
+                        .reject_before_send(
+                            &metered,
+                            "assistant_authority_changed",
+                            had_dispatched_failure,
+                        )
+                        .await?;
+                    return Err(error);
+                }
             }
             if let Some(accounting) = &pool_accounting {
                 accounting
@@ -5201,17 +5563,6 @@ async fn execute_resolved_proxy_inner(
                             target.connection_id.as_deref(),
                         );
                         destination_audit.complete(response.status().as_u16());
-                        if response.status().is_success() {
-                            approval_service::record_chat_approval(
-                                &state.db,
-                                auth_user.assistant_chat.as_deref(),
-                                approval_auto,
-                                service_id,
-                                &target.service.name,
-                                &operation,
-                            )
-                            .await;
-                        }
                         return observe_model_response(model_request, path, response).await;
                     }
 
@@ -5483,17 +5834,6 @@ async fn execute_resolved_proxy_inner(
 
                     destination_audit.complete(response.status().as_u16());
                     request_audit.response(response.status().as_u16());
-                    if response.status().is_success() {
-                        approval_service::record_chat_approval(
-                            &state.db,
-                            auth_user.assistant_chat.as_deref(),
-                            approval_auto,
-                            service_id,
-                            &target.service.name,
-                            &operation,
-                        )
-                        .await;
-                    }
                     return observe_model_response(model_request, path, response).await;
                 }
                 Err(NodeProxyFailure {
@@ -5504,6 +5844,7 @@ async fn execute_resolved_proxy_inner(
                         destination_audit.denied();
                     }
                     had_dispatched_failure |= dispatched;
+                    node_failure_evidence.record(&err, dispatched);
                     // A different fallback node may have the credential
                     // configured locally, so we still try the rest of
                     // the pool. Preserve the original error class in
@@ -5565,6 +5906,7 @@ async fn execute_resolved_proxy_inner(
                         destination_audit.denied();
                     }
                     had_dispatched_failure |= dispatched;
+                    node_failure_evidence.record(&err, dispatched);
                     // Record error metrics (fire-and-forget)
                     let db_clone = state.db.clone();
                     let nid = node_id.to_string();
@@ -5673,6 +6015,14 @@ async fn execute_resolved_proxy_inner(
         //   * No server-side credential is available, so direct routing
         //     cannot succeed anyway.
         if node_routing_required || !has_server_credential {
+            if let (Some(chat), Some(admission)) = (
+                auth_user.assistant_chat.as_deref(),
+                assistant_decision.admission.as_ref(),
+            ) {
+                admission
+                    .exhausted_node_routes(&state.db, chat, &node_failure_evidence)
+                    .await?;
+            }
             emit_preheader_diagnostics(
                 exchange_started_at,
                 first_dispatch_admission_ms.unwrap_or_else(|| elapsed_ms(exchange_started_at)),
@@ -5806,6 +6156,82 @@ async fn execute_resolved_proxy_inner(
             model.clone(),
         );
 
+        if resolved_user_service_id.is_none() {
+            if let Some(job) = machine_ingress.as_ref().and_then(|i| i.job_id.as_deref()) {
+                if let Err(error) = crate::services::assistant_job_service_use::validate_catalog(
+                    &state.db,
+                    job,
+                    &target.service.id,
+                )
+                .await
+                {
+                    state
+                        .billing
+                        .fail(&metered, "machine_authority_changed")
+                        .await?;
+                    if let Some(reservation) = durable_reservation.as_ref() {
+                        durable_operation_grant_service::mark_pre_dispatch_rejected(
+                            &state.db,
+                            reservation,
+                            "machine authority changed before dispatch",
+                        )
+                        .await;
+                    }
+                    return Err(error);
+                }
+            }
+        }
+        if let Some(admission) = assistant_decision.admission.as_ref() {
+            let revalidation = async {
+                let id = resolved_user_service_id
+                    .as_deref()
+                    .ok_or(AppError::AssistantTurnRequired)?;
+                if let Some(chat) = auth_user.assistant_chat.as_deref() {
+                    crate::services::assistant_service_execution::verify_resolved(
+                        &state.db,
+                        &state.encryption_keys,
+                        chat,
+                        id,
+                        &target,
+                        method.as_str(),
+                        path,
+                    )
+                    .await?;
+                }
+                admission.revalidate(&state.db, id, Some(&target)).await?;
+                if let Some(chat) = auth_user.assistant_chat.as_deref() {
+                    crate::services::assistant_service_execution::verify_node_route(
+                        &state.db,
+                        chat,
+                        id,
+                        node_route.as_ref(),
+                        &target,
+                    )
+                    .await?;
+                }
+                Ok::<_, AppError>(())
+            }
+            .await;
+            if let Err(error) = revalidation {
+                if let Some(reservation) = durable_reservation.as_ref() {
+                    durable_operation_grant_service::mark_pre_dispatch_rejected(
+                        &state.db,
+                        reservation,
+                        "assistant authority changed before dispatch",
+                    )
+                    .await;
+                }
+                state
+                    .billing
+                    .reject_before_send(
+                        &metered,
+                        "assistant_authority_changed",
+                        had_dispatched_failure,
+                    )
+                    .await?;
+                return Err(error);
+            }
+        }
         if let Err(error) = state.billing.mark_forwarded(&metered).await {
             if let Some(reservation) = durable_reservation.as_ref() {
                 durable_operation_grant_service::mark_pre_dispatch_rejected(
@@ -5819,6 +6245,34 @@ async fn execute_resolved_proxy_inner(
         }
         if let Some(reservation) = durable_reservation.as_ref() {
             durable_operation_grant_service::mark_dispatched(&state.db, reservation, None).await?;
+        }
+        if let Some(admission) = assistant_decision.admission.as_ref() {
+            if let Err(error) = admission
+                .http_egress(
+                    &state.db,
+                    &state.encryption_keys,
+                    &target,
+                    method.as_str(),
+                    path,
+                )
+                .routed(node_route.as_ref())
+                .revalidate()
+                .await
+            {
+                if let Some(reservation) = durable_reservation.as_ref() {
+                    durable_operation_grant_service::mark_send_rejected(&state.db, reservation)
+                        .await;
+                }
+                state
+                    .billing
+                    .reject_before_send(
+                        &metered,
+                        "assistant_authority_changed",
+                        had_dispatched_failure,
+                    )
+                    .await?;
+                return Err(error);
+            }
         }
         mark_pool_attempt_dispatched(pool_dispatch_state.as_ref());
         destination_audit.dispatch();
@@ -5926,21 +6380,86 @@ async fn execute_resolved_proxy_inner(
 
         destination_audit.complete(response.status().as_u16());
         request_audit.response(response.status().as_u16());
-        if response.status().is_success() {
-            approval_service::record_chat_approval(
-                &state.db,
-                auth_user.assistant_chat.as_deref(),
-                approval_auto,
-                service_id,
-                &target.service.name,
-                &operation,
-            )
-            .await;
-        }
         return observe_model_response(model_request, path, response).await;
     }
 
     // Reuse the shared reqwest::Client from AppState for connection pooling.
+    if resolved_user_service_id.is_none() {
+        if let Some(job) = machine_ingress.as_ref().and_then(|i| i.job_id.as_deref()) {
+            if let Err(error) = crate::services::assistant_job_service_use::validate_catalog(
+                &state.db,
+                job,
+                &target.service.id,
+            )
+            .await
+            {
+                state
+                    .billing
+                    .fail(&metered, "machine_authority_changed")
+                    .await?;
+                if let Some(reservation) = durable_reservation.as_ref() {
+                    durable_operation_grant_service::mark_pre_dispatch_rejected(
+                        &state.db,
+                        reservation,
+                        "machine authority changed before dispatch",
+                    )
+                    .await;
+                }
+                return Err(error);
+            }
+        }
+    }
+    if let Some(admission) = assistant_decision.admission.as_ref() {
+        let revalidation = async {
+            let id = resolved_user_service_id
+                .as_deref()
+                .ok_or(AppError::AssistantTurnRequired)?;
+            if let Some(chat) = auth_user.assistant_chat.as_deref() {
+                crate::services::assistant_service_execution::verify_resolved(
+                    &state.db,
+                    &state.encryption_keys,
+                    chat,
+                    id,
+                    &target,
+                    method.as_str(),
+                    path,
+                )
+                .await?;
+            }
+            admission.revalidate(&state.db, id, Some(&target)).await?;
+            if let Some(chat) = auth_user.assistant_chat.as_deref() {
+                crate::services::assistant_service_execution::verify_node_route(
+                    &state.db,
+                    chat,
+                    id,
+                    node_route.as_ref(),
+                    &target,
+                )
+                .await?;
+            }
+            Ok::<_, AppError>(())
+        }
+        .await;
+        if let Err(error) = revalidation {
+            if let Some(reservation) = durable_reservation.as_ref() {
+                durable_operation_grant_service::mark_pre_dispatch_rejected(
+                    &state.db,
+                    reservation,
+                    "assistant authority changed before dispatch",
+                )
+                .await;
+            }
+            state
+                .billing
+                .reject_before_send(
+                    &metered,
+                    "assistant_authority_changed",
+                    had_dispatched_failure,
+                )
+                .await?;
+            return Err(error);
+        }
+    }
     if let Err(error) = state.billing.mark_forwarded(&metered).await {
         if let Some(reservation) = durable_reservation.as_ref() {
             durable_operation_grant_service::mark_pre_dispatch_rejected(
@@ -5959,9 +6478,20 @@ async fn execute_resolved_proxy_inner(
     destination_audit.dispatch();
     let target_admission_ms = elapsed_ms(exchange_started_at);
     let downstream_started_at = std::time::Instant::now();
+    let egress_guard = assistant_decision.admission.as_ref().map(|admission| {
+        admission
+            .http_egress(
+                &state.db,
+                &state.encryption_keys,
+                &target,
+                method.as_str(),
+                path,
+            )
+            .routed(node_route.as_ref())
+    });
     let downstream_result = until_client_disconnect(
         &downstream_cancellation,
-        Box::pin(proxy_service::forward_request_with_extra_outbound_headers(
+        Box::pin(proxy_service::forward_request_with_egress_guard(
             if is_pool_attempt
                 || operation_scoped
                 || permission_ingress.is_some()
@@ -5988,6 +6518,7 @@ async fn execute_resolved_proxy_inner(
             &state.cloud_response_cache,
             extra_outbound_headers,
             billing_egress_permit,
+            egress_guard.as_ref(),
         )),
     )
     .await;
@@ -5998,8 +6529,36 @@ async fn execute_resolved_proxy_inner(
     let request_body_len = upload_meter
         .as_ref()
         .map_or(request_body_len, |meter| meter.bytes());
+    if let (Some(chat), Some(admission)) = (
+        auth_user.assistant_chat.as_deref(),
+        assistant_decision.admission.as_ref(),
+    ) {
+        match &downstream_result {
+            Ok(Ok(response)) => {
+                admission
+                    .response(&state.db, chat, response.status().as_u16())
+                    .await?
+            }
+            Ok(Err(error)) => admission.transport_failure(&state.db, chat, error).await?,
+            Err(_) => {}
+        }
+    }
     let downstream_response = match downstream_result {
         Ok(Ok(response)) => response,
+        Ok(Err(proxy_service::ForwardRequestError::PreDispatchRejected(error))) => {
+            if let Some(reservation) = durable_reservation.as_ref() {
+                durable_operation_grant_service::mark_send_rejected(&state.db, reservation).await;
+            }
+            state
+                .billing
+                .reject_before_send(
+                    &metered,
+                    "assistant_authority_changed",
+                    had_dispatched_failure,
+                )
+                .await?;
+            return Err(error);
+        }
         Ok(Err(error)) => {
             emit_preheader_diagnostics(
                 exchange_started_at,
@@ -6151,17 +6710,6 @@ async fn execute_resolved_proxy_inner(
             target.connection_id.as_deref(),
         );
         destination_audit.complete(status.as_u16());
-        if response.status().is_success() {
-            approval_service::record_chat_approval(
-                &state.db,
-                auth_user.assistant_chat.as_deref(),
-                approval_auto,
-                service_id,
-                &target.service.name,
-                &operation,
-            )
-            .await;
-        }
         return observe_model_response(model_request, path, response).await;
     }
 
@@ -6230,17 +6778,6 @@ async fn execute_resolved_proxy_inner(
 
     destination_audit.complete(response.status().as_u16());
     request_audit.response(response.status().as_u16());
-    if response.status().is_success() {
-        approval_service::record_chat_approval(
-            &state.db,
-            auth_user.assistant_chat.as_deref(),
-            approval_auto,
-            service_id,
-            &target.service.name,
-            &operation,
-        )
-        .await;
-    }
     Ok(response)
 }
 
@@ -7211,6 +7748,7 @@ async fn handle_ws_passthrough(
     metered: crate::services::billing::MeteredProxyContext,
     billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
     service_lease: Option<crate::services::service_concurrency_service::Lease>,
+    egress_guard: Option<&crate::services::assistant_service_execution::HttpEgressGuard<'_>>,
 ) -> AppResult<Response> {
     crate::services::destination_routing::reject_websocket(target)?;
     let downstream_url = build_downstream_ws_url(target, path, query, delegated)?;
@@ -7231,6 +7769,15 @@ async fn handle_ws_passthrough(
 
     // Connect to downstream BEFORE upgrading the client connection.
     // If the downstream is unreachable, the client gets a normal HTTP error.
+    if let Some(egress) = egress_guard {
+        if let Err(error) = egress.revalidate().await {
+            state
+                .billing
+                .reject_before_send(&metered, "assistant_authority_changed", false)
+                .await?;
+            return Err(error);
+        }
+    }
     let downstream = connect_downstream_ws(
         &downstream_url,
         target,
@@ -7352,6 +7899,7 @@ async fn handle_ws_passthrough_via_node(
     metered: crate::services::billing::MeteredProxyContext,
     billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
     service_lease: Option<crate::services::service_concurrency_service::Lease>,
+    egress_guard: Option<&crate::services::assistant_service_execution::HttpEgressGuard<'_>>,
 ) -> AppResult<Response> {
     crate::services::destination_routing::reject_websocket(target)?;
     use crate::services::node_ws_manager::NodeWsProxyRequest;
@@ -7472,6 +8020,15 @@ async fn handle_ws_passthrough_via_node(
             ws_frame_injections: target.ws_frame_injections.clone(),
         };
 
+        if let Some(egress) = egress_guard {
+            if let Err(error) = egress.revalidate().await {
+                state
+                    .billing
+                    .reject_before_send(&metered, "assistant_authority_changed", false)
+                    .await?;
+                return Err(error);
+            }
+        }
         match state
             .node_dispatch
             .open_ws_proxy(
@@ -11754,6 +12311,7 @@ mod proxy_resolution_integration_tests {
                 .extensions_mut()
                 .insert(crate::services::machine_gateway_service::Ingress {
                     declared_id: service.id.clone(),
+                    job_id: None,
                     git: None,
                 });
             let result = tokio::time::timeout(

@@ -78,6 +78,8 @@ Admin → Feature Flags. See [feature flag management](docs/API.md#feature-flag-
 
 ## What NyxID Does
 
+- **Control NyxBot service use** — NyxBot enforces saved connection order, prefers suitable working personal connections, and asks before organization use in Auto and Ask every time. Choose an exact connection for the next message without changing permission modes. See [NyxBot service execution](docs/NYXBOT_SERVICE_EXECUTION.md).
+
 - **Connect Stripe to agents** — [Stripe Apps OAuth](docs/STRIPE_OAUTH.md) supports a managed account connection and read-only customer, invoice, payment, and subscription tools.
 
 - **Connect email to agents** — [Aurinko Email](docs/AURINKO_INTEGRATION.md) provides an AI Service for mailbox API/MCP operations and an email channel bot for signed incoming notifications and replies. Connect with an account token; the channel additionally uses the application's signing secret.

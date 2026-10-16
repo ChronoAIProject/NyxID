@@ -10,6 +10,21 @@ services. Provider linking and requirement mutations are serialized through the
 service record. A small retirement guard keeps historical vendor credential
 stores inaccessible. See [Service configuration and vendor retirement](SERVICE_CONFIGURATION.md).
 
+NyxBot's assistant-only concrete execution gate is shared by MCP, raw proxy,
+LLM gateway, native SSH/Oracle, and machine service requests. It preserves the
+existing authority and billing boundaries while enforcing per-catalog personal
+priority and organization consent. `assistant_service_execution` stores private
+turn input admissions, owner selections, exact card bindings, bounded model-use
+grants, model callback attempt correlation, job plans and outage evidence.
+Its compound index covers owner/conversation/key/turn/kind; `expires_at` has an
+absolute TTL index. Every read checks expiry (TTL deletion is asynchronous).
+Turn/key fences make old rows unusable immediately; conversation deletion,
+agent destruction and owner purge remove associated rows. Outages use one atomic
+bounded 32-entry array per turn with 60-second entry expiry and credential/config
+binding. Machine jobs persist their command-use grant on `machine_jobs` for their
+existing bounded lifetime. No secret or payload is stored in these digests or
+forwarded to providers. See [NyxBot service execution](NYXBOT_SERVICE_EXECUTION.md).
+
 ## Table of Contents
 
 - [System Overview](#system-overview)

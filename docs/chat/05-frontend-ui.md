@@ -215,6 +215,14 @@ upstream display names when present, with **Default model** for the legacy
 while a turn runs. New-chat selections are local to that composer, passed on the
 first send, and applied to any persisted upload draft before submission.
 
+The combined settings menu also offers **Next message connection**. It
+lists enabled accessible exact connections and shows the selected label on the
+compact trigger. A successful send clears this local choice; a failed send
+retains it. Submission prefixes the owner's message with `/service <UUID>` and
+an actual newline. The server binds that choice to the newly admitted turn.
+Choosing an organization connection still requires the existing action card
+in Auto and Ask every time. This choice is independent of Permissions.
+
 The composer stays in one row while empty or while its text fits alongside the
 controls. It expands only when text wraps or contains a newline, then collapses
 again when the text fits. In the expanded composer, the text occupies the full

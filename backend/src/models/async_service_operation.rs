@@ -57,6 +57,14 @@ pub struct AsyncServiceOperation {
     pub contract: AsyncOperationContract,
     pub delivery: DeliveryBinding,
     pub operation_id: Option<String>,
+    /// Submission-approved connection/config/key authority, never credential material.
+    #[serde(default)]
+    pub execution_binding: Option<String>,
+    /// Zero denotes a watch admitted before connection consent was introduced.
+    #[serde(default)]
+    pub authority_version: u8,
+    #[serde(default)]
+    pub contract_binding: Option<String>,
     /// submitting, waiting, cancelling, ready, queued, delivered, cancelled.
     pub state: String,
     pub reason: Option<String>,

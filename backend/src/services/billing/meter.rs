@@ -499,6 +499,25 @@ pub(super) async fn settle_persisted(
     Ok(())
 }
 
+pub(super) async fn reject_before_send(
+    db: &mongodb::Database,
+    metered: &MeteredProxyContext,
+    reason: &str,
+) -> AppResult<()> {
+    let Some(ctx) = &metered.route else {
+        return Ok(());
+    };
+    db.collection::<UsageMeterRow>(USAGE_METER)
+        .update_many(
+            doc! {"billing_request_id": &ctx.billing_request_id, "status": "forwarded",
+            "released": false, "quantity": bson::Bson::Null},
+            doc! {"$set": {"status": "reserved", "forwarded": false,
+            "updated_at": bson::DateTime::from_chrono(Utc::now())}},
+        )
+        .await?;
+    fail(db, metered, reason).await
+}
+
 pub async fn fail(
     db: &mongodb::Database,
     metered: &MeteredProxyContext,

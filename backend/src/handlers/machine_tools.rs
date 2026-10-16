@@ -232,6 +232,25 @@ pub async fn call(
             .await?
             .revision
     );
+    let job_plan = if operation == Operation::Exec {
+        match crate::services::assistant_job_service_use::prepare(
+            state,
+            chat,
+            &node.id,
+            &arguments,
+            &declared_services,
+        )
+        .await?
+        {
+            Ok(plan) => Some(plan),
+            Err(refusal) => return Ok(refusal),
+        }
+    } else {
+        None
+    };
+    if let Some(plan) = &job_plan {
+        arguments["job_service_use"] = plan.confirmation();
+    }
     // Arbitrary commands, writes and mutating desktop input can destroy data.
     // Filling a checked login field and asking the owner for control change
     // state, but do not themselves remove data or grant arbitrary execution.
@@ -252,11 +271,14 @@ pub async fn call(
         ) || (matches!(operation, Operation::Computer | Operation::Browser)
             && !read_only),
     };
-    let floor = machines::confirmation(&node, operation, &arguments)
+    let floor = job_plan
+        .as_ref()
+        .is_some_and(|plan| !plan.org_labels.is_empty())
+        || machines::confirmation(&node, operation, &arguments)
         || login.as_ref().is_some_and(|row| row.confirm_each_sign_in);
     let gate = acks::confirmation_needed(&state.db, chat, facts, floor).await?;
     let confirmation_arguments = arguments.clone();
-    let summary = format!(
+    let mut summary = format!(
         "Allow {name} on {}{}",
         node.name,
         if operation == Operation::Exec {
@@ -272,6 +294,15 @@ pub async fn call(
             String::new()
         }
     );
+    if let Some(plan) = &job_plan {
+        if !plan.org_labels.is_empty() {
+            summary.push_str(&format!(
+                "; this command may use {} for job {} until it finishes or expires",
+                plan.org_labels.join(", "),
+                plan.id
+            ));
+        }
+    }
     if let Some(need) = gate.ask() {
         // Outside webhook automations a mismatched card id raises a fresh
         // card for the exact arguments, as machine confirmation always has.
@@ -285,6 +316,9 @@ pub async fn call(
         )
         .await?
         {
+            if let Some(plan) = &job_plan {
+                plan.bind_card(&state.db, &refusal).await?;
+            }
             return Ok(refusal);
         }
     }
@@ -308,14 +342,38 @@ pub async fn call(
         arguments["environment"] = json!(crate::services::machine_gateway_service::environment(
             &declared_services
         )?);
-        let job = machines::issue_job(
+        job_plan
+            .as_ref()
+            .expect("exec plan")
+            .revalidate(&state.db, chat)
+            .await?;
+        job_plan
+            .as_ref()
+            .expect("exec plan")
+            .claim(&state.db)
+            .await?;
+        let job = machines::issue_job_with_id(
             &state.db,
             chat,
             &node,
             arguments["timeout_secs"].as_u64().unwrap_or(120),
             crate::services::machine_gateway_service::declared(&declared_services),
+            job_plan.as_ref().expect("exec plan").id.clone(),
         )
         .await?;
+        if let Err(error) = job_plan
+            .as_ref()
+            .expect("exec plan")
+            .publish(&state.db, &job)
+            .await
+        {
+            machines::finish(&state.db, &job.id).await?;
+            return Err(error);
+        }
+        arguments
+            .as_object_mut()
+            .expect("arguments")
+            .remove("job_service_use");
         arguments["job_id"] = json!(job.id);
         arguments["runtime_id"] = json!(job.runtime_id);
         arguments["conversation_id"] = json!(chat.conversation_id);
@@ -378,6 +436,9 @@ pub async fn call(
             crate::services::machine_desktop_service::agent_allowed(&state.db, &node.id).await
         };
         if let Err(error) = allowed {
+            if let Some(job) = &job {
+                machines::finish(&state.db, &job.id).await?;
+            }
             if let Some(authority) = &authority {
                 let _ = state
                     .db
@@ -433,6 +494,7 @@ pub async fn call(
         )
         .await?;
     }
+    let preparation = async {
     if let (Some(job), Some(authority)) = (&job, &authority) {
         state.db.collection::<mongodb::bson::Document>(crate::models::machine_job::COLLECTION_NAME)
             .update_one(mongodb::bson::doc!{"_id":&job.id},mongodb::bson::doc!{"$set":{"machine_authority":mongodb::bson::to_bson(authority).map_err(|_|AppError::MachineAuthorityStale)?}}).await?;
@@ -460,6 +522,39 @@ pub async fn call(
     );
     receipt.preview_enabled = receipts::preview_enabled(&state.db, chat).await?;
     receipts::record(&state.db, chat, &receipt).await?;
+        Ok::<_,AppError>(receipt)
+    }.await;
+    let mut receipt = match preparation {
+        Ok(receipt) => receipt,
+        Err(error) => {
+            if let Some(job) = &job {
+                machines::finish(&state.db, &job.id).await?;
+            }
+            if let Some(authority) = &authority {
+                let _ = state
+                    .db
+                    .collection::<mongodb::bson::Document>(crate::models::machine_access::LEASES)
+                    .delete_one(mongodb::bson::doc! {"_id":&authority.lease_id})
+                    .await;
+            }
+            return Err(error);
+        }
+    };
+    if let Some(plan) = &job_plan {
+        if let Err(error) = plan.revalidate(&state.db, chat).await {
+            if let Some(job) = &job {
+                machines::finish(&state.db, &job.id).await?;
+            }
+            if let Some(authority) = &authority {
+                let _ = state
+                    .db
+                    .collection::<mongodb::bson::Document>(crate::models::machine_access::LEASES)
+                    .delete_one(mongodb::bson::doc! {"_id":&authority.lease_id})
+                    .await;
+            }
+            return Err(error);
+        }
+    }
     let started = std::time::Instant::now();
     let mut result = match operation {
         Operation::SaveAttachment => {

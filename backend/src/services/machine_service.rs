@@ -198,6 +198,25 @@ pub async fn issue_job(
     timeout: u64,
     services: Vec<crate::models::machine_job::DeclaredService>,
 ) -> AppResult<MachineJob> {
+    issue_job_with_id(
+        db,
+        chat,
+        node,
+        timeout,
+        services,
+        uuid::Uuid::new_v4().to_string(),
+    )
+    .await
+}
+
+pub async fn issue_job_with_id(
+    db: &Database,
+    chat: &ChatAuthority,
+    node: &Node,
+    timeout: u64,
+    services: Vec<crate::models::machine_job::DeclaredService>,
+    id: String,
+) -> AppResult<MachineJob> {
     caller(chat)?;
     let now = Utc::now();
     let runtime_id = node
@@ -207,7 +226,7 @@ pub async fn issue_job(
         .filter(|id| uuid::Uuid::parse_str(id).is_ok())
         .ok_or_else(|| AppError::NodeOffline("Machine runtime has not connected".into()))?;
     let job = MachineJob {
-        id: uuid::Uuid::new_v4().to_string(),
+        id,
         user_id: chat.user_id.clone(),
         node_id: node.id.clone(),
         runtime_id,

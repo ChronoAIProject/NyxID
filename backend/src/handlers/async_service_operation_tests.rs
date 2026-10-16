@@ -1456,3 +1456,6 @@ async fn async_carriers_prove_report_targets_from_the_live_turn_snapshot_only() 
     assert_eq!(snapshot(&claimed), None);
     finish_live(&a, &claimed).await;
 }
+
+#[path = "async_service_policy_tests.rs"]
+mod service_policy;

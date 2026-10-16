@@ -36,7 +36,8 @@ for (const width of [1280, 390, 320]) {
     await trigger.click();
     const menu = page.getByRole("menu", { name: "Model and permissions" });
     await expect(menu).toBeVisible();
-    await expect(menu.getByRole("menuitem")).toHaveCount(3);
+    await expect(menu.getByRole("menuitem")).toHaveCount(4);
+    await expect(menu.getByRole("menuitem", { name: /Next message connection/ })).toBeVisible();
     await expect(
       menu.getByRole("menuitemcheckbox", { name: "Thinking mode" }),
     ).toHaveCount(0);
@@ -295,7 +296,8 @@ for (const width of [1280, 320]) {
     await expect(trigger).toHaveText("Auto");
     await trigger.click();
     const menu = page.getByRole("menu", { name: "Thinking and permissions" });
-    await expect(menu.getByRole("menuitem")).toHaveCount(1);
+    await expect(menu.getByRole("menuitem")).toHaveCount(2);
+    await expect(menu.getByRole("menuitem", { name: /Next message connection/ })).toBeVisible();
     await expect(
       menu.getByRole("menuitem", { name: /^Permissions/ }),
     ).toBeVisible();
@@ -399,6 +401,54 @@ test("external composer resizes its maximum while short drafts remain compact", 
   await expect.poll(async () => (await input.boundingBox())!.height).toBeLessThanOrEqual(250);
   await handle.dblclick();
   await expect.poll(async () => (await input.boundingBox())!.height).toBeLessThan(120);
+  await input.focus();
   await input.fill("");
+  await expect(input).toHaveText("");
   await expect(page.getByRole("button", { name: "Open voice call" })).toBeVisible();
 });
+
+for (const width of [1280, 320]) {
+  test(`exact organization connection picker sends and resets at ${width}px`, async ({ page }, testInfo) => {
+    await page.setViewportSize({ width, height: 900 });
+    await openAssistant(page, { faults: { nyxagentEnabled: true, modelControlsEnabled: true } });
+    const sent: string[] = [];
+    await page.exposeFunction("capturePolicyRequest", (body: string) => { sent.push(body); });
+    await page.evaluate(() => {
+      const original = globalThis.__nyxidAssistantHttpMock;
+      if (!original) throw new Error("Missing HTTP fixture");
+      const capture = (globalThis as typeof globalThis & {
+        capturePolicyRequest: (body: string) => Promise<void>;
+      }).capturePolicyRequest;
+      globalThis.__nyxidAssistantHttpMock = async (request) => {
+        if (request.init.method === "POST" && typeof request.init.body === "string") {
+          await capture(request.init.body);
+        }
+        return original(request);
+      };
+    });
+    const trigger = page.getByRole("button", { name: /Model and permissions:/ });
+    await trigger.click();
+    await page.getByRole("menuitem", { name: /Next message connection/ }).click();
+    await page.getByRole("menuitemradio", { name: /ChronoAI.*Shared GPT-4o/ }).click();
+    await expect(trigger).toHaveAccessibleName(/Connection: ChronoAI.*Shared GPT-4o/);
+    const bounds = (await trigger.boundingBox())!;
+    expect(bounds.x).toBeGreaterThanOrEqual(0);
+    expect(bounds.x + bounds.width).toBeLessThanOrEqual(width);
+    await page.screenshot({ path: testInfo.outputPath("connection-selected.png") });
+    await composerInput(page).fill("Use the selected organization account");
+    await page.getByRole("button", { name: "Send message", exact: true }).click();
+    await expect.poll(() => sent.some((body) => {
+      const request: { text?: string } = JSON.parse(body);
+      return request.text === "/service key-0008\nUse the selected organization account";
+    })).toBe(true);
+    await expect(page).toHaveURL(/c=nyxa-/);
+    await expect(trigger).not.toHaveAccessibleName(/Connection:/);
+    await expect(page.getByRole("button", { name: "Stop assistant turn" })).toHaveCount(0);
+    await composerInput(page).fill("Use the saved order next time");
+    await page.getByRole("button", { name: "Send message", exact: true }).click();
+    await expect.poll(() => sent.some((body) => {
+      const request: { text?: string } = JSON.parse(body);
+      return request.text === "Use the saved order next time";
+    })).toBe(true);
+  });
+}

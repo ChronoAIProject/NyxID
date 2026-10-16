@@ -2433,6 +2433,7 @@ async fn dispatch_tools_call(
                 | "nyx__oracle_pools"
                 | "nyx__oracle_result"
                 | "nyx__oracle_session"
+                | "nyx__ssh_exec" | "nyx__oracle_ask" | "nyx__oracle_attach" | "nyx__oracle_extract"
                 | "nyx__attachment_read" | "nyx__attachment_list" | "nyx__conversation_history"
                 | "nyx__machine_list"
                 | "nyx__saved_logins"
@@ -2796,7 +2797,11 @@ async fn dispatch_service_tool(
     let execution_arguments = webhook_execution_arguments(auth, &arguments);
     let prepared =
         match mcp_service::prepare_proxy_tool_call(service, endpoint, &execution_arguments) {
-            Ok(prepared) => prepared,
+            Ok(prepared) => prepared.with_acknowledgement(
+                auth.chat
+                    .as_ref()
+                    .and_then(|_| arguments["acknowledgement_id"].as_str()),
+            ),
             Err(e) => {
                 return tool_result(
                     request.id.clone(),
@@ -2868,6 +2873,24 @@ async fn dispatch_service_tool(
         }
     } else {
         None
+    };
+    let prepared = if matches!(
+        service.source,
+        mcp_service::McpToolSource::UserManaged { .. }
+    ) {
+        prepared
+            .with_automatic_receipt(
+                auto_allowed.as_ref().map(|(choice, _)| *choice),
+                tool_name,
+                &arguments,
+                auto_allowed
+                    .as_ref()
+                    .map(|(_, summary)| summary.as_str())
+                    .unwrap_or_default(),
+            )
+            .with_async_submission(async_watch.as_ref())
+    } else {
+        prepared
     };
     let exec_ctx = mcp_exec_context(auth);
     update_activity_label(
@@ -2950,7 +2973,13 @@ async fn dispatch_service_tool(
 
     let concurrency = response.concurrency.take();
     let (content, is_error, failure) = service_tool_content(state, auth, tool_name, response).await;
-    if !is_error && let (Some((auto, summary)), Some(chat)) = (auto_allowed, auth.chat.as_ref()) {
+    if !is_error
+        && !matches!(
+            service.source,
+            mcp_service::McpToolSource::UserManaged { .. }
+        )
+        && let (Some((auto, summary)), Some(chat)) = (auto_allowed, auth.chat.as_ref())
+    {
         crate::services::assistant_acknowledgement_service::record_auto_allowed(
             &state.db, chat, tool_name, &arguments, &auto, &summary,
         )
@@ -3441,6 +3470,9 @@ async fn webhook_service_gate(
     let Some(chat) = auth.chat.as_ref().filter(|chat| !chat.guest) else {
         return Ok(None);
     };
+    if service.source.is_user_service() {
+        return Ok(None);
+    }
     let metadata = service
         .durable_endpoint_metadata
         .get(&endpoint.endpoint_id)
@@ -3893,7 +3925,11 @@ async fn handle_meta_call_tool(
     let execution_arguments = webhook_execution_arguments(auth, &inner_args);
     let prepared =
         match mcp_service::prepare_proxy_tool_call(service, endpoint, &execution_arguments) {
-            Ok(prepared) => prepared,
+            Ok(prepared) => prepared.with_acknowledgement(
+                auth.chat
+                    .as_ref()
+                    .and_then(|_| inner_args["acknowledgement_id"].as_str()),
+            ),
             Err(e) => {
                 return tool_result(request_id, &format!("Invalid tool arguments: {e}"), true);
             }
@@ -3985,6 +4021,24 @@ async fn handle_meta_call_tool(
     } else {
         None
     };
+    let prepared = if matches!(
+        service.source,
+        mcp_service::McpToolSource::UserManaged { .. }
+    ) {
+        prepared
+            .with_automatic_receipt(
+                auto_allowed.as_ref().map(|(choice, _)| *choice),
+                tool_name,
+                &inner_args,
+                auto_allowed
+                    .as_ref()
+                    .map(|(_, summary)| summary.as_str())
+                    .unwrap_or_default(),
+            )
+            .with_async_submission(async_watch.as_ref())
+    } else {
+        prepared
+    };
     let exec_ctx = mcp_exec_context(auth);
     update_activity_label(
         state,
@@ -4063,7 +4117,13 @@ async fn handle_meta_call_tool(
 
     let concurrency = response.concurrency.take();
     let (content, is_error, failure) = service_tool_content(state, auth, tool_name, response).await;
-    if !is_error && let (Some((auto, summary)), Some(chat)) = (auto_allowed, auth.chat.as_ref()) {
+    if !is_error
+        && !matches!(
+            service.source,
+            mcp_service::McpToolSource::UserManaged { .. }
+        )
+        && let (Some((auto, summary)), Some(chat)) = (auto_allowed, auth.chat.as_ref())
+    {
         crate::services::assistant_acknowledgement_service::record_auto_allowed(
             &state.db,
             chat,
@@ -4955,6 +5015,29 @@ async fn handle_oracle_ask(
     let result = async {
         let pool = oracle_pool_service::get_pool(&state.db, pool_ref).await?;
         oracle_pool_service::ensure_can_submit(&state.db, &auth.user_id, &pool).await?;
+        let admission = match crate::services::assistant_native_execution::resource(
+            &state.db,
+            auth.chat.as_ref(),
+            "oracle_pools",
+            &pool.id,
+            &pool.user_id,
+            "nyx__oracle_ask",
+            arguments,
+            crate::services::assistant_acknowledgement_service::ActionFacts {
+                class: crate::services::assistant_acknowledgement_service::OwnerActionClass::Change,
+                read_only: false,
+                destructive: true,
+            },
+            "Use the exact approved Oracle operation",
+        )
+        .await?
+        {
+            Ok(value) => value,
+            Err(refusal) => return Err(crate::errors::AppError::Conflict(refusal.to_string())),
+        };
+        if let Some(admission) = &admission {
+            admission.revalidate(&state.db).await?;
+        }
         let outcome = oracle_task_service::submit_task(
             &state.db,
             &pool,
@@ -4968,6 +5051,9 @@ async fn handle_oracle_ask(
             },
         )
         .await?;
+        if let Some(admission) = &admission {
+            admission.receipt(&state.db).await;
+        }
         poll_oracle_task(&state.db, &auth.user_id, &outcome.task.id, wait_secs).await
     }
     .await;
@@ -5034,14 +5120,41 @@ async fn handle_oracle_attach(
     let result = async {
         let pool = oracle_pool_service::get_pool(&state.db, pool_ref).await?;
         oracle_pool_service::ensure_can_submit(&state.db, &auth.user_id, &pool).await?;
-        oracle_task_service::attach_conversation(
+        let admission = match crate::services::assistant_native_execution::resource(
+            &state.db,
+            auth.chat.as_ref(),
+            "oracle_pools",
+            &pool.id,
+            &pool.user_id,
+            "nyx__oracle_attach",
+            arguments,
+            crate::services::assistant_acknowledgement_service::ActionFacts {
+                class: crate::services::assistant_acknowledgement_service::OwnerActionClass::Change,
+                read_only: false,
+                destructive: true,
+            },
+            "Use the exact approved Oracle operation",
+        )
+        .await?
+        {
+            Ok(value) => value,
+            Err(refusal) => return Err(crate::errors::AppError::Conflict(refusal.to_string())),
+        };
+        if let Some(admission) = &admission {
+            admission.revalidate(&state.db).await?;
+        }
+        let outcome = oracle_task_service::attach_conversation(
             &state.db,
             &pool,
             &oracle_submitter(auth),
             chatgpt_url,
             None,
         )
-        .await
+        .await?;
+        if let Some(admission) = &admission {
+            admission.receipt(&state.db).await;
+        }
+        Ok(outcome)
     }
     .await;
 
@@ -5076,6 +5189,29 @@ async fn handle_oracle_extract(
     let result = async {
         let pool = oracle_pool_service::get_pool(&state.db, pool_ref).await?;
         oracle_pool_service::ensure_can_submit(&state.db, &auth.user_id, &pool).await?;
+        let admission = match crate::services::assistant_native_execution::resource(
+            &state.db,
+            auth.chat.as_ref(),
+            "oracle_pools",
+            &pool.id,
+            &pool.user_id,
+            "nyx__oracle_extract",
+            arguments,
+            crate::services::assistant_acknowledgement_service::ActionFacts {
+                class: crate::services::assistant_acknowledgement_service::OwnerActionClass::Change,
+                read_only: false,
+                destructive: true,
+            },
+            "Use the exact approved Oracle operation",
+        )
+        .await?
+        {
+            Ok(value) => value,
+            Err(refusal) => return Err(crate::errors::AppError::Conflict(refusal.to_string())),
+        };
+        if let Some(admission) = &admission {
+            admission.revalidate(&state.db).await?;
+        }
         let task = oracle_task_service::extract_url(
             &state.db,
             &pool,
@@ -5084,6 +5220,9 @@ async fn handle_oracle_extract(
             optional_string_arg(arguments, "model"),
         )
         .await?;
+        if let Some(admission) = &admission {
+            admission.receipt(&state.db).await;
+        }
         poll_oracle_task(&state.db, &auth.user_id, &task.id, wait_secs).await
     }
     .await;
@@ -5174,18 +5313,46 @@ async fn handle_mcp_ssh_exec(
         .unwrap_or(30)
         .min(300) as u32;
 
-    // Resolve service by slug or ID
-    let service_id =
-        match resolve_ssh_service_id(&state.db, auth.user_id.as_str(), service_ref).await {
+    let connection = if auth.chat.is_some() {
+        match crate::services::assistant_native_execution::ssh_connection(
+            state,
+            &auth.user_id,
+            service_ref,
+        )
+        .await
+        {
+            Ok(row) => row,
+            Err(error) => return tool_result(request_id, &error.to_string(), true),
+        }
+    } else {
+        let id = match resolve_ssh_service_id(&state.db, &auth.user_id, service_ref).await {
             Ok(id) => id,
-            Err(msg) => return tool_result(request_id, &msg, true),
+            Err(error) => return tool_result(request_id, &error, true),
         };
-
+        match user_service_service::find_by_catalog_service_id(&state.db, &auth.user_id, &id).await
+        {
+            Ok(Some(row)) => row,
+            _ => return tool_result(request_id, "SSH service unavailable", true),
+        }
+    };
+    let Some(service_id) = connection.catalog_service_id.clone() else {
+        return tool_result(request_id, "SSH catalog configuration required", true);
+    };
     // Get SSH config
     let ssh_svc = match ssh_service::get_ssh_service(&state.db, &service_id).await {
         Ok(svc) => svc,
         Err(e) => return tool_result(request_id, &format!("SSH service error: {e}"), true),
     };
+
+    if auth.chat.is_some()
+        && connection.ssh_auth_mode != crate::models::ssh_auth_mode::SshAuthMode::Cert
+    {
+        return tool_result(
+            request_id,
+            "This MCP SSH adapter requires an exact certificate-mode connection; use the SSH exec API for node-key mode",
+            true,
+        );
+    }
 
     if !ssh_svc.certificate_auth_enabled {
         return tool_result(
@@ -5275,6 +5442,17 @@ async fn handle_mcp_ssh_exec(
         timeout_secs,
     };
 
+    if let Err(error) = super::ssh_exec::check_dangerous_command(command) {
+        return tool_result(request_id, &error.to_string(), true);
+    }
+    let decision=match crate::services::assistant_native_execution::ssh_gate(state,auth.chat.as_ref(),&connection,&ssh_svc,
+        &serde_json::json!({"command":command,"principal":resolved_principal,"timeout_secs":timeout_secs,
+            "acknowledgement_id":arguments.get("acknowledgement_id")})).await {
+        Ok(value)=>value,Err(error)=>return tool_result(request_id,&error.to_string(),true),
+    };
+    if let Some(refusal) = decision.refusal {
+        return tool_result(request_id, &refusal.to_string(), true);
+    }
     let concurrency = match crate::services::service_concurrency_service::acquire_policy(
         &state.db,
         service.concurrency_policy.as_ref(),
@@ -5293,6 +5471,8 @@ async fn handle_mcp_ssh_exec(
         &service_id,
         &ssh_svc,
         &body,
+        &connection,
+        decision.admission.as_ref(),
         billing_egress_permit,
     ));
     let result = match &concurrency {
@@ -5302,6 +5482,13 @@ async fn handle_mcp_ssh_exec(
 
     let response = match result {
         Ok(response) => {
+            if response.exit_code == 0 && !response.timed_out && approval_auto.is_none() {
+                if let (Some(chat), Some(admission)) =
+                    (auth.chat.as_ref(), decision.admission.as_ref())
+                {
+                    admission.receipt(&state.db, chat, decision.automatic).await;
+                }
+            }
             let response_json = serde_json::json!({
                 "exit_code": response.exit_code,
                 "stdout": response.stdout,
@@ -5482,12 +5669,14 @@ async fn execute_ssh_command_internal(
     service_id: &str,
     ssh_svc: &crate::models::downstream_service::SshServiceConfig,
     body: &super::ssh_exec::SshExecRequest,
+    connection: &crate::models::user_service::UserService,
+    admission: Option<&crate::services::assistant_service_execution::Admission>,
     billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
 ) -> Result<super::ssh_exec::SshExecResponse, crate::errors::AppError> {
     use crate::errors::AppError;
     use crate::models::service_billing::{BillingMetric, PlatformUsage};
     use crate::models::usage_meter::CredentialClass;
-    use crate::services::{node_routing_service, node_service};
+    use crate::services::node_service;
 
     let user_id = auth.user_id.as_str();
 
@@ -5509,27 +5698,19 @@ async fn execute_ssh_command_internal(
     super::ssh_exec::check_dangerous_command(command)?;
 
     // Require a node agent for SSH execution
-    let node_route = node_routing_service::resolve_node_route(
-        &state.db,
-        user_id,
-        service_id,
-        &state.node_ws_manager,
-    )
-    .await
-    .ok()
-    .flatten()
-    .ok_or_else(|| {
-        AppError::BadRequest(
-            "No node agent is bound to this SSH service. \
-             Deploy a NyxID node agent and bind it to this service to execute commands."
-                .to_string(),
+    let node_route = if auth.chat.is_some() {
+        crate::services::assistant_native_execution::ssh_route(state, connection).await?
+    } else {
+        crate::services::node_routing_service::resolve_node_route(
+            &state.db,
+            user_id,
+            service_id,
+            &state.node_ws_manager,
         )
-    })?;
-
-    let user_service =
-        user_service_service::find_by_catalog_service_id(&state.db, user_id, service_id)
-            .await?
-            .ok_or_else(|| AppError::NotFound("SSH service not found".to_string()))?;
+        .await?
+        .ok_or_else(|| AppError::NodeOffline("SSH has no credential node".into()))?
+    };
+    let user_service = connection.clone();
     let credential_class = CredentialClass::NodeManaged;
     let billing_owner = state
         .billing
@@ -5582,6 +5763,35 @@ async fn execute_ssh_command_internal(
     let mut last_error = None;
 
     for node_id in &all_node_ids {
+        if let Some(chat) = auth.chat.as_ref() {
+            if !crate::services::node_routing_service::is_node_id_dispatchable(
+                &state.db,
+                node_id,
+                &state.node_ws_manager,
+            )
+            .await?
+            {
+                continue;
+            }
+            match crate::services::assistant_native_execution::verify_ssh_node(
+                &state,
+                chat,
+                &connection.id,
+                node_id,
+            )
+            .await
+            {
+                Ok(()) => {}
+                Err(AppError::ApiKeyScopeForbidden(_)) => continue,
+                Err(error) => {
+                    state
+                        .billing
+                        .fail(&metered, "assistant_authority_changed")
+                        .await?;
+                    return Err(error);
+                }
+            }
+        }
         let signing_secret = if state.config.node_hmac_signing_enabled {
             match node_service::get_node_signing_secret(
                 &state.db,
@@ -5607,6 +5817,28 @@ async fn execute_ssh_command_internal(
         };
 
         state.billing.mark_forwarded(&metered).await?;
+        if let Some(admission) = admission {
+            let validation = async {
+                admission
+                    .revalidate(&state.db, &connection.id, None)
+                    .await?;
+                crate::services::assistant_native_execution::verify_ssh_node(
+                    state,
+                    auth.chat.as_ref().ok_or(AppError::AssistantTurnRequired)?,
+                    &connection.id,
+                    node_id,
+                )
+                .await
+            }
+            .await;
+            if let Err(error) = validation {
+                state
+                    .billing
+                    .reject_before_send(&metered, "assistant_authority_changed", false)
+                    .await?;
+                return Err(error);
+            }
+        }
         match session_guard
             .run_until_lost(state.node_dispatch.exec_ssh_command(
                 node_id,
@@ -5674,6 +5906,10 @@ async fn execute_ssh_command_internal(
             }
             Err(error @ AppError::RateLimited) => return Err(error),
             Err(error) => {
+                if auth.chat.is_some() {
+                    state.billing.fail(&metered, "ssh_outcome_unknown").await?;
+                    return Err(error);
+                }
                 tracing::warn!(
                     service_id = %service_id,
                     node_id = %node_id,

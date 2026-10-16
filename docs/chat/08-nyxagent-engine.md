@@ -250,9 +250,9 @@ client cannot widen access by submitting a different mode. The three modes are:
   machine/saved-login, service approval, pairing/update and skill-publication
   confirmations. Successful bypassed actions leave automatic allowance receipts.
 - **Auto** (`nyxmode`) proceeds automatically for ordinary actions and asks before
-  sensitive or destructive actions.
+  sensitive or destructive actions, and before any organization connection use (including reads).
 - **Ask every time** (`ask_every_time`) asks before every action that changes something; reads do
-  not prompt.
+  not prompt unless they use an organization connection.
 
 Confirmation cards identify the action and requested scope, the risk class
 (`change`, `sensitive`, or `destructive`), the effective mode, and why the card
@@ -1532,8 +1532,12 @@ or lease expiry even after socket loss. Legacy assignments remain visibly shared
 context IDs in this phase do not isolate files or browser sessions.
 
 Chat-key discovery rows carry dense authorized `preference_rank` and follow the
-owner's saved same-catalog connection order by refilling only that group's occupied slots within equal relevance buckets; search also reports `executable`. Execution targets and approval
-authority are unchanged. Guest connected search/list includes only granted
+owner's saved same-catalog connection order by refilling only that group's occupied slots within equal relevance buckets; search also reports `executable`.
+NyxBot enforces eligible personal-first order at the concrete execution boundary,
+including raw model callbacks. Exact names stay exact; one-turn owner selection
+chooses a target and does not waive org consent. See
+[service execution](../NYXBOT_SERVICE_EXECUTION.md) for raw model turn grants,
+pool pins, native execution and machine job grants. Guest connected search/list includes only granted
 UserManaged and Platform connections and drops Internal catalog entries before
 ranking. Native `nyxid` virtual tools remain subject to their separate guest
 authorization; including that virtual catalog does not grant execution access.

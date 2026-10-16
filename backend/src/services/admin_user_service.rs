@@ -569,6 +569,7 @@ async fn delete_user_cascade_internal(
         crate::models::assistant_message::COLLECTION_NAME,
         crate::models::assistant_message_feedback::COLLECTION_NAME,
         crate::models::assistant_checkpoint::COLLECTION_NAME,
+        super::assistant_service_execution::COLLECTION,
         crate::models::nyxbot_channel::COLLECTION_NAME,
         crate::models::nyxbot_channel::THREADS_COLLECTION_NAME,
         crate::models::nyxbot_channel::EVENTS_COLLECTION_NAME,

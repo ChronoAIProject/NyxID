@@ -97,7 +97,14 @@ async fn call(
     }
     let id = watch.operation_id.as_deref().ok_or_else(denied)?;
     let args = serde_json::json!({watch.contract.id_parameter.clone():id});
-    let prepared = mcp_service::prepare_proxy_tool_call(service, endpoint, &args)?;
+    let prepared = mcp_service::prepare_proxy_tool_call(service, endpoint, &args)?
+        .with_async_continuation(
+            crate::services::assistant_service_execution::AsyncContinuation::new(
+                watch,
+                endpoint,
+                state.node_ws_manager.clone(),
+            )?,
+        );
     prepared.authorize_agent_operations(&auth.assistant_operation_scopes, service, endpoint)?;
     authorize_mcp_tool_operation(
         state,

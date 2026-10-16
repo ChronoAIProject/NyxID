@@ -1242,7 +1242,7 @@ pub enum ServicePreferenceCommands {
         #[command(flatten)]
         auth: AuthArgs,
     },
-    /// Set this catalog group's discovery order with IDs or slugs
+    /// Set this catalog group's agent order; NyxBot enforces personal-first execution
     Set {
         #[arg(long)]
         group: String,
@@ -1280,7 +1280,7 @@ pub enum ServicePreferenceCommands {
 // not load-bearing — accept the lint here.
 #[allow(clippy::large_enum_variant)]
 pub enum ServiceCommands {
-    /// Set agent discovery order within a service's connections
+    /// Set per-service agent order (enforced for NyxBot, advisory for other clients)
     Preference {
         #[command(subcommand)]
         command: ServicePreferenceCommands,

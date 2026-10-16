@@ -3530,7 +3530,36 @@ pub fn build_proxy_args(
     Ok((method, path, query, parameter_headers, body))
 }
 
+/// Server-selected receipt; never parsed from tool arguments.
+struct AutomaticReceipt {
+    choice: super::assistant_acknowledgement_service::AutoAllowed,
+    tool: String,
+    arguments: serde_json::Value,
+    summary: String,
+}
+impl AutomaticReceipt {
+    async fn record(
+        &self,
+        db: &mongodb::Database,
+        chat: &super::assistant_acknowledgement_service::ChatAuthority,
+    ) {
+        super::assistant_acknowledgement_service::record_auto_allowed(
+            db,
+            chat,
+            &self.tool,
+            &self.arguments,
+            &self.choice,
+            &self.summary,
+        )
+        .await;
+    }
+}
+
 pub struct PreparedProxyCall {
+    automatic_receipt: Option<AutomaticReceipt>,
+    async_submission: Option<String>,
+    async_continuation: Option<super::assistant_service_execution::AsyncContinuation>,
+    acknowledgement_id: Option<String>,
     endpoint_target: Option<Option<String>>,
     method: reqwest::Method,
     path: String,
@@ -3544,6 +3573,40 @@ pub struct PreparedProxyCall {
 }
 
 impl PreparedProxyCall {
+    pub(crate) fn with_automatic_receipt(
+        mut self,
+        choice: Option<super::assistant_acknowledgement_service::AutoAllowed>,
+        tool: &str,
+        arguments: &serde_json::Value,
+        summary: &str,
+    ) -> Self {
+        self.automatic_receipt = choice.map(|choice| AutomaticReceipt {
+            choice,
+            tool: tool.into(),
+            arguments: arguments.clone(),
+            summary: summary.into(),
+        });
+        self
+    }
+    pub(crate) fn with_async_submission(
+        mut self,
+        watch: Option<&crate::models::async_service_operation::AsyncServiceOperation>,
+    ) -> Self {
+        self.async_submission = watch.map(|w| w.id.clone());
+        self
+    }
+    pub(crate) fn with_async_continuation(
+        mut self,
+        authority: super::assistant_service_execution::AsyncContinuation,
+    ) -> Self {
+        self.async_continuation = Some(authority);
+        self
+    }
+    pub(crate) fn with_acknowledgement(mut self, id: Option<&str>) -> Self {
+        self.acknowledgement_id = id.map(str::to_owned);
+        self
+    }
+
     pub(crate) fn resolve_destination(
         &self,
         target: &mut proxy_service::ProxyTarget,
@@ -3768,6 +3831,10 @@ pub(crate) fn http_carries_method_override(
         return true;
     };
     PreparedProxyCall {
+        automatic_receipt: None,
+        async_submission: None,
+        async_continuation: None,
+        acknowledgement_id: None,
         endpoint_target: None,
         method,
         path: String::new(),
@@ -3855,6 +3922,10 @@ pub fn prepare_proxy_tool_call(
     };
 
     Ok(PreparedProxyCall {
+        automatic_receipt: None,
+        async_submission: None,
+        async_continuation: None,
+        acknowledgement_id: None,
         endpoint_target: (!is_generic_proxy_endpoint
             && (endpoint.target_id.is_some()
                 || producer_operation_generation(service, endpoint).is_some()))
@@ -4946,7 +5017,114 @@ async fn execute_tool_resolved_inner(
         &target,
     );
     prepared.validate_destination(&target)?;
+    let assistant_chat =
+        super::assistant_acknowledgement_service::for_key(db, user_id, exec_ctx.api_key_id).await?;
+    let mut assistant_admission = None;
+    let mut assistant_auto = None;
+    if let Some(chat) = assistant_chat.as_ref() {
+        if let McpToolSource::UserManaged {
+            user_service_id,
+            effective_owner_id,
+            ..
+        } = &service.source
+        {
+            super::assistant_service_execution::verify_resolved(
+                db,
+                encryption_keys,
+                &chat,
+                user_service_id,
+                &target,
+                prepared.method.as_str(),
+                &prepared.path,
+            )
+            .await?;
+            let mut operation = super::assistant_service_execution::http_operation(
+                &target,
+                prepared.method.as_str(),
+                &prepared.path,
+                prepared.query.as_deref(),
+                prepared.body.as_deref().unwrap_or_default(),
+            );
+            super::assistant_service_execution::bind_headers(
+                &mut operation,
+                &prepared.parameter_headers,
+            );
+            operation["endpoint_id"] = serde_json::json!(endpoint.endpoint_id);
+            operation["endpoint_contract"] = serde_json::json!(endpoint_contract_digest(endpoint));
+            if endpoint.async_operation.is_some() {
+                operation["async_contract"] = serde_json::json!(
+                    super::assistant_service_execution::async_contract_binding(service, endpoint)?
+                );
+            }
+            let metadata = service
+                .durable_endpoint_metadata
+                .get(&endpoint.endpoint_id)
+                .copied()
+                .unwrap_or_default();
+            let effects = operation_effects(prepared.method(), metadata);
+            let read = effects.reads && !prepared.carries_method_override();
+            let destructive = effects.destructive || prepared.carries_method_override();
+            let decision = if let Some(authority) = prepared.async_continuation.as_ref() {
+                authority
+                    .admit(db, chat, user_service_id, &target, &operation)
+                    .await?
+            } else {
+                super::assistant_service_execution::check(
+                    db,
+                    node_ws_manager,
+                    &chat,
+                    user_service_id,
+                    effective_owner_id,
+                    &operation,
+                    super::assistant_acknowledgement_service::ActionFacts::of(
+                        super::assistant_acknowledgement_service::service_action_class(
+                            read,
+                            destructive,
+                        ),
+                    ),
+                    prepared.acknowledgement_id.as_deref(),
+                    &format!(
+                        "{} {} on {}",
+                        prepared.method(),
+                        endpoint.name,
+                        service.service_slug
+                    ),
+                    false,
+                    Some(&target),
+                    false,
+                    Some((
+                        prepared.body.as_deref().unwrap_or_default(),
+                        Some("application/json"),
+                    )),
+                )
+                .await?
+            };
+            assistant_auto = decision.automatic;
+            if let Some(refusal) = decision.refusal {
+                return Ok(McpToolExecutionOutcome::Response(ToolResponse {
+                    concurrency: None,
+                    status: 409,
+                    text: refusal.to_string(),
+                    media: None,
+                }));
+            }
+            if let Some(admission) = decision.admission {
+                if let Some(watch) = prepared.async_submission.as_deref() {
+                    admission.bind_async_submission(db, watch).await?;
+                }
+                admission
+                    .revalidate(db, user_service_id, Some(&target))
+                    .await?;
+                assistant_admission = Some(admission);
+            }
+        }
+    }
+
     let PreparedProxyCall {
+        automatic_receipt,
+        async_submission: _,
+        async_continuation: _,
+        acknowledgement_id: _,
         endpoint_target: _,
         method,
         path,
@@ -5244,6 +5422,8 @@ async fn execute_tool_resolved_inner(
             .collect();
 
         let mut last_error: Option<AppError> = None;
+        let mut node_failure_evidence =
+            super::assistant_service_execution::NodeFailureEvidence::default();
         for nid in &all_node_ids {
             let mut attempt = node_request.clone();
             attempt.request_id = uuid::Uuid::new_v4().to_string();
@@ -5252,6 +5432,8 @@ async fn execute_tool_resolved_inner(
                 match node_service::get_node_signing_secret(db, encryption_keys, nid).await {
                     Ok(secret) => Some(secret),
                     Err(e @ AppError::NodeNotFound(_) | e @ AppError::NodeOffline(_)) => {
+                        // Signing preparation failures are not credential outages.
+                        node_failure_evidence.disqualify();
                         last_error = Some(e);
                         continue;
                     }
@@ -5267,7 +5449,54 @@ async fn execute_tool_resolved_inner(
                     .await?;
             }
             destination_audit.dispatch();
+            if let (Some(chat), Some(admission)) =
+                (assistant_chat.as_ref(), assistant_admission.as_ref())
+            {
+                let validation = async {
+                    super::assistant_service_execution::verify_resolved(
+                        db,
+                        encryption_keys,
+                        chat,
+                        &service.service_id,
+                        &target,
+                        method.as_str(),
+                        &path,
+                    )
+                    .await?;
+                    admission
+                        .revalidate(db, &service.service_id, Some(&target))
+                        .await?;
+                    super::assistant_service_execution::verify_node_route(
+                        db,
+                        chat,
+                        &service.service_id,
+                        node_route.as_ref(),
+                        &target,
+                    )
+                    .await
+                }
+                .await;
+                if let Err(error) = validation {
+                    billing
+                        .reject_before_send(&metered, "assistant_authority_changed", false)
+                        .await?;
+                    return Err(error);
+                }
+            }
             billing.mark_forwarded(&metered).await?;
+            if let Some(admission) = assistant_admission.as_ref() {
+                if let Err(error) = admission
+                    .http_egress(db, encryption_keys, &target, method.as_str(), &path)
+                    .routed(node_route.as_ref())
+                    .revalidate()
+                    .await
+                {
+                    billing
+                        .reject_before_send(&metered, "assistant_authority_changed", false)
+                        .await?;
+                    return Err(error);
+                }
+            }
             match node_ws_manager
                 .send_proxy_request_classified(
                     nid,
@@ -5294,6 +5523,17 @@ async fn execute_tool_resolved_inner(
                         .await?;
                     destination_audit.complete(resp.status);
                     request_audit.response(resp.status);
+                    if (200..300).contains(&resp.status) {
+                        if let (Some(chat), Some(admission)) =
+                            (assistant_chat.as_ref(), assistant_admission.as_ref())
+                        {
+                            if let Some(receipt) = &automatic_receipt {
+                                receipt.record(db, chat).await;
+                            } else {
+                                admission.receipt(db, chat, assistant_auto).await;
+                            }
+                        }
+                    }
                     return Ok(McpToolExecutionOutcome::Response(tool_response(
                         resp.status,
                         header_value(&resp.headers, "content-type"),
@@ -5330,6 +5570,17 @@ async fn execute_tool_resolved_inner(
                         .await?;
                     destination_audit.complete(status);
                     request_audit.response(status);
+                    if (200..300).contains(&status) {
+                        if let (Some(chat), Some(admission)) =
+                            (assistant_chat.as_ref(), assistant_admission.as_ref())
+                        {
+                            if let Some(receipt) = &automatic_receipt {
+                                receipt.record(db, chat).await;
+                            } else {
+                                admission.receipt(db, chat, assistant_auto).await;
+                            }
+                        }
+                    }
                     return Ok(McpToolExecutionOutcome::Response(tool_response(
                         status,
                         header_value(&headers, "content-type"),
@@ -5344,6 +5595,7 @@ async fn execute_tool_resolved_inner(
                     }
                     NodeDispatchFailureDisposition::TryFallback => {
                         destination_audit.denied();
+                        node_failure_evidence.record(&failure.error, failure.dispatched);
                         last_error = Some(failure.error);
                         continue;
                     }
@@ -5361,6 +5613,13 @@ async fn execute_tool_resolved_inner(
         // holds a decrypt-able credential. node_managed keys and node-only
         // platform services have no server credential.
         if !has_server_credential {
+            if let (Some(chat), Some(admission)) =
+                (assistant_chat.as_ref(), assistant_admission.as_ref())
+            {
+                admission
+                    .exhausted_node_routes(db, chat, &node_failure_evidence)
+                    .await?;
+            }
             return Err(last_error
                 .unwrap_or_else(|| AppError::NodeOffline("All node routes failed".to_string())));
         }
@@ -5371,8 +5630,45 @@ async fn execute_tool_resolved_inner(
     // Direct proxy (no node, or node offline with server credential fallback)
     // -------------------------------------------------------------------
     destination_audit.dispatch();
+    if let (Some(chat), Some(admission)) = (assistant_chat.as_ref(), assistant_admission.as_ref()) {
+        let validation = async {
+            super::assistant_service_execution::verify_resolved(
+                db,
+                encryption_keys,
+                chat,
+                &service.service_id,
+                &target,
+                method.as_str(),
+                &path,
+            )
+            .await?;
+            admission
+                .revalidate(db, &service.service_id, Some(&target))
+                .await?;
+            super::assistant_service_execution::verify_node_route(
+                db,
+                chat,
+                &service.service_id,
+                node_route.as_ref(),
+                &target,
+            )
+            .await
+        }
+        .await;
+        if let Err(error) = validation {
+            billing
+                .reject_before_send(&metered, "assistant_authority_changed", false)
+                .await?;
+            return Err(error);
+        }
+    }
     billing.mark_forwarded(&metered).await?;
-    let response = match proxy_service::forward_request_with_extra_outbound_headers(
+    let egress_guard = assistant_admission.as_ref().map(|admission| {
+        admission
+            .http_egress(db, encryption_keys, &target, method.as_str(), &path)
+            .routed(node_route.as_ref())
+    });
+    let response = match proxy_service::forward_request_with_egress_guard(
         http_client,
         &target,
         method,
@@ -5387,10 +5683,17 @@ async fn execute_tool_resolved_inner(
         cloud_response_cache,
         server_owned_headers,
         billing_egress_permit,
+        egress_guard.as_ref(),
     )
     .await
     {
         Ok(response) => response,
+        Err(proxy_service::ForwardRequestError::PreDispatchRejected(error)) => {
+            billing
+                .reject_before_send(&metered, "assistant_authority_changed", false)
+                .await?;
+            return Err(error);
+        }
         Err(proxy_service::ForwardRequestError::Application(error)) => return Err(error),
         Err(error @ proxy_service::ForwardRequestError::OutcomeUnknown) => {
             return Ok(McpToolExecutionOutcome::ProviderOutcomeUnknown(
@@ -5400,6 +5703,15 @@ async fn execute_tool_resolved_inner(
         Err(proxy_service::ForwardRequestError::Transport(error))
             if direct_transport_failure_is_pre_dispatch(&error) =>
         {
+            if error.is_connect() {
+                if let (Some(chat), Some(admission)) =
+                    (assistant_chat.as_ref(), assistant_admission.as_ref())
+                {
+                    admission
+                        .record_unavailable(db, chat, "pre_dispatch")
+                        .await?;
+                }
+            }
             tracing::warn!(
                 connect = error.is_connect(),
                 builder = error.is_builder(),
@@ -5424,6 +5736,9 @@ async fn execute_tool_resolved_inner(
     };
 
     let status = response.status().as_u16();
+    if let (Some(chat), Some(admission)) = (assistant_chat.as_ref(), assistant_admission.as_ref()) {
+        admission.response(db, chat, status).await?;
+    }
     // Images are read as bytes; everything else keeps charset-aware decoding.
     let image_type = tool_image_type(
         response
@@ -5486,6 +5801,17 @@ async fn execute_tool_resolved_inner(
 
     destination_audit.complete(status);
     request_audit.response(status);
+    if (200..300).contains(&status) {
+        if let (Some(chat), Some(admission)) =
+            (assistant_chat.as_ref(), assistant_admission.as_ref())
+        {
+            if let Some(receipt) = &automatic_receipt {
+                receipt.record(db, chat).await;
+            } else {
+                admission.receipt(db, chat, assistant_auto).await;
+            }
+        }
+    }
     Ok(McpToolExecutionOutcome::Response(ToolResponse {
         concurrency: None,
         status,

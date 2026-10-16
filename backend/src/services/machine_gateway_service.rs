@@ -53,6 +53,8 @@ fn catalog_projection() -> mongodb::bson::Document {
 pub struct Ingress {
     pub declared_id: String,
     pub git: Option<GitHttp>,
+    /// Server-issued job identity, never populated from HTTP headers.
+    pub(crate) job_id: Option<String>,
 }
 
 impl Ingress {

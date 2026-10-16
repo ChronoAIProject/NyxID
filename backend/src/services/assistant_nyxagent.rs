@@ -2493,6 +2493,10 @@ pub(crate) async fn begin_owner_turn_in_session(
         _ => {}
     }
     row.updated_at = now;
+    Box::pin(super::assistant_service_execution::bind_owner_selection(
+        db, session, &row, &start, &text,
+    ))
+    .await?;
     if voice_request.is_none() || hidden_voice {
         row.message_count += 1;
     }
@@ -4554,6 +4558,7 @@ pub async fn delete(
                         crate::models::assistant_voice::REQUESTS,
                         crate::models::assistant_voice_session::COLLECTION_NAME,
                         crate::models::assistant_acknowledgement::COLLECTION_NAME,
+                        super::assistant_service_execution::COLLECTION,
                         crate::models::assistant_attachment::COLLECTION_NAME,
                         crate::models::nyxbot_image_delivery::COLLECTION_NAME,
                         crate::models::nyxbot_image_delivery::LEGACY_COLLECTION_NAME,

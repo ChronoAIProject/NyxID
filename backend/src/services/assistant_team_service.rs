@@ -1834,6 +1834,10 @@ pub async fn destroy(db: &Database, owner: &str, agent_id: &str) -> AppResult<As
                     .delete_many(doc! {"user_id": &row.user_id, "conversation_id": &row.id})
                     .session(&mut *session)
                     .await?;
+                    db.collection::<bson::Document>(super::assistant_service_execution::COLLECTION)
+                        .delete_many(doc! {"user_id":&row.user_id,"conversation_id":&row.id})
+                        .session(&mut *session)
+                        .await?;
                     db.collection::<bson::Document>(ACKS)
                         .update_many(
                             doc! {"user_id": &row.user_id, "conversation_id": &row.id,

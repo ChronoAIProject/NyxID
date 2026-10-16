@@ -553,6 +553,7 @@ async fn authorize_and_execute(
         .insert(crate::services::machine_gateway_service::Ingress {
             declared_id: selected.id.clone(),
             git,
+            job_id: Some(job.id.clone()),
         });
     let path_only = path.split('?').next().unwrap_or_default();
     super::proxy::proxy_request_by_slug_inner(
@@ -588,3 +589,7 @@ async fn verify(
         .verify(request, node_id, &secret, chrono::Utc::now().timestamp())
         .map_err(|_| AppError::Forbidden("Machine service signature refused".into()))
 }
+
+#[cfg(test)]
+#[path = "machine_service_policy_tests.rs"]
+mod service_policy_tests;

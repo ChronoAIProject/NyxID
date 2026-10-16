@@ -170,6 +170,8 @@ pub struct BillingService {
     lago: Option<Arc<dyn LagoApi>>,
     #[cfg(test)]
     pub(crate) settlement_gate: Option<Arc<SettlementGate>>,
+    #[cfg(test)]
+    pub(crate) before_send_gate: Option<Arc<SettlementGate>>,
 }
 
 #[cfg(test)]
@@ -218,6 +220,8 @@ impl BillingService {
             lago,
             #[cfg(test)]
             settlement_gate: None,
+            #[cfg(test)]
+            before_send_gate: None,
         }
     }
 
@@ -233,6 +237,7 @@ impl BillingService {
             owner_resolver: BillingOwnerResolver::new(db),
             lago: Some(lago),
             settlement_gate: None,
+            before_send_gate: None,
         }
     }
 
@@ -620,7 +625,12 @@ impl BillingService {
     }
 
     pub async fn mark_forwarded(&self, metered: &MeteredProxyContext) -> AppResult<()> {
-        meter::mark_forwarded(&self.db, metered).await
+        meter::mark_forwarded(&self.db, metered).await?;
+        #[cfg(test)]
+        if let Some(gate) = &self.before_send_gate {
+            gate.wait().await?;
+        }
+        Ok(())
     }
 
     pub async fn settle(
@@ -673,6 +683,21 @@ impl BillingService {
 
     pub async fn fail(&self, metered: &MeteredProxyContext, reason: &str) -> AppResult<()> {
         meter::fail(&self.db, metered, reason).await
+    }
+
+    /// A private sender fence proved that the operation was never sent. Undo
+    /// pre-send bookkeeping before releasing its reservation; transport errors
+    /// and cancellation after dispatch must use the ordinary settlement path.
+    pub(crate) async fn reject_before_send(
+        &self,
+        metered: &MeteredProxyContext,
+        reason: &str,
+        previously_dispatched: bool,
+    ) -> AppResult<()> {
+        if previously_dispatched {
+            return self.fail(metered, reason).await;
+        }
+        meter::reject_before_send(&self.db, metered, reason).await
     }
 }
 

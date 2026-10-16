@@ -181,6 +181,12 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
 }
 
 async fn ensure_core_indexes(db: &Database) -> Result<(), mongodb::error::Error> {
+    db.collection::<Document>(crate::services::assistant_service_execution::COLLECTION)
+        .create_indexes([
+            IndexModel::builder().keys(doc! {"expires_at": 1})
+                .options(IndexOptions::builder().expire_after(Duration::ZERO).build()).build(),
+            IndexModel::builder().keys(doc! {"user_id": 1, "conversation_id": 1, "api_key_id": 1, "turn_id": 1, "kind": 1}).build(),
+        ]).await?;
     db.collection::<Document>(crate::models::assistant_agent_learning::PROPOSALS_COLLECTION_NAME)
         .create_index(
             IndexModel::builder()

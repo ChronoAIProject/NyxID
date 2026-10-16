@@ -1,4 +1,4 @@
-import { useRef, useState, type ComponentProps } from "react";
+import { useEffect, useRef, useState, type ComponentProps } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { UploadComposer } from "./upload-composer";
@@ -8,6 +8,7 @@ import { nyxAgentTransport } from "@/lib/assistant/nyxagent-transport";
 import { steeringNotice } from "@/lib/assistant/nyxagent-steering";
 import { nyxBotApi } from "@/lib/assistant/nyxbot-api";
 import { ComposerSettings } from "./composer-settings";
+import { useKeys } from "@/hooks/use-keys";
 import type { NyxAgentAccessMode, NyxAgentConversation } from "@/schemas/assistant-nyxagent";
 
 type UploadProps = ComponentProps<typeof UploadComposer>;
@@ -20,6 +21,11 @@ type Props = Omit<UploadProps, "onSend"> & {
 /** Key by person + thread: pending guidance must never move with navigation. */
 export function NyxAgentComposer({ conversation, agentOverride, ...props }: Props) {
   const [draftModel, setDraftModel] = useState<string>();
+  const [connection, setConnection] = useState("");
+  const connections = useKeys();
+  const availableConnections = (connections.data ?? []).filter((key) => key.is_active &&
+    !(key.credential_source?.type === "org" && !key.credential_source.allowed));
+  useEffect(() => { setConnection(""); }, [props.ownerUserId, props.draftKey, conversation?.id]);
   const capabilities = useQuery({
     queryKey: ["nyxagent-steer-capabilities", props.ownerUserId, conversation?.id],
     queryFn: () => nyxAgentTransport.capabilities(conversation!.id),
@@ -42,6 +48,12 @@ export function NyxAgentComposer({ conversation, agentOverride, ...props }: Prop
       agentOverride={agentOverride}
       active={props.active || props.sending || submitting}
       disabled={props.disabled}
+      connectionChoice={{
+        value: connection, onChange: setConnection, disabled: connections.isError,
+        options: availableConnections.map((key) => ({ id: key.id,
+          label: `${key.credential_source?.type === "org" ? `${key.credential_source.org_name} · ` : "Personal · "}${key.label} (${key.slug})`,
+        })),
+      }}
     />}
     onVoice={props.onVoice ? async (id) => {
       if (!conversation && draftModel) await nyxBotApi.changeModel(id, draftModel);
@@ -81,7 +93,9 @@ export function NyxAgentComposer({ conversation, agentOverride, ...props }: Prop
             setSubmitting(false);
           }
         }
-        return props.onSend(text, uploads, draftModel);
+        await props.onSend(connection ? `/service ${connection}\n${text}` : text, uploads, draftModel);
+        setConnection("");
+        return;
       }
       if (!canSteer || !conversation || !turn || busy.current) throw new Error("Wait for the current request.");
       if (uploads?.attachmentIds.length || [...text].length > (capabilities.data?.steer?.max_chars ?? 32_000)) {

@@ -1770,6 +1770,15 @@ curl -X POST http://localhost:3001/api/v1/services/d1e2f3a4-b5c6-7890-1234-56789
 
 NyxID supports authenticated SSH-over-WebSocket tunnels plus short-lived SSH certificate issuance for downstream services.
 
+NyxBot callers retain these routes under the existing permission modes. Exact
+certificate/session admission binds the connection (or existing catalog-only
+authority), requested parameters and bounded lifetime. Organization use asks in
+Auto and Ask every time; Full access admits without a prompt. Retry the same
+request with `X-NyxID-Acknowledgement-Id` after allowing its action card. A tunnel
+or terminal card authorizes that one session's dynamic traffic, with live
+revocation checks; it does not represent per-frame approval. See
+[NyxBot service execution](NYXBOT_SERVICE_EXECUTION.md).
+
 SSH configuration is embedded directly in the service object under `ssh_config` when `service_type` is `"ssh"`. Create SSH services with `POST /api/v1/services` and update them with `PUT /api/v1/services/{service_id}` instead of calling separate SSH-specific CRUD endpoints.
 
 #### POST /api/v1/ssh/{service_id}/certificate
@@ -8583,3 +8592,36 @@ can send the same image once as a document under the
 A response with `"delivered_as": ["file"]` reports this actual transport kind,
 and the outbound message's `content_type` is `file`. The reply anchor, topic and
 caption are preserved. Other adapters can omit this field.
+
+## NyxBot exact service selection and consent
+
+An authenticated first-party human owner may prefix a new NyxAgent message with
+`/service <connection UUID or unambiguous connection slug>` followed by a newline
+and the request. The composer offers the same next-message choice. The selector
+lasts one admitted turn and chooses identity, not permission. API keys (including
+conversation, delegated and service-account keys), guests and webhook inputs
+cannot install human selection. Ordinary new turns clear it. An approved-card
+continuation inherits only that card's exact target and operation; expired,
+denied or consumed cards install no selection.
+
+Assistant raw proxy/LLM/SSH exec retries accept
+`X-NyxID-Acknowledgement-Id`; MCP service and native tools accept the existing
+`acknowledgement_id`. Native Oracle submit, attach and extract request bodies add
+optional `acknowledgement_id: string`. NyxID consumes this control metadata only
+for assistant execution; ordinary endpoint clients keep their payload contract.
+No acknowledgement transport metadata reaches the provider. Assistant chat keys
+use exact SSH exec and bounded certificate/tunnel/terminal session admission.
+For assistant calls, organization use asks in Auto and Ask every time and Full
+access proceeds without a prompt. Certificate cards bind the subject public key
+and principal; session cards bind the exact connection, principal/initial terminal
+geometry and maximum lifetime (at most one hour). Resume the same request with
+`X-NyxID-Acknowledgement-Id`. Session consent covers dynamic session traffic;
+revocation, config drift or elapsed authority closes the session. Ordinary client
+routing and existing personal catalog-only access are retained.
+
+Organization-use refusals persist the existing action card and return its
+`acknowledgement_id`. Full access bypasses consent while retaining preference
+and authority checks. Raw stateless org model consent admits an exact model and
+connection for the resumed turn; MCP/stateful actions retain exact semantic
+request consent. Machine exec cards explicitly admit declared exact organization
+connections for that command/job. See [execution contract](NYXBOT_SERVICE_EXECUTION.md).
