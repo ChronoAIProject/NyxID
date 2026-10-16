@@ -28,9 +28,10 @@ for (const engine of ["actor", "NyxAgent", "group"] as const) {
     if (engine === "group") await expect(page.getByRole("article", { name: "Message from NyxBot", exact: true })).toBeVisible();
     if (engine === "NyxAgent") await expect(page.getByText("Your connected services are ready.", { exact: false })).toBeVisible();
     const send = page.getByRole("button", { name: "Send message", exact: true });
-    await expect(send).toBeVisible();
+    await expect(send).toHaveCount(0);
     const input = page.locator("[data-composer-textbox]");
     await input.fill("A longer mobile draft\nwith multiple lines\nand the send control still reachable");
+    await expect(send).toBeVisible();
     expect(await input.evaluate((el) => parseFloat(getComputedStyle(el).fontSize))).toBeGreaterThanOrEqual(16);
     const scroller = page.locator("main div.flex-1.overflow-y-auto").first();
     const distance = () => scroller.evaluate((el) => el.scrollHeight - el.clientHeight - el.scrollTop);

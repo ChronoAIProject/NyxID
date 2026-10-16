@@ -2146,6 +2146,23 @@ There is no persisted message queue or automatic replay. See
 [Complete IM replies](CHANNEL_COMPLETE_REPLIES.md) for the API and rollout
 contract.
 
+## Composer dictation and platform voice authority
+
+Private-thread audio uses a live conversation/key/agent binding to authorize
+platform inference independently of specialist tool grants. Platform credential
+ACLs and operation restrictions remain mandatory; BYOK uses the exact granted
+connection. Platform audio is funded by the acting person's existing billing
+account.
+
+`handlers/assistant_voice/dictation.rs` provides bounded browser WebSocket ingress
+to `services/voice/dictation.rs`, which owns the fixed OpenAI transcription
+session, authorization refresh, concurrency slot, funding and final drain.
+Dictation reuses `assistant_voice_sessions` with an additive, default-false
+`dictation` discriminator and durable confirmed-duration checkpoints. Recovery
+settles those checkpoints without reopening capture; conversational attach and
+control paths reject dictation sessions. No audio recording is stored. See the
+[voice architecture and transport contract](chat/11-voice.md).
+
 ## Native channel mention admission
 
 `channel_native_mentions` interprets bounded, authenticated Telegram and

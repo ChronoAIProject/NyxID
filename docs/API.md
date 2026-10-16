@@ -56,6 +56,7 @@ This document describes every HTTP endpoint exposed by the NyxID backend. All en
   - [Approval Management](#approval-management)
   - [Telegram New Channel Creation](#telegram-new-channel-creation)
   - [Webhooks](#webhooks)
+- [Assistant voice and dictation](#assistant-voice-and-dictation)
 
 ---
 
@@ -8571,6 +8572,38 @@ Human `POST/PUT /api/v1/services` use the same skill validation/history path; up
 
 The operation-contract route returns the authorized catalog service's bounded source OpenAPI document, preserving upstream server declarations. It does not rewrite proxy URLs or grant execution access; generated skills must use the consumer's authorized NyxID service connection. It reads a configured `openapi_spec_url` through NyxID's hardened, size-limited path, resolving known hosted overlay URLs locally. When the URL is absent or empty, it falls back to an embedded overlay registered for the service slug. The configured URL must be readable without downstream credentials; this route never injects a service-account or catalog credential. Authenticated custom documents need a separate, explicitly scoped contract-fetch capability. The route never resolves a user-managed `/keys` service, injects a credential, or returns the caller-wide `/mcp/config` catalog. The discovery response includes the catalog service `id`, `slug`, `name`, and current skill revision. Catalog and MCP responses retain name recommendations and expose optional refs/revision. Ref-only changes do not change the existing `catalog_digest`; `skills_manifest_digest` is a separate versioned digest. Instance names suppress inherited refs. See [Service account curation](SERVICE_ACCOUNTS.md#catalog-skill-curation) for exact payloads, grant limits, history pagination, recovery, runtime confinement, rollout ordering, and the boundary with Ornn package content CRU.
 
+
+## Assistant voice and dictation
+
+The [voice contract](chat/11-voice.md) specifies the existing call lifecycle,
+options, controls, captions and billing. Platform audio in a private specialist
+thread does not require granting OpenAI as a tool. The live conversation, agent
+and key binding, platform ACL, operation restrictions and billing admission still
+apply. BYOK retains the exact selected connection's ownership and grant checks.
+
+Dictation adds two first-party human browser routes:
+
+| Route | Contract |
+| --- | --- |
+| `GET /api/v1/assistant/nyxagent/dictation/options?conversation_id={id}` | Read-only eligibility and price discovery. Returns `options`, `transcription_model` (`gpt-live-transcribe`) and `max_seconds` (`120`). Options use the voice option schema with platform OpenAI sources. No funds are reserved by discovery. |
+| `GET /api/v1/assistant/nyxagent/conversations/{id}/dictation` | Same-origin WebSocket upgrade authenticated by a live browser session. Requires enabled voice features and a private authorized conversation; delegated credentials cannot execute it. |
+
+Within five seconds of upgrading, send one JSON message containing
+`client_request_id` and `preferences` (the existing voice preferences schema).
+The server selects only platform OpenAI transcription. After the server's `ready`
+event, send binary PCM16 mono audio at 24 kHz, at most 4096 bytes per message, or
+the exact text message `{"type":"stop"}`. Capture is bounded to 120 seconds.
+Provider commands, keys, tools and destination overrides are not accepted.
+
+Server events are `ready` (`session_id`, `model`), `delta` and `completed`
+(`item_id`, `order`, `text`; completion also includes `confirmed_seconds`),
+`stopped` (`confirmed`), and `error` (the standard sanitized `error` envelope).
+The browser reviews the resulting text before inserting it into a draft; the
+transport never submits a chat message. Closing capture releases the microphone
+immediately while the server drains forwarded audio within a bounded deadline
+and settles provider-confirmed input duration. See the
+[transport and accounting contract](chat/11-voice.md#bounded-transcription-transport-and-accounting)
+for limits, exact duration handling and recovery.
 
 ## Assistant skill review and image input
 

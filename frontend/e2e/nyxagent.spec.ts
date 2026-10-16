@@ -40,9 +40,10 @@ test("the home composer starts a NyxBot thread: durable reload, connect link, re
   await page.getByRole("button", { name: "Options for List connected services" }).click();
   await page.getByRole("menuitem", { name: "Rename" }).click();
   await expect(page.getByRole("menu", { includeHidden: true })).toHaveCount(0);
-  await page.getByRole("dialog").getByRole("textbox").fill("Services overview");
-  await page.getByRole("button", { name: "Save", exact: true }).click();
-  await expect(page.getByRole("dialog", { includeHidden: true })).toHaveCount(0);
+  const rename = page.getByRole("form", { name: "Rename chat", exact: true });
+  await rename.getByRole("textbox", { name: "Title", exact: true }).fill("Services overview");
+  await rename.getByRole("button", { name: "Save", exact: true }).click();
+  await expect(rename).toHaveCount(0);
   await expect(conversationRow(page, "Services overview")).toBeVisible();
   await conversationRow(page, "Services overview").hover();
   await page.getByRole("button", { name: "Options for Services overview" }).click();
