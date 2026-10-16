@@ -5,6 +5,37 @@ fn body_digest(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
 }
 
+/// The legacy model transport scope exception includes ordinary generation and
+/// the runtime's exact compaction callback. It grants no account fungibility or
+/// turn consent, and never applies to arbitrary response/file/session routes.
+pub(super) fn legacy_model_generation(
+    target: &crate::services::proxy_service::ProxyTarget,
+    method: &str,
+    path: &str,
+    body: &[u8],
+) -> bool {
+    let path = path.trim_matches('/');
+    let path = path.strip_prefix("v1/").unwrap_or(path);
+    target.service.inference.is_some()
+        && method == "POST"
+        && matches!(
+            path,
+            "responses" | "responses/compact" | "chat/completions" | "messages" | "embeddings"
+        )
+        && serde_json::from_slice::<Value>(body)
+            .ok()
+            .is_some_and(|body| {
+                body.get("model")
+                    .and_then(Value::as_str)
+                    .is_some_and(|model| !model.trim().is_empty())
+            })
+}
+
+pub(super) fn model_compaction(path: &str) -> bool {
+    let path = path.trim_matches('/');
+    path.strip_prefix("v1/").unwrap_or(path) == "responses/compact"
+}
+
 /// Only catalog-declared inference on a closed model generation endpoint is
 /// account-fungible. Stateful response/file handles retain account identity.
 pub fn http_operation(

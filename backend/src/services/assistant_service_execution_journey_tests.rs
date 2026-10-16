@@ -79,7 +79,7 @@ fn generation(text: &str) -> Value {
         "tools":[{"type":"function","function":{"name":"lookup","parameters":{"type":"object",
         "properties":{"prompt":{"type":"string"},"file_id":{"type":"string"}}}}},{"type":"web_search"}]})
 }
-async fn settled(
+pub(super) async fn settled(
     f: &Fixture,
     row: &crate::models::assistant_conversation::AssistantConversation,
     result: &engine::TurnResult,
@@ -349,7 +349,7 @@ impl contract::NyxAgentEgress for CallbackEgress {
             .unwrap())
     }
 }
-async fn execute(
+pub(super) async fn execute(
     f: &Fixture,
     row: &crate::models::assistant_conversation::AssistantConversation,
     egress: &dyn contract::NyxAgentEgress,

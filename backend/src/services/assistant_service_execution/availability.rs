@@ -76,6 +76,9 @@ pub(super) async fn verified_unavailable(
             return Ok(true);
         }
     }
+    if !chat.turn_live || chat.turn_stopped {
+        return Ok(false);
+    }
     let mut filter = scope(chat)?;
     filter.extend(
         doc! {"kind": "unavailable_bucket", "entries": {"$elemMatch": {
@@ -158,6 +161,9 @@ impl Admission {
         Box::pin(async move {
             chat.ensure_live_turn(db, None, None, "assistant.service_failure")
                 .await?;
+            if !chat.turn_live || chat.turn_stopped {
+                return Ok(());
+            }
             if self.binding != connection_binding(db, &self.connection, &self.api_key_id).await? {
                 return Ok(());
             }
@@ -209,6 +215,9 @@ pub(super) async fn pool_predispatch_failure(
     binding: &str,
     operation: &Value,
 ) -> AppResult<Option<crate::errors::PoolAttemptTransportKind>> {
+    if !chat.turn_live || chat.turn_stopped {
+        return Ok(None);
+    }
     let mut filter = scope(chat)?;
     filter.insert("kind", "unavailable_bucket");
     let Some(bucket) = db

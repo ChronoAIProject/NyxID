@@ -244,6 +244,18 @@ async fn check_http_projected_inner(
     headers: &axum::http::HeaderMap,
     projection: &HttpProjection,
 ) -> AppResult<Decision> {
+    if let Some(chat) = auth.assistant_chat.as_deref()
+        && !chat.turn_live
+        && let Some(owner) = owner
+        && state
+            .db
+            .collection::<crate::models::user::User>("users")
+            .find_one(doc! {"_id":owner,"is_active":true})
+            .await?
+            .is_some_and(|row| row.user_type == crate::models::user::UserType::Org)
+    {
+        return Err(AppError::AssistantTurnRequired);
+    }
     let (Some(chat), Some(id)) = (auth.assistant_chat.as_deref(), id) else {
         return Ok(Decision {
             refusal: None,
@@ -277,7 +289,18 @@ async fn check_http_projected_inner(
         operation["pool_revision"] = json!(row.config_revision);
     }
     let method_override = mcp_service::http_carries_method_override(method, headers, query, body);
-    let raw_inference = operation["kind"] == "inference" && !chat.guest && !method_override;
+    let model_transport = !chat.guest
+        && !method_override
+        && super::request_identity::legacy_model_generation(target, method, path, body);
+    let compaction = model_transport && super::request_identity::model_compaction(path);
+    let legacy_inference = model_transport && (!chat.turn_live || compaction);
+    let stateless = operation["kind"] == "inference";
+    if legacy_inference {
+        // This only preserves the existing model transport scope exception. It
+        // neither installs turn consent nor proves cross-account equivalence.
+        operation["kind"] = json!("legacy_inference");
+    }
+    let raw_inference = chat.turn_live && stateless && !chat.guest && !method_override;
     let mut model_consent = false;
     let mut consent_binding = None;
     if raw_inference {
@@ -378,7 +401,7 @@ async fn check_http_projected_inner(
         owner.unwrap_or(&chat.user_id),
         &operation,
         acks::ActionFacts::of(acks::service_action_class(
-            read || raw_inference,
+            read || raw_inference || (legacy_inference && stateless),
             destructive,
         )),
         acknowledgement,
@@ -397,7 +420,7 @@ async fn check_http_projected_inner(
     if let Some(binding) = consent_binding.as_deref() {
         validate_model_consent_snapshot(decision.admission.as_ref(), binding)?;
     }
-    if raw_inference {
+    if raw_inference || (chat.turn_live && compaction) {
         super::bootstrap::observe_model_callback(&state.db, chat, decision.refusal.as_ref())
             .await?;
     }

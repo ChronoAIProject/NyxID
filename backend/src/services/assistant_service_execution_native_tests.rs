@@ -287,6 +287,7 @@ pub(super) async fn node_service_call(f: &Fixture, id: &str, mcp: bool) -> AppRe
         .expect("fixture publishes the exact GET /read endpoint");
     let prepared = mcp_service::prepare_proxy_tool_call(service, endpoint, &json!({}))?;
     let context = mcp_service::McpExecContext {
+        assistant_chat: Some(&f.chat),
         response_body_limit: None,
         actor_user_id: None,
         caller_token: None,

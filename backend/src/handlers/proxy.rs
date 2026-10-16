@@ -4254,9 +4254,7 @@ async fn execute_resolved_proxy_inner(
     // Structured adapters inspect bounded JSON for approval, signing and billing.
     // Opaque machine uploads (including git packfiles) retain backpressure all
     // the way to the upstream connection instead of materializing the body.
-    let stream_upload = machine_ingress
-        .as_ref()
-        .is_some_and(|ingress| ingress.job_id().is_some())
+    let stream_upload = machine_ingress.is_some()
         && !is_ws
         && crate::services::machine_gateway_service::can_stream(&target, &all_headers, machine_git);
     let (body_bytes, ws_request, mut streaming_body, upload_meter) = if is_ws {

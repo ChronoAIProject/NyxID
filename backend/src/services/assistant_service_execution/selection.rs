@@ -5,27 +5,39 @@ pub fn live_authority<'a>(
     original: &'a acks::ChatAuthority,
     route: &'a str,
 ) -> futures::future::BoxFuture<'a, AppResult<acks::ChatAuthority>> {
-    Box::pin(async move { reload_live_authority(db, original, route, None, false).await })
+    Box::pin(async move { reload_authority(db, original, route, None, false, true).await })
 }
 
-pub(crate) fn live_connection_authority<'a>(
+/// Personal legacy execution retains the default-off rollout contract. An
+/// admission captured in a live turn always keeps its mandatory same-turn fence;
+/// an idle snapshot cannot borrow a later turn or its selection/consent.
+pub(crate) fn personal_authority<'a>(
     db: &'a Database,
     original: &'a acks::ChatAuthority,
     route: &'a str,
-    connection: &'a str,
+    connection: Option<&'a str>,
     require_service_grant: bool,
 ) -> futures::future::BoxFuture<'a, AppResult<acks::ChatAuthority>> {
     Box::pin(async move {
-        reload_live_authority(db, original, route, Some(connection), require_service_grant).await
+        reload_authority(
+            db,
+            original,
+            route,
+            connection,
+            require_service_grant,
+            false,
+        )
+        .await
     })
 }
 
-async fn reload_live_authority(
+async fn reload_authority(
     db: &Database,
     original: &acks::ChatAuthority,
     route: &str,
     connection: Option<&str>,
     require_service_grant: bool,
+    require_live: bool,
 ) -> AppResult<acks::ChatAuthority> {
     let key =
         crate::services::key_service::get_api_key(db, &original.user_id, &original.api_key_id)
@@ -50,11 +62,34 @@ async fn reload_live_authority(
     let live = acks::for_key(db, &original.user_id, Some(&original.api_key_id))
         .await?
         .ok_or(AppError::AssistantTurnRequired)?;
-    if !live.turn_live || live.turn_stopped || live.turn_id != original.turn_id {
+    if live.conversation_id != original.conversation_id
+        || live.agent_id != original.agent_id
+        || live.turn_id != original.turn_id
+        || if require_live || original.turn_live {
+            !live.turn_live || live.turn_stopped
+        } else {
+            live.turn_live || live.turn_stopped != original.turn_stopped
+        }
+    {
         return Err(AppError::AssistantTurnRequired);
     }
     live.ensure_live_turn(db, None, None, route).await?;
     Ok(live)
+}
+
+pub(super) async fn selected(
+    db: &Database,
+    chat: &acks::ChatAuthority,
+) -> AppResult<Option<Document>> {
+    if !chat.turn_live || chat.turn_stopped {
+        return Ok(None);
+    }
+    let mut filter = scope(chat)?;
+    filter.insert("kind", "selection");
+    Ok(db
+        .collection::<Document>(COLLECTION)
+        .find_one(filter)
+        .await?)
 }
 
 pub(super) fn scope(chat: &acks::ChatAuthority) -> AppResult<Document> {
@@ -195,6 +230,9 @@ pub(crate) async fn require_catalog_only_selection(
     chat: &acks::ChatAuthority,
     catalog: &str,
 ) -> AppResult<()> {
+    if !chat.turn_live || chat.turn_stopped {
+        return Ok(());
+    }
     let mut filter = scope(chat)?;
     filter.extend(doc! {"kind":"selection","catalog_service_id":catalog});
     if db

@@ -167,6 +167,9 @@ impl McpBillingRouteContextBuilder {
 /// node allow-list enforcement. OAuth and session callers pass `api_key_id:
 /// None` and `allow_all_nodes: true`, preserving their existing behavior.
 pub struct McpExecContext<'a> {
+    /// Original authenticated turn fence. Credential/catalog awaits must never
+    /// downgrade a live foreground request to legacy idle compatibility.
+    pub assistant_chat: Option<&'a super::assistant_acknowledgement_service::ChatAuthority>,
     /// Background result readers may stop buffering after this many bytes.
     pub response_body_limit: Option<usize>,
     /// Acting person/SA when credential resolution runs as another owner.
@@ -5118,8 +5121,11 @@ async fn execute_tool_resolved_inner(
         &target,
     );
     prepared.validate_destination(&target)?;
-    let assistant_chat =
-        super::assistant_acknowledgement_service::for_key(db, user_id, exec_ctx.api_key_id).await?;
+    let assistant_chat = if let Some(chat) = exec_ctx.assistant_chat {
+        Some(chat.clone())
+    } else {
+        super::assistant_acknowledgement_service::for_key(db, user_id, exec_ctx.api_key_id).await?
+    };
     let mut assistant_admission = None;
     let mut assistant_auto = None;
     if let Some(chat) = assistant_chat.as_ref()
@@ -6940,6 +6946,7 @@ mod tests {
                     &state.token_exchange_cache,
                     &state.cloud_response_cache,
                     &McpExecContext {
+                        assistant_chat: None,
                         response_body_limit: None,
                         actor_user_id: None,
                         caller_token: None,

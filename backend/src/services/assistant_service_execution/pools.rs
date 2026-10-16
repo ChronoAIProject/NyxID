@@ -12,6 +12,9 @@ pub async fn pinned_pool_member(
     let Some(chat) = chat else {
         return Ok(None);
     };
+    if !chat.turn_live || chat.turn_stopped {
+        return Ok(None);
+    }
     let mut filter = scope(chat)?;
     filter.extend(doc! {"kind": {"$in": ["selection", "card_binding"]}, "operation.pool_id": pool});
     let rows: Vec<Document> = db

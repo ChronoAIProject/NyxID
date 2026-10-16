@@ -43,6 +43,24 @@ Oracle pools are not organization resources. Platform/BYO credential-source
 labels do not prove org ownership. Existing guest grants remain authoritative;
 guests cannot raise/consume owner cards or widen their read/use permissions.
 
+The existing `assistant:live-turn-gate` rollout remains off by default. With it
+off, personal requests first authenticated without a live turn retain ordinary
+automatic execution under the existing permission mode. A mode-required action
+card or any organization connection use requires a real live turn. Idle calls
+still enforce personal saved order, exact grants, ACLs, operation scopes and
+final key/configuration/mode checks, and cannot reuse turn selections, consent
+or outage evidence. Live admissions always stop on Stop or a replaced turn.
+Legacy personal/platform model generation also retains the existing scope
+exception when `store:false` is omitted; this does not establish stateless
+account equivalence or authorize cross-account fallback.
+NyxAgent's `responses/compact` callback retains the model transport scope
+exception. Personal/platform calls keep live and idle compatibility; organization
+calls still require a live turn and the existing organization consent gate.
+Compaction binds its exact account and complete semantic request, uses the
+existing change-action permission gate, and never inherits stateless model
+consent or account fallback. A compaction card pauses the runtime visibly, and
+Allow resumes only its exact bound request.
+
 ## Model bootstrap and turn consent
 
 Raw stateless inference on a conversation key has one honest bounded contract:

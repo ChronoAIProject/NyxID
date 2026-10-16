@@ -9,6 +9,10 @@ use uuid::Uuid;
 
 #[path = "assistant_service_execution_authority_tests.rs"]
 mod authority_tests;
+#[path = "assistant_service_execution_compaction_tests.rs"]
+mod compaction;
+#[path = "assistant_service_execution_compatibility_tests.rs"]
+mod compatibility;
 #[path = "assistant_service_execution_egress_tests.rs"]
 mod egress;
 #[path = "assistant_service_execution_journey_tests.rs"]

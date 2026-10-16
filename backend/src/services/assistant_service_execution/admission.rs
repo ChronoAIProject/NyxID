@@ -87,12 +87,15 @@ impl Admission {
         if let Some(watch) = &self.async_continuation {
             watch.revalidate(db, &self.chat).await?;
         } else if self.job_id.is_none() {
-            live_connection_authority(
+            personal_authority(
                 db,
                 &self.chat,
                 "assistant.service_egress",
-                connection,
-                self.operation_identity["kind"] != "raw_inference",
+                Some(connection),
+                !matches!(
+                    self.operation_identity["kind"].as_str(),
+                    Some("raw_inference" | "legacy_inference")
+                ),
             )
             .await?;
         }

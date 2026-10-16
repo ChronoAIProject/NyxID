@@ -3124,6 +3124,7 @@ async fn dispatch_service_tool(
 /// the authenticated MCP caller -- API key identity + node scope.
 fn mcp_exec_context<'a>(auth: &'a McpAuthContext) -> mcp_service::McpExecContext<'a> {
     mcp_service::McpExecContext {
+        assistant_chat: auth.chat.as_ref(),
         response_body_limit: None,
         actor_user_id: Some(&auth.user_id),
         caller_token: auth.caller_token.as_deref(),

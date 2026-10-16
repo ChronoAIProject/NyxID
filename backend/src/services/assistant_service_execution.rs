@@ -57,7 +57,7 @@ pub use resolution::resolve_implicit_for_request;
 use selection::owner_selector;
 use selection::scope;
 pub use selection::{bind_owner_selection, live_authority};
-pub(crate) use selection::{live_connection_authority, require_catalog_only_selection};
+pub(crate) use selection::{personal_authority, require_catalog_only_selection};
 
 pub const COLLECTION: &str = "assistant_service_execution";
 pub const ACK_HEADER: &str = "x-nyxid-acknowledgement-id";
@@ -226,6 +226,15 @@ async fn check_inner(
         .await?;
     let service =
         super::user_service_service::get_user_service(db, effective_owner, connection_id).await?;
+    let owner_row = db
+        .collection::<crate::models::user::User>("users")
+        .find_one(doc! {"_id":effective_owner,"is_active":true})
+        .await?
+        .ok_or_else(|| AppError::Forbidden("Service owner unavailable".into()))?;
+    let org = owner_row.user_type == crate::models::user::UserType::Org;
+    if org {
+        scope(chat)?;
+    }
     let access =
         super::org_service::resolve_owner_access(db, &chat.user_id, effective_owner).await?;
     let eligible = match &access {
@@ -300,12 +309,7 @@ async fn check_inner(
     if let Some(id) = acknowledgement {
         args["acknowledgement_id"] = json!(id);
     }
-    let mut selected_filter = scope(chat)?;
-    selected_filter.insert("kind", "selection");
-    let selected = db
-        .collection::<Document>(COLLECTION)
-        .find_one(selected_filter)
-        .await?;
+    let selected = selection::selected(db, chat).await?;
     if let Some(selected) = selected.as_ref()
         && let Ok(selected_id) = selected.get_str("connection_id")
     {
@@ -418,9 +422,13 @@ async fn check_inner(
                 !matches!(
                     row.source,
                     super::user_service_service::CredentialSource::Org { allowed: false, .. }
-                ) && (key.allow_all_services
-                    || allowed_services.contains(&row.service.id)
-                    || operation["kind"] == "raw_inference")
+                ) && (chat.turn_live || row.service.user_id == chat.user_id)
+                    && (key.allow_all_services
+                        || allowed_services.contains(&row.service.id)
+                        || matches!(
+                            operation["kind"].as_str(),
+                            Some("raw_inference" | "legacy_inference")
+                        ))
                     && (allow_all_nodes
                         || row
                             .service
@@ -529,12 +537,6 @@ async fn check_inner(
             });
         }
     }
-    let owner_row = db
-        .collection::<crate::models::user::User>("users")
-        .find_one(doc! {"_id":effective_owner,"is_active":true})
-        .await?
-        .ok_or_else(|| AppError::Forbidden("Service owner unavailable".into()))?;
-    let org = owner_row.user_type == crate::models::user::UserType::Org;
     if chat.guest {
         return Ok(Decision {
             refusal: None,
@@ -578,6 +580,11 @@ async fn check_inner(
         summary.to_owned()
     };
     let gate = acks::confirmation_needed(db, chat, facts, org && !model_consent).await?;
+    if gate.ask().is_some() {
+        // Legacy idle calls can retain their existing automatic behavior, but
+        // cannot mint or redeem turn-bound consent without an admitted turn.
+        scope(chat)?;
+    }
     if let Some(need) = gate.ask()
         && let Some(refusal) =
             acks::confirm_action(db, chat, "nyxid.service_execution", &args, &need, &summary)

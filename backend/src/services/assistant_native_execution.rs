@@ -32,7 +32,9 @@ fn binding(row: &Document) -> String {
 }
 impl ResourceAdmission {
     pub async fn revalidate(&self, db: &mongodb::Database) -> AppResult<()> {
-        let live = execution::live_authority(db, &self.chat, "assistant.native_egress").await?;
+        let live =
+            execution::personal_authority(db, &self.chat, "assistant.native_egress", None, false)
+                .await?;
         if key_binding(db, &live).await? != self.key_binding {
             return Err(AppError::Conflict(
                 "Native execution authority changed; confirm again".into(),
@@ -170,6 +172,9 @@ pub async fn resource(
         .await?
         .ok_or_else(|| AppError::Forbidden("Resource owner unavailable".into()))?;
     let org = owner_row.user_type == crate::models::user::UserType::Org;
+    if org {
+        chat.turn_fence().require_live()?;
+    }
     let summary = if org {
         format!(
             "Organization service {} ({}) in {}: {}",
@@ -187,6 +192,9 @@ pub async fn resource(
         summary.to_owned()
     };
     let gate = acks::confirmation_needed(db, chat, facts, org).await?;
+    if gate.ask().is_some() {
+        chat.turn_fence().require_live()?;
+    }
     if let Some(need) = gate.ask()
         && let Some(refusal) = acks::confirm_action(db, chat, tool, &exact, &need, &summary).await?
     {
@@ -336,11 +344,11 @@ pub async fn verify_ssh_node(
     connection: &str,
     node: &str,
 ) -> AppResult<()> {
-    let live = execution::live_connection_authority(
+    let live = execution::personal_authority(
         &state.db,
         chat,
         "assistant.ssh_egress",
-        connection,
+        Some(connection),
         true,
     )
     .await?;

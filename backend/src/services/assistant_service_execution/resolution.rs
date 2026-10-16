@@ -65,13 +65,7 @@ pub async fn resolve_implicit_for_request(
         .enumerate()
         .map(|(i, id)| (id.as_str(), i))
         .collect();
-    let mut selected_filter = scope(chat)?;
-    selected_filter.insert("kind", "selection");
-    let selected = state
-        .db
-        .collection::<Document>(COLLECTION)
-        .find_one(selected_filter)
-        .await?;
+    let selected = selection::selected(&state.db, chat).await?;
     let selected_id = selected
         .as_ref()
         .and_then(|row| row.get_str("connection_id").ok());
@@ -81,9 +75,10 @@ pub async fn resolve_implicit_for_request(
             !matches!(
                 row.source,
                 crate::services::user_service_service::CredentialSource::Org { allowed: false, .. }
-            ) && (auth.allow_all_services
-                || auth.allowed_service_ids.contains(&row.service.id)
-                || inference_catalog)
+            ) && (chat.turn_live || row.service.user_id == chat.user_id)
+                && (auth.allow_all_services
+                    || auth.allowed_service_ids.contains(&row.service.id)
+                    || inference_catalog)
         })
         .map(|row| row.service)
         .collect();
@@ -183,15 +178,17 @@ pub async fn resolve_implicit_for_request(
                     && let Some((method, path, query, body, headers, projection)) = request
                 {
                     projection.apply(&mut resolved.target);
-                    if let Some(operation) = super::request_identity::raw_identity(
-                        &resolved.target,
-                        method,
-                        path,
-                        query,
-                        body,
-                        headers,
-                        projection,
-                    ) {
+                    if chat.turn_live
+                        && let Some(operation) = super::request_identity::raw_identity(
+                            &resolved.target,
+                            method,
+                            path,
+                            query,
+                            body,
+                            headers,
+                            projection,
+                        )
+                    {
                         if verified_unavailable(
                             &state.db,
                             &state.node_ws_manager,

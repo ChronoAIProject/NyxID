@@ -1,6 +1,6 @@
-//! Correlate a raw model refusal with the currently executing upstream turn.
-//! This is server-owned correlation, not a model-only provenance claim: raw
-//! inference callbacks on the conversation key share the bounded turn contract.
+//! Correlate model generation/compaction refusals with the executing upstream
+//! turn. This is server-owned correlation, not a model-only provenance claim.
+//! Compaction retains exact action consent; stateless inference has turn consent.
 use super::*;
 
 pub async fn begin_model_attempt(
