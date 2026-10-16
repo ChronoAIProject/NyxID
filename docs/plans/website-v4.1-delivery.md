@@ -1,5 +1,9 @@
 # 官网 A + v4.1 交付 / Website A + v4.1 delivery
 
+> 最新全站验证见 [2026-10-16逐页自查报告](website-all-pages-audit-2026-10-16.md)：25条路由×中英实际组件矩阵、59次本地页面/Auth/Docs HTTP200、线上公开认证配置一致；15文件199测试单worker串行通过，隔离生成68输出一致。NAV-01与Legacy Auth查询修复已纳入。此结果不等于图形视觉/真实账号OAuth或邮件投递验收；订阅与背景水印仍未完成。
+> Current page/link/auth-entry evidence is in the all-pages audit.199 serial tests and68-file regeneration passed; physical/graphical/real-account/client delivery and the open newsletter/branding items remain outside that conclusion.
+
+
 当前状态：Contact 邮箱客户端交接及公共按钮渐变修复已完成定向验证（见文末最新增量），等待外部视觉/客户端验收；**原场景品牌水印尚未解决，整体不能判定完成**。组织 PR 由负责人手动创建。本文覆盖先前 A-only 文档里的“不接 B”旧范围。
 
 Status: implementation and theme fix verified locally, pending independent acceptance. **The original scene still carries branding; overall delivery is incomplete.** The owner creates the organization PR manually. This supersedes the historical A-only scope.
@@ -62,7 +66,7 @@ Resolution requires an authorized watermark-free publication of the original sce
 
 ## 本地运行、配置与回滚 / Run, configuration and rollback
 
-`cd frontend && npm ci && npm run dev -- --host 127.0.0.1 --port 4180 --strictPort`；预览 `http://127.0.0.1:4180/?lang=zh`。生产构建不依赖未跟踪的评审源文件。
+依赖安装使用 `cd frontend && npm ci`；当前单实例预览由根线程管理，带生产后端代理的准确启动命令见下文“当前单实例预览”，避免重复启动。预览 `http://127.0.0.1:4180/?lang=zh`。生产构建不依赖未跟踪的评审源文件。
 
 The local preview is retained on port4180. Production builds require only committed source and locked dependencies.
 
@@ -117,3 +121,42 @@ Both shared and mock primary backgrounds now paint once across the border box. G
 本轮按降载要求仅串行执行两个相关文件、单worker：Contact/helper 9项测试通过（约1.10s），包含中英有效/无效表单、mailto内容/编码、CRLF边界和模拟客户端启动失败时保留草稿/邮箱入口。相关5文件 ESLint、生成器语法和 Git whitespace 通过。另做一次性 Node CSS 静态核对（2项通过）；没有提交镜像 CSS 测试。未启动 IAB/CUA、真实邮件客户端、服务、完整生成器、完整类型构建或全量测试，未重启4180。见 `contact-mailto-checks.json` 与相关日志。旧125项/完整build证据不冒充当前HEAD验证；整体水印阻塞仍存在。
 
 Incremental evidence covers nine targeted behavior/encoding tests in a single serial worker, scoped lint, generator syntax and one-time CSS checks. No browser, OS client, full generation/build/suite or service startup ran. Existing production preview remains managed by the source chat. Overall acceptance remains blocked by branding and unperformed visual/OS checks.
+
+## 全站审计增量：Legacy Auth 查询 / Site audit increment: legacy auth queries
+
+只读全站调查发现 legacyDestination 对真实 `#/login` / `#/signup` 丢弃 fragment query；本次修正为合并外层 search 与目标 fragment query，目标同名参数优先，保留 code、嵌套 return_to、lang、UTM 等。只在首个 `?` 切分，避免截断参数值里的合法问号。实际跳转路径仍是固定本地 `/login` / `/register`，其它公开路径仍须经过原白名单；不放宽协议相对路径、编码绕过或外部路径。
+
+Legacy real-auth fragments now retain the outer and fragment query contexts, with destination parameters winning conflicts. Splitting only the first query delimiter preserves question marks inside values. Destinations remain fixed local auth paths and the existing public-route allowlist is unchanged.
+
+兼容策略：原型 `#/start` / `#/done` 不再模拟配置成功；只把原外层 search 带到真实注册，整段丢弃 mock fragment query（包括 t），不把原型方案选择当作真实凭据/开通状态。回归覆盖合并、优先级、嵌套参数、问号及 mock 丢弃；原外部路径防护用例保留。根线程已统一串行验证通过；详见 [逐页自查报告](website-all-pages-audit-2026-10-16.md)。
+
+Mock Start/Done fragments continue to enter real registration using only the outer query; their fragment state is intentionally discarded. Regression cases cover real-auth merge/precedence, nested query values and discarded mock flow fields. The source chat's coordinated serial run passed; see the linked all-pages audit.
+
+核心 AuthFlow 不修改：登录/注册面板跨越时仅保留 code/return_to，与 upstream/main 相同，按“登录保持线上”保留此既有行为；不能把官网入口的完整 query 保留扩大宣称为整个 AuthFlow 都保留 lang/UTM。可信 return_to 和 MFA/Provider/邀请策略继续由原实现负责。
+
+Core AuthFlow remains unchanged to match production: its panel switch retains code/return_to only. Website-link propagation does not imply arbitrary query preservation through all authentication steps. Existing trusted-return, MFA and live provider/invitation rules remain authoritative.
+
+### 当前单实例预览 / Current single-instance preview
+
+由根线程管理现有4180服务，本交付对话不重启或另起。根线程已确认公开配置请求200并逐字段与线上一致（github/google/apple；invite_code_required=false；email_auth_enabled=false），这仅是公开配置核验，不证明账号登录/OAuth/MFA完成。当前配置启动方式：
+
+The source chat manages the single existing4180 service and reports parity of public authentication configuration. This is not real-account authentication evidence. Current command:
+
+```sh
+cd frontend
+BACKEND_URL=https://nyx-api.chrono-ai.fun FRONTEND_URL=https://nyx.chrono-ai.fun NODE_USE_ENV_PROXY=1 npm run dev -- --host 127.0.0.1 --port 4180 --strictPort
+```
+
+默认未配置 backend 的本地命令可能使 public/config 代理失败；不能以这种502推断线上禁用登录，也不能以当前200推断所有鉴权流程通过。本交付对话未运行浏览器/测试/构建或更改服务；根线程统一验证与 HTTP/配置检查结果见逐页自查报告。独立 page-matrix.test.tsx 由根线程编写并与本轮修复一并交付。
+
+An unconfigured local backend can produce proxy502 and is not evidence of disabled production login. A200 public configuration is not full auth verification. This delivery chat ran no browser/tests/build or service changes. The source chat completed coordinated tests and HTTP/config checks; its independent page matrix is included with these fixes.
+
+### NAV-01 当前栏目恢复 / Current navigation restoration
+
+独立静态审查发现原HTML的 `.nl.on` 高亮在生成时遗漏；此前只有精确路由 aria-current，没有实际选中样式，详情页也无所属栏目。本次以共享 `websiteNavProps` 同时恢复 class 与可访问状态：顶级页为 page，方案/博客等子路径归属对应栏目为 location；使用完整 `/` 段边界，`/solutions-old`、`/blogger` 不误选。中英文Header与生成器同步，href/query、移动登录和原CSS不改变。
+
+The shared navigation adapter restores both selected styling and accessible current state. Exact pages use aria-current=page; descendants mark their owning section with location. Segment boundaries prevent prefix collisions. Both generated headers and the generator agree without changing destinations, query context or mobile login.
+
+已在既有 generated-contract 测试中补7顶级栏目、2类详情归属及无匹配/相似前缀场景，保留原链接参数测试。根线程已统一串行验证并纳入独立页面矩阵：15文件199项通过，生成器隔离复现68个输出一致；无新增图形浏览器检查。
+
+New header regression sources cover every top-level column, solution/blog descendants and unrelated/prefix-like paths. The coordinated source-chat run passed199 tests across15 files and isolated regeneration matched68 outputs. This delivery chat did not repeat those checks or open a browser.

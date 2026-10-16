@@ -190,6 +190,10 @@ function jsx(el) {
         continue;
       }
     }
+    if (name === "className" && el.hasAttribute("data-nav")) {
+      attrs.push(`{...websiteNavProps(s.route,${q("/" + el.dataset.nav)})}`);
+      continue;
+    }
     if (
       name === "className" &&
       el.hasAttribute("data-v") &&
@@ -202,8 +206,6 @@ function jsx(el) {
       attrs.push(`className={s.filterClass(${q(group)},${q(el.dataset.v)})}`);
       continue;
     }
-    if (name === "data-nav")
-      attrs.push(`aria-current={s.route===${q("/" + value)}?'page':undefined}`);
     if (name === "className" && el.hasAttribute("data-lang")) {
       attrs.push(
         `className={s.language===${q(value === "on" ? (locale === "en" ? "en" : "zh") : el.dataset.lang)}?'on':''}`,
@@ -485,6 +487,7 @@ for (locale of ["en", "zh"]) {
       banner +
       imports + visualImports +
       (body.includes("<ContactSection") ? "import {ContactSection} from '../../contact';\n" : "") +
+      (body.includes("websiteNavProps") ? "import {websiteNavProps} from '../../navigation';\n" : "") +
       `import {useWebsite} from '../../website-context';\nexport default function ${component}(){const s=useWebsite(); void s; return <>${body}</>;}\n`;
     fs.writeFileSync(
       path.join(outDir, locale, component + ".tsx"),

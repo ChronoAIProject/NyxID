@@ -1,6 +1,7 @@
 // Generated from approved A, SHA-256 5ba81989df18ad10986c1f00cebdcb1e2efd294932853a7671685187a7e34d33.
 // Run: node scripts/website-a/generate.mjs <baseline.html>
 import { VisualLink } from "../../visuals/elements";
+import { websiteNavProps } from "../../navigation";
 import { useWebsite } from "../../website-context";
 export default function WebsiteHeader() {
   const s = useWebsite();
@@ -31,63 +32,56 @@ export default function WebsiteHeader() {
         >
           {"\n      "}
           <a
-            className="nl"
+            {...websiteNavProps(s.route, "/nyxbot")}
             href={s.siteHref("/nyxbot")}
-            aria-current={s.route === "/nyxbot" ? "page" : undefined}
             data-nav="nyxbot"
           >
             {"NyxBot"}
           </a>
           {"\n      "}
           <a
-            className="nl"
+            {...websiteNavProps(s.route, "/solutions")}
             href={s.siteHref("/solutions")}
-            aria-current={s.route === "/solutions" ? "page" : undefined}
             data-nav="solutions"
           >
             {"Solutions"}
           </a>
           {"\n      "}
           <a
-            className="nl"
+            {...websiteNavProps(s.route, "/how-it-works")}
             href={s.siteHref("/how-it-works")}
-            aria-current={s.route === "/how-it-works" ? "page" : undefined}
             data-nav="how-it-works"
           >
             {"How it works"}
           </a>
           {"\n      "}
           <a
-            className="nl"
+            {...websiteNavProps(s.route, "/security")}
             href={s.siteHref("/security")}
-            aria-current={s.route === "/security" ? "page" : undefined}
             data-nav="security"
           >
             {"Security"}
           </a>
           {"\n      "}
           <a
-            className="nl"
+            {...websiteNavProps(s.route, "/agents")}
             href={s.siteHref("/agents")}
-            aria-current={s.route === "/agents" ? "page" : undefined}
             data-nav="agents"
           >
             {"Your agent"}
           </a>
           {"\n      "}
           <a
-            className="nl"
+            {...websiteNavProps(s.route, "/pricing")}
             href={s.siteHref("/pricing")}
-            aria-current={s.route === "/pricing" ? "page" : undefined}
             data-nav="pricing"
           >
             {"Pricing"}
           </a>
           {"\n      "}
           <a
-            className="nl"
+            {...websiteNavProps(s.route, "/blog")}
             href={s.siteHref("/blog")}
-            aria-current={s.route === "/blog" ? "page" : undefined}
             data-nav="blog"
           >
             {"Blog"}

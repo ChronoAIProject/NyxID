@@ -54,6 +54,58 @@ describe("website authentication entry parity", () => {
   });
 });
 
+describe("legacy authentication fragment context", () => {
+  it.each([
+    ["/login", "/login"],
+    ["/signup", "/register"],
+  ])("merges %s fragment parameters with the outer query", (legacy, target) => {
+    const returnTo = "/oauth/authorize?client_id=web&scope=openid";
+    const fragment = new URLSearchParams({
+      code: "FRAGMENT-INVITE",
+      return_to: returnTo,
+      lang: "zh",
+      utm_source: "fragment",
+    });
+    const destination = legacyDestination(
+      `#${legacy}?${fragment}`,
+      "?code=OUTER&return_to=%2Fkeys&lang=en&utm_medium=email",
+    );
+    const url = new URL(destination!, "https://nyxid.example");
+    expect(url.origin).toBe("https://nyxid.example");
+    expect(url.pathname).toBe(target);
+    expect(url.searchParams.get("code")).toBe("FRAGMENT-INVITE");
+    expect(url.searchParams.get("return_to")).toBe(returnTo);
+    expect(url.searchParams.get("lang")).toBe("zh");
+    expect(url.searchParams.get("utm_source")).toBe("fragment");
+    expect(url.searchParams.get("utm_medium")).toBe("email");
+  });
+
+  it("keeps the full value after the first query delimiter", () => {
+    const destination = legacyDestination(
+      "#/login?return_to=/keys?tab=active",
+      "?code=OUTER",
+    );
+    const url = new URL(destination!, "https://nyxid.example");
+    expect(url.pathname).toBe("/login");
+    expect(url.searchParams.get("return_to")).toBe("/keys?tab=active");
+    expect(url.searchParams.get("code")).toBe("OUTER");
+  });
+
+  it.each(["/start", "/done"])(
+    "drops mock %s fragment state without losing the outer auth context",
+    (path) => {
+      expect(
+        legacyDestination(
+          `#${path}?t=restaurant-manager&code=MOCK&return_to=https%3A%2F%2Fexample.org`,
+          "?code=REAL&return_to=%2Fkeys&lang=zh&utm_source=campaign",
+        ),
+      ).toBe(
+        "/register?code=REAL&return_to=%2Fkeys&lang=zh&utm_source=campaign",
+      );
+    },
+  );
+});
+
 it("only migrates recognized prototype paths and cannot become an external redirect", () => {
   for (const hash of [
     "#//example.org",

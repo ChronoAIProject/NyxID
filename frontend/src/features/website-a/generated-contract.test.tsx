@@ -6,10 +6,11 @@ import ChineseHeader from "./generated/zh/WebsiteHeader";
 import EnglishSolutions from "./generated/en/SolutionsPage";
 import ChineseSolutions from "./generated/zh/SolutionsPage";
 
+const navState = vi.hoisted(() => ({ route: "/solutions" }));
 vi.mock("./website-context", () => ({
   useWebsite: () => ({
     language: "en",
-    route: "/solutions",
+    route: navState.route,
     menuOpen: true,
     authHref,
     siteHref,
@@ -23,6 +24,7 @@ vi.mock("./interactions", () => ({ SolutionFilm: () => null }));
 afterEach(() => {
   cleanup();
   window.history.replaceState({}, "", "/");
+  navState.route = "/solutions";
 });
 
 describe.each([
@@ -31,12 +33,58 @@ describe.each([
 ] as const)(
   "generated %s website",
   (language, Header, Solutions, login, cta) => {
+    it.each([
+      ["/nyxbot", "nyxbot", "page"],
+      ["/solutions", "solutions", "page"],
+      ["/how-it-works", "how-it-works", "page"],
+      ["/security", "security", "page"],
+      ["/agents", "agents", "page"],
+      ["/pricing", "pricing", "page"],
+      ["/blog", "blog", "page"],
+      ["/solutions/restaurant-manager", "solutions", "location"],
+      ["/blog/scoped-keys", "blog", "location"],
+    ])(
+      "marks the current column for %s without changing link context",
+      (route, column, current) => {
+        navState.route = route!;
+        const query = `?lang=${language}&code=QA-INVITE&return_to=%2Fkeys`;
+        window.history.replaceState({}, "", `${route}${query}`);
+        const { container } = render(<Header />);
+        const active = container.querySelectorAll("a.nl.on");
+        expect(active).toHaveLength(1);
+        expect(active[0]).toHaveAttribute("data-nav", column);
+        expect(active[0]).toHaveAttribute("aria-current", current);
+        expect(active[0]).toHaveAttribute("href", `/${column}${query}`);
+        expect(
+          container.querySelectorAll("a[data-nav][aria-current]"),
+        ).toHaveLength(1);
+      },
+    );
+
+    it("does not select lookalike prefixes or unrelated pages", () => {
+      for (const route of [
+        "/solutions-old",
+        "/blogger",
+        "/",
+        "/contact",
+        "/integrations",
+      ]) {
+        navState.route = route;
+        const { container, unmount } = render(<Header />);
+        expect(container.querySelectorAll("a.nl.on")).toHaveLength(0);
+        expect(
+          container.querySelectorAll("a[data-nav][aria-current]"),
+        ).toHaveLength(0);
+        unmount();
+      }
+    });
+
     it("offers a real login link inside the expanded menu with the full auth query", () => {
       const query = `?lang=${language}&code=QA-INVITE&return_to=%2Fkeys%3Ftab%3Dactive&utm_source=qa`;
       window.history.replaceState({}, "", `/${query}`);
       const { container } = render(<Header />);
       const menu = container.querySelector<HTMLElement>("#website-nav-links")!;
-    const link = within(menu).getByRole("link", { name: login });
+      const link = within(menu).getByRole("link", { name: login });
       expect(link).toHaveAttribute("href", `/login${query}`);
       expect(link).not.toHaveAttribute("tabindex", "-1");
       expect(link).not.toHaveClass("hide-m");

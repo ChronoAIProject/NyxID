@@ -1,0 +1,464 @@
+{
+  "checkedAt": "2026-10-16T11:36:55.189123+08:00",
+  "baseCommit": "4ed6b651e474cb9629a472bb32a41ed8069793f1",
+  "candidateHashes": {
+    "frontend/src/features/website-a/auth-links.ts": "90c27d590da530af337dedf30cae02f04a1596aeeed511f730238ec29bea7805",
+    "frontend/src/features/website-a/auth-links.test.ts": "3f57d0f24b4b6fa17b895813f7e46186d1e99a6eb010874563482763043f0c46",
+    "frontend/src/features/website-a/navigation.ts": "d3890d3c4d128f05f065bd0cde2e639e40a6b16803bed538de4e18844a3f4c1b",
+    "frontend/src/features/website-a/generated/en/WebsiteHeader.tsx": "c1090035ae1827c3dbb7b8528eb7ec5c0ceb0870a2b6172dbe54745eba9b5fe4",
+    "frontend/src/features/website-a/generated/zh/WebsiteHeader.tsx": "a769762662253fa6d3a047bb1810a755a4dc73bd6ce58337fd744520e5b37bf6",
+    "frontend/src/features/website-a/generated-contract.test.tsx": "a9393924a313b649f38db42bc682e80e07cdf43d15ad6cd4101c031f69107f66",
+    "frontend/src/features/website-a/page-matrix.test.tsx": "0efa4d119f66ba3238357dbb076329b04a0eda011749901989df12d7d305509f",
+    "frontend/scripts/website-a/generate.mjs": "caf56d18c8a38ef330ea5596ecbbf9290b3594ea6d40e2245c695eca473e72ab"
+  },
+  "testSummary": {
+    "files": 15,
+    "passed": 199,
+    "workers": 1,
+    "fileParallelism": false,
+    "durationSeconds": 26.58,
+    "log": "full-site-tests.txt"
+  },
+  "pageMatrix": {
+    "languages": [
+      "en",
+      "zh"
+    ],
+    "routes": [
+      "/",
+      "/nyxbot",
+      "/solutions",
+      "/how-it-works",
+      "/security",
+      "/agents",
+      "/pricing",
+      "/integrations",
+      "/blog",
+      "/contact",
+      "/solutions/restaurant-manager",
+      "/solutions/help-desk",
+      "/solutions/appointment-booker",
+      "/solutions/callback-queue",
+      "/solutions/stock-analyst",
+      "/solutions/news-aggregator",
+      "/solutions/desk-researcher",
+      "/solutions/x-lead-catcher",
+      "/solutions/back-office-clerk",
+      "/blog/what-is-nyxid",
+      "/blog/luna-bistro",
+      "/blog/never-share-passwords",
+      "/blog/five-jobs",
+      "/blog/scoped-keys",
+      "/blog/x-dms-live"
+    ],
+    "renderedPages": 50,
+    "runtime": "happy-dom; actual WebsitePage components; location and motion APIs stubbed",
+    "checks": [
+      "headings, content, header/footer",
+      "all rendered local anchor destinations and code/return_to/lang",
+      "top-level and detail navbar section markers",
+      "Solutions category+channel sample",
+      "Integrations search/empty/recovery",
+      "Blog category sample",
+      "language switching"
+    ]
+  },
+  "http": [
+    {
+      "path": "/",
+      "language": "en",
+      "status": "200",
+      "exit": 0
+    },
+    {
+      "path": "/nyxbot",
+      "language": "en",
+      "status": "200",
+      "exit": 0
+    },
+    {
+      "path": "/solutions",
+      "language": "en",
+      "status": "200",
+      "exit": 0
+    },
+    {
+      "path": "/how-it-works",
+      "language": "en",
+      "status": "200",
+      "exit": 0
+    },
+    {
+      "path": "/security",
+      "language": "en",
+      "status": "200",
+      "exit": 0
+    },
+    {
+      "path": "/agents",
+      "language": "en",
+      "status": "200",
+      "exit": 0
+    },
+    {
+      "path": "/pricing",
+      "language": "en",
+      "status": "200",
+      "exit": 0
+    },
+    {
+      "path": "/integrations",
+      "language": "en",
+      "status": "200",
+      "exit": 0
+    },
+    {
+      "path": "/blog",
+      "language": "en",
+      "status": "200",
+      "exit": 0
+    },
+    {
+      "path": "/contact",
+      "language": "en",
+      "status": "200",
+      "exit": 0
+    },
+    {
+      "path": "/solutions/restaurant-manager",
+      "language": "en",
+      "status": "200",
+      "exit": 0
+    },
+    {
+      "path": "/solutions/help-desk",
+      "language": "en",
+      "status": "200",
+      "exit": 0
+    },
+    {
+      "path": "/solutions/appointment-booker",
+      "language": "en",
+      "status": "200",
+      "exit": 0
+    },
+    {
+      "path": "/solutions/callback-queue",
+      "language": "en",
+      "status": "200",
+      "exit": 0
+    },
+    {
+      "path": "/solutions/stock-analyst",
+      "language": "en",
+      "status": "200",
+      "exit": 0
+    },
+    {
+      "path": "/solutions/news-aggregator",
+      "language": "en",
+      "status": "200",
+      "exit": 0
+    },
+    {
+      "path": "/solutions/desk-researcher",
+      "language": "en",
+      "status": "200",
+      "exit": 0
+    },
+    {
+      "path": "/solutions/x-lead-catcher",
+      "language": "en",
+      "status": "200",
+      "exit": 0
+    },
+    {
+      "path": "/solutions/back-office-clerk",
+      "language": "en",
+      "status": "200",
+      "exit": 0
+    },
+    {
+      "path": "/blog/what-is-nyxid",
+      "language": "en",
+      "status": "200",
+      "exit": 0
+    },
+    {
+      "path": "/blog/luna-bistro",
+      "language": "en",
+      "status": "200",
+      "exit": 0
+    },
+    {
+      "path": "/blog/never-share-passwords",
+      "language": "en",
+      "status": "200",
+      "exit": 0
+    },
+    {
+      "path": "/blog/five-jobs",
+      "language": "en",
+      "status": "200",
+      "exit": 0
+    },
+    {
+      "path": "/blog/scoped-keys",
+      "language": "en",
+      "status": "200",
+      "exit": 0
+    },
+    {
+      "path": "/blog/x-dms-live",
+      "language": "en",
+      "status": "200",
+      "exit": 0
+    },
+    {
+      "path": "/",
+      "language": "zh",
+      "status": "200",
+      "exit": 0
+    },
+    {
+      "path": "/nyxbot",
+      "language": "zh",
+      "status": "200",
+      "exit": 0
+    },
+    {
+      "path": "/solutions",
+      "language": "zh",
+      "status": "200",
+      "exit": 0
+    },
+    {
+      "path": "/how-it-works",
+      "language": "zh",
+      "status": "200",
+      "exit": 0
+    },
+    {
+      "path": "/security",
+      "language": "zh",
+      "status": "200",
+      "exit": 0
+    },
+    {
+      "path": "/agents",
+      "language": "zh",
+      "status": "200",
+      "exit": 0
+    },
+    {
+      "path": "/pricing",
+      "language": "zh",
+      "status": "200",
+      "exit": 0
+    },
+    {
+      "path": "/integrations",
+      "language": "zh",
+      "status": "200",
+      "exit": 0
+    },
+    {
+      "path": "/blog",
+      "language": "zh",
+      "status": "200",
+      "exit": 0
+    },
+    {
+      "path": "/contact",
+      "language": "zh",
+      "status": "200",
+      "exit": 0
+    },
+    {
+      "path": "/solutions/restaurant-manager",
+      "language": "zh",
+      "status": "200",
+      "exit": 0
+    },
+    {
+      "path": "/solutions/help-desk",
+      "language": "zh",
+      "status": "200",
+      "exit": 0
+    },
+    {
+      "path": "/solutions/appointment-booker",
+      "language": "zh",
+      "status": "200",
+      "exit": 0
+    },
+    {
+      "path": "/solutions/callback-queue",
+      "language": "zh",
+      "status": "200",
+      "exit": 0
+    },
+    {
+      "path": "/solutions/stock-analyst",
+      "language": "zh",
+      "status": "200",
+      "exit": 0
+    },
+    {
+      "path": "/solutions/news-aggregator",
+      "language": "zh",
+      "status": "200",
+      "exit": 0
+    },
+    {
+      "path": "/solutions/desk-researcher",
+      "language": "zh",
+      "status": "200",
+      "exit": 0
+    },
+    {
+      "path": "/solutions/x-lead-catcher",
+      "language": "zh",
+      "status": "200",
+      "exit": 0
+    },
+    {
+      "path": "/solutions/back-office-clerk",
+      "language": "zh",
+      "status": "200",
+      "exit": 0
+    },
+    {
+      "path": "/blog/what-is-nyxid",
+      "language": "zh",
+      "status": "200",
+      "exit": 0
+    },
+    {
+      "path": "/blog/luna-bistro",
+      "language": "zh",
+      "status": "200",
+      "exit": 0
+    },
+    {
+      "path": "/blog/never-share-passwords",
+      "language": "zh",
+      "status": "200",
+      "exit": 0
+    },
+    {
+      "path": "/blog/five-jobs",
+      "language": "zh",
+      "status": "200",
+      "exit": 0
+    },
+    {
+      "path": "/blog/scoped-keys",
+      "language": "zh",
+      "status": "200",
+      "exit": 0
+    },
+    {
+      "path": "/blog/x-dms-live",
+      "language": "zh",
+      "status": "200",
+      "exit": 0
+    },
+    {
+      "path": "/login",
+      "status": "200",
+      "exit": 0
+    },
+    {
+      "path": "/register",
+      "status": "200",
+      "exit": 0
+    },
+    {
+      "path": "/privacy",
+      "status": "200",
+      "exit": 0
+    },
+    {
+      "path": "/terms",
+      "status": "200",
+      "exit": 0
+    },
+    {
+      "path": "/docs",
+      "status": "200",
+      "exit": 0
+    },
+    {
+      "path": "/docs/ai/guides/mcp-proxy",
+      "status": "200",
+      "exit": 0
+    },
+    {
+      "path": "/docs/ai/guides/agent-isolation",
+      "status": "200",
+      "exit": 0
+    },
+    {
+      "path": "/docs/shared/concepts/credential-nodes",
+      "status": "200",
+      "exit": 0
+    },
+    {
+      "path": "/docs/cli/getting-started/install",
+      "status": "200",
+      "exit": 0
+    }
+  ],
+  "authentication": {
+    "productionConfigURL": "https://nyx.chrono-ai.fun/api/v1/public/config",
+    "proxyTarget": "https://nyx-api.chrono-ai.fun",
+    "localConfigStatus": 200,
+    "matchingFields": {
+      "version": "0.71.0",
+      "social_providers": [
+        "github",
+        "google",
+        "apple"
+      ],
+      "invite_code_required": false,
+      "email_auth_enabled": false
+    },
+    "providerStarts": [
+      {
+        "provider": "github",
+        "status": 302,
+        "destinationHost": "github.com",
+        "callback": "https://nyx-api.chrono-ai.fun/api/v1/auth/social/github/callback"
+      },
+      {
+        "provider": "google",
+        "status": 302,
+        "destinationHost": "accounts.google.com",
+        "callback": "https://nyx-api.chrono-ai.fun/api/v1/auth/social/google/callback"
+      },
+      {
+        "provider": "apple",
+        "status": 302,
+        "destinationHost": "appleid.apple.com",
+        "callback": "https://nyx-api.chrono-ai.fun/api/v1/auth/social/apple/callback"
+      }
+    ],
+    "noRedirectFollow": true,
+    "liveAccountLoginPerformed": false,
+    "coreAuthDiffAgainstUpstreamMain": false
+  },
+  "generator": {
+    "comparedFiles": 68,
+    "mismatches": 0,
+    "evidence": "full-site-generation.json"
+  },
+  "limits": [
+    "No graphical browser, pixel, physical-device or OS mail-client verification in this round.",
+    "OAuth/MFA completion with a real account not performed.",
+    "Newsletter subscription remains disabled without a receiving service.",
+    "UnicornStudio branding remains unresolved.",
+    "Static catalogue and scripted demos are presentation content; no live service execution is implied.",
+    "Existing AuthFlow login/register panel switching preserves code/return_to only, matching the unchanged production implementation."
+  ]
+}

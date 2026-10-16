@@ -90,7 +90,7 @@ The first independent acceptance failed on mobile login reachability, the custom
 | --- | --- |
 | Mock social login / invitation regex / Start→Done | Original `/login` and `/register`, full query preserved. No mock account or provisioning success. Legacy hash conversion uses an exact public-route allowlist; protocol-relative/external inputs are rejected. |
 | “No sign-up / try now” plus unset demo bot QR links | Neutral connect/setup copy and existing registration. Unavailable demo links and decorative QR are excluded. No anonymous trial or free credit entitlement. |
-| Contact form local “sent” and scripted chat | Contact page uses the existing real Discord destination. No fake submission, no contact backend or email collection. |
+| Contact form local “sent” and scripted chat | Historical Discord-only replacement was superseded: the approved form/FAQ UI is restored. The owner-provided configurable email opens a user-reviewed mailto draft; no fake success or backend send API. See website-v4.1-delivery.md for current scope/evidence. |
 | Newsletter button with no handler | Clearly disabled “Subscriptions coming soon”; no data sent or saved. |
 | Illustrative Luna Bistro story | Retained with an explicit example/non-customer disclosure. |
 | Internal design/brand/reference pages and placeholder status | Excluded from public navigation. Existing terms/privacy and Docs/CLI remain reachable. Unverified hosting/certification placeholders ask the team instead of asserting compliance. |

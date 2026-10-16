@@ -45,9 +45,19 @@ export function legacyDestination(
   search = window.location.search,
 ): string | null {
   if (!hash.startsWith("#/")) return null;
-  const [pathname = "/", query = ""] = hash.slice(1).split("?");
-  if (["/login", "/signup", "/start", "/done"].includes(pathname)) {
-    return authHref(pathname === "/login" ? "login" : "register", search);
+  const fragment = hash.slice(1);
+  const queryStart = fragment.indexOf("?");
+  const pathname = queryStart === -1 ? fragment : fragment.slice(0, queryStart);
+  const query = queryStart === -1 ? "" : fragment.slice(queryStart + 1);
+  if (pathname === "/login" || pathname === "/signup") {
+    const target = pathname === "/login" ? "/login" : "/register";
+    // Real auth links retain both contexts; destination parameters take precedence.
+    return siteHref(target + (query ? `?${query}` : ""), search);
+  }
+  if (pathname === "/start" || pathname === "/done") {
+    // Mock provisioning fragments (including `t`) are not real auth state.
+    // Preserve only the original outer query when entering real registration.
+    return authHref("register", search);
   }
   if (!publicRoutes.includes(pathname)) return null;
   return siteHref(pathname + (query ? `?${query}` : ""), search);
