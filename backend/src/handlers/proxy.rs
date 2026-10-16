@@ -3904,25 +3904,22 @@ async fn execute_resolved_proxy_inner(
         }
     }
 
+    let assistant_projection =
+        crate::services::assistant_service_execution::HttpProjection::for_machine(
+            machine_ingress.as_ref(),
+        );
     if machine_git {
         let git = machine_ingress
             .as_ref()
             .and_then(|ingress| ingress.git.as_ref())
             .expect("machine git ingress");
-        let catalog = state
-            .db
-            .collection::<crate::models::downstream_service::DownstreamService>(
-                crate::models::downstream_service::COLLECTION_NAME,
-            )
-            .find_one(doc! { "_id": &target.service.id, "is_active": true })
-            .await?
-            .ok_or_else(|| AppError::Forbidden("Git catalog service unavailable".into()))?;
-        target.service.git_http = catalog.git_http;
-        crate::services::machine_gateway_service::apply_git_target(
+        crate::services::machine_gateway_service::apply_live_git_target(
+            &state.db,
             &mut target,
             master_credential,
             git,
-        )?;
+        )
+        .await?;
     }
 
     // Dedicated skill reads must retain the person's signed Ornn identity and
@@ -4388,10 +4385,11 @@ async fn execute_resolved_proxy_inner(
                 &target,
                 &method_str,
                 path,
+                &assistant_projection,
             )
             .await?
         } else {
-            crate::services::assistant_service_execution::check_http(
+            crate::services::assistant_service_execution::check_http_projected(
                 state,
                 auth_user,
                 resolved_user_service_id.as_deref(),
@@ -4406,6 +4404,7 @@ async fn execute_resolved_proxy_inner(
                     .as_ref()
                     .map(|authority| authority.pool_id.as_str()),
                 &all_headers,
+                &assistant_projection,
             )
             .await?
         },
@@ -5167,6 +5166,7 @@ async fn execute_resolved_proxy_inner(
                     method.as_str(),
                     path,
                 )
+                .projected(&assistant_projection)
                 .routed(node_route.as_ref())
                 .revalidate()
                 .await;
@@ -5220,6 +5220,7 @@ async fn execute_resolved_proxy_inner(
                                 method.as_str(),
                                 path,
                             )
+                            .projected(&assistant_projection)
                             .routed(Some(node_route))
                     })
                     .as_ref(),
@@ -5258,6 +5259,7 @@ async fn execute_resolved_proxy_inner(
                             method.as_str(),
                             path,
                         )
+                        .projected(&assistant_projection)
                         .routed(node_route.as_ref())
                 })
                 .as_ref(),
@@ -5417,6 +5419,7 @@ async fn execute_resolved_proxy_inner(
                         method.as_str(),
                         path,
                     )
+                    .projected(&assistant_projection)
                     .routed(Some(node_route))
                     .revalidate()
                     .await;
@@ -5469,7 +5472,11 @@ async fn execute_resolved_proxy_inner(
                     method.as_str(),
                     path,
                 )
-                .map(|guard| guard.routed(Some(node_route)))
+                .map(|guard| {
+                    guard
+                        .projected(&assistant_projection)
+                        .routed(Some(node_route))
+                })
                 && let Err(error) = guard.revalidate().await
             {
                 if let Some(reservation) = durable_reservation.as_ref() {
@@ -6239,6 +6246,7 @@ async fn execute_resolved_proxy_inner(
                     method.as_str(),
                     path,
                 )
+                .projected(&assistant_projection)
                 .routed(node_route.as_ref())
                 .revalidate()
                 .await;
@@ -6286,7 +6294,11 @@ async fn execute_resolved_proxy_inner(
                 method.as_str(),
                 path,
             )
-            .map(|guard| guard.routed(node_route.as_ref()))
+            .map(|guard| {
+                guard
+                    .projected(&assistant_projection)
+                    .routed(node_route.as_ref())
+            })
             && let Err(error) = guard.revalidate().await
         {
             if let Some(reservation) = durable_reservation.as_ref() {
@@ -6444,6 +6456,7 @@ async fn execute_resolved_proxy_inner(
                 method.as_str(),
                 path,
             )
+            .projected(&assistant_projection)
             .routed(node_route.as_ref())
             .revalidate()
             .await;
@@ -6494,7 +6507,11 @@ async fn execute_resolved_proxy_inner(
         method.as_str(),
         path,
     )
-    .map(|guard| guard.routed(node_route.as_ref()));
+    .map(|guard| {
+        guard
+            .projected(&assistant_projection)
+            .routed(node_route.as_ref())
+    });
     let downstream_result = until_client_disconnect(
         &downstream_cancellation,
         Box::pin(proxy_service::forward_request_with_egress_guard(

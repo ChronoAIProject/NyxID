@@ -471,6 +471,7 @@ pub async fn llm_proxy_request(
         replace_headers: provider_slug == "openai-codex",
         base_url: dispatch_base,
         extra_headers: dispatch_headers,
+        ..Default::default()
     };
     let (target, resolved_via_user_service, master_credential, owner_for_approval) =
         match crate::services::assistant_service_execution::resolve_implicit_for_request(
@@ -1182,6 +1183,7 @@ async fn gateway_provider_request(
         } else {
             extra_headers.clone()
         },
+        ..Default::default()
     };
     let (target, resolved_via_user_service, master_credential) =
         match crate::services::assistant_service_execution::resolve_implicit_for_request(

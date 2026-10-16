@@ -547,6 +547,27 @@ pub fn git_path<'a>(raw: &'a str, method: &str) -> AppResult<(&'a str, &'a str)>
     Ok((host, path))
 }
 
+/// Reproduce the catalog-controlled Git translation after resolving a fresh
+/// connection. Synthetic proxy services do not carry Git metadata themselves.
+pub(crate) fn apply_live_git_target<'a>(
+    db: &'a Database,
+    target: &'a mut super::proxy_service::ProxyTarget,
+    master: bool,
+    requested: &'a GitHttp,
+) -> futures::future::BoxFuture<'a, AppResult<()>> {
+    Box::pin(async move {
+        let catalog = db
+            .collection::<crate::models::downstream_service::DownstreamService>(
+                crate::models::downstream_service::COLLECTION_NAME,
+            )
+            .find_one(doc! { "_id": &target.service.id, "is_active": true })
+            .await?
+            .ok_or_else(|| AppError::Forbidden("Git catalog service unavailable".into()))?;
+        target.service.git_http = catalog.git_http;
+        apply_git_target(target, master, requested)
+    })
+}
+
 pub fn apply_git_target(
     target: &mut super::proxy_service::ProxyTarget,
     master: bool,

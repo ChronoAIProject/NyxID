@@ -45,9 +45,9 @@ mod resolution;
 mod selection;
 use availability::verified_unavailable;
 pub use availability::{NodeFailureEvidence, observe_transport};
-pub use http::{
-    HttpProjection, check_http, check_http_projected, verify_resolved, verify_resolved_projected,
-};
+#[cfg(test)]
+pub use http::check_http;
+pub use http::{HttpProjection, check_http_projected, verify_resolved, verify_resolved_projected};
 use request_identity::selection_fingerprint;
 #[cfg(test)]
 use request_identity::stateless_inference;
@@ -107,9 +107,16 @@ pub fn check_job_http<'a>(
     target: &'a super::proxy_service::ProxyTarget,
     method: &'a str,
     path: &'a str,
+    projection: &'a HttpProjection,
 ) -> futures::future::BoxFuture<'a, AppResult<Decision>> {
     Box::pin(check_job_http_inner(
-        state, job, id, owner, target, method, path,
+        state,
+        job,
+        id,
+        owner,
+        target,
+        (method, path),
+        projection,
     ))
 }
 
@@ -119,8 +126,8 @@ async fn check_job_http_inner(
     id: Option<&str>,
     owner: Option<&str>,
     target: &super::proxy_service::ProxyTarget,
-    method: &str,
-    path: &str,
+    operation: (&str, &str),
+    projection: &HttpProjection,
 ) -> AppResult<Decision> {
     let Some(id) = id else {
         // Catalog/platform credentials have no UserService owner. Their ACL
@@ -140,14 +147,15 @@ async fn check_job_http_inner(
         .assistant_chat
         .as_deref()
         .ok_or(AppError::MachinePermissionRevoked)?;
-    verify_resolved(
+    verify_resolved_projected(
         &state.db,
         &state.encryption_keys,
         chat,
         id,
         target,
-        method,
-        path,
+        operation.0,
+        operation.1,
+        projection,
     )
     .await?;
     Ok(Decision {

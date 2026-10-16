@@ -7,6 +7,7 @@ pub struct HttpProjection {
     pub replace_headers: bool,
     pub base_url: Option<String>,
     pub extra_headers: Vec<(String, String)>,
+    pub(crate) machine_git: Option<crate::models::downstream_service::GitHttp>,
 }
 impl Default for HttpProjection {
     fn default() -> Self {
@@ -15,10 +16,20 @@ impl Default for HttpProjection {
             replace_headers: false,
             base_url: None,
             extra_headers: Vec::new(),
+            machine_git: None,
         }
     }
 }
 impl HttpProjection {
+    pub(crate) fn for_machine(
+        ingress: Option<&crate::services::machine_gateway_service::Ingress>,
+    ) -> Self {
+        Self {
+            machine_git: ingress.and_then(|ingress| ingress.git.clone()),
+            ..Self::default()
+        }
+    }
+
     pub fn apply(&self, target: &mut crate::services::proxy_service::ProxyTarget) {
         if let Some(base) = &self.base_url {
             target.base_url.clone_from(base);
@@ -150,6 +161,15 @@ async fn verify_resolved_projected_inner(
         fresh.target.credential = override_credential;
     }
     projection.apply(&mut fresh.target);
+    if let Some(git) = projection.machine_git.as_ref() {
+        crate::services::machine_gateway_service::apply_live_git_target(
+            db,
+            &mut fresh.target,
+            fresh.master_credential,
+            git,
+        )
+        .await?;
+    }
     if before != connection_binding(db, id, &chat.api_key_id).await?
         || execution_digest(actual) != execution_digest(&fresh.target)
     {
@@ -160,6 +180,7 @@ async fn verify_resolved_projected_inner(
     Ok(())
 }
 
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub fn check_http<'a>(
     state: &'a crate::AppState,
