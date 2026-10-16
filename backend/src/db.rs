@@ -3337,6 +3337,8 @@ async fn ensure_service_indexes(db: &Database) -> Result<(), mongodb::error::Err
         )
         .await?;
 
+    crate::services::oracle_pool_service::ensure_lifecycle_indexes(db).await?;
+
     // ── oracle_worker_commands ──
     let oracle_worker_commands =
         db.collection::<Document>(crate::models::oracle_worker_command::COLLECTION_NAME);

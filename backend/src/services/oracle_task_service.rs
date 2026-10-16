@@ -68,6 +68,8 @@ const WORKER_CAPACITY_FAILURES: &[&str] = &["usage_limit_reached", "model_unavai
 const WORKER_INFRASTRUCTURE_FAILURES: &[&str] = &["browser_recovery_exhausted"];
 
 /// Workers polling within this window count as "active" in pool status.
+const TASK_MAINTENANCE_BATCH_SIZE: i64 = 16;
+
 pub const WORKER_RECENT_SECS: i64 = 120;
 /// Billing policy marker for the oracle relay (#1155): user-supplied browser
 /// capacity is exempt from platform metering. Only asserted from the test module.
@@ -81,7 +83,7 @@ pub struct SubmitterIdentity {
     pub api_key_name: Option<String>,
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct SubmitTaskInput {
     pub prompt: String,
     pub model_label: Option<String>,
@@ -216,10 +218,15 @@ fn mint_conversation_id() -> String {
     format!("conv_{}", hex::encode(rand::random::<[u8; 8]>()))
 }
 
-async fn count_tasks(db: &mongodb::Database, filter: Document) -> AppResult<u64> {
+pub(super) async fn count_tasks_in_session(
+    db: &mongodb::Database,
+    mongo_session: &mut mongodb::ClientSession,
+    filter: Document,
+) -> AppResult<u64> {
     Ok(db
         .collection::<OracleTask>(ORACLE_TASKS)
         .count_documents(filter)
+        .session(&mut *mongo_session)
         .await?)
 }
 
@@ -231,8 +238,61 @@ pub async fn submit_task(
     submitter: &SubmitterIdentity,
     input: SubmitTaskInput,
 ) -> AppResult<SubmitOutcome> {
+    let transaction_db = db.clone();
+    let transaction_pool = pool.clone();
+    let transaction_submitter = submitter.clone();
+    let mut mongo_session = db.client().start_session().await?;
+    mongo_session
+        .start_transaction()
+        .and_run(
+            (
+                transaction_db,
+                transaction_pool,
+                transaction_submitter,
+                input,
+            ),
+            |mongo_session, (transaction_db, transaction_pool, transaction_submitter, input)| {
+                Box::pin(async move {
+                    let input = &*input;
+                    let db = &*transaction_db;
+                    let pool = &*transaction_pool;
+                    let submitter = &*transaction_submitter;
+                    crate::services::api_key_mutation_service::transaction_result(
+                        submit_task_in_session(db, mongo_session, pool, submitter, input.clone())
+                            .await,
+                    )
+                })
+            },
+        )
+        .await
+        .map_err(crate::services::api_key_mutation_service::map_transaction_error)
+}
+
+pub(crate) async fn submit_task_in_session(
+    db: &mongodb::Database,
+    mongo_session: &mut mongodb::ClientSession,
+    pool: &OraclePool,
+    submitter: &SubmitterIdentity,
+    input: SubmitTaskInput,
+) -> AppResult<SubmitOutcome> {
+    crate::services::oracle_mutation_service::lock_expected_pool(db, mongo_session, pool, true)
+        .await?;
+
+    crate::services::oracle_mutation_service::lock_submitter(
+        db,
+        mongo_session,
+        &submitter.user_id,
+        pool,
+    )
+    .await?;
+
     validate_submit_input(&input)?;
-    enforce_submit_quotas(db, pool, submitter).await?;
+    if let Some(client_ref) = &input.client_ref
+        && let Some(existing) = db.collection::<OracleTask>(ORACLE_TASKS).find_one(doc! {"pool_id": &pool.id, "submitter_user_id": &submitter.user_id, "client_ref": client_ref}).session(&mut *mongo_session).await? {
+            let queue_position = queue_position_in_session(db, mongo_session, &existing).await?;
+            return Ok(SubmitOutcome {task:existing, queue_position, deduplicated:true});
+    }
+    enforce_submit_quotas_in_session(db, mongo_session, pool, submitter).await?;
 
     // Session resolution (three-state conversation_id).
     let now = Utc::now();
@@ -258,6 +318,7 @@ pub async fn submit_task(
                 };
                 db.collection::<OracleSession>(ORACLE_SESSIONS)
                     .insert_one(&session)
+                    .session(&mut *mongo_session)
                     .await?;
                 (Some(conv_id), false, None)
             }
@@ -265,6 +326,7 @@ pub async fn submit_task(
                 let session = db
                     .collection::<OracleSession>(ORACLE_SESSIONS)
                     .find_one(doc! { "_id": conv_id })
+                    .session(&mut *mongo_session)
                     .await?
                     .ok_or_else(|| AppError::OracleSessionNotFound(conv_id.to_string()))?;
                 if session.closed_at.is_some() {
@@ -347,38 +409,12 @@ pub async fn submit_task(
         updated_at: now,
     };
 
-    let insert = db
-        .collection::<OracleTask>(ORACLE_TASKS)
+    db.collection::<OracleTask>(ORACLE_TASKS)
         .insert_one(&task)
-        .await;
-    if let Err(e) = insert {
-        // Pool + submitter-scoped idempotency: a duplicate client_ref
-        // returns the original task instead of erroring, so blind retries
-        // are safe without cross-pool collisions.
-        if oracle_pool_service::is_duplicate_key(&e)
-            && let Some(client_ref) = &task.client_ref
-        {
-            let existing = db
-                .collection::<OracleTask>(ORACLE_TASKS)
-                .find_one(doc! {
-                    "pool_id": &task.pool_id,
-                    "submitter_user_id": &submitter.user_id,
-                    "client_ref": client_ref,
-                })
-                .await?;
-            if let Some(existing) = existing {
-                let position = queue_position(db, &existing).await?;
-                return Ok(SubmitOutcome {
-                    task: existing,
-                    queue_position: position,
-                    deduplicated: true,
-                });
-            }
-        }
-        return Err(e.into());
-    }
+        .session(&mut *mongo_session)
+        .await?;
 
-    let position = queue_position(db, &task).await?;
+    let position = queue_position_in_session(db, mongo_session, &task).await?;
     Ok(SubmitOutcome {
         task,
         queue_position: position,
@@ -509,20 +545,27 @@ fn is_blocked_domain(host: &str) -> bool {
         || normalized.ends_with(".lan")
 }
 
-async fn enforce_submit_quotas(
+pub(super) async fn enforce_submit_quotas_in_session(
     db: &mongodb::Database,
+    mongo_session: &mut mongodb::ClientSession,
     pool: &OraclePool,
     submitter: &SubmitterIdentity,
 ) -> AppResult<()> {
-    let queued = count_tasks(db, doc! { "pool_id": &pool.id, "status": "queued" }).await?;
+    let queued = count_tasks_in_session(
+        db,
+        mongo_session,
+        doc! { "pool_id": &pool.id, "status": "queued" },
+    )
+    .await?;
     if queued >= u64::from(pool.max_queue_length) {
         return Err(AppError::OracleQueueFull(format!(
             "pool '{}' already has {queued} queued tasks",
             pool.slug
         )));
     }
-    let inflight = count_tasks(
+    let inflight = count_tasks_in_session(
         db,
+        mongo_session,
         doc! {
             "pool_id": &pool.id,
             "submitter_user_id": &submitter.user_id,
@@ -546,6 +589,64 @@ pub async fn extract_url(
     url: &str,
     model_label: Option<String>,
 ) -> AppResult<OracleTask> {
+    let transaction_db = db.clone();
+    let transaction_pool = pool.clone();
+    let transaction_submitter = submitter.clone();
+    let transaction_url = url.to_owned();
+    let mut mongo_session = db.client().start_session().await?;
+    mongo_session
+        .start_transaction()
+        .and_run(
+            (
+                transaction_db,
+                transaction_pool,
+                transaction_submitter,
+                transaction_url,
+                model_label,
+            ),
+            |mongo_session,
+             (
+                transaction_db,
+                transaction_pool,
+                transaction_submitter,
+                transaction_url,
+                model_label,
+            )| {
+                Box::pin(async move {
+                    let model_label = &*model_label;
+                    let db = &*transaction_db;
+                    let pool = &*transaction_pool;
+                    let submitter = &*transaction_submitter;
+                    let url = transaction_url.as_str();
+                    crate::services::api_key_mutation_service::transaction_result(
+                        extract_url_in_session(
+                            db,
+                            mongo_session,
+                            pool,
+                            submitter,
+                            url,
+                            model_label.clone(),
+                        )
+                        .await,
+                    )
+                })
+            },
+        )
+        .await
+        .map_err(crate::services::api_key_mutation_service::map_transaction_error)
+}
+
+pub(crate) async fn extract_url_in_session(
+    db: &mongodb::Database,
+    mongo_session: &mut mongodb::ClientSession,
+    pool: &OraclePool,
+    submitter: &SubmitterIdentity,
+    url: &str,
+    model_label: Option<String>,
+) -> AppResult<OracleTask> {
+    crate::services::oracle_mutation_service::lock_expected_pool(db, mongo_session, pool, true)
+        .await?;
+
     validate_extract_url(url)?;
     if !pool.allow_extract {
         return Err(AppError::OracleExtractDisabled(
@@ -560,7 +661,15 @@ pub async fn extract_url(
             "model exceeds {MAX_MODEL_LABEL_LEN} chars"
         )));
     }
-    enforce_submit_quotas(db, pool, submitter).await?;
+    crate::services::oracle_mutation_service::lock_submitter(
+        db,
+        mongo_session,
+        &submitter.user_id,
+        pool,
+    )
+    .await?;
+
+    enforce_submit_quotas_in_session(db, mongo_session, pool, submitter).await?;
 
     let now = Utc::now();
     let task = OracleTask {
@@ -614,6 +723,7 @@ pub async fn extract_url(
     };
     db.collection::<OracleTask>(ORACLE_TASKS)
         .insert_one(&task)
+        .session(&mut *mongo_session)
         .await?;
 
     Ok(task)
@@ -626,13 +736,79 @@ pub async fn attach_conversation(
     chatgpt_url: &str,
     tag: Option<String>,
 ) -> AppResult<(OracleSession, OracleTask)> {
+    let transaction_db = db.clone();
+    let transaction_pool = pool.clone();
+    let transaction_submitter = submitter.clone();
+    let transaction_chatgpt_url = chatgpt_url.to_owned();
+    let mut mongo_session = db.client().start_session().await?;
+    mongo_session
+        .start_transaction()
+        .and_run(
+            (
+                transaction_db,
+                transaction_pool,
+                transaction_submitter,
+                transaction_chatgpt_url,
+                tag,
+            ),
+            |mongo_session,
+             (
+                transaction_db,
+                transaction_pool,
+                transaction_submitter,
+                transaction_chatgpt_url,
+                tag,
+            )| {
+                Box::pin(async move {
+                    let tag = &*tag;
+                    let db = &*transaction_db;
+                    let pool = &*transaction_pool;
+                    let submitter = &*transaction_submitter;
+                    let chatgpt_url = transaction_chatgpt_url.as_str();
+                    crate::services::api_key_mutation_service::transaction_result(
+                        attach_conversation_in_session(
+                            db,
+                            mongo_session,
+                            pool,
+                            submitter,
+                            chatgpt_url,
+                            tag.clone(),
+                        )
+                        .await,
+                    )
+                })
+            },
+        )
+        .await
+        .map_err(crate::services::api_key_mutation_service::map_transaction_error)
+}
+
+pub(crate) async fn attach_conversation_in_session(
+    db: &mongodb::Database,
+    mongo_session: &mut mongodb::ClientSession,
+    pool: &OraclePool,
+    submitter: &SubmitterIdentity,
+    chatgpt_url: &str,
+    tag: Option<String>,
+) -> AppResult<(OracleSession, OracleTask)> {
+    crate::services::oracle_mutation_service::lock_expected_pool(db, mongo_session, pool, true)
+        .await?;
+
     validate_attach_url(chatgpt_url)?;
     if tag.as_deref().is_some_and(|t| t.len() > MAX_TAG_LEN) {
         return Err(AppError::ValidationError(format!(
             "tag exceeds {MAX_TAG_LEN} chars"
         )));
     }
-    enforce_submit_quotas(db, pool, submitter).await?;
+    crate::services::oracle_mutation_service::lock_submitter(
+        db,
+        mongo_session,
+        &submitter.user_id,
+        pool,
+    )
+    .await?;
+
+    enforce_submit_quotas_in_session(db, mongo_session, pool, submitter).await?;
 
     let now = Utc::now();
     let session = OracleSession {
@@ -652,6 +828,7 @@ pub async fn attach_conversation(
     };
     db.collection::<OracleSession>(ORACLE_SESSIONS)
         .insert_one(&session)
+        .session(&mut *mongo_session)
         .await?;
 
     let task = OracleTask {
@@ -705,18 +882,24 @@ pub async fn attach_conversation(
     };
     db.collection::<OracleTask>(ORACLE_TASKS)
         .insert_one(&task)
+        .session(&mut *mongo_session)
         .await?;
 
     Ok((session, task))
 }
 
 /// 1-based position among queued tasks of the same pool (0 = not queued).
-async fn queue_position(db: &mongodb::Database, task: &OracleTask) -> AppResult<u64> {
+pub(super) async fn queue_position_in_session(
+    db: &mongodb::Database,
+    mongo_session: &mut mongodb::ClientSession,
+    task: &OracleTask,
+) -> AppResult<u64> {
     if task.status != OracleTaskStatus::Queued {
         return Ok(0);
     }
-    let ahead = count_tasks(
+    let ahead = count_tasks_in_session(
         db,
+        mongo_session,
         doc! {
             "pool_id": &task.pool_id,
             "status": "queued",
@@ -741,13 +924,52 @@ pub async fn get_task_for_consumer(
         .ok_or_else(|| AppError::OracleTaskNotFound(task_id.to_string()))?;
 
     if task.submitter_user_id != actor_user_id {
-        let pool = oracle_pool_service::get_pool(db, &task.pool_id).await?;
+        let pool = oracle_pool_service::get_pool_for_history(db, &task.pool_id).await?;
         oracle_pool_service::ensure_can_manage(db, actor_user_id, &pool)
             .await
             .map_err(|_| AppError::OracleTaskNotFound(task_id.to_string()))?;
     }
 
     let position = queue_position(db, &task).await?;
+    Ok((task, position))
+}
+
+pub(crate) async fn get_task_for_consumer_in_session(
+    db: &mongodb::Database,
+    mongo_session: &mut mongodb::ClientSession,
+    actor_user_id: &str,
+    task_id: &str,
+) -> AppResult<(OracleTask, u64)> {
+    let task = db
+        .collection::<OracleTask>(ORACLE_TASKS)
+        .find_one(doc! { "_id": task_id })
+        .session(&mut *mongo_session)
+        .await?
+        .ok_or_else(|| AppError::OracleTaskNotFound(task_id.to_string()))?;
+
+    if task.submitter_user_id != actor_user_id {
+        let pool = crate::services::oracle_mutation_service::lookup_pool(
+            db,
+            mongo_session,
+            &task.pool_id,
+            true,
+        )
+        .await?;
+        // Keep history reads lightweight; this helper authorizes a mutation.
+        crate::services::oracle_mutation_service::lock_manager(
+            db,
+            mongo_session,
+            actor_user_id,
+            &pool.user_id,
+        )
+        .await
+        .map_err(|error| match error {
+            AppError::Forbidden(_) => AppError::OracleTaskNotFound(task_id.to_string()),
+            other => other,
+        })?;
+    }
+
+    let position = queue_position_in_session(db, mongo_session, &task).await?;
     Ok((task, position))
 }
 
@@ -760,7 +982,58 @@ pub async fn cancel_task(
     task_id: &str,
     retention_days: u32,
 ) -> AppResult<OracleTask> {
-    let (task, _) = get_task_for_consumer(db, actor_user_id, task_id).await?;
+    let transaction_db = db.clone();
+    let transaction_actor_user_id = actor_user_id.to_owned();
+    let transaction_task_id = task_id.to_owned();
+    let mut mongo_session = db.client().start_session().await?;
+    mongo_session
+        .start_transaction()
+        .and_run(
+            (
+                transaction_db,
+                transaction_actor_user_id,
+                transaction_task_id,
+                retention_days,
+            ),
+            |mongo_session, context| {
+                let (
+                    transaction_db,
+                    transaction_actor_user_id,
+                    transaction_task_id,
+                    retention_days,
+                ) = context;
+                Box::pin(async move {
+                    let retention_days = *retention_days;
+                    let db = &*transaction_db;
+                    let actor_user_id = transaction_actor_user_id.as_str();
+                    let task_id = transaction_task_id.as_str();
+                    crate::services::api_key_mutation_service::transaction_result(
+                        cancel_task_in_session(
+                            db,
+                            mongo_session,
+                            actor_user_id,
+                            task_id,
+                            retention_days,
+                        )
+                        .await,
+                    )
+                })
+            },
+        )
+        .await
+        .map_err(crate::services::api_key_mutation_service::map_transaction_error)
+}
+
+pub(crate) async fn cancel_task_in_session(
+    db: &mongodb::Database,
+    mongo_session: &mut mongodb::ClientSession,
+    actor_user_id: &str,
+    task_id: &str,
+    retention_days: u32,
+) -> AppResult<OracleTask> {
+    let (task, _) =
+        get_task_for_consumer_in_session(db, mongo_session, actor_user_id, task_id).await?;
+    crate::services::oracle_mutation_service::lock_pool(db, mongo_session, &task.pool_id).await?;
     match task.status {
         OracleTaskStatus::Cancelled => return Ok(task),
         OracleTaskStatus::Completed | OracleTaskStatus::Failed => {
@@ -792,6 +1065,7 @@ pub async fn cancel_task(
                 .return_document(ReturnDocument::After)
                 .build(),
         )
+        .session(&mut *mongo_session)
         .await?;
 
     updated.ok_or_else(|| AppError::Conflict("task reached a terminal state first".to_string()))
@@ -823,15 +1097,26 @@ fn truncate_chars(value: &str, max: usize) -> String {
     }
 }
 
-async fn upsert_worker_presence(
+struct WorkerPresenceInput<'a> {
+    current_task_id: Option<&'a str>,
+    script_version: Option<&'a str>,
+    _page_url: Option<&'a str>,
+    authorized_worker: Option<&'a OracleWorker>,
+}
+
+async fn upsert_worker_presence_in_session(
     db: &mongodb::Database,
+    mongo_session: &mut mongodb::ClientSession,
     pool: &OraclePool,
     worker_label: &str,
-    current_task_id: Option<&str>,
-    script_version: Option<&str>,
-    _page_url: Option<&str>,
-    authorized_worker: Option<&OracleWorker>,
+    input: WorkerPresenceInput<'_>,
 ) -> AppResult<()> {
+    let WorkerPresenceInput {
+        current_task_id,
+        script_version,
+        authorized_worker,
+        ..
+    } = input;
     let now = bson::DateTime::from_chrono(Utc::now());
     let mut set = doc! {
         "pool_id": &pool.id,
@@ -858,7 +1143,7 @@ async fn upsert_worker_presence(
             },
         )
         .upsert(authorized_worker.is_none())
-        .await?;
+        .session(&mut *mongo_session).await?;
     if authorized_worker.is_some() && updated.matched_count == 0 {
         return Err(AppError::OracleWorkerTokenInvalid);
     }
@@ -867,8 +1152,9 @@ async fn upsert_worker_presence(
 
 /// Requeue expired dispatches at the FIFO front while retry budget remains,
 /// then fail exhausted tasks with a retention TTL.
-async fn requeue_expired_leases(
+pub(super) async fn requeue_expired_leases_in_session(
     db: &mongodb::Database,
+    mongo_session: &mut mongodb::ClientSession,
     pool_id: &str,
     retention_days: u32,
 ) -> AppResult<u64> {
@@ -903,6 +1189,7 @@ async fn requeue_expired_leases(
                 },
             },
         )
+        .session(&mut *mongo_session)
         .await?;
 
     let exhausted = db
@@ -938,6 +1225,7 @@ async fn requeue_expired_leases(
                 },
             },
         )
+        .session(&mut *mongo_session)
         .await?;
 
     Ok(retryable.modified_count + exhausted.modified_count)
@@ -956,27 +1244,42 @@ async fn requeue_expired_leases(
 /// may claim it. A non-owner that picks it up cannot reopen the other
 /// account's `/c/<id>` and will report an extraction failure, but that
 /// surfaces a terminal error and frees the quota instead of leaking it.
-async fn release_stale_affinity(db: &mongodb::Database, pool: &OraclePool) -> AppResult<u64> {
+pub(super) async fn release_stale_affinity_in_session(
+    db: &mongodb::Database,
+    mongo_session: &mut mongodb::ClientSession,
+    pool: &OraclePool,
+) -> AppResult<u64> {
     let now = Utc::now();
     let cutoff = now - Duration::seconds(pool.task_timeout_secs as i64);
-    let result = db
-        .collection::<OracleTask>(ORACLE_TASKS)
-        .update_many(
-            doc! {
-                "pool_id": &pool.id,
-                "status": "queued",
-                "required_worker_label": { "$ne": null },
-                "created_at": { "$lt": bson::DateTime::from_chrono(cutoff) },
-            },
-            doc! {
-                "$set": {
-                    "phase": "affinity_released_after_grace",
-                    "updated_at": bson::DateTime::from_chrono(now),
-                },
-                "$unset": { "required_worker_label": "" },
-            },
-        )
+    let tasks = db.collection::<Document>(ORACLE_TASKS);
+    let rows: Vec<Document> = tasks
+        .find(doc! {
+            "pool_id": &pool.id, "status":"queued", "required_worker_label":{"$ne":null},
+            "created_at":{"$lt":bson::DateTime::from_chrono(cutoff)},
+        })
+        .projection(doc! {"_id":1})
+        .sort(doc! {"created_at":1,"_id":1})
+        .limit(TASK_MAINTENANCE_BATCH_SIZE)
+        .session(&mut *mongo_session)
+        .await?
+        .stream(&mut *mongo_session)
+        .try_collect()
         .await?;
+    if rows.is_empty() {
+        return Ok(0);
+    }
+    let ids: Vec<_> = rows
+        .iter()
+        .map(|row| {
+            row.get("_id")
+                .cloned()
+                .ok_or_else(|| AppError::Internal("invalid Oracle task ID".into()))
+        })
+        .collect::<AppResult<_>>()?;
+    let result = tasks.update_many(doc! {"_id":{"$in":ids}}, doc! {
+        "$set":{"phase":"affinity_released_after_grace","updated_at":bson::DateTime::from_chrono(now)},
+        "$unset":{"required_worker_label":""},
+    }).session(&mut *mongo_session).await?;
     Ok(result.modified_count)
 }
 
@@ -1020,8 +1323,9 @@ pub struct WorkerTaskPayload {
     pub submitted_at: String,
 }
 
-async fn worker_payload(
+pub(super) async fn worker_payload_in_session(
     db: &mongodb::Database,
+    mongo_session: &mut mongodb::ClientSession,
     pool: &OraclePool,
     task: &OracleTask,
     worker_label: &str,
@@ -1034,6 +1338,7 @@ async fn worker_payload(
             Some(conv_id) => db
                 .collection::<OracleSession>(ORACLE_SESSIONS)
                 .find_one(doc! { "_id": conv_id })
+                .session(&mut *mongo_session)
                 .await?
                 .and_then(|s| s.chatgpt_url),
             None => task.chatgpt_url.clone(),
@@ -1076,7 +1381,76 @@ pub async fn claim_task(
     script_version: Option<&str>,
     page_url: Option<&str>,
 ) -> AppResult<Option<WorkerTaskPayload>> {
-    claim_task_with_retention(db, pool, worker_label, script_version, page_url, 30, None).await
+    let transaction_db = db.clone();
+    let transaction_pool = pool.clone();
+    let transaction_worker_label = worker_label.to_owned();
+    let transaction_script_version = script_version.map(str::to_owned);
+    let transaction_page_url = page_url.map(str::to_owned);
+    let mut mongo_session = db.client().start_session().await?;
+    mongo_session
+        .start_transaction()
+        .and_run(
+            (
+                transaction_db,
+                transaction_pool,
+                transaction_worker_label,
+                transaction_script_version,
+                transaction_page_url,
+            ),
+            |mongo_session,
+             (
+                transaction_db,
+                transaction_pool,
+                transaction_worker_label,
+                transaction_script_version,
+                transaction_page_url,
+            )| {
+                Box::pin(async move {
+                    let db = &*transaction_db;
+                    let pool = &*transaction_pool;
+                    let worker_label = transaction_worker_label.as_str();
+                    let script_version = transaction_script_version.as_deref();
+                    let page_url = transaction_page_url.as_deref();
+                    crate::services::api_key_mutation_service::transaction_result(
+                        claim_task_in_session(
+                            db,
+                            mongo_session,
+                            pool,
+                            worker_label,
+                            script_version,
+                            page_url,
+                        )
+                        .await,
+                    )
+                })
+            },
+        )
+        .await
+        .map_err(crate::services::api_key_mutation_service::map_transaction_error)
+}
+
+#[cfg(test)]
+pub(crate) async fn claim_task_in_session(
+    db: &mongodb::Database,
+    mongo_session: &mut mongodb::ClientSession,
+    pool: &OraclePool,
+    worker_label: &str,
+    script_version: Option<&str>,
+    page_url: Option<&str>,
+) -> AppResult<Option<WorkerTaskPayload>> {
+    claim_task_with_retention_in_session(
+        db,
+        mongo_session,
+        pool,
+        worker_label,
+        WorkerClaimInput {
+            script_version,
+            page_url,
+            authorized_worker: None,
+        },
+        30,
+    )
+    .await
 }
 
 /// Requeues expired leases, releases stale affinity, idempotently returns the
@@ -1091,12 +1465,98 @@ pub async fn claim_task_with_retention(
     retention_days: u32,
     authorized_worker: Option<&OracleWorker>,
 ) -> AppResult<Option<WorkerTaskPayload>> {
+    let transaction_db = db.clone();
+    let transaction_pool = pool.clone();
+    let transaction_worker_label = worker_label.to_owned();
+    let transaction_script_version = script_version.map(str::to_owned);
+    let transaction_page_url = page_url.map(str::to_owned);
+    let transaction_authorized_worker = authorized_worker.cloned();
+    let mut mongo_session = db.client().start_session().await?;
+    mongo_session
+        .start_transaction()
+        .and_run(
+            (
+                transaction_db,
+                transaction_pool,
+                transaction_worker_label,
+                transaction_script_version,
+                transaction_page_url,
+                retention_days,
+                transaction_authorized_worker,
+            ),
+            |mongo_session,
+             (
+                transaction_db,
+                transaction_pool,
+                transaction_worker_label,
+                transaction_script_version,
+                transaction_page_url,
+                retention_days,
+                transaction_authorized_worker,
+            )| {
+                Box::pin(async move {
+                    let retention_days = *retention_days;
+                    let db = &*transaction_db;
+                    let pool = &*transaction_pool;
+                    let worker_label = transaction_worker_label.as_str();
+                    let script_version = transaction_script_version.as_deref();
+                    let page_url = transaction_page_url.as_deref();
+                    let authorized_worker = transaction_authorized_worker.as_ref();
+                    crate::services::api_key_mutation_service::transaction_result(
+                        claim_task_with_retention_in_session(
+                            db,
+                            mongo_session,
+                            pool,
+                            worker_label,
+                            WorkerClaimInput {
+                                script_version,
+                                page_url,
+                                authorized_worker,
+                            },
+                            retention_days,
+                        )
+                        .await,
+                    )
+                })
+            },
+        )
+        .await
+        .map_err(crate::services::api_key_mutation_service::map_transaction_error)
+}
+
+struct WorkerClaimInput<'a> {
+    pub script_version: Option<&'a str>,
+    pub page_url: Option<&'a str>,
+    pub authorized_worker: Option<&'a OracleWorker>,
+}
+
+async fn claim_task_with_retention_in_session(
+    db: &mongodb::Database,
+    mongo_session: &mut mongodb::ClientSession,
+    pool: &OraclePool,
+    worker_label: &str,
+    input: WorkerClaimInput<'_>,
+    retention_days: u32,
+) -> AppResult<Option<WorkerTaskPayload>> {
+    let WorkerClaimInput {
+        script_version,
+        page_url,
+        authorized_worker,
+    } = input;
+    crate::services::oracle_mutation_service::lock_expected_pool(db, mongo_session, pool, true)
+        .await?;
+
     validate_worker_label(worker_label)?;
     if let Some(worker) = authorized_worker {
-        super::oracle_worker_enrollment_service::ensure_current_worker(db, worker).await?;
+        super::oracle_worker_enrollment_service::ensure_current_worker_in_session(
+            db,
+            mongo_session,
+            worker,
+        )
+        .await?;
     }
-    requeue_expired_leases(db, &pool.id, retention_days).await?;
-    release_stale_affinity(db, pool).await?;
+    requeue_expired_leases_in_session(db, mongo_session, &pool.id, retention_days).await?;
+    release_stale_affinity_in_session(db, mongo_session, pool).await?;
 
     let now = Utc::now();
     let lease = now + Duration::seconds(pool.task_timeout_secs as i64);
@@ -1120,39 +1580,60 @@ pub async fn claim_task_with_retention(
                 .return_document(ReturnDocument::After)
                 .build(),
         )
+        .session(&mut *mongo_session)
         .await?;
     if let Some(task) = resumed {
-        upsert_worker_presence(
+        upsert_worker_presence_in_session(
             db,
+            mongo_session,
             pool,
             worker_label,
-            Some(&task.id),
-            script_version,
-            page_url,
-            authorized_worker,
+            WorkerPresenceInput {
+                current_task_id: Some(&task.id),
+                script_version,
+                _page_url: page_url,
+                authorized_worker,
+            },
         )
         .await?;
-        return Ok(Some(worker_payload(db, pool, &task, worker_label).await?));
+        return Ok(Some(
+            worker_payload_in_session(db, mongo_session, pool, &task, worker_label).await?,
+        ));
     }
 
-    upsert_worker_presence(
+    upsert_worker_presence_in_session(
         db,
+        mongo_session,
         pool,
         worker_label,
-        None,
-        script_version,
-        page_url,
-        authorized_worker,
+        WorkerPresenceInput {
+            current_task_id: None,
+            script_version,
+            _page_url: page_url,
+            authorized_worker,
+        },
     )
     .await?;
-    settle_unroutable_capacity_tasks(db, &pool.id, retention_days).await?;
-    if !super::oracle_worker_service::accepts_new_tasks(db, &pool.id, worker_label).await? {
+    settle_unroutable_capacity_tasks_in_session(db, mongo_session, &pool.id, retention_days)
+        .await?;
+    if !super::oracle_worker_service::accepts_new_tasks_in_session(
+        db,
+        mongo_session,
+        &pool.id,
+        worker_label,
+    )
+    .await?
+    {
         return Ok(None);
     }
 
-    // Soft capacity gate (concurrent claims may briefly overshoot by one;
-    // the cap is a fairness knob, not an invariant).
-    let dispatched = count_tasks(db, doc! { "pool_id": &pool.id, "status": "dispatched" }).await?;
+    // The pool fence serializes this capacity check with concurrent claims.
+    let dispatched = count_tasks_in_session(
+        db,
+        mongo_session,
+        doc! { "pool_id": &pool.id, "status": "dispatched" },
+    )
+    .await?;
     if dispatched >= u64::from(pool.max_workers) {
         return Ok(None);
     }
@@ -1195,21 +1676,27 @@ pub async fn claim_task_with_retention(
                 .return_document(ReturnDocument::After)
                 .build(),
         )
+        .session(&mut *mongo_session)
         .await?;
 
     match claimed {
         Some(task) => {
-            upsert_worker_presence(
+            upsert_worker_presence_in_session(
                 db,
+                mongo_session,
                 pool,
                 worker_label,
-                Some(&task.id),
-                script_version,
-                page_url,
-                authorized_worker,
+                WorkerPresenceInput {
+                    current_task_id: Some(&task.id),
+                    script_version,
+                    _page_url: page_url,
+                    authorized_worker,
+                },
             )
             .await?;
-            Ok(Some(worker_payload(db, pool, &task, worker_label).await?))
+            Ok(Some(
+                worker_payload_in_session(db, mongo_session, pool, &task, worker_label).await?,
+            ))
         }
         None => Ok(None),
     }
@@ -1231,9 +1718,66 @@ pub async fn worker_ack(
     task_id: &str,
     input: WorkerAckInput<'_>,
 ) -> AppResult<AckOutcome> {
-    worker_ack_fenced(db, pool, worker_label, task_id, input).await
+    let transaction_db = db.clone();
+    let transaction_pool = pool.clone();
+    let transaction_worker_label = worker_label.to_owned();
+    let transaction_task_id = task_id.to_owned();
+    let mut mongo_session = db.client().start_session().await?;
+    mongo_session
+        .start_transaction()
+        .and_run(
+            (
+                transaction_db,
+                transaction_pool,
+                transaction_worker_label,
+                transaction_task_id,
+                input,
+            ),
+            |mongo_session,
+             (
+                transaction_db,
+                transaction_pool,
+                transaction_worker_label,
+                transaction_task_id,
+                input,
+            )| {
+                Box::pin(async move {
+                    let input = &*input;
+                    let db = &*transaction_db;
+                    let pool = &*transaction_pool;
+                    let worker_label = transaction_worker_label.as_str();
+                    let task_id = transaction_task_id.as_str();
+                    crate::services::api_key_mutation_service::transaction_result(
+                        worker_ack_in_session(
+                            db,
+                            mongo_session,
+                            pool,
+                            worker_label,
+                            task_id,
+                            input.clone(),
+                        )
+                        .await,
+                    )
+                })
+            },
+        )
+        .await
+        .map_err(crate::services::api_key_mutation_service::map_transaction_error)
 }
 
+#[cfg(test)]
+pub(crate) async fn worker_ack_in_session(
+    db: &mongodb::Database,
+    mongo_session: &mut mongodb::ClientSession,
+    pool: &OraclePool,
+    worker_label: &str,
+    task_id: &str,
+    input: WorkerAckInput<'_>,
+) -> AppResult<AckOutcome> {
+    worker_ack_fenced_in_session(db, mongo_session, pool, worker_label, task_id, input).await
+}
+
+#[derive(Clone)]
 pub struct WorkerAckInput<'a> {
     pub authorized_worker: Option<&'a OracleWorker>,
     pub phase: Option<&'a str>,
@@ -1252,9 +1796,72 @@ pub async fn worker_ack_fenced(
     task_id: &str,
     input: WorkerAckInput<'_>,
 ) -> AppResult<AckOutcome> {
+    let transaction_db = db.clone();
+    let transaction_pool = pool.clone();
+    let transaction_worker_label = worker_label.to_owned();
+    let transaction_task_id = task_id.to_owned();
+    let mut mongo_session = db.client().start_session().await?;
+    mongo_session
+        .start_transaction()
+        .and_run(
+            (
+                transaction_db,
+                transaction_pool,
+                transaction_worker_label,
+                transaction_task_id,
+                input,
+            ),
+            |mongo_session,
+             (
+                transaction_db,
+                transaction_pool,
+                transaction_worker_label,
+                transaction_task_id,
+                input,
+            )| {
+                Box::pin(async move {
+                    let input = &*input;
+                    let db = &*transaction_db;
+                    let pool = &*transaction_pool;
+                    let worker_label = transaction_worker_label.as_str();
+                    let task_id = transaction_task_id.as_str();
+                    crate::services::api_key_mutation_service::transaction_result(
+                        worker_ack_fenced_in_session(
+                            db,
+                            mongo_session,
+                            pool,
+                            worker_label,
+                            task_id,
+                            input.clone(),
+                        )
+                        .await,
+                    )
+                })
+            },
+        )
+        .await
+        .map_err(crate::services::api_key_mutation_service::map_transaction_error)
+}
+
+pub(crate) async fn worker_ack_fenced_in_session(
+    db: &mongodb::Database,
+    mongo_session: &mut mongodb::ClientSession,
+    pool: &OraclePool,
+    worker_label: &str,
+    task_id: &str,
+    input: WorkerAckInput<'_>,
+) -> AppResult<AckOutcome> {
+    crate::services::oracle_mutation_service::lock_expected_pool(db, mongo_session, pool, true)
+        .await?;
+
     validate_worker_label(worker_label)?;
     if let Some(worker) = input.authorized_worker {
-        super::oracle_worker_enrollment_service::ensure_current_worker(db, worker).await?;
+        super::oracle_worker_enrollment_service::ensure_current_worker_in_session(
+            db,
+            mongo_session,
+            worker,
+        )
+        .await?;
     }
     let now = Utc::now();
     let lease = now + Duration::seconds(pool.task_timeout_secs as i64);
@@ -1284,16 +1891,20 @@ pub async fn worker_ack_fenced(
     let updated = db
         .collection::<OracleTask>(ORACLE_TASKS)
         .update_one(filter, doc! { "$set": set })
+        .session(&mut *mongo_session)
         .await?;
 
-    upsert_worker_presence(
+    upsert_worker_presence_in_session(
         db,
+        mongo_session,
         pool,
         worker_label,
-        (updated.matched_count > 0).then_some(task_id),
-        input.script_version,
-        input.page_url,
-        input.authorized_worker,
+        WorkerPresenceInput {
+            current_task_id: (updated.matched_count > 0).then_some(task_id),
+            script_version: input.script_version,
+            _page_url: input.page_url,
+            authorized_worker: input.authorized_worker,
+        },
     )
     .await?;
 
@@ -1314,6 +1925,7 @@ pub enum ResultOutcome {
 
 /// Worker-reported image payload (base64 over the wire), validated and decoded
 /// to bytes before storage. The handler maps its request DTO to this type.
+#[derive(Clone)]
 pub struct ResultImage {
     pub mime: String,
     pub data_base64: String,
@@ -1322,6 +1934,7 @@ pub struct ResultImage {
 
 /// Worker-reported generic file payload (base64 over the wire), validated and
 /// decoded before storage. Names are mandatory and sanitized server-side.
+#[derive(Clone)]
 pub struct ResultFile {
     pub name: String,
     pub mime: String,
@@ -1441,9 +2054,67 @@ pub async fn worker_submit_result(
     task_id: &str,
     input: WorkerResultInput<'_>,
 ) -> AppResult<ResultOutcome> {
-    worker_submit_result_fenced(db, pool, worker_label, task_id, input).await
+    let transaction_db = db.clone();
+    let transaction_pool = pool.clone();
+    let transaction_worker_label = worker_label.to_owned();
+    let transaction_task_id = task_id.to_owned();
+    let mut mongo_session = db.client().start_session().await?;
+    mongo_session
+        .start_transaction()
+        .and_run(
+            (
+                transaction_db,
+                transaction_pool,
+                transaction_worker_label,
+                transaction_task_id,
+                input,
+            ),
+            |mongo_session,
+             (
+                transaction_db,
+                transaction_pool,
+                transaction_worker_label,
+                transaction_task_id,
+                input,
+            )| {
+                Box::pin(async move {
+                    let input = &*input;
+                    let db = &*transaction_db;
+                    let pool = &*transaction_pool;
+                    let worker_label = transaction_worker_label.as_str();
+                    let task_id = transaction_task_id.as_str();
+                    crate::services::api_key_mutation_service::transaction_result(
+                        worker_submit_result_in_session(
+                            db,
+                            mongo_session,
+                            pool,
+                            worker_label,
+                            task_id,
+                            input.clone(),
+                        )
+                        .await,
+                    )
+                })
+            },
+        )
+        .await
+        .map_err(crate::services::api_key_mutation_service::map_transaction_error)
 }
 
+#[cfg(test)]
+pub(crate) async fn worker_submit_result_in_session(
+    db: &mongodb::Database,
+    mongo_session: &mut mongodb::ClientSession,
+    pool: &OraclePool,
+    worker_label: &str,
+    task_id: &str,
+    input: WorkerResultInput<'_>,
+) -> AppResult<ResultOutcome> {
+    worker_submit_result_fenced_in_session(db, mongo_session, pool, worker_label, task_id, input)
+        .await
+}
+
+#[derive(Clone)]
 pub struct WorkerResultInput<'a> {
     pub failure_detail: Option<&'a str>,
     pub observed_model_switcher: Option<&'a str>,
@@ -1524,8 +2195,9 @@ fn validate_result_metadata(input: &WorkerResultInput<'_>) -> AppResult<()> {
     Ok(())
 }
 
-async fn record_failure_detail(
+pub(super) async fn record_failure_detail_in_session(
     db: &mongodb::Database,
+    mongo_session: &mut mongodb::ClientSession,
     pool: &OraclePool,
     worker_label: &str,
     input: &WorkerResultInput<'_>,
@@ -1537,13 +2209,15 @@ async fn record_failure_detail(
             .unwrap_or_else(|| doc! { "_id": worker_doc_id(&pool.id, worker_label) });
         db.collection::<Document>(ORACLE_WORKERS)
             .update_one(filter, doc! { "$set": { "last_error": detail } })
+            .session(&mut *mongo_session)
             .await?;
     }
     Ok(())
 }
 
-async fn has_capacity_alternative(
+pub(super) async fn has_capacity_alternative_in_session(
     db: &mongodb::Database,
+    mongo_session: &mut mongodb::ClientSession,
     pool_id: &str,
     excluded: &[String],
 ) -> AppResult<bool> {
@@ -1553,31 +2227,56 @@ async fn has_capacity_alternative(
         "last_seen_at": { "$gte": bson::DateTime::from_chrono(now - Duration::seconds(WORKER_RECENT_SECS)) },
         "desired_state": { "$ne": "draining" }, "logged_in": { "$ne": false }, "chrome_alive": { "$ne": false },
         "$or": [{ "cooldown_until": null }, { "cooldown_until": { "$lte": bson::DateTime::from_chrono(now) } }],
-    }).await?.is_some())
+    }).session(&mut *mongo_session).await?.is_some())
 }
 
 // A worker may disappear after a reroute was queued. Recheck at the same lazy
 // claim/status boundaries as lease expiry so that capacity failures never park.
-async fn settle_unroutable_capacity_tasks(
+
+pub(super) async fn settle_unroutable_capacity_tasks_in_session(
     db: &mongodb::Database,
+    mongo_session: &mut mongodb::ClientSession,
     pool_id: &str,
     retention_days: u32,
 ) -> AppResult<()> {
-    let tasks = db.collection::<OracleTask>(ORACLE_TASKS);
-    let mut cursor = tasks.find(doc! { "pool_id": pool_id, "status": "queued", "reroute_count": { "$gt": 0 }, "failure_reason": { "$in": WORKER_CAPACITY_FAILURES } }).await?;
-    while let Some(task) = cursor.try_next().await? {
-        if has_capacity_alternative(db, pool_id, &task.excluded_worker_ids).await? {
+    #[derive(serde::Deserialize)]
+    struct CapacityTask {
+        #[serde(rename = "_id")]
+        id: String,
+        #[serde(default)]
+        excluded_worker_ids: Vec<String>,
+        failure_reason: Option<String>,
+        reroute_count: u32,
+    }
+    let tasks = db.collection::<CapacityTask>(ORACLE_TASKS);
+    let mut cursor = tasks.find(doc! { "pool_id": pool_id, "status": "queued", "reroute_count": { "$gt": 0 }, "failure_reason": { "$in": WORKER_CAPACITY_FAILURES } })
+        .projection(doc! {"_id":1,"excluded_worker_ids":1,"failure_reason":1,"reroute_count":1})
+        .sort(doc! {"created_at":1,"_id":1}).session(&mut *mongo_session).await?;
+    let mut failed = 0;
+    while let Some(task) = cursor.next(&mut *mongo_session).await.transpose()? {
+        if has_capacity_alternative_in_session(
+            db,
+            mongo_session,
+            pool_id,
+            &task.excluded_worker_ids,
+        )
+        .await?
+        {
             continue;
         }
         let code = task
             .failure_reason
             .as_deref()
             .unwrap_or("model_unavailable");
-        tasks.update_one(doc! { "_id": &task.id, "status": "queued", "reroute_count": task.reroute_count }, doc! { "$set": {
+        let result = tasks.update_one(doc! { "_id": &task.id, "status": "queued", "reroute_count": task.reroute_count }, doc! { "$set": {
             "status": "failed", "response": format!("ERROR: {code}"), "phase": code,
             "completed_at": bson::DateTime::from_chrono(Utc::now()), "expires_at": bson::DateTime::from_chrono(terminal_expiry(retention_days)),
             "updated_at": bson::DateTime::from_chrono(Utc::now()),
-        } }).await?;
+        } }).session(&mut *mongo_session).await?;
+        failed += result.modified_count;
+        if failed >= TASK_MAINTENANCE_BATCH_SIZE as u64 {
+            break;
+        }
     }
     Ok(())
 }
@@ -1589,11 +2288,74 @@ pub async fn worker_submit_result_fenced(
     pool: &OraclePool,
     worker_label: &str,
     task_id: &str,
+    input: WorkerResultInput<'_>,
+) -> AppResult<ResultOutcome> {
+    let transaction_db = db.clone();
+    let transaction_pool = pool.clone();
+    let transaction_worker_label = worker_label.to_owned();
+    let transaction_task_id = task_id.to_owned();
+    let mut mongo_session = db.client().start_session().await?;
+    mongo_session
+        .start_transaction()
+        .and_run(
+            (
+                transaction_db,
+                transaction_pool,
+                transaction_worker_label,
+                transaction_task_id,
+                input,
+            ),
+            |mongo_session,
+             (
+                transaction_db,
+                transaction_pool,
+                transaction_worker_label,
+                transaction_task_id,
+                input,
+            )| {
+                Box::pin(async move {
+                    let input = &*input;
+                    let db = &*transaction_db;
+                    let pool = &*transaction_pool;
+                    let worker_label = transaction_worker_label.as_str();
+                    let task_id = transaction_task_id.as_str();
+                    crate::services::api_key_mutation_service::transaction_result(
+                        worker_submit_result_fenced_in_session(
+                            db,
+                            mongo_session,
+                            pool,
+                            worker_label,
+                            task_id,
+                            input.clone(),
+                        )
+                        .await,
+                    )
+                })
+            },
+        )
+        .await
+        .map_err(crate::services::api_key_mutation_service::map_transaction_error)
+}
+
+pub(crate) async fn worker_submit_result_fenced_in_session(
+    db: &mongodb::Database,
+    mongo_session: &mut mongodb::ClientSession,
+    pool: &OraclePool,
+    worker_label: &str,
+    task_id: &str,
     mut input: WorkerResultInput<'_>,
 ) -> AppResult<ResultOutcome> {
+    crate::services::oracle_mutation_service::lock_expected_pool(db, mongo_session, pool, true)
+        .await?;
+
     validate_worker_label(worker_label)?;
     if let Some(worker) = input.authorized_worker {
-        super::oracle_worker_enrollment_service::ensure_current_worker(db, worker).await?;
+        super::oracle_worker_enrollment_service::ensure_current_worker_in_session(
+            db,
+            mongo_session,
+            worker,
+        )
+        .await?;
     }
     validate_result_metadata(&input)?;
     let now = Utc::now();
@@ -1622,7 +2384,11 @@ pub async fn worker_submit_result_fenced(
 
     if worker_error.is_some_and(|code| WORKER_CAPACITY_FAILURES.contains(&code)) {
         let tasks = db.collection::<OracleTask>(ORACLE_TASKS);
-        let Some(task) = tasks.find_one(live_dispatch.clone()).await? else {
+        let Some(task) = tasks
+            .find_one(live_dispatch.clone())
+            .session(&mut *mongo_session)
+            .await?
+        else {
             return Ok(ResultOutcome::Ignored);
         };
         let mut excluded = task.excluded_worker_ids.clone();
@@ -1632,7 +2398,7 @@ pub async fn worker_submit_result_fenced(
         // Account-pinned conversations cannot cross accounts. Preserve affinity.
         let eligible = task.required_worker_label.is_none()
             && task.reroute_count < MAX_CAPACITY_REROUTES
-            && has_capacity_alternative(db, &pool.id, &excluded).await?;
+            && has_capacity_alternative_in_session(db, mongo_session, &pool.id, &excluded).await?;
         if eligible {
             // CAS uses the same lease/attempt fences as every result path.
             let result = tasks.update_one(live_dispatch.clone(), doc! {
@@ -1642,21 +2408,24 @@ pub async fn worker_submit_result_fenced(
                     "excluded_worker_ids": &excluded, "updated_at": bson::DateTime::from_chrono(now) },
                 "$inc": { "reroute_count": 1_i64 },
                 "$unset": { "assigned_worker_id": "", "dispatched_at": "", "lease_expires_at": "", "dispatch_attempt_id": "", "chatgpt_url": "" },
-            }).await?;
+            }).session(&mut *mongo_session).await?;
             if result.modified_count == 0 {
                 return Ok(ResultOutcome::Ignored);
             }
-            upsert_worker_presence(
+            upsert_worker_presence_in_session(
                 db,
+                mongo_session,
                 pool,
                 worker_label,
-                None,
-                input.script_version,
-                None,
-                input.authorized_worker,
+                WorkerPresenceInput {
+                    current_task_id: None,
+                    script_version: input.script_version,
+                    _page_url: None,
+                    authorized_worker: input.authorized_worker,
+                },
             )
             .await?;
-            record_failure_detail(db, pool, worker_label, &input).await?;
+            record_failure_detail_in_session(db, mongo_session, pool, worker_label, &input).await?;
             return Ok(ResultOutcome::Requeued);
         }
         // No alternate recent capacity, or bound reached: settle below with the original code.
@@ -1700,19 +2469,23 @@ pub async fn worker_submit_result_fenced(
                     .return_document(ReturnDocument::After)
                     .build(),
             )
+            .session(&mut *mongo_session)
             .await?;
         if requeued.is_some() {
-            upsert_worker_presence(
+            upsert_worker_presence_in_session(
                 db,
+                mongo_session,
                 pool,
                 worker_label,
-                None,
-                input.script_version,
-                None,
-                input.authorized_worker,
+                WorkerPresenceInput {
+                    current_task_id: None,
+                    script_version: input.script_version,
+                    _page_url: None,
+                    authorized_worker: input.authorized_worker,
+                },
             )
             .await?;
-            record_failure_detail(db, pool, worker_label, &input).await?;
+            record_failure_detail_in_session(db, mongo_session, pool, worker_label, &input).await?;
             return Ok(ResultOutcome::Requeued);
         }
 
@@ -1757,19 +2530,22 @@ pub async fn worker_submit_result_fenced(
                     .return_document(ReturnDocument::After)
                     .build(),
             )
-            .await?;
-        upsert_worker_presence(
+            .session(&mut *mongo_session).await?;
+        upsert_worker_presence_in_session(
             db,
+            mongo_session,
             pool,
             worker_label,
-            None,
-            input.script_version,
-            None,
-            input.authorized_worker,
+            WorkerPresenceInput {
+                current_task_id: None,
+                script_version: input.script_version,
+                _page_url: None,
+                authorized_worker: input.authorized_worker,
+            },
         )
         .await?;
         if exhausted.is_some() {
-            record_failure_detail(db, pool, worker_label, &input).await?;
+            record_failure_detail_in_session(db, mongo_session, pool, worker_label, &input).await?;
         }
         return Ok(if exhausted.is_some() {
             ResultOutcome::Failed
@@ -1861,16 +2637,20 @@ pub async fn worker_submit_result_fenced(
                 .return_document(ReturnDocument::After)
                 .build(),
         )
+        .session(&mut *mongo_session)
         .await?;
 
-    upsert_worker_presence(
+    upsert_worker_presence_in_session(
         db,
+        mongo_session,
         pool,
         worker_label,
-        None,
-        input.script_version,
-        None,
-        input.authorized_worker,
+        WorkerPresenceInput {
+            current_task_id: None,
+            script_version: input.script_version,
+            _page_url: None,
+            authorized_worker: input.authorized_worker,
+        },
     )
     .await?;
 
@@ -1879,7 +2659,7 @@ pub async fn worker_submit_result_fenced(
     };
 
     if is_failure {
-        record_failure_detail(db, pool, worker_label, &input).await?;
+        record_failure_detail_in_session(db, mongo_session, pool, worker_label, &input).await?;
     }
 
     // Session bookkeeping: bump the turn and pin the conversation URL.
@@ -1899,6 +2679,7 @@ pub async fn worker_submit_result_fenced(
                     "$inc": { "turn_count": 1 },
                 },
             )
+            .session(&mut *mongo_session)
             .await?;
 
         // Stamp the owning account on the first successful result: the
@@ -1912,6 +2693,7 @@ pub async fn worker_submit_result_fenced(
                     doc! { "_id": conv_id, "owner_worker_label": null },
                     doc! { "$set": { "owner_worker_label": worker_label } },
                 )
+                .session(&mut *mongo_session)
                 .await?;
         }
     }
@@ -1961,22 +2743,67 @@ pub async fn worker_submit_transcript(
     chatgpt_url: Option<&str>,
     retention_days: u32,
 ) -> AppResult<TranscriptOutcome> {
-    worker_submit_transcript_fenced(
-        db,
-        pool,
-        worker_label,
-        task_id,
-        WorkerTranscriptInput {
-            authorized_worker: None,
-            turns,
-            chatgpt_url,
-            retention_days,
-            dispatch_attempt_id: None,
-        },
-    )
-    .await
+    let transaction_db = db.clone();
+    let transaction_pool = pool.clone();
+    let transaction_worker_label = worker_label.to_owned();
+    let transaction_task_id = task_id.to_owned();
+    let transaction_chatgpt_url = chatgpt_url.map(str::to_owned);
+    let mut mongo_session = db.client().start_session().await?;
+    mongo_session
+        .start_transaction()
+        .and_run(
+            (
+                transaction_db,
+                transaction_pool,
+                transaction_worker_label,
+                transaction_task_id,
+                turns,
+                transaction_chatgpt_url,
+                retention_days,
+            ),
+            |mongo_session,
+             (
+                transaction_db,
+                transaction_pool,
+                transaction_worker_label,
+                transaction_task_id,
+                turns,
+                transaction_chatgpt_url,
+                retention_days,
+            )| {
+                Box::pin(async move {
+                    let turns = *turns;
+                    let retention_days = *retention_days;
+                    let db = &*transaction_db;
+                    let pool = &*transaction_pool;
+                    let worker_label = transaction_worker_label.as_str();
+                    let task_id = transaction_task_id.as_str();
+                    let chatgpt_url = transaction_chatgpt_url.as_deref();
+                    crate::services::api_key_mutation_service::transaction_result(
+                        worker_submit_transcript_fenced_in_session(
+                            db,
+                            mongo_session,
+                            pool,
+                            worker_label,
+                            task_id,
+                            WorkerTranscriptInput {
+                                authorized_worker: None,
+                                turns,
+                                chatgpt_url,
+                                retention_days,
+                                dispatch_attempt_id: None,
+                            },
+                        )
+                        .await,
+                    )
+                })
+            },
+        )
+        .await
+        .map_err(crate::services::api_key_mutation_service::map_transaction_error)
 }
 
+#[derive(Clone)]
 pub struct WorkerTranscriptInput<'a> {
     pub authorized_worker: Option<&'a OracleWorker>,
     pub turns: &'a [TranscriptTurn],
@@ -1992,9 +2819,72 @@ pub async fn worker_submit_transcript_fenced(
     task_id: &str,
     input: WorkerTranscriptInput<'_>,
 ) -> AppResult<TranscriptOutcome> {
+    let transaction_db = db.clone();
+    let transaction_pool = pool.clone();
+    let transaction_worker_label = worker_label.to_owned();
+    let transaction_task_id = task_id.to_owned();
+    let mut mongo_session = db.client().start_session().await?;
+    mongo_session
+        .start_transaction()
+        .and_run(
+            (
+                transaction_db,
+                transaction_pool,
+                transaction_worker_label,
+                transaction_task_id,
+                input,
+            ),
+            |mongo_session,
+             (
+                transaction_db,
+                transaction_pool,
+                transaction_worker_label,
+                transaction_task_id,
+                input,
+            )| {
+                Box::pin(async move {
+                    let input = &*input;
+                    let db = &*transaction_db;
+                    let pool = &*transaction_pool;
+                    let worker_label = transaction_worker_label.as_str();
+                    let task_id = transaction_task_id.as_str();
+                    crate::services::api_key_mutation_service::transaction_result(
+                        worker_submit_transcript_fenced_in_session(
+                            db,
+                            mongo_session,
+                            pool,
+                            worker_label,
+                            task_id,
+                            input.clone(),
+                        )
+                        .await,
+                    )
+                })
+            },
+        )
+        .await
+        .map_err(crate::services::api_key_mutation_service::map_transaction_error)
+}
+
+pub(crate) async fn worker_submit_transcript_fenced_in_session(
+    db: &mongodb::Database,
+    mongo_session: &mut mongodb::ClientSession,
+    pool: &OraclePool,
+    worker_label: &str,
+    task_id: &str,
+    input: WorkerTranscriptInput<'_>,
+) -> AppResult<TranscriptOutcome> {
+    crate::services::oracle_mutation_service::lock_expected_pool(db, mongo_session, pool, true)
+        .await?;
+
     validate_worker_label(worker_label)?;
     if let Some(worker) = input.authorized_worker {
-        super::oracle_worker_enrollment_service::ensure_current_worker(db, worker).await?;
+        super::oracle_worker_enrollment_service::ensure_current_worker_in_session(
+            db,
+            mongo_session,
+            worker,
+        )
+        .await?;
     }
     if let Some(url) = input.chatgpt_url.filter(|u| !u.is_empty()) {
         validate_attach_url(url)?;
@@ -2041,16 +2931,20 @@ pub async fn worker_submit_transcript_fenced(
                 .return_document(ReturnDocument::After)
                 .build(),
         )
+        .session(&mut *mongo_session)
         .await?;
 
-    upsert_worker_presence(
+    upsert_worker_presence_in_session(
         db,
+        mongo_session,
         pool,
         worker_label,
-        None,
-        None,
-        input.chatgpt_url,
-        input.authorized_worker,
+        WorkerPresenceInput {
+            current_task_id: None,
+            script_version: None,
+            _page_url: input.chatgpt_url,
+            authorized_worker: input.authorized_worker,
+        },
     )
     .await?;
 
@@ -2126,7 +3020,10 @@ pub async fn worker_submit_transcript_fenced(
         })
         .collect();
     if !imported_tasks.is_empty() {
-        task_collection.insert_many(imported_tasks).await?;
+        task_collection
+            .insert_many(imported_tasks)
+            .session(&mut *mongo_session)
+            .await?;
     }
 
     let mut session_set = doc! {
@@ -2144,6 +3041,7 @@ pub async fn worker_submit_transcript_fenced(
                 "$inc": { "turn_count": pair_count as i64 },
             },
         )
+        .session(&mut *mongo_session)
         .await?;
 
     // The account that scraped the conversation physically owns its
@@ -2153,6 +3051,7 @@ pub async fn worker_submit_transcript_fenced(
             doc! { "_id": &session_id, "owner_worker_label": null },
             doc! { "$set": { "owner_worker_label": worker_label } },
         )
+        .session(&mut *mongo_session)
         .await?;
 
     Ok(TranscriptOutcome::Imported { pairs: pair_count })
@@ -2169,17 +3068,140 @@ pub async fn pin_conversation_url(
     task_id: &str,
     chatgpt_url: &str,
 ) -> AppResult<()> {
-    pin_conversation_url_fenced(db, pool, worker_label, task_id, chatgpt_url, None).await
+    let transaction_db = db.clone();
+    let transaction_pool = pool.clone();
+    let transaction_worker_label = worker_label.to_owned();
+    let transaction_task_id = task_id.to_owned();
+    let transaction_chatgpt_url = chatgpt_url.to_owned();
+    let mut mongo_session = db.client().start_session().await?;
+    mongo_session
+        .start_transaction()
+        .and_run(
+            (
+                transaction_db,
+                transaction_pool,
+                transaction_worker_label,
+                transaction_task_id,
+                transaction_chatgpt_url,
+            ),
+            |mongo_session,
+             (
+                transaction_db,
+                transaction_pool,
+                transaction_worker_label,
+                transaction_task_id,
+                transaction_chatgpt_url,
+            )| {
+                Box::pin(async move {
+                    let db = &*transaction_db;
+                    let pool = &*transaction_pool;
+                    let worker_label = transaction_worker_label.as_str();
+                    let task_id = transaction_task_id.as_str();
+                    let chatgpt_url = transaction_chatgpt_url.as_str();
+                    crate::services::api_key_mutation_service::transaction_result(
+                        pin_conversation_url_in_session(
+                            db,
+                            mongo_session,
+                            pool,
+                            worker_label,
+                            task_id,
+                            chatgpt_url,
+                        )
+                        .await,
+                    )
+                })
+            },
+        )
+        .await
+        .map_err(crate::services::api_key_mutation_service::map_transaction_error)
+}
+
+#[cfg(test)]
+pub(crate) async fn pin_conversation_url_in_session(
+    db: &mongodb::Database,
+    mongo_session: &mut mongodb::ClientSession,
+    pool: &OraclePool,
+    worker_label: &str,
+    task_id: &str,
+    chatgpt_url: &str,
+) -> AppResult<()> {
+    crate::services::oracle_mutation_service::lock_expected_pool(db, mongo_session, pool, true)
+        .await?;
+
+    pin_conversation_url_fenced_in_session(
+        db,
+        mongo_session,
+        pool,
+        PinConversationInput {
+            worker_label,
+            task_id,
+            chatgpt_url,
+            dispatch_attempt_id: None,
+            authorized_worker: None,
+        },
+    )
+    .await
+}
+
+#[derive(Clone, Copy)]
+pub struct PinConversationInput<'a> {
+    pub worker_label: &'a str,
+    pub task_id: &'a str,
+    pub chatgpt_url: &'a str,
+    pub dispatch_attempt_id: Option<&'a str>,
+    pub authorized_worker: Option<&'a OracleWorker>,
 }
 
 pub async fn pin_conversation_url_fenced(
     db: &mongodb::Database,
     pool: &OraclePool,
-    worker_label: &str,
-    task_id: &str,
-    chatgpt_url: &str,
-    dispatch_attempt_id: Option<&str>,
+    input: PinConversationInput<'_>,
 ) -> AppResult<()> {
+    let transaction_db = db.clone();
+    let transaction_pool = pool.clone();
+    let mut session = db.client().start_session().await?;
+    session
+        .start_transaction()
+        .and_run(
+            (transaction_db, transaction_pool, input),
+            |session, (transaction_db, transaction_pool, input)| {
+                Box::pin(async move {
+                    let input = *input;
+                    let db = &*transaction_db;
+                    let pool = &*transaction_pool;
+                    crate::services::api_key_mutation_service::transaction_result(
+                        pin_conversation_url_fenced_in_session(db, session, pool, input).await,
+                    )
+                })
+            },
+        )
+        .await
+        .map_err(crate::services::api_key_mutation_service::map_transaction_error)
+}
+
+pub(crate) async fn pin_conversation_url_fenced_in_session(
+    db: &mongodb::Database,
+    mongo_session: &mut mongodb::ClientSession,
+    pool: &OraclePool,
+    input: PinConversationInput<'_>,
+) -> AppResult<()> {
+    crate::services::oracle_mutation_service::lock_expected_pool(db, mongo_session, pool, true)
+        .await?;
+    if let Some(worker) = input.authorized_worker {
+        super::oracle_worker_enrollment_service::ensure_current_worker_in_session(
+            db,
+            mongo_session,
+            worker,
+        )
+        .await?;
+    }
+    let PinConversationInput {
+        worker_label,
+        task_id,
+        chatgpt_url,
+        dispatch_attempt_id,
+        ..
+    } = input;
     validate_worker_label(worker_label)?;
     if chatgpt_url.is_empty() || chatgpt_url.len() > MAX_URL_LEN {
         return Err(AppError::ValidationError(
@@ -2207,6 +3229,7 @@ pub async fn pin_conversation_url_fenced(
                 .return_document(ReturnDocument::After)
                 .build(),
         )
+        .session(&mut *mongo_session)
         .await?
         .ok_or_else(|| AppError::OracleTaskNotFound(task_id.to_string()))?;
     if let Some(conv_id) = &task.conversation_id {
@@ -2215,6 +3238,7 @@ pub async fn pin_conversation_url_fenced(
                 doc! { "_id": conv_id },
                 doc! { "$set": { "chatgpt_url": chatgpt_url, "updated_at": now } },
             )
+            .session(&mut *mongo_session)
             .await?;
     }
     Ok(())
@@ -2247,7 +3271,34 @@ pub struct WorkerStatus {
 
 #[cfg(test)]
 pub async fn pool_status(db: &mongodb::Database, pool: &OraclePool) -> AppResult<PoolStatus> {
-    pool_status_with_retention(db, pool, 30).await
+    let transaction_db = db.clone();
+    let transaction_pool = pool.clone();
+    let mut mongo_session = db.client().start_session().await?;
+    mongo_session
+        .start_transaction()
+        .and_run(
+            (transaction_db, transaction_pool),
+            |mongo_session, (transaction_db, transaction_pool)| {
+                Box::pin(async move {
+                    let db = &*transaction_db;
+                    let pool = &*transaction_pool;
+                    crate::services::api_key_mutation_service::transaction_result(
+                        pool_status_in_session(db, mongo_session, pool).await,
+                    )
+                })
+            },
+        )
+        .await
+        .map_err(crate::services::api_key_mutation_service::map_transaction_error)
+}
+
+#[cfg(test)]
+pub(crate) async fn pool_status_in_session(
+    db: &mongodb::Database,
+    mongo_session: &mut mongodb::ClientSession,
+    pool: &OraclePool,
+) -> AppResult<PoolStatus> {
+    pool_status_with_retention_in_session(db, mongo_session, pool, 30).await
 }
 
 /// Returns consumer-facing queue and worker metadata without task bodies.
@@ -2256,10 +3307,58 @@ pub async fn pool_status_with_retention(
     pool: &OraclePool,
     retention_days: u32,
 ) -> AppResult<PoolStatus> {
-    requeue_expired_leases(db, &pool.id, retention_days).await?;
-    settle_unroutable_capacity_tasks(db, &pool.id, retention_days).await?;
-    let queued = count_tasks(db, doc! { "pool_id": &pool.id, "status": "queued" }).await?;
-    let dispatched = count_tasks(db, doc! { "pool_id": &pool.id, "status": "dispatched" }).await?;
+    let transaction_db = db.clone();
+    let transaction_pool = pool.clone();
+    let mut mongo_session = db.client().start_session().await?;
+    mongo_session
+        .start_transaction()
+        .and_run(
+            (transaction_db, transaction_pool, retention_days),
+            |mongo_session, (transaction_db, transaction_pool, retention_days)| {
+                Box::pin(async move {
+                    let retention_days = *retention_days;
+                    let db = &*transaction_db;
+                    let pool = &*transaction_pool;
+                    crate::services::api_key_mutation_service::transaction_result(
+                        pool_status_with_retention_in_session(
+                            db,
+                            mongo_session,
+                            pool,
+                            retention_days,
+                        )
+                        .await,
+                    )
+                })
+            },
+        )
+        .await
+        .map_err(crate::services::api_key_mutation_service::map_transaction_error)
+}
+
+pub(crate) async fn pool_status_with_retention_in_session(
+    db: &mongodb::Database,
+    mongo_session: &mut mongodb::ClientSession,
+    pool: &OraclePool,
+    retention_days: u32,
+) -> AppResult<PoolStatus> {
+    crate::services::oracle_mutation_service::lock_expected_pool(db, mongo_session, pool, false)
+        .await?;
+
+    requeue_expired_leases_in_session(db, mongo_session, &pool.id, retention_days).await?;
+    settle_unroutable_capacity_tasks_in_session(db, mongo_session, &pool.id, retention_days)
+        .await?;
+    let queued = count_tasks_in_session(
+        db,
+        mongo_session,
+        doc! { "pool_id": &pool.id, "status": "queued" },
+    )
+    .await?;
+    let dispatched = count_tasks_in_session(
+        db,
+        mongo_session,
+        doc! { "pool_id": &pool.id, "status": "dispatched" },
+    )
+    .await?;
 
     let now = Utc::now();
     let recent_cutoff = now - Duration::seconds(WORKER_RECENT_SECS);
@@ -2269,7 +3368,9 @@ pub async fn pool_status_with_retention(
             "pool_id": &pool.id,
             "last_seen_at": { "$gte": bson::DateTime::from_chrono(recent_cutoff) },
         })
+        .session(&mut *mongo_session)
         .await?
+        .stream(&mut *mongo_session)
         .try_collect()
         .await?;
     let active_workers: Vec<WorkerStatus> = workers
@@ -2306,6 +3407,162 @@ pub async fn pool_status_with_retention(
         active_workers,
         diagnosis: diagnosis.to_string(),
     })
+}
+
+async fn queue_position(db: &mongodb::Database, task: &OracleTask) -> AppResult<u64> {
+    if task.status != OracleTaskStatus::Queued {
+        return Ok(0);
+    }
+    let ahead = db
+        .collection::<OracleTask>(ORACLE_TASKS)
+        .count_documents(doc! {
+            "pool_id": &task.pool_id, "status": "queued",
+            "created_at": {"$lt": bson::DateTime::from_chrono(task.created_at)},
+        })
+        .await?;
+    Ok(ahead + 1)
+}
+
+#[cfg(test)]
+async fn has_capacity_alternative(
+    db: &mongodb::Database,
+    pool_id: &str,
+    excluded: &[String],
+) -> AppResult<bool> {
+    let transaction_db = db.clone();
+    let transaction_pool_id = pool_id.to_owned();
+    let mut session = db.client().start_session().await?;
+    session
+        .start_transaction()
+        .and_run(
+            (transaction_db, transaction_pool_id, excluded),
+            |session, (transaction_db, transaction_pool_id, excluded)| {
+                Box::pin(async move {
+                    let excluded = *excluded;
+                    let db = &*transaction_db;
+                    let pool_id = transaction_pool_id.as_str();
+                    crate::services::api_key_mutation_service::transaction_result(
+                        has_capacity_alternative_in_session(db, session, pool_id, excluded).await,
+                    )
+                })
+            },
+        )
+        .await
+        .map_err(crate::services::api_key_mutation_service::map_transaction_error)
+}
+
+#[cfg(test)]
+async fn settle_unroutable_capacity_tasks(
+    db: &mongodb::Database,
+    pool_id: &str,
+    retention_days: u32,
+) -> AppResult<()> {
+    let transaction_db = db.clone();
+    let transaction_pool_id = pool_id.to_owned();
+    let mut session = db.client().start_session().await?;
+    session
+        .start_transaction()
+        .and_run(
+            (transaction_db, transaction_pool_id, retention_days),
+            |session, (transaction_db, transaction_pool_id, retention_days)| {
+                Box::pin(async move {
+                    let retention_days = *retention_days;
+                    let db = &*transaction_db;
+                    let pool_id = transaction_pool_id.as_str();
+                    let result = async {
+                        crate::services::oracle_mutation_service::lock_pool(db, session, pool_id)
+                            .await?;
+                        settle_unroutable_capacity_tasks_in_session(
+                            db,
+                            session,
+                            pool_id,
+                            retention_days,
+                        )
+                        .await
+                    }
+                    .await;
+                    crate::services::api_key_mutation_service::transaction_result(result)
+                })
+            },
+        )
+        .await
+        .map_err(crate::services::api_key_mutation_service::map_transaction_error)
+}
+
+#[cfg(test)]
+async fn upsert_worker_presence(
+    db: &mongodb::Database,
+    pool: &OraclePool,
+    worker_label: &str,
+    current_task_id: Option<&str>,
+    script_version: Option<&str>,
+    page_url: Option<&str>,
+    authorized_worker: Option<&OracleWorker>,
+) -> AppResult<()> {
+    let transaction_db = db.clone();
+    let transaction_pool = pool.clone();
+    let transaction_worker_label = worker_label.to_owned();
+    let transaction_current_task_id = current_task_id.map(str::to_owned);
+    let transaction_script_version = script_version.map(str::to_owned);
+    let transaction_page_url = page_url.map(str::to_owned);
+    let transaction_authorized_worker = authorized_worker.cloned();
+    let mut session = db.client().start_session().await?;
+    session
+        .start_transaction()
+        .and_run(
+            (
+                transaction_db,
+                transaction_pool,
+                transaction_worker_label,
+                transaction_current_task_id,
+                transaction_script_version,
+                transaction_page_url,
+                transaction_authorized_worker,
+            ),
+            |session,
+             (
+                transaction_db,
+                transaction_pool,
+                transaction_worker_label,
+                transaction_current_task_id,
+                transaction_script_version,
+                transaction_page_url,
+                transaction_authorized_worker,
+            )| {
+                Box::pin(async move {
+                    let db = &*transaction_db;
+                    let pool = &*transaction_pool;
+                    let worker_label = transaction_worker_label.as_str();
+                    let current_task_id = transaction_current_task_id.as_deref();
+                    let script_version = transaction_script_version.as_deref();
+                    let page_url = transaction_page_url.as_deref();
+                    let authorized_worker = transaction_authorized_worker.as_ref();
+                    let result = async {
+                        crate::services::oracle_mutation_service::lock_expected_pool(
+                            db, session, pool, false,
+                        )
+                        .await?;
+                        upsert_worker_presence_in_session(
+                            db,
+                            session,
+                            pool,
+                            worker_label,
+                            WorkerPresenceInput {
+                                current_task_id,
+                                script_version,
+                                _page_url: page_url,
+                                authorized_worker,
+                            },
+                        )
+                        .await
+                    }
+                    .await;
+                    crate::services::api_key_mutation_service::transaction_result(result)
+                })
+            },
+        )
+        .await
+        .map_err(crate::services::api_key_mutation_service::map_transaction_error)
 }
 
 #[cfg(test)]
@@ -2511,6 +3768,7 @@ mod tests {
             return;
         };
         let pool = test_pool(&uuid::Uuid::new_v4().to_string());
+        seed_pool(&db, &pool).await;
         for heartbeat in [false, true] {
             db.collection::<Document>(ORACLE_WORKERS)
                 .update_one(
@@ -2886,6 +4144,10 @@ mod tests {
     fn test_pool(owner: &str) -> OraclePool {
         let now = Utc::now();
         OraclePool {
+            deleted_at: None,
+            lifecycle_version: 0,
+            installation_epoch: 0,
+            deletion_cleanup_pending: false,
             require_model_match: true,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: owner.to_string(),
@@ -2909,7 +4171,33 @@ mod tests {
 
     /// Persist the pool so the non-submitter ACL path (which re-fetches the
     /// pool from the DB) sees it, as it always would in production.
+    async fn seed_person(db: &mongodb::Database, id: &str) {
+        let user = crate::test_utils::test_user(id, crate::models::user::UserType::Person);
+        db.collection::<Document>(crate::models::user::COLLECTION_NAME)
+            .update_one(
+                doc! {"_id":id},
+                doc! {"$setOnInsert":bson::to_document(&user).unwrap()},
+            )
+            .upsert(true)
+            .await
+            .unwrap();
+    }
     async fn seed_pool(db: &mongodb::Database, pool: &OraclePool) {
+        db.collection::<Document>(ORACLE_TASKS)
+            .create_index(
+                mongodb::IndexModel::builder()
+                    .keys(doc! {"pool_id":1,"submitter_user_id":1,"client_ref":1})
+                    .options(
+                        mongodb::options::IndexOptions::builder()
+                            .unique(true)
+                            .partial_filter_expression(doc! {"client_ref":{"$exists":true}})
+                            .build(),
+                    )
+                    .build(),
+            )
+            .await
+            .unwrap();
+        seed_person(db, &pool.user_id).await;
         db.collection::<OraclePool>(crate::models::oracle_pool::COLLECTION_NAME)
             .insert_one(pool)
             .await
@@ -3876,6 +5164,7 @@ mod tests {
         };
         let owner = uuid::Uuid::new_v4().to_string();
         let stranger = uuid::Uuid::new_v4().to_string();
+        seed_person(&db, &stranger).await;
         let mut pool = test_pool(&owner);
         pool.per_user_max_inflight = 5;
         seed_pool(&db, &pool).await;
@@ -4005,10 +5294,13 @@ mod tests {
         pin_conversation_url_fenced(
             &db,
             &pool,
-            "tab_1",
-            &submitted.task.id,
-            "https://chatgpt.com/c/resume-one-shot",
-            Some(&first_attempt),
+            PinConversationInput {
+                worker_label: "tab_1",
+                task_id: &submitted.task.id,
+                chatgpt_url: "https://chatgpt.com/c/resume-one-shot",
+                dispatch_attempt_id: Some(&first_attempt),
+                authorized_worker: None,
+            },
         )
         .await
         .unwrap();
@@ -4041,10 +5333,13 @@ mod tests {
         let stale = pin_conversation_url_fenced(
             &db,
             &pool,
-            "tab_1",
-            &submitted.task.id,
-            "https://chatgpt.com/c/stale",
-            Some(&first_attempt),
+            PinConversationInput {
+                worker_label: "tab_1",
+                task_id: &submitted.task.id,
+                chatgpt_url: "https://chatgpt.com/c/stale",
+                dispatch_attempt_id: Some(&first_attempt),
+                authorized_worker: None,
+            },
         )
         .await;
         assert!(matches!(stale, Err(AppError::OracleTaskNotFound(_))));
@@ -4481,6 +5776,7 @@ mod tests {
         };
         let owner = uuid::Uuid::new_v4().to_string();
         let other = uuid::Uuid::new_v4().to_string();
+        seed_person(&db, &other).await;
         let mut pool = test_pool(&owner);
         pool.max_queue_length = 2;
         pool.per_user_max_inflight = 1;
@@ -4541,20 +5837,24 @@ mod tests {
         .unwrap();
         assert_eq!(other_task.model_label.as_deref(), Some("chatgpt-6-pro"));
 
+        let extra = uuid::Uuid::new_v4().to_string();
+        seed_person(&db, &extra).await;
         extract_url(
             &db,
             &pool,
-            &submitter(&uuid::Uuid::new_v4().to_string()),
+            &submitter(&extra),
             "https://example.org/also-queued",
             None,
         )
         .await
         .unwrap();
 
+        let queue_full_actor = uuid::Uuid::new_v4().to_string();
+        seed_person(&db, &queue_full_actor).await;
         let queue_full = extract_url(
             &db,
             &pool,
-            &submitter(&uuid::Uuid::new_v4().to_string()),
+            &submitter(&queue_full_actor),
             "https://example.net/full",
             None,
         )
@@ -4613,6 +5913,7 @@ mod tests {
 
         let owner = uuid::Uuid::new_v4().to_string();
         let stranger = uuid::Uuid::new_v4().to_string();
+        seed_person(&db, &stranger).await;
         let mut pool = test_pool(&owner);
         pool.per_user_max_inflight = 5;
         seed_pool(&db, &pool).await;
@@ -4744,5 +6045,93 @@ mod tests {
         );
 
         db.drop().await.ok();
+    }
+
+    #[tokio::test]
+    async fn oracle_lazy_task_maintenance_bounds_writes_without_starving_unroutables() {
+        let db =
+            crate::test_utils::connect_transaction_test_database("oracle_task_maintenance_batches")
+                .await;
+        let owner = uuid::Uuid::new_v4().to_string();
+        let pool = test_pool(&owner);
+        seed_pool(&db, &pool).await;
+        let tasks = db.collection::<Document>(ORACLE_TASKS);
+        let past = bson::DateTime::from_chrono(Utc::now() - Duration::days(1));
+        let count = TASK_MAINTENANCE_BATCH_SIZE as usize + 3;
+        tasks.insert_many((0..count).map(|i|doc! {
+            "_id":format!("affinity-{i:03}"),"pool_id":&pool.id,"status":"queued","required_worker_label":"gone","created_at":past,
+        })).await.unwrap();
+        // Status recovery owns the normal pool transaction; use an explicit
+        // transaction here to observe exactly one maintenance invocation.
+        for expected in [TASK_MAINTENANCE_BATCH_SIZE as u64, 3] {
+            let mut session = db.client().start_session().await.unwrap();
+            session.start_transaction().await.unwrap();
+            crate::services::oracle_mutation_service::lock_expected_pool(
+                &db,
+                &mut session,
+                &pool,
+                false,
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                release_stale_affinity_in_session(&db, &mut session, &pool)
+                    .await
+                    .unwrap(),
+                expected
+            );
+            session.commit_transaction().await.unwrap();
+        }
+        assert_eq!(
+            tasks
+                .count_documents(doc! {"required_worker_label":{"$ne":null}})
+                .await
+                .unwrap(),
+            0
+        );
+        // A whole leading batch is still routable. The scan must pass those
+        // rows and cap actual failed writes rather than scanned candidates.
+        db.collection::<Document>(ORACLE_WORKERS).insert_one(doc! {
+            "_id":worker_doc_id(&pool.id,"alternate"),"pool_id":&pool.id,"worker_label":"alternate","last_seen_at":bson::DateTime::now(),
+        }).await.unwrap();
+        let mut rows: Vec<_> = (0..count).map(|i|doc! {
+            "_id":format!("a-routable-{i:03}"),"pool_id":&pool.id,"status":"queued","reroute_count":1,
+            "failure_reason":"usage_limit_reached","excluded_worker_ids":["other"],"created_at":past,
+        }).collect();
+        rows.extend((0..count).map(|i|doc! {
+            "_id":format!("z-unroutable-{i:03}"),"pool_id":&pool.id,"status":"queued","reroute_count":1,
+            "failure_reason":"usage_limit_reached","excluded_worker_ids":["alternate"],"created_at":past,
+        }));
+        // These compact rows intentionally omit prompt/result fields: the
+        // settlement projection must deserialize only routing/failure metadata.
+        tasks.insert_many(rows).await.unwrap();
+        settle_unroutable_capacity_tasks(&db, &pool.id, 30)
+            .await
+            .unwrap();
+        assert_eq!(
+            tasks
+                .count_documents(doc! {"status":"failed"})
+                .await
+                .unwrap(),
+            TASK_MAINTENANCE_BATCH_SIZE as u64
+        );
+        settle_unroutable_capacity_tasks(&db, &pool.id, 30)
+            .await
+            .unwrap();
+        assert_eq!(
+            tasks
+                .count_documents(doc! {"status":"failed"})
+                .await
+                .unwrap(),
+            count as u64
+        );
+        assert_eq!(
+            tasks
+                .count_documents(doc! {"_id":{"$regex":"^a-routable"},"status":"queued"})
+                .await
+                .unwrap(),
+            count as u64
+        );
+        db.drop().await.unwrap();
     }
 }

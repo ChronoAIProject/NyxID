@@ -34,6 +34,7 @@ This document describes every HTTP endpoint exposed by the NyxID backend. All en
   - [Service Endpoints](#service-endpoints)
   - [MCP Config](#mcp-config)
   - [Service Pools](#service-pools)
+  - [Oracle Pool Lifecycle](#oracle-pool-lifecycle-unreleased)
   - [Proxy](#proxy)
   - [Proxy Service Discovery](#proxy-service-discovery)
   - [LLM Gateway](#llm-gateway)
@@ -8471,3 +8472,34 @@ Tool service writes and publication require platform admin authority in Phase 1.
 Tools updates distinguish omission from JSON `null` for `supplier` and `import_source`: omit to retain, null to clear. `GET /api/v1/keys?include_tool_bindings=true` includes otherwise-hidden platform Tool bindings with the existing KeyResponse shape; default listing still hides them and includes BYOK rows. Owner, membership, restricted API-key and delegated read semantics are unchanged. Tools `limits` is null when `PLATFORM_SERVICE_RATE_LIMIT_PER_SECOND=0`, otherwise `{ rate_limit_per_second, burst }`.
 
 CLI catalog creation requires `--endpoint-url` or `--twin-of` (otherwise the local error is `Catalog creation requires --endpoint-url or --twin-of`). Catalog updates support `--clear-supplier`, conflicting with `--supplier`. Tools table output formats prices as `Free` or `<credits> credits / <metric>`, limits as `<n>/s, burst <b>` or `none`, and topics as a comma-separated list. `tools show` prints rows for each operation (name, method, path, risk, data scope, cost class). JSON output remains the raw response.
+
+## Oracle pool lifecycle (unreleased)
+
+Oracle is an authenticated asynchronous browser-worker task relay. Pool management
+accepts the same JWT/general API-key callers as other Oracle consumer operations;
+shared worker and installation tokens do not authorize management. The pool owner
+is the existing person/org `user_id`; platform visibility grants discovery/use,
+not ownership. The first tagged release containing issues #1527/#1542 adds:
+
+| Method and path | Request | Success / conflicts |
+|---|---|---|
+| `POST /api/v1/oracle/pools/{id_or_slug}/transfer` | `owner_user_id` UUID, optional `rotate_worker_token` (default false), optional `visibility:"private"` for org-visible → person | 200 `{pool, worker_token?}`, no-store; source/destination manager ACL, active own-person or active managed org, ten-pool destination limit |
+| `DELETE /api/v1/oracle/pools/{id_or_slug}` | No body | 200 `{id,slug,status:"deleted",cleanup:"asynchronous",deleted_at}`, identical on authorized retry; 409 `oracle_pool_active_work` for queued/dispatched tasks or queued/delivered commands; 403 forbidden, 404 unknown |
+
+Transfer preserves pool identity/settings/history and the shared token by default.
+Owner changes require fresh installation credentials. Deletion reserves the slug,
+hides discovery and invalidates all workers at commit. Durable bounded cleanup
+then closes idle sessions and removes worker rows and encrypted login material;
+`cleanup:"asynchronous"` acknowledges this policy, not physical completion.
+Terminal task TTLs and readable history remain. Idle online
+workers do not block deletion. Settle active work before deletion. All replicas and
+old in-flight requests must be upgraded/drained before lifecycle operations are
+used. See [Oracle Relay](ORACLE_RELAY.md#pool-ownership-and-deletion-unreleased-1527-1542)
+for retention, retry, concurrency, token and deployment contracts and CLI examples.
+
+DELETE also settles deadline-expired worker commands from any generation in at
+most sixteen separately committed batches of 256 IDs per request. HTTP 409 /
+11017 can therefore mean that bounded expiry progress was made and more remains;
+retry DELETE. Unexpired work still blocks deletion. Authorization is checked for
+every batch, and an interruption or later conflict preserves committed expiry.
+Already-deleted pools skip expiry and return their stable acknowledgement.

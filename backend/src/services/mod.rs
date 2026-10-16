@@ -132,6 +132,7 @@ pub mod operation_descriptor;
 pub(crate) mod operation_path;
 pub mod oracle_login_profile_service;
 pub mod oracle_login_snapshot_service;
+pub mod oracle_mutation_service;
 pub mod oracle_pool_service;
 pub mod oracle_session_service;
 pub mod oracle_task_service;

@@ -2048,8 +2048,13 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             )
             .route(
                 "/pools/{id_or_slug}",
-                get(handlers::oracle_pools::get_pool).patch(handlers::oracle_pools::update_pool),
+                get(handlers::oracle_pools::get_pool).patch(handlers::oracle_pools::update_pool).delete(handlers::oracle_pools::delete_pool),
             )
+            .route("/pools/{id_or_slug}/transfer", post(handlers::oracle_pools::transfer_pool).layer(DefaultBodyLimit::max(4096))
+                .layer(middleware::map_response(|mut response: axum::response::Response| async move {
+                    response.headers_mut().insert(axum::http::header::CACHE_CONTROL, axum::http::HeaderValue::from_static("no-store"));
+                    response
+                })))
             .route(
                 "/pools/{id_or_slug}/rotate-token",
                 post(handlers::oracle_pools::rotate_token),
