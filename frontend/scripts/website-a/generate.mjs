@@ -7,6 +7,7 @@ import path from "node:path";
 import { Window } from "happy-dom";
 import postcss from "postcss";
 import { format } from "prettier";
+import { fixPrimaryButtonPaint } from "./primary-button-css.mjs";
 
 const root = path.resolve(import.meta.dirname, "../..");
 const source = fs.readFileSync(
@@ -523,6 +524,7 @@ for (locale of ["en", "zh"]) {
 // Scope every public rule; never leak body, button, input or theme styles into auth/app routes.
 const css = source.match(/<style>([\s\S]*?)<\/style>/)[1];
 const sheet = postcss.parse(css);
+fixPrimaryButtonPaint(sheet);
 const keyframes = [];
 sheet.walkAtRules(/keyframes$/, (rule) => {
   keyframes.push(rule.params);

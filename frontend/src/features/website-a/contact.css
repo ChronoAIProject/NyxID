@@ -25,7 +25,8 @@
   line-height: 1.5;
 }
 
-.website-a #contact-demo-note a {
+.website-a #contact-demo-note a,
+.website-a #contact-delivery-note a {
   color: var(--ptext);
   text-decoration: underline;
   text-underline-offset: 3px;

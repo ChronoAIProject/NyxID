@@ -42,8 +42,17 @@ the unresolved UnicornStudio branding requirement.
 Contact uses a native `ContactSection` adapter while retaining the original
 Discord card and scoped layout selectors. Its form and scripted FAQ live in
 `src/features/website-a/contact.tsx`; validation is in
-`src/schemas/website-contact.ts`. Delivery integration is pending an owner-provided
-recipient/endpoint. Never restore the prototype's fake success branch or replace
+`src/schemas/website-contact.ts`. Delivery opens the user's mail client with an encoded draft; it never claims to
+send automatically. Never restore the prototype's fake success branch or replace
 the whole interface when a backend is unavailable. Contact-specific shrink/error
 and disclosure styles are in `contact.css`; the original layout/breakpoint
 styles remain in `website-a.css`.
+
+The public contact address is configured once with `VITE_WEBSITE_CONTACT_EMAIL`
+(default: `contact@chrono-ai.fun`). It is a public build-time setting; rebuild to
+change it. Invalid single-mailbox overrides fall back with a non-sensitive warning.
+Native mail client availability and actual sending remain user-controlled.
+
+`primary-button-css.mjs` adapts both base and later mock primary-gradient
+shorthands to border-box/no-repeat paint. Preserve this transform when
+regenerating CSS so transparent borders cannot tile the gradient edge.

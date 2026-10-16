@@ -1,0 +1,39 @@
+{
+  "base_commit": "a2423b4f053d3a43c960d5ef535ebedae93184fa",
+  "tests": {
+    "command": "NODE_ENV=test ./node_modules/.bin/vitest run src/features/website-a/contact-mailto.test.ts src/features/website-a/contact.test.tsx --maxWorkers=1 --no-file-parallelism",
+    "files": 2,
+    "passed": 9,
+    "exit_code": 0,
+    "duration_seconds": 1.1,
+    "mail_client": "mocked; not launched"
+  },
+  "eslint": {
+    "files": [
+      "contact.tsx",
+      "contact-mailto.ts",
+      "config.ts",
+      "contact.test.tsx",
+      "contact-mailto.test.ts"
+    ],
+    "exit_code": 0
+  },
+  "generator_syntax": {
+    "command": "node --check frontend/scripts/website-a/generate.mjs",
+    "exit_code": 0
+  },
+  "css_static_check": {
+    "cases": 2,
+    "exit_code": 0,
+    "one_time_only": true,
+    "no_css_test_committed": true
+  },
+  "not_run": [
+    "browser",
+    "real mail client",
+    "full generation",
+    "full build/typecheck",
+    "full test suite"
+  ],
+  "branding": "unresolved"
+}

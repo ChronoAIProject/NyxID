@@ -50,7 +50,7 @@
 .website-a .lang button.on{background:var(--ov2);color:var(--fg)}
 .website-a .btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;height:38px;padding:0 16px;border-radius:var(--r-ctl);font-size:14px;font-weight:500;border:1px solid var(--hair);background:var(--ov);color:var(--fg);white-space:nowrap;transition:border-color .15s,background .15s,transform .15s}
 .website-a .btn:hover{border-color:var(--hair2);background:var(--ov2)}
-.website-a .btn.p{background:var(--vivid);border-color:transparent;color:#fff;box-shadow:0 8px 24px -10px rgba(94,0,245,.7)}
+.website-a .btn.p{background:var(--vivid) border-box no-repeat;border-color:transparent;color:#fff;box-shadow:0 8px 24px -10px rgba(94,0,245,.7)}
 .website-a .btn.p:hover{transform:translateY(-1px)}
 .website-a .btn.lg{height:46px;padding:0 22px;font-size:15px;border-radius:var(--r-sm)}
 .website-a .btn.sm{height:32px;padding:0 12px;font-size:13px}
@@ -183,7 +183,7 @@
 /* illustrative UI: looks like the product, never acts like a control */
 .website-a .mock .btn{pointer-events:none;box-shadow:none;cursor:default}
 .website-a .mock .btn:hover{transform:none;border-color:var(--hair);background:var(--ov)}
-.website-a .mock .btn.p,.website-a .mock .btn.p:hover{background:var(--vivid);border-color:transparent}
+.website-a .mock .btn.p,.website-a .mock .btn.p:hover{background:var(--vivid) border-box no-repeat;border-color:transparent}
 
 /* permission card */
 .website-a .perm-card{background:var(--card);border:1px solid var(--border);border-radius:var(--r-card);padding:20px}

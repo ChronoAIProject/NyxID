@@ -1,6 +1,6 @@
 # 官网 A + v4.1 交付 / Website A + v4.1 delivery
 
-当前状态：实现及主题修复已完成本地验证，等待独立验收；**原场景品牌水印尚未解决，整体不能判定完成**。组织 PR 由负责人手动创建。本文覆盖先前 A-only 文档里的“不接 B”旧范围。
+当前状态：Contact 邮箱客户端交接及公共按钮渐变修复已完成定向验证（见文末最新增量），等待外部视觉/客户端验收；**原场景品牌水印尚未解决，整体不能判定完成**。组织 PR 由负责人手动创建。本文覆盖先前 A-only 文档里的“不接 B”旧范围。
 
 Status: implementation and theme fix verified locally, pending independent acceptance. **The original scene still carries branding; overall delivery is incomplete.** The owner creates the organization PR manually. This supersedes the historical A-only scope.
 
@@ -80,7 +80,7 @@ The Home emphasis now uses the reference page's two brand-purple endpoints while
 
 Incremental checks passed:13 related tests, scoped lint and68-file generation equality. Browser evidence records both animated languages, the reference and static fallback, plus animation recovery. Earlier full-build/125-test evidence belongs to the previous implementation commit; no full rerun was needed for this palette-only change. Branding remains unresolved.
 
-## Contact 恢复阶段 / Contact restoration stage
+## Contact 恢复阶段（历史记录，收件方式已在下文接通） / Contact restoration history
 
 静态对比确认生成器此前将批准表单和 NyxBot 问答整块替换为 Discord，导致功能界面丢失。现恢复原双列结构、五字段（公司选填）、五类主题和 Bundle 查询预选，正确 label 与原必填/邮箱校验；以原生 React、useAppForm 和 Zod 实现。右侧 FAQ 保留四个快捷问题、输入框、本地规则答复及原 Discord 卡；Bundle 问答可同步选中主题。演示明确不调用真实 AI，并保留真实登录入口。
 
@@ -99,3 +99,21 @@ The restored DOM matches the original two-column, card, form, input, button, FAQ
 补充 `contact.css` 仅限制Contact范围：网格子项/输入允许收缩，问答输入与44px发送按钮共用行宽；长问题换行、消息不被挤缩；演示说明增加12px留白并显示真实登录链接；无效字段使用已有错误色。没有改全站主题/动画或原型字体token。接收渠道待确认；样式已提交代码，尚未做浏览器/窄屏实测、构建或测试，不能据静态匹配宣称像素验收通过。
 
 Contact-scoped CSS adds shrink safety, long-question wrapping, stable message sizing, readable demo disclosure/sign-in and existing error-color feedback. Recipient integration and runtime verification remain pending; static selector mapping does not establish visual or responsive acceptance.
+
+## 当前增量：按钮渐变与联系邮箱 / Current increment: button paint and contact email
+
+负责人已指定 `contact@chrono-ai.fun`，表单采用邮件客户端交接，无后台公开发信 API。`VITE_WEBSITE_CONTACT_EMAIL` 为单一 build-time 配置；缺省为指定邮箱，非法单邮箱配置回退并记录固定无敏感信息警告。页面有可访问的邮箱链接；有效表单点击“打开邮件客户端”后只请求打开已填收件人/固定主题/正文的 mailto，正文包含姓名、回复邮箱、可选公司、主题及留言。客户端须由使用者确认发送；页面不宣称已发送、也不清空草稿。异常分支和未打开客户端时仍可使用邮箱链接，FAQ 套餐指引同步更新。此前“渠道接入中”状态已替换。
+
+The owner-provided mailbox is configured centrally through `VITE_WEBSITE_CONTACT_EMAIL`, defaulting to the specified address. The form composes a mailto draft only after validation; it includes all contact details in the encoded body and fixed topic labels in the subject. Users review/send in their email client. The page retains the draft and direct address and never reports successful delivery. No backend endpoint, external request, paid email service or anonymous AI is added.
+
+编码边界：收件人只允许单邮箱，原始 CRLF 拒绝；表单先经 Zod 校验。用户姓名/公司等只进正文且单行化，留言换行规范化为 CRLF 后整段 encodeURIComponent。只有固定 subject/body 两个参数，无 cc/bcc/Reply-To 头；特殊字符、中文、emoji、+、&、百分号与头注入形状文本不改变收件人或参数集合。
+
+Recipient validation rejects raw CRLF and multiple recipients. User values stay in the encoded body; only fixed topic labels enter the subject. Body line breaks are normalized and URI-encoded, preventing query/header escape. There is no automatic send or proof that an OS email app is installed.
+
+公共主按钮 `.btn.p` 和较晚的 `.mock .btn.p/.btn.p:hover` 均改为 `background:var(--vivid) border-box no-repeat`，让渐变从边框范围完整绘制，避免透明1px边框处重复左端亮色。生成器使用同一小型 PostCSS 转换防止重新生成回退。普通次按钮真实边框、focus outline、原渐变、Specular 没有移除；后续实色 `.band .btn` 设计不变。该解释由 CSS 默认绘制模型支持，实际亮边是否消失仍由外部浏览器验收，未用 Codex 内置浏览器复现。
+
+Both shared and mock primary backgrounds now paint once across the border box. Generation reuses the same transformation. Secondary borders, keyboard focus and approved animation remain. Solid band-button backgrounds retain their original design; visual confirmation remains pending.
+
+本轮按降载要求仅串行执行两个相关文件、单worker：Contact/helper 9项测试通过（约1.10s），包含中英有效/无效表单、mailto内容/编码、CRLF边界和模拟客户端启动失败时保留草稿/邮箱入口。相关5文件 ESLint、生成器语法和 Git whitespace 通过。另做一次性 Node CSS 静态核对（2项通过）；没有提交镜像 CSS 测试。未启动 IAB/CUA、真实邮件客户端、服务、完整生成器、完整类型构建或全量测试，未重启4180。见 `contact-mailto-checks.json` 与相关日志。旧125项/完整build证据不冒充当前HEAD验证；整体水印阻塞仍存在。
+
+Incremental evidence covers nine targeted behavior/encoding tests in a single serial worker, scoped lint, generator syntax and one-time CSS checks. No browser, OS client, full generation/build/suite or service startup ran. Existing production preview remains managed by the source chat. Overall acceptance remains blocked by branding and unperformed visual/OS checks.

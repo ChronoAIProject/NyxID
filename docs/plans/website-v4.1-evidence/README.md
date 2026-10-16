@@ -16,3 +16,13 @@ Browser checks demonstrate real shader/gradient/fade output, offscreen pause/res
 The four actual components and license/source adapters are documented in `frontend/src/features/website-a/visuals/react-bits/PROVENANCE.md`. Review HTML remains untracked and is not used by production. Full delivery scope and watermark resolution paths are in `../website-v4.1-delivery.md`.
 
 Palette-only increment: `color-audit.json` and `color-{home-en,home-zh,how-it-works-zh}.jpg` show the owner-requested #A672FB → #5E00F5 alignment, actual animation and static offscreen fallback. `color-tests.txt`:13 passed /2 files; `color-lint.txt`:exit0; `color-generation.json`:68 unchanged outputs. Earlier Home screenshots show the previous palette and are historical for this specific color detail.
+
+Contact mailto/button increment: `contact-mailto-tests.txt` records9 passed tests
+across2 related files with maxWorkers=1 and file parallelism disabled.
+`contact-mailto-lint.txt` is exit0 with no output.
+`button-css-static-check.txt` records a one-time2-case Node check of generation
+paint bounds and existing borders/focus; no CSS mirror test is committed.
+`contact-mailto-checks.json` records the exact commands/limits. No full build,
+full generator, browser or actual email client was run for this increment.
+Previous pending-recipient notes are historical: the owner supplied the mailbox
+and the UI now hands an encoded draft to the user's email client.

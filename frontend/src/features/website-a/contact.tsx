@@ -12,15 +12,15 @@ import {
 } from "@/schemas/website-contact";
 import type { WebsiteContactData } from "@/schemas/website-contact";
 import { useWebsite } from "./website-context";
+import { websiteConfig } from "./config";
+import {
+  contactEmailHref,
+  contactTopics,
+  createContactMailto,
+  openContactMailto,
+} from "./contact-mailto";
 import "./contact.css";
 
-const topics = [
-  ["bundle", "Custom bundle", "定制套餐"],
-  ["enterprise", "Enterprise or self-hosting", "企业部署或自托管"],
-  ["partner", "Partnerships", "合作"],
-  ["support", "Help with my setup", "设置帮助"],
-  ["other", "Something else", "其他"],
-] as const;
 const questions = [
   ["How does pricing work?", "怎么收费？"],
   ["I need a custom bundle", "我需要定制套餐"],
@@ -45,7 +45,22 @@ function replyFor(question: string): Reply {
 function ContactForm({ form }: { form: UseFormReturn<WebsiteContactData> }) {
   const { language } = useWebsite();
   const zh = language === "zh";
-  const [checked, setChecked] = useState(false);
+  const [mailClient, setMailClient] = useState<
+    "idle" | "requested" | "unavailable"
+  >("idle");
+  function composeMessage(fields: WebsiteContactData) {
+    try {
+      openContactMailto(
+        createContactMailto(websiteConfig.contactEmail, fields, language),
+      );
+      setMailClient("requested");
+    } catch {
+      setMailClient("unavailable");
+      console.warn(
+        "[nyxid-contact] Mail client handoff unavailable; direct email link retained.",
+      );
+    }
+  }
   const errors = form.formState.errors;
   const error = (name: keyof WebsiteContactData) =>
     errors[name] ? (
@@ -68,14 +83,18 @@ function ContactForm({ form }: { form: UseFormReturn<WebsiteContactData> }) {
       </h2>
       <p className="small" id="contact-delivery-note">
         {zh
-          ? "发送渠道接入中。当前填写内容不会发送或保存，请通过右侧 Discord 联系团队。"
-          : "Email delivery is being connected. Entries are not sent or saved; contact the team through Discord for now."}
+          ? "填写后将打开邮件客户端，请在客户端确认并发送。也可直接发邮件至 "
+          : "This form opens your email app. Review and send there, or email "}
+        <a href={contactEmailHref(websiteConfig.contactEmail)}>
+          {websiteConfig.contactEmail}
+        </a>
+        {zh ? "。" : " directly."}
       </p>
       <form
         id="cForm"
         noValidate
         aria-describedby="contact-delivery-note"
-        onSubmit={form.handleSubmit(() => setChecked(true))}
+        onSubmit={form.handleSubmit(composeMessage)}
       >
         <div className="f2">
           <div>
@@ -133,7 +152,7 @@ function ContactForm({ form }: { form: UseFormReturn<WebsiteContactData> }) {
               {...field("topic")}
             >
               <option value="">{zh ? "选择主题" : "Choose a topic"}</option>
-              {topics.map(([value, en, cn]) => (
+              {contactTopics.map(([value, en, cn]) => (
                 <option key={value} value={value}>
                   {zh ? cn : en}
                 </option>
@@ -157,13 +176,17 @@ function ContactForm({ form }: { form: UseFormReturn<WebsiteContactData> }) {
           {error("message")}
         </div>
         <button className="btn p lg" type="submit" style={{ width: "100%" }}>
-          {zh ? "发送" : "Send message"}
+          {zh ? "打开邮件客户端" : "Open email app"}
         </button>
-        {checked && (
+        {mailClient !== "idle" && (
           <p className="small" role="status">
-            {zh
-              ? "尚未发送：发送渠道未接通，填写内容仍留在此页。"
-              : "Not sent: email delivery is not connected. Your entries remain on this page."}
+            {mailClient === "requested"
+              ? zh
+                ? "已请求打开邮件客户端，邮件尚未发送。请在客户端确认并发送；若未打开，可使用上方邮箱链接。"
+                : "Email app requested; your message has not been sent. Review and send in your email app, or use the address above if it did not open."
+              : zh
+                ? "未能打开邮件客户端。请使用上方邮箱链接联系团队，填写内容仍留在此页。"
+                : "Could not open your email app. Use the address above; your entries remain on this page."}
           </p>
         )}
       </form>
@@ -204,8 +227,8 @@ function ContactDemo({ selectBundle }: { selectBundle: () => void }) {
     switch (reply) {
       case "bundle":
         return zh
-          ? "套餐可围绕用量、可预期支出、SSO、部署和支持定制。左侧已选择“定制套餐”；当前表单不会发送信息，可先到 Discord 与团队交流。"
-          : "Bundles can cover volume, predictable spend, SSO, deployment and support. Custom bundle is selected in the form; it does not send yet, so talk to the team on Discord for now.";
+          ? "套餐可围绕用量、可预期支出、SSO、部署和支持定制。左侧已选择“定制套餐”；填写表单后点击“打开邮件客户端”，再在客户端确认发送。"
+          : "Bundles can cover volume, predictable spend, SSO, deployment and support. Custom bundle is selected in the form; complete it, choose Open email app, then review and send there.";
       case "pricing":
         return (
           <>
