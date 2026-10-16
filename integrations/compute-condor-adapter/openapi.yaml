@@ -1,0 +1,210 @@
+openapi: 3.1.0
+info:
+  title: NyxID Compute HTCondor Adapter
+  version: 0.1.0
+  description: External compute service contract for exposing an HTCondor pool through NyxID as a custom service.
+servers:
+  - url: http://127.0.0.1:8787
+security:
+  - bearerAuth: []
+paths:
+  /health:
+    get:
+      security: []
+      summary: Health check
+      responses:
+        "200":
+          description: Service is healthy.
+  /v1/status:
+    get:
+      summary: Get scheduler, queue, and capacity status
+      responses:
+        "200":
+          description: Current scheduler status.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Status"
+  /v1/tasks:
+    post:
+      summary: Submit a compute task
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SubmitTask"
+      responses:
+        "202":
+          description: Task accepted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Task"
+  /v1/tasks/{task_id}:
+    get:
+      summary: Get task state or result
+      parameters:
+        - name: task_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Task state.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Task"
+        "404":
+          description: Task was not found.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /v1/tasks/{task_id}/cancel:
+    post:
+      summary: Cancel a queued or running task
+      parameters:
+        - name: task_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Cancelled task state.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Task"
+        "409":
+          description: Task is already completed or failed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+  schemas:
+    SubmitTask:
+      type: object
+      required:
+        - model
+      properties:
+        kind:
+          type: string
+          default: chat_completion
+        model:
+          type: string
+        input:
+          type: object
+          additionalProperties: true
+        priority:
+          type: integer
+          default: 0
+        client_ref:
+          type: string
+          description: Optional idempotency key scoped to this adapter instance.
+        requirements:
+          type: object
+          additionalProperties: true
+          description: Scheduler requirements such as host kind, GPU type, memory, or runtime profile.
+    Task:
+      type: object
+      properties:
+        task_id:
+          type: string
+        scheduler_job_id:
+          type:
+            - string
+            - "null"
+          description: Backend scheduler id, for example an HTCondor ClusterId.ProcId.
+        kind:
+          type: string
+        model:
+          type: string
+        priority:
+          type: integer
+        status:
+          type: string
+          enum:
+            - queued
+            - running
+            - completed
+            - failed
+            - cancelled
+        phase:
+          type:
+            - string
+            - "null"
+        output:
+          type:
+            - object
+            - array
+            - string
+            - number
+            - boolean
+            - "null"
+        failure_reason:
+          type:
+            - string
+            - "null"
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        completed_at:
+          type:
+            - string
+            - "null"
+          format: date-time
+    Status:
+      type: object
+      properties:
+        scheduler:
+          type: string
+          enum:
+            - htcondor
+        healthy:
+          type: boolean
+        queued:
+          type: integer
+        running:
+          type: integer
+        capacity:
+          type: array
+          items:
+            $ref: "#/components/schemas/Capacity"
+    Capacity:
+      type: object
+      properties:
+        host_kind:
+          type:
+            - string
+            - "null"
+        gpu_name:
+          type:
+            - string
+            - "null"
+        total_slots:
+          type: integer
+        available_slots:
+          type: integer
+        models:
+          type: array
+          items:
+            type: string
+    Error:
+      type: object
+      properties:
+        error:
+          type: string
+        status:
+          type: string
