@@ -619,6 +619,7 @@ pub async fn transfer_node_owner_with_expected_state_version(
     max_nodes_per_user: u32,
     expected_state_version: Option<i64>,
 ) -> AppResult<TransferNodeResult> {
+    super::remote_machine_service::guard_legacy_node_mutation(db, node_id, "transfer").await?;
     let node = load_active_node(db, node_id).await?;
     ensure_node_writable_by_access(db, actor_user_id, &node).await?;
 
@@ -790,6 +791,7 @@ pub async fn delete_node_with_expected_state_version(
     node_id: &str,
     expected_state_version: Option<i64>,
 ) -> AppResult<()> {
+    super::remote_machine_service::guard_legacy_node_mutation(db, node_id, "delete").await?;
     let node = load_active_node(db, node_id).await?;
     ensure_node_writable_by_access(db, user_id, &node).await?;
 
@@ -1046,6 +1048,7 @@ pub async fn rotate_auth_token(
     user_id: &str,
     node_id: &str,
 ) -> AppResult<(String, String)> {
+    super::remote_machine_service::guard_legacy_node_mutation(db, node_id, "rotate").await?;
     let _node = ensure_node_writable_by_actor(db, user_id, node_id).await?;
 
     let raw_token = format!("nyx_nauth_{}", hex::encode(rand::random::<[u8; 32]>()));
@@ -1082,6 +1085,58 @@ pub async fn rotate_auth_token(
 
     tracing::info!(node_id = %node_id, "Node auth token and signing secret rotated");
     Ok((raw_token, raw_signing_secret))
+}
+
+/// Prepared using the same Node credential format as ordinary registration.
+/// Only managed bootstrap may activate it, in its lifecycle-fenced transaction.
+pub(crate) struct ManagedNodeCredentialMaterial {
+    pub auth_token: Zeroizing<String>,
+    pub signing_secret: Zeroizing<String>,
+    pub signing_secret_encrypted: Vec<u8>,
+}
+
+pub(crate) async fn prepare_managed_credentials(
+    encryption_keys: &EncryptionKeys,
+) -> AppResult<ManagedNodeCredentialMaterial> {
+    let auth_token = Zeroizing::new(format!(
+        "nyx_nauth_{}",
+        hex::encode(rand::random::<[u8; 32]>())
+    ));
+    let signing_secret = Zeroizing::new(hex::encode(rand::random::<[u8; 32]>()));
+    let signing_secret_encrypted = encryption_keys.encrypt(signing_secret.as_bytes()).await?;
+    Ok(ManagedNodeCredentialMaterial {
+        auth_token,
+        signing_secret,
+        signing_secret_encrypted,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn activate_managed_credentials(
+    db: &mongodb::Database,
+    session: &mut mongodb::ClientSession,
+    node_id: &str,
+    owner_id: &str,
+    auth_hash: &str,
+    signing_hash: &str,
+    signing_secret_encrypted: &[u8],
+    now: DateTime<Utc>,
+) -> AppResult<()> {
+    let updated = db.collection::<Node>(NODES).update_one(
+        doc! {"_id": node_id, "user_id": owner_id, "metadata.provisioning_source": "remote_machine"},
+        doc! {"$set": {
+            "auth_token_hash": auth_hash, "signing_secret_hash": signing_hash,
+            "signing_secret_encrypted": bson::Binary { subtype: bson::spec::BinarySubtype::Generic, bytes: signing_secret_encrypted.to_vec() },
+            "is_active": true, "status": NodeStatus::Offline.as_str(),
+            "connection_owner": bson::Bson::Null, "updated_at": bson::DateTime::from_chrono(now),
+        }, "$inc": {"access_revision": 1_i64, "state_version": 1_i64}},
+    ).session(session).await?;
+    if updated.modified_count != 1 {
+        return Err(AppError::Conflict(
+            "managed_node_identity_unavailable".into(),
+        ));
+    }
+    Ok(())
 }
 
 /// Update a binding's priority.
@@ -1155,6 +1210,7 @@ pub async fn list_all_nodes(
 
 /// Admin: soft-delete a node without ownership check.
 pub async fn admin_delete_node(db: &mongodb::Database, node_id: &str) -> AppResult<()> {
+    super::remote_machine_service::guard_legacy_node_mutation(db, node_id, "delete").await?;
     let now = bson::DateTime::from_chrono(Utc::now());
 
     let result = db

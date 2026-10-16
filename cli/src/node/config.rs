@@ -13,6 +13,14 @@ use super::secret_backend::SecretBackend;
 pub struct NodeConfig {
     pub server: ServerConfig,
     pub node: NodeSection,
+    /// Only controlled managed bootstrap may set this. Self-hosted nodes leave
+    /// it absent and retain the existing registration and WSS behavior.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub managed_runtime: Option<nyxid_machine::managed::Binding>,
+    /// Immutable capability ceiling delivered inside the sealed bootstrap.
+    /// Older managed configs omitted this and retain shell/files only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub managed_capabilities: Option<Vec<String>>,
     #[serde(default)]
     pub signing: SigningConfig,
     #[serde(default)]
@@ -429,6 +437,8 @@ impl NodeConfig {
                 id: node_id,
                 auth_token_encrypted: String::new(),
             },
+            managed_runtime: None,
+            managed_capabilities: None,
             signing: SigningConfig::default(),
             ssh: SshConfig::default(),
             machine: Default::default(),
@@ -445,6 +455,13 @@ impl NodeConfig {
             Error::Config(format!("Failed to read config at {}: {e}", path.display()))
         })?;
         let config: Self = toml::from_str(&content)?;
+        if let Some(binding) = &config.managed_runtime {
+            super::managed_config::validate_existing_config(&config, binding).map_err(|_| {
+                Error::Config(
+                    "managed runtime configuration violates its sealed capability ceiling".into(),
+                )
+            })?;
+        }
         Ok(config)
     }
 

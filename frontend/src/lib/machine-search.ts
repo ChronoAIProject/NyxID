@@ -3,6 +3,8 @@ import { parseAutomationSearch } from "@/lib/automation-search";
 export function parseMachinesSearch(search: Record<string, unknown>): {
   tab?: "logins";
   machine?: string;
+  operation?: string;
+  confirmation?: string;
 } {
   return {
     tab: search.tab === "logins" ? ("logins" as const) : undefined,
@@ -10,13 +12,25 @@ export function parseMachinesSearch(search: Record<string, unknown>): {
     /^[a-zA-Z0-9-]{1,128}$/.test(search.machine)
       ? { machine: search.machine }
       : {}),
+    ...(typeof search.operation === "string" &&
+    /^[a-zA-Z0-9-]{1,128}$/.test(search.operation)
+      ? { operation: search.operation }
+      : {}),
+    ...(typeof search.confirmation === "string" &&
+    /^[a-zA-Z0-9-]{1,128}$/.test(search.confirmation)
+      ? { confirmation: search.confirmation }
+      : {}),
   };
 }
 
 export function parseMachineSetupSearch(search: Record<string, unknown>): {
   setup?: string;
+  where?: "hosted";
 } {
-  return { setup: parseAutomationSearch(search).setup };
+  return {
+    setup: parseAutomationSearch(search).setup,
+    where: search.where === "hosted" ? "hosted" : undefined,
+  };
 }
 
 export function parseMachinePairSearch(search: Record<string, unknown>): {

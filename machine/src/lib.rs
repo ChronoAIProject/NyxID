@@ -2,10 +2,12 @@
 
 pub mod authority;
 pub mod binary;
+pub mod bootstrap;
 pub mod config;
 pub mod context;
 pub mod desktop;
 pub mod gateway;
+pub mod managed;
 pub mod signing;
 pub mod text;
 pub mod update;
@@ -90,6 +92,10 @@ impl MachineProfile {
     pub fn authority_v2(&self) -> bool {
         self.authority_versions.contains(&authority::VERSION)
     }
+    pub fn authority_v3(&self) -> bool {
+        self.authority_versions
+            .contains(&authority::EXTERNAL_VERSION)
+    }
     pub fn enabled(&self) -> bool {
         self.version == PROTOCOL_VERSION
             && (self.shell || self.files || self.computer || self.browser_enabled())
@@ -167,6 +173,8 @@ pub struct Request {
     pub version: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub authority: Option<Box<authority::Authority>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_authority: Option<Box<authority::ExternalAuthority>>,
     pub request_id: String,
     pub node_id: String,
     pub operation: Operation,

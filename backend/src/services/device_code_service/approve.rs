@@ -8,6 +8,7 @@ use zeroize::Zeroizing;
 use crate::crypto::aes::EncryptionKeys;
 use crate::crypto::token::hash_token;
 use crate::errors::{AppError, AppResult};
+#[cfg(test)]
 use crate::models::api_key::{ApiKey, COLLECTION_NAME as API_KEYS};
 use crate::models::device_code::{COLLECTION_NAME as DEVICE_CODES, DeviceCode, DeviceCodeStatus};
 use crate::models::node::{COLLECTION_NAME as NODES, Node};
@@ -275,9 +276,10 @@ pub(super) async fn scope_api_key_to_node(
 }
 
 /// Physically remove resources created by an approval attempt that never
-/// committed the DeviceCode's `approved` transition. This is intentionally not
-/// an ApiKey authority mutation: no device received the one-time secret, so the
-/// incomplete key must not remain as a visible revoked credential.
+/// committed the DeviceCode's `approved` transition. No device received the
+/// one-time secret, so the incomplete key need not remain a visible revoked
+/// credential. The owner may still have approved a Machine grant while the
+/// active row was visible; physical removal must fence that source atomically.
 pub(super) async fn cleanup_partial_approval(
     db: &Database,
     owner_user_id: &str,
@@ -299,10 +301,7 @@ pub(super) async fn cleanup_partial_approval(
     }
 
     if let Some(api_key_id) = api_key_id
-        && let Err(error) = db
-            .collection::<ApiKey>(API_KEYS)
-            .delete_one(doc! { "_id": api_key_id, "user_id": owner_user_id })
-            .await
+        && let Err(error) = key_mutations::delete_one(db, owner_user_id, api_key_id, None).await
     {
         tracing::warn!(
             api_key_id = %api_key_id,

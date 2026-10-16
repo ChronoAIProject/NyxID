@@ -27,6 +27,7 @@ dependencies = [
  "cfg-if",
  "cipher",
  "cpufeatures 0.2.17",
+ "zeroize",
 ]
 
 [[package]]
@@ -41,6 +42,7 @@ dependencies = [
  "ctr",
  "ghash",
  "subtle",
+ "zeroize",
 ]
 
 [[package]]
@@ -2497,6 +2499,7 @@ checksum = "f0d8a4362ccb29cb0b265253fb0a2728f592895ee6854fd9bc13f2ffda266ff1"
 dependencies = [
  "opaque-debug",
  "polyval",
+ "zeroize",
 ]
 
 [[package]]
@@ -4481,9 +4484,15 @@ dependencies = [
 name = "nyxid-machine"
 version = "0.1.0"
 dependencies = [
+ "aes",
+ "aes-gcm",
  "base64 0.22.1",
+ "ghash",
  "hex",
  "hmac",
+ "polyval",
+ "rand 0.8.5",
+ "rsa 0.9.10",
  "semver",
  "serde",
  "serde_json",
@@ -4499,9 +4508,11 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
+ "chrono",
  "const-oid 0.9.6",
  "futures",
  "hex",
+ "jsonwebtoken 10.3.0",
  "libc",
  "nyxid-machine",
  "rcgen",
@@ -4523,6 +4534,7 @@ dependencies = [
  "tracing",
  "url",
  "urlencoding",
+ "uuid",
  "webpki-roots 1.0.6",
  "wiremock",
  "x509-cert",
@@ -5146,6 +5158,7 @@ dependencies = [
  "cpufeatures 0.2.17",
  "opaque-debug",
  "universal-hash",
+ "zeroize",
 ]
 
 [[package]]

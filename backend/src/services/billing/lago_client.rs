@@ -58,6 +58,13 @@ pub trait LagoApi: Send + Sync {
             .map(Credits::from_whole)
     }
     async fn entitlements(&self, subscription_id: &str) -> AppResult<Vec<Entitlement>>;
+    /// Strict live subscription identity for paid Machine admission. Older
+    /// adapters must opt in; feature entitlements alone are not billing proof.
+    async fn runtime_subscription(&self, _subscription_id: &str) -> AppResult<RuntimeSubscription> {
+        Err(AppError::BillingProviderUnavailable(
+            "Lago runtime subscription verification is not supported".into(),
+        ))
+    }
     /// Per-unit rates for the plan's standard charges, used to refresh the
     /// local rate cache. Defaults to empty so fakes opt in explicitly.
     async fn plan_rates(&self, _plan_code: &str) -> AppResult<PlanRates> {
@@ -134,6 +141,16 @@ pub struct InvoiceSummary {
     pub payment_status: String,
     pub external_customer_id: Option<String>,
     pub issuing_date: Option<String>,
+}
+
+/// Provider-owned identity and lifecycle of the subscription that will receive
+/// runtime events. No customer profile, payment data or credentials are exposed.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+pub struct RuntimeSubscription {
+    pub external_id: String,
+    pub external_customer_id: String,
+    pub plan_code: String,
+    pub status: String,
 }
 
 /// A per-unit price from a Lago plan charge, converted to micro-credits
@@ -687,6 +704,41 @@ impl LagoApi for LagoClient {
                     .collect()
             })
             .unwrap_or_default())
+    }
+
+    async fn runtime_subscription(&self, subscription_id: &str) -> AppResult<RuntimeSubscription> {
+        if subscription_id.is_empty() || subscription_id != subscription_id.trim() {
+            return Err(AppError::BillingProviderUnavailable(
+                "Lago runtime subscription identity is invalid".into(),
+            ));
+        }
+        let value = self
+            .get_one_by_external_id("subscriptions", "subscription", subscription_id)
+            .await?
+            .ok_or_else(|| {
+                AppError::BillingProviderUnavailable(
+                    "Lago runtime subscription was not found".into(),
+                )
+            })?;
+        let subscription: RuntimeSubscription = serde_json::from_value(value).map_err(|_| {
+            AppError::BillingProviderUnavailable(
+                "Lago runtime subscription proof is incomplete".into(),
+            )
+        })?;
+        if subscription.external_id != subscription_id
+            || [
+                subscription.external_customer_id.as_str(),
+                subscription.plan_code.as_str(),
+                subscription.status.as_str(),
+            ]
+            .iter()
+            .any(|value| value.is_empty() || *value != value.trim())
+        {
+            return Err(AppError::BillingProviderUnavailable(
+                "Lago runtime subscription proof does not match".into(),
+            ));
+        }
+        Ok(subscription)
     }
 
     async fn wallet_transaction_invoices(
@@ -1867,6 +1919,89 @@ mod tests {
             metric_description: "NyxID-managed platform usage price".to_string(),
             credits_per_unit: "0.125".to_string(),
         }
+    }
+
+    #[tokio::test]
+    async fn runtime_subscription_reads_live_provider_identity_without_provisioning() {
+        let app = axum::Router::new().route(
+            "/api/v1/subscriptions/subscription-1",
+            axum::routing::get(|| async {
+                axum::Json(json!({ "subscription": {
+                    "external_id": "subscription-1", "external_customer_id": "owner-1",
+                    "plan_code": "nyxid-standard", "status": "active",
+                    "lago_id": "provider-internal-id", "unrelated_field": true,
+                } }))
+            }),
+        );
+        let client = LagoClient::new(spawn_lago_mock(app).await, "test-api-key".into()).unwrap();
+        let proof = client.runtime_subscription("subscription-1").await.unwrap();
+        assert_eq!(proof.external_id, "subscription-1");
+        assert_eq!(proof.external_customer_id, "owner-1");
+        assert_eq!(proof.plan_code, "nyxid-standard");
+        assert_eq!(proof.status, "active");
+    }
+
+    #[tokio::test]
+    async fn runtime_subscription_rejects_missing_malformed_and_mismatched_proof() {
+        let valid = json!({
+            "external_id": "subscription-1", "external_customer_id": "owner-1",
+            "plan_code": "nyxid-standard", "status": "active",
+        });
+        let mut missing_plan = valid.clone();
+        missing_plan.as_object_mut().unwrap().remove("plan_code");
+        let mut wrong_id = valid.clone();
+        wrong_id["external_id"] = json!("another-subscription");
+        let mut numeric_customer = valid.clone();
+        numeric_customer["external_customer_id"] = json!(1234);
+        let mut empty_status = valid.clone();
+        empty_status["status"] = json!("");
+        for body in [
+            Value::Null,
+            json!({}),
+            missing_plan,
+            wrong_id,
+            numeric_customer,
+            empty_status,
+        ] {
+            let app = axum::Router::new().route(
+                "/api/v1/subscriptions/subscription-1",
+                axum::routing::get(move || {
+                    let body = body.clone();
+                    async move { axum::Json(json!({ "subscription": body })) }
+                }),
+            );
+            let client =
+                LagoClient::new(spawn_lago_mock(app).await, "test-api-key".into()).unwrap();
+            assert!(client.runtime_subscription("subscription-1").await.is_err());
+        }
+        let client = LagoClient::new(
+            spawn_lago_mock(axum::Router::new()).await,
+            "test-api-key".into(),
+        )
+        .unwrap();
+        assert!(client.runtime_subscription("missing").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn runtime_subscription_preserves_inactive_status_for_admission_to_reject() {
+        let app = axum::Router::new().route(
+            "/api/v1/subscriptions/subscription-1",
+            axum::routing::get(|| async {
+                axum::Json(json!({ "subscription": {
+                    "external_id": "subscription-1", "external_customer_id": "owner-1",
+                    "plan_code": "nyxid-standard", "status": "terminated",
+                } }))
+            }),
+        );
+        let client = LagoClient::new(spawn_lago_mock(app).await, "test-api-key".into()).unwrap();
+        assert_eq!(
+            client
+                .runtime_subscription("subscription-1")
+                .await
+                .unwrap()
+                .status,
+            "terminated"
+        );
     }
 
     fn plan_response(charges: serde_json::Value) -> serde_json::Value {
@@ -3187,6 +3322,7 @@ mod tests {
             pending_resale_quantity: None,
             pending_platform_usage: None,
             pool_attempt: None,
+            machine_usage: None,
             status: crate::models::usage_meter::UsageStatus::Finalized,
             forwarded: true,
             released: true,

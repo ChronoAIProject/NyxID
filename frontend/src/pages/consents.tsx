@@ -1,3 +1,4 @@
+import { MachineGrantCard } from "@/components/shared/machine-grant-card";
 import { useState } from "react";
 import { useNavigate, useRouterState } from "@tanstack/react-router";
 import { useMyConsents, useRevokeConsent } from "@/hooks/use-consents";
@@ -153,9 +154,11 @@ function AuthorizedAppsTab({ viewMode }: { readonly viewMode: ViewMode }) {
   const { data, isLoading, error, refetch } = useMyConsents();
   const revokeMutation = useRevokeConsent();
   const [revokeClientId, setRevokeClientId] = useState<string | null>(null);
+  const [machineClientId, setMachineClientId] = useState<string | null>(null);
 
   const consents = data?.consents ?? [];
   const revokeTarget = consents.find((c) => c.client_id === revokeClientId);
+  const machineTarget = consents.find((c) => c.client_id === machineClientId);
 
   async function handleRevoke() {
     if (!revokeClientId) return;
@@ -236,6 +239,7 @@ function AuthorizedAppsTab({ viewMode }: { readonly viewMode: ViewMode }) {
                 Service access
               </p>
               <ServiceAccess consent={consent} />
+              <Button variant="outline" size="sm" onClick={() => setMachineClientId(consent.client_id)}>Machine permissions</Button>
             </div>
             <div className="mt-3 space-y-1">
               <p className="text-11 text-muted-foreground">
@@ -286,6 +290,7 @@ function AuthorizedAppsTab({ viewMode }: { readonly viewMode: ViewMode }) {
                   Service access
                 </p>
                 <ServiceAccess consent={consent} />
+                <Button variant="outline" size="sm" onClick={() => setMachineClientId(consent.client_id)}>Machine permissions</Button>
               </div>
               <div className="mt-3 space-y-1">
                 <p className="text-11 text-muted-foreground">
@@ -339,6 +344,7 @@ function AuthorizedAppsTab({ viewMode }: { readonly viewMode: ViewMode }) {
                   </TableCell>
                   <TableCell>
                     <ServiceAccess consent={consent} />
+                    <Button variant="outline" size="sm" onClick={() => setMachineClientId(consent.client_id)}>Machine permissions</Button>
                   </TableCell>
                   <TableCell className="text-muted-foreground">
                     {formatDate(consent.granted_at)}
@@ -365,6 +371,12 @@ function AuthorizedAppsTab({ viewMode }: { readonly viewMode: ViewMode }) {
         </div>
       )}
 
+      <Dialog open={machineClientId !== null} onOpenChange={(open) => { if (!open) setMachineClientId(null); }}>
+        <DialogContent className="max-h-[90dvh] overflow-y-auto sm:max-w-2xl">
+          <DialogHeader><DialogTitle>{consents.find((consent) => consent.client_id === machineClientId)?.client_name} · Machine permissions</DialogTitle><DialogDescription>Manage the Machine grant for this account and OAuth client.</DialogDescription></DialogHeader>
+          {machineClientId && <MachineGrantCard source={{ kind: "oauth", id: machineClientId }} allowedServiceIds={machineTarget?.allow_all_services ? undefined : machineTarget?.allowed_service_ids ?? []} />}
+        </DialogContent>
+      </Dialog>
       <Dialog
         open={revokeClientId !== null}
         onOpenChange={(open) => {
@@ -381,7 +393,9 @@ function AuthorizedAppsTab({ viewMode }: { readonly viewMode: ViewMode }) {
                 : "this application"}
               ? The application will need your consent again before it can
               refresh access or use brokered authorizations. Any access tokens
-              already issued can keep working for up to 15 minutes.
+              already issued can keep working for up to 15 minutes for ordinary services.
+              Machine permissions are revoked with this consent and old consent
+              versions cannot be used to resume Machine work.
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>

@@ -691,6 +691,32 @@ async fn full_access_machine_policy_executes_with_receipt_while_auto_asks() {
             );
             assert_eq!(rows[0].decided_by.as_deref(), Some("access_mode"));
             assert_eq!(rows[0].status, "allowed");
+            // Full access replaces the confirmation choice, never the live
+            // owner-control fence; a refusal produces no automatic receipt.
+            use crate::services::machine_desktop_service as desktop;
+            let desktop = desktop::open(&f.state.db, &f.owner, &node.id, Some(&f.row.id))
+                .await
+                .unwrap();
+            let desktop = desktop::take(&f.state.db, &desktop, "owner").await.unwrap();
+            desktop::controlled(&f.state.db, &desktop, "owner")
+                .await
+                .unwrap();
+            let refused = machine_mcp_call(
+                &f,
+                &auth,
+                "nyx__machine_exec",
+                json!({"machine":node.id,"command":"true"}),
+            )
+            .await;
+            assert_eq!(refused["error_code"], 12408);
+            assert!(requests.try_recv().is_err());
+            assert_eq!(
+                acks::history(&f.state.db, &f.owner, &f.row.id)
+                    .await
+                    .unwrap()
+                    .len(),
+                1,
+            );
         }
         task.abort();
         f.state.db.drop().await.unwrap();

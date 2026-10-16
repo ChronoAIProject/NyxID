@@ -1,4 +1,5 @@
 import Constants from "expo-constants";
+import { ACCOUNT_DELETION_POLICY_VERSION } from "../accountDeletionPolicy";
 
 import { ApiError } from "./ApiError";
 import {
@@ -803,5 +804,6 @@ export async function getCurrentUserProfileRequest(): Promise<AccountProfile> {
 export async function deleteCurrentUserAccountRequest(): Promise<DeleteAccountResponse> {
   return requestJson<DeleteAccountResponse>("/users/me", {
     method: "DELETE",
+    headers: { "X-NyxID-Account-Deletion-Policy": ACCOUNT_DELETION_POLICY_VERSION },
   });
 }

@@ -1,9 +1,23 @@
-import { MachineIsolationBadge, MachineSharingBadge } from "@/components/shared/machine-isolation";
+import { useRemoteMachineAdmission } from "@/hooks/use-remote-machine-admission";
+import {
+  MachineIsolationBadge,
+  MachineSharingBadge,
+} from "@/components/shared/machine-isolation";
 import { useState } from "react";
 import { Link, useNavigate, useSearch } from "@tanstack/react-router";
 import { Monitor, Settings, History } from "lucide-react";
-import { useMachineUpdates } from "@/hooks/use-machines";
-import type { MachineUpdateStatus } from "@/schemas/machines";
+import { useMachineUpdates, useRemoteMachines } from "@/hooks/use-machines";
+import type { MachineUpdateStatus, RemoteMachine } from "@/schemas/machines";
+import { RemoteMachineDetail } from "@/components/machines/remote-machine-detail";
+import { ErrorBanner } from "@/components/shared/error-banner";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
 import { useNodes } from "@/hooks/use-nodes";
 import { useOrgs } from "@/hooks/use-orgs";
 import { useAuthStore } from "@/stores/auth-store";
@@ -87,7 +101,10 @@ function MachineCard({
             </Link>
           </Button>
         ) : null}
-        <Button onClick={onActivity}><History />Activity</Button>
+        <Button onClick={onActivity}>
+          <History />
+          Activity
+        </Button>
         <Button onClick={onSettings} aria-label={`Settings for ${node.name}`}>
           <Settings />
           Settings
@@ -98,12 +115,14 @@ function MachineCard({
 }
 
 export function MachinesPage() {
+  const remoteAdmission = useRemoteMachineAdmission();
   const navigate = useNavigate();
   const search = parseMachinesSearch(
     useSearch({ strict: false }) as Record<string, unknown>,
   );
   const nodes = useNodes({ pollIntervalMs: 5000 });
   const updates = useMachineUpdates();
+  const remote = useRemoteMachines();
   const orgs = useOrgs();
   const userId = useAuthStore((state) => state.user?.id);
   const [activityId, setActivityId] = useState<string>();
@@ -118,13 +137,37 @@ export function MachinesPage() {
   const adminOrgs = new Set(
     orgs.data?.filter((org) => org.your_role === "admin").map((org) => org.id),
   );
+  const hostedMachines = remote.data ?? [];
+  const hostedIds = new Set(hostedMachines.map((machine) => machine.node_id));
   const machines = (nodes.data ?? []).filter(
     (node) =>
       node.machine &&
+      node.metadata?.provisioning_source !== "remote_machine" &&
+      !hostedIds.has(node.id) &&
       (node.owner.id === userId ||
         (node.owner.kind === "org" && adminOrgs.has(node.owner.id))),
   );
   const selected = machines.find((node) => node.id === selectedId);
+  const selectedRemote = hostedMachines.find(
+    (machine) => machine.node_id === selectedId,
+  );
+  // Deleted resources leave the active list but retain an owner-readable
+  // tombstone. Resolve direct links independently so cleanup stays reviewable.
+  const remoteDetailId =
+    selectedRemote?.node_id ??
+    (selectedId &&
+    selectedId === search.machine &&
+    !selected &&
+    !nodes.isPending
+      ? selectedId
+      : undefined);
+  function openRemote(machineId: string, operationId?: string) {
+    setSelectedId(machineId);
+    void navigate({
+      to: "/assistant/machines",
+      search: { machine: machineId, operation: operationId },
+    });
+  }
   return (
     <div className="space-y-6">
       <Tabs
@@ -143,14 +186,66 @@ export function MachinesPage() {
         <TabsContent value="machines" className="mt-6 space-y-6">
           <PageHeader
             title="Machines"
-            description="Computers NyxBot and your specialists can work on."
+            description="Remote and self-hosted computers for authorized agents and clients."
             actions={
-              <AddCtaButton
-                label="Add a machine"
-                onClick={() => void navigate({ to: "/assistant/machines/new" })}
-              />
+              <div className="flex flex-wrap gap-2">
+                {remoteAdmission && (
+                  <AddCtaButton
+                    label="Create remote machine"
+                    onClick={() =>
+                      void navigate({
+                        to: "/assistant/machines/new",
+                        search: { where: "hosted" },
+                      })
+                    }
+                  />
+                )}
+                <AddCtaButton
+                  label="Add a machine"
+                  onClick={() =>
+                    void navigate({ to: "/assistant/machines/new" })
+                  }
+                />
+              </div>
             }
           />
+          <section aria-label="Remote machines" className="space-y-3">
+            <h3 className="text-15 font-semibold">Remote machines</h3>
+            <p className="text-12 text-muted-foreground">
+              Personal hosted machines with a fixed workspace and selected
+              capabilities. Resource state, runtime billing and execution
+              authorization are independent.
+            </p>
+            {!remote.isPending &&
+              !remote.error &&
+              !remote.discoveryComplete && (
+                <p role="status" className="text-12 text-muted-foreground">
+                  Complete remote Machine discovery is not confirmed by this
+                  server.
+                </p>
+              )}
+            {remote.isPending ? (
+              <p role="status" className="text-12">
+                Loading remote machines…
+              </p>
+            ) : remote.error ? (
+              <ErrorBanner
+                message="Remote machine management could not be loaded. This deployment may not expose it yet."
+                onRetry={() => void remote.refetch()}
+              />
+            ) : hostedMachines.length ? (
+              <RemoteMachineList
+                machines={hostedMachines}
+                onOpen={openRemote}
+              />
+            ) : (
+              <p className="rounded-lg border border-dashed border-border p-6 text-12 text-muted-foreground">
+                No remote machines. Check your free slot and the configured
+                profile before creating one.
+              </p>
+            )}
+          </section>
+          <h3 className="text-15 font-semibold">Self-hosted machines</h3>
           {nodes.isPending || orgs.isPending ? (
             <p role="status">Loading machines…</p>
           ) : null}
@@ -186,13 +281,57 @@ export function MachinesPage() {
           <SavedLoginsPage />
         </TabsContent>
       </Tabs>
-      <Sheet open={Boolean(activityId)} onOpenChange={(open) => { if (!open) setActivityId(undefined); }}>
+      <Sheet
+        open={Boolean(remoteDetailId)}
+        onOpenChange={(open) => {
+          if (!open) {
+            setSelectedId(undefined);
+            void navigate({ to: "/assistant/machines", search: {} });
+          }
+        }}
+      >
+        <SheetContent className="w-full overflow-y-auto sm:max-w-3xl">
+          <SheetHeader className="pr-8">
+            <SheetTitle>Remote machine details</SheetTitle>
+            <SheetDescription>
+              Lifecycle, access, work history and billing for this machine.
+            </SheetDescription>
+          </SheetHeader>
+          {remoteDetailId ? (
+            <RemoteMachineDetail
+              key={`${userId}:${remoteDetailId}:${search.operation ?? ""}:${search.confirmation ?? ""}`}
+              operationId={search.operation}
+              confirmationId={search.confirmation}
+              machineId={remoteDetailId}
+              initialMachine={selectedRemote}
+              node={
+                nodes.error
+                  ? undefined
+                  : nodes.data?.find(
+                      (node) =>
+                        node.id === remoteDetailId && node.owner.id === userId,
+                    )
+              }
+            />
+          ) : null}
+        </SheetContent>
+      </Sheet>
+      <Sheet
+        open={Boolean(activityId)}
+        onOpenChange={(open) => {
+          if (!open) setActivityId(undefined);
+        }}
+      >
         <SheetContent className="flex w-full min-w-0 flex-col gap-0 overflow-hidden p-0 sm:max-w-lg">
           <SheetHeader className="shrink-0 p-5 pr-10">
             <SheetTitle>Machine activity</SheetTitle>
-            <SheetDescription>{machines.find((node) => node.id === activityId)?.name}</SheetDescription>
+            <SheetDescription>
+              {machines.find((node) => node.id === activityId)?.name}
+            </SheetDescription>
           </SheetHeader>
-          {activityId && <MachineActivity key={activityId} nodeId={activityId} />}
+          {activityId && (
+            <MachineActivity key={activityId} nodeId={activityId} />
+          )}
         </SheetContent>
       </Sheet>
       <Sheet
@@ -219,5 +358,103 @@ export function MachinesPage() {
         </SheetContent>
       </Sheet>
     </div>
+  );
+}
+
+function RemoteMachineList({
+  machines,
+  onOpen,
+}: {
+  readonly machines: RemoteMachine[];
+  readonly onOpen: (id: string) => void;
+}) {
+  const label = (value: string) =>
+    value.replaceAll("_", " ").replace(/^./, (c) => c.toUpperCase());
+  const state = (machine: RemoteMachine) => (
+    <div className="flex flex-wrap gap-2">
+      <Badge
+        variant={
+          machine.resource_state === "ready"
+            ? "success"
+            : machine.resource_state === "failed"
+              ? "destructive"
+              : "secondary"
+        }
+      >
+        {label(machine.resource_state)}
+      </Badge>
+      <span className="text-11 text-muted-foreground">
+        Billing: {label(machine.billing_state)} · Authorization:{" "}
+        {label(machine.authorization_state)}
+      </span>
+    </div>
+  );
+  return (
+    <>
+      <div className="flex flex-col gap-3 md:hidden">
+        {machines.map((machine) => (
+          <article
+            key={machine.node_id}
+            className="space-y-3 rounded-xl border border-border/50 bg-card p-4"
+          >
+            <h4 className="break-all text-13 font-semibold">
+              {machine.name ?? machine.sandbox_name}
+            </h4>
+            {state(machine)}
+            <p className="text-11 text-muted-foreground">
+              Generation {machine.runtime_generation} ·{" "}
+              {machine.profile.workspace_gib} GiB workspace
+            </p>
+            <Button onClick={() => onOpen(machine.node_id)}>
+              View details
+            </Button>
+          </article>
+        ))}
+      </div>
+      <div className="hidden overflow-hidden rounded-xl border border-border/50 bg-card md:block">
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead>Machine</TableHead>
+              <TableHead>State</TableHead>
+              <TableHead>Runtime</TableHead>
+              <TableHead>
+                <span className="sr-only">Details</span>
+              </TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {machines.map((machine) => (
+              <TableRow key={machine.node_id}>
+                <TableCell>
+                  <div className="font-medium">
+                    {machine.name ?? machine.sandbox_name}
+                  </div>
+                  <div className="font-mono text-11 text-muted-foreground">
+                    {machine.node_id}
+                  </div>
+                </TableCell>
+                <TableCell>{state(machine)}</TableCell>
+                <TableCell>
+                  Generation {machine.runtime_generation}
+                  <br />
+                  <span className="text-11 text-muted-foreground">
+                    {machine.profile.workspace_gib} GiB workspace
+                  </span>
+                </TableCell>
+                <TableCell>
+                  <Button
+                    onClick={() => onOpen(machine.node_id)}
+                    aria-label={`View ${machine.name ?? machine.sandbox_name}`}
+                  >
+                    Details
+                  </Button>
+                </TableCell>
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
+      </div>
+    </>
   );
 }

@@ -396,9 +396,15 @@ async fn machine_preview_consent_encryption_acl_expiry_and_late_result() {
         })
         .await
         .unwrap();
-    Box::pin(super::super::admin_user_service::delete_current_user_cascade(&f.state.db, &f.owner))
-        .await
-        .unwrap();
+    Box::pin(
+        super::super::admin_user_service::delete_current_user_cascade(
+            &f.state.db,
+            &f.owner,
+            crate::services::admin_user_service::ACCOUNT_DELETION_POLICY_VERSION,
+        ),
+    )
+    .await
+    .unwrap();
     assert_eq!(
         f.state
             .db

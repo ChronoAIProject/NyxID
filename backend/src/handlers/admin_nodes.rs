@@ -252,6 +252,12 @@ pub async fn admin_disconnect_node(
     Path(node_id): Path<String>,
 ) -> AppResult<impl IntoResponse> {
     require_admin(&state, &auth_user).await?;
+    crate::services::remote_machine_service::guard_legacy_node_mutation(
+        &state.db,
+        &node_id,
+        "disconnect",
+    )
+    .await?;
 
     let was_connected = state
         .node_dispatch
@@ -297,6 +303,10 @@ pub async fn admin_delete_node(
     Path(node_id): Path<String>,
 ) -> AppResult<impl IntoResponse> {
     require_admin(&state, &auth_user).await?;
+    crate::services::remote_machine_service::guard_legacy_node_mutation(
+        &state.db, &node_id, "delete",
+    )
+    .await?;
 
     node_service::admin_delete_node(&state.db, &node_id).await?;
     let _ = state

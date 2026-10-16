@@ -194,10 +194,41 @@ async fn fixture_inner(distinct: bool) -> Fixture {
 
 impl Fixture {
     pub(crate) async fn claim(&self) -> SetupStepJob {
-        provisioning::claim_step(&self.state.db)
-            .await
-            .unwrap()
-            .unwrap()
+        use std::time::Duration;
+
+        // Enqueue and eligibility use application and MongoDB clocks. Like the
+        // worker, wait for a real claim instead of assuming immediate eligibility.
+        let claimed = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Some(job) = provisioning::claim_step(&self.state.db)
+                    .await
+                    .expect("provisioning claim query must succeed")
+                {
+                    return job;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        if let Ok(job) = claimed {
+            return job;
+        }
+        let diagnostic = tokio::time::timeout(Duration::from_secs(1), async {
+            self.state
+                .db
+                .collection::<mongodb::bson::Document>(crate::models::platform_installation::STEPS)
+                .find_one(doc! {"setup_id": &self.setup.id})
+                .projection(
+                    doc! {"_id": 1, "phase": 1, "generation": 1, "attempts": 1, "retry_at": 1},
+                )
+                .await
+        })
+        .await;
+        panic!(
+            "timed out waiting for provisioning claim; database={}, setup={}, step={diagnostic:?}",
+            self.state.db.name(),
+            self.setup.id,
+        );
     }
     pub(crate) async fn native_start(
         &self,

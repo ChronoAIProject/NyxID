@@ -25,359 +25,383 @@ fn argument<'a>(value: &'a Value, key: &str) -> AppResult<&'a str> {
         .ok_or_else(|| AppError::ValidationError(format!("Missing {key}")))
 }
 
-pub async fn call(
-    state: &AppState,
-    chat: &ChatAuthority,
-    name: &str,
+pub fn call<'a>(
+    state: &'a AppState,
+    chat: &'a ChatAuthority,
+    name: &'a str,
     mut arguments: Value,
-) -> AppResult<Value> {
-    machines::caller(chat)?;
-    if !tools::is_tool(name) {
-        return Err(AppError::NotFound("Machine tool not found".into()));
-    }
-    if arguments.to_string().len() > 128 * 1024 {
-        return Err(AppError::ValidationError(
-            "Machine arguments exceed the size limit".into(),
-        ));
-    }
-    if name == "nyx__saved_logins" {
-        let rows =
-            crate::services::saved_login_service::available(&state.db, &chat.user_id).await?;
-        return tools::list_page("logins", rows.into_iter()
-            .filter(|login| chat.is_orchestrator() || chat.saved_login_ids.contains(&login.id))
-            .map(|row| json!({"id":row.id,"label":row.label,"allowed_origins":row.allowed_origins}))
-            .collect(), &arguments, json!({}));
-    }
-    let nodes = machines::visible_nodes(&state.db, chat).await?;
-    if name == "nyx__machine_list" {
-        let services = crate::services::machine_gateway_service::services(
-            &state.db,
-            &chat.user_id,
-            &chat.api_key_id,
-        )
-        .await?;
-        let environment = services
-            .iter()
-            .map(|row| {
-                let spec = crate::services::machine_gateway_service::environment(
-                    std::slice::from_ref(row),
-                )?;
-                Ok(json!({
-                    "service": row.slug,
-                    "spec": spec,
-                }))
-            })
-            .collect::<AppResult<Vec<_>>>()?;
-        let instructions = if nodes.iter().any(|node| machines::granted(chat, node)) {
-            tools::USE_INSTRUCTIONS
-        } else {
-            "No machine is available. Ask NyxBot for a machine setup link."
-        };
-        let visible = Box::pin(access::visible_assignments(&state.db, chat))
-            .await?
-            .into_iter()
-            .map(|(node, assignment)| {
-                let mut row = machines::metadata(&node);
-                row["execution_note"] = json!(tools::execution_note(
-                    &assignment.mode,
-                    node.machine.as_ref().and_then(|p| p.separated.as_ref()).is_some_and(|s| s.available),
-                ));
-                if assignment.mode == "separated" {
-                    row["machine"]["roots"] = json!(["."]);
-                    row["context_note"] = json!("Paths are relative to this agent context workspace; the secure and developer browsers are separate from other contexts. Full isolation requires a separate machine container or VM.");
-                }
-                row["access"] = json!(assignment);
-                row
-            })
-            .collect();
-        return tools::list_page(
-            "machines",
-            visible,
-            &arguments,
-            json!({
-                "services": services.iter().map(|service| service.slug.as_str()).collect::<Vec<_>>(),
-                "environment": environment,
-                "instructions": instructions,
-            }),
-        );
-    }
-
-    let selector = argument(&arguments, "machine")?;
-    let mut matches = nodes
-        .into_iter()
-        .filter(|node| node.id == selector || node.name == selector);
-    let node = matches
-        .next()
-        .ok_or_else(|| AppError::NodeNotFound("Machine not found or not usable".into()))?;
-    if matches.next().is_some() {
-        return Err(AppError::ValidationError(
-            "Several machines have this name; use the ID".into(),
-        ));
-    }
-    let operation = tools::operation(name)
-        .ok_or_else(|| AppError::NotFound("Machine tool not found".into()))?;
-    let mut separated = false;
-    if operation != Operation::JobCancel {
-        match Box::pin(access::assignment(&state.db, chat, &node)).await {
-            Ok(assignment) => separated = assignment.mode == "separated",
-            Err(AppError::MachinePermissionRevoked) => {
-                return permission(state, chat, "machine", &node.id, &node.name).await;
-            }
-            Err(error) => return Err(error),
+) -> futures::future::BoxFuture<'a, AppResult<Value>> {
+    Box::pin(async move {
+        machines::caller(chat)?;
+        if !tools::is_tool(name) {
+            return Err(AppError::NotFound("Machine tool not found".into()));
         }
-    }
-    machines::capable(&node, operation)?;
-    if operation == Operation::Browser
-        && !node
-            .machine
-            .as_ref()
-            .is_some_and(|profile| profile.browser_tools)
-    {
-        return Ok(json!({
-            "error": {
-                "code": 12416,
-                "message": "This machine predates the managed browser tools. Offer nyxid__machine_update: it applies the governing permission mode and guides the host step if needed. Do not ask the owner to diagnose browser settings."
-            },
-            "settings_path": AssistantPage::MachineSettings {node: &node.id}.path(),
-        }));
-    }
-    if operation == Operation::Computer
-        && !node.machine.as_ref().is_some_and(|profile| {
-            arguments["tool"]
-                .as_str()
-                .is_some_and(|tool| profile.computer_tools.iter().any(|allowed| allowed == tool))
-        })
-    {
-        return Ok(json!({
-            "error": {
-                "code": AppError::MachineComputerToolUnsupported.error_code(),
-                "message": "computer_tool_not_supported: choose a tool from computer_tools below. For page content use nyx__machine_browser action=snapshot; owner screenshot attachments use browser=dev action=screenshot.",
-                "computer_tools": node.machine.as_ref().map(|p| p.computer_tools.iter()
-                    .take(64).map(|tool| tool.chars().take(128).collect::<String>()).collect::<Vec<_>>()).unwrap_or_default(),
-            },
-        }));
-    }
-    arguments["machine"] = json!(node.id);
-    let mut login = None;
-    if operation == Operation::FillLogin {
-        if arguments.get("browser").is_some_and(|v| v != "secure") {
+        if arguments.to_string().len() > 128 * 1024 {
             return Err(AppError::ValidationError(
-                "Saved logins are available only in the secure browser".into(),
+                "Machine arguments exceed the size limit".into(),
             ));
         }
-        let selector = argument(&arguments, "login")?;
-        let rows =
-            crate::services::saved_login_service::available(&state.db, &chat.user_id).await?;
-        let mut found = rows
-            .into_iter()
-            .filter(|row| row.id == selector || row.label == selector);
-        let row = found.next().ok_or_else(|| AppError::MachineLoginNotFound)?;
-        if found.next().is_some() {
-            return Err(AppError::ValidationError(
-                "Several logins have this label; use the ID".into(),
-            ));
+        if name == "nyx__saved_logins" {
+            let rows =
+                crate::services::saved_login_service::available(&state.db, &chat.user_id).await?;
+            return tools::list_page("logins", rows.into_iter()
+                .filter(|login| chat.is_orchestrator() || chat.saved_login_ids.contains(&login.id))
+                .map(|row| json!({"id":row.id,"label":row.label,"allowed_origins":row.allowed_origins}))
+                .collect(), &arguments, json!({}));
         }
-        if !chat.is_orchestrator() && !chat.saved_login_ids.contains(&row.id) {
-            return permission(state, chat, "saved_login", &row.id, &row.label).await;
-        }
-        if !node.machine.as_ref().is_some_and(|p| p.browser_isolated)
-            && !node.allow_single_user_saved_logins
-        {
-            return Ok(json!({
-                "error":{
-                    "code":12409,
-                    "message":"Saved-login typing is off on this single-user machine. Its commands run as the browser user and could read typed values. The owner can allow it in Assistant → Machines settings after reviewing the warning, or use the machine container or a separated VM."
-                },
-                "settings_path": AssistantPage::Machines.path()
-            }));
-        }
-        if !separated && !node.machine.as_ref().is_some_and(|p| p.saved_login_ready) {
-            return Err(AppError::MachineBrowserUnavailable);
-        }
-        arguments["login"] = json!(row.id);
-        login = Some(row);
-    }
-    Box::pin(access::authorize(
-        &state.db, chat, &node, operation, &arguments,
-    ))
-    .await?;
-    let declared_services = if operation == Operation::Exec {
-        let requested: Vec<String> = serde_json::from_value(
-            arguments
-                .get("services")
-                .cloned()
-                .unwrap_or_else(|| json!([])),
-        )
-        .map_err(|_| {
-            AppError::ValidationError("services must be a list of service slugs or IDs".into())
-        })?;
-        let available = if requested.is_empty() {
-            Vec::new()
-        } else {
-            crate::services::machine_gateway_service::services(
+        let nodes = machines::visible_nodes(&state.db, chat).await?;
+        if name == "nyx__machine_list" {
+            let services = crate::services::machine_gateway_service::services(
                 &state.db,
                 &chat.user_id,
                 &chat.api_key_id,
             )
-            .await?
-        };
-        let selected = crate::services::machine_gateway_service::declare(&requested, available)?;
-        arguments["services"] = json!(selected.iter().map(|row| &row.slug).collect::<Vec<_>>());
-        selected
-    } else {
-        Vec::new()
-    };
-    arguments["machine_access_revision"] = json!(
-        Box::pin(access::policy(&state.db, &chat.agent_id))
-            .await?
-            .revision
-    );
-    // Arbitrary commands, writes and mutating desktop input can destroy data.
-    // Filling a checked login field and asking the owner for control change
-    // state, but do not themselves remove data or grant arbitrary execution.
-    // One digest-bound owner card satisfies every reason to confirm: the
-    // webhook policy, the owner's access mode, machine_confirm and per-login
-    // confirmation. Never consume it twice.
-    let read_only = !machines::changing(operation, &arguments);
-    let facts = acks::ActionFacts {
-        class: acks::classify_owner_action(name, &arguments),
-        read_only,
-        destructive: matches!(
-            operation,
-            Operation::Exec
-                | Operation::WriteFile
-                | Operation::EditFile
-                | Operation::SaveAttachment
-                | Operation::JobCancel
-        ) || (matches!(operation, Operation::Computer | Operation::Browser)
-            && !read_only),
-    };
-    let floor = machines::confirmation(&node, operation, &arguments)
-        || login.as_ref().is_some_and(|row| row.confirm_each_sign_in);
-    let gate = acks::confirmation_needed(&state.db, chat, facts, floor).await?;
-    let confirmation_arguments = arguments.clone();
-    let summary = format!(
-        "Allow {name} on {}{}",
-        node.name,
-        if operation == Operation::Exec {
-            format!(
-                "; declared services: {}",
-                declared_services
-                    .iter()
-                    .map(|row| row.slug.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )
-        } else {
-            String::new()
+            .await?;
+            let environment = services
+                .iter()
+                .map(|row| {
+                    let spec = crate::services::machine_gateway_service::environment(
+                        std::slice::from_ref(row),
+                    )?;
+                    Ok(json!({
+                        "service": row.slug,
+                        "spec": spec,
+                    }))
+                })
+                .collect::<AppResult<Vec<_>>>()?;
+            let instructions = if nodes.iter().any(|node| machines::granted(chat, node)) {
+                tools::USE_INSTRUCTIONS
+            } else {
+                "No machine is available. Ask NyxBot for a machine setup link."
+            };
+            let visible = Box::pin(access::visible_assignments(&state.db, chat))
+                .await?
+                .into_iter()
+                .map(|(node, assignment)| {
+                    let mut row = machines::metadata(&node);
+                    row["execution_note"] = json!(tools::execution_note(
+                        &assignment.mode,
+                        node.machine.as_ref().and_then(|p| p.separated.as_ref()).is_some_and(|s| s.available),
+                    ));
+                    if assignment.mode == "separated" {
+                        row["machine"]["roots"] = json!(["."]);
+                        row["context_note"] = json!("Paths are relative to this agent context workspace; the secure and developer browsers are separate from other contexts. Full isolation requires a separate machine container or VM.");
+                    }
+                    row["access"] = json!(assignment);
+                    row
+                })
+                .collect();
+            return tools::list_page(
+                "machines",
+                visible,
+                &arguments,
+                json!({
+                    "services": services.iter().map(|service| service.slug.as_str()).collect::<Vec<_>>(),
+                    "environment": environment,
+                    "instructions": instructions,
+                }),
+            );
         }
-    );
-    if let Some(need) = gate.ask() {
-        // Outside webhook automations a mismatched card id raises a fresh
-        // card for the exact arguments, as machine confirmation always has.
-        let on_invalid = if need.webhook {
-            acks::InvalidCard::Refuse
-        } else {
-            acks::InvalidCard::Reissue
-        };
-        if let Some(refusal) = acks::confirm_action_with(
-            &state.db, chat, name, &arguments, &need, &summary, on_invalid,
-        )
-        .await?
+
+        let selector = argument(&arguments, "machine")?;
+        let mut matches = nodes
+            .into_iter()
+            .filter(|node| node.id == selector || node.name == selector);
+        let node = matches
+            .next()
+            .ok_or_else(|| AppError::NodeNotFound("Machine not found or not usable".into()))?;
+        if matches.next().is_some() {
+            return Err(AppError::ValidationError(
+                "Several machines have this name; use the ID".into(),
+            ));
+        }
+        let operation = tools::operation(name)
+            .ok_or_else(|| AppError::NotFound("Machine tool not found".into()))?;
+        let mut separated = false;
+        if operation != Operation::JobCancel {
+            match Box::pin(access::assignment(&state.db, chat, &node)).await {
+                Ok(assignment) => separated = assignment.mode == "separated",
+                Err(AppError::MachinePermissionRevoked) => {
+                    return permission(state, chat, "machine", &node.id, &node.name).await;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        machines::capable(&node, operation)?;
+        if operation == Operation::Browser
+            && !node
+                .machine
+                .as_ref()
+                .is_some_and(|profile| profile.browser_tools)
         {
-            return Ok(refusal);
+            return Ok(json!({
+                "error": {
+                    "code": 12416,
+                    "message": "This machine predates the managed browser tools. Offer nyxid__machine_update: it applies the governing permission mode and guides the host step if needed. Do not ask the owner to diagnose browser settings."
+                },
+                "settings_path": AssistantPage::MachineSettings {node: &node.id}.path(),
+            }));
         }
-    }
-    // Fence against Stop/settlement before issuing any signed machine work.
-    let turn_id = chat
-        .turn_id
-        .as_deref()
-        .filter(|_| !chat.turn_stopped)
-        .ok_or(AppError::MachineTurnStopped)?;
-    machines::admit_turn_operation(&state.db, chat, &node).await?;
-    arguments["conversation_id"] = json!(chat.conversation_id);
-    arguments["turn_id"] = json!(turn_id);
-    // Desktop state is opened only after authority admission. A separated
-    // authority carries the signed context id that the node must use; opening
-    // it before admission would create a legacy desktop row and route control
-    // to the wrong browser profile.
-    if matches!(operation, Operation::Job | Operation::JobCancel) {
-        machines::job(&state.db, chat, &node.id, argument(&arguments, "job_id")?).await?;
-    }
-    let job = if operation == Operation::Exec {
-        arguments["environment"] = json!(crate::services::machine_gateway_service::environment(
-            &declared_services
-        )?);
-        let job = machines::issue_job(
+        if operation == Operation::Computer
+            && !node.machine.as_ref().is_some_and(|profile| {
+                arguments["tool"].as_str().is_some_and(|tool| {
+                    profile.computer_tools.iter().any(|allowed| allowed == tool)
+                })
+            })
+        {
+            return Ok(json!({
+                "error": {
+                    "code": AppError::MachineComputerToolUnsupported.error_code(),
+                    "message": "computer_tool_not_supported: choose a tool from computer_tools below. For page content use nyx__machine_browser action=snapshot; owner screenshot attachments use browser=dev action=screenshot.",
+                    "computer_tools": node.machine.as_ref().map(|p| p.computer_tools.iter()
+                        .take(64).map(|tool| tool.chars().take(128).collect::<String>()).collect::<Vec<_>>()).unwrap_or_default(),
+                },
+            }));
+        }
+        arguments["machine"] = json!(node.id);
+        let mut login = None;
+        if operation == Operation::FillLogin {
+            if arguments.get("browser").is_some_and(|v| v != "secure") {
+                return Err(AppError::ValidationError(
+                    "Saved logins are available only in the secure browser".into(),
+                ));
+            }
+            let selector = argument(&arguments, "login")?;
+            let rows =
+                crate::services::saved_login_service::available(&state.db, &chat.user_id).await?;
+            let mut found = rows
+                .into_iter()
+                .filter(|row| row.id == selector || row.label == selector);
+            let row = found.next().ok_or_else(|| AppError::MachineLoginNotFound)?;
+            if found.next().is_some() {
+                return Err(AppError::ValidationError(
+                    "Several logins have this label; use the ID".into(),
+                ));
+            }
+            if !chat.is_orchestrator() && !chat.saved_login_ids.contains(&row.id) {
+                return permission(state, chat, "saved_login", &row.id, &row.label).await;
+            }
+            if !node.machine.as_ref().is_some_and(|p| p.browser_isolated)
+                && !node.allow_single_user_saved_logins
+            {
+                return Ok(json!({
+                    "error":{
+                        "code":12409,
+                        "message":"Saved-login typing is off on this single-user machine. Its commands run as the browser user and could read typed values. The owner can allow it in Assistant → Machines settings after reviewing the warning, or use the machine container or a separated VM."
+                    },
+                    "settings_path": AssistantPage::Machines.path()
+                }));
+            }
+            if !separated && !node.machine.as_ref().is_some_and(|p| p.saved_login_ready) {
+                return Err(AppError::MachineBrowserUnavailable);
+            }
+            arguments["login"] = json!(row.id);
+            login = Some(row);
+        }
+        Box::pin(access::authorize(
+            &state.db, chat, &node, operation, &arguments,
+        ))
+        .await?;
+        let declared_services = if operation == Operation::Exec {
+            let requested: Vec<String> = serde_json::from_value(
+                arguments
+                    .get("services")
+                    .cloned()
+                    .unwrap_or_else(|| json!([])),
+            )
+            .map_err(|_| {
+                AppError::ValidationError("services must be a list of service slugs or IDs".into())
+            })?;
+            let available = if requested.is_empty() {
+                Vec::new()
+            } else {
+                crate::services::machine_gateway_service::services(
+                    &state.db,
+                    &chat.user_id,
+                    &chat.api_key_id,
+                )
+                .await?
+            };
+            let selected =
+                crate::services::machine_gateway_service::declare(&requested, available)?;
+            arguments["services"] = json!(selected.iter().map(|row| &row.slug).collect::<Vec<_>>());
+            selected
+        } else {
+            Vec::new()
+        };
+        arguments["machine_access_revision"] = json!(
+            Box::pin(access::policy(&state.db, &chat.agent_id))
+                .await?
+                .revision
+        );
+        // Arbitrary commands, writes and mutating desktop input can destroy data.
+        // Filling a checked login field and asking the owner for control change
+        // state, but do not themselves remove data or grant arbitrary execution.
+        // One digest-bound owner card satisfies every reason to confirm: the
+        // webhook policy, the owner's access mode, machine_confirm and per-login
+        // confirmation. Never consume it twice.
+        let read_only = !machines::changing(operation, &arguments);
+        let facts = acks::ActionFacts {
+            class: acks::classify_owner_action(name, &arguments),
+            read_only,
+            destructive: matches!(
+                operation,
+                Operation::Exec
+                    | Operation::WriteFile
+                    | Operation::EditFile
+                    | Operation::SaveAttachment
+                    | Operation::JobCancel
+            ) || (matches!(operation, Operation::Computer | Operation::Browser)
+                && !read_only),
+        };
+        let floor = machines::confirmation(&node, operation, &arguments)
+            || login.as_ref().is_some_and(|row| row.confirm_each_sign_in);
+        let gate = acks::confirmation_needed(&state.db, chat, facts, floor).await?;
+        let confirmation_arguments = arguments.clone();
+        let summary = format!(
+            "Allow {name} on {}{}",
+            node.name,
+            if operation == Operation::Exec {
+                format!(
+                    "; declared services: {}",
+                    declared_services
+                        .iter()
+                        .map(|row| row.slug.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            } else {
+                String::new()
+            }
+        );
+        if let Some(need) = gate.ask() {
+            // Outside webhook automations a mismatched card id raises a fresh
+            // card for the exact arguments, as machine confirmation always has.
+            let on_invalid = if need.webhook {
+                acks::InvalidCard::Refuse
+            } else {
+                acks::InvalidCard::Reissue
+            };
+            if let Some(refusal) = acks::confirm_action_with(
+                &state.db, chat, name, &arguments, &need, &summary, on_invalid,
+            )
+            .await?
+            {
+                return Ok(refusal);
+            }
+        }
+        // Fence against Stop/settlement before issuing any signed machine work.
+        let turn_id = chat
+            .turn_id
+            .as_deref()
+            .filter(|_| !chat.turn_stopped)
+            .ok_or(AppError::MachineTurnStopped)?;
+        machines::admit_turn_operation(&state.db, chat, &node).await?;
+        arguments["conversation_id"] = json!(chat.conversation_id);
+        arguments["turn_id"] = json!(turn_id);
+        // Desktop state is opened only after authority admission. A separated
+        // authority carries the signed context id that the node must use; opening
+        // it before admission would create a legacy desktop row and route control
+        // to the wrong browser profile.
+        if matches!(operation, Operation::Job | Operation::JobCancel) {
+            machines::job(&state.db, chat, &node.id, argument(&arguments, "job_id")?).await?;
+        }
+        let job = if operation == Operation::Exec {
+            arguments["environment"] = json!(
+                crate::services::machine_gateway_service::environment(&declared_services)?
+            );
+            let job = machines::issue_job(
+                &state.db,
+                chat,
+                &node,
+                arguments["timeout_secs"].as_u64().unwrap_or(120),
+                crate::services::machine_gateway_service::declared(&declared_services),
+            )
+            .await?;
+            arguments["job_id"] = json!(job.id);
+            arguments["runtime_id"] = json!(job.runtime_id);
+            arguments["conversation_id"] = json!(chat.conversation_id);
+            Some(job)
+        } else {
+            None
+        };
+        let authority = match Box::pin(access::admit(
             &state.db,
             chat,
             &node,
-            arguments["timeout_secs"].as_u64().unwrap_or(120),
-            crate::services::machine_gateway_service::declared(&declared_services),
-        )
-        .await?;
-        arguments["job_id"] = json!(job.id);
-        arguments["runtime_id"] = json!(job.runtime_id);
-        arguments["conversation_id"] = json!(chat.conversation_id);
-        Some(job)
-    } else {
-        None
-    };
-    let authority = match Box::pin(access::admit(
-        &state.db,
-        chat,
-        &node,
-        operation,
-        &arguments,
-        job.as_ref().map(|job| job.id.as_str()),
-    ))
-    .await
-    {
-        Ok(authority) => authority,
-        Err(error) => {
-            if let Some(job) = &job {
-                machines::finish(&state.db, &job.id).await?;
-            }
-            return Err(error);
-        }
-    };
-    let context_id = authority
-        .as_deref()
-        .filter(|authority| authority.mode == "separated")
-        .map(|authority| authority.context_id.as_str());
-    let display = if name == "nyx__machine_request_control" {
-        nyxid_machine::desktop::Display::from_parameters(&arguments)
-            .map_err(|message| AppError::ValidationError(message.into()))?
-    } else if operation == Operation::Browser && arguments["browser"] == "dev" {
-        nyxid_machine::desktop::Display::Dev
-    } else {
-        nyxid_machine::desktop::Display::Secure
-    };
-    if name != "nyx__machine_request_control" {
-        let allowed = if node
-            .machine
-            .as_ref()
-            .is_some_and(|profile| profile.os == "linux")
+            operation,
+            &arguments,
+            job.as_ref().map(|job| job.id.as_str()),
+        ))
+        .await
         {
-            if matches!(
-                operation,
-                Operation::Browser | Operation::Computer | Operation::FillLogin
-            ) {
-                crate::services::machine_desktop_service::agent_display_allowed_for_context(
-                    &state.db, &node.id, display, context_id,
-                )
-                .await
-            } else {
-                crate::services::machine_desktop_service::agent_allowed_for_context(
-                    &state.db, &node.id, context_id,
-                )
-                .await
+            Ok(authority) => authority,
+            Err(error) => {
+                if let Some(job) = &job {
+                    machines::finish(&state.db, &job.id).await?;
+                }
+                return Err(error);
             }
-        } else {
-            // Native macOS browsers share a physical desktop.
-            crate::services::machine_desktop_service::agent_allowed(&state.db, &node.id).await
         };
-        if let Err(error) = allowed {
+        let context_id = authority
+            .as_deref()
+            .filter(|authority| authority.mode == "separated")
+            .map(|authority| authority.context_id.as_str());
+        let display = if name == "nyx__machine_request_control" {
+            nyxid_machine::desktop::Display::from_parameters(&arguments)
+                .map_err(|message| AppError::ValidationError(message.into()))?
+        } else if operation == Operation::Browser && arguments["browser"] == "dev" {
+            nyxid_machine::desktop::Display::Dev
+        } else {
+            nyxid_machine::desktop::Display::Secure
+        };
+        if name != "nyx__machine_request_control" {
+            let allowed = if node
+                .machine
+                .as_ref()
+                .is_some_and(|profile| profile.os == "linux")
+            {
+                if matches!(
+                    operation,
+                    Operation::Browser | Operation::Computer | Operation::FillLogin
+                ) {
+                    crate::services::machine_desktop_service::agent_display_allowed_for_context(
+                        &state.db, &node.id, display, context_id,
+                    )
+                    .await
+                } else {
+                    crate::services::machine_desktop_service::agent_allowed_for_context(
+                        &state.db, &node.id, context_id,
+                    )
+                    .await
+                }
+            } else {
+                // Native macOS browsers share a physical desktop.
+                crate::services::machine_desktop_service::agent_allowed(&state.db, &node.id).await
+            };
+            if let Err(error) = allowed {
+                if let Some(authority) = &authority {
+                    let _ = state
+                        .db
+                        .collection::<mongodb::bson::Document>(
+                            crate::models::machine_access::LEASES,
+                        )
+                        .delete_one(mongodb::bson::doc! {"_id": &authority.lease_id})
+                        .await;
+                }
+                return Err(error);
+            }
+        }
+        if name == "nyx__machine_request_control" {
+            let result = super::machine_desktop::request_control(
+                state,
+                chat,
+                &node,
+                argument(&arguments, "reason")?,
+                display,
+                context_id,
+            )
+            .await;
             if let Some(authority) = &authority {
                 let _ = state
                     .db
@@ -385,29 +409,261 @@ pub async fn call(
                     .delete_one(mongodb::bson::doc! {"_id": &authority.lease_id})
                     .await;
             }
-            return Err(error);
+            if result
+                .as_ref()
+                .is_ok_and(|value| value.get("error").is_none())
+                && let Some(auto) = gate.auto_allowed()
+            {
+                acks::record_auto_allowed(
+                    &state.db,
+                    chat,
+                    name,
+                    &confirmation_arguments,
+                    &auto,
+                    &summary,
+                )
+                .await;
+            }
+            return result;
         }
-    }
-    if name == "nyx__machine_request_control" {
-        let result = super::machine_desktop::request_control(
-            state,
-            chat,
-            &node,
-            argument(&arguments, "reason")?,
-            display,
-            context_id,
-        )
-        .await;
-        if let Some(authority) = &authority {
+        if matches!(operation, Operation::Computer | Operation::Browser) {
+            crate::services::machine_desktop_service::open_display_for_context(
+                &state.db,
+                &chat.user_id,
+                &node.id,
+                Some(&chat.conversation_id),
+                context_id,
+                display,
+            )
+            .await?;
+        }
+        if let (Some(job), Some(authority)) = (&job, &authority) {
+            state.db.collection::<mongodb::bson::Document>(crate::models::machine_job::COLLECTION_NAME)
+                .update_one(mongodb::bson::doc!{"_id":&job.id},mongodb::bson::doc!{"$set":{"machine_authority":mongodb::bson::to_bson(authority).map_err(|_|AppError::MachineAuthorityStale)?}}).await?;
+        }
+        if let Some(login) = &login {
+            let field = argument(&arguments, "field")?.to_owned();
+            let value = crate::services::saved_login_service::materialize(
+                &state.encryption_keys,
+                login,
+                &field,
+                Utc::now().timestamp().max(0) as u64,
+            )
+            .await?;
+            arguments["value"] = json!(value.as_str());
+            arguments["allowed_origins"] = json!(login.allowed_origins);
+        }
+        let mut receipt = receipts::receipt(chat, &node.id, operation, &arguments);
+        receipt.context_mode = Some(
+            if separated {
+                "separated"
+            } else {
+                "shared_legacy"
+            }
+            .into(),
+        );
+        receipt.preview_enabled = receipts::preview_enabled(&state.db, chat).await?;
+        receipts::record(&state.db, chat, &receipt).await?;
+        let started = std::time::Instant::now();
+        let mut result = match operation {
+            Operation::SaveAttachment => {
+                save_attachment(state, chat, &node, &arguments, authority.clone()).await
+            }
+            Operation::ShareFile => {
+                share_file(state, chat, &node, &arguments, authority.clone()).await
+            }
+            _ => {
+                dispatch_authorized(
+                    state,
+                    &node,
+                    operation,
+                    arguments.clone(),
+                    authority.clone(),
+                )
+                .await
+            }
+        };
+        if let Some(authority) = &authority
+            && operation != Operation::JobCancel
+        {
+            let current = state.db.collection::<mongodb::bson::Document>(crate::models::assistant_agent::COLLECTION_NAME)
+                .find_one(mongodb::bson::doc! {"_id":&authority.agent_id,"destroyed_at":mongodb::bson::Bson::Null,format!("machine_access.assignments.{}.revision",node.id):authority.revision})
+                .projection(mongodb::bson::doc! {"_id":1}).await?;
+            if current.is_none() {
+                result = Err(AppError::MachinePermissionRevoked);
+            }
+        }
+        if let Some(authority) = &authority
+            && (job.is_none()
+                || result.as_ref().is_ok_and(|r| r["status"] == "finished")
+                || result.is_err())
+        {
             let _ = state
                 .db
                 .collection::<mongodb::bson::Document>(crate::models::machine_access::LEASES)
-                .delete_one(mongodb::bson::doc! {"_id": &authority.lease_id})
+                .delete_one(mongodb::bson::doc! {"_id":&authority.lease_id})
                 .await;
         }
-        if result
-            .as_ref()
-            .is_ok_and(|value| value.get("error").is_none())
+        if let Some(job) = job
+            && (result.is_err()
+                || result
+                    .as_ref()
+                    .is_ok_and(|r| r["status"] == "finished" || r.get("error").is_some()))
+        {
+            machines::finish(&state.db, &job.id).await?;
+        }
+        if matches!(operation, Operation::Job | Operation::JobCancel)
+            && result.as_ref().is_ok_and(|r| r["status"] == "finished")
+        {
+            machines::finish(&state.db, argument(&arguments, "job_id")?).await?;
+        }
+        // This copy is only needed for dispatch; cards and audit never contain it.
+        if let Some(Value::String(value)) = arguments.get_mut("value") {
+            use zeroize::Zeroize;
+            value.zeroize();
+        }
+        let mut result = match result {
+            Ok(result) => result,
+            Err(error) => {
+                receipt.status = if error.error_code() == 12418 {
+                    "cancelled"
+                } else {
+                    "error"
+                }
+                .into();
+                receipt.error_code = Some(error.error_code());
+                receipt.duration_ms = Some(started.elapsed().as_millis() as u64);
+                let _ = receipts::record(&state.db, chat, &receipt).await;
+                audit_service::log_async(
+                    state.db.clone(),
+                    Some(chat.user_id.clone()),
+                    "machine_operation".into(),
+                    Some(json!({
+                        "node_id":node.id,
+                        "operation":operation,
+                        "operation_id":receipt.operation_id,
+                        "activity_id":receipts::activity_id(),
+                        "agent_id":chat.agent_id,
+                        "action":receipt.action,
+                        "job_id":receipt.job_id,
+                        "conversation_id":chat.conversation_id,
+                        "agent_role":chat.role,
+                        "services":declared_services.iter().map(|row|row.slug.as_str()).collect::<Vec<_>>(),
+                        "outcome":"failed",
+                        "code":error.error_code(),
+                        "duration_ms":started.elapsed().as_millis() as u64,
+                        "card_used":arguments.get("acknowledgement_id").is_some()
+                    })),
+                    None,
+                    None,
+                    Some(chat.api_key_id.clone()),
+                    None,
+                );
+                return Err(error);
+            }
+        };
+        if matches!(operation, Operation::Computer | Operation::Browser) {
+            receipt.screenshot_id = attach_computer_images(state, chat, &mut result).await?;
+        }
+        if let Some(login) = login {
+            if result["status"] == "filled" {
+                crate::services::saved_login_service::record_use(&state.db, &login.id).await?;
+                result = json!({
+                    "filled":arguments["field"],
+                    "login":login.label,
+                    "origin":result["origin"]
+                });
+            } else if result["status"] == "refused" {
+                let error = match result["reason"].as_str() {
+                    Some("origin_mismatch") => AppError::MachineLoginOriginMismatch,
+                    Some("wrong_field" | "focus_changed" | "no_suitable_focused_field") => {
+                        AppError::MachineLoginWrongField
+                    }
+                    _ => AppError::MachineBrowserUnavailable,
+                };
+                result = crate::services::assistant_account_tools::error_result(error).value;
+            }
+            audit_service::log_async(
+                state.db.clone(),
+                Some(chat.user_id.clone()),
+                "machine_login_filled".into(),
+                Some(json!({
+                    "login_id":login.id,
+                    "node_id":node.id,
+                    "field":arguments["field"],
+                    "origin":result["origin"],
+                    "outcome":if result.get("error").is_some(){
+                        "refused"
+                    }else{
+                        "filled"
+                    }
+                })),
+                None,
+                None,
+                Some(chat.api_key_id.clone()),
+                None,
+            );
+        }
+        receipt.status = receipts::outcome(&result, operation).into();
+        receipt.exit_code = result["exit_code"].as_i64();
+        receipt.bytes = receipts::transferred_bytes(operation, &arguments, &result);
+        receipt.duration_ms = Some(started.elapsed().as_millis() as u64);
+        receipt.error_code = result["error"]["code"]
+            .as_u64()
+            .and_then(|n| u32::try_from(n).ok());
+        if let (Some(job_id), Some(exit_code)) = (&receipt.job_id, receipt.exit_code) {
+            // Additional outcome metadata; do not resurrect a cancelled job.
+            let _ = state.db.collection::<mongodb::bson::Document>(crate::models::machine_job::COLLECTION_NAME)
+                .update_one(mongodb::bson::doc!{"_id":job_id,"user_id":&chat.user_id,"conversation_id":&chat.conversation_id,"state":{"$ne":"cancelled"}},
+                    mongodb::bson::doc!{"$set":{"exit_code":exit_code}}).await;
+        }
+        if operation == Operation::JobCancel
+            && receipt.status == "cancelled"
+            && let Some(job_id) = &receipt.job_id
+        {
+            // Presentation only: the existing job lifecycle remains authoritative.
+            let _ = state.db.collection::<mongodb::bson::Document>(crate::models::machine_job::COLLECTION_NAME)
+                .update_one(mongodb::bson::doc!{"_id":job_id,"user_id":&chat.user_id,"conversation_id":&chat.conversation_id},
+                    mongodb::bson::doc!{"$set":{"receipt_cancelled":true}}).await;
+        }
+        if receipts::record(&state.db, chat, &receipt).await.is_err()
+            || receipts::store_preview(state, chat, &mut receipt, &result)
+                .await
+                .is_err()
+        {
+            tracing::warn!("Machine receipt preview could not be retained");
+        }
+        audit_service::log_async(
+            state.db.clone(),
+            Some(chat.user_id.clone()),
+            "machine_operation".into(),
+            Some(json!({
+                "node_id":node.id,
+                "operation":operation,
+                "operation_id":receipt.operation_id,
+                "activity_id":receipts::activity_id(),
+                "agent_id":chat.agent_id,
+                "action":receipt.action,
+                "job_id":receipt.job_id,
+                "conversation_id":chat.conversation_id,
+                "agent_role":chat.role,
+                "services":declared_services.iter().map(|row|row.slug.as_str()).collect::<Vec<_>>(),
+                "outcome":receipt.status,
+                "exit_code":result["exit_code"].as_i64(),
+                "duration_ms":started.elapsed().as_millis() as u64,
+                "bytes":result.to_string().len(),
+                "card_used":arguments.get("acknowledgement_id").is_some()
+            })),
+            None,
+            None,
+            Some(chat.api_key_id.clone()),
+            None,
+        );
+        if result.get("error").is_none()
+            && !matches!(
+                result["status"].as_str(),
+                Some("failed" | "refused" | "cancelled")
+            )
             && let Some(auto) = gate.auto_allowed()
         {
             acks::record_auto_allowed(
@@ -420,257 +676,8 @@ pub async fn call(
             )
             .await;
         }
-        return result;
-    }
-    if matches!(operation, Operation::Computer | Operation::Browser) {
-        crate::services::machine_desktop_service::open_display_for_context(
-            &state.db,
-            &chat.user_id,
-            &node.id,
-            Some(&chat.conversation_id),
-            context_id,
-            display,
-        )
-        .await?;
-    }
-    if let (Some(job), Some(authority)) = (&job, &authority) {
-        state.db.collection::<mongodb::bson::Document>(crate::models::machine_job::COLLECTION_NAME)
-            .update_one(mongodb::bson::doc!{"_id":&job.id},mongodb::bson::doc!{"$set":{"machine_authority":mongodb::bson::to_bson(authority).map_err(|_|AppError::MachineAuthorityStale)?}}).await?;
-    }
-    if let Some(login) = &login {
-        let field = argument(&arguments, "field")?.to_owned();
-        let value = crate::services::saved_login_service::materialize(
-            &state.encryption_keys,
-            login,
-            &field,
-            Utc::now().timestamp().max(0) as u64,
-        )
-        .await?;
-        arguments["value"] = json!(value.as_str());
-        arguments["allowed_origins"] = json!(login.allowed_origins);
-    }
-    let mut receipt = receipts::receipt(chat, &node.id, operation, &arguments);
-    receipt.context_mode = Some(
-        if separated {
-            "separated"
-        } else {
-            "shared_legacy"
-        }
-        .into(),
-    );
-    receipt.preview_enabled = receipts::preview_enabled(&state.db, chat).await?;
-    receipts::record(&state.db, chat, &receipt).await?;
-    let started = std::time::Instant::now();
-    let mut result = match operation {
-        Operation::SaveAttachment => {
-            save_attachment(state, chat, &node, &arguments, authority.clone()).await
-        }
-        Operation::ShareFile => share_file(state, chat, &node, &arguments, authority.clone()).await,
-        _ => {
-            dispatch_authorized(
-                state,
-                &node,
-                operation,
-                arguments.clone(),
-                authority.clone(),
-            )
-            .await
-        }
-    };
-    if let Some(authority) = &authority
-        && operation != Operation::JobCancel
-    {
-        let current = state.db.collection::<mongodb::bson::Document>(crate::models::assistant_agent::COLLECTION_NAME)
-            .find_one(mongodb::bson::doc! {"_id":&authority.agent_id,"destroyed_at":mongodb::bson::Bson::Null,format!("machine_access.assignments.{}.revision",node.id):authority.revision})
-            .projection(mongodb::bson::doc! {"_id":1}).await?;
-        if current.is_none() {
-            result = Err(AppError::MachinePermissionRevoked);
-        }
-    }
-    if let Some(authority) = &authority
-        && (job.is_none()
-            || result.as_ref().is_ok_and(|r| r["status"] == "finished")
-            || result.is_err())
-    {
-        let _ = state
-            .db
-            .collection::<mongodb::bson::Document>(crate::models::machine_access::LEASES)
-            .delete_one(mongodb::bson::doc! {"_id":&authority.lease_id})
-            .await;
-    }
-    if let Some(job) = job
-        && (result.is_err()
-            || result
-                .as_ref()
-                .is_ok_and(|r| r["status"] == "finished" || r.get("error").is_some()))
-    {
-        machines::finish(&state.db, &job.id).await?;
-    }
-    if matches!(operation, Operation::Job | Operation::JobCancel)
-        && result.as_ref().is_ok_and(|r| r["status"] == "finished")
-    {
-        machines::finish(&state.db, argument(&arguments, "job_id")?).await?;
-    }
-    // This copy is only needed for dispatch; cards and audit never contain it.
-    if let Some(Value::String(value)) = arguments.get_mut("value") {
-        use zeroize::Zeroize;
-        value.zeroize();
-    }
-    let mut result = match result {
-        Ok(result) => result,
-        Err(error) => {
-            receipt.status = if error.error_code() == 12418 {
-                "cancelled"
-            } else {
-                "error"
-            }
-            .into();
-            receipt.error_code = Some(error.error_code());
-            receipt.duration_ms = Some(started.elapsed().as_millis() as u64);
-            let _ = receipts::record(&state.db, chat, &receipt).await;
-            audit_service::log_async(
-                state.db.clone(),
-                Some(chat.user_id.clone()),
-                "machine_operation".into(),
-                Some(json!({
-                    "node_id":node.id,
-                    "operation":operation,
-                    "operation_id":receipt.operation_id,
-                    "activity_id":receipts::activity_id(),
-                    "agent_id":chat.agent_id,
-                    "action":receipt.action,
-                    "job_id":receipt.job_id,
-                    "conversation_id":chat.conversation_id,
-                    "agent_role":chat.role,
-                    "services":declared_services.iter().map(|row|row.slug.as_str()).collect::<Vec<_>>(),
-                    "outcome":"failed",
-                    "code":error.error_code(),
-                    "duration_ms":started.elapsed().as_millis() as u64,
-                    "card_used":arguments.get("acknowledgement_id").is_some()
-                })),
-                None,
-                None,
-                Some(chat.api_key_id.clone()),
-                None,
-            );
-            return Err(error);
-        }
-    };
-    if matches!(operation, Operation::Computer | Operation::Browser) {
-        receipt.screenshot_id = attach_computer_images(state, chat, &mut result).await?;
-    }
-    if let Some(login) = login {
-        if result["status"] == "filled" {
-            crate::services::saved_login_service::record_use(&state.db, &login.id).await?;
-            result = json!({
-                "filled":arguments["field"],
-                "login":login.label,
-                "origin":result["origin"]
-            });
-        } else if result["status"] == "refused" {
-            let error = match result["reason"].as_str() {
-                Some("origin_mismatch") => AppError::MachineLoginOriginMismatch,
-                Some("wrong_field" | "focus_changed" | "no_suitable_focused_field") => {
-                    AppError::MachineLoginWrongField
-                }
-                _ => AppError::MachineBrowserUnavailable,
-            };
-            result = crate::services::assistant_account_tools::error_result(error).value;
-        }
-        audit_service::log_async(
-            state.db.clone(),
-            Some(chat.user_id.clone()),
-            "machine_login_filled".into(),
-            Some(json!({
-                "login_id":login.id,
-                "node_id":node.id,
-                "field":arguments["field"],
-                "origin":result["origin"],
-                "outcome":if result.get("error").is_some(){
-                    "refused"
-                }else{
-                    "filled"
-                }
-            })),
-            None,
-            None,
-            Some(chat.api_key_id.clone()),
-            None,
-        );
-    }
-    receipt.status = receipts::outcome(&result, operation).into();
-    receipt.exit_code = result["exit_code"].as_i64();
-    receipt.bytes = receipts::transferred_bytes(operation, &arguments, &result);
-    receipt.duration_ms = Some(started.elapsed().as_millis() as u64);
-    receipt.error_code = result["error"]["code"]
-        .as_u64()
-        .and_then(|n| u32::try_from(n).ok());
-    if let (Some(job_id), Some(exit_code)) = (&receipt.job_id, receipt.exit_code) {
-        // Additional outcome metadata; do not resurrect a cancelled job.
-        let _ = state.db.collection::<mongodb::bson::Document>(crate::models::machine_job::COLLECTION_NAME)
-            .update_one(mongodb::bson::doc!{"_id":job_id,"user_id":&chat.user_id,"conversation_id":&chat.conversation_id,"state":{"$ne":"cancelled"}},
-                mongodb::bson::doc!{"$set":{"exit_code":exit_code}}).await;
-    }
-    if operation == Operation::JobCancel
-        && receipt.status == "cancelled"
-        && let Some(job_id) = &receipt.job_id
-    {
-        // Presentation only: the existing job lifecycle remains authoritative.
-        let _ = state.db.collection::<mongodb::bson::Document>(crate::models::machine_job::COLLECTION_NAME)
-            .update_one(mongodb::bson::doc!{"_id":job_id,"user_id":&chat.user_id,"conversation_id":&chat.conversation_id},
-                mongodb::bson::doc!{"$set":{"receipt_cancelled":true}}).await;
-    }
-    if receipts::record(&state.db, chat, &receipt).await.is_err()
-        || receipts::store_preview(state, chat, &mut receipt, &result)
-            .await
-            .is_err()
-    {
-        tracing::warn!("Machine receipt preview could not be retained");
-    }
-    audit_service::log_async(
-        state.db.clone(),
-        Some(chat.user_id.clone()),
-        "machine_operation".into(),
-        Some(json!({
-            "node_id":node.id,
-            "operation":operation,
-            "operation_id":receipt.operation_id,
-            "activity_id":receipts::activity_id(),
-            "agent_id":chat.agent_id,
-            "action":receipt.action,
-            "job_id":receipt.job_id,
-            "conversation_id":chat.conversation_id,
-            "agent_role":chat.role,
-            "services":declared_services.iter().map(|row|row.slug.as_str()).collect::<Vec<_>>(),
-            "outcome":receipt.status,
-            "exit_code":result["exit_code"].as_i64(),
-            "duration_ms":started.elapsed().as_millis() as u64,
-            "bytes":result.to_string().len(),
-            "card_used":arguments.get("acknowledgement_id").is_some()
-        })),
-        None,
-        None,
-        Some(chat.api_key_id.clone()),
-        None,
-    );
-    if result.get("error").is_none()
-        && !matches!(
-            result["status"].as_str(),
-            Some("failed" | "refused" | "cancelled")
-        )
-        && let Some(auto) = gate.auto_allowed()
-    {
-        acks::record_auto_allowed(
-            &state.db,
-            chat,
-            name,
-            &confirmation_arguments,
-            &auto,
-            &summary,
-        )
-        .await;
-    }
-    Ok(tools::bounded_result(result))
+        Ok(tools::bounded_result(result))
+    })
 }
 
 pub(crate) async fn permission(

@@ -2359,6 +2359,8 @@ async fn pico_costs_retain_472_micros_across_raw_rollup_api_and_analytics() {
         axum::extract::State(test_app_state(db.clone())),
         test_auth_user(&actor),
         axum::extract::Query(crate::handlers::billing::UsageQuery {
+            machine_id: None,
+            job_id: None,
             period: None,
             bucket: None,
         }),

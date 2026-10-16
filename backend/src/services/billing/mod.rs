@@ -5,6 +5,8 @@ pub mod funding;
 pub mod grants;
 pub mod lago_client;
 pub mod ledger;
+pub mod machine_runtime;
+mod machine_runtime_math;
 pub mod meter;
 pub mod metric_resolution;
 pub mod owner_resolver;
@@ -2253,7 +2255,7 @@ mod tests {
         let first = crate::services::auth_service::register_user(
             &db,
             "cap-global@example.com",
-            "password123",
+            &uuid::Uuid::new_v4().to_string(),
             Some("Cap Global"),
             None,
             true,
@@ -2285,7 +2287,7 @@ mod tests {
         let second = crate::services::auth_service::register_user(
             &db,
             "cap-env@example.com",
-            "password123",
+            &uuid::Uuid::new_v4().to_string(),
             Some("Cap Env"),
             None,
             true,
