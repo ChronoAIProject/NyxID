@@ -973,6 +973,7 @@ mod tests {
             apple_team_id: None,
             apple_key_id: None,
             apple_private_key_path: None,
+            apple_native_client_ids: vec![],
             smtp_host: None,
             smtp_port: None,
             smtp_username: None,

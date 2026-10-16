@@ -263,6 +263,10 @@ pub struct AppConfig {
     pub apple_team_id: Option<String>,
     pub apple_key_id: Option<String>,
     pub apple_private_key_path: Option<String>,
+    /// Additional Apple ID token audiences accepted by the social token
+    /// exchange (`/oauth/token`), typically the iOS app bundle ID used by
+    /// native Sign in with Apple. `APPLE_CLIENT_ID` stays the web Services ID.
+    pub apple_native_client_ids: Vec<String>,
 
     // SMTP configuration
     pub smtp_host: Option<String>,
@@ -649,6 +653,7 @@ impl std::fmt::Debug for AppConfig {
             .field("apple_team_id", &self.apple_team_id)
             .field("apple_key_id", &self.apple_key_id)
             .field("apple_private_key_path", &self.apple_private_key_path)
+            .field("apple_native_client_ids", &self.apple_native_client_ids)
             .field("smtp_host", &self.smtp_host)
             .field("smtp_port", &self.smtp_port)
             .field("smtp_username", &self.smtp_username)
@@ -1115,6 +1120,12 @@ impl AppConfig {
             apple_private_key_path: env::var("APPLE_PRIVATE_KEY_PATH")
                 .ok()
                 .filter(|s| !s.is_empty()),
+            apple_native_client_ids: env::var("APPLE_NATIVE_CLIENT_IDS")
+                .unwrap_or_default()
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect(),
 
             smtp_host: env::var("SMTP_HOST").ok(),
             smtp_port: env::var("SMTP_PORT").ok().and_then(|v| v.parse().ok()),
@@ -1689,6 +1700,22 @@ impl AppConfig {
         self.broker_require_admin_capability
     }
 
+    /// Apple ID token audiences accepted by the social token exchange: the web
+    /// Services ID (when configured) followed by the native client IDs.
+    pub fn apple_exchange_audiences(&self) -> Vec<&str> {
+        let mut audiences: Vec<&str> = Vec::new();
+        for aud in self
+            .apple_client_id
+            .iter()
+            .chain(self.apple_native_client_ids.iter())
+        {
+            if !audiences.contains(&aud.as_str()) {
+                audiences.push(aud);
+            }
+        }
+        audiences
+    }
+
     /// Returns true if all Apple Sign In credentials are configured.
     pub fn apple_configured(&self) -> bool {
         self.apple_client_id.is_some()
@@ -1928,6 +1955,7 @@ mod tests {
             apple_team_id: None,
             apple_key_id: None,
             apple_private_key_path: None,
+            apple_native_client_ids: vec![],
             smtp_host: None,
             smtp_port: None,
             smtp_username: None,
@@ -2379,6 +2407,23 @@ mod tests {
         assert!(!cfg.apple_configured());
         cfg.apple_private_key_path = Some("/path".to_string());
         assert!(cfg.apple_configured());
+    }
+
+    #[test]
+    fn apple_exchange_audiences_combine_web_and_native_ids() {
+        let mut cfg = make_config("http://localhost:3001", "dev", &"ab".repeat(32));
+        assert!(cfg.apple_exchange_audiences().is_empty());
+
+        cfg.apple_native_client_ids = vec!["dev.nyxid.app".to_string()];
+        assert_eq!(cfg.apple_exchange_audiences(), vec!["dev.nyxid.app"]);
+
+        cfg.apple_client_id = Some("dev.nyxid.web".to_string());
+        cfg.apple_native_client_ids =
+            vec!["dev.nyxid.app".to_string(), "dev.nyxid.web".to_string()];
+        assert_eq!(
+            cfg.apple_exchange_audiences(),
+            vec!["dev.nyxid.web", "dev.nyxid.app"]
+        );
     }
 
     #[test]

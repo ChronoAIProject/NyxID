@@ -799,7 +799,7 @@ pub async fn apple_callback(
 
     let claims = state
         .jwks_cache
-        .verify_apple_id_token(&id_token, apple_client_id)
+        .verify_apple_id_token(&id_token, &[apple_client_id])
         .await
         .map_err(|e| {
             tracing::warn!(error = %e, "Apple ID token verification failed");

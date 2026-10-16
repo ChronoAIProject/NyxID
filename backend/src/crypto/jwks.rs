@@ -307,12 +307,12 @@ impl JwksCache {
 
     /// Verify an Apple ID token and return the parsed claims.
     ///
-    /// Performs full JWT verification: RS256 signature via JWKS, issuer, audience,
-    /// expiry, and iat freshness check.
+    /// Performs full JWT verification: signature via JWKS, issuer, audience
+    /// (any of `expected_audiences`), expiry, and iat freshness check.
     pub async fn verify_apple_id_token(
         &self,
         token: &str,
-        expected_audience: &str,
+        expected_audiences: &[&str],
     ) -> AppResult<AppleIdTokenClaims> {
         let header = jsonwebtoken::decode_header(token)
             .map_err(|e| AppError::ExternalTokenInvalid(format!("Invalid JWT header: {e}")))?;
@@ -332,7 +332,7 @@ impl JwksCache {
             token,
             kid,
             &keys,
-            expected_audience,
+            expected_audiences,
             &[APPLE_ISSUER],
         ) {
             Ok(claims) => return validate_apple_claims(claims),
@@ -348,7 +348,7 @@ impl JwksCache {
             token,
             kid,
             &keys,
-            expected_audience,
+            expected_audiences,
             &[APPLE_ISSUER],
         )
         .map_err(|err| {
@@ -364,7 +364,7 @@ fn verify_with_keys_generic<T: serde::de::DeserializeOwned>(
     token: &str,
     kid: Option<&str>,
     keys: &[CachedKey],
-    expected_audience: &str,
+    expected_audiences: &[&str],
     expected_issuers: &[&str],
 ) -> Result<T, VerifyError> {
     let matching_keys: Vec<&CachedKey> = if let Some(kid) = kid {
@@ -383,7 +383,7 @@ fn verify_with_keys_generic<T: serde::de::DeserializeOwned>(
     for key in matching_keys {
         let mut validation = Validation::new(key.algorithm);
         validation.set_issuer(expected_issuers);
-        validation.set_audience(&[expected_audience]);
+        validation.set_audience(expected_audiences);
 
         match decode::<T>(token, &key.decoding_key, &validation) {
             Ok(token_data) => return Ok(token_data.claims),
@@ -412,7 +412,7 @@ fn verify_with_keys(
     keys: &[CachedKey],
     expected_audience: &str,
 ) -> Result<GoogleIdTokenClaims, VerifyError> {
-    verify_with_keys_generic(token, kid, keys, expected_audience, &[GOOGLE_ISSUER])
+    verify_with_keys_generic(token, kid, keys, &[expected_audience], &[GOOGLE_ISSUER])
 }
 
 /// Validate Google-specific claims beyond basic JWT verification.
@@ -531,6 +531,57 @@ fn parse_cache_control_max_age(header: Option<&str>) -> Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn signed_apple_test_token(aud: &str) -> (String, Vec<CachedKey>) {
+        let keys = crate::test_utils::cached_test_jwt_keys();
+        let now = chrono::Utc::now().timestamp();
+        let mut header = jsonwebtoken::Header::new(Algorithm::RS256);
+        header.kid = Some(keys.kid.clone());
+        let claims = serde_json::json!({
+            "sub": "apple-user",
+            "iss": APPLE_ISSUER,
+            "aud": aud,
+            "exp": now + 600,
+            "iat": now,
+        });
+        let token = jsonwebtoken::encode(&header, &claims, &keys.encoding).expect("sign token");
+        let cached = vec![CachedKey {
+            kid: Some(keys.kid.clone()),
+            decoding_key: keys.decoding.clone(),
+            algorithm: Algorithm::RS256,
+        }];
+        (token, cached)
+    }
+
+    #[test]
+    fn apple_verification_accepts_any_configured_audience() {
+        let audiences = ["com.example.nyxid.web", "com.example.nyxid.ios"];
+        for aud in audiences {
+            let (token, keys) = signed_apple_test_token(aud);
+            let claims = verify_with_keys_generic::<AppleIdTokenClaims>(
+                &token,
+                keys[0].kid.as_deref(),
+                &keys,
+                &audiences,
+                &[APPLE_ISSUER],
+            )
+            .unwrap_or_else(|_| panic!("audience {aud} accepted"));
+            assert_eq!(claims.aud, aud);
+        }
+    }
+
+    #[test]
+    fn apple_verification_rejects_unconfigured_audience() {
+        let (token, keys) = signed_apple_test_token("com.attacker.app");
+        let result = verify_with_keys_generic::<AppleIdTokenClaims>(
+            &token,
+            keys[0].kid.as_deref(),
+            &keys,
+            &["com.example.nyxid.web", "com.example.nyxid.ios"],
+            &[APPLE_ISSUER],
+        );
+        assert!(matches!(result, Err(VerifyError::InvalidAudience)));
+    }
 
     #[test]
     fn parse_cache_control_max_age_basic() {
