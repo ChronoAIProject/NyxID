@@ -45,7 +45,7 @@ const SLOW_CALLBACK: u8 = 9;
 struct ExternalRuntime {
     state: AppState,
     manifest: Arc<Mutex<RuntimeManifest>>,
-    callback_base: String,
+    callback_url: reqwest::Url,
     mode: Arc<AtomicU8>,
     callback_statuses: Arc<Mutex<Vec<u16>>>,
     cleanup_authorities: Arc<Mutex<Vec<Value>>>,
@@ -114,6 +114,7 @@ async fn readiness(
     let authority = verify_assertion(&mock.state, &raw, "readiness", &bytes).unwrap();
     let request: ProbeRequest = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(request.contract, EXECUTION_CONTRACT);
+    assert_eq!(request.probe_callback, mock.callback_url.path());
     assert_eq!(
         authority["binding"],
         serde_json::to_value(&request.binding).unwrap()
@@ -230,10 +231,13 @@ async fn readiness(
             );
         }
     } else if mode != NO_CALLBACK {
-        let client = reqwest::Client::new();
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap();
         let callback = || {
             client
-                .post(format!("{}{}", mock.callback_base, request.probe_callback))
+                .post(mock.callback_url.clone())
                 .bearer_auth(&request.probe_authorization)
                 .header("content-type", "application/json")
                 .body(if mode == WRONG_BODY {
@@ -464,7 +468,11 @@ impl Handshake {
         let runtime = ExternalRuntime {
             state: state.clone(),
             manifest: Arc::new(Mutex::new(e.manifest)),
-            callback_base,
+            callback_url: reqwest::Url::parse(&format!(
+                "{callback_base}/api/v1/public-nyxbot/models/{}/responses",
+                service.id
+            ))
+            .unwrap(),
             mode: Arc::new(AtomicU8::new(mode)),
             callback_statuses: Arc::new(Mutex::new(vec![])),
             cleanup_authorities: Arc::new(Mutex::new(vec![])),
