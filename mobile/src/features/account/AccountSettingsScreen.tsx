@@ -13,6 +13,7 @@ import { useAuthSession } from "../auth/AuthSessionContext";
 import { capture } from "../../lib/telemetry";
 import { useNetworkStatus } from "../../hooks/useNetworkStatus";
 import { mobileApi } from "../../lib/api/mobileApi";
+import { ACCOUNT_DELETION_DISCLOSURE } from "../../lib/accountDeletionPolicy";
 import { isApiError } from "../../lib/api/ApiError";
 import { resolveErrorMessage } from "../../lib/api/errorMessages";
 import { activatePushAfterLogin } from "../../lib/notifications/pushNotifications";
@@ -429,7 +430,7 @@ export function AccountSettingsScreen({ navigation }: Props) {
     });
     Alert.alert(
       "Delete Account",
-      "This action is permanent and will permanently delete your account and server-side data.",
+      ACCOUNT_DELETION_DISCLOSURE,
       [
         { text: "Cancel", style: "cancel" },
         {

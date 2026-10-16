@@ -6,6 +6,15 @@ requires a live, non-stopped turn; dedicated channel-agent credentials remain
 separate and idle-capable. Deploy all replicas before enabling the flag, and
 disable it before rollback.
 
+NyxBot service ordering does not enable this rollout flag. While it is off,
+personal service calls and existing personal/platform model inference remain
+available to keys first authenticated without a live turn, subject to their
+current grants, ACLs, operation scopes and permission mode. Actions that need
+confirmation and organization connection use require a real live turn. Turn
+selection and organization model consent cannot be borrowed by an idle request.
+An admission captured in a live turn always retains its same-turn and Stop
+fence through final dispatch, independently of the rollout flag.
+
 ## Login Credentials Bound to a Key
 
 `nyxid login --agent-key` enrolls a CLI profile through explicit human approval in the web console or the mobile app's QR flow. The operator chooses an existing eligible personal/org key or creates a limited key. Each login receives its own `api_key_credentials` child secret; the parent key's primary secret is never recovered, displayed, or silently rotated. New keys also use child credentials, with their undisclosed primary secret discarded.
@@ -405,4 +414,4 @@ All changes are additive. No breaking changes for existing users:
 
 ### NyxBot access authority
 
-Specialist agents cannot widen access or grant permissions. The backend rejects card and connection-link creation from specialist chat keys with the stable `access_request_denied` refusal; only the owner's NyxBot can initiate these requests.
+Specialist agents cannot widen access or grant permissions. For work NyxBot assigned, or in a personal group NyxBot is a member of, access requests go through NyxBot and the backend rejects card and connection-link creation from specialist chat keys with the stable `access_request_denied` refusal. When a person talks to a specialist directly, that work is not NyxBot's: an ungranted call returns a neutral `missing_access` result (scope, target, "no request was created", a link to the agent's details) and the specialist continues; it never asks NyxBot to take over. Only the owner, in the agent's details, or a legitimately involved NyxBot under routed mode can widen a specialist's access.

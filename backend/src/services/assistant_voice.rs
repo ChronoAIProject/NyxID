@@ -237,9 +237,17 @@ pub(crate) async fn enqueue_in_session(
     } else {
         db.collection::<AssistantMessage>(MESSAGES)
             .insert_one(AssistantMessage {
+                platform_delivery_recovery_queued: false,
+                platform_reply: None,
+                platform_origin: None,
+                report_to: None,
+                continuation_of: None,
                 retry_of: None,
+                retry_claimed_by: None,
+                activity_count: None,
                 specialist_id: None,
                 steering: None,
+                author: Some(crate::models::assistant_message::MessageAuthor::Owner),
                 voice: None,
                 execution_pending: true,
                 id: request.message_id.clone(),
@@ -252,9 +260,11 @@ pub(crate) async fn enqueue_in_session(
                 status: "completed".into(),
                 error_code: None,
                 upstream_error_code: None,
+                turn_metadata: None,
                 error_detail: None,
                 created_at: request.created_at,
                 activities: Vec::new(),
+                activity_total: 0,
                 attachments: Vec::new(),
                 origin: Some(TurnOrigin::User),
                 via: Some("voice".into()),
@@ -346,9 +356,17 @@ pub(crate) async fn publish_result(
                 let text: String = source.text.chars().take(12_000).collect();
                 db.collection::<AssistantMessage>(MESSAGES)
                     .insert_one(AssistantMessage {
+        platform_delivery_recovery_queued: false,
+        platform_reply: None,
+        platform_origin: None,
+        report_to: None,
+        continuation_of: None,
         retry_of: None,
+                        retry_claimed_by: None,
+                        activity_count: None,
                         specialist_id: None,
                         steering: None,
+                        author: None,
                         id: id.clone(),
                         conversation_id: current.conversation_id,
                         user_id: current.user_id,
@@ -358,10 +376,12 @@ pub(crate) async fn publish_result(
                         text,
                         status: source.status,
                         error_code: source.error_code,
-                        upstream_error_code: None,
-                        error_detail: None,
+                        upstream_error_code: source.upstream_error_code,
+                        turn_metadata: source.turn_metadata,
+                        error_detail: source.error_detail,
                         created_at: Utc::now(),
                         activities: source.activities,
+                        activity_total: source.activity_total,
                         attachments: source.attachments,
                         origin: source.origin,
                         via: Some("voice".into()),
@@ -748,9 +768,17 @@ async fn settle_lost_in_session(
     };
     db.collection::<AssistantMessage>(MESSAGES)
         .insert_one(AssistantMessage {
+            platform_delivery_recovery_queued: false,
+            platform_reply: None,
+            platform_origin: None,
+            report_to: None,
+            continuation_of: None,
             retry_of: None,
+            retry_claimed_by: None,
+            activity_count: None,
             specialist_id: None,
             steering: None,
+            author: None,
             id: Uuid::new_v4().to_string(),
             conversation_id: target.id,
             user_id: row.user_id.clone(),
@@ -761,9 +789,11 @@ async fn settle_lost_in_session(
             status: "failed".into(),
             error_code: Some("turn_lost".into()),
             upstream_error_code: None,
+            turn_metadata: None,
             error_detail: None,
             created_at: Utc::now(),
             activities: Vec::new(),
+            activity_total: 0,
             attachments: Vec::new(),
             origin: Some(TurnOrigin::Orchestrator),
             via: Some("voice".into()),
@@ -952,7 +982,7 @@ pub(crate) async fn continuation(
         return Err(AppError::Conflict("Voice task was stopped".into()));
     }
     let text = format!(
-        "The owner decided the confirmation: {} (acknowledgement_id {}). Continue within the existing authority; do not retry a denied action.",
+        "The owner decided the confirmation: {} (acknowledgement_id {}). Continue within the existing authority; do not retry a denied action. Then tell the user in one or two plain sentences what you did and the result.",
         card.status, card.id
     );
     let now = Utc::now();

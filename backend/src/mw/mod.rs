@@ -1,3 +1,4 @@
+pub mod assistant_trace;
 pub mod auth;
 pub mod csrf;
 pub mod rate_limit;

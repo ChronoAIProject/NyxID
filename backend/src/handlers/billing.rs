@@ -34,6 +34,8 @@ const LAGO_HMAC_SHA256_ALGORITHM: &str = "hmac";
 
 #[derive(Debug, Deserialize)]
 pub struct UsageQuery {
+    pub machine_id: Option<String>,
+    pub job_id: Option<String>,
     pub period: Option<String>,
     /// `day` additionally splits rows by UTC calendar day for usage charts.
     pub bucket: Option<String>,
@@ -41,6 +43,8 @@ pub struct UsageQuery {
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct BillingUsageResponse {
+    pub machine_id: Option<String>,
+    pub job_id: Option<String>,
     pub owner_id: String,
     pub period: String,
     pub rows: Vec<BillingUsageRow>,
@@ -50,6 +54,9 @@ pub struct BillingUsageResponse {
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct BillingUsageRow {
+    /// Verified gateway origin, independent of the runtime running-seconds SKU.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub machine_usage: Option<crate::models::usage_meter::MachineUsageAttribution>,
     pub operation: Option<String>,
     pub service_slug: Option<String>,
     pub service_id: Option<String>,
@@ -236,6 +243,22 @@ pub async fn get_usage(
 ) -> AppResult<Json<BillingUsageResponse>> {
     let owner_id = auth_user.user_id.to_string();
     let period = query.period.unwrap_or_else(|| "30d".to_string());
+    let machine_id = query
+        .machine_id
+        .map(|id| {
+            uuid::Uuid::parse_str(&id)
+                .map(|id| id.to_string())
+                .map_err(|_| AppError::ValidationError("machine_id must be a UUID".into()))
+        })
+        .transpose()?;
+    let job_id = query
+        .job_id
+        .map(|id| {
+            uuid::Uuid::parse_str(&id)
+                .map(|id| id.to_string())
+                .map_err(|_| AppError::ValidationError("job_id must be a UUID".into()))
+        })
+        .transpose()?;
     let since = period_start(&period);
     let by_day = match query.bucket.as_deref() {
         None => false,
@@ -252,6 +275,12 @@ pub async fn get_usage(
         "created_at": { "$gte": bson::DateTime::from_chrono(since) },
         "status": { "$in": ["finalized", "dead_letter"] },
     };
+    if let Some(id) = &machine_id {
+        match_doc.insert("machine_usage.node_id", id);
+    }
+    if let Some(id) = &job_id {
+        match_doc.insert("machine_usage.job_id", id);
+    }
     match_doc.insert(
         "$or",
         vec![
@@ -309,6 +338,7 @@ pub async fn get_usage(
                     // optional on the ledger, so absent values group together.
                     "model": "$model",
                     "api_key_id": "$api_key_id",
+                    "machine_usage": "$machine_usage",
                     // Rows without a wallet were metered for observability
                     // only (service not platform_billable); they carry no
                     // cost and are never pushed to Lago.
@@ -396,6 +426,12 @@ pub async fn get_usage(
         .await?;
         let costs = usage_costs(&doc, billable, pricing)?;
         rows.push(BillingUsageRow {
+            machine_usage: id_doc
+                .get("machine_usage")
+                .filter(|value| !matches!(value, bson::Bson::Null))
+                .map(|value| bson::from_bson(value.clone()))
+                .transpose()
+                .map_err(|_| AppError::Internal("Invalid Machine usage attribution".into()))?,
             operation: id_doc.get_str("operation").ok().map(ToString::to_string),
             service_slug: id_doc.get_str("service_slug").ok().map(ToString::to_string),
             service_id: id_doc.get_str("service_id").ok().map(ToString::to_string),
@@ -460,6 +496,8 @@ pub async fn get_usage(
     };
 
     Ok(Json(BillingUsageResponse {
+        machine_id,
+        job_id,
         owner_id,
         period,
         rows,

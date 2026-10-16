@@ -1,12 +1,16 @@
-import { useState } from "react";
+import { useEffect, useId, useState } from "react";
+import type { z } from "zod";
+import { DecisionReceipt } from "./decision-receipt";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
 import { assistantJson } from "@/lib/assistant/assistant-http";
 import { useAuthStore } from "@/stores/auth-store";
 import type { NyxAgentAcknowledgement } from "@/schemas/assistant-nyxagent";
 import { authoredSkillPreviewSchema, learningDraftEditable } from "@/schemas/agent-skills";
 import { nyxBotQueryKeys } from "@/hooks/use-nyxbot-agents";
-import { publicationFailureText } from "@/lib/assistant/skill-publication-copy";
+import { publicationFailureText, publicationRuleText } from "@/lib/assistant/skill-publication-copy";
 import { ProposalDraftEditor } from "./learning-draft-editor";
 
 // A `publishing` row whose lease expired was interrupted (for example the
@@ -24,19 +28,124 @@ function interruptedCopy(actions: readonly string[]): string {
     : "The last attempt was interrupted. NyxID cannot yet confirm whether Ornn published this version.";
 }
 
+type AuthoredPreview = z.infer<typeof authoredSkillPreviewSchema>;
+
+function FailureDetails({ data }: { readonly data: AuthoredPreview }) {
+  if (!data.failure_code) return null;
+  return (
+    <>
+      <p role="alert" className="text-[12px] text-destructive">
+        {publicationFailureText(data.failure_code, data.status, "authored")}
+      </p>
+      {data.failure_rules.length ? (
+        <ul className="list-disc pl-5 text-11 text-muted-foreground">
+          {data.failure_rules.map((rule) => <li key={rule}>{publicationRuleText(rule)}</li>)}
+        </ul>
+      ) : data.failure_details_unavailable ? (
+        <p className="text-11 text-muted-foreground">Format details unavailable.</p>
+      ) : null}
+    </>
+  );
+}
+
+function ScopeSection({ data, id, accepted, onAccepted }: {
+  readonly data: AuthoredPreview;
+  readonly id: string;
+  readonly accepted: boolean;
+  readonly onAccepted: (accepted: boolean) => void;
+}) {
+  if (data.scope_unavailable) {
+    return (
+      <p role="alert" className="text-11 text-muted-foreground">
+        Scope unavailable. Reload the draft before allowing publication.
+      </p>
+    );
+  }
+  if (!data.scope) return null;
+  const { status, omissions } = data.scope;
+  return (
+    <>
+      {omissions.length ? (
+        <ul aria-label="Declared omissions" className="list-disc pl-5 text-11 text-muted-foreground">
+          {omissions.map((text, index) => <li key={index}>{text}</li>)}
+        </ul>
+      ) : null}
+      {status === "reduced" ? (
+        <div className="flex items-start gap-2">
+          <Checkbox
+            id={id}
+            checked={accepted}
+            onCheckedChange={(checked) => onAccepted(checked === true)}
+          />
+          <Label htmlFor={id} className="text-11 leading-4">
+            I accept this reduced scope ({omissions.length} declared omission
+            {omissions.length === 1 ? "" : "s"}).
+          </Label>
+        </div>
+      ) : (
+        <p className="text-11 text-muted-foreground">
+          The drafting agent declares this draft covers everything requested.
+          The read coverage shown here is what NyxID observed.
+        </p>
+      )}
+    </>
+  );
+}
+
+function coverageText(upload: AuthoredPreview["coverage"][number]): string {
+  if (upload.expired) return "expired";
+  if (upload.unknown) return "read coverage unavailable";
+  if (upload.reads === 0) return "not read";
+  if (upload.lower_bound) return `at least ${upload.percent}%`;
+  if (upload.percent === 100) return "read completely";
+  return `read ${upload.percent}%`;
+}
+
+function CoverageList({ data }: { readonly data: AuthoredPreview }) {
+  return (
+    <>
+      {data.coverage.length ? (
+        <div className="space-y-1 text-11 text-muted-foreground">
+          <p>Observed reads in the drafting conversation</p>
+          <ul>
+            {data.coverage.map((upload) => (
+              <li key={upload.id}>
+                {upload.name}: {coverageText(upload)}
+                {upload.since_reset_percent != null ? (
+                  <>; {upload.lower_bound ? "at least " : "read "}
+                    {upload.since_reset_percent}% since the last context reset
+                  </>
+                ) : null}
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+      {data.coverage_omitted ? (
+        <p className="text-11 text-muted-foreground">
+          {data.coverage_omitted} earlier uploads are not shown.
+        </p>
+      ) : null}
+    </>
+  );
+}
+
 export const SAVED_EDIT_NOTICE =
   "Draft saved. A new review card for this version was posted in this conversation; confirm it there.";
 
-export function AuthoredSkillCard({ acknowledgement: card, deciding, onDecision }: {
+export function AuthoredSkillCard({ acknowledgement: card, confirmationsBypassed = false, deciding, onDecision }: {
   readonly acknowledgement: NyxAgentAcknowledgement;
+  readonly confirmationsBypassed?: boolean;
   readonly deciding: boolean;
-  readonly onDecision: (choice: "allow" | "deny") => Promise<unknown>;
+  readonly onDecision: (choice: "allow" | "deny", acceptReducedScope?: boolean) => Promise<unknown>;
 }) {
   const reference = card.authored_skill!;
   const owner = useAuthStore((s) => s.user?.id);
   const queryClient = useQueryClient();
   const [error, setError] = useState<string>();
   const [notice, setNotice] = useState<string>();
+  const [acceptReducedScope, setAcceptReducedScope] = useState(false);
+  const scopeId = useId();
   const [editing, setEditing] = useState(false);
   const preview = useQuery({
     queryKey: ["authored-skill-review", owner, reference.proposal_id, card.id],
@@ -51,6 +160,11 @@ export function AuthoredSkillCard({ acknowledgement: card, deciding, onDecision 
   });
   const data = preview.data;
   const actions = data?.actions ?? [];
+  useEffect(() => {
+    setAcceptReducedScope(false);
+  }, [data?.revision]);
+  const scopePending = data?.scope_unavailable
+    || (data?.scope?.status === "reduced" && !acceptReducedScope);
   const path = `/assistant/nyxagent/agents/${encodeURIComponent(reference.agent_id)}/learning/proposals/${encodeURIComponent(reference.proposal_id)}`;
   async function refresh() {
     await Promise.all([
@@ -60,7 +174,7 @@ export function AuthoredSkillCard({ acknowledgement: card, deciding, onDecision 
   }
   async function decide(choice: "allow" | "deny") {
     setError(undefined);
-    try { await onDecision(choice); }
+    try { await (acceptReducedScope ? onDecision(choice, true) : onDecision(choice)); }
     catch { setError("Publication did not finish. The current state is shown below."); }
     finally { await refresh(); }
   }
@@ -98,16 +212,24 @@ export function AuthoredSkillCard({ acknowledgement: card, deciding, onDecision 
     {actions.includes("dismiss_card") ? <Button variant="outline" disabled={deciding} onClick={() => void decide("deny")}>Dismiss confirmation</Button> : null}
     {actions.includes("discard") ? <Button variant="outline" disabled={deciding} onClick={() => void postAction("reject")}>Discard</Button> : null}
     {actions.includes("renew") ? <Button variant="primary" disabled={deciding} onClick={() => void postAction("approve")}>Request a new confirmation</Button> : null}
-    {actions.includes("publish") ? <Button variant="primary" disabled={deciding} onClick={() => void decide("allow")}>Allow and publish</Button> : null}
-    {actions.includes("retry") ? <Button variant="primary" disabled={deciding} onClick={() => void decide("allow")}>Retry publication</Button> : null}
-    {actions.includes("check") ? <Button variant="primary" disabled={deciding} onClick={() => void decide("allow")}>Check again</Button> : null}
+    {actions.includes("publish") ? <Button variant="primary" disabled={deciding || scopePending} onClick={() => void decide("allow")}>Allow and publish</Button> : null}
+    {actions.includes("retry") ? <Button variant="primary" disabled={deciding || scopePending} onClick={() => void decide("allow")}>Retry publication</Button> : null}
+    {actions.includes("check") ? <Button variant="primary" disabled={deciding || scopePending} onClick={() => void decide("allow")}>Check again</Button> : null}
     {actions.includes("reprepare") ? <Button variant="primary" disabled={deciding} onClick={() => void postAction("reprepare")}>Review updated package</Button> : null}
     {actions.includes("show_updated_draft") ? <Button variant="primary" disabled={deciding} onClick={() => void postAction("reprepare")}>Show updated draft</Button> : null}
   </div> : null;
+  if (confirmationsBypassed) {
+    return <DecisionReceipt acknowledgement={card} retired={card.status === "pending"}
+      summary={data?.state === "pinned" ? `Skill ${data.name} ${data.version} published and attached to ${data.agent_name}` : undefined} />;
+  }
   if (data?.state && data.state !== "active") {
-    const status = <p role="status" className="ml-[30px] text-[11px] text-muted-foreground">
-      {data.state === "pinned" ? "Skill published and attached" : data.state === "discarded" ? "Skill draft discarded" : data.state === "invalidated" ? "Skill draft is no longer available" : data.state === "dismissed" ? "Confirmation dismissed; the publication remains available." : "This confirmation no longer matches the draft."}
-    </p>;
+    const stateSummary = data.state === "pinned" ? `Skill ${data.name} ${data.version} published and attached to ${data.agent_name}`
+      : data.state === "discarded" ? "Skill draft discarded"
+      : data.state === "invalidated" ? "Skill draft is no longer available"
+      : data.state === "dismissed" ? "Confirmation dismissed; the publication remains available."
+      : "This confirmation no longer matches the draft.";
+    const status = <DecisionReceipt acknowledgement={data.state === "pinned" ? { ...card, status: "allowed", decided_by: "user" } : card}
+      summary={stateSummary} />;
     if (!buttons && !error && !notice) return status;
     // An older card of a rebuilt draft can still raise the new package's card.
     return <div className="space-y-2">
@@ -119,6 +241,7 @@ export function AuthoredSkillCard({ acknowledgement: card, deciding, onDecision 
       </div>
     </div>;
   }
+  if (!data && card.status !== "pending") return <DecisionReceipt acknowledgement={card} />;
   return <section aria-label="Review skill draft" className="ml-[30px] space-y-3 rounded-xl border border-border/50 bg-card p-4">
     <p className="text-[13px] font-medium">Review skill draft{data ? `: ${data.name} · ${data.version}` : ""}</p>
     {data ? <p className="text-[12px]">Attach to {data.agent_name}</p> : null}
@@ -126,7 +249,7 @@ export function AuthoredSkillCard({ acknowledgement: card, deciding, onDecision 
     {data?.base_scripts_not_copied ? <p className="text-[12px] text-muted-foreground">Scripts and executable files from the source skill are not copied into this draft.</p> : null}
     {data?.files.map((file) => <div key={file.path}>
       <p className="text-[12px] font-medium">{file.path}</p>
-      <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-words rounded-lg bg-muted p-3 text-[11px]">{file.content}</pre>
+      <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-words rounded-lg bg-muted p-3 text-11">{file.content}</pre>
     </div>)}
     {data && learningDraftEditable(data.status) ? <div className="space-y-2">
       <Button variant="outline" size="sm" aria-expanded={editing} disabled={deciding} onClick={() => setEditing(!editing)}>
@@ -144,7 +267,18 @@ export function AuthoredSkillCard({ acknowledgement: card, deciding, onDecision 
     {data?.status === "publishing" ? <p role="status" className="text-[12px] text-muted-foreground">{data.lease_live ? "Publication is in progress." : interruptedCopy(actions)}</p> : null}
     {preview.isLoading ? <p role="status">Loading complete draft…</p> : null}
     {preview.isError ? <p role="alert" className="text-[12px] text-destructive">Draft unavailable or changed. Reload and review it again.</p> : null}
-    {data?.failure_code ? <p role="alert" className="text-[12px] text-destructive">{publicationFailureText(data.failure_code, data.status)}</p> : null}
+    {data ? (
+      <>
+        <FailureDetails data={data} />
+        <ScopeSection
+          data={data}
+          id={scopeId}
+          accepted={acceptReducedScope}
+          onAccepted={setAcceptReducedScope}
+        />
+        <CoverageList data={data} />
+      </>
+    ) : null}
     {messages}
     {buttons}
   </section>;

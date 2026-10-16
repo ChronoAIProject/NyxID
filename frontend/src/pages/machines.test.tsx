@@ -43,11 +43,44 @@ vi.mock("@tanstack/react-router", () => ({
   ),
 }));
 vi.mock("@/hooks/use-machines", () => ({
-  useVerifiedUpdaterImage: () => ({ data: {version: "0.41.0", image: "ghcr.io/chronoaiproject/nyxid/nyxid-machine-updater@sha256:" + "ab".repeat(32)} }),
+  useRemoteMachines: () => ({ data: remoteMachines, refetch: vi.fn() }),
+  useVerifiedUpdaterImage: () => ({
+    data: {
+      version: "0.41.0",
+      image:
+        "ghcr.io/chronoaiproject/nyxid/nyxid-machine-updater@sha256:" +
+        "ab".repeat(32),
+    },
+  }),
   useMachineUpdates: () => ({ data: [] }),
 }));
+vi.mock("@/components/machines/remote-machine-create", () => ({
+  RemoteMachineCreate: ({ open }: { open: boolean }) =>
+    open ? <p>Review remote machine preflight</p> : null,
+}));
+vi.mock("@/components/machines/remote-machine-detail", () => ({
+  RemoteMachineDetail: ({ machineId }: { machineId: string }) => (
+    <p>Hosted details for {machineId}</p>
+  ),
+}));
+vi.mock("@/components/machines/remote-machine-paid-start", () => ({
+  RemoteMachinePaidStart: () => null,
+}));
+const remoteMachines = [
+  {
+    node_id: "hosted-machine",
+    name: "Remote work",
+    sandbox_name: "machine-hosted-uuid",
+    resource_state: "reconciling",
+    billing_state: "pending",
+    authorization_state: "revoked",
+    runtime_generation: 4,
+    profile: { workspace_gib: 20 },
+  },
+];
 vi.mock("@/hooks/use-nodes", () => ({ useNodes: () => ({ data: nodes }) }));
 vi.mock("@/hooks/use-orgs", () => ({
+  useOrg: () => ({ data: undefined }),
   useOrgs: () => ({
     data: [
       { id: "org-admin", your_role: "admin" },
@@ -103,6 +136,18 @@ const nodes = [
     owner: { id: "another", kind: "user", display_name: "Another" },
   },
   { ...base, id: "credential", name: "Credential-only", machine: null },
+  {
+    ...base,
+    id: "hosted-not-listed",
+    name: "Hosted node awaiting list",
+    metadata: {
+      provisioning_source: "remote_machine",
+      agent_version: null,
+      os: "linux",
+      arch: null,
+      ip_address: null,
+    },
+  },
 ];
 const auth = useAuthStore.getState();
 afterEach(() => {
@@ -112,8 +157,18 @@ afterEach(() => {
   state.machine = undefined;
   vi.clearAllMocks();
 });
-function show() {
-  useAuthStore.setState({ user: { ...auth.user!, id: "me" } });
+function show(enabled = true) {
+  useAuthStore.setState({
+    user: {
+      ...auth.user!,
+      id: "me",
+      capabilities: {
+        enabled_features: enabled ? ["experimental:remote-machines"] : [],
+      },
+    },
+    isAuthenticated: true,
+    isLoading: false,
+  });
   return render(
     <TooltipProvider>
       <MachinesPage />
@@ -128,6 +183,9 @@ it("lists usable machines with connection and isolation state and opens their se
   expect(screen.queryByText("Not administered")).not.toBeInTheDocument();
   expect(screen.queryByText("Someone else's")).not.toBeInTheDocument();
   expect(screen.queryByText("Credential-only")).not.toBeInTheDocument();
+  expect(
+    screen.queryByText("Hosted node awaiting list"),
+  ).not.toBeInTheDocument();
   expect(screen.getAllByText("Not isolated")).toHaveLength(2);
   expect(screen.getByText(/Team · Disconnected/)).toBeInTheDocument();
   expect(
@@ -190,5 +248,62 @@ it("opens a guided-update machine link even when the machines page is already mo
   );
   expect(
     within(screen.getByRole("dialog")).getByText("Settings form for Team VM"),
+  ).toBeInTheDocument();
+});
+
+it("keeps hosted resource, billing and authorization state separate and opens the real Machines detail", async () => {
+  show();
+  expect(screen.getAllByText("Remote work").length).toBeGreaterThan(0);
+  expect(screen.getAllByText("Reconciling").length).toBeGreaterThan(0);
+  expect(
+    screen.getAllByText(/Billing: Pending · Authorization: Revoked/).length,
+  ).toBeGreaterThan(0);
+  await userEvent.click(
+    screen.getByRole("button", { name: "View Remote work" }),
+  );
+  expect(
+    screen.getByText("Hosted details for hosted-machine"),
+  ).toBeInTheDocument();
+  expect(state.navigate).toHaveBeenCalledWith({
+    to: "/assistant/machines",
+    search: { machine: "hosted-machine", operation: undefined },
+  });
+});
+
+it("resolves a deleted machine deep link after it leaves the active list", () => {
+  state.machine = "deleted-machine";
+  show();
+  expect(
+    screen.getByText("Hosted details for deleted-machine"),
+  ).toBeInTheDocument();
+});
+
+it("navigates the hosted shortcut to the shared setup form", async () => {
+  show();
+  await userEvent.click(
+    screen.getByRole("button", { name: "Create remote machine" }),
+  );
+  expect(state.navigate).toHaveBeenCalledWith({
+    to: "/assistant/machines/new",
+    search: { where: "hosted" },
+  });
+  expect(
+    screen.queryByText("Review remote machine preflight"),
+  ).not.toBeInTheDocument();
+});
+
+it("hides hosted creation when OFF while existing hosted and self-hosted management remains", async () => {
+  show(false);
+  expect(
+    screen.queryByRole("button", { name: "Create remote machine" }),
+  ).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Add a machine" })).toBeEnabled();
+  expect(screen.getAllByText("Remote work").length).toBeGreaterThan(0);
+  expect(screen.getByText("My VM")).toBeInTheDocument();
+  await userEvent.click(
+    screen.getByRole("button", { name: "View Remote work" }),
+  );
+  expect(
+    screen.getByText("Hosted details for hosted-machine"),
   ).toBeInTheDocument();
 });

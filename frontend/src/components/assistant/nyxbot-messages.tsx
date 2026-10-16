@@ -11,6 +11,7 @@ import {
   ShieldX,
 } from "lucide-react";
 import { AgentAvatar } from "@/components/assistant/nyxbot-agent-avatar";
+import { MessageTime } from "@/components/assistant/message-time";
 import type { ChatMessage } from "@/lib/assistant/chat-types";
 import {
   describeEventNotice,
@@ -117,7 +118,7 @@ const NYXBOT_MARK = { id: "nyxbot", name: "NyxBot", kind: "nyxbot" } as const;
 /** An instruction NyxBot sent to this specialist: shaped like a user turn, labelled as NyxBot's. */
 export function NyxBotOrchestratorMessage({ message }: { readonly message: ChatMessage }) {
   return (
-    <article aria-label="Message from NyxBot" className="flex flex-col items-end gap-1">
+    <article aria-label="Message from NyxBot" className="group/message flex flex-col items-end gap-1">
       <div className="flex items-center gap-1.5 text-10 text-text-tertiary">
         <AgentAvatar agent={NYXBOT_MARK} size="xs" />
         From NyxBot
@@ -125,6 +126,7 @@ export function NyxBotOrchestratorMessage({ message }: { readonly message: ChatM
       <div className="ml-auto max-w-[78%] whitespace-pre-wrap rounded-lg border border-hairline bg-overlay px-3 py-2 text-12 leading-relaxed text-foreground">
         {message.content}
       </div>
+      <MessageTime value={message.timestamp} reveal />
     </article>
   );
 }

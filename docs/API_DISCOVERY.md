@@ -386,11 +386,16 @@ Service-account subjects normally have no human document and retain default
 order. Delegated/OAuth metadata GET follows management policy; they cannot write,
 and MCP order applies only when existing proxy scopes authorize the request.
 
-This is advisory ordering for NyxID responses. Independent clients may use their
-own tools and choose another connection. Named tools and slugs execute exactly
-the addressed connection; explicit service pools keep their own routing rules.
-`tools/list`, `/mcp/config`, catalog digests, approvals, authority and billing are
-unchanged. Implicit LLM gateway selection is unchanged by Part A.
+NyxBot enforces saved connection priority at execution, within each catalog
+service group: eligible personal connections first, then eligible organization
+connections, using saved order within each tier. Default order remains personal
+newest first, then organization membership order and newest within each org.
+Custom connections are singletons. Exact named calls stay exact: an out-of-order
+proposal is refused with an eligible preferred target, never silently rerouted.
+Account-specific alternatives require server-known equivalence or an authenticated
+owner's one-turn connection choice. Independent external clients retain advisory
+discovery ordering. Service Pools retain their own strategy and bind the actual
+approved member. See [NyxBot service execution](NYXBOT_SERVICE_EXECUTION.md).
 
 ### Image tool results
 
@@ -446,7 +451,15 @@ Submit and optional cancel use POST; status and result use GET. `id_field`,
 `status_field` and optional `error_field` are JSON pointers. The ID parameter is
 the sole path parameter of each referenced operation. The model never supplies
 a polling URL, credentials, or a delivery destination. Changed contracts fail
-closed for existing watches. No new environment variable is required.
+closed for existing watches. A successful admitted submission through a
+user-managed connection snapshots its execution-authority digest in the private
+watch's `execution_binding` and `contract_binding` fields (`authority_version: 1`
+for new submissions). Legacy watches with no version retain their already-submitted
+bounded lifecycle under live checks. This bounds status/result/cancel use to the
+original operation and current lease even after the originating turn completes. Live key, membership,
+service scope and credential/configuration checks remain mandatory at egress;
+watch authority cannot authorize another submission. No new environment variable
+is required.
 
 The `chrono-sandbox` overlay follows
 <https://sandbox.chrono-ai.fun/openapi.json>. It exposes async `/executions`

@@ -364,6 +364,7 @@ mod tests {
         billable_svc.id = Uuid::new_v4().to_string();
         billable_svc.slug = "billable-service".to_string();
         billable_svc.billing = Some(ServiceBilling {
+            managed_execution: None,
             platform_billable: false,
             platform_charge_nyxid_credentials_only: false,
             platform_metric: None,

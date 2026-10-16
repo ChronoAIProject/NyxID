@@ -73,6 +73,12 @@ describe("ProviderCard", () => {
     ["cloudflare", "Cloudflare", "api-cloudflare"],
     ["supabase-management", "Supabase Management", "api-supabase-management"],
     ["railway", "Railway", "api-railway"],
+    ["twilio", "Twilio", "api-twilio"],
+    ["twitch", "Twitch", "api-twitch"],
+    ["whatsapp-business", "WhatsApp", "api-whatsapp-business"],
+    ["zoom", "Zoom", "api-zoom"],
+    ["xai", "xAI", "llm-xai"],
+    ["zoho-mail", "Zoho Mail", "api-zoho-mail"],
   ])("renders the brand SVG for the %s provider", (slug, name, catalogSlug) => {
     const { container } = renderCard(undefined, {
       ...telegramProvider,

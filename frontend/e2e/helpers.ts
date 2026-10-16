@@ -64,7 +64,7 @@ export function thread(page: Page) {
 export function composerInput(page: Page) {
   // Placeholder flips to "Assistant is working..." while a turn runs; match
   // the element, not one placeholder value.
-  return page.locator("textarea");
+  return page.locator("[data-composer-textbox]");
 }
 
 export async function sendMessage(page: Page, text: string): Promise<void> {
@@ -122,8 +122,15 @@ export async function observeTurnContinuity(
         );
       };
       const inspect = () => {
-        const visibleText =
-          document.querySelector("main")?.innerText ?? document.body.innerText;
+        // A contenteditable composer has text nodes; drafts are not transcript echoes.
+        const root = document.querySelector("main") ?? document.body;
+        const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+        const text: string[] = [];
+        while (walker.nextNode()) {
+          const parent = walker.currentNode.parentElement;
+          if (parent && !parent.closest("[data-composer-band]") && isVisible(parent)) text.push(walker.currentNode.textContent ?? "");
+        }
+        const visibleText = text.join("");
         if (visibleText.includes(message)) probe.sawMessage = true;
         const emptyStateVisible =
           visibleText.includes("Start a new conversation") ||

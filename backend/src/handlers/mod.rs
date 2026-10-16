@@ -6,6 +6,7 @@ mod admin_billing_tests;
 pub mod admin_feature_flags;
 pub mod admin_groups;
 pub mod admin_helpers;
+pub mod admin_machine_runtime_billing;
 pub mod admin_nodes;
 pub mod admin_ownership;
 pub mod admin_platform_credentials;
@@ -49,6 +50,7 @@ pub mod channel_managed;
 #[cfg(test)]
 mod channel_managed_tests;
 pub mod channel_relay;
+pub mod channel_relay_request;
 pub mod channel_webhooks;
 pub mod cli_pairings;
 pub mod codex_connection;
@@ -73,6 +75,7 @@ pub mod llms_txt;
 pub mod login_approval;
 pub(crate) mod login_client_context;
 pub mod login_code;
+pub(crate) mod managed_executions;
 pub mod mcp;
 pub mod mcp_transport;
 pub mod mfa;
@@ -93,6 +96,8 @@ pub mod org_role_scopes;
 pub mod orgs;
 pub mod platform_binding;
 pub mod platform_bots;
+pub mod platform_personal_bindings;
+pub mod platform_public_model;
 pub mod platform_setups;
 pub mod providers;
 pub mod proxy;
@@ -179,6 +184,10 @@ mod assistant_titles;
 pub mod assistant_voice;
 
 pub mod machine_access;
+pub mod machine_external_execution;
+pub mod remote_machine;
+pub mod remote_machine_bootstrap;
+pub mod remote_machine_usage;
 
 pub mod admin_utility_inference;
 
@@ -191,5 +200,8 @@ mod service_preference_tests;
 
 pub mod catalog_icons;
 
+pub mod machine_external_grant;
+
+pub mod admin_remote_machine_platform;
 #[cfg(test)]
 mod tools_manager_tests;

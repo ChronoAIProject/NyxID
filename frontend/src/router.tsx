@@ -1,3 +1,5 @@
+import "@/lib/platform-personal-handoff";
+import { PersonalLinkPage } from "@/pages/platform-personal-link";
 import { onboardingSearch } from "@/schemas/platform-onboarding";
 import { ToolsPage } from "@/pages/tools";
 import { AdminToolsPage } from "@/pages/admin-tools";
@@ -41,6 +43,7 @@ import {
   canManageCatalog,
   canManageTools,
   canReadAdminUsage,
+  canReadFeatureFlags,
   hasAdminRead,
 } from "@/types/api";
 import { shouldRedirectFromBilling } from "@/lib/billing-availability";
@@ -898,6 +901,7 @@ const apiKeyDetailRoute = createRoute({
 
 export const platformOnboardingRoute = createRoute({path: "/onboarding", getParentRoute: () => rootRoute, validateSearch: onboardingSearch, component: PlatformOnboardingPage});
 export const platformBindingReviewRoute = createRoute({path: "/onboarding/link", getParentRoute: () => rootRoute, validateSearch: onboardingSearch, component: PlatformBindingReviewPage});
+export const platformPersonalLinkRoute = createRoute({path: "/nyxbot/link", getParentRoute: () => rootRoute, validateSearch: () => ({}), component: PersonalLinkPage});
 export const platformSetupsRoute = createRoute({path: "/onboarding/setups", getParentRoute: () => dashboardLayout, validateSearch: onboardingSearch, component: PlatformSetupsPage});
 export const platformSetupDetailRoute = createRoute({path: "/onboarding/setups/$setupId", getParentRoute: () => dashboardLayout, component: PlatformSetupDetailPage});
 
@@ -990,20 +994,20 @@ const adminLayout = createRoute({
     if (!isAuthenticated && !isLoading) {
       throw redirect({ to: "/login" });
     }
-    // Admin layout is reachable by both `admin` (read+write) and `operator`
-    // (read-only). Per-action write controls inside admin pages are gated
-    // separately so operators see admin data but cannot mutate it. Holders of
-    // the usage-read role permission reach only the Usage page.
     if (isLoading || hasAdminRead(user)) return;
     const usagePath =
       location.pathname === "/admin/usage" ||
       location.pathname === "/admin/analytics";
-    if (!canReadAdminUsage(user)) {
-      throw redirect({ to: "/dashboard" });
-    }
-    if (!usagePath) {
-      throw redirect({ to: "/admin/usage" });
-    }
+    const flagsPath = location.pathname === "/admin/feature-flags";
+    if (
+      (usagePath && canReadAdminUsage(user)) ||
+      (flagsPath && canReadFeatureFlags(user))
+    )
+      return;
+    if (canReadFeatureFlags(user))
+      throw redirect({ to: "/admin/feature-flags" });
+    if (canReadAdminUsage(user)) throw redirect({ to: "/admin/usage" });
+    throw redirect({ to: "/dashboard" });
   },
   component: () => <Outlet />,
 });
@@ -1216,6 +1220,7 @@ const adminFeatureFlagsRoute = createRoute({
 const routeTree = rootRoute.addChildren([
   platformOnboardingRoute,
   platformBindingReviewRoute,
+  platformPersonalLinkRoute,
   landingRoute,
   nyxbotOnboardingRoute,
   authLayout.addChildren([loginRoute, registerRoute]),

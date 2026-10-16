@@ -34,6 +34,7 @@ This document describes every HTTP endpoint exposed by the NyxID backend. All en
   - [Service Endpoints](#service-endpoints)
   - [MCP Config](#mcp-config)
   - [Service Pools](#service-pools)
+  - [Managed Execution Status](#managed-execution-status)
   - [Proxy](#proxy)
   - [Proxy Service Discovery](#proxy-service-discovery)
   - [LLM Gateway](#llm-gateway)
@@ -167,6 +168,7 @@ CLI text errors preserve the existing `Error: ...` line and append the accepted 
 | 6004 | `external_token_invalid`   | 400         | External provider token verification failed (signature, expiry, audience, or claims) |
 | 6005 | `external_provider_not_configured` | 400  | Provider hint missing or provider not configured on the server |
 | 7000 | `approval_required`        | 403         | User approval required (proxy/LLM requests block until decision; this code is used for async status polling) |
+| 12800 | `managed_execution_pending` | 409       | Provider outcome requires verification; inspect the execution UUID in the message and do not retry automatically |
 
 ---
 
@@ -1769,6 +1771,15 @@ curl -X POST http://localhost:3001/api/v1/services/d1e2f3a4-b5c6-7890-1234-56789
 ### SSH
 
 NyxID supports authenticated SSH-over-WebSocket tunnels plus short-lived SSH certificate issuance for downstream services.
+
+NyxBot callers retain these routes under the existing permission modes. Exact
+certificate/session admission binds the connection (or existing catalog-only
+authority), requested parameters and bounded lifetime. Organization use asks in
+Auto and Ask every time; Full access admits without a prompt. Retry the same
+request with `X-NyxID-Acknowledgement-Id` after allowing its action card. A tunnel
+or terminal card authorizes that one session's dynamic traffic, with live
+revocation checks; it does not represent per-frame approval. See
+[NyxBot service execution](NYXBOT_SERVICE_EXECUTION.md).
 
 SSH configuration is embedded directly in the service object under `ssh_config` when `service_type` is `"ssh"`. Create SSH services with `POST /api/v1/services` and update them with `PUT /api/v1/services/{service_id}` instead of calling separate SSH-specific CRUD endpoints.
 
@@ -3903,6 +3914,53 @@ connections remain in the response. Repair that connection before selecting it.
 Priority execution skips such members before dispatch. Database and data
 integrity errors still fail the request.
 
+### Managed Execution Status
+
+The Telnyx platform offering reserves NyxID credits before provider dispatch and
+settles validated token usage. These authenticated reads expose execution
+metadata without prompts, completions, provider credentials, or raw usage
+responses. Existing credential-type and scope checks still apply. A person can
+read their own acting executions and liabilities funded by their personal
+wallet, including their service accounts; a service account can see only its
+own acting executions. There is no caller-selected billing owner.
+
+#### GET /api/v1/billing/executions
+
+**Auth: Required.** Returns a JSON array of the latest 50 visible executions,
+ordered by descending `created_at` and then descending ID. It accepts no
+pagination or owner selection parameters.
+
+#### GET /api/v1/billing/executions/{id}
+
+**Auth: Required.** Returns one visible execution. An invalid UUID, absent row,
+or inaccessible execution returns `404`.
+
+Both endpoints use this metadata shape:
+
+```json
+{
+  "id": "0e8569b5-16ba-4205-a91f-047ace6c6588",
+  "service_slug": "telnyx-platform",
+  "model": "THE_VERIFIED_MODEL_ID",
+  "state": "pending",
+  "maximum_credits": "0.001",
+  "pending_reason": "outcome_unknown",
+  "created_at": "2026-10-16T00:00:00Z",
+  "updated_at": "2026-10-16T00:00:01Z"
+}
+```
+
+`maximum_credits` is an exact decimal string containing the reservation ceiling.
+`service_slug` and `pending_reason` may be null. States are `prepared`, `funded`,
+`dispatch_admitted`, `pending`, `evidence_ready`, `cancelling`, `released`, and
+`settled`. A pending execution retains possible liability; reading its status
+does not replay the provider call or resolve missing evidence. Successful HTTP
+execution responses include `X-NyxID-Execution-Id`; uncertain outcomes return
+`managed_execution_pending` with the UUID in the error message.
+
+See [Telnyx platform billing](TELNYX_PLATFORM_BILLING.md) for the supported
+operation, funding behavior, activation requirements, and recovery limits.
+
 ### Proxy
 
 #### ANY /api/v1/proxy/{service_id}/{*path}
@@ -5490,13 +5548,98 @@ behavior](ADMIN_FORM_SAFETY.md) for sparse updates and confirmation.
 
 ### Admin
 
-All admin endpoints require the authenticated user to have `is_admin = true`. Admin endpoints include self-protection: admins cannot change their own role, disable themselves, or delete themselves.
+Admin endpoints require the authenticated user to hold the applicable platform or scoped permission described for each route. Admin user management includes self-protection: admins cannot change their own role, disable themselves, or delete themselves.
+
+#### Feature flag roles and management
+
+The system roles `feature-flag-operator` and `feature-flag-admin` can be assigned
+to any user through the existing user role assignments or through a group.
+They grant only feature flag administration; neither role grants access to
+unrelated admin pages or the admin user directory.
+
+| Caller | List flags | Create flags | Edit rollout and metadata |
+| --- | --- | --- | --- |
+| Platform Admin | All | Yes | All |
+| Platform Operator | All | No | No |
+| `feature-flag-operator` | Flags they created | Yes | Flags they created |
+| `feature-flag-admin` | All | Yes | All |
+
+Permissions combine: a Platform Operator who also holds `feature-flag-operator`
+retains the platform-wide read permission but can write only their own flags.
+Feature flag admin access wins when both feature flag roles are held.
+Authorization resolves current direct and group roles on every API request.
+
+The roles carry `nyxid:feature_flags:own:write` and
+`nyxid:feature_flags:admin`, respectively. Startup seeds both as non-default,
+protected system roles. A pre-existing custom/client role with the same slug is
+left untouched so existing assignments never acquire permissions implicitly.
+
+`GET /api/v1/admin/feature-flags` merges built-in code definitions and runtime
+flags, filtering the list to the caller's read scope. Each flag includes additive
+`created_by` (null for built-ins) and `can_edit` fields. Runtime creator identity
+is immutable; changing or clearing the free-text `owner` does not change access.
+Built-in keys are reserved and cannot be claimed through creation.
+
+`POST /api/v1/admin/feature-flags` creates a runtime flag:
+
+```json
+{
+  "key": "my-team:new-feature",
+  "description": "Enables the new feature for our rollout.",
+  "default_enabled": false
+}
+```
+
+Keys are 1–128 ASCII lowercase letters, digits, colons, underscores or hyphens,
+starting with a letter or digit. Descriptions are required and limited to 512
+characters after trimming. `default_enabled` defaults to false. Unknown fields
+are rejected. The server binds `created_by` to the authenticated user, persists a
+UUID v4 definition in `feature_flag_definitions`, and returns 201 with `key` and
+`created_by`. Duplicate built-in or runtime keys return 409.
+
+Runtime flags use the existing global, organization, and personal override
+precedence and appear in resolved `enabled_features` on `/users/me` and org
+responses. Creating a flag makes it available for consumers to use its key;
+application behavior still requires a consumer for that key. Built-in definitions
+win if a later deployment introduces the same key. Overrides and metadata bind
+runtime definition UUIDs separately from built-ins, so old settings never carry
+across that boundary or from a retired built-in into a newly created flag.
+Replacement unique indexes include that identity and are created before the
+legacy indexes are retired.
+
+Deploy the backend before the frontend so `/admin/feature-flag-targets` is
+available when the updated rollout picker starts using it. Upgrade all backend
+replicas before creating runtime keys that match retired
+built-ins. Older binaries recreate the legacy unique indexes on startup. Before
+rolling back to such a binary, remove any rows split across definition identities
+for the same key and target. A runtime definition shadowed by a built-in remains
+stored and becomes visible again if that built-in is retired; retirement cleanup
+can remove the runtime definition and its identity-bound settings when needed.
+
+Existing `PUT /api/v1/admin/feature-flags/{flag_key}` and `DELETE` at the same
+path set and clear rollout overrides. Metadata PUT/PATCH retain their existing
+contracts. Every write checks the caller's permission and, for operators, the
+immutable creator. `DELETE` clears an override; it does not remove the definition.
+
+`GET /api/v1/admin/feature-flag-targets` supplies bounded rollout suggestions
+without granting access to `/admin/users`. It requires `flag_key` naming an
+editable flag and `kind=person|org`; optional `search` is a literal, case-insensitive
+email/name/slug match (max 128 bytes), and `limit` is clamped to 1–20. Results
+contain only active accounts with `id`, `email`, nullable `display_name`, and
+nullable `slug`. A caller who cannot edit the referenced flag receives 403.
+Successful searches emit metadata-only audit events containing the flag key and
+target kind. Creation and existing writes retain audit events.
+
+`GET /users/me` includes `capabilities.read_feature_flags`,
+`create_feature_flags`, and `manage_all_feature_flags`. The admin navigation and
+route guard expose `/admin/feature-flags` to these role holders without opening
+other admin pages. The page uses each flag's `can_edit` for write controls.
 
 #### PATCH /api/v1/admin/feature-flags/{flag_key}/metadata
 
 Update only the supplied metadata fields for a registered feature flag.
 
-**Auth:** Admin
+**Auth:** Platform Admin, feature flag Admin, or feature flag Operator for a flag they created
 
 | Field | Type | Required | Behavior |
 | --- | --- | --- | --- |
@@ -8471,3 +8614,63 @@ Tool service writes and publication require platform admin authority in Phase 1.
 Tools updates distinguish omission from JSON `null` for `supplier` and `import_source`: omit to retain, null to clear. `GET /api/v1/keys?include_tool_bindings=true` includes otherwise-hidden platform Tool bindings with the existing KeyResponse shape; default listing still hides them and includes BYOK rows. Owner, membership, restricted API-key and delegated read semantics are unchanged. Tools `limits` is null when `PLATFORM_SERVICE_RATE_LIMIT_PER_SECOND=0`, otherwise `{ rate_limit_per_second, burst }`.
 
 CLI catalog creation requires `--endpoint-url` or `--twin-of` (otherwise the local error is `Catalog creation requires --endpoint-url or --twin-of`). Catalog updates support `--clear-supplier`, conflicting with `--supplier`. Tools table output formats prices as `Free` or `<credits> credits / <metric>`, limits as `<n>/s, burst <b>` or `none`, and topics as a comma-separated list. `tools show` prints rows for each operation (name, method, path, risk, data scope, cost class). JSON output remains the raw response.
+
+## Complete channel replies
+
+`POST /api/v1/channel-relay/reply` and `/thread-reply` accept one complete
+logical text reply in the existing request shape. NyxID splits it for the
+platform, preserves order and the bound destination, and consumes a reply
+token once for the entire request. HTTP 200 means every part has a valid
+platform acceptance receipt and persisted delivery metadata; the existing
+`message_id` and `platform_message_id` identify the last part. Partial or
+uncertain sends return an error and must not be automatically replayed.
+
+Text-only requests are limited to 2 MiB of serialized JSON before token
+consumption. Plans exceeding 64 platform parts are rejected before sending.
+Rich content, media, edits and proactive sends retain their separate contracts.
+See [Complete IM replies](CHANNEL_COMPLETE_REPLIES.md) for platform bounds,
+metadata retention, ingress configuration and CMAEG deadline coordination.
+
+## Channel media delivery substitutions
+
+`POST /api/v1/channel-relay/reply`, `/thread-reply` and `/send` accept the existing
+media request shape and may add `delivered_as` to a successful response. For
+Telegram and telegram-new, a narrowly classified photo-specific 400 refusal
+can send the same image once as a document under the
+[relay fallback rules](CHANNEL_BOT_RELAY.md#image-outcomes-and-telegram-document-fallback).
+A response with `"delivered_as": ["file"]` reports this actual transport kind,
+and the outbound message's `content_type` is `file`. The reply anchor, topic and
+caption are preserved. Other adapters can omit this field.
+
+## NyxBot exact service selection and consent
+
+An authenticated first-party human owner may prefix a new NyxAgent message with
+`/service <connection UUID or unambiguous connection slug>` followed by a newline
+and the request. The composer offers the same next-message choice. The selector
+lasts one admitted turn and chooses identity, not permission. API keys (including
+conversation, delegated and service-account keys), guests and webhook inputs
+cannot install human selection. Ordinary new turns clear it. An approved-card
+continuation inherits only that card's exact target and operation; expired,
+denied or consumed cards install no selection.
+
+Assistant raw proxy/LLM/SSH exec retries accept
+`X-NyxID-Acknowledgement-Id`; MCP service and native tools accept the existing
+`acknowledgement_id`. Native Oracle submit, attach and extract request bodies add
+optional `acknowledgement_id: string`. NyxID consumes this control metadata only
+for assistant execution; ordinary endpoint clients keep their payload contract.
+No acknowledgement transport metadata reaches the provider. Assistant chat keys
+use exact SSH exec and bounded certificate/tunnel/terminal session admission.
+For assistant calls, organization use asks in Auto and Ask every time and Full
+access proceeds without a prompt. Certificate cards bind the subject public key
+and principal; session cards bind the exact connection, principal/initial terminal
+geometry and maximum lifetime (at most one hour). Resume the same request with
+`X-NyxID-Acknowledgement-Id`. Session consent covers dynamic session traffic;
+revocation, config drift or elapsed authority closes the session. Ordinary client
+routing and existing personal catalog-only access are retained.
+
+Organization-use refusals persist the existing action card and return its
+`acknowledgement_id`. Full access bypasses consent while retaining preference
+and authority checks. Raw stateless org model consent admits an exact model and
+connection for the resumed turn; MCP/stateful actions retain exact semantic
+request consent. Machine exec cards explicitly admit declared exact organization
+connections for that command/job. See [execution contract](NYXBOT_SERVICE_EXECUTION.md).

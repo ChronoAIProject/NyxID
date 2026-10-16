@@ -4,7 +4,7 @@ use crate::models::service_billing::BillingMetric;
 use crate::models::usage_meter::{CredentialClass, PoolAttemptAccounting};
 use crate::services::billing::{BillingIngress, NodeIntent};
 
-async fn fixture(
+pub(super) async fn fixture(
     label: &str,
 ) -> (
     mongodb::Database,
@@ -86,7 +86,7 @@ async fn fixture(
     (db, ctx, wallet, layers)
 }
 
-async fn holds(db: &mongodb::Database) -> (i64, Credits, Credits) {
+pub(super) async fn holds(db: &mongodb::Database) -> (i64, Credits, Credits) {
     let period = db
         .collection::<UsageAllowancePeriod>(USAGE_ALLOWANCE_PERIODS)
         .find_one(doc! {})

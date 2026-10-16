@@ -59,6 +59,13 @@ server {
         proxy_set_header X-Forwarded-Proto $scheme;
         proxy_read_timeout 3600s;
         proxy_send_timeout 3600s;
+
+        # Reply routes enforce their text/media budgets in the backend. Keep
+        # nginx's default 1 MiB cap from rejecting complete 2 MiB text replies.
+        location ~ ^/api/v1/channel-relay/(reply|thread-reply)$ {
+            client_max_body_size 32m;
+            proxy_pass ${BACKEND_URL};
+        }
     }
 
     # TEMPORARY: pre-rename backends redirect popup completions to /oauth.

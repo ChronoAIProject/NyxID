@@ -13,6 +13,10 @@ pub mod error;
 mod keychain;
 #[path = "node/machine/runtime.rs"]
 pub mod machine;
+#[path = "node/managed_config.rs"]
+pub mod managed_config;
+#[path = "node/managed_deadline.rs"]
+pub mod managed_deadline;
 #[path = "node/metrics.rs"]
 mod metrics;
 #[path = "node/proxy_executor.rs"]
@@ -79,6 +83,8 @@ fn test_credentials(
             id: "test-node".to_string(),
             auth_token_encrypted: String::new(),
         },
+        managed_runtime: None,
+        managed_capabilities: None,
         signing: config::SigningConfig::default(),
         ssh: config::SshConfig::default(),
         machine: Default::default(),
@@ -99,5 +105,5 @@ mod test_support {
 }
 
 pub mod node {
-    pub use crate::{config, machine, proxy_upload, ws_client};
+    pub use crate::{config, machine, managed_config, managed_deadline, proxy_upload, ws_client};
 }

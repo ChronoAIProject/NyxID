@@ -1,5 +1,6 @@
 use super::*;
 use crate::models::assistant_conversation::{COLLECTION_NAME as CONVERSATIONS, RunningResponse};
+use crate::services::assistant_nyxagent::TurnResult;
 use crate::services::assistant_steering as steering_service;
 
 struct Fixture {
@@ -132,6 +133,16 @@ async fn value(response: Response) -> Value {
 async fn assistant_steer_accepted_uses_thread_key_and_marks_transcript() {
     let f = fixture(200, "", true).await;
     let row = running(&f).await;
+    // Steering is not an admission: a turn's report snapshot survives it.
+    f.state
+        .db
+        .collection::<AssistantConversation>(CONVERSATIONS)
+        .update_one(
+            doc! {"_id": &row.id, "active_turn.turn_id": &row.active_turn.as_ref().unwrap().turn_id},
+            doc! {"$set": {"active_turn.report_to": "nyxa-assigning", "active_turn.with_nyxbot": true}},
+        )
+        .await
+        .unwrap();
     let id = Uuid::new_v4().to_string();
     let reply = submit(&f, &row, &id, "  Follow this direction  ").await;
     assert_eq!(reply.status(), 200);
@@ -164,15 +175,12 @@ async fn assistant_steer_accepted_uses_thread_key_and_marks_transcript() {
         row.active_turn.as_ref().unwrap().turn_id
     );
     assert_eq!(history[1].steering.as_ref().unwrap().outcome, "applied");
-    assert_eq!(
-        engine::get(&f.state.db, OWNER, &row.id)
-            .await
-            .unwrap()
-            .active_turn
-            .unwrap()
-            .turn_id,
-        history[0].turn_id
-    );
+    let steered = engine::get(&f.state.db, OWNER, &row.id).await.unwrap();
+    let kept = steered.active_turn.as_ref().unwrap();
+    assert_eq!(kept.turn_id, history[0].turn_id);
+    assert_eq!(kept.report_to.as_deref(), Some("nyxa-assigning"));
+    assert!(kept.with_nyxbot);
+    assert_eq!(steered.report_to, None);
 }
 
 #[tokio::test]
@@ -476,11 +484,7 @@ async fn assistant_steer_excluded_from_anchors_and_only_labelled_in_recap() {
         &history,
     )
     .unwrap();
-    assert!(
-        !prepared
-            .instructions(&history, false)
-            .contains("NEW GUIDANCE")
-    );
+    assert!(!prepared.instructions().contains("NEW GUIDANCE"));
     assert!(
         !prepared
             .input_with_memory("", "Next request", true)
@@ -488,7 +492,9 @@ async fn assistant_steer_excluded_from_anchors_and_only_labelled_in_recap() {
     );
     assert!(
         prepared
-            .instructions(&history, true)
+            .instructions_with_recap(&crate::services::assistant_nyxagent::bounded_recap(
+                &history
+            ))
             .contains("user (steering, applied): NEW GUIDANCE")
     );
 }

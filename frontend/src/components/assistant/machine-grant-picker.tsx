@@ -64,7 +64,10 @@ export function MachineGrantPicker({
       ))}
       {!rows.length && !unknown.length ? (
         <p className="text-12 text-muted-foreground">
-          None available. The agent can ask NyxBot for access later.
+          None available.{" "}
+          {kind === "machines"
+            ? "Pair a machine first, then grant it here."
+            : "Save a login first, then grant it here."}
         </p>
       ) : null}
     </fieldset>

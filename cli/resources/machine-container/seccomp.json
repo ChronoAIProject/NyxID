@@ -1092,11 +1092,7 @@
         "chroot"
       ],
       "action": "SCMP_ACT_ALLOW",
-      "includes": {
-        "caps": [
-          "CAP_SYS_CHROOT"
-        ]
-      }
+      "comment": "Chromium's user-namespace sandbox chroots after creating its own user namespace. Kernel capability checks still deny chroot in the original namespace without CAP_SYS_CHROOT; the container does not receive that capability."
     },
     {
       "names": [

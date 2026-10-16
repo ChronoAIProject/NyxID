@@ -153,6 +153,7 @@ impl AuthUser {
         db: &mongodb::Database,
         route: &str,
     ) -> AppResult<()> {
+        crate::services::key_service::require_ordinary_purpose(self.api_key_purpose)?;
         let Some(fence) = self.assistant_turn_fence.as_ref() else {
             return Ok(());
         };
@@ -299,6 +300,7 @@ impl AuthUser {
     }
 
     pub fn ensure_rest_proxy_access(&self) -> Result<(), AppError> {
+        crate::services::key_service::require_ordinary_purpose(self.api_key_purpose)?;
         if self.can_use_rest_proxy() {
             return Ok(());
         }
@@ -309,6 +311,7 @@ impl AuthUser {
     }
 
     pub fn ensure_llm_proxy_access(&self) -> Result<(), AppError> {
+        crate::services::key_service::require_ordinary_purpose(self.api_key_purpose)?;
         if self.can_use_llm_proxy() {
             return Ok(());
         }
@@ -503,6 +506,9 @@ async fn ensure_catalog_editor_route(
 }
 
 pub(crate) fn ensure_api_key_purpose_route(api_key: &ApiKey, path: &str) -> Result<(), AppError> {
+    // Public activation remains unavailable; no generic route, scope, child
+    // or feature flag may turn this purpose into ordinary execution authority.
+    crate::services::key_service::require_ordinary_purpose(api_key.purpose)?;
     if api_key.purpose == ApiKeyPurpose::PermissionBound {
         return if path == "/api/v1/permission-execution/mcp"
             || path.starts_with("/api/v1/permission-execution/rest/")
@@ -648,7 +654,14 @@ fn delegated_read_denied_path(path: &str) -> bool {
                 | "catalog-curation"
                 | "saved-logins"
                 | "machines"
+                | "remote-machines"
+                | "remote-machine-quotes"
+                | "remote-machine-entitlement"
+                | "remote-machine-operations"
+                | "machine-confirmations"
                 | "onboarding"
+                | "platform-personal-bindings"
+                | "platform-personal-links"
         )
     ) {
         return true;
@@ -659,6 +672,8 @@ fn delegated_read_denied_path(path: &str) -> bool {
         segments.as_slice(),
         ["channel-relay", "messages", _, "attachments", _]
             | ["users", "me", "oauth-consent-requests", _]
+            | ["api-keys", _, "machine-grant"]
+            | ["users", "me", "consents", _, "machine-grant"]
     ) {
         return true;
     }
@@ -750,7 +765,7 @@ fn ensure_delegated_claim_consistency(claims: &jwt::Claims) -> Result<(), AppErr
     Ok(())
 }
 
-async fn validate_dpop_bound_access(
+pub(crate) async fn validate_dpop_bound_access(
     parts: &Parts,
     state: &AppState,
     expected_jkt: &str,
@@ -772,7 +787,7 @@ async fn validate_dpop_bound_access(
     Ok(())
 }
 
-fn validate_mtls_bound_access(
+pub(crate) fn validate_mtls_bound_access(
     parts: &Parts,
     state: &AppState,
     expected_x5t: &str,
@@ -813,6 +828,7 @@ pub(crate) async fn api_key_auth_user(
     ip_address: Option<String>,
     user_agent: Option<String>,
 ) -> Result<AuthUser, AppError> {
+    crate::services::key_service::require_ordinary_purpose(key.purpose)?;
     if !key.is_active || key.expires_at.is_some_and(|at| at <= chrono::Utc::now()) {
         return Err(AppError::Unauthorized(
             "API key is inactive or expired".into(),
@@ -888,6 +904,96 @@ pub(crate) async fn api_key_auth_user(
         ip_address,
         user_agent,
     })
+}
+
+/// Reconstruct the real execution identity of a persisted external Machine job.
+/// The caller must first perform the source/grant/lease transaction fence. This
+/// creates no credential and cannot authorize token-forwarding operations.
+pub(crate) async fn machine_external_gateway_auth_user(
+    db: &mongodb::Database,
+    principal: &crate::models::machine_external_grant::ExternalPrincipalRef,
+    node_id: &str,
+    service_ids: &[String],
+) -> AppResult<AuthUser> {
+    use crate::models::machine_external_grant::ExternalPrincipalRef;
+    let mut auth = match principal {
+        ExternalPrincipalRef::ApiKey {
+            user_id,
+            api_key_id,
+            api_key_credential_id,
+        } => {
+            let key = db
+                .collection::<ApiKey>(API_KEYS)
+                .find_one(doc! {"_id":api_key_id,"user_id":user_id})
+                .await?
+                .ok_or(AppError::MachinePermissionRevoked)?;
+            // Repeat class checks; a durable job is never a route around a
+            // changed key purpose or the Assistant owner-turn branch.
+            crate::services::machine_external_grant_service::VerifiedExternalSource::from_verified_api_key(
+                &key, api_key_credential_id.as_deref())?;
+            let auth =
+                api_key_auth_user(db, &key, api_key_credential_id.clone(), None, None).await?;
+            if auth.assistant_chat.is_some() {
+                return Err(AppError::MachineNotAllowed);
+            }
+            auth
+        }
+        ExternalPrincipalRef::OAuth {
+            user_id,
+            oauth_client_id,
+        } => {
+            let user = db
+                .collection::<User>(USERS)
+                .find_one(doc! {"_id":user_id})
+                .await?
+                .filter(|user| {
+                    user.is_active && user.user_type == crate::models::user::UserType::Person
+                })
+                .ok_or(AppError::MachinePermissionRevoked)?;
+            AuthUser {
+                user_id: Uuid::parse_str(&user.id).map_err(|_| AppError::MachineNotAllowed)?,
+                session_id: None,
+                scope: "proxy machine".into(),
+                acting_client_id: None,
+                oauth_client_id: Some(oauth_client_id.clone()),
+                token_jti: None,
+                approval_owner_user_id: None,
+                auth_method: AuthMethod::AccessToken,
+                allow_all_services: false,
+                allow_all_nodes: false,
+                allowed_service_ids: service_ids.to_vec(),
+                allowed_node_ids: vec![node_id.into()],
+                org_agent_access: None,
+                assistant_agent_owner_id: None,
+                assistant_group_id: None,
+                assistant_operation_scopes: Default::default(),
+                assistant_chat: None,
+                assistant_turn_fence: None,
+                resource_uris: None,
+                api_key_id: None,
+                api_key_name: None,
+                api_key_credential_id: None,
+                api_key_purpose: ApiKeyPurpose::General,
+                rate_limit_per_second: None,
+                rate_limit_burst: None,
+                ip_address: None,
+                user_agent: None,
+            }
+        }
+    };
+    if !auth.allow_all_nodes && !auth.allowed_node_ids.iter().any(|id| id == node_id) {
+        return Err(AppError::MachinePermissionRevoked);
+    }
+    let effective = service_ids
+        .iter()
+        .filter(|id| auth.allow_all_services || auth.allowed_service_ids.contains(id))
+        .cloned()
+        .collect();
+    auth.allow_all_nodes = false;
+    auth.allowed_node_ids = vec![node_id.into()];
+    auth.allow_all_services = false;
+    auth.allowed_service_ids = effective;
+    Ok(auth)
 }
 
 /// Conversation credentials have a durable assistant platform plus one of the
@@ -1502,6 +1608,7 @@ pub async fn ensure_relay_agent_key_active(
         .ok_or_else(|| {
             AppError::Unauthorized("Relay token's agent key is inactive or revoked".to_string())
         })?;
+    crate::services::key_service::require_ordinary_purpose(key.purpose)?;
     Ok(key)
 }
 
@@ -2006,6 +2113,16 @@ mod tests {
             "/api/v1/assistant/wire-logs/7d6f176c-45c6-4efa-95b2-12dc58a7341f",
             "/api/v1/assistant/nyxagent/machines/node-id/desktop",
             "/api/v1/machines/setups/setup-id",
+            "/api/v1/remote-machines/machine-id",
+            "/api/v1/remote-machine-quotes",
+            "/api/v1/remote-machine-entitlement",
+            "/api/v1/remote-machine-operations/operation-id",
+            "/api/v1/machine-confirmations/confirmation-id/decision",
+            "/api/v1/api-keys/key-id/machine-grant",
+            "/api/v1/users/me/consents/consent-id/machine-grant",
+            "/api/v1/onboarding/setups/setup-id",
+            "//api/v1//onboarding/bindings/?page=2",
+            "/api/v1/remote-machines/?page=2",
             "/api/v1/saved-logins/login-id",
             "/api/v1/auth/social/github",
             "/api/v1/devices/code/poll",
@@ -2130,6 +2247,8 @@ mod tests {
             "/api/v1/keys/",
             "/api/v1/keys?include=all",
             "/api/v1/nodesXYZ",
+            "/api/v1/onboardingXYZ",
+            "/api/v1/remote-machinesXYZ",
             "/api/v1/administer",
         ] {
             assert!(
@@ -2187,6 +2306,7 @@ mod tests {
     #[test]
     fn verified_delegated_claims_must_set_actor_and_flag_together() {
         let mut claims = jwt::Claims {
+            protected_consent: None,
             sub: Uuid::new_v4().to_string(),
             iss: "nyxid".to_string(),
             aud: "http://localhost:3001".to_string(),
@@ -2558,6 +2678,20 @@ mod tests {
             assert_eq!(response.status(), StatusCode::FORBIDDEN);
         }
         for path in [
+            "/api/v1/remote-machine-entitlement",
+            "/api/v1/remote-machines",
+            "/api/v1/remote-machines/machine-id",
+            "/api/v1/remote-machine-operations/operation-id",
+            "/api/v1/machine-confirmations",
+            "/api/v1/api-keys/key-id/machine-grant",
+            "/api/v1/users/me/consents/consent-id/machine-grant",
+            "/api/v1/onboarding/bindings",
+            "/api/v1/onboarding/setups",
+        ] {
+            let response = delegated_router_response(&app, Method::GET, path, &delegated).await;
+            assert_eq!(response.status(), StatusCode::FORBIDDEN, "GET {path}");
+        }
+        for path in [
             "/api/v1/assistant/nyxagent/voice/options",
             "/api/v1/assistant/nyxagent/conversations/id/voice-requests/rid",
             "/api/v1/assistant/nyxagent/conversations/id/voice-sessions/sid/stream",
@@ -2571,6 +2705,16 @@ mod tests {
         assert!(delegated_read_denied_path(
             "/api/v1/users/me/oauth-consent-requests/id"
         ));
+        for path in [
+            "/api/v1/remote-machine-entitlement",
+            "/api/v1/machines/managed/bootstrap",
+            "/api/v1/remote-machine-quotes",
+            "/api/v1/remote-machines",
+            "/api/v1/remote-machines/machine-id",
+            "/api/v1/remote-machine-operations/operation-id",
+        ] {
+            assert!(delegated_read_denied_path(path));
+        }
         db.drop().await.unwrap();
     }
 
@@ -2591,6 +2735,7 @@ mod tests {
             is_active: true,
             created_at: chrono::Utc::now(),
             rotation_predecessor_id: None,
+            machine_external_grants_present: false,
             state_version: 1,
             updated_at: Some(chrono::Utc::now()),
             description: None,
@@ -3418,6 +3563,8 @@ mod tests {
         let auth = AuthUser {
             assistant_turn_fence: Some(
                 crate::services::assistant_acknowledgement_service::AssistantTurnFence {
+                    platform_thread: false,
+                    platform_origin: None,
                     conversation_id: "conversation".into(),
                     turn_id: Some("turn".into()),
                     turn_live: true,
@@ -3487,6 +3634,8 @@ mod tests {
         let mut auth = AuthUser {
             assistant_turn_fence: Some(
                 crate::services::assistant_acknowledgement_service::AssistantTurnFence {
+                    platform_thread: false,
+                    platform_origin: None,
                     conversation_id: "conversation".into(),
                     turn_id: None,
                     turn_live: false,
@@ -3649,6 +3798,8 @@ mod tests {
         let mut user = test_auth_user(AuthMethod::ApiKey, "proxy");
         user.assistant_turn_fence = Some(
             crate::services::assistant_acknowledgement_service::AssistantTurnFence {
+                platform_thread: false,
+                platform_origin: None,
                 conversation_id: "conversation".into(),
                 turn_id: Some("turn".into()),
                 turn_live: true,
@@ -3698,6 +3849,8 @@ mod tests {
     #[test]
     fn conversation_fence_requires_a_live_non_stopped_turn() {
         let base = crate::services::assistant_acknowledgement_service::AssistantTurnFence {
+            platform_thread: false,
+            platform_origin: None,
             conversation_id: "conversation".into(),
             turn_id: Some("turn".into()),
             turn_live: true,
@@ -4153,6 +4306,48 @@ mod tests {
     #[test]
     fn path_matches_prefix_rejects_unrelated() {
         assert!(!path_matches_prefix("/other/path", "/api/v1"));
+    }
+
+    #[test]
+    fn public_keys_cannot_enter_any_ordinary_route_even_with_wide_scopes() {
+        let mut key = delegated_fixture_api_key("key", "owner", "hash");
+        key.purpose = ApiKeyPurpose::PublicNyxbot;
+        key.scopes = "proxy proxy:all llm:proxy account:read admin".into();
+        for path in [
+            "/mcp",
+            "/api/v1/mcp",
+            "/api/v1/proxy/s/llm-openai/v1/responses",
+            "/api/v1/llm/openai/v1/responses",
+            "/api/v1/llm/gateway/v1/responses",
+            "/api/v1/llm/status",
+            "/api/v1/llm/pools",
+            "/api/v1/api-keys",
+            "/api/v1/assistant/nyxagent/turns",
+        ] {
+            assert!(ensure_api_key_purpose_route(&key, path).is_err(), "{path}");
+        }
+        let mut auth = test_auth_user(AuthMethod::ApiKey, "proxy proxy:all llm:proxy");
+        auth.api_key_purpose = ApiKeyPurpose::PublicNyxbot;
+        assert!(auth.ensure_rest_proxy_access().is_err());
+        assert!(auth.ensure_llm_proxy_access().is_err());
+    }
+
+    #[test]
+    fn personal_binding_and_link_protocol_reads_are_human_only() {
+        for path in [
+            "/api/v1/platform-personal-bindings",
+            "/api/v1/platform-personal-bindings/id",
+            "/api/v1/platform-personal-links",
+            "/api/v1/platform-personal-links/id/status",
+        ] {
+            assert!(delegated_read_denied_path(path), "{path}");
+            assert!(!delegated_request_allowed(
+                &Method::GET,
+                path,
+                &HeaderMap::new(),
+                "account:read"
+            ));
+        }
     }
 
     #[test]

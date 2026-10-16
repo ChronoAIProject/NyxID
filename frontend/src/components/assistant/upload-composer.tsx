@@ -37,6 +37,7 @@ type Pending = {
   /** A long paste's own text, so a saved draft can restore it inline. */
   text?: string;
   name: string;
+  size: number;
   preview?: string;
   progress: number;
   error?: string;
@@ -54,6 +55,9 @@ export function UploadComposer({ scope, onSend, onVoice, ...props }: Props) {
   const [files, setFiles] = useState<Pending[]>([]);
   const [notice, setNotice] = useState<string>();
   const [preview, setPreview] = useState<Pending>();
+  const attachmentStrip = useRef<HTMLUListElement>(null);
+  const revealNewAttachment = useRef(false);
+  const [attachmentEdges, setAttachmentEdges] = useState({ left: false, right: false });
   const pending = useRef(new Map<string, Pending>());
   const input = useRef<HTMLInputElement>(null);
   const attach = useRef<HTMLButtonElement>(null);
@@ -75,6 +79,30 @@ export function UploadComposer({ scope, onSend, onVoice, ...props }: Props) {
       }
     };
   }, []);
+
+  useEffect(() => {
+    const strip = attachmentStrip.current;
+    if (!strip) return;
+    if (revealNewAttachment.current) {
+      // Scroll only the attachment row, keeping focus and the page in place.
+      strip.scrollLeft = strip.scrollWidth;
+      revealNewAttachment.current = false;
+    }
+    const updateEdges = () => {
+      const left = strip.scrollLeft > 1;
+      const right = strip.scrollWidth - strip.clientWidth - strip.scrollLeft > 1;
+      setAttachmentEdges((previous) => previous.left === left && previous.right === right
+        ? previous : { left, right });
+    };
+    updateEdges();
+    strip.addEventListener("scroll", updateEdges, { passive: true });
+    const observer = typeof ResizeObserver === "undefined" ? undefined : new ResizeObserver(updateEdges);
+    observer?.observe(strip);
+    return () => {
+      strip.removeEventListener("scroll", updateEdges);
+      observer?.disconnect();
+    };
+  }, [files]);
 
   function refresh() {
     if (alive.current) setFiles([...pending.current.values()]);
@@ -106,14 +134,16 @@ export function UploadComposer({ scope, onSend, onVoice, ...props }: Props) {
       handleCounts.current[fileKind] += 1;
       const entry: Pending = {
         key: crypto.randomUUID(),
-        handle: `${fileKind}-${String(handleCounts.current[fileKind])}`,
+        handle: `${fileKind === "pasted-text" ? "text" : fileKind}-${String(handleCounts.current[fileKind])}`,
         kind: fileKind,
         ...(text === undefined ? {} : { text }),
         name: file.name,
+        size: file.size,
         progress: 0,
         controller: new AbortController(),
       };
       handles.push(entry.handle);
+      revealNewAttachment.current = true;
       if (!isSupportedAttachment(file)) {
         entry.error = UNSUPPORTED_FORMAT_MESSAGE;
         pending.current.set(entry.key, entry);
@@ -194,7 +224,7 @@ export function UploadComposer({ scope, onSend, onVoice, ...props }: Props) {
       }))}
       onLongText={(text) => {
         if (locked || pending.current.size >= 10) return undefined;
-        // Named like its handle: @pasted-text-2 is pasted-text-2.md.
+        // Keep the descriptive filename separate from its short @text-N handle.
         const file = pastedTextFile(text, handleCounts.current["pasted-text"] + 1);
         return add([file], "pasted-text", text)[0];
       }}
@@ -212,65 +242,84 @@ export function UploadComposer({ scope, onSend, onVoice, ...props }: Props) {
       attachments={
         <div className={files.length || notice ? "mb-2 space-y-2" : undefined}>
           {files.length > 0 && (
-            <ul aria-label="Attachments" className="assistant-scrollbar grid max-h-44 gap-1.5 overflow-y-auto overscroll-contain sm:grid-cols-2">
-              {files.map((file) => (
-                <li
-                  key={file.key}
-                  className="flex min-w-0 items-center gap-2 rounded-lg border border-hairline bg-card p-2 text-xs"
-                >
-                  {file.preview ? (
-                    <button
-                      type="button"
-                      className="shrink-0"
-                      aria-label={`Preview ${file.name}`}
-                      onClick={() => setPreview(file)}
-                    >
-                      <img
-                        src={file.preview}
-                        alt={file.name}
-                        className="h-16 w-16 shrink-0 rounded object-cover"
-                      />
-                    </button>
-                  ) : (
-                    <FileText className="h-5 w-5 shrink-0 text-muted-foreground" />
-                  )}
-                  <div className="min-w-0 flex-1">
-                    <p className="truncate">
-                      <span
-                        className="mr-1.5 font-mono text-muted-foreground"
-                        title={`Type @${file.handle} to refer to this file`}
+            <div className="relative min-w-0">
+              <ul
+                ref={attachmentStrip}
+                aria-label="Attachments"
+                tabIndex={0}
+                className="assistant-scrollbar flex gap-2 overflow-x-auto overscroll-x-contain py-1 outline-none focus-visible:ring-2 focus-visible:ring-ring rounded-xl"
+              >
+                {files.map((file) => (
+                  <li
+                    key={file.key}
+                    title={`${file.name} · Type @${file.handle} to refer to this file`}
+                    className={`relative h-24 shrink-0 overflow-hidden rounded-xl border bg-card text-xs ${file.error ? "border-destructive/50" : "border-hairline"} ${file.preview ? "w-24" : "w-44"}`}
+                  >
+                    {file.preview ? (
+                      <button
+                        type="button"
+                        className="h-full w-full bg-muted/30 outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
+                        aria-label={`Preview ${file.name}`}
+                        onClick={() => setPreview(file)}
                       >
-                        @{file.handle}
-                      </span>
-                      {file.item?.label ?? file.name}
-                    </p>
+                        <img
+                          src={file.preview}
+                          alt={file.name}
+                          className="h-full w-full object-cover"
+                        />
+                      </button>
+                    ) : (
+                      <div className="flex h-full flex-col justify-between p-3">
+                        {file.kind === "pasted-text" ? (
+                          <p className="line-clamp-2 pr-5 text-[10px] leading-3 text-muted-foreground">{file.text}</p>
+                        ) : (
+                          <FileText aria-hidden="true" className="h-6 w-6 text-muted-foreground" strokeWidth={1.5} />
+                        )}
+                        <div className="min-w-0">
+                          <p className="truncate font-medium">
+                            {file.kind === "pasted-text" ? "Pasted text" : file.item?.label ?? file.name}
+                          </p>
+                          {!file.error && file.item && (
+                            <p className="mt-0.5 text-[10px] text-muted-foreground">
+                              {file.kind === "pasted-text" ? "TEXT" : file.name.includes(".") ? file.name.split(".").pop()?.toUpperCase() : "FILE"}
+                              {" · "}{file.size < 1024 ? `${file.size} B` : file.size < 1024 * 1024 ? `${Math.ceil(file.size / 1024)} KB` : `${(file.size / (1024 * 1024)).toFixed(1)} MB`}
+                            </p>
+                          )}
+                        </div>
+                      </div>
+                    )}
                     {file.error ? (
-                      <p role="alert" className="break-words text-destructive">
+                      <p role="alert" title={file.error} className="absolute inset-x-0 bottom-0 line-clamp-2 bg-card/95 px-2 py-1 text-[10px] leading-3 text-destructive">
                         {file.error}
                       </p>
                     ) : (
-                      <p role="status" className="text-muted-foreground">
-                        {file.item
-                          ? "Ready"
-                          : file.progress >= 99
-                            ? "Checking file…"
-                            : `Uploading ${file.progress}%`}
+                      <p role="status" className={file.item ? "sr-only" : "absolute inset-x-0 bottom-0 bg-card/95 px-2 py-1 text-[10px] text-muted-foreground"}>
+                        {file.item ? "Ready" : file.progress >= 99 ? "Checking file…" : `Uploading ${file.progress}%`}
                       </p>
                     )}
-                  </div>
-                  <Button
-                    type="button"
-                    size="icon"
-                    variant="ghost"
-                    aria-label={`Remove ${file.name}`}
-                    onClick={() => remove(file.key)}
-                    disabled={props.sending}
-                  >
-                    <X className="h-4 w-4" />
-                  </Button>
-                </li>
-              ))}
-            </ul>
+                    <button
+                      type="button"
+                      className="absolute right-1 top-1 flex size-6 items-center justify-center rounded-full border border-hairline bg-background/95 text-muted-foreground shadow-sm transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
+                      aria-label={`Remove ${file.name}`}
+                      onClick={() => remove(file.key)}
+                      disabled={props.sending}
+                    >
+                      <X aria-hidden="true" className="h-3.5 w-3.5" />
+                    </button>
+                  </li>
+                ))}
+              </ul>
+              <div
+                aria-hidden="true"
+                data-attachment-fade="left"
+                className={`pointer-events-none absolute inset-y-1 left-0 w-12 rounded-l-xl bg-gradient-to-r from-card via-card/80 to-transparent transition-opacity duration-150 ${attachmentEdges.left ? "opacity-100" : "opacity-0"}`}
+              />
+              <div
+                aria-hidden="true"
+                data-attachment-fade="right"
+                className={`pointer-events-none absolute inset-y-1 right-0 w-12 rounded-r-xl bg-gradient-to-l from-card via-card/80 to-transparent transition-opacity duration-150 ${attachmentEdges.right ? "opacity-100" : "opacity-0"}`}
+              />
+            </div>
           )}
           {notice && (
             <p role="status" className="text-xs text-muted-foreground">

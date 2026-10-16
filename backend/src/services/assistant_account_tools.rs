@@ -236,7 +236,7 @@ fn description(name: &str) -> String {
                 administration and billing are available only in the UI.",
         if destructive(name) {
             "Destructive: NyxID shows the user a single-use confirmation card unless their \
-            access mode is Autopilot; retry with its acknowledgement_id."
+            access mode is Full access; retry with its acknowledgement_id."
         } else if read_only(name) {
             "Non-destructive. Read-only."
         } else {
@@ -260,7 +260,7 @@ pub fn virtual_service(chat: &acks::ChatAuthority) -> McpToolService {
             .endpoints
             .retain(|endpoint| read_only(&endpoint.name));
         service.description = Some(
-            "Read the user's NyxID account (specialist: read-only, with NyxBot's grant) and \
+            "Read the user's NyxID account (specialist: read-only, when granted) and \
             manage your memory."
                 .into(),
         );
@@ -424,8 +424,47 @@ impl std::fmt::Debug for ToolResult {
 }
 
 pub fn error_result(error: AppError) -> ToolResult {
+    error_result_inner(error, None, "")
+}
+
+pub fn error_result_for(
+    error: AppError,
+    chat: Option<&acks::ChatAuthority>,
+    frontend: &str,
+) -> ToolResult {
+    let mut result = error_result_inner(error, chat, frontend);
+    result.value = super::assistant_access_policy::with_frontend(result.value, frontend);
+    result
+}
+
+fn error_result_inner(
+    error: AppError,
+    chat: Option<&acks::ChatAuthority>,
+    frontend: &str,
+) -> ToolResult {
     let body = error.response_body();
     let message = match error {
+        AppError::AssistantMissingAccess(value) => {
+            return ToolResult {
+                permission_request: None,
+                is_error: true,
+                value: *value,
+            };
+        }
+        AppError::MachinePermissionRevoked => {
+            let mut value = json!({"error": body.error, "error_code": body.error_code,
+                "message": body.message});
+            if let Some(chat) = chat {
+                value["instructions"] = json!(
+                    super::assistant_access_policy::machine_permission_guidance(chat, frontend)
+                );
+            }
+            return ToolResult {
+                permission_request: None,
+                is_error: true,
+                value,
+            };
+        }
         AppError::SkillDraftValidation(_) => {
             return ToolResult {
                 permission_request: None,
@@ -455,6 +494,7 @@ pub fn error_result(error: AppError) -> ToolResult {
                 value: super::assistant_acknowledgement_service::access_request_denied(),
             };
         }
+
         error if error.is_forbidden() || matches!(error, AppError::Unauthorized(_)) => {
             "This operation requires a conversation key and human acknowledgement."
         }
@@ -552,7 +592,9 @@ impl AccountTools<'_> {
             Ok(None) => Err(AppError::Forbidden("Conversation key required".into())),
             Err(error) => Err(error),
         };
-        let result = result.unwrap_or_else(error_result);
+        let mut result = result.unwrap_or_else(error_result);
+        result.value =
+            super::assistant_access_policy::with_frontend(result.value, &self.config.frontend_url);
         // Never audit arguments, output, URLs, names or raw service-layer errors.
         let actor = audit_service::AuditActor::from_auth_user(auth);
         let target = ["api_key_id", "bot_id", "route_id", "service_id", "node_id"]
@@ -615,12 +657,18 @@ impl AccountTools<'_> {
         // One card answers every reason to confirm (webhook policy and the
         // governing access mode) and is consumed exactly once.
         let facts = acks::ActionFacts::of(acks::classify_owner_action(tool_name, args));
-        if let Some(need) = acks::confirmation_needed(self.db, chat, facts, false).await? {
+        let gate = acks::confirmation_needed(self.db, chat, facts, false).await?;
+        let summary = if gate != acks::Gate::Proceed {
+            Some(self.action_summary(&chat.user_id, name, args).await?)
+        } else {
+            None
+        };
+        if let Some(need) = gate.ask() {
             // Resolve ownership and a human-readable summary before requesting
             // authority, preserving not-found refusals and key restrictions.
-            let summary = self.action_summary(&chat.user_id, name, args).await?;
+            let summary = summary.as_deref().unwrap_or_default();
             if let Some(refusal) =
-                acks::confirm_action(self.db, chat, tool_name, args, &need, &summary).await?
+                acks::confirm_action(self.db, chat, tool_name, args, &need, summary).await?
             {
                 return Ok(ToolResult {
                     permission_request: None,
@@ -630,6 +678,17 @@ impl AccountTools<'_> {
             }
         }
         let value = self.dispatch(&chat.user_id, auth, name, args).await?;
+        if let Some(auto) = gate.auto_allowed() {
+            acks::record_auto_allowed(
+                self.db,
+                chat,
+                tool_name,
+                args,
+                &auto,
+                summary.as_deref().unwrap_or_default(),
+            )
+            .await;
+        }
         Ok(ToolResult {
             permission_request: None,
             value,

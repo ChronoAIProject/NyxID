@@ -61,8 +61,38 @@ pub struct AgentEvent {
     /// of the turn that drains it.
     #[serde(default)]
     pub reply_to: Vec<ChannelOrigin>,
+    /// The producer proved `report_to` from a validated source (the causing
+    /// turn's snapshot, a card's stored routing, or a carrier with validated
+    /// provenance). Unbound (legacy) events never create NyxBot involvement.
+    #[serde(default)]
+    pub bound: bool,
+    #[serde(default)]
+    pub report_to: Option<String>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
+}
+
+impl AgentEvent {
+    /// Mark the event as proved from a validated source. `None` means the
+    /// causing work was proven not to report to NyxBot (new owner work).
+    pub fn bound_to(mut self, report_to: Option<&str>) -> Self {
+        self.bound = true;
+        self.report_to = report_to.map(str::to_owned);
+        self
+    }
+}
+
+/// First validated report-snapshot format on delayed carriers (async
+/// operations, watches, machine jobs). 0 or absent is legacy and unproven;
+/// unknown versions fail closed.
+pub const REPORT_PROVENANCE_V1: u8 = 1;
+
+pub fn carried_report_to(report_to: Option<&str>, provenance: u8) -> Option<String> {
+    if provenance == REPORT_PROVENANCE_V1 {
+        report_to.map(str::to_owned)
+    } else {
+        None
+    }
 }
 
 /// The external channel a conversation answers, when it was started by a
@@ -80,6 +110,73 @@ pub struct ChannelOrigin {
     pub platform: String,
 }
 
+/// Stable ownership of a personal manager thread. Retained after transport
+/// unlink so the owner can continue the thread in NyxID.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlatformThread {
+    pub platform: String,
+    pub profile_id: String,
+    pub manager_bot_id: String,
+    pub telegram_bot_id: i64,
+    pub binding_id: String,
+    pub binding_generation: i64,
+    pub user_id: String,
+    pub nyxbot_agent_id: String,
+}
+
+/// An event receives fresh admission; it never reuses an ingress receipt.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PlatformOriginSource {
+    Ingress {
+        receipt_id: String,
+        claim_id: String,
+    },
+    ThreadEvent {
+        admission_id: String,
+    },
+}
+
+/// Exact server-authored execution and delivery proof. Never accepted from an
+/// owner request or projected wholesale into an HTTP response.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlatformTurnOrigin {
+    pub thread: PlatformThread,
+    pub manager_authority_epoch: i64,
+    pub personal_control_revision: i64,
+    pub sender_id: i64,
+    pub chat_id: i64,
+    pub source: PlatformOriginSource,
+}
+
+/// Delivery authority is independent of a later continuation's execution.
+/// Web-only watches must not acquire a destination from a newer link.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PlatformReplyRouting {
+    WebOnly,
+    Captured {
+        origin: Box<PlatformTurnOrigin>,
+        turn_id: String,
+        #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+        expires_at: DateTime<Utc>,
+    },
+}
+
+impl std::fmt::Debug for PlatformThread {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PlatformThread")
+            .field("platform", &self.platform)
+            .finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Debug for PlatformTurnOrigin {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PlatformTurnOrigin").finish_non_exhaustive()
+    }
+}
+
 /// One tool call made with the chat's key during a live turn. Metadata only:
 /// the label is a tool identifier, never arguments, results, or secrets.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -92,16 +189,28 @@ pub struct TurnActivity {
     pub digest: Option<String>,
     /// `running`, `completed`, or `error`.
     pub status: String,
+    #[serde(default)]
+    pub failure: Option<ToolFailure>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub started_at: DateTime<Utc>,
     #[serde(default, with = "crate::models::bson_datetime::optional")]
     pub ended_at: Option<DateTime<Utc>>,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ToolFailure {
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<u16>,
+}
+
 /// Metadata for an image a tool returned during a turn; the bytes live in
 /// `assistant_attachments`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TurnAttachment {
+    /// Whether this tool image may accompany a reply sent to a channel chat.
+    #[serde(default)]
+    pub chat_delivery: Option<bool>,
     #[serde(default)]
     pub image_input: Option<String>,
     #[serde(default)]
@@ -124,10 +233,83 @@ pub struct ToolProgress {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ModelRefusal {
+    pub code: String,
+    pub attempt_id: String,
+    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+    pub at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ModelStreamFault {
+    pub kind: String,
+    pub attempt_id: String,
+    pub attributable: bool,
+    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+    pub at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EngineWorkerInstance {
+    pub id: String,
+    #[serde(default)]
+    pub hostname: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ActiveTurn {
+    /// Process incarnation that claimed execution; absent on older replicas' turns.
+    #[serde(default)]
+    pub worker_instance: Option<EngineWorkerInstance>,
+    #[serde(default)]
+    pub model_attempt_id: Option<String>,
+    #[serde(default)]
+    pub model_requests_active: u32,
+    #[serde(default)]
+    pub model_attribution_uncertain: bool,
+    #[serde(default)]
+    pub model_refusal: Option<ModelRefusal>,
+    #[serde(default)]
+    pub model_stream_fault: Option<ModelStreamFault>,
+    #[serde(default)]
+    pub model_stream_cancellation: Option<ModelStreamFault>,
+    #[serde(default)]
+    pub waiting_for_capacity: bool,
+    /// NyxID-authored display note only; never a transcript/model message.
+    #[serde(default)]
+    pub capacity_wait_note_origin: Option<String>,
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
+    pub engine_request_started_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub engine_attempts: u32,
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
+    pub capacity_wait_started_at: Option<DateTime<Utc>>,
+    /// Accumulated completed admission waits; excludes execution between requests.
+    #[serde(default)]
+    pub capacity_wait_ms: u64,
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
+    pub capacity_wait_deadline: Option<DateTime<Utc>>,
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
+    pub capacity_accepted_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub capacity_notice_claimed: bool,
+    #[serde(default)]
+    pub platform_reply: Option<PlatformReplyRouting>,
+    /// One platform worker may execute an admitted turn. A lost worker is
+    /// settled by orphan recovery; its execution claim is never reopened.
+    #[serde(default)]
+    pub execution_started: bool,
+    #[serde(default)]
+    pub machine_scopes: Vec<MachineTurnScope>,
+    #[serde(default)]
+    pub platform_origin: Option<PlatformTurnOrigin>,
     /// The failed turn this turn retries (owner Retry only).
     #[serde(default)]
     pub retry_of: Option<String>,
+    /// New turns count every dispatched tool call, including entries evicted
+    /// from the bounded activity display. Absent on legacy turns.
+    #[serde(default)]
+    pub activity_count: Option<i64>,
     /// Canonical call digests the retried turn completed. A repeated call
     /// with the same tool and arguments is refused (`retry_duplicate_action`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -147,6 +329,8 @@ pub struct ActiveTurn {
     pub machine_node_ids: Vec<String>,
     #[serde(default)]
     pub continuations: u32,
+    #[serde(default)]
+    pub activity_total: i64,
     /// Rolling hashes only; never persist tool arguments or results. Reset per continuation.
     #[serde(default)]
     pub tool_progress: ToolProgress,
@@ -157,6 +341,17 @@ pub struct ActiveTurn {
     pub heartbeat_at: Option<DateTime<Utc>>,
     #[serde(default)]
     pub trigger_run_id: Option<String>,
+    /// Specialist threads: the NyxBot thread this turn reports to, decided
+    /// once at admission; ambiguity resolves to `None`.
+    #[serde(default)]
+    pub report_to: Option<String>,
+    /// Group turns: the owner's NyxBot was a member of this personal group at
+    /// admission (org groups: never).
+    #[serde(default)]
+    pub with_nyxbot: bool,
+    /// Confirmation continuation claims ignore the original run grace deadline.
+    #[serde(default)]
+    pub trigger_continuation: bool,
     pub turn_id: String,
     #[serde(default)]
     pub origin: TurnOrigin,
@@ -193,6 +388,13 @@ pub struct ActiveTurn {
     pub also_deliver: Vec<ChannelOrigin>,
 }
 
+/// Runtime identity captured before a machine operation is issued.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MachineTurnScope {
+    pub node_id: String,
+    pub runtime_id: String,
+}
+
 /// Absent on old rows: their existing title is final until the owner renames it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -205,6 +407,8 @@ pub enum TitleSource {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct AssistantConversation {
+    #[serde(default)]
+    pub platform_thread: Option<PlatformThread>,
     /// Internal conversion fence; typed settlement must preserve it until exact cleanup completes.
     #[serde(default)]
     pub platform_cleanup_pending: bool,
@@ -261,8 +465,9 @@ pub struct AssistantConversation {
     /// the owner/member has opted in.
     #[serde(default)]
     pub learning_epoch: Option<i64>,
-    /// Specialist threads only: the NyxBot thread that assigned the current
-    /// work, which receives its report and permission requests.
+    /// Legacy assignment marker written for old readers only: the NyxBot
+    /// thread that assigned the newest work. New code reads the turn snapshot
+    /// (`ActiveTurn::report_to`), never this field.
     #[serde(default)]
     pub report_to: Option<String>,
     /// Bounded wake-up queue drained by the next event turn.

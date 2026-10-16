@@ -22,6 +22,12 @@ pub struct AsyncOperationContract {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct DeliveryBinding {
+    #[serde(default)]
+    pub platform_reply: Option<super::assistant_conversation::PlatformReplyRouting>,
+    /// Original result destination; independent of a later event turn's fresh
+    /// execution authority. An absent field keeps legacy/web watches local.
+    #[serde(default)]
+    pub platform_origin: Option<super::assistant_conversation::PlatformTurnOrigin>,
     pub origin: TurnOrigin,
     pub channel: Option<ChannelOrigin>,
     pub reply_channel: Option<ChannelOrigin>,
@@ -29,7 +35,12 @@ pub struct DeliveryBinding {
     pub group_request_id: Option<String>,
     pub voice_request_id: Option<String>,
     pub trigger_run_id: Option<String>,
+    /// The causing turn's `ActiveTurn::report_to` snapshot. Trusted only with
+    /// `report_provenance == REPORT_PROVENANCE_V1`; legacy rows stored the
+    /// conversation's assignment marker here and are unproven.
     pub report_to: Option<String>,
+    #[serde(default)]
+    pub report_provenance: u8,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -46,6 +57,14 @@ pub struct AsyncServiceOperation {
     pub contract: AsyncOperationContract,
     pub delivery: DeliveryBinding,
     pub operation_id: Option<String>,
+    /// Submission-approved connection/config/key authority, never credential material.
+    #[serde(default)]
+    pub execution_binding: Option<String>,
+    /// Zero denotes a watch admitted before connection consent was introduced.
+    #[serde(default)]
+    pub authority_version: u8,
+    #[serde(default)]
+    pub contract_binding: Option<String>,
     /// submitting, waiting, cancelling, ready, queued, delivered, cancelled.
     pub state: String,
     pub reason: Option<String>,

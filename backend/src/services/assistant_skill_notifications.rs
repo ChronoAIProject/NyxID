@@ -111,9 +111,36 @@ pub(crate) async fn defer_authority(
     Ok(())
 }
 
+/// The card stays allowed for the owner; nothing retries. Metadata only.
+pub(crate) async fn terminalize(
+    db: &Database,
+    request: &AssistantAcknowledgement,
+    attempt: &DeliveryAttempt,
+    reason: &str,
+) -> AppResult<()> {
+    db.collection::<bson::Document>(ACKS)
+        .update_one(
+            attempt.filter(request),
+            doc! {
+                "$inc": {"skill_notification_fence": 1_i64},
+                "$unset": {"skill_notification_pending": "",
+                    "skill_notification_authority_reason": "",
+                    "skill_notification_authority_failures": "",
+                    "skill_notification_retry_after": ""},
+                "$set": {"skill_notification_terminal": {
+                    "reason": reason, "at": bson::DateTime::now()}},
+            },
+        )
+        .await?;
+    Ok(())
+}
+
 /// Keep the marker until a turn consumes the event. The bounded general
 /// event queue may evict old entries; the next sweep then restores them.
 /// Concurrent delivery and replay never duplicate an event already queued.
+/// Eligibility (plan §4) is enforced again inside the transaction against
+/// the card as stored, so a routing that changed under the handler cannot
+/// enqueue.
 pub(crate) async fn enqueue(
     db: &Database,
     request: &AssistantAcknowledgement,
@@ -132,6 +159,22 @@ pub(crate) async fn enqueue(
     let mut session = db.client().start_session().await?;
     session.start_transaction().and_run2(async move |session| {
         let operation = Box::pin(async {
+            use super::super::assistant_access_policy as policy;
+            let Some(card) = db.collection::<AssistantAcknowledgement>(ACKS)
+                .find_one(doc! {"_id": &request_id, "user_id": &owner, "kind": "skills"})
+                .session(&mut *session).await? else { return Ok(None); };
+            let eligible = match policy::skill_notification_eligible(&card, policy::cutover_at(&db))? {
+                policy::SkillEligibility::Eligible(policy::SkillDestination::GroupNyxbotHome { group_id }) => {
+                    policy::nyxbot_in_personal_group(&db, &owner, &group_id, Some(&mut *session)).await?
+                        .then_some(()).ok_or("group_membership_changed")
+                }
+                policy::SkillEligibility::Eligible(_) => Ok(()),
+                policy::SkillEligibility::Ineligible(reason) => Err(reason),
+            };
+            if let Err(reason) = eligible {
+                policy::terminalize_skill_outbox_in_session(&db, &owner, &request_id, reason, session).await?;
+                return Ok(None);
+            }
             // The handler authorized this exact destination from the snapshot.
             // Migration is allowed only while the old destination is deleted.
             if let Some(stored) = observed_target.as_deref()

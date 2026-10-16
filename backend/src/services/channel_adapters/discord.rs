@@ -648,7 +648,17 @@ impl PlatformAdapter for DiscordAdapter {
             request.multipart(form)
         };
         if !reply.attachments.is_empty() {
-            let response = media::response_json(request).await?;
+            let response =
+                media::platform_json(request, "Discord", UNREACHABLE_TARGET_MARKERS).await?;
+            if response.get("code").is_some() && response.get("message").is_some() {
+                return Err(
+                    crate::services::channel_platform::classify_upstream_refusal(
+                        "Discord",
+                        response["message"].as_str().unwrap_or("provider refusal"),
+                        UNREACHABLE_TARGET_MARKERS,
+                    ),
+                );
+            }
             return response["id"]
                 .as_str()
                 .map(|id| Some(id.to_string()))

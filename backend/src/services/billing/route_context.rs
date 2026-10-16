@@ -50,6 +50,13 @@ pub enum NodeIntent {
 pub struct BillingRouteContext {
     pub ingress: BillingIngress,
     pub pool_attempt: Option<crate::models::usage_meter::PoolAttemptAccounting>,
+    pub machine_usage: Option<crate::models::usage_meter::MachineUsageAttribution>,
+    /// An internal durable public call reservation; never accepted from HTTP.
+    pub(crate) public_admission: Option<PublicBillingAdmission>,
+    /// Internal readiness probe uses the same durable funding transaction.
+    pub(crate) public_probe: bool,
+    pub(crate) managed_admission: Option<ManagedBillingAdmission>,
+    pub(crate) managed_billing: Option<ServiceBilling>,
     pub billing_request_id: String,
     pub billing_owner_id: String,
     pub actor_user_id: String,
@@ -84,6 +91,20 @@ pub struct BillingRouteContext {
     lane_pricing_configured: bool,
     pub(crate) platform_metered: bool,
     pub(crate) platform_billable: bool,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct PublicBillingAdmission {
+    pub call_id: String,
+    pub model_id: String,
+    pub expires_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ManagedBillingAdmission {
+    pub execution_id: String,
+    pub route_digest: String,
+    pub expires_at: chrono::DateTime<chrono::Utc>,
 }
 
 impl BillingRouteContext {
@@ -167,8 +188,15 @@ impl BillingRouteContext {
             service_platform_billable = false;
         }
         Self {
+            public_admission: None,
+            public_probe: false,
+            managed_admission: None,
+            managed_billing: service_billing
+                .filter(|billing| billing.managed_execution.is_some())
+                .cloned(),
             ingress,
             pool_attempt: None,
+            machine_usage: None,
             billing_request_id,
             billing_owner_id,
             actor_user_id,
@@ -320,6 +348,8 @@ impl BillingRouteContext {
                 BillingMetric::Requests => 1,
                 BillingMetric::Bytes => self.request_bytes.saturating_add(response_bytes),
                 BillingMetric::Images | BillingMetric::VoiceSeconds => 0,
+                // Machine runtime is reserved only by dedicated admission.
+                BillingMetric::MachineRunningSeconds => 0,
             };
         }
         if self.requested_voice_seconds > 0 {
@@ -335,6 +365,8 @@ impl BillingRouteContext {
             }
             BillingMetric::Images => self.requested_images,
             BillingMetric::VoiceSeconds => self.requested_voice_seconds.max(0),
+            // Dedicated Machine admission reserves a finite runtime window.
+            BillingMetric::MachineRunningSeconds => 0,
             // Cache quantities are already covered by the input estimate.
             BillingMetric::CacheReadTokens
             | BillingMetric::CacheWriteTokens
@@ -371,6 +403,7 @@ mod tests {
 
     fn context_for(credential_class: CredentialClass) -> BillingRouteContext {
         let billing = ServiceBilling {
+            managed_execution: None,
             platform_billable: false,
             platform_charge_nyxid_credentials_only: false,
             platform_metric: None,
@@ -637,6 +670,30 @@ mod tests {
     }
 
     #[test]
+    fn native_text_bound_does_not_reserve_machine_runtime() {
+        let ctx = context_for(CredentialClass::UserOwned).with_request_body(Some(&[b'x'; 400]));
+        assert_eq!(
+            ctx.estimated_quantity(BillingMetric::MachineRunningSeconds),
+            0
+        );
+        let ctx = ctx.with_native_text_bound(320, 64, 4096);
+        for (metric, expected) in [
+            (BillingMetric::Tokens, 384),
+            (BillingMetric::InputTokens, 320),
+            (BillingMetric::OutputTokens, 64),
+            (BillingMetric::CacheReadTokens, 320),
+            (BillingMetric::CacheWriteTokens, 320),
+            (BillingMetric::Requests, 1),
+            (BillingMetric::Bytes, 4496),
+            (BillingMetric::Images, 0),
+            (BillingMetric::VoiceSeconds, 0),
+            (BillingMetric::MachineRunningSeconds, 0),
+        ] {
+            assert_eq!(ctx.estimated_quantity(metric), expected, "{metric:?}");
+        }
+    }
+
+    #[test]
     fn request_image_count_is_only_read_when_an_active_spec_prices_images() {
         let ctx = context_for(CredentialClass::UserOwned);
         assert_eq!(
@@ -738,6 +795,7 @@ mod tests {
     #[test]
     fn resale_requires_operator_flag() {
         let billing = ServiceBilling {
+            managed_execution: None,
             platform_billable: false,
             platform_charge_nyxid_credentials_only: false,
             platform_metric: None,

@@ -119,6 +119,7 @@ export const AUTOCAPTURE_DENYLIST = [
  * response) that would leak if captured.
  */
 const SENSITIVE_PATH_PATTERNS: RegExp[] = [
+  /^\/nyxbot\/link(?:\/|$)/,
   /^\/onboarding\/link(?:\/|$)/,
   /^\/connect\/bot\/[^/]+/,
   /^\/login\/(?:device|agent-key|code)(?:\/|$)/,
@@ -139,7 +140,7 @@ function isSensitiveCurrentPage(): boolean {
 
 function stripQueryString(url: string | undefined): string | undefined {
   if (!url) return url;
-  const idx = url.indexOf('?');
+  const idx = url.search(/[?#]/);
   return idx >= 0 ? url.slice(0, idx) : url;
 }
 

@@ -1,0 +1,25 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: nyxid-machine-manager
+  namespace: nyxid-machine
+rules:
+  # Manager can submit and observe Sandbox intent only. The Agent Sandbox
+  # controller remains the sole Pod/PVC reconciler; no pod/exec or pvc writes.
+  - apiGroups: ["agents.x-k8s.io"]
+    resources: ["sandboxes"]
+    verbs: ["get", "list", "watch", "create", "patch", "update", "delete"]
+  - apiGroups: ["agents.x-k8s.io"]
+    resources: ["sandboxes/status"]
+    verbs: ["get"]
+  # Read-only observations bind Pod/PVC UIDs to Sandbox ownerReferences.
+  - apiGroups: [""]
+    resources: ["pods", "persistentvolumeclaims"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["get", "list", "watch"]
+  # Explicit operator health probe; does not mutate quota or grant permissions.
+  - apiGroups: [""]
+    resources: ["resourcequotas"]
+    verbs: ["get", "list"]

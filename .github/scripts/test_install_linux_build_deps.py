@@ -14,12 +14,14 @@ class BuildDependencyTests(unittest.TestCase):
         self.addCleanup(self.directory.cleanup)
         self.root = Path(self.directory.name)
         self.calls = self.root / "calls"
+        self.arguments = self.root / "arguments"
         self.harness = self.root / "commands.sh"
         # Exercise failure propagation without modifying the developer's system.
         self.harness.write_text('''
 sudo() {
   [[ "$1" == -n && "$2" == env && "$3" == DEBIAN_FRONTEND=noninteractive && "$4" == apt-get ]] || return 99
   shift 4
+  printf '%s\\n' "$@" >> "$TEST_ARGUMENTS"
   local operation arg
   for arg in "$@"; do
     case "$arg" in update|install) operation="$arg";; esac
@@ -34,7 +36,7 @@ sudo() {
     def invoke(self, failure=""):
         return subprocess.run(
             ["bash", str(SCRIPT)], env={**os.environ, "BASH_ENV": str(self.harness),
-                "TEST_CALLS": str(self.calls), "TEST_FAIL": failure},
+                "TEST_CALLS": str(self.calls), "TEST_ARGUMENTS": str(self.arguments), "TEST_FAIL": failure},
             capture_output=True, text=True, timeout=10,
         )
 
@@ -42,6 +44,11 @@ sudo() {
         result = self.invoke()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.calls.read_text().splitlines(), ["update", "install"])
+
+    def test_install_includes_backend_boundary_scanner(self):
+        result = self.invoke()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("ripgrep", self.arguments.read_text().splitlines())
 
     def test_update_failure_stops_before_install(self):
         result = self.invoke("update")

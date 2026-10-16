@@ -53,6 +53,37 @@ See [KMS_MIGRATION_GUIDE.md](KMS_MIGRATION_GUIDE.md) and [KMS_OPERATIONS_GUIDE.m
 | `FRONTEND_URL` | `http://localhost:3000` | Frontend origin for CORS |
 | `ENVIRONMENT` | `development` | `development`, `staging`, `production` |
 
+## Remote Machine backend Kubernetes authentication
+
+| Variable | Default | Description |
+|---|---|---|
+| `NYXID_REMOTE_MACHINE_KUBE_AUTH_MODE` | `token_file` only when unset | Exact `token_file` or `google_metadata`. Blank/unknown/padded values fail; no cross-mode fallback. |
+| `NYXID_REMOTE_MACHINE_KUBE_API` | *(none)* | Actual target Kubernetes/GKE HTTPS API; required in both modes. Credentials, query and fragment in the URL are rejected. |
+| `NYXID_REMOTE_MACHINE_KUBE_TOKEN_FILE` | *(none)* | Required absolute path in `token_file` only. Protected regular file, at most 64 KiB, re-read per request to support rotation. Ignored in `google_metadata`. |
+| `NYXID_REMOTE_MACHINE_KUBE_CA_FILE` | System trust | Optional PEM CA for the target API, both modes; invalid/unreadable CA fails configuration. TLS and hostname verification stay enabled. |
+
+`google_metadata` is explicitly for the trusted backend Google identity. It uses
+the fixed Google metadata token endpoint and `Metadata-Flavor: Google`, directly
+without proxy/redirect, caches by positive `expires_in` and refreshes early under
+a shared single-flight cache. Limits: 1-second connect, 3-second request,
+5-second acquisition including wait, 64 KiB response, 16 KiB token, integer
+TTL 1–86400 seconds, refresh `min(60 seconds, TTL/10)` before conservative expiry,
+one-second failed-refresh cooldown. Failures reject and permit later retries;
+there is no expired/stale credential or unauthenticated fallback. There is no
+production metadata URL environment override. KMS ADC settings above are
+unrelated. KubeletCollector retains its independent credentials.
+
+Readiness checks the selected configuration, then existing async API probes
+exercise actual credentials/authorization; metadata mode never requires a token
+file. Managed bootstrap still uses a Pod-bound Kubernetes token with audience
+`nyxid-remote-machine-v1`. Tokens remain backend-only; untrusted metadata/network
+restrictions are not relaxed. Google `chrono-nyxid` is not the Kubernetes
+`nyxid-machine-manager` ServiceAccount: its actual principal, target permissions,
+API connectivity and CA must be verified in the deployment environment. See
+[Remote Machine deployment](../deploy/remote-machine/README.md) for the distinction,
+local-fixture limits and pending environment acceptance. No IAM/RBAC changes
+are supplied or authorized by this configuration support.
+
 ## Cluster coordination
 
 NyxID uses MongoDB for shared ownership, leases, replay checks, rate windows,

@@ -73,6 +73,22 @@ macro_rules! llm_billing_routes {
     };
 }
 
+macro_rules! public_nyxbot_model_billing_routes {
+    ($apply:ident, $router:expr) => {
+        $apply!($router;
+            (
+                "/public-nyxbot/models/{service_id}/{*path}",
+                "/api/v1/public-nyxbot/models/{service_id}/{*path}",
+                "handlers::platform_public_model::dispatch",
+                post(handlers::platform_public_model::dispatch),
+                crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
+                    crate::services::billing::BillingIngress::Proxy
+                )
+            ),
+        )
+    };
+}
+
 macro_rules! proxy_billing_routes {
     ($apply:ident, $router:expr) => {
         $apply!($router;
@@ -465,6 +481,10 @@ pub(crate) fn mounted_billing_route_inventory()
         ()
     ));
     routes.extend(proxy_billing_routes!(collect_billing_route_specs, ()));
+    routes.extend(public_nyxbot_model_billing_routes!(
+        collect_billing_route_specs,
+        ()
+    ));
     routes.extend(assistant_direct_billing_routes!(
         collect_billing_route_specs,
         ()
@@ -584,6 +604,16 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         )
         .route("/me/consents", get(handlers::consent::list_my_consents))
         .route(
+            "/me/oauth-machine-consent-requests",
+            post(handlers::oauth::prepare_machine_consent),
+        )
+        .route(
+            "/me/consents/{client_id}/machine-grant",
+            get(handlers::machine_external_grant::get_oauth)
+                .put(handlers::machine_external_grant::put_oauth)
+                .delete(handlers::machine_external_grant::revoke_oauth),
+        )
+        .route(
             "/me/oauth-consent-requests/{handle}",
             get(handlers::oauth::get_consent_request),
         )
@@ -597,6 +627,12 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         );
 
     let api_key_routes = Router::new()
+        .route(
+            "/{key_id}/machine-grant",
+            get(handlers::machine_external_grant::get_key)
+                .put(handlers::machine_external_grant::put_key)
+                .delete(handlers::machine_external_grant::revoke_key),
+        )
         .route(
             "/{key_id}/credentials",
             get(handlers::auth_agent_key::list_credentials),
@@ -934,6 +970,28 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         );
 
     let admin_routes = Router::new()
+        .merge(if router_state.is_some() {
+            Router::new()
+                .route(
+                    "/platform-bots/{id}/runtime",
+                    get(handlers::platform_bots::get_runtime)
+                        .put(handlers::platform_bots::put_runtime),
+                )
+                .route(
+                    "/platform-bots/{id}/runtime/clear-emergency-stop",
+                    post(handlers::platform_bots::clear_runtime_emergency_stop),
+                )
+                .route(
+                    "/platform-bots/{id}/public/profiles",
+                    post(handlers::platform_bots::discover_public_profiles),
+                )
+                .route(
+                    "/platform-bots/{id}/public/readiness",
+                    post(handlers::platform_bots::probe_public_readiness),
+                )
+        } else {
+            Router::new()
+        })
         .route("/channel-bots", get(handlers::channel_bots::admin_list))
         .route(
             "/channel-bots/webhook-rejections",
@@ -957,7 +1015,12 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         )
         .route(
             "/feature-flags",
-            get(handlers::admin_feature_flags::list_feature_flags),
+            get(handlers::admin_feature_flags::list_feature_flags)
+                .post(handlers::admin_feature_flags::create_feature_flag),
+        )
+        .route(
+            "/feature-flag-targets",
+            get(handlers::admin_feature_flags::list_feature_flag_targets),
         )
         .route(
             "/feature-flags/{flag_key}",
@@ -1142,6 +1205,26 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             get(handlers::admin_billing::get_config).put(handlers::admin_billing::put_config),
         )
         .route("/billing/rates", get(handlers::admin_billing::get_rates))
+        .route(
+            "/remote-machines/platform",
+            get(handlers::admin_remote_machine_platform::get),
+        )
+        .route(
+            "/billing/runtime",
+            get(handlers::admin_machine_runtime_billing::get),
+        )
+        .route(
+            "/billing/runtime/rates",
+            post(handlers::admin_machine_runtime_billing::stage),
+        )
+        .route(
+            "/billing/runtime/rates/{id}/resync",
+            post(handlers::admin_machine_runtime_billing::sync),
+        )
+        .route(
+            "/billing/runtime/rates/{id}/retire",
+            post(handlers::admin_machine_runtime_billing::retire),
+        )
         .route(
             "/billing/overview",
             get(handlers::admin_billing::get_overview),
@@ -1653,6 +1736,8 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         );
 
     let billing_routes = Router::new()
+        .route("/executions", get(handlers::managed_executions::list))
+        .route("/executions/{id}", get(handlers::managed_executions::get))
         .route("/usage", get(handlers::billing::get_usage))
         .route(
             "/wallet",
@@ -1820,8 +1905,8 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         )
         .route(
             "/reply",
-            post(handlers::channel_relay::async_reply).layer(DefaultBodyLimit::max(
-                crate::services::channel_media_service::request_body_limit(
+            post(handlers::channel_relay_request::reply).layer(DefaultBodyLimit::max(
+                handlers::channel_relay_request::request_body_limit(
                     router_state
                         .as_ref()
                         .map_or(crate::config::DEFAULT_CHANNEL_MEDIA_MAX_BYTES, |state| {
@@ -1832,8 +1917,8 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         )
         .route(
             "/thread-reply",
-            post(handlers::channel_relay::async_thread_reply).layer(DefaultBodyLimit::max(
-                crate::services::channel_media_service::request_body_limit(
+            post(handlers::channel_relay_request::thread_reply).layer(DefaultBodyLimit::max(
+                handlers::channel_relay_request::request_body_limit(
                     router_state
                         .as_ref()
                         .map_or(crate::config::DEFAULT_CHANNEL_MEDIA_MAX_BYTES, |state| {
@@ -1952,6 +2037,28 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .route("/{id}/deny", post(handlers::login_approval::deny));
 
     let api_v1_public = Router::new()
+        .merge(public_nyxbot_model_billing_routes!(
+            register_billing_routes,
+            Router::new()
+        ))
+        .merge(if router_state.is_some() {
+            Router::new().route(
+                "/platform-personal-links/preview",
+                post(handlers::platform_personal_bindings::preview),
+            )
+        } else {
+            Router::new()
+        })
+        .route(
+            "/machines/managed/prepare",
+            post(handlers::remote_machine_bootstrap::prepare)
+                .layer(DefaultBodyLimit::max(72 * 1024)),
+        )
+        .route(
+            "/machines/managed/bootstrap",
+            post(handlers::remote_machine_bootstrap::bootstrap)
+                .layer(DefaultBodyLimit::max(72 * 1024)),
+        )
         .route(
             "/onboarding/link/preview",
             post(handlers::platform_binding::preview),
@@ -2237,6 +2344,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             get(handlers::assistant_nyxagent::history).patch(handlers::assistant_nyxagent::rename),
         )
         .route(
+            "/nyxagent/conversations/{id}/messages/{message_id}/recovery",
+            get(handlers::assistant_nyxagent::recovery),
+        )
+        .route(
             "/nyxagent/conversations/{id}/model",
             patch(handlers::assistant_nyxagent::change_model),
         )
@@ -2476,6 +2587,86 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
     // Routes that BLOCK service account tokens (human-only endpoints)
     let api_v1_human_only = Router::new()
         .route(
+            "/remote-machine-entitlement",
+            get(handlers::remote_machine::entitlement),
+        )
+        .route(
+            "/remote-machine-quotes",
+            post(handlers::remote_machine::quote),
+        )
+        .route(
+            "/remote-machines",
+            get(handlers::remote_machine::list).post(handlers::remote_machine::create),
+        )
+        .route(
+            "/remote-machines/{machine_id}",
+            get(handlers::remote_machine::get).delete(handlers::remote_machine::delete),
+        )
+        .route(
+            "/remote-machines/{machine_id}/events",
+            get(handlers::remote_machine::events),
+        )
+        .route(
+            "/remote-machines/{machine_id}/billing",
+            get(handlers::remote_machine::billing),
+        )
+        .route(
+            "/remote-machines/{machine_id}/usage",
+            get(handlers::remote_machine_usage::get),
+        )
+        .route(
+            "/remote-machines/{machine_id}/jobs",
+            get(handlers::machine_external_execution::jobs),
+        )
+        .route(
+            "/remote-machines/{machine_id}/grants",
+            get(handlers::machine_external_grant::list_machine),
+        )
+        .route(
+            "/remote-machines/{machine_id}/jobs/{job_id}/output",
+            get(handlers::machine_external_execution::output),
+        )
+        .route(
+            "/remote-machines/{machine_id}/jobs/{job_id}/cancel",
+            post(handlers::machine_external_execution::cancel),
+        )
+        .route(
+            "/remote-machines/{machine_id}/confirmations/{id}/decision",
+            post(handlers::machine_external_execution::decide_bound),
+        )
+        .route(
+            "/machines/{node_id}/jobs",
+            get(handlers::machine_external_execution::jobs),
+        )
+        .route(
+            "/machine-confirmations",
+            get(handlers::machine_external_execution::confirmations),
+        )
+        .route(
+            "/machine-confirmations/{id}/decision",
+            post(handlers::machine_external_execution::decide),
+        )
+        .route(
+            "/remote-machines/{machine_id}/billing/runs",
+            get(handlers::remote_machine::billing_runs),
+        )
+        .route(
+            "/remote-machines/{machine_id}/operations",
+            get(handlers::remote_machine::operations),
+        )
+        .route(
+            "/remote-machines/{machine_id}/rekey",
+            post(handlers::remote_machine::rekey),
+        )
+        .route(
+            "/remote-machines/{machine_id}/actions",
+            post(handlers::remote_machine::action),
+        )
+        .route(
+            "/remote-machine-operations/{operation_id}",
+            get(handlers::remote_machine::operation),
+        )
+        .route(
             "/onboarding/setups/{id}/binding",
             post(handlers::platform_setups::attach_binding),
         )
@@ -2619,6 +2810,35 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
                 .delete(handlers::saved_logins::delete),
         )
         .route("/options/{option_set}", get(handlers::options::get_options))
+        .merge(if router_state.is_some() {
+            Router::new()
+                .route(
+                    "/platform-personal-links/review",
+                    post(handlers::platform_personal_bindings::review),
+                )
+                .route(
+                    "/platform-personal-links/approve",
+                    post(handlers::platform_personal_bindings::approve),
+                )
+                .route(
+                    "/platform-personal-links/deny",
+                    post(handlers::platform_personal_bindings::deny),
+                )
+                .route(
+                    "/platform-personal-links/status",
+                    post(handlers::platform_personal_bindings::status),
+                )
+                .route(
+                    "/platform-personal-bindings",
+                    get(handlers::platform_personal_bindings::list),
+                )
+                .route(
+                    "/platform-personal-bindings/{id}/revoke",
+                    post(handlers::platform_personal_bindings::revoke),
+                )
+        } else {
+            Router::new()
+        })
         .route(
             "/channel-bots/telegram-new/claims/preview",
             post(handlers::telegram_new::preview_claim),
@@ -3004,6 +3224,16 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
     let public_mcp_routes = public_mcp_billing_routes!(register_billing_routes, Router::new())
         .layer(DefaultBodyLimit::disable());
     let private = private.merge(mcp_transport_routes).merge(public_mcp_routes);
+    let private = if let Some(state) = router_state.as_ref() {
+        private.layer(axum::Extension(
+            crate::services::platform_manager_transport::compose(
+                state.clone(),
+                crate::handlers::assistant_team::owner_turn_settled_hook(state.clone()),
+            ),
+        ))
+    } else {
+        private
+    };
 
     (
         public_oauth.layer(middleware::from_fn(
@@ -3017,6 +3247,15 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
 
 #[cfg(test)]
 mod org_membership_tests;
+
+#[cfg(test)]
+mod remote_machine_tests;
+
+#[cfg(test)]
+mod remote_machine_flag_tests;
+
+#[cfg(test)]
+mod runtime_profile_tests;
 
 #[cfg(test)]
 mod service_inventory_tests;
@@ -3066,3 +3305,6 @@ mod retirement_tests {
         db.drop().await.unwrap();
     }
 }
+
+#[cfg(test)]
+mod machine_external_runtime_tests;

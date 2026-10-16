@@ -10,6 +10,8 @@ pub struct RefreshToken {
     /// JWT ID (jti) for this refresh token
     pub jti: String,
     pub client_id: String,
+    #[serde(default)]
+    pub protected_consent: Option<crate::models::consent::ProtectedConsentRef>,
     pub user_id: String,
     pub session_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -46,6 +48,7 @@ mod tests {
     #[test]
     fn bson_roundtrip() {
         let token = RefreshToken {
+            protected_consent: None,
             id: uuid::Uuid::new_v4().to_string(),
             jti: uuid::Uuid::new_v4().to_string(),
             client_id: "default".to_string(),

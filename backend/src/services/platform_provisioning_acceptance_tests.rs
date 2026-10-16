@@ -297,6 +297,116 @@ async fn platform_onboarding_connected_and_active_reapproval_preserve_identity_a
 }
 
 #[tokio::test]
+async fn platform_onboarding_specialist_preflight_retries_owner_write_conflict() {
+    use mongodb::event::{EventHandler, command::CommandEvent};
+    use std::{
+        sync::atomic::{AtomicUsize, Ordering},
+        time::Duration,
+    };
+
+    let f = Box::pin(support::distinct_fixture()).await;
+    approve_observed(&f).await;
+    let original = installation(&f).await;
+    telegram::provider_connection(&f.server, &original.channel_bot_id, 200).await;
+    let base = f.server.uri();
+    let service = telegram::service(&f.state, &base);
+    Box::pin(service.complete_pending_creations())
+        .await
+        .unwrap();
+    assert_eq!(native(&f).await.status, Status::Connected);
+    let agents = f
+        .state
+        .db
+        .collection::<crate::models::assistant_agent::AssistantAgent>(
+            crate::models::assistant_agent::COLLECTION_NAME,
+        );
+    let original_agent = agents
+        .find_one(doc! {"_id": &original.agent_id})
+        .await
+        .unwrap()
+        .unwrap();
+    reapprove(&f).await;
+    let fresh = f.claim().await;
+
+    let conflict = Arc::new(Notify::new());
+    let conflicts = Arc::new(AtomicUsize::new(0));
+    let signal = conflict.clone();
+    let observed = conflicts.clone();
+    let handler = EventHandler::callback(move |event| {
+        if let CommandEvent::Failed(event) = event
+            && event.command_name == "update"
+            && event.failure.contains_label("TransientTransactionError")
+            && matches!(
+                event.failure.kind.as_ref(),
+                mongodb::error::ErrorKind::Command(error) if error.code == 112
+            )
+        {
+            observed.fetch_add(1, Ordering::SeqCst);
+            signal.notify_one();
+        }
+    });
+    let mut options =
+        mongodb::options::ClientOptions::parse(std::env::var("NYXID_TEST_DATABASE_URL").unwrap())
+            .await
+            .unwrap();
+    options.command_event_handler = Some(handler);
+    let mut state = f.state.clone();
+    state.db = mongodb::Client::with_options(options)
+        .unwrap()
+        .database(f.state.db.name());
+
+    // Hold the real owner write until the preflight encounters contention.
+    // Release by command observation, not a sleep or a whole-operation retry.
+    let mut blocker = f.state.db.client().start_session().await.unwrap();
+    blocker.start_transaction().await.unwrap();
+    setups::fence_owner(&f.state.db, &f.owner, &mut blocker)
+        .await
+        .unwrap();
+    let (result, ()) = tokio::join!(
+        async {
+            tokio::time::timeout(
+                Duration::from_secs(30),
+                Box::pin(provisioning::execute_step(&state, &fresh)),
+            )
+            .await
+            .expect("provisioning must finish after the competing writer rolls back")
+        },
+        async {
+            let observed = tokio::time::timeout(Duration::from_secs(10), conflict.notified()).await;
+            blocker.abort_transaction().await.unwrap();
+            observed.expect("the real preflight must encounter a transient transaction error");
+        },
+    );
+    result.expect("specialist authority preflight must retry transient owner write conflicts");
+    assert!(conflicts.load(Ordering::SeqCst) > 0);
+    assert_single_resources(&f, &original).await;
+    let ready = setups::get_owned(&f.state.db, &f.owner, &f.setup.id)
+        .await
+        .unwrap();
+    assert_eq!(ready.state, SetupState::ReadyForTest);
+    assert!(!ready.delivery_tested);
+    let current_agent = agents
+        .find_one(doc! {"_id": &original.agent_id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        current_agent.home_conversation_id,
+        original_agent.home_conversation_id
+    );
+    assert_eq!(
+        f.state
+            .db
+            .collection::<Document>(crate::models::assistant_conversation::COLLECTION_NAME)
+            .count_documents(doc! {"agent_id": &original.agent_id, "user_id": &f.owner})
+            .await
+            .unwrap(),
+        1
+    );
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
 async fn platform_onboarding_registered_reapproval_resumes_saved_native_worker_without_new_token() {
     let f = Box::pin(support::distinct_fixture()).await;
     approve_observed(&f).await;

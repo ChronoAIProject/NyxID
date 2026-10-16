@@ -58,6 +58,9 @@ export interface ProfileConfig {
 export interface UserCapabilities {
   /** Admin, or Operator holding Tools Manager. Older backends omit it. */
   readonly manage_tools?: boolean;
+  readonly read_feature_flags?: boolean;
+  readonly create_feature_flags?: boolean;
+  readonly manage_all_feature_flags?: boolean;
   /** Admin, or Operator holding Catalog Manager. Older backends omit it. */
   readonly manage_catalog?: boolean;
   readonly billing_available?: boolean;
@@ -176,7 +179,30 @@ export function canReadAdminUsage(
   return hasAdminRead(user) || user?.capabilities?.read_admin_usage === true;
 }
 
+export function canReadFeatureFlags(
+  user:
+    | Pick<User, "is_admin" | "is_operator" | "role" | "capabilities">
+    | null
+    | undefined,
+): boolean {
+  return hasAdminRead(user) || user?.capabilities?.read_feature_flags === true;
+}
+
+export function canCreateFeatureFlags(
+  user:
+    | Pick<User, "is_admin" | "is_operator" | "role" | "capabilities">
+    | null
+    | undefined,
+): boolean {
+  return (
+    canAdminWrite(user) || user?.capabilities?.create_feature_flags === true
+  );
+}
+
 export interface ApiKey {
+  /** Approval CAS only; normal use may advance this version. */
+  readonly state_version?: number;
+  readonly purpose?: string;
   readonly assistant_conversation_id?: string | null;
   readonly id: string;
   readonly name: string;
@@ -455,6 +481,7 @@ export interface ServiceCapabilities {
 }
 
 export interface ServiceBilling {
+  readonly managed_execution?: ManagedExecutionContract | null;
   readonly byok_pricing?: LanePricingView | null;
   readonly platform_key_pricing?: LanePricingView | null;
   /** Admin opt-in: only platform_billable services charge wallet credits. */
@@ -469,6 +496,17 @@ export interface ServiceBilling {
   readonly resale_billable?: boolean;
   readonly resale_metric?: string;
   readonly lago_resale_metric_code?: string | null;
+}
+
+export interface ManagedExecutionContract {
+  readonly model: string;
+  readonly max_input_tokens: number;
+  readonly max_output_tokens: number;
+  readonly max_request_bytes: number;
+  readonly max_response_bytes: number;
+  readonly tariff_version: string;
+  readonly tariff_source: string;
+  readonly tariff_verified_at: { readonly $date: { readonly $numberLong: string } | string };
 }
 
 export interface ServicePlatformPricing {

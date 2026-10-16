@@ -15,6 +15,7 @@ pub(crate) const OPENID_CONFIGURATION_SCOPES_SUPPORTED: &[&str] = &[
     "roles",
     "groups",
     "offline_access",
+    "machine",
 ];
 pub(crate) const OAUTH_AUTHORIZATION_SERVER_SCOPES_SUPPORTED: &[&str] = &[
     "openid",
@@ -23,6 +24,7 @@ pub(crate) const OAUTH_AUTHORIZATION_SERVER_SCOPES_SUPPORTED: &[&str] = &[
     "roles",
     "groups",
     "offline_access",
+    "machine",
     "proxy",
 ];
 
@@ -126,7 +128,7 @@ pub async fn oauth_protected_resource(State(state): State<AppState>) -> Json<ser
         "authorization_servers": [base],
         // Aligned with DEFAULT_MCP_ALLOWED_SCOPES (NyxID#1222/#1226): clients
         // use this list to decide which scopes to request.
-        "scopes_supported": ["openid", "profile", "email", "roles", "groups", "proxy", "offline_access"],
+        "scopes_supported": ["openid", "profile", "email", "roles", "groups", "proxy", "machine", "offline_access"],
         "bearer_methods_supported": ["header"],
     }))
 }
@@ -364,6 +366,7 @@ mod tests {
                 "roles",
                 "groups",
                 "proxy",
+                "machine",
                 "offline_access"
             ])
         );

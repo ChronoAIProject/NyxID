@@ -39,7 +39,9 @@ async fn result(response: Response, error: bool) -> Value {
     let body: Value = serde_json::from_slice(&bytes).unwrap();
     assert!(body.get("error").is_none(), "{body}");
     assert_eq!(body["result"]["isError"], error, "{body}");
-    serde_json::from_str(body["result"]["content"][0]["text"].as_str().unwrap()).unwrap()
+    serde_json::from_str(body["result"]["content"][0]["text"].as_str().unwrap()).unwrap_or_else(
+        |error| panic!("Expected structured tool result: {error}; envelope: {body}"),
+    )
 }
 
 async fn direct_call(f: &Fixture, auth: &McpAuthContext, name: &str, args: Value) -> Response {
@@ -68,6 +70,75 @@ async fn call(f: &Fixture, auth: &McpAuthContext, name: &str, args: Value) -> Re
         json!({"tool_name": name, "arguments_json": args.to_string()}),
     )
     .await
+}
+
+async fn webhook_policy(f: &Fixture, policy: crate::models::trigger_schedule::ConfirmationPolicy) {
+    let now = bson::DateTime::now();
+    f.state.db.collection::<bson::Document>(crate::models::trigger_run::COLLECTION_NAME)
+        .replace_one(doc! {"_id":"webhook-run"}, doc! {
+            "_id":"webhook-run","trigger_id":uuid::Uuid::new_v4().to_string(),"user_id":&f.owner,
+            "scheduled_at":now,"deadline":now,"outcome":"started","confirmation_policy":bson::to_bson(&policy).unwrap(),
+            "thread_id":&f.row.id,"turn_id":&f.row.active_turn.as_ref().unwrap().turn_id,
+            "fence":"test","lease_until":now,"expires_at":bson::DateTime::from_chrono(chrono::Utc::now()+chrono::Duration::hours(4)),
+        }).upsert(true).await.unwrap();
+    f.state
+        .db
+        .collection::<bson::Document>(crate::models::assistant_conversation::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id":&f.row.id},
+            doc! {"$set":{"active_turn.trigger_run_id":"webhook-run"}},
+        )
+        .await
+        .unwrap();
+}
+
+/// Exercise the real resolved MCP executor; user connections are gated there,
+/// after the operation and exact destination have been resolved.
+#[allow(clippy::too_many_arguments)]
+async fn execute_webhook_connection(
+    state: &AppState,
+    auth: &McpAuthContext,
+    service: &mcp_service::McpToolService,
+    endpoint: &mcp_service::McpToolEndpoint,
+    _prepared: &mcp_service::PreparedProxyCall,
+    _tool: &str,
+    args: &Value,
+    request_id: Option<Value>,
+) -> Result<(), Box<Response>> {
+    let prepared = mcp_service::prepare_proxy_tool_call(
+        service,
+        endpoint,
+        &webhook_execution_arguments(auth, args),
+    )
+    .unwrap()
+    .with_acknowledgement(args["acknowledgement_id"].as_str());
+    let exec = mcp_exec_context(auth);
+    let response = Box::pin(mcp_service::execute_tool_response(
+        &state.http_client,
+        &state.db,
+        &state.encryption_keys,
+        &state.node_ws_manager,
+        &state.billing,
+        &auth.user_id,
+        auth.billing_principal_user_id(),
+        service,
+        endpoint,
+        prepared,
+        &state.jwt_keys,
+        &state.config,
+        &state.connection_expiry_notifier,
+        &state.token_exchange_cache,
+        &state.cloud_response_cache,
+        &exec,
+        crate::services::billing::route_inventory::internal_node_dispatch_permit(),
+    ))
+    .await
+    .expect("resolved webhook execution");
+    if (200..300).contains(&response.status) {
+        Ok(())
+    } else {
+        Err(Box::new(tool_result(request_id, &response.text, true)))
+    }
 }
 
 async fn assert_scoped_thread_attachment_access(f: &Fixture, auth: &McpAuthContext) {
@@ -154,17 +225,6 @@ async fn mounted_chat_service_edits_record_verified_actor_and_separate_request_g
         "https://example.com",
     )
     .await;
-    f.state
-        .db
-        .collection::<mongodb::bson::Document>(
-            crate::models::assistant_conversation::COLLECTION_NAME,
-        )
-        .update_one(
-            doc! {"_id": &f.row.id},
-            doc! {"$set": {"active_turn": mongodb::bson::Bson::Null}},
-        )
-        .await
-        .unwrap();
     let credential = credentials::load_for_conversation(
         &f.state.db,
         &f.state.encryption_keys,
@@ -201,6 +261,31 @@ async fn mounted_chat_service_edits_record_verified_actor_and_separate_request_g
         assert_eq!(response.status(), axum::http::StatusCode::OK);
         assert_eq!(result(response, false).await["is_active"], enabled);
     }
+    // Once the turn ends, the same key cannot make an unrecorded edit.
+    crate::services::assistant_nyxagent::force_stop(
+        &f.state.db,
+        &f.owner,
+        &f.row.id,
+        &f.row.active_turn.as_ref().unwrap().turn_id,
+    )
+    .await
+    .unwrap();
+    let auth = authenticate(&f).await;
+    let refused = direct_call(
+        &f,
+        &auth,
+        "nyxid__set_service_enabled",
+        json!({"service_id": service, "enabled": false}),
+    )
+    .await;
+    let body = axum::body::to_bytes(refused.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let body: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        body["error"]["message"],
+        "Assistant turn is no longer active"
+    );
     let events: Vec<ServiceChangeEvent> = f
         .state
         .db
@@ -940,7 +1025,7 @@ async fn ask_service_consent_allows_its_node_route_without_a_second_grant() {
 async fn chat_tool_calls_are_recorded_as_metadata_only_turn_activity() {
     let f = fixture("mcp_activity").await;
     let auth = authenticate(&f).await;
-    // One entry per tools/call: the effective tool name, never arguments.
+    // One entry per tools/call; compiled native tools establish label provenance.
     call(
         &f,
         &auth,
@@ -1003,26 +1088,33 @@ async fn b4_duplicate_action_fence_through_tools_call() {
         .unwrap();
     let first: Value = serde_json::from_slice(&first).unwrap();
     assert_eq!(first["result"]["isError"], false, "{first}");
-    assert!(
-        crate::services::assistant_nyxagent::force_stop(
-            &f.state.db,
-            &f.owner,
-            &f.row.id,
-            &failed_turn
-        )
-        .await
-        .unwrap()
-    );
+    crate::services::assistant_nyxagent::finish_turn(
+        &f.state.db,
+        &f.row,
+        &f.row.credential_api_key_id,
+        &uuid::Uuid::new_v4().to_string(),
+        &crate::services::assistant_nyxagent::TurnResult {
+            text: String::new(),
+            session_id: None,
+            response_id: None,
+            error: Some(crate::services::assistant_nyxagent::TurnError::new(
+                "idle_timeout",
+            )),
+        },
+    )
+    .await
+    .unwrap();
     // Turn 2 is the owner's Retry of turn 1.
     let retry = crate::services::assistant_nyxagent::begin_turn(
         &f.state.db,
         &f.owner,
         &crate::services::assistant_nyxagent::TurnRequest {
+            acknowledgement_id: None,
             retry_of: Some(failed_turn.clone()),
             attachment_ids: Vec::new(),
             agent_id: None,
             conversation_id: Some(f.row.id.clone()),
-            text: "find the issues".into(),
+            text: "Please manage my account".into(),
             model: None,
             access_mode: None,
         },
@@ -1200,7 +1292,11 @@ async fn chat_tool_images_become_mcp_image_content_and_owner_only_turn_attachmen
         "{note}"
     );
     assert!(
-        note.contains("already displays this image to the user"),
+        note.contains("shows this image to the user under your reply in the NyxID app"),
+        "{note}"
+    );
+    assert!(
+        !note.contains("Delivered") && !note.contains("shown below"),
         "{note}"
     );
     assert!(
@@ -1987,13 +2083,13 @@ async fn guests_never_ask_for_more_access() {
 async fn webhook_calls_require_exact_action_cards_from_http_and_catalog_effects() {
     use crate::models::trigger_schedule::ConfirmationPolicy;
     let f = orchestrator_fixture("webhook_action_cards").await;
-    let service_id = connected(
-        &f.state.db,
-        &f.owner,
-        "webhook-target",
-        "http://127.0.0.1:9",
-    )
-    .await;
+    let server = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::any())
+        .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(json!({"ok":true})))
+        .mount(&server)
+        .await;
+    let service_id = connected(&f.state.db, &f.owner, "webhook-target", &server.uri()).await;
+    webhook_policy(&f, ConfirmationPolicy::Changes).await;
     let mut auth = authenticate(&f).await;
     auth.chat.as_mut().unwrap().confirmation_policy = Some(ConfirmationPolicy::Changes);
     f.state
@@ -2018,7 +2114,7 @@ async fn webhook_calls_require_exact_action_cards_from_http_and_catalog_effects(
     let tool = "webhook-target__proxy";
     let args = json!({"method": "PATCH", "path": "/settings", "body": {"value": true}});
     let prepared = mcp_service::prepare_proxy_tool_call(service, &endpoint, &args).unwrap();
-    let response = webhook_service_gate(
+    let response = execute_webhook_connection(
         &f.state,
         &auth,
         service,
@@ -2029,8 +2125,8 @@ async fn webhook_calls_require_exact_action_cards_from_http_and_catalog_effects(
         Some(json!(1)),
     )
     .await
-    .unwrap();
-    let card = result(response, true).await;
+    .unwrap_err();
+    let card = result(*response, true).await;
     assert_eq!(card["error"], "acknowledgement_required");
     let id = card["acknowledgement_id"].as_str().unwrap();
     let stored = acks::history(&f.state.db, &f.owner, &f.row.id)
@@ -2041,7 +2137,7 @@ async fn webhook_calls_require_exact_action_cards_from_http_and_catalog_effects(
     let get = json!({"method": "GET", "path": "/settings"});
     let prepared_get = mcp_service::prepare_proxy_tool_call(service, &endpoint, &get).unwrap();
     assert!(
-        webhook_service_gate(
+        execute_webhook_connection(
             &f.state,
             &auth,
             service,
@@ -2052,7 +2148,7 @@ async fn webhook_calls_require_exact_action_cards_from_http_and_catalog_effects(
             None
         )
         .await
-        .is_none()
+        .is_ok()
     );
     acks::decide(&f.state.db, &f.owner, &f.row.id, id, true)
         .await
@@ -2063,26 +2159,27 @@ async fn webhook_calls_require_exact_action_cards_from_http_and_catalog_effects(
     let schema = webhook_tool_schema(&auth, &json!({"type": "object", "properties": {}}));
     assert_eq!(schema["properties"]["acknowledgement_id"]["type"], "string");
     assert!(
-        webhook_service_gate(
+        execute_webhook_connection(
             &f.state, &auth, service, &endpoint, &prepared, tool, &approved, None
         )
         .await
-        .is_none()
+        .is_ok()
     );
     assert!(
-        webhook_service_gate(
+        execute_webhook_connection(
             &f.state, &auth, service, &endpoint, &prepared, tool, &approved, None
         )
         .await
-        .is_some()
+        .is_err()
     );
-    auth.chat.as_mut().unwrap().confirmation_policy = Some(ConfirmationPolicy::Destructive);
+    webhook_policy(&f, ConfirmationPolicy::Destructive).await;
+    auth = authenticate(&f).await;
     assert!(
-        webhook_service_gate(
+        execute_webhook_connection(
             &f.state, &auth, service, &endpoint, &prepared, tool, &args, None
         )
         .await
-        .is_none()
+        .is_ok()
     );
     service
         .durable_endpoint_metadata
@@ -2090,16 +2187,16 @@ async fn webhook_calls_require_exact_action_cards_from_http_and_catalog_effects(
         .or_default()
         .destructive = true;
     assert!(
-        webhook_service_gate(
+        execute_webhook_connection(
             &f.state, &auth, service, &endpoint, &prepared, tool, &args, None
         )
         .await
-        .is_some()
+        .is_err()
     );
 }
 
 #[tokio::test]
-async fn webhook_native_changes_require_owner_cards_even_with_skip_destructive() {
+async fn webhook_native_changes_keep_owner_cards_in_auto() {
     use crate::models::trigger_schedule::ConfirmationPolicy;
     let f = orchestrator_fixture("webhook_native_cards").await;
     let mut auth = authenticate(&f).await;
@@ -2109,7 +2206,7 @@ async fn webhook_native_changes_require_owner_cards_even_with_skip_destructive()
         &f.state.db,
         &f.owner,
         crate::services::assistant_settings_service::Update {
-            skip_destructive_confirmation: Some(true),
+            access_mode: Some(crate::models::assistant_settings::AccessMode::Nyxmode),
             ..Default::default()
         },
     )
@@ -2264,9 +2361,12 @@ async fn assistant_operation_scopes_block_direct_universal_raw_and_guest_bypasse
         .await["ok"],
         true
     );
-    let mut webhook = auth.clone();
-    webhook.chat.as_mut().unwrap().confirmation_policy =
-        Some(crate::models::trigger_schedule::ConfirmationPolicy::Changes);
+    webhook_policy(
+        &f,
+        crate::models::trigger_schedule::ConfirmationPolicy::Changes,
+    )
+    .await;
+    let webhook = authenticate(&f).await;
     let card = result(
         call(
             &f,
@@ -2435,7 +2535,7 @@ async fn assistant_operation_scopes_block_direct_universal_raw_and_guest_bypasse
 }
 
 #[tokio::test]
-async fn assistant_operation_scopes_require_owner_card_even_when_skip_destructive_is_enabled() {
+async fn assistant_operation_scopes_auto_requires_exact_one_use_owner_card() {
     use crate::models::{agent_operation_scope::OperationSelection, assistant_agent::AgentGrants};
     use crate::services::{
         agent_operation_scope_service as scopes, assistant_team_service as team,
@@ -2475,7 +2575,7 @@ async fn assistant_operation_scopes_require_owner_card_even_when_skip_destructiv
         &f.state.db,
         &f.owner,
         crate::services::assistant_settings_service::Update {
-            skip_destructive_confirmation: Some(true),
+            access_mode: Some(crate::models::assistant_settings::AccessMode::Nyxmode),
             ..Default::default()
         },
     )
@@ -3041,7 +3141,7 @@ async fn assistant_operation_scopes_rollout_gate_blocks_configuration_and_pendin
 }
 
 #[tokio::test]
-async fn specialist_machine_update_dispatch_preserves_one_owner_card() {
+async fn specialist_machine_update_dispatch_auto_preserves_one_owner_card() {
     use crate::services::assistant_team_service as team;
     for universal in [false, true] {
         let f = fixture("mcp_specialist_update_card").await;
@@ -3063,7 +3163,7 @@ async fn specialist_machine_update_dispatch_preserves_one_owner_card() {
             &f.state.db,
             &f.owner,
             crate::services::assistant_settings_service::Update {
-                skip_destructive_confirmation: Some(true),
+                access_mode: Some(crate::models::assistant_settings::AccessMode::Nyxmode),
                 ..Default::default()
             },
         )
@@ -3166,7 +3266,7 @@ async fn assistant_skills_card_is_one_use_and_cannot_be_bypassed() {
         &f.state.db,
         &f.owner,
         crate::services::assistant_settings_service::Update {
-            skip_destructive_confirmation: Some(true),
+            access_mode: Some(crate::models::assistant_settings::AccessMode::Nyxmode),
             ..Default::default()
         },
     )
@@ -4188,29 +4288,32 @@ async fn set_access_mode(f: &Fixture, mode: crate::models::assistant_settings::A
 async fn owner_access_mode_gates_service_operations_by_effect() {
     use crate::models::assistant_settings::AccessMode;
     let f = orchestrator_fixture("owner_mode_service_gate").await;
-    let service_id = connected(&f.state.db, &f.owner, "mode-target", "http://127.0.0.1:9").await;
+    let server = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::any())
+        .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(json!({"ok":true})))
+        .mount(&server)
+        .await;
+    connected(&f.state.db, &f.owner, "mode-target", &server.uri()).await;
     let auth = authenticate(&f).await;
     assert!(auth.chat.as_ref().unwrap().confirmation_policy.is_none());
-    let mut services = load_all_services_for_meta_tools(&f.state, &auth)
-        .await
-        .unwrap();
-    let service = services
-        .iter_mut()
-        .find(|candidate| candidate.service_id == service_id)
-        .unwrap();
-    let endpoint = service.endpoints.remove(0);
-    let (service, endpoint) = (&*service, &endpoint);
-    let tool = "mode-target__proxy";
-    let gate = |method: &'static str| {
+    let tool = "mode-target__request";
+    let gate = |method: &'static str, meta: bool| {
         let args = json!({"method": method, "path": "/items/1"});
-        let prepared = mcp_service::prepare_proxy_tool_call(service, endpoint, &args).unwrap();
         let (f, auth) = (&f, &auth);
         async move {
-            webhook_service_gate(
-                &f.state, auth, service, endpoint, &prepared, tool, &args, None,
-            )
-            .await
-            .is_some()
+            let response = if meta {
+                call(f, auth, tool, args).await
+            } else {
+                direct_call(f, auth, tool, args).await
+            };
+            let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+                .await
+                .unwrap();
+            let body: Value = serde_json::from_slice(&bytes).unwrap();
+            let text = body["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap_or_default();
+            text.contains("acknowledgement_required")
         }
     };
     let matrix = [
@@ -4221,7 +4324,13 @@ async fn owner_access_mode_gates_service_operations_by_effect() {
     for (mode, expected) in matrix {
         set_access_mode(&f, mode).await;
         for (method, asks) in ["GET", "POST", "PATCH", "DELETE"].into_iter().zip(expected) {
-            assert_eq!(gate(method).await, asks, "{mode:?} {method}");
+            for meta in [false, true] {
+                assert_eq!(
+                    gate(method, meta).await,
+                    asks,
+                    "{mode:?} {method} meta={meta}"
+                );
+            }
         }
     }
     let rows = acks::history(&f.state.db, &f.owner, &f.row.id)
@@ -4252,13 +4361,41 @@ async fn owner_access_mode_gates_service_operations_by_effect() {
 }
 
 /// Meta tools are classified by name at dispatch: SSH commands are
-/// destructive (NyxMode asks), while Autopilot proceeds to the tool itself.
+/// destructive (Auto asks), while Full access proceeds to the tool itself.
 #[tokio::test]
 async fn owner_access_mode_gates_meta_tools_at_dispatch() {
     use crate::models::assistant_settings::AccessMode;
     let f = orchestrator_fixture("owner_mode_meta_gate").await;
     let auth = authenticate(&f).await;
-    let args = json!({"service": "no-such-host", "command": "uptime"});
+    let mut catalog = crate::test_utils::test_auto_connected_catalog_service();
+    catalog.service_type = "ssh".into();
+    catalog.ssh_config = Some(
+        crate::services::ssh_service::build_ssh_config(
+            &f.state.encryption_keys,
+            &catalog.id,
+            None,
+            crate::services::ssh_service::SshConfigInput {
+                host: "127.0.0.1",
+                port: 22,
+                certificate_auth_enabled: true,
+                ssh_auth_mode: Some(crate::models::ssh_auth_mode::SshAuthMode::Cert),
+                certificate_ttl_minutes: 30,
+                allowed_principals: &["ubuntu".into()],
+            },
+        )
+        .await
+        .unwrap(),
+    );
+    f.state
+        .db
+        .collection::<crate::models::downstream_service::DownstreamService>("downstream_services")
+        .insert_one(&catalog)
+        .await
+        .unwrap();
+    let connection = connected(&f.state.db, &f.owner, "mode-ssh", "ssh://127.0.0.1").await;
+    f.state.db.collection::<bson::Document>("user_services").update_one(doc! {"_id":&connection},
+        doc! {"$set":{"service_type":"ssh","catalog_service_id":&catalog.id,"ssh_auth_mode":"cert"}}).await.unwrap();
+    let args = json!({"service": connection, "command": "uptime"});
     let text = |response: Response| async move {
         let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
             .await
@@ -4278,13 +4415,13 @@ async fn owner_access_mode_gates_meta_tools_at_dispatch() {
         .unwrap()
         .pop()
         .unwrap();
-    assert_eq!(row.tool_name.as_deref(), Some("nyx__ssh_exec"));
+    assert_eq!(row.tool_name.as_deref(), Some("nyxid.service_execution"));
     assert_eq!(row.confirmation.as_ref().unwrap().risk, "destructive");
     assert!(
         !row.summary.contains("uptime"),
         "commands never enter a card"
     );
-    // Discovery never asks, even in Ask Every Time.
+    // Discovery never asks, even in Ask every time.
     set_access_mode(&f, AccessMode::AskEveryTime).await;
     let listed =
         text(direct_call(&f, &auth, "nyx__list_connected_services", json!({})).await).await;
@@ -4429,5 +4566,169 @@ async fn specialist_conversation_key_cannot_call_assistant_management_routes() {
             .as_array()
             .is_some_and(|tools| !tools.is_empty())
     );
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn full_access_service_approval_executes_with_receipt_while_auto_waits() {
+    use crate::models::{
+        assistant_settings::AccessMode,
+        service_approval_config::{COLLECTION_NAME as CONFIGS, ServiceApprovalConfig},
+    };
+    for (mode, asks) in [(AccessMode::Autopilot, false), (AccessMode::Nyxmode, true)] {
+        let f = orchestrator_fixture("mode_service_approval").await;
+        set_access_mode(&f, mode).await;
+        let hits = Arc::new(AtomicUsize::new(0));
+        let hit = hits.clone();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new().fallback(any(move || {
+                    hit.fetch_add(1, Ordering::SeqCst);
+                    async { Json(json!({"ok":true})) }
+                })),
+            )
+            .await
+            .unwrap();
+        });
+        let service = connected(&f.state.db, &f.owner, "mode-approval", &address).await;
+        let now = chrono::Utc::now();
+        f.state
+            .db
+            .collection::<ServiceApprovalConfig>(CONFIGS)
+            .insert_one(ServiceApprovalConfig {
+                id: uuid::Uuid::new_v4().to_string(),
+                user_id: f.owner.clone(),
+                service_id: service.clone(),
+                service_name: "Mode approval".into(),
+                approval_required: true,
+                approval_mode: Default::default(),
+                rules: vec![],
+                default_effect: None,
+                created_at: now,
+                updated_at: now,
+            })
+            .await
+            .unwrap();
+        let auth = authenticate(&f).await;
+        let args = json!({"method":"GET","path":"/work"});
+        if asks {
+            let future = call(&f, &auth, "mode-approval__request", args);
+            tokio::pin!(future);
+            tokio::time::timeout(std::time::Duration::from_secs(10),async {
+                loop {
+                    tokio::select! { value=&mut future => panic!("Approval was not awaited: {}",value.status()), _=tokio::time::sleep(std::time::Duration::from_millis(25))=>{} }
+                    if f.state.db.collection::<mongodb::bson::Document>(crate::models::approval_request::COLLECTION_NAME).count_documents(doc! {"service_id":&service}).await.unwrap()==1 {break;}
+                }
+            }).await.unwrap();
+            assert_eq!(hits.load(Ordering::SeqCst), 0);
+            assert!(
+                acks::history(&f.state.db, &f.owner, &f.row.id)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+        } else {
+            let value = result(call(&f, &auth, "mode-approval__request", args).await, false).await;
+            assert_eq!(value["ok"], true);
+            assert_eq!(hits.load(Ordering::SeqCst), 1);
+            assert_eq!(
+                f.state
+                    .db
+                    .collection::<mongodb::bson::Document>(
+                        crate::models::approval_request::COLLECTION_NAME
+                    )
+                    .count_documents(doc! {"service_id":&service})
+                    .await
+                    .unwrap(),
+                0
+            );
+            let rows = acks::history(&f.state.db, &f.owner, &f.row.id)
+                .await
+                .unwrap();
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].status, "allowed");
+            assert_eq!(rows[0].confirmation.as_ref().unwrap().reason, "approval");
+            assert_eq!(rows[0].summary, "mcp:GET /work on GitHub");
+            let value = result(
+                call(
+                    &f,
+                    &auth,
+                    "mode-approval__request",
+                    json!({"method":"DELETE","path":"/remove"}),
+                )
+                .await,
+                false,
+            )
+            .await;
+            assert_eq!(value["ok"], true);
+            assert_eq!(hits.load(Ordering::SeqCst), 2);
+            let rows = acks::history(&f.state.db, &f.owner, &f.row.id)
+                .await
+                .unwrap();
+            assert_eq!(rows.len(), 2, "one receipt for each successful operation");
+            let destructive = rows.iter().find(|r| r.summary.contains("/remove")).unwrap();
+            assert_eq!(
+                destructive.confirmation.as_ref().unwrap().risk,
+                "destructive"
+            );
+            assert_eq!(
+                destructive.confirmation.as_ref().unwrap().reason,
+                "approval"
+            );
+            assert!(rows.iter().all(|r| r.status == "allowed"));
+        }
+        server.abort();
+        f.state.db.drop().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn missing_access_mcp_service_and_connect_results_have_absolute_instruction_links() {
+    let f = crate::services::assistant_authority_tests::direct_fixture("mcp_missing_access_links")
+        .await;
+    let service_id = connected(&f.state.db, &f.owner, "github", "https://api.github.com").await;
+    let auth = authenticate(&f).await;
+    let services = load_all_services_for_meta_tools(&f.state, &auth)
+        .await
+        .unwrap();
+    let service = services
+        .iter()
+        .find(|service| service.service_id == service_id)
+        .unwrap();
+    let service = result(
+        chat_service_gate(&f.state, &auth, service, None)
+            .await
+            .unwrap(),
+        true,
+    )
+    .await;
+    let connect = result(
+        handle_meta_connect(
+            &f.state,
+            &auth,
+            None,
+            &json!({"service_id": service_id}),
+            None,
+            false,
+        )
+        .await,
+        true,
+    )
+    .await;
+    for value in [service, connect] {
+        assert_eq!(value["error"], "missing_access");
+        let instructions = value["instructions"].as_str().unwrap();
+        assert!(
+            instructions.contains(&format!(
+                "({}/assistant?",
+                f.state.config.frontend_url.trim_end_matches('/')
+            )),
+            "{instructions}"
+        );
+        assert!(!instructions.contains("(/assistant?"));
+    }
     f.state.db.drop().await.unwrap();
 }

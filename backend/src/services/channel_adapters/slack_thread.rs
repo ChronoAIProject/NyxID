@@ -43,7 +43,13 @@ impl SlackAdapter {
         // Both text and external file completion already preserve thread_ts.
         self.send_reply(http, credentials, &facts.chat_id, &reply)
             .await
-            .map_err(|_| threads::unavailable())
+            .map_err(|error| {
+                if reply.attachments.is_empty() {
+                    threads::unavailable()
+                } else {
+                    error
+                }
+            })
     }
 
     pub(super) async fn history_in_thread(

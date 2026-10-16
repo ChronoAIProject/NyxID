@@ -33,6 +33,15 @@ pub struct Consent {
     pub expires_at: Option<DateTime<Utc>>,
 }
 
+/// Protected, server-issued consent identity carried by OAuth codes and tokens.
+/// Missing legacy references never acquire Machine authority on refresh.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProtectedConsentRef {
+    pub consent_id: String,
+    pub consent_revision: String,
+}
+
 /// Explicit opt-in; omission retains the existing replacement/review behavior.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

@@ -1,3 +1,4 @@
+import { platformThreadSchema, platformTurnOriginSchema } from "./platform-personal";
 import { DEFAULT_SCHEDULE_MINIMUM_MINUTES } from "@/lib/automation-limits";
 import { z } from "zod";
 import { machineReceiptSchema } from "./machine-activity";
@@ -14,6 +15,7 @@ export const nyxAgentTurnActivitySchema = z.object({
   status: z.enum(["running", "completed", "error"]),
   started_at: z.string(),
   ended_at: z.string().nullable().default(null),
+  failure: z.object({ kind: z.enum(["service_status", "tool_error", "refused", "internal"]), status: z.number().int().nullish().transform((value) => value ?? undefined).optional() }).nullish(),
 });
 export type NyxAgentTurnActivity = z.infer<typeof nyxAgentTurnActivitySchema>;
 
@@ -77,6 +79,7 @@ export type NyxAgentChannelOrigin = z.infer<typeof nyxAgentChannelOriginSchema>;
 export const nyxAgentConversationSchema = z.object({
   id: conversationId,
   title: z.string(),
+  platform_thread: platformThreadSchema.nullish(),
   title_source: z.enum(["provisional", "generated", "user"]).optional(),
   model: z.string(),
   created_at: z.string(),
@@ -85,11 +88,18 @@ export const nyxAgentConversationSchema = z.object({
   pending_acknowledgements: z.number().int().nonnegative().default(0),
   active_turn: z
     .object({
+      platform_origin: platformTurnOriginSchema.nullish(),
       turn_id: z.string(),
       response_id: z.string().nullish(),
+      waiting_for_capacity: z.boolean().optional(),
+      capacity_wait_note_origin: z.string().nullish(),
+      engine_request_started_at: z.string().nullish(),
+      capacity_wait_started_at: z.string().nullish(),
+      capacity_wait_deadline: z.string().nullish(),
       steering_allowed: z.boolean().optional(),
       stop_requested: z.boolean().optional(),
       continuations: z.number().int().nonnegative().optional(),
+      activity_total: z.number().int().nonnegative().nullish().transform((value) => value ?? undefined).optional(),
       started_at: z.string(),
       activities: z.array(nyxAgentTurnActivitySchema).default([]),
       attachments: z.array(nyxAgentAttachmentSchema).default([]),
@@ -121,9 +131,19 @@ export type NyxAgentSteering = z.infer<typeof nyxAgentSteeringSchema>;
 export const nyxAgentCapabilitiesSchema = z.object({
   steer: z.object({ max_chars: z.number().int().positive(), max_per_turn: z.number().int().positive() }).nullable(),
 });
+export const nyxAgentRecoverySchema = z.object({
+  status: z.enum(["available", "review"]),
+  reason: z.string(),
+  text: z.string().nullable(),
+  attachments: z.array(z.string()),
+});
+export type NyxAgentRecovery = z.infer<typeof nyxAgentRecoverySchema>;
 export const nyxAgentMessageSchema = z.object({
+  platform_origin: platformTurnOriginSchema.nullish(),
+  recovery: nyxAgentRecoverySchema.nullable().optional(),
   feedback: z.object({ vote: z.enum(["up", "down"]), comment: z.string().nullish(), updated_at: z.string().optional() }).nullish(),
   steering: nyxAgentSteeringSchema.nullish(),
+  continuation_of: z.string().nullish(),
   id: z.string(),
   seq: z.number().int().positive(),
   turn_id: z.string(),
@@ -132,7 +152,10 @@ export const nyxAgentMessageSchema = z.object({
   status: z.enum(["completed", "failed"]),
   error_code: z.string().nullable(),
   upstream_error_code: z.string().nullable().optional(),
+  turn_metadata: z.object({ attempts: z.number().int().nonnegative().nullish(), capacity_wait_ms: z.number().nonnegative().nullish() }).nullish(),
   error_detail: z.object({
+    attempts: z.number().int().nonnegative().nullish(),
+    capacity_wait_ms: z.number().nonnegative().nullish(),
     stage: z.string(),
     http_status: z.number().int().nullable(),
     upstream_request_id: z.string().nullable(),
@@ -144,6 +167,7 @@ export const nyxAgentMessageSchema = z.object({
   created_at: z.string(),
   activities: z.array(nyxAgentTurnActivitySchema).default([]),
   attachments: z.array(nyxAgentAttachmentSchema).default([]),
+  activity_total: z.number().int().nonnegative().nullish().transform((value) => value ?? undefined).optional(),
   /** A user message written in a chat app: its platform. */
   via: z.string().nullish(),
   execution_pending: z.boolean().optional(),
@@ -156,7 +180,7 @@ export type NyxAgentAccessMode = z.infer<typeof nyxAgentAccessModeSchema>;
 export const nyxAgentActionConfirmationSchema = z.object({
   risk: z.enum(["read", "change", "sensitive", "destructive"]),
   access_mode: nyxAgentAccessModeSchema.nullish(),
-  reason: z.enum(["access_mode", "webhook", "policy"]),
+  reason: z.enum(["access_mode", "webhook", "policy", "approval"]).catch("access_mode"),
 });
 export type NyxAgentActionConfirmation = z.infer<typeof nyxAgentActionConfirmationSchema>;
 
@@ -175,12 +199,13 @@ export const nyxAgentAcknowledgementSchema = z.object({
   continuation_receipt_id: z.string().uuid().nullish(),
   trigger_run_id: z.string().nullable().optional(),
   id: z.string().uuid(),
-  kind: z.enum(["service", "account", "action", "operations", "skills"]),
+  kind: z.enum(["service", "account", "action", "operations", "skills", "machine", "saved_login"]),
   status: z.enum(["pending", "allowed", "denied", "expired", "used"]),
   summary: z.string(),
+  link: z.string().nullish(),
   /** `orchestrator`: a specialist's request that NyxBot decides (the user may too). */
   decider: z.enum(["user", "orchestrator"]).default("user"),
-  decided_by: z.enum(["user", "orchestrator"]).nullable().default(null),
+  decided_by: z.string().nullable().default(null),
   reason: z.string().nullable().default(null),
   confirmation: nyxAgentActionConfirmationSchema.nullish(),
   service_slug: z.string().nullable(),
@@ -239,11 +264,17 @@ export const nyxAgentEventSchema = z.discriminatedUnion("event", [
     conversation_id: conversationId,
     turn_id: z.string(),
     status: z.enum(["running", "waiting"]),
+    waiting_for_capacity: z.boolean().optional(),
+    engine_accepted: z.boolean().optional(),
+    capacity_wait_note_origin: z.string().nullish(),
+    engine_request_started_at: z.string().nullish(),
+    capacity_wait_started_at: z.string().nullish(),
+    capacity_wait_deadline: z.string().nullish(),
   }),
   base.extend({ event: z.literal("turn.continuing"), turn_id: z.string(), continuation: z.number().int().positive() }),
   base.extend({
     event: z.literal("turn.notice"),
-    code: z.enum(["context_reset", "image_input_unavailable"]),
+    code: z.enum(["context_reset", "image_input_unavailable", "retrying"]),
     message: z.string(),
   }),
   base.extend({
@@ -265,7 +296,13 @@ export const nyxAgentEventSchema = z.discriminatedUnion("event", [
     event: z.literal("turn.completed"),
     turn_id: z.string(),
     status: z.enum(["completed", "failed", "cancelled"]),
-    error: z.object({ code: z.string(), message: z.string() }).nullable(),
+    turn_metadata: z.object({ attempts: z.number().int().nonnegative().nullish(), capacity_wait_ms: z.number().nonnegative().nullish() }).nullish(),
+    error: z.object({
+      attempts: z.number().int().nonnegative().nullish(), capacity_wait_ms: z.number().nonnegative().nullish(),
+      code: z.string(), message: z.string(), upstream_error_code: z.string().nullish(),
+      stage: z.string().optional(), http_status: z.number().nullish(),
+      upstream_request_id: z.string().nullish(), response_id: z.string().nullish(),
+    }).nullable(),
   }),
 ]);
 export type NyxAgentConversation = z.infer<typeof nyxAgentConversationSchema>;

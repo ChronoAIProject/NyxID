@@ -1,3 +1,4 @@
+vi.mock("./composer-editor", () => import("./composer-editor.test-support"));
 import {
   act,
   fireEvent,
@@ -356,13 +357,13 @@ describe("Assistant uploads composer", () => {
     const textbox = screen.getByRole("textbox");
     const wall = Array.from({ length: 8 }, (_, line) => `line ${String(line)}`).join("\n");
     fireEvent.paste(textbox, { clipboardData: { files: [], items: [], getData: () => wall } });
-    expect(textbox).toHaveValue("@pasted-text-1 ");
+    expect(textbox).toHaveValue("@text-1 ");
     await screen.findByText("Ready");
     expect(vi.mocked(uploadFile).mock.calls[0]?.[1]).toMatchObject({ name: "pasted-text-1.txt", type: "text/plain" });
     // A short paste stays ordinary text.
     fireEvent.paste(textbox, { clipboardData: { files: [], items: [], getData: () => "short" } });
     expect(uploadFile).toHaveBeenCalledTimes(1);
-    fireEvent.change(textbox, { target: { value: "Summarize @pasted-text-1 please" } });
+    fireEvent.change(textbox, { target: { value: "Summarize @text-1 please" } });
     fireEvent.click(screen.getByRole("button", { name: "Send message" }));
     await waitFor(() =>
       expect(base.onSend).toHaveBeenCalledWith('Summarize pasted text "pasted-text-1.txt" please', expect.objectContaining({
@@ -380,7 +381,7 @@ describe("Assistant uploads composer", () => {
     const wall = Array.from({ length: 8 }, (_, line) => `line ${String(line)}`).join("\n");
     fireEvent.paste(screen.getByRole("textbox"), { clipboardData: { files: [], items: [], getData: () => wall } });
     await screen.findByText("Ready");
-    fireEvent.change(screen.getByRole("textbox"), { target: { value: "Summarize @pasted-text-1" } });
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "Summarize @text-1" } });
     unmount();
     render(<UploadComposer {...props} scope={{ kind: "conversations", id: "one" }} />);
     expect(screen.getByRole("textbox")).toHaveValue(`Summarize ${wall}`);
@@ -393,7 +394,7 @@ describe("Assistant uploads composer", () => {
     render(<UploadComposer {...base} scope={{ kind: "conversations", id: "one" }} />);
     choose(new File(["png"], "chart.png", { type: "image/png" }));
     await screen.findByText("Ready");
-    expect(screen.getByText("@image-1")).toBeInTheDocument();
+    expect(screen.getByTitle("chart.png · Type @image-1 to refer to this file")).toBeInTheDocument();
     const textbox = screen.getByRole<HTMLTextAreaElement>("textbox");
     fireEvent.change(textbox, { target: { value: "see @im" } });
     textbox.setSelectionRange(7, 7);

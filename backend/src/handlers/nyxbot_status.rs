@@ -31,6 +31,7 @@ const FIRST_LOOKBACK_HOURS: i64 = 1;
 /// Admission records outlive this, so older accepted messages are not judged.
 const JUDGE_WINDOW_HOURS: i64 = 12;
 
+// Preserve unknown labels verbatim here, including the generic "chat app".
 fn platform_name(platform: &str) -> &str {
     match platform {
         "telegram" | "telegram-new" => "Telegram",
@@ -672,9 +673,10 @@ async fn notify_failing(
         state,
         &row.user_id,
         &target,
-        vec![crate::services::assistant_team_service::event(
+        vec![crate::services::assistant_team_service::bound_event(
             "channel_delivery_failing",
             text,
+            None,
             None,
         )],
     )

@@ -94,7 +94,7 @@ it("raises the rebuilt package's card from an older card", async () => {
     return respond(200, { ...preview, state: "changed", actions: rebuilt ? [] : ["show_updated_draft"] });
   });
   show();
-  expect(await screen.findByText("This confirmation no longer matches the draft.")).toBeVisible();
+  expect(await screen.findByText(/This confirmation no longer matches the draft/)).toBeVisible();
   expect(screen.getByText(/rebuilt package for this draft is waiting for its review card/)).toBeVisible();
   fireEvent.click(screen.getByRole("button", { name: "Show updated draft" }));
   await waitFor(() => expect(posted(`${proposalPath}/reprepare`)).toBeDefined());

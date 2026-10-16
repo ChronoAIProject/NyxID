@@ -97,7 +97,14 @@ async fn call(
     }
     let id = watch.operation_id.as_deref().ok_or_else(denied)?;
     let args = serde_json::json!({watch.contract.id_parameter.clone():id});
-    let prepared = mcp_service::prepare_proxy_tool_call(service, endpoint, &args)?;
+    let prepared = mcp_service::prepare_proxy_tool_call(service, endpoint, &args)?
+        .with_async_continuation(
+            crate::services::assistant_service_execution::AsyncContinuation::new(
+                watch,
+                endpoint,
+                state.node_ws_manager.clone(),
+            )?,
+        );
     prepared.authorize_agent_operations(&auth.assistant_operation_scopes, service, endpoint)?;
     authorize_mcp_tool_operation(
         state,
@@ -162,7 +169,7 @@ async fn step(state: &AppState, w: &AsyncServiceOperation) -> crate::errors::App
         {
             let _ = tokio::time::timeout(Duration::from_secs(5), call(state, w, name)).await;
         }
-        return watches::cancelled(&state.db, w).await;
+        return watches::cancelled(&state.db, w, &state.config.frontend_url).await;
     }
     if chrono::Utc::now() >= w.deadline {
         return watches::ready(&state.db, w, None, "timeout", None).await;

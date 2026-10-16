@@ -18,12 +18,16 @@ pub mod assistant_action_receipts;
 pub mod assistant_agent_learning;
 pub mod assistant_agent_learning_review;
 pub mod assistant_direct;
+pub mod assistant_engine_policy;
+pub mod assistant_engine_worker;
 pub mod assistant_feedback_service;
 mod assistant_learning_publication;
 pub mod assistant_links;
+pub mod assistant_model_observer;
 pub mod assistant_readiness_service;
 pub mod assistant_service;
 pub mod assistant_skill_authoring;
+pub mod assistant_turn_observability;
 pub mod assistant_wire_log_service;
 pub mod audit_chain_service;
 pub mod audit_service;
@@ -47,6 +51,7 @@ pub mod channel_admission_service;
 pub mod channel_billing_service;
 pub mod channel_bot_health;
 pub mod channel_bot_service;
+pub mod channel_bot_turn_service;
 pub mod channel_connect_link_service;
 pub mod channel_connection_webhook_service;
 pub mod channel_credentials;
@@ -55,12 +60,16 @@ pub mod channel_event_service;
 pub mod channel_inbound_service;
 pub mod channel_managed;
 pub mod channel_media_service;
+pub mod channel_native_mentions;
 pub mod channel_platform;
 pub mod channel_poll_service;
 pub mod channel_registration;
 pub mod channel_relay_service;
+pub mod channel_reply_delivery;
+pub mod channel_reply_plan;
 pub mod channel_routing_service;
 pub mod channel_send_service;
+pub mod channel_text;
 pub mod channel_thread_follow_service;
 pub mod channel_thread_service;
 pub mod channel_verification_service;
@@ -105,6 +114,8 @@ pub mod llm_usage_service;
 pub mod login_approval_service;
 pub mod login_client_context;
 pub mod login_code_service;
+pub mod machine_external_source_service;
+pub mod managed_execution_service;
 pub mod mcp_approval;
 pub mod mcp_service;
 pub mod mfa_service;
@@ -151,7 +162,24 @@ pub mod par_service;
 pub(crate) mod platform_binding_service;
 pub(crate) mod platform_bot_authority;
 pub(crate) mod platform_bot_config_service;
+pub mod platform_bot_runtime_control_service;
 pub mod platform_credential_service;
+pub mod platform_link_intent_service;
+#[allow(dead_code)]
+pub mod platform_manager_command_service;
+pub(crate) mod platform_manager_contract;
+pub mod platform_manager_dispatch_service;
+pub mod platform_manager_ingress_service;
+pub mod platform_personal_binding_service;
+pub mod platform_personal_owner_lifecycle;
+pub mod platform_personal_turn_service;
+pub mod platform_public_agent_service;
+pub mod platform_public_budget_service;
+pub mod platform_public_credential_service;
+pub mod platform_public_execution;
+pub mod platform_public_policy;
+pub mod platform_public_proxy_service;
+pub mod platform_public_tools;
 pub mod platform_settings_service;
 pub(crate) mod platform_setup_service;
 pub mod pool_failover;
@@ -159,6 +187,7 @@ pub mod provider_service;
 pub mod provider_token_exchange_service;
 pub mod proxy_authorization;
 pub mod proxy_discovery_service;
+pub mod proxy_http_response;
 pub mod proxy_service;
 pub mod push_service;
 pub mod rbac_helpers;
@@ -186,6 +215,7 @@ pub mod telegram_new_worker;
 pub mod telegram_poller;
 pub mod telegram_service;
 pub mod telemetry_erasure_service;
+pub(crate) mod telnyx_platform_service;
 pub mod token_exchange_service;
 pub mod token_service;
 pub mod trigger_service;
@@ -218,13 +248,22 @@ pub mod assistant_agent_credential_service;
 pub mod assistant_continuation;
 pub mod assistant_group_service;
 pub mod assistant_instruction_context;
+pub mod assistant_job_service_use;
 pub mod assistant_live;
+pub mod assistant_native_execution;
 pub mod assistant_nyxagent;
+pub mod assistant_nyxagent_egress;
+pub mod assistant_nyxagent_runtime;
+pub mod assistant_platform_reply_decision;
 pub mod assistant_profile_routing;
+pub mod assistant_service_execution;
 pub mod assistant_settings_service;
+pub(crate) mod assistant_ssh_session;
 pub mod assistant_steering;
 pub mod assistant_team_service;
 pub mod assistant_team_tools;
+pub mod channel_image_audience;
+pub mod channel_image_delivery;
 pub mod channel_retry_ingress;
 pub mod channel_turn_delivery;
 pub mod provider_link_service;
@@ -254,6 +293,17 @@ pub mod machine_update_service;
 pub mod saved_login_service;
 
 pub mod machine_setup_service;
+pub mod remote_machine_adapter;
+pub mod remote_machine_bootstrap;
+pub mod remote_machine_bootstrap_verifier;
+pub mod remote_machine_controller_health;
+// Deferred signed-provider contracts are exercised by fixtures only.
+#[cfg(test)]
+pub mod remote_machine_fence;
+mod remote_machine_kubernetes_auth;
+pub mod remote_machine_kubernetes_identity;
+pub mod remote_machine_runtime;
+pub mod remote_machine_usage;
 
 #[cfg(test)]
 pub(crate) mod machine_integration_tests;
@@ -261,6 +311,7 @@ pub(crate) mod machine_integration_tests;
 #[cfg(test)]
 mod machine_transport_tests;
 
+pub mod trigger_run_images;
 pub mod trigger_schedule;
 
 #[cfg(test)]
@@ -296,6 +347,13 @@ pub mod assistant_voice;
 mod org_group_tests;
 
 pub mod machine_access_service;
+pub mod remote_machine_configuration;
+pub mod remote_machine_operation_service;
+#[cfg(test)]
+mod remote_machine_operation_tests;
+pub mod remote_machine_service;
+#[cfg(test)]
+mod remote_machine_service_tests;
 pub mod voice;
 
 #[cfg(test)]
@@ -316,7 +374,24 @@ pub mod tool_twin_service;
 
 pub mod catalog_icon_service;
 
+pub mod machine_oauth_consent_service;
+
+pub mod machine_external_grant_service;
+pub mod machine_external_service;
+
+pub mod remote_machine_events;
+pub mod remote_machine_manager;
+pub mod remote_machine_native;
+
+#[cfg(test)]
+pub mod remote_machine_provider;
+
+pub mod remote_machine_quota;
+
+pub mod remote_machine_storage_telemetry;
+
 pub mod platform_provisioning_service;
+pub mod remote_machine_reclamation;
 
 pub mod platform_inference_service;
 
@@ -335,5 +410,12 @@ mod platform_provisioning_acceptance_tests;
 
 pub mod platform_setup_notice_service;
 
+pub mod assistant_access_policy;
 pub(crate) mod nyxbot_gateway_service;
+pub mod nyxbot_watch_service;
 pub mod tools_manager_service;
+
+pub mod platform_manager_delivery;
+pub mod platform_manager_transport;
+
+pub mod platform_public_contract_service;

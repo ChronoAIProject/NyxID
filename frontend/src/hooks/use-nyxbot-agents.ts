@@ -11,6 +11,7 @@ import type {
 } from "@/schemas/assistant-nyxagent";
 import { livePollInterval, useNyxAgentLiveConnected } from "@/hooks/use-nyxagent-live-status";
 import { useAuthStore } from "@/stores/auth-store";
+import { useAgentOwnerMutation } from "./use-agent-owner-mutation";
 
 export const nyxBotQueryKeys = {
   root: (userId: string | undefined) => ["assistant", "nyxagent", userId] as const,
@@ -100,9 +101,12 @@ export function useUpdateNyxBotAgent() {
 }
 
 export function useSetNyxBotAgentGrants() {
-  return useAgentsMutation(({ id, ...grants }: AssistantAgentGrantsRequest & { id: string }) =>
-    nyxBotApi.setGrants(id, grants),
-  );
+  const client = useQueryClient();
+  return useAgentOwnerMutation({
+    mutationFn: ({ id, ...grants }: AssistantAgentGrantsRequest & { id: string }, guard) =>
+      nyxBotApi.setGrants(id, grants, guard),
+    onSettled: (owner) => client.invalidateQueries({ queryKey: nyxBotQueryKeys.agents(owner) }),
+  });
 }
 
 /** Destroying also disconnects the agent's channel bots. */

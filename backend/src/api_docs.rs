@@ -149,6 +149,8 @@
         crate::handlers::billing::create_topup,
         crate::handlers::billing::list_topups,
         crate::handlers::billing::download_invoice,
+        crate::handlers::managed_executions::list,
+        crate::handlers::managed_executions::get,
         crate::handlers::billing_credits::issue_grant,
         crate::handlers::billing_credits::admin_list_grants,
         crate::handlers::billing_credits::revoke_grant,
@@ -317,6 +319,7 @@
             crate::handlers::billing::TopUpRequest,
             crate::handlers::billing::BillingWalletResponse,
             crate::handlers::billing::TopUpResponse,
+            crate::handlers::managed_executions::ExecutionStatus,
             crate::handlers::billing_credits::IssueGrantRequest,
             crate::handlers::billing_credits::IssueGrantResponse,
             crate::handlers::billing_credits::IssueGrantRecipientResponse,
@@ -440,7 +443,7 @@ mod tests {
             ("UpdateKeyRequest", vec!["use_platform_key"]),
             (
                 "ServiceBilling",
-                vec!["byok_pricing", "platform_key_pricing"],
+                vec!["byok_pricing", "platform_key_pricing", "managed_execution"],
             ),
             ("CreateConnectLinkRequest", vec!["use_platform_key"]),
         ] {
@@ -475,6 +478,8 @@ mod tests {
             ("/api/v1/providers/codex-connection", "get", true),
             ("/api/v1/providers/codex-connection", "post", true),
             ("/api/v1/providers/codex-connection/verify", "post", true),
+            ("/api/v1/billing/executions", "get", true),
+            ("/api/v1/billing/executions/{id}", "get", true),
         ] {
             let operation = &document["paths"][path][method];
             assert!(operation.is_object(), "missing {method} {path}");

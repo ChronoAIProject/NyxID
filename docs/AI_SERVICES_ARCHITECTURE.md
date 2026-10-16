@@ -189,10 +189,12 @@ without renumbering ranks; groups remain alphabetical and connection rows retain
 inventory order. Inline Agent order controls use the complete service group and
 preserve filters, saved views and the expanded card without writing service-view settings.
 Within equal relevance, discovery preference refills only that catalog service's
-occupied slots; unrelated services retain their slots. The order is advisory.
-Explicit execution uses the called
-slug, pool priority or rotation, and the personal → organization → platform
-credential cascade. Preference does not change those decisions or cause retries.
+occupied slots; unrelated services retain their slots. NyxBot also enforces
+personal-first saved order at execution within each catalog group. Exact calls
+are refused when out of order, never silently moved to different credentials.
+Other clients retain advisory discovery ordering. Owner one-turn selection and
+bounded server-verified fallback are described in
+[NyxBot service execution](NYXBOT_SERVICE_EXECUTION.md).
 
 Priority pools support bounded failover; round-robin and weighted pools select a
 single member per request. Omitted/null priority policies use server defaults, not
@@ -976,9 +978,10 @@ dedicated native order form outside the connection table, so unrelated panel
 buttons cannot submit the order. Invalid/failed submissions focus and reveal
 one error below the sticky cover, including repeated same-error attempts.
 The named **Info** button sits beside the preference text in that same shared
-section. Its standard tooltip gives three short rules: equal matches follow the saved order; the AI chooses a
-connection and this order is advisory; agents see only enabled HTTP connections
-they can access. Only applicable short protocol/gateway notes are added.
+section. Its tooltip explains saved discovery order, NyxBot's personal-first
+execution enforcement and one-turn connection choice, and enabled accessible
+HTTP discovery. The model note explains eligible model routing and the separate
+Service Pool strategy. Only applicable short protocol notes are added.
 The tooltip is noninteractive, with no links or buttons; Service Pools retain
 their existing settings navigation. Normal LLM copy is at most about 85 words.
 Implementation details remain in this documentation. No separate help row,
@@ -1000,9 +1003,9 @@ draft and offer scoped Reload/Overwrite, bound to the original identity.
 | Choice | Behavior |
 |---|---|
 | Present preferred Anthropic alternatives to agents | Refill that catalog group's discovery slots; preference applies within equal search relevance |
-| Run a named tool or connection slug | Execute exactly the addressed connection |
+| Run a named tool or connection slug | Execute exactly the addressed connection; NyxBot first checks preference, target choice and consent |
 | Route/fail over across alternatives | Explicit service pool, addressed by its pool slug; its strategy is unchanged |
-| Resolve an implicit LLM provider/model without `pool:` | Existing active-row database choice within owner tiers; unchanged by Part A |
+| Resolve an implicit LLM provider/model without `pool:` | NyxBot selects the first eligible preferred connection for that provider/model; other clients retain their existing routing |
 
 The card's agent-key count is keys with access, not connections. HTTP rows are alternatives
 with different tool-name prefixes. Non-HTTP rows keep saved positions but have

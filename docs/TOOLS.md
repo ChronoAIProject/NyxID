@@ -46,6 +46,26 @@ All source endpoint rows receive new UUIDs, generation 1, draft publication and 
 
 Phase 1 targets are Firecrawl (`api-firecrawl`, bearer), X (`api-twitter`, bearer), ElevenLabs (`api-elevenlabs`, `xi-api-key` header), Twilio (`api-twilio`, `Authorization` header containing the Basic value), and Chrono LLM (flip in place). Chrono rows are admin-created rather than seeded; configure an eligible row first on a fresh deployment.
 
+The existing `api-firecrawl` hosted overlay exposes `scrape` with markdown,
+`waitFor`/`timeout`, `maxAge`, and `storeInCache`, plus `map_site` with
+`sitemap` (`include`, `only`, `skip`), `ignoreQueryParameters`, `ignoreCache`,
+`limit`, and `timeout`. The suggested 10-second render wait, 60-second timeout,
+and 200-URL map limit are agent guidance, not NyxID request validation. These
+are provider controls in the existing connection,
+not a NyxID fetch service. The schema keeps provider extension options open.
+Request `markdown` when the page body matters; a title-only result is incomplete.
+`maxAge` is cache eligibility and `ignoreCache` bypasses the sitemap cache;
+neither establishes a live scrape from the response alone. Report `sourceURL`,
+final `url`, `statusCode`, and `provider` only when returned. For private or
+authenticated pages, use an authorized machine browser instead of forwarding
+cookies, headers, or page contents to a public extractor. The active NyxAgent
+prompt gives NyxBot and specialists this workflow within their existing grants.
+
+NyxBot's current priority is reliable, cost-effective execution of NyxID services,
+connections, and tools. Native GPT image search is deferred for later discussion;
+this integration does not enable it. Image generation belongs to a dedicated
+NyxID-connected service and follows the existing authorization and usage paths.
+
 For a new API, use Add tool → New service, or CLI `service add --catalog-admin --slug … --endpoint-url … --auth-method … --service-category internal --offering-kind tool --openapi-spec-url …`. Configure a master credential/platform grant and pricing in Service settings. Run `catalog discover` to populate draft operations from the spec, then review and publish selected operations.
 
 ## Manifest CLI and wizard

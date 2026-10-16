@@ -1,6 +1,8 @@
+import { useRemoteMachineAdmission } from "@/hooks/use-remote-machine-admission";
+import { RemoteMachineCreate } from "@/components/machines/remote-machine-create";
 import { useVerifiedUpdaterImage } from "@/hooks/use-machines";
 import { useEffect, useRef, useState } from "react";
-import { Link, useSearch } from "@tanstack/react-router";
+import { Link, useNavigate, useSearch } from "@tanstack/react-router";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { OrgScopeSelect } from "@/components/shared/org-scope-select";
 import { PageHeader } from "@/components/shared/page-header";
@@ -65,7 +67,16 @@ const states: Record<string, string> = {
 };
 
 export function MachineSetupPage() {
-  const search = useSearch({ strict: false }) as { setup?: string };
+  const search = useSearch({ strict: false }) as {
+    setup?: string;
+    where?: "hosted";
+  };
+  const navigate = useNavigate();
+  const remoteAdmission = useRemoteMachineAdmission();
+  const [hostedSelected, setHosted] = useState(
+    search.where === "hosted" && !search.setup,
+  );
+  const hosted = hostedSelected && remoteAdmission;
   const [id, setId] = useState(search.setup);
   const setup = useMachineSetup(id);
   const create = useCreateMachineSetup();
@@ -119,7 +130,10 @@ export function MachineSetupPage() {
         throw new Error(
           "Server release version is unavailable. Reload before creating the Docker command.",
         );
-      if (choices.where === "docker" && (!updater.data?.image || updater.data.version !== config.data?.version))
+      if (
+        choices.where === "docker" &&
+        (!updater.data?.image || updater.data.version !== config.data?.version)
+      )
         throw new Error("Verifying the updater image, try again shortly.");
       const row = id ? { id } : await create.mutateAsync(choices);
       setId(row.id);
@@ -128,7 +142,13 @@ export function MachineSetupPage() {
         config.data?.node_ws_url ??
         `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.host}/api/v1/nodes/ws`;
       setCommand(
-        machineSetupCommand(choices, issued.token, wsUrl, config.data?.version, updater.data?.image ?? undefined),
+        machineSetupCommand(
+          choices,
+          issued.token,
+          wsUrl,
+          config.data?.version,
+          updater.data?.image ?? undefined,
+        ),
       );
       issued.token = "";
     } catch (cause) {
@@ -149,166 +169,217 @@ export function MachineSetupPage() {
     >
       <PageHeader
         title="Add a machine"
-        description="Review the choices, then run one command on the machine."
+        description={
+          hosted
+            ? "Configure a personal NyxID hosted machine and review its billing and data policies."
+            : "Review the choices, then run one command on the machine."
+        }
       />
-      <SetupSafety />
-      <Form {...form}>
-        <form onSubmit={form.handleSubmit(submit)} className="space-y-4">
-          <Tabs
-            value={where}
-            onValueChange={(value) =>
-              form.setValue("where", value as MachineChoices["where"])
-            }
+      {hosted ? (
+        <p className="rounded-lg border border-warning/30 bg-warning/5 p-4 text-12 text-muted-foreground">
+          Agents can run code and access this Machine’s workspace. Prompt
+          injection is possible. All authorized clients share the OS and
+          workspace; file roots do not isolate shell commands.
+        </p>
+      ) : (
+        <SetupSafety />
+      )}
+      <Tabs
+        value={hosted ? "hosted" : where}
+        onValueChange={(value) => {
+          setHosted(value === "hosted");
+          if (value !== "hosted")
+            form.setValue("where", value as MachineChoices["where"]);
+        }}
+      >
+        <TabsList>
+          <TabsTrigger
+            value="this_computer"
+            disabled={locked}
+            className="px-2 sm:px-3"
           >
-            <TabsList>
-              <TabsTrigger value="this_computer" disabled={locked}>
-                This computer
-              </TabsTrigger>
-              <TabsTrigger value="vm" disabled={locked}>
-                Remote VM
-              </TabsTrigger>
-              <TabsTrigger value="docker" disabled={locked}>
-                Docker
-              </TabsTrigger>
-            </TabsList>
-          </Tabs>
-          <FormField
-            control={form.control}
-            name="owner_id"
-            render={({ field }) => (
-              <FormItem>
-                <FormLabel>Machine owner</FormLabel>
-                <FormControl>
-                  <OrgScopeSelect
-                    value={field.value ?? null}
-                    onChange={field.onChange}
-                    disabled={locked}
-                    label="Machine owner"
-                  />
-                </FormControl>
-                <FormMessage />
-              </FormItem>
-            )}
-          />
-          <FormField
-            control={form.control}
-            name="name"
-            render={({ field }) => (
-              <FormItem>
-                <FormLabel>Machine name</FormLabel>
-                <FormControl>
-                  <Input {...field} disabled={locked} autoComplete="off" />
-                </FormControl>
-                <FormMessage />
-              </FormItem>
-            )}
-          />
-          <fieldset disabled={locked} className="space-y-3">
-            <legend className="mb-2 text-12 font-medium">
-              Enable on this machine
-            </legend>
-            {(["shell", "files", "browser", "computer"] as const).map((capability) => (
-              <label
-                key={capability}
-                className="flex items-center gap-2 text-12"
-              >
-                <Checkbox
-                  checked={capabilities.includes(capability)}
-                  onCheckedChange={(checked) =>
-                    form.setValue(
-                      "capabilities",
-                      checked
-                        ? [...capabilities, capability]
-                        : capabilities.filter((c) => c !== capability),
-                    )
-                  }
-                />
-                {labels[capability]}
-              </label>
-            ))}
-          </fieldset>
-          <FormField
-            control={form.control}
-            name="grant_to"
-            render={({ field }) => (
-              <FormItem>
-                <FormLabel>Select a specialist for this machine</FormLabel>
-                <Select
-                  value={field.value ?? "none"}
-                  disabled={locked}
-                  onValueChange={(value) =>
-                    field.onChange(value === "none" ? null : value)
-                  }
-                >
-                  <FormControl>
-                    <SelectTrigger>
-                      <SelectValue />
-                    </SelectTrigger>
-                  </FormControl>
-                  <SelectContent>
-                    <SelectItem value="none">No specialist assignment</SelectItem>
-                    {agents.data?.agents
-                      .filter(
-                        (agent) =>
-                          agent.kind !== "nyxbot" &&
-                          agent.status !== "destroyed",
-                      )
-                      .map((agent) => (
-                        <SelectItem key={agent.id} value={agent.id}>
-                          {agent.name}
-                        </SelectItem>
-                      ))}
-                  </SelectContent>
-                </Select>
-                <FormMessage />
-              </FormItem>
-            )}
-          />
-          <p className="text-12 text-muted-foreground">Agent permissions are configured separately in agent settings. New assignments start with no allowed capabilities.</p>
-          <label className="flex items-start gap-2 text-12">
-            <Checkbox
-              checked={form.watch("automatic_updates") ?? true}
+            This computer
+          </TabsTrigger>
+          <TabsTrigger value="vm" disabled={locked} className="px-2 sm:px-3">
+            Remote VM
+          </TabsTrigger>
+          <TabsTrigger
+            value="docker"
+            disabled={locked}
+            className="px-2 sm:px-3"
+          >
+            Docker
+          </TabsTrigger>
+          {remoteAdmission && (
+            <TabsTrigger
+              value="hosted"
               disabled={locked}
-              onCheckedChange={(value) =>
-                form.setValue("automatic_updates", value === true)
-              }
-            />
-            <span>
-              Update automatically when idle (recommended). Updates wait for
-              work and desktop sessions to end, and notify you.
-            </span>
-          </label>
-          {where === "docker" ? (
-            <p className="text-12 text-muted-foreground">
-              The command also installs a small updater companion. Its Docker
-              socket grants host-root access; only the node supervisor can
-              request an update, and the helper accepts only a release version,
-              verifies the official image attestation and restores the previous
-              container if reconnection fails. Your identity and workspace
-              volumes are preserved.
-            </p>
-          ) : null}
-          {where !== "docker" && (capabilities.includes("computer") || capabilities.includes("browser")) ? (
-            <p className="text-12 text-muted-foreground">
-              {SINGLE_USER_WARNING} Saved-login typing starts off; allow it
-              later in Nodes settings. Setup asks once for administrator access
-              to install browser policies. On macOS, also allow Screen Recording
-              and Accessibility.
-            </p>
-          ) : null}
-          {!locked ? (
-            <Button
-              type="submit"
-              variant="primary"
-              isLoading={issuing}
-              disabled={!capabilities.length || !form.watch("name")}
+              className="px-2 sm:px-3"
             >
-              Create my setup command
-            </Button>
-          ) : null}
-        </form>
-      </Form>
-      {command ? (
+              NyxID hosted
+            </TabsTrigger>
+          )}
+        </TabsList>
+      </Tabs>
+      {hosted ? (
+        <RemoteMachineCreate
+          onCreated={(machineId, operationId) =>
+            void navigate({
+              to: "/assistant/machines",
+              search: { machine: machineId, operation: operationId },
+            })
+          }
+        />
+      ) : (
+        <Form {...form}>
+          <form onSubmit={form.handleSubmit(submit)} className="space-y-4">
+            <FormField
+              control={form.control}
+              name="owner_id"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>Machine owner</FormLabel>
+                  <FormControl>
+                    <OrgScopeSelect
+                      value={field.value ?? null}
+                      onChange={field.onChange}
+                      disabled={locked}
+                      label="Machine owner"
+                    />
+                  </FormControl>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+            <FormField
+              control={form.control}
+              name="name"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>Machine name</FormLabel>
+                  <FormControl>
+                    <Input {...field} disabled={locked} autoComplete="off" />
+                  </FormControl>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+            <fieldset disabled={locked} className="space-y-3">
+              <legend className="mb-2 text-12 font-medium">
+                Enable on this machine
+              </legend>
+              {(["shell", "files", "browser", "computer"] as const).map(
+                (capability) => (
+                  <label
+                    key={capability}
+                    className="flex items-center gap-2 text-12"
+                  >
+                    <Checkbox
+                      checked={capabilities.includes(capability)}
+                      onCheckedChange={(checked) =>
+                        form.setValue(
+                          "capabilities",
+                          checked
+                            ? [...capabilities, capability]
+                            : capabilities.filter((c) => c !== capability),
+                        )
+                      }
+                    />
+                    {labels[capability]}
+                  </label>
+                ),
+              )}
+            </fieldset>
+            <FormField
+              control={form.control}
+              name="grant_to"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>Select a specialist for this machine</FormLabel>
+                  <Select
+                    value={field.value ?? "none"}
+                    disabled={locked}
+                    onValueChange={(value) =>
+                      field.onChange(value === "none" ? null : value)
+                    }
+                  >
+                    <FormControl>
+                      <SelectTrigger>
+                        <SelectValue />
+                      </SelectTrigger>
+                    </FormControl>
+                    <SelectContent>
+                      <SelectItem value="none">
+                        No specialist assignment
+                      </SelectItem>
+                      {agents.data?.agents
+                        .filter(
+                          (agent) =>
+                            agent.kind !== "nyxbot" &&
+                            agent.status !== "destroyed",
+                        )
+                        .map((agent) => (
+                          <SelectItem key={agent.id} value={agent.id}>
+                            {agent.name}
+                          </SelectItem>
+                        ))}
+                    </SelectContent>
+                  </Select>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+            <p className="text-12 text-muted-foreground">
+              Agent permissions are configured separately in agent settings. New
+              assignments start with no allowed capabilities.
+            </p>
+            <label className="flex items-start gap-2 text-12">
+              <Checkbox
+                checked={form.watch("automatic_updates") ?? true}
+                disabled={locked}
+                onCheckedChange={(value) =>
+                  form.setValue("automatic_updates", value === true)
+                }
+              />
+              <span>
+                Update automatically when idle (recommended). Updates wait for
+                work and desktop sessions to end, and notify you.
+              </span>
+            </label>
+            {where === "docker" ? (
+              <p className="text-12 text-muted-foreground">
+                The command also installs a small updater companion. Its Docker
+                socket grants host-root access; only the node supervisor can
+                request an update, and the helper accepts only a release
+                version, verifies the official image attestation and restores
+                the previous container if reconnection fails. Your identity and
+                workspace volumes are preserved.
+              </p>
+            ) : null}
+            {where !== "docker" &&
+            (capabilities.includes("computer") ||
+              capabilities.includes("browser")) ? (
+              <p className="text-12 text-muted-foreground">
+                {SINGLE_USER_WARNING} Saved-login typing starts off; allow it
+                later in Nodes settings. Setup asks once for administrator
+                access to install browser policies. On macOS, also allow Screen
+                Recording and Accessibility.
+              </p>
+            ) : null}
+            {!locked ? (
+              <Button
+                type="submit"
+                variant="primary"
+                isLoading={issuing}
+                disabled={!capabilities.length || !form.watch("name")}
+              >
+                Create my setup command
+              </Button>
+            ) : null}
+          </form>
+        </Form>
+      )}
+      {!hosted && command ? (
         <div className="space-y-2">
           <CopyableField label="Run on your machine" value={command} />
           <p className="text-11 text-text-tertiary">

@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const BILLING_METRICS = [
+export const SERVICE_BILLING_METRICS = [
   "tokens",
   "requests",
   "bytes",
@@ -10,6 +10,11 @@ export const BILLING_METRICS = [
   "cache_write_tokens",
   "images",
   "voice_seconds",
+] as const;
+// Runtime billing has its own logical SKU; ordinary service lanes cannot price it.
+export const BILLING_METRICS = [
+  ...SERVICE_BILLING_METRICS,
+  "machine_running_seconds",
 ] as const;
 export const BILLING_UNITS: Record<
   (typeof BILLING_METRICS)[number],
@@ -38,7 +43,16 @@ export const BILLING_UNITS: Record<
     singular: "cache-write token",
     tokenFamily: true,
   },
-  voice_seconds: { label: "voice seconds", singular: "voice second", tokenFamily: false },
+  voice_seconds: {
+    label: "voice seconds",
+    singular: "voice second",
+    tokenFamily: false,
+  },
+  machine_running_seconds: {
+    label: "machine running seconds",
+    singular: "machine running second",
+    tokenFamily: false,
+  },
   images: { label: "images", singular: "image", tokenFamily: false },
 };
 export function metricLabel(metric: string, quantity?: number): string {

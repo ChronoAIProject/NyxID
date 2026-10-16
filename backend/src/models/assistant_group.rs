@@ -10,6 +10,7 @@ pub const MAX_PARTICIPANTS: usize = 16;
 pub const REQUESTS_COLLECTION_NAME: &str = "assistant_group_requests";
 /// NyxBot threads that posted into a group and wait for its outcome.
 pub const MAX_FOLLOWERS: usize = 8;
+pub const FOLLOWER_TTL_HOURS: i64 = 24;
 
 /// A group chat: the owner plus several of their agents (Grok-Bot style).
 /// Each member speaks through its own hidden member thread, so it keeps its
@@ -89,7 +90,9 @@ pub struct GroupMessage {
     pub created_at: DateTime<Utc>,
 }
 
-/// A NyxBot thread waiting for a group's answer to what it posted.
+/// A NyxBot thread waiting for a group's answer to what it posted: a
+/// temporary participant, not a member, with no decision authority over
+/// member cards.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct GroupFollower {
     pub conversation_id: String,
@@ -97,6 +100,17 @@ pub struct GroupFollower {
     pub since_seq: i64,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
+    /// `created_at + FOLLOWER_TTL_HOURS`; rows written before expiry existed
+    /// use the same rule from `created_at`.
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
+    pub expires_at: Option<DateTime<Utc>>,
+}
+
+impl GroupFollower {
+    pub fn expiry(&self) -> DateTime<Utc> {
+        self.expires_at
+            .unwrap_or(self.created_at + chrono::Duration::hours(FOLLOWER_TTL_HOURS))
+    }
 }
 
 /// One org-group message chain; actor and attachment authority never change

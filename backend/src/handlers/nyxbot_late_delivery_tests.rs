@@ -6,6 +6,9 @@ use wiremock::{
     matchers::{method, path},
 };
 
+#[path = "nyxbot_image_delivery_tests.rs"]
+mod image_delivery_tests;
+
 struct Fixture {
     state: AppState,
     channel: NyxbotChannel,
@@ -90,6 +93,7 @@ async fn fixture(name: &str) -> Fixture {
             .unwrap(),
     );
     event.delivery = Some(ChannelTurnDelivery {
+        sender_kind: None,
         version: 1,
         state: "waiting".into(),
         origin: ChannelOrigin {
@@ -242,12 +246,9 @@ async fn partial_failure_survives_both_stream_and_late_delivery() {
     assert_eq!(requests.len(), 1);
     let body: Value = serde_json::from_slice(&requests[0].body).unwrap();
     assert_eq!(body["text"], partial);
-    assert!(
-        late_delivery::answer(&"界".repeat(9000), true)
-            .chars()
-            .count()
-            <= MAX_CHANNEL_REPLY_CHARS
-    );
+    let long = "界".repeat(9000);
+    assert!(late_delivery::answer(&long, true).starts_with(&long));
+    assert_eq!(late_delivery::answer(&long, false), long);
 }
 
 #[tokio::test]
@@ -660,4 +661,72 @@ async fn event_binding_rolls_back_with_admission_and_stale_claim_cannot_finish()
         .await
         .unwrap();
     assert_eq!(status(&f).await, "sent");
+}
+
+#[tokio::test]
+async fn external_bot_delayed_answer_keeps_guest_authority_despite_owner_id_overlap() {
+    let f = fixture("external_bot_delayed_guest").await;
+    // This ID is intentionally already present in owner_sender_ids. The
+    // authenticated bot actor classification must survive stream detachment.
+    f.state.db.collection::<bson::Document>(THREADS).update_one(
+        doc! {"channel_id":&f.channel.id},
+        doc! {"$set":{"kind":"group","members":"everyone","owner_seen":false,"owner_chat":false}},
+    ).await.unwrap();
+    patch(
+        &f,
+        doc! {"delivery.guest":true,"delivery.sender_kind":"bot","delivery.state":"pending"},
+    )
+    .await;
+    f.state
+        .db
+        .collection::<bson::Document>(CONVERSATIONS)
+        .update_one(
+            doc! {"_id":&f.event.conversation_id},
+            doc! {"$set":{"guest_turn":true}},
+        )
+        .await
+        .unwrap();
+    settled(&f, false).await;
+    late_delivery::sweep(&f.state).await.unwrap();
+    late_delivery::sweep(&f.state).await.unwrap();
+    assert_eq!(
+        status(&f).await,
+        "sent",
+        "a bot stays an admitted guest through delayed delivery"
+    );
+    assert_eq!(
+        sends(&f).await.len(),
+        1,
+        "settlement cannot duplicate an effect"
+    );
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn late_capacity_failure_preserves_complete_partial_reply_and_wait_copy() {
+    let f = fixture("channel_late_capacity_complete").await;
+    settled(&f, true).await;
+    let text = "界".repeat(9000);
+    f.state
+        .db
+        .collection::<bson::Document>(crate::models::assistant_message::COLLECTION_NAME)
+        .update_one(
+            doc! {"conversation_id": &f.event.conversation_id, "turn_id": &f.event.turn_id},
+            doc! {"$set": {"text": &text, "error_code": "capacity_exceeded"}},
+        )
+        .await
+        .unwrap();
+    delivery::detach(&f.state.db, &f.event.id).await.unwrap();
+    late_delivery::sweep(&f.state).await.unwrap();
+    late_delivery::sweep(&f.state).await.unwrap();
+    let requests = sends(&f).await;
+    assert_eq!(requests.len(), 1);
+    let body: Value = serde_json::from_slice(&requests[0].body).unwrap();
+    assert_eq!(
+        body["text"],
+        format!(
+            "{text}\n\n{}",
+            crate::services::assistant_turn_observability::capacity_message(None)
+        )
+    );
 }

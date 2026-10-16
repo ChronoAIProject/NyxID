@@ -56,7 +56,7 @@ async fn resolve_api_key_write_owner(
     let key = state
         .db
         .collection::<ApiKey>(API_KEYS)
-        .find_one(doc! { "_id": key_id })
+        .find_one(doc! { "_id": key_id, "purpose": {"$ne": "public_nyxbot"} })
         .await?
         .ok_or_else(|| AppError::NotFound("API key not found".to_string()))?;
 
@@ -83,7 +83,7 @@ async fn resolve_api_key_read_owner(
     let key = state
         .db
         .collection::<ApiKey>(API_KEYS)
-        .find_one(doc! { "_id": key_id })
+        .find_one(doc! { "_id": key_id, "purpose": {"$ne": "public_nyxbot"} })
         .await?
         .ok_or_else(|| AppError::NotFound("API key not found".to_string()))?;
 
@@ -2207,6 +2207,7 @@ mod tests {
                 is_active: true,
                 created_at: now,
                 rotation_predecessor_id: None,
+                machine_external_grants_present: false,
                 state_version: 1,
                 updated_at: Some(now),
                 description: None,
@@ -2529,6 +2530,7 @@ mod tests {
                 is_active: true,
                 created_at: Utc::now(),
                 rotation_predecessor_id: None,
+                machine_external_grants_present: false,
                 state_version: 1,
                 updated_at: Some(Utc::now()),
                 last_used_at: None,
@@ -2931,6 +2933,7 @@ mod tests {
             is_active: true,
             created_at: Utc::now(),
             rotation_predecessor_id: None,
+            machine_external_grants_present: false,
             state_version: 1,
             updated_at: Some(Utc::now()),
             description: None,

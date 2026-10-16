@@ -1,0 +1,25 @@
+{
+  "actor": {
+    "display_name": "Alice",
+    "id": "7",
+    "kind": "bot"
+  },
+  "conversation": {
+    "id": "42",
+    "kind": "group"
+  },
+  "event_id": "message-1",
+  "kind": {
+    "attachments": [],
+    "mentions_bot": true,
+    "text": "😀 /ask@support_bot",
+    "type": "message"
+  },
+  "occurred_at": "2026-10-15T00:00:00Z",
+  "schema_version": 1,
+  "source": {
+    "platform": "telegram",
+    "route_id": "route-1",
+    "type": "nyxid_relay"
+  }
+}

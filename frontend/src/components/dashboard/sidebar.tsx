@@ -48,6 +48,7 @@ import {
   canAdminWrite,
   canManageTools,
   canReadAdminUsage,
+  canReadFeatureFlags,
   hasAdminRead,
   isBillingAvailable,
 } from "@/types/api";
@@ -123,8 +124,7 @@ export function getVisibleMainNav(
   );
 }
 
-/// Admin nav entries the user may open. Usage-only role holders (no admin
-/// read access) see just the Usage page.
+/// Admin nav entries permitted by platform roles or scoped capabilities.
 export function getVisibleAdminNav(
   user: Parameters<typeof canReadAdminUsage>[0],
 ): readonly NavItemDef[] {
@@ -132,7 +132,8 @@ export function getVisibleAdminNav(
     return ADMIN_NAV.filter(
       (item) =>
         (item.to === ADMIN_USAGE_PATH && canReadAdminUsage(user)) ||
-        (item.to === "/admin/tools" && canManageTools(user)),
+        (item.to === "/admin/tools" && canManageTools(user)) ||
+        (item.to === "/admin/feature-flags" && canReadFeatureFlags(user)),
     );
   }
   return ADMIN_NAV.filter(

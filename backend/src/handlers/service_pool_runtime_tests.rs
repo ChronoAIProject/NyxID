@@ -21,6 +21,7 @@ async fn machine_buffered_pool_request_fails_over_with_declared_pool_authority()
             .extensions_mut()
             .insert(crate::services::machine_gateway_service::Ingress {
                 declared_id: fixture.pool_id.clone(),
+                job: None,
                 git: None,
             });
         let response = super::super::proxy::proxy_request_by_slug(
@@ -74,6 +75,7 @@ async fn machine_gateway_stream_cannot_enter_pool_or_replay_on_another_member() 
         .extensions_mut()
         .insert(crate::services::machine_gateway_service::Ingress {
             declared_id: fixture.pool_id.clone(),
+            job: None,
             git: None,
         });
     let result = super::super::proxy::proxy_request_by_slug(

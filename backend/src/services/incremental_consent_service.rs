@@ -192,7 +192,7 @@ pub async fn validate_issued(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub async fn approve(
+pub async fn approve_with_machine(
     db: &mongodb::Database,
     user_id: &str,
     client_id: &str,
@@ -201,6 +201,7 @@ pub async fn approve(
     allow_all_services: bool,
     binding_hash: Option<&str>,
     external_subject: Option<&ExternalSubjectRef>,
+    machine: Option<&super::machine_oauth_consent_service::MachineConsentApproval>,
 ) -> AppResult<IncrementalConsent> {
     // Add-only mode cannot introduce a wildcard grant. Existing wildcard
     // authority is retained even if a modified form submits false.
@@ -234,11 +235,12 @@ pub async fn approve(
         existing.allowed_service_ids.as_deref().unwrap_or_default(),
         &grant_ids,
     );
-    let updated = consent_service::replace_incremental_consent(
+    let updated = consent_service::replace_incremental_consent_with_machine(
         db,
         &existing,
         &union_scopes(&existing.scopes, &snapshot.scopes),
         consent_ids,
+        machine,
     )
     .await?;
     Ok(IncrementalConsent {

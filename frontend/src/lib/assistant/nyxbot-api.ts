@@ -61,8 +61,8 @@ export const nyxBotApi = {
     await assistantJson(agentPath(id), { method: "PATCH", body });
   },
   /** Replaces a specialist's grants. */
-  async setGrants(id: string, body: AssistantAgentGrantsRequest) {
-    await assistantJson(`${agentPath(id)}/grants`, { method: "PUT", body });
+  async setGrants(id: string, body: AssistantAgentGrantsRequest, authorityGuard?: () => void) {
+    await assistantJson(`${agentPath(id)}/grants`, { method: "PUT", body, authorityGuard });
   },
   async destroyAgent(id: string) {
     return assistantAgentDestroyedSchema.parse(

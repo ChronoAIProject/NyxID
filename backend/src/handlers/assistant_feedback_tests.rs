@@ -33,7 +33,17 @@ mod fixtures {
     /// A completed assistant reply; override fields with struct update syntax.
     pub fn message(id: String, conversation_id: String, user_id: String) -> AssistantMessage {
         AssistantMessage {
+            platform_delivery_recovery_queued: false,
+            platform_reply: None,
+            platform_origin: None,
+            author: None,
+            activity_total: 0,
+            report_to: None,
+            continuation_of: None,
             retry_of: None,
+            retry_claimed_by: None,
+            activity_count: None,
+            turn_metadata: None,
             error_detail: None,
             specialist_id: None,
             upstream_error_code: None,
@@ -59,6 +69,7 @@ mod fixtures {
 
     pub fn activity(label: &str, status: &str) -> TurnActivity {
         TurnActivity {
+            failure: None,
             machine: None,
             id: uuid::Uuid::new_v4().to_string(),
             label: label.into(),
@@ -123,7 +134,11 @@ async fn feedback_concurrent_first_puts_share_one_row() {
     insert_feedback_message(
         &f,
         AssistantMessage {
+            platform_delivery_recovery_queued: false,
+            continuation_of: None,
             retry_of: None,
+            retry_claimed_by: None,
+            activity_count: None,
             turn_id: "turn-r3".into(),
             ..fixtures::message(message_id.into(), conversation_id.into(), f.owner.clone())
         },
@@ -168,7 +183,11 @@ async fn feedback_concurrent_first_puts_share_one_row() {
     insert_feedback_message(
         &f,
         AssistantMessage {
+            platform_delivery_recovery_queued: false,
+            continuation_of: None,
             retry_of: None,
+            retry_claimed_by: None,
+            activity_count: None,
             seq: 2,
             turn_id: "turn-direct".into(),
             ..fixtures::message(
@@ -343,7 +362,11 @@ async fn feedback_put_change_withdraw_and_ineligible_reply() {
     insert_feedback_message(
         &f,
         AssistantMessage {
+            platform_delivery_recovery_queued: false,
+            continuation_of: None,
             retry_of: None,
+            retry_claimed_by: None,
+            activity_count: None,
             turn_id: "b5-turn".into(),
             ..fixtures::message(message_id.into(), conversation_id.into(), f.owner.clone())
         },
@@ -407,7 +430,11 @@ async fn feedback_vote_change_preserves_comment_without_comment_field() {
     insert_feedback_message(
         &f,
         AssistantMessage {
+            platform_delivery_recovery_queued: false,
+            continuation_of: None,
             retry_of: None,
+            retry_claimed_by: None,
+            activity_count: None,
             turn_id: "s2-turn".into(),
             ..fixtures::message(
                 message_id.into(),
@@ -455,7 +482,11 @@ async fn feedback_withdraw_is_idempotent_after_first_delete() {
     insert_feedback_message(
         &f,
         AssistantMessage {
+            platform_delivery_recovery_queued: false,
+            continuation_of: None,
             retry_of: None,
+            retry_claimed_by: None,
+            activity_count: None,
             turn_id: "s3-turn".into(),
             ..fixtures::message(
                 message_id.into(),
@@ -519,25 +550,73 @@ async fn feedback_put_rejects_unknown_conversation_as_not_found() {
 #[tokio::test]
 async fn feedback_route_limits_one_user_burst() {
     let f = fixture("feedback-s4-limit", false).await;
-    let mut limited = false;
-    for i in 0..31 {
-        let path =
-            format!("/api/v1/assistant/nyxagent/conversations/missing-{i}/messages/m/feedback");
-        if request(
+    use crate::models::coordination::{RATE_WINDOW_COLLECTION_NAME, RateWindowRecord};
+
+    let path = "/api/v1/assistant/nyxagent/conversations/missing/messages/m/feedback";
+    assert_eq!(
+        request(
             &f.state,
             "PUT",
-            &path,
+            path,
             &f.human_token,
-            Some(json!({"vote":"up"})),
+            Some(json!({"vote":"up"}))
         )
         .await
-        .0 == StatusCode::TOO_MANY_REQUESTS
-        {
-            limited = true;
-            break;
+        .0,
+        StatusCode::NOT_FOUND
+    );
+    let windows = f
+        .state
+        .db
+        .collection::<RateWindowRecord>(RATE_WINDOW_COLLECTION_NAME);
+    let window = windows
+        .find_one(doc! {"namespace": "assistant_feedback"})
+        .await
+        .unwrap()
+        .expect("the route must use the shared feedback limiter");
+
+    // MongoDB aligns these windows to minute boundaries. Prepare the last
+    // allowed request, then verify both sides of the exact 30-request limit.
+    // Only a persisted window rollover permits restarting this assertion.
+    for _ in 0..3 {
+        let prepared = windows
+            .find_one_and_update(doc! {"_id": &window.id}, doc! {"$set": {"count": 29_i64}})
+            .return_document(mongodb::options::ReturnDocument::After)
+            .await
+            .unwrap()
+            .unwrap();
+        for (expected_status, expected_count) in [
+            (StatusCode::NOT_FOUND, 30),
+            (StatusCode::TOO_MANY_REQUESTS, 30),
+        ] {
+            let status = request(
+                &f.state,
+                "PUT",
+                path,
+                &f.human_token,
+                Some(json!({"vote":"up"})),
+            )
+            .await
+            .0;
+            let observed = windows
+                .find_one(doc! {"_id": &window.id})
+                .await
+                .unwrap()
+                .unwrap();
+            if observed.window_start != prepared.window_start {
+                assert!(observed.window_start > prepared.window_start);
+                assert_eq!(status, StatusCode::NOT_FOUND);
+                assert_eq!(observed.count, 1);
+                break;
+            }
+            assert_eq!(status, expected_status);
+            assert_eq!(observed.count, expected_count);
+            if status == StatusCode::TOO_MANY_REQUESTS {
+                return;
+            }
         }
     }
-    assert!(limited);
+    panic!("feedback limit could not be checked within one persisted rate window");
 }
 
 #[tokio::test]
@@ -548,7 +627,11 @@ async fn feedback_routes_reject_when_engine_flag_is_disabled() {
     insert_feedback_message(
         &f,
         AssistantMessage {
+            platform_delivery_recovery_queued: false,
+            continuation_of: None,
             retry_of: None,
+            retry_claimed_by: None,
+            activity_count: None,
             turn_id: "turn".into(),
             ..fixtures::message(message_id.into(), conversation_id.into(), f.owner.clone())
         },
@@ -559,6 +642,7 @@ async fn feedback_routes_reject_when_engine_flag_is_disabled() {
         "/api/v1/assistant/nyxagent/conversations/{conversation_id}/messages/{message_id}/feedback"
     );
     let override_doc = crate::models::feature_flag_override::FeatureFlagOverride {
+        definition_id: None,
         id: "s5-off".into(),
         org_user_id: None,
         flag_key: crate::services::feature_flag_service::NYXAGENT_ENGINE_FLAG_KEY.into(),
@@ -621,7 +705,11 @@ async fn feedback_rejects_user_failed_and_stopped_replies() {
         insert_feedback_message(
             &f,
             AssistantMessage {
+                platform_delivery_recovery_queued: false,
+                continuation_of: None,
                 retry_of: None,
+                retry_claimed_by: None,
+                activity_count: None,
                 turn_id: id.into(),
                 role: role.into(),
                 status: status.into(),
@@ -878,7 +966,11 @@ async fn feedback_existing_conversation_rejects_other_user_put_and_delete() {
     insert_feedback_message(
         &f,
         AssistantMessage {
+            platform_delivery_recovery_queued: false,
+            continuation_of: None,
             retry_of: None,
+            retry_claimed_by: None,
+            activity_count: None,
             turn_id: "turn".into(),
             ..fixtures::message(message_id.into(), conversation_id.into(), f.owner.clone())
         },
@@ -967,7 +1059,11 @@ async fn feedback_rejects_message_from_another_owned_conversation() {
     insert_feedback_message(
         &f,
         AssistantMessage {
+            platform_delivery_recovery_queued: false,
+            continuation_of: None,
             retry_of: None,
+            retry_claimed_by: None,
+            activity_count: None,
             turn_id: "turn".into(),
             ..fixtures::message(
                 "scoped-reply".into(),
@@ -1083,7 +1179,11 @@ async fn feedback_revoked_org_member_cannot_vote_on_org_agent_thread() {
     insert_feedback_message(
         &f,
         AssistantMessage {
+            platform_delivery_recovery_queued: false,
+            continuation_of: None,
             retry_of: None,
+            retry_claimed_by: None,
+            activity_count: None,
             turn_id: "t".into(),
             ..fixtures::message(
                 "org-reply".into(),
@@ -1293,7 +1393,11 @@ async fn feedback_vote_persists_reply_context_and_logs_metadata_only() {
     let answered = asked + Duration::milliseconds(1500);
     for message in [
         AssistantMessage {
+            platform_delivery_recovery_queued: false,
+            continuation_of: None,
             retry_of: None,
+            retry_claimed_by: None,
+            activity_count: None,
             role: "user".into(),
             turn_id: "turn-ctx".into(),
             text: "PROMPT-SENTINEL".into(),
@@ -1301,7 +1405,11 @@ async fn feedback_vote_persists_reply_context_and_logs_metadata_only() {
             ..fixtures::message("ctx-user".into(), conversation_id.into(), f.owner.clone())
         },
         AssistantMessage {
+            platform_delivery_recovery_queued: false,
+            continuation_of: None,
             retry_of: None,
+            retry_claimed_by: None,
+            activity_count: None,
             seq: 2,
             turn_id: "turn-ctx".into(),
             text: "REPLY-SENTINEL".into(),
