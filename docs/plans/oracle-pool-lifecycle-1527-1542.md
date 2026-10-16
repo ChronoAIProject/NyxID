@@ -292,7 +292,16 @@ outside the lifecycle contract. README and architecture documentation now link
 and explain that contract as required by the contribution guide. No package
 version or release tag is changed; releases use the repository's tag workflow.
 
-Post-integration tests and PR CI are being verified before merge. The task-owned
-MongoDB replica set was restarted solely for those tests with the contribution
-guide's ephemeral-test snapshot-history setting. It will be stopped again after
-verification; unrelated services and workspaces will not be removed.
+Post-integration backend Oracle tests passed: **139 passed, 0 failed, 0 ignored**
+(`/tmp/oracle-integrated-backend.log`). The CLI Oracle rerun also passed: **52
+passed, 0 failed, 0 ignored** (`/tmp/oracle-integrated-cli.log`). The task-owned
+MongoDB replica set was restarted solely for these tests with the contribution
+guide's ephemeral-test snapshot-history setting. Its exact process identity and
+lock file were verified before SIGTERM; shutdown completed with exit code 0.
+Unrelated services and workspaces are outside teardown scope.
+
+PR #1921 targets main with the Conventional Commit title
+`feat: support Oracle pool ownership transfer and deletion`. Final GitHub check
+results and the squash-merge record are authoritative in the PR. The PR remains
+in draft until integration validation passes; merging is gated on settled CI,
+current conflict checks, and the primary's final readiness review.
