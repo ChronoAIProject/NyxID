@@ -480,7 +480,7 @@ pub(crate) async fn assess_record(
             UnavailableReason::ProofExpired,
         ));
     }
-    let expected = match evidence(&record) {
+    let expected = match evidence(record) {
         Ok(e) => e,
         Err(_) => {
             return Ok(PublicReadiness::Unavailable(

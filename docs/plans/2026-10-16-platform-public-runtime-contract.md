@@ -126,6 +126,15 @@ scopes accept only their own typed authority schema; no ordinary JWT interchange
 Manifest array ordering is part of the contract identity and must stay stable
 across refreshes of the same deployed contract.
 
+Catalog authority digests (`nyxagent_catalog_digest` and each model operation's
+`execution_authority_digest`) and the manager `candidate_digest` use NyxID's
+canonical JSON digest format: `sha256:` followed by exactly 64 lowercase hex
+characters. Copy the catalog authority digest from trusted discovery without
+removing its prefix. Runtime/profile digests, endpoint-set digests, stable policy
+and evidence digests, request byte hashes and credential hashes are exactly 64
+lowercase hex characters without a prefix. These representations are strict;
+uppercase, alternate algorithms and truncated values are rejected.
+
 ## Model protocol and cost
 
 The only dynamic public tools are exactly `public_faq_search`, `public_faq_read`,

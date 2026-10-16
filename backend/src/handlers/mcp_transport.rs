@@ -5770,7 +5770,10 @@ mod tests {
                 .unwrap();
             let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
             assert_eq!(body["error"], "forbidden");
-            assert_eq!(body["message"], "Public tool or arguments are not allowed");
+            assert_eq!(
+                body["message"],
+                "Forbidden: Public tool or arguments are not allowed"
+            );
             assert!(authenticate_mcp(&state, &headers, true).await.is_err());
         }
         let observed = commands.lock().unwrap().clone();

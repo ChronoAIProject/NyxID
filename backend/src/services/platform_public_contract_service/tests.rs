@@ -112,6 +112,8 @@ async fn stored_deployment(
         .await
         .unwrap();
     let e = evidence(&outer, &model, &[]);
+    validate_manifest(&e.manifest)
+        .expect("stored catalog digests must satisfy the public wire contract");
     fence(db, &e)
         .await
         .expect("stored deployment must authorize before any negative or race assertion");
@@ -130,6 +132,12 @@ async fn fence(db: &Database, e: &DeploymentEvidence) -> AppResult<()> {
 fn versioned_fixture_requires_containment_versions_and_affordable_bounds() {
     let m = manifest();
     validate_manifest(&m).unwrap();
+    let op = &m.profiles[0].model_operations[0];
+    assert_eq!(fixture()["probe_body"], probe_body(op));
+    assert_eq!(
+        fixture()["probe_body"]["max_output_tokens"],
+        op.max_output_tokens
+    );
     let claims: Assertion = serde_json::from_value(fixture()["assertion_claims"].clone()).unwrap();
     validate_authority(&claims.scope, &claims.authority).unwrap();
     let cleanup: Assertion =
@@ -150,6 +158,48 @@ fn versioned_fixture_requires_containment_versions_and_affordable_bounds() {
     let mut raw = fixture()["manifest"].clone();
     raw["unbounded_provider_fallback"] = json!(true);
     assert!(serde_json::from_value::<RuntimeManifest>(raw).is_err());
+}
+
+#[tokio::test]
+async fn catalog_digest_roundtrip_matches_trusted_discovery_and_strict_manifest() {
+    let db = crate::test_utils::connect_transaction_test_database("public_catalog_digest").await;
+    let (outer, model, e) = stored_deployment(&db).await;
+    for service in [&outer, &model] {
+        let stored = db
+            .collection::<DownstreamService>(SERVICES)
+            .find_one(doc! {"_id": &service.id})
+            .await
+            .unwrap()
+            .unwrap();
+        let actual = proxy::catalog_digest(&stored).unwrap();
+        assert!(catalog_sha(&actual));
+        assert_eq!(actual, proxy::catalog_digest(service).unwrap());
+    }
+    let bindings = model_bindings(&db, &e.binding.sponsor_owner_user_id)
+        .await
+        .unwrap();
+    let advertised = bindings
+        .iter()
+        .find(|op| op["service_id"] == model.id)
+        .expect("configured inference catalog must advertise its operation");
+    assert_eq!(
+        advertised["execution_authority_digest"],
+        e.manifest.profiles[0].model_operations[0].execution_authority_digest
+    );
+    validate_manifest(&e.manifest).unwrap();
+    let digest = &e.manifest.profiles[0].model_operations[0].execution_authority_digest;
+    for malformed in [
+        digest.trim_start_matches("sha256:").to_owned(),
+        digest.to_uppercase(),
+        digest.replacen("sha256:", "sha512:", 1),
+        format!("{digest}0"),
+        format!("sha256:{}g", "a".repeat(63)),
+    ] {
+        let mut manifest = e.manifest.clone();
+        manifest.profiles[0].model_operations[0].execution_authority_digest = malformed;
+        assert!(validate_manifest(&manifest).is_err());
+    }
+    db.drop().await.unwrap();
 }
 
 #[tokio::test]
@@ -225,6 +275,10 @@ async fn cleanup_is_session_scoped_after_key_revocation_with_or_without_an_obser
         .await
         .unwrap();
     let e = evidence(&outer, &model, &[]);
+    validate_manifest(&e.manifest).unwrap();
+    fence(&db, &e)
+        .await
+        .expect("cleanup deployment must authorize before session revocation and expiry");
     db.collection::<PublicDeploymentRecord>(DEPLOYMENT_RECORDS)
         .insert_one(PublicDeploymentRecord {
             id: uuid::Uuid::new_v4().to_string(),

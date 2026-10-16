@@ -47,6 +47,9 @@ fn sha(value: &str) -> bool {
             .bytes()
             .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
 }
+fn catalog_sha(value: &str) -> bool {
+    value.strip_prefix("sha256:").is_some_and(sha)
+}
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -233,7 +236,7 @@ pub(crate) fn validate_manifest(m: &RuntimeManifest) -> AppResult<()> {
                 || op.method != "POST"
                 || op.model_id.is_empty()
                 || op.model_id.len() > 256
-                || !sha(&op.execution_authority_digest)
+                || !catalog_sha(&op.execution_authority_digest)
                 || !sha(&op.endpoint_set_digest)
                 || op.endpoint_generation < 0
                 || op.max_input_bytes == 0

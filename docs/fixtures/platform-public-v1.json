@@ -8,7 +8,7 @@
     "manager_authority_epoch": 1,
     "public_policy_revision": 1,
     "sponsor_owner_user_id": "33333333-3333-4333-8333-333333333333",
-    "candidate_digest": "4444444444444444444444444444444444444444444444444444444444444444"
+    "candidate_digest": "sha256:4444444444444444444444444444444444444444444444444444444444444444"
   },
   "manifest": {
     "contract": "nyxid-public-execution.v1",
@@ -36,7 +36,7 @@
             "method": "POST",
             "canonical_path": "responses",
             "protocol": "openai_responses",
-            "execution_authority_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "execution_authority_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             "endpoint_generation": 0,
             "endpoint_set_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
             "model_id": "review-fixture-model",
@@ -64,7 +64,7 @@
   "probe_body": {
     "model": "review-fixture-model",
     "input": "Reply OK.",
-    "max_output_tokens": 16
+    "max_output_tokens": 256
   },
   "assertion_header": {
     "alg": "RS256",
@@ -87,7 +87,7 @@
         "manager_authority_epoch": 1,
         "public_policy_revision": 1,
         "sponsor_owner_user_id": "33333333-3333-4333-8333-333333333333",
-        "candidate_digest": "4444444444444444444444444444444444444444444444444444444444444444"
+        "candidate_digest": "sha256:4444444444444444444444444444444444444444444444444444444444444444"
       },
       "manifest": {
         "contract": "nyxid-public-execution.v1",
@@ -115,7 +115,7 @@
                 "method": "POST",
                 "canonical_path": "responses",
                 "protocol": "openai_responses",
-                "execution_authority_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "execution_authority_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                 "endpoint_generation": 0,
                 "endpoint_set_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
                 "model_id": "review-fixture-model",
@@ -149,7 +149,7 @@
       "session_expires_at": "2027-01-16T00:00:00Z",
       "turn_expires_at": "2027-01-15T00:01:30Z",
       "nyxagent_service_id": "99999999-9999-4999-8999-999999999999",
-      "nyxagent_catalog_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "nyxagent_catalog_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
       "policy_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
       "proof_record_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
     },
@@ -172,10 +172,10 @@
         "manager_authority_epoch": 1,
         "public_policy_revision": 1,
         "sponsor_owner_user_id": "33333333-3333-4333-8333-333333333333",
-        "candidate_digest": "4444444444444444444444444444444444444444444444444444444444444444"
+        "candidate_digest": "sha256:4444444444444444444444444444444444444444444444444444444444444444"
       },
       "nyxagent_service_id": "99999999-9999-4999-8999-999999999999",
-      "nyxagent_catalog_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "nyxagent_catalog_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
       "manifest": {
         "contract": "nyxid-public-execution.v1",
         "build": "1111111111111111111111111111111111111111",
@@ -202,7 +202,7 @@
                 "method": "POST",
                 "canonical_path": "responses",
                 "protocol": "openai_responses",
-                "execution_authority_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "execution_authority_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                 "endpoint_generation": 0,
                 "endpoint_set_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
                 "model_id": "review-fixture-model",

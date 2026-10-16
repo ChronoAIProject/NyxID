@@ -390,6 +390,8 @@ impl Handshake {
         )
         .await;
         let e = evidence(&outer, &service, &[]);
+        validate_manifest(&e.manifest)
+            .expect("real catalog authority must satisfy the runtime manifest contract");
         let reviewed = reviewed(&e);
         crate::services::role_service::seed_system_roles(&db)
             .await
@@ -456,6 +458,9 @@ impl Handshake {
             "plan_kind":"prepaid", "balance_credits": Credits::from_whole(20).decimal(), "reserved_credits": Credits::ZERO.decimal(),
             "collection_state":"good", "balance_synced_at":bson::DateTime::now(), "created_at":bson::DateTime::now(), "updated_at":bson::DateTime::now(),
         }).await.unwrap();
+        fence(&db, &e)
+            .await
+            .expect("live catalog and sponsor must authorize before any fault is injected");
         let runtime = ExternalRuntime {
             state: state.clone(),
             manifest: Arc::new(Mutex::new(e.manifest)),
@@ -500,6 +505,23 @@ impl Handshake {
             producers,
         };
         fixture.consent().await;
+        let (discovery, deployed) = discover(&fixture.state, &fixture.reviewed)
+            .await
+            .expect("signed discovery must succeed before readiness fault injection");
+        assert!(deployed.is_some());
+        assert_eq!(
+            discovery.default_profile.as_deref(),
+            Some(
+                fixture
+                    .reviewed
+                    .public_policy
+                    .as_ref()
+                    .unwrap()
+                    .nyxagent_profile
+                    .as_str()
+            )
+        );
+        assert_eq!(discovery.profiles.len(), 1);
         fixture
     }
 
@@ -556,6 +578,18 @@ impl Handshake {
             .try_collect()
             .await
             .unwrap()
+    }
+    async fn assert_probe_prepared(&self) {
+        assert_eq!(
+            self.state
+                .db
+                .collection::<PublicProbe>(PROBES)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            1,
+            "negative readiness case must reach real probe preparation"
+        );
     }
     async fn expire_and_recover(&self) {
         self.state
@@ -779,6 +813,7 @@ async fn expired_consent_and_changed_signed_body_prevent_funding_and_provider_ef
             "terminal_amount":Credits::ZERO.decimal(), "granted_by":&fixture.actor.user_id, "created_at":bson::DateTime::now(), "updated_at":bson::DateTime::now(),
         }).await.unwrap();
         assert!(fixture.probe().await.is_err());
+        fixture.assert_probe_prepared().await;
         let grant = fixture
             .state
             .db
@@ -822,6 +857,7 @@ async fn failed_readiness_recovery_releases_real_funded_and_pre_funding_holds() 
         )
         .await;
         assert!(fixture.probe().await.is_err());
+        fixture.assert_probe_prepared().await;
         if mode == FUND_ONLY {
             assert!(fixture.wallet().await.reserved_credits > Credits::ZERO);
             assert_eq!(fixture.meters().await.len(), 5);
