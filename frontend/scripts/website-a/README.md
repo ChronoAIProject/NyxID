@@ -38,3 +38,12 @@ and pinned-source hashes are retained there. The static 24-card tool wall remain
 unchanged. Public pages use an independent dark theme and never change saved app
 preferences. See `docs/plans/website-v4.1-delivery.md` for current verification and
 the unresolved UnicornStudio branding requirement.
+
+Contact uses a native `ContactSection` adapter while retaining the original
+Discord card and scoped layout selectors. Its form and scripted FAQ live in
+`src/features/website-a/contact.tsx`; validation is in
+`src/schemas/website-contact.ts`. Delivery integration is pending an owner-provided
+recipient/endpoint. Never restore the prototype's fake success branch or replace
+the whole interface when a backend is unavailable. Contact-specific shrink/error
+and disclosure styles are in `contact.css`; the original layout/breakpoint
+styles remain in `website-a.css`.

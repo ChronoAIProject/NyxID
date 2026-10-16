@@ -89,3 +89,13 @@ Static comparison identified an overbroad Discord substitution in the generator.
 接收邮箱/接口待负责人提供。此阶段只做本地校验，明确提示未发送、不保存；不生成伪成功、不猜收件人、不绕过匿名额度。尚不构成 Contact 完整交付。已编写相关回归测试，但按 CPU 降载要求尚未执行测试、构建、生成器复现或浏览器验证；两个生成页暂为按新生成规则静态同步，恢复验证后须核对逐字节复现。未提交用户系统日志，不推断网站 WebGL 已被证明是 Codex 退出根因。
 
 Delivery awaits an owner-provided recipient or endpoint. Entries are validated locally and explicitly remain unsent; no fake success, guessed recipient or anonymous AI is introduced. Contact is incomplete. Tests are authored but unexecuted under the CPU constraint; build, generation equality and browser checks are deferred. The two generated pages were aligned statically and require reproduction verification when testing resumes. System diagnostics are excluded from repository artifacts.
+
+### Contact 样式静态核对 / Contact style mapping
+
+按负责人“先把样式处理了”完成样式代码：原 `.wrap.contact` 的 `1.15fr/.85fr` 双列与20px间距、`.card` 的22px内边距/16px圆角、`.contact-form form` 的16px行距与22px顶部留白、`.f2` 的两列/14px间距、44px输入控件、五行留言及46px全宽主按钮均匹配恢复后的原生DOM。原 `.contact-side`、`.bot`、`.bot-h`、240px `.bot-msgs`、快捷chips与Discord样式继续生效；原960px media rule将左右两栏及字段分组均堆叠为单列。
+
+The restored DOM matches the original two-column, card, form, input, button, FAQ and Discord selectors in `website-a.css`, including its960px single-column breakpoint. No replacement design or content layout is introduced.
+
+补充 `contact.css` 仅限制Contact范围：网格子项/输入允许收缩，问答输入与44px发送按钮共用行宽；长问题换行、消息不被挤缩；演示说明增加12px留白并显示真实登录链接；无效字段使用已有错误色。没有改全站主题/动画或原型字体token。接收渠道待确认；样式已提交代码，尚未做浏览器/窄屏实测、构建或测试，不能据静态匹配宣称像素验收通过。
+
+Contact-scoped CSS adds shrink safety, long-question wrapping, stable message sizing, readable demo disclosure/sign-in and existing error-color feedback. Recipient integration and runtime verification remain pending; static selector mapping does not establish visual or responsive acceptance.
