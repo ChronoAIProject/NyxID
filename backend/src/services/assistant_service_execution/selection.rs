@@ -49,7 +49,39 @@ async fn reload_authority(
         db, &key, None, None, None,
     ))
     .await?;
-    crate::services::org_agent_service::authorize_execution(db, &auth, connection).await?;
+    // Only server-admitted model transport may retain the proxy's implicit
+    // scope exception. Explicit grants still use the organization resource
+    // boundary; ordinary MCP/native actions and targetless calls never skip it.
+    let implicit_model_transport = !require_service_grant
+        && !auth.allow_all_services
+        && connection
+            .is_some_and(|id| !auth.allowed_service_ids.iter().any(|allowed| allowed == id));
+    if implicit_model_transport {
+        let service = crate::services::user_service_service::find_user_service_by_id(
+            db,
+            connection.expect("implicit model transport has an exact connection"),
+        )
+        .await?
+        .filter(|row| row.is_active)
+        .ok_or_else(|| AppError::ApiKeyScopeForbidden("Model connection unavailable".into()))?;
+        let catalog = service.catalog_service_id.as_deref().ok_or_else(|| {
+            AppError::ApiKeyScopeForbidden("Model transport requires an inference catalog".into())
+        })?;
+        if db
+            .collection::<crate::models::downstream_service::DownstreamService>(
+                "downstream_services",
+            )
+            .find_one(doc! {"_id":catalog,"is_active":true})
+            .await?
+            .is_none_or(|catalog| catalog.inference.is_none())
+        {
+            return Err(AppError::ApiKeyScopeForbidden(
+                "Model transport scope revoked".into(),
+            ));
+        }
+    } else {
+        crate::services::org_agent_service::authorize_execution(db, &auth, connection).await?;
+    }
     if require_service_grant
         && let Some(connection) = connection
         && !auth.allow_all_services

@@ -31,11 +31,6 @@ pub(super) fn legacy_model_generation(
             })
 }
 
-pub(super) fn model_compaction(path: &str) -> bool {
-    let path = path.trim_matches('/');
-    path.strip_prefix("v1/").unwrap_or(path) == "responses/compact"
-}
-
 /// Only catalog-declared inference on a closed model generation endpoint is
 /// account-fungible. Stateful response/file handles retain account identity.
 pub fn http_operation(

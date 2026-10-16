@@ -292,9 +292,8 @@ async fn check_http_projected_inner(
     let model_transport = !chat.guest
         && !method_override
         && super::request_identity::legacy_model_generation(target, method, path, body);
-    let compaction = model_transport && super::request_identity::model_compaction(path);
-    let legacy_inference = model_transport && (!chat.turn_live || compaction);
     let stateless = operation["kind"] == "inference";
+    let legacy_inference = model_transport && (!chat.turn_live || !stateless);
     if legacy_inference {
         // This only preserves the existing model transport scope exception. It
         // neither installs turn consent nor proves cross-account equivalence.
@@ -420,7 +419,7 @@ async fn check_http_projected_inner(
     if let Some(binding) = consent_binding.as_deref() {
         validate_model_consent_snapshot(decision.admission.as_ref(), binding)?;
     }
-    if raw_inference || (chat.turn_live && compaction) {
+    if chat.turn_live && model_transport {
         super::bootstrap::observe_model_callback(&state.db, chat, decision.refusal.as_ref())
             .await?;
     }

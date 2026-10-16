@@ -151,7 +151,11 @@ async fn assert_call(f: &Fixture, mcp: bool, method: &str, name: &str, allowed: 
             body.get("error").is_some() || body["result"]["isError"] == true,
             "{body}"
         );
-        assert!(body.to_string().contains("live turn"), "{body}");
+        assert_eq!(body["error"]["code"], -32603, "{body}");
+        assert_eq!(
+            body["error"]["message"], "Assistant turn is no longer active",
+            "{body}"
+        );
     } else {
         assert_eq!(status, if allowed { 200 } else { 409 }, "{body}");
         if !allowed {
@@ -161,50 +165,90 @@ async fn assert_call(f: &Fixture, mcp: bool, method: &str, name: &str, allowed: 
 }
 
 #[tokio::test]
-async fn idle_personal_http_and_mcp_preserve_rollout_and_existing_mode_gates() {
-    for mcp in [false, true] {
-        let mut f = orchestrator_fixture("idle_personal_rollout").await;
-        mode(&f, AccessMode::Nyxmode).await;
-        flag(&f, false).await;
-        let server = wiremock::MockServer::start().await;
-        wiremock::Mock::given(wiremock::matchers::any())
-            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(json!({"ok":true})))
-            .mount(&server)
-            .await;
-        service(&f, &f.owner, &server.uri()).await;
-        idle(&mut f).await;
-        assert_call(&f, mcp, "GET", "read", true).await;
-        assert_call(&f, mcp, "POST", "change", true).await;
-        assert_call(&f, mcp, "DELETE", "destroy", false).await;
-        mode(&f, AccessMode::AskEveryTime).await;
-        assert_call(&f, mcp, "POST", "change", false).await;
-        mode(&f, AccessMode::Autopilot).await;
-        assert_call(&f, mcp, "DELETE", "destroy", true).await;
-        assert_eq!(server.received_requests().await.unwrap().len(), 3);
-        flag(&f, true).await;
-        assert_call(&f, mcp, "GET", "read", false).await;
-        assert_eq!(server.received_requests().await.unwrap().len(), 3);
-        assert_eq!(
-            f.state
-                .db
-                .collection::<Document>("assistant_acknowledgements")
-                .count_documents(doc! {"kind":"action","status":"pending"})
-                .await
-                .unwrap(),
-            0
-        );
-        assert_eq!(
-            f.state
-                .db
-                .collection::<Document>(COLLECTION)
-                .count_documents(
-                    doc! {"kind":{"$in":["card_binding","model_consent","unavailable_bucket"]}}
-                )
-                .await
-                .unwrap(),
-            0
-        );
-    }
+async fn idle_personal_http_preserves_rollout_and_existing_mode_gates() {
+    let mut f = orchestrator_fixture("idle_personal_rollout").await;
+    mode(&f, AccessMode::Nyxmode).await;
+    flag(&f, false).await;
+    let server = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::any())
+        .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(json!({"ok":true})))
+        .mount(&server)
+        .await;
+    service(&f, &f.owner, &server.uri()).await;
+    idle(&mut f).await;
+    assert_call(&f, false, "GET", "read", true).await;
+    assert_call(&f, false, "POST", "change", true).await;
+    assert_call(&f, false, "DELETE", "destroy", false).await;
+    mode(&f, AccessMode::AskEveryTime).await;
+    assert_call(&f, false, "POST", "change", false).await;
+    mode(&f, AccessMode::Autopilot).await;
+    assert_call(&f, false, "DELETE", "destroy", true).await;
+    assert_eq!(server.received_requests().await.unwrap().len(), 3);
+    flag(&f, true).await;
+    assert_call(&f, false, "GET", "read", false).await;
+    assert_eq!(server.received_requests().await.unwrap().len(), 3);
+    assert_eq!(
+        f.state
+            .db
+            .collection::<Document>("assistant_acknowledgements")
+            .count_documents(doc! {"kind":"action","status":"pending"})
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        f.state
+            .db
+            .collection::<Document>(COLLECTION)
+            .count_documents(
+                doc! {"kind":{"$in":["card_binding","model_consent","unavailable_bucket"]}}
+            )
+            .await
+            .unwrap(),
+        0
+    );
+}
+
+#[tokio::test]
+async fn idle_mcp_keeps_main_activity_fence_while_direct_executor_respects_rollout() {
+    let mut f = orchestrator_fixture("idle_mcp_main_contract").await;
+    mode(&f, AccessMode::Nyxmode).await;
+    flag(&f, false).await;
+    let server = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::any())
+        .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(json!({"ok":true})))
+        .mount(&server)
+        .await;
+    let id = service(&f, &f.owner, &server.uri()).await;
+    idle(&mut f).await;
+    // main's handle_tool_call_with_activity requires a tracked live activity,
+    // even with the rollout off. The HTTP/executor gates do not remove it.
+    assert_call(&f, true, "GET", "read", false).await;
+    assert!(server.received_requests().await.unwrap().is_empty());
+    assert_eq!(
+        super::native::node_service_call(&f, &id, true)
+            .await
+            .unwrap(),
+        200
+    );
+    assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    flag(&f, true).await;
+    assert!(matches!(
+        super::native::node_service_call(&f, &id, true).await,
+        Err(AppError::AssistantTurnRequired)
+    ));
+    let (_, denied) = call(&f, true, "GET", "read").await;
+    assert_eq!(denied["error"]["code"], -32003, "{denied}");
+    assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    assert_eq!(
+        f.state
+            .db
+            .collection::<Document>("assistant_acknowledgements")
+            .count_documents(doc! {"status":"pending"})
+            .await
+            .unwrap(),
+        0
+    );
 }
 
 #[tokio::test]

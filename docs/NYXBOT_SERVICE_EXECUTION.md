@@ -50,16 +50,24 @@ card or any organization connection use requires a real live turn. Idle calls
 still enforce personal saved order, exact grants, ACLs, operation scopes and
 final key/configuration/mode checks, and cannot reuse turn selections, consent
 or outage evidence. Live admissions always stop on Stop or a replaced turn.
-Legacy personal/platform model generation also retains the existing scope
-exception when `store:false` is omitted; this does not establish stateless
-account equivalence or authorize cross-account fallback.
-NyxAgent's `responses/compact` callback retains the model transport scope
-exception. Personal/platform calls keep live and idle compatibility; organization
-calls still require a live turn and the existing organization consent gate.
-Compaction binds its exact account and complete semantic request, uses the
-existing change-action permission gate, and never inherits stateless model
-consent or account fallback. A compaction card pauses the runtime visibly, and
-Allow resumes only its exact bound request.
+The public MCP transport retains its existing live activity requirement even
+with this rollout off; direct executor compatibility does not remove that gate.
+
+Model transport scope and account equivalence are separate. The closed supported
+generation routes and NyxAgent's `responses/compact` callback retain their existing
+model scope exception, including omitted/true `store`, previous response/file
+handles and provider extensions. Personal/platform calls keep live and idle
+compatibility; organization calls require a live turn and the existing consent
+gate. An organization-owned specialist may use an otherwise ungranted thinking
+model through that same implicit scope exception. Explicit grants still use the
+organization resource boundary, and every path retains live membership, key,
+connection ACL, operation and execution-configuration checks.
+
+Every nonstateless model request binds its exact account and complete semantic
+request, uses the existing change-action permission gate, and never inherits
+stateless model consent or account fallback. Its card pauses the runtime visibly,
+and Allow resumes only the exact bound request. No exception extends to arbitrary
+provider file, response-management or other resource routes.
 
 ## Model bootstrap and turn consent
 
