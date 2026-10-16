@@ -2536,7 +2536,7 @@ async fn issue_1844_revocation_expiry_preserves_delivery_quarantine_and_legacy_r
     assert_eq!(expired[0]["revocation_pending"], false);
     assert_eq!(expired[0]["delivery_pending"], true);
     let row = outbox.find_one(doc! {"_id":&id}).await.unwrap().unwrap();
-    assert_eq!(row.get_bool("pending").unwrap(), true);
+    assert!(row.get_bool("pending").unwrap());
     assert!(!row.contains_key("acknowledged_at"));
     // Expiry cannot perform profile quarantine or claim its acknowledgement.
     outbox

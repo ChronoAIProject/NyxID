@@ -770,7 +770,13 @@ assert policy['URLBlocklist']==['file://*'] and 'ExtensionInstallForcelist' not 
  console.log('Authority revoke-to-finished ms:',(performance.now()-revokeAt).toFixed(2));
  assert.equal((await call('authority_renew',{}, {...leased,expires_at_ms:Date.now()+45000})).error.code,12421,'revoked lease cannot renew');
  assert.equal((await call('exec',{job_id:randomUUID(),command:'true',services:[]},authority())).error.code,12421,'old revision cannot restart');
- const expiring=authority({revision:2,expires_at_ms:Date.now()+5000}),expiryJob=randomUUID();
+ // Signed authority consumes the 5s CLOCK_SKEW_MS budget before admission;
+ // a deadline with no usable budget must fail, while 10s leaves a short 5s lease.
+ const skewBudgetMs=5000;
+ const exhausted=await call('exec',{job_id:randomUUID(),command:'true',services:[]},authority({revision:2,expires_at_ms:Date.now()+skewBudgetMs}));
+ assert.equal(exhausted.error?.code,12421,'no usable skew budget refuses admission');
+ assert.equal(exhausted.error?.reason,'authority_expired');
+ const expiring=authority({revision:2,expires_at_ms:Date.now()+skewBudgetMs+5000}),expiryJob=randomUUID();
  const startedExpiry=await call('exec',{job_id:expiryJob,command:'sleep 60',background:true,services:[]},expiring);
  assert.equal(startedExpiry.job_id,expiryJob,JSON.stringify(startedExpiry));
  await delay(5200);
