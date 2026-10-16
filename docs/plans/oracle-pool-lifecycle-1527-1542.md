@@ -143,8 +143,8 @@ by the existing llms.txt handler.
 ## Final verification evidence
 
 Implementation and the primary's source/fixture review are complete. All required
-checks below passed. Source is held on `implement-nyxid-issues-1527-1542`; changes
-remain uncommitted. One requested Heca implementation session used
+checks below passed. The implementation checkpoint was verified on
+`implement-nyxid-issues-1527-1542` before the shipping phase below. One requested Heca implementation session used
 `gpt-6.1-sol`, `xhigh`, full access; the primary personally reviewed and iterated
 with that same session. No native subagents or additional implementation/review
 sessions were created. No push, PR, deployment, or GitHub mutation was performed.
@@ -244,6 +244,8 @@ successful strict check; this final plan update records the completed evidence.
 ## Changed files
 
 - `CLAUDE.md`
+- `README.md`
+- `docs/ARCHITECTURE.md`
 - `backend/src/api_docs.rs`
 - `backend/src/db.rs`
 - `backend/src/errors/mod.rs`
@@ -276,3 +278,21 @@ successful strict check; this final plan update records the completed evidence.
 - `docs/API.md`
 - `docs/ORACLE_RELAY.md`
 - `docs/plans/oracle-pool-lifecycle-1527-1542.md`
+
+## Shipping integration
+
+The user authorized PR creation, CI monitoring, squash merge into main, branch
+removal and local build/service teardown. The branch is now
+`feature/oracle-pool-lifecycle`, following CONTRIBUTING.md's feature prefix.
+It incorporates `origin/main` at `0aceacb0`. The only merge conflict was in
+`docs/API.md`; both independent documentation additions were retained. Upstream
+Oracle input-validation visibility changes and assistant admission gates remain
+intact. The final compatibility review found no unintended breaking changes
+outside the lifecycle contract. README and architecture documentation now link
+and explain that contract as required by the contribution guide. No package
+version or release tag is changed; releases use the repository's tag workflow.
+
+Post-integration tests and PR CI are being verified before merge. The task-owned
+MongoDB replica set was restarted solely for those tests with the contribution
+guide's ephemeral-test snapshot-history setting. It will be stopped again after
+verification; unrelated services and workspaces will not be removed.
