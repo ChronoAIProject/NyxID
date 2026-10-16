@@ -844,6 +844,13 @@ async fn push_gateway_groups(
     };
     let bot = channel_bot_service::get_bot(&state.db, &row.channel_bot_id).await?;
     let creator = creator_bearer(state, &row.user_id)?;
+    let bots = super::gateway_bot_mentions::desired(row, &bot);
+    let reconciliation = GatewayReconciliation {
+        wanted,
+        threads,
+        bots,
+        identity_changed,
+    };
     let mut update = gateway_policy(state, row, &bot, &[route_id.to_owned()], wanted);
     if threads.version == Some(1) {
         update["reply"]["thread_contract"] = super::gateway_threads::policy(threads);
@@ -862,7 +869,6 @@ async fn push_gateway_groups(
     .await;
     match response {
         Ok(response) if response.status == 200 => {
-            let bots = super::gateway_bot_mentions::desired(row, &bot);
             if !gateway_policy_acknowledged(&response.body, &update) {
                 // A successful PUT without a trustworthy echo is an
                 // uncertain write. Read the authenticated record before
@@ -871,10 +877,7 @@ async fn push_gateway_groups(
                 return reconcile_gateway_groups(
                     state,
                     row,
-                    wanted,
-                    threads,
-                    bots,
-                    identity_changed,
+                    reconciliation,
                     creator.as_str(),
                     &update,
                 )
@@ -884,10 +887,7 @@ async fn push_gateway_groups(
                 return reconcile_gateway_groups(
                     state,
                     row,
-                    wanted,
-                    threads,
-                    bots,
-                    identity_changed,
+                    reconciliation,
                     creator.as_str(),
                     &update,
                 )
@@ -897,25 +897,21 @@ async fn push_gateway_groups(
                 .await
         }
         Ok(response) if response.status == 409 => {
-            let bots = super::gateway_bot_mentions::desired(row, &bot);
             // A concurrent writer may already have applied the desired
             // definition. Reconcile the fresh CAS version before deciding
             // whether another PUT is needed.
-            reconcile_gateway_groups(
-                state,
-                row,
-                wanted,
-                threads,
-                bots,
-                identity_changed,
-                creator.as_str(),
-                &update,
-            )
-            .await
+            reconcile_gateway_groups(state, row, reconciliation, creator.as_str(), &update).await
         }
         Ok(response) => Ok(Some(gateway_error_code(&response))),
         Err(_) => Ok(Some("gateway_unavailable")),
     }
+}
+
+struct GatewayReconciliation<'a> {
+    wanted: &'static str,
+    threads: &'a crate::models::nyxbot_channel::GatewayThreadSupport,
+    bots: bool,
+    identity_changed: bool,
 }
 
 /// Compare only the provider fields that NyxID authored. Gateways may add
@@ -1014,10 +1010,7 @@ pub(super) fn gateway_local_cas_filter(
 async fn reconcile_gateway_groups(
     state: &AppState,
     row: &NyxbotChannel,
-    wanted: &'static str,
-    threads: &crate::models::nyxbot_channel::GatewayThreadSupport,
-    bots: bool,
-    identity_changed: bool,
+    policy: GatewayReconciliation<'_>,
     creator: &str,
     requested: &Value,
 ) -> AppResult<Option<&'static str>> {
@@ -1048,9 +1041,9 @@ async fn reconcile_gateway_groups(
             state,
             row,
             row.gateway_version.unwrap_or_default(),
-            wanted,
-            threads,
-            bots,
+            policy.wanted,
+            policy.threads,
+            policy.bots,
             version,
         )
         .await;
@@ -1073,11 +1066,11 @@ async fn reconcile_gateway_groups(
     if updated.matched_count != 1 {
         return Ok(Some("gateway_reconcile_conflict"));
     }
-    if identity_changed {
+    if policy.identity_changed {
         Ok(Some("gateway_receiving_identity_unavailable"))
-    } else if bots {
+    } else if policy.bots {
         Ok(Some("gateway_native_bot_mentions_unavailable"))
-    } else if threads.version == Some(1) {
+    } else if policy.threads.version == Some(1) {
         Ok(Some("gateway_thread_contract_unavailable"))
     } else {
         Ok(Some("gateway_policy_unavailable"))
@@ -2409,7 +2402,7 @@ pub(super) fn native_sender_kind(
                 let valid_operator = operator["open_id"]
                     .as_str()
                     .is_some_and(|id| id.starts_with("ou_") && (4..=128).contains(&id.len()));
-                return valid_operator.then_some(Human).unwrap_or(Unknown);
+                return if valid_operator { Human } else { Unknown };
             }
             match raw["event"]["sender"]["sender_type"].as_str() {
                 Some("user") => Human,
@@ -2473,7 +2466,7 @@ pub(super) async fn existing_bot_chat(
     Ok(state.db.collection::<NyxbotThread>(THREADS).find_one(doc! {
         "user_id":&row.user_id,"channel_id":&row.id,"partition":partition,
         "record_scope":{"$ne":crate::services::channel_thread_follow_service::SCOPE},"kind":"group"
-    }).await?.filter(|chat| members_may_talk(chat)))
+    }).await?.filter(members_may_talk))
 }
 
 #[cfg(test)]
