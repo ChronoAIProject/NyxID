@@ -99,6 +99,9 @@ function jsx(el) {
     id = el.id,
     cls = el.getAttribute("class") ?? "";
   if (el.hasAttribute("data-skip")) return "";
+  if (currentRoute === "contact" && tag === "div" && cls.split(" ").includes("contact")) {
+    return `<ContactSection>${jsx(el.querySelector(".discord-card"))}</ContactSection>`;
+  }
   if (currentRoute === "" && tag === "h1" && el.closest(".hero")) return "<HeroTitle />";
   if (
     cls.split(" ").includes("ann") ||
@@ -436,15 +439,6 @@ for (locale of ["en", "zh"]) {
       button.textContent =
         locale === "zh" ? "订阅暂未开放" : "Subscriptions coming soon";
     }
-    if (route === "contact") {
-      tree.querySelector("#cForm").remove();
-      tree.querySelector("#cDone").remove();
-      tree.querySelector(".bot").remove();
-      const form = tree.querySelector(".contact-form");
-      form.innerHTML = run(
-        `'<div class="over">'+L('Contact','联系')+'</div><h2 class="h3">'+L('Talk to the team','与团队交流')+'</h2><p class="sub">'+L('Join our Discord for questions about bundles, self-hosting or your setup.','有关套餐、自托管或设置的问题，欢迎加入 Discord 与团队交流。')+'</p>'+discordBtn('btn p')`,
-      );
-    }
     tree.querySelectorAll("p").forEach((p) => {
       if (/\[Placeholder:|［占位：/.test(p.textContent))
         p.textContent =
@@ -489,6 +483,7 @@ for (locale of ["en", "zh"]) {
     const pageSource =
       banner +
       imports + visualImports +
+      (body.includes("<ContactSection") ? "import {ContactSection} from '../../contact';\n" : "") +
       `import {useWebsite} from '../../website-context';\nexport default function ${component}(){const s=useWebsite(); void s; return <>${body}</>;}\n`;
     fs.writeFileSync(
       path.join(outDir, locale, component + ".tsx"),

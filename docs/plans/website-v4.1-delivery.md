@@ -79,3 +79,13 @@ The Home emphasis now uses the reference page's two brand-purple endpoints while
 增量验证：13项相关测试、改动 ESLint、68个输出生成复现通过；真实浏览器核对中英动画、中文参照页和离屏静态 computed gradient 一致，返回后动画恢复。见 `website-v4.1-evidence/color-audit.json` 与 `color-*.jpg/txt/json`。整体125项/完整构建记录属于前一实现 commit；本纯配色修改没有重跑全量。水印阻塞不变，独立验收按新 commit 增量复验。
 
 Incremental checks passed:13 related tests, scoped lint and68-file generation equality. Browser evidence records both animated languages, the reference and static fallback, plus animation recovery. Earlier full-build/125-test evidence belongs to the previous implementation commit; no full rerun was needed for this palette-only change. Branding remains unresolved.
+
+## Contact 恢复阶段 / Contact restoration stage
+
+静态对比确认生成器此前将批准表单和 NyxBot 问答整块替换为 Discord，导致功能界面丢失。现恢复原双列结构、五字段（公司选填）、五类主题和 Bundle 查询预选，正确 label 与原必填/邮箱校验；以原生 React、useAppForm 和 Zod 实现。右侧 FAQ 保留四个快捷问题、输入框、本地规则答复及原 Discord 卡；Bundle 问答可同步选中主题。演示明确不调用真实 AI，并保留真实登录入口。
+
+Static comparison identified an overbroad Discord substitution in the generator. The restored native interface includes five labelled fields, optional company, five topics, Bundle preselection, original validation, scripted FAQ and the existing Discord card. FAQ responses are local, bounded and timer-free; real NyxBot remains behind sign-in.
+
+接收邮箱/接口待负责人提供。此阶段只做本地校验，明确提示未发送、不保存；不生成伪成功、不猜收件人、不绕过匿名额度。尚不构成 Contact 完整交付。已编写相关回归测试，但按 CPU 降载要求尚未执行测试、构建、生成器复现或浏览器验证；两个生成页暂为按新生成规则静态同步，恢复验证后须核对逐字节复现。未提交用户系统日志，不推断网站 WebGL 已被证明是 Codex 退出根因。
+
+Delivery awaits an owner-provided recipient or endpoint. Entries are validated locally and explicitly remain unsent; no fake success, guessed recipient or anonymous AI is introduced. Contact is incomplete. Tests are authored but unexecuted under the CPU constraint; build, generation equality and browser checks are deferred. The two generated pages were aligned statically and require reproduction verification when testing resumes. System diagnostics are excluded from repository artifacts.
