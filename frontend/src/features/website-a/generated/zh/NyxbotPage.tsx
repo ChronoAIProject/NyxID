@@ -1,6 +1,7 @@
 // Generated from approved A, SHA-256 5ba81989df18ad10986c1f00cebdcb1e2efd294932853a7671685187a7e34d33.
 // Run: node scripts/website-a/generate.mjs <baseline.html>
 import { DemoAgents, DemoMessages, DemoChips } from "../../interactions";
+import { VisualLink } from "../../visuals/elements";
 import { useWebsite } from "../../website-context";
 export default function NyxbotPage() {
   const s = useWebsite();
@@ -56,9 +57,13 @@ export default function NyxbotPage() {
                 marginTop: "30px",
               }}
             >
-              <a className="btn p lg" href={s.authHref("register")}>
+              <VisualLink
+                className="btn p lg"
+                href={s.authHref("register")}
+                effect="button"
+              >
                 {"从 NyxBot 开始"}
-              </a>
+              </VisualLink>
               <a className="btn lg" href={s.siteHref("/solutions")}>
                 {"看看它能做什么"}
               </a>
@@ -577,9 +582,10 @@ export default function NyxbotPage() {
             <div className="org-rail"></div>
             {"\n    "}
             <div className="grid g4 org-grid">
-              <a
+              <VisualLink
                 className="card clk"
                 href={s.siteHref("/solutions/restaurant-manager")}
+                effect="card"
               >
                 <div className="ic">
                   <svg className="i" viewBox="0 0 24 24">
@@ -611,10 +617,11 @@ export default function NyxbotPage() {
                   </svg>
                   {" 不能：收取订金"}
                 </div>
-              </a>
-              <a
+              </VisualLink>
+              <VisualLink
                 className="card clk"
                 href={s.siteHref("/solutions/news-aggregator")}
+                effect="card"
               >
                 <div className="ic">
                   <svg className="i" viewBox="0 0 24 24">
@@ -646,10 +653,11 @@ export default function NyxbotPage() {
                   </svg>
                   {" 只读来源"}
                 </div>
-              </a>
-              <a
+              </VisualLink>
+              <VisualLink
                 className="card clk"
                 href={s.siteHref("/solutions/back-office-clerk")}
+                effect="card"
               >
                 <div className="ic">
                   <svg className="i" viewBox="0 0 24 24">
@@ -681,10 +689,11 @@ export default function NyxbotPage() {
                   </svg>
                   {" 不能：运行命令"}
                 </div>
-              </a>
-              <a
+              </VisualLink>
+              <VisualLink
                 className="card clk"
                 href={s.siteHref("/solutions/callback-queue")}
+                effect="card"
               >
                 <div className="ic">
                   <svg className="i" viewBox="0 0 24 24">
@@ -716,7 +725,7 @@ export default function NyxbotPage() {
                   </svg>
                   {" 先问你：提供退款或优惠"}
                 </div>
-              </a>
+              </VisualLink>
             </div>
             {"\n  "}
           </div>

@@ -30,3 +30,11 @@ The baseline's five-workflow embedded film is migrated to locale JSON and native
 React, with accessible selection and playback controls. Its animation timing and
 responsive arrangement are implemented in `interactions.tsx` / `workflow-film.css`.
 All public CSS selectors and animation names are scoped to avoid changing the app.
+
+The approved A + v4.1 enhancement is generated through native `HeroSection`,
+`HeroTitle`, `VisualLink` and precise `RevealFrame` placements. Source adapters,
+scoped styles and lifecycle tests live in `visuals/`; the full React Bits license
+and pinned-source hashes are retained there. The static 24-card tool wall remains
+unchanged. Public pages use an independent dark theme and never change saved app
+preferences. See `docs/plans/website-v4.1-delivery.md` for current verification and
+the unresolved UnicornStudio branding requirement.

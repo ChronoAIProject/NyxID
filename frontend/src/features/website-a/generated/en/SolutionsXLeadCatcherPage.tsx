@@ -1,5 +1,6 @@
 // Generated from approved A, SHA-256 5ba81989df18ad10986c1f00cebdcb1e2efd294932853a7671685187a7e34d33.
 // Run: node scripts/website-a/generate.mjs <baseline.html>
+import { VisualLink } from "../../visuals/elements";
 import { useWebsite } from "../../website-context";
 export default function SolutionsXLeadCatcherPage() {
   const s = useWebsite();
@@ -60,9 +61,13 @@ export default function SolutionsXLeadCatcherPage() {
                 marginTop: "28px",
               }}
             >
-              <a className="btn p lg" href={s.authHref("register")}>
+              <VisualLink
+                className="btn p lg"
+                href={s.authHref("register")}
+                effect="button"
+              >
                 {"Use this solution"}
-              </a>
+              </VisualLink>
               <a className="btn lg" href={s.siteHref("/how-it-works")}>
                 {"How it works"}
               </a>
@@ -367,7 +372,11 @@ export default function SolutionsXLeadCatcherPage() {
             </a>
           </div>
           <div className="grid g3">
-            <a className="card sol " href={s.siteHref("/solutions/help-desk")}>
+            <VisualLink
+              className="card sol "
+              href={s.siteHref("/solutions/help-desk")}
+              effect="card"
+            >
               {"\n  "}
               <div className="top">
                 <div className="ic">
@@ -409,7 +418,7 @@ export default function SolutionsXLeadCatcherPage() {
                   </svg>
                 </span>
               </div>
-            </a>
+            </VisualLink>
           </div>
         </div>
       </section>

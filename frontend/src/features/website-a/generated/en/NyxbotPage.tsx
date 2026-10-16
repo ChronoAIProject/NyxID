@@ -1,6 +1,7 @@
 // Generated from approved A, SHA-256 5ba81989df18ad10986c1f00cebdcb1e2efd294932853a7671685187a7e34d33.
 // Run: node scripts/website-a/generate.mjs <baseline.html>
 import { DemoAgents, DemoMessages, DemoChips } from "../../interactions";
+import { VisualLink } from "../../visuals/elements";
 import { useWebsite } from "../../website-context";
 export default function NyxbotPage() {
   const s = useWebsite();
@@ -56,9 +57,13 @@ export default function NyxbotPage() {
                 marginTop: "30px",
               }}
             >
-              <a className="btn p lg" href={s.authHref("register")}>
+              <VisualLink
+                className="btn p lg"
+                href={s.authHref("register")}
+                effect="button"
+              >
                 {"Start with NyxBot"}
-              </a>
+              </VisualLink>
               <a className="btn lg" href={s.siteHref("/solutions")}>
                 {"See what it can run"}
               </a>
@@ -607,9 +612,10 @@ export default function NyxbotPage() {
             <div className="org-rail"></div>
             {"\n    "}
             <div className="grid g4 org-grid">
-              <a
+              <VisualLink
                 className="card clk"
                 href={s.siteHref("/solutions/restaurant-manager")}
+                effect="card"
               >
                 <div className="ic">
                   <svg className="i" viewBox="0 0 24 24">
@@ -641,10 +647,11 @@ export default function NyxbotPage() {
                   </svg>
                   {" Can’t: charge deposits"}
                 </div>
-              </a>
-              <a
+              </VisualLink>
+              <VisualLink
                 className="card clk"
                 href={s.siteHref("/solutions/news-aggregator")}
+                effect="card"
               >
                 <div className="ic">
                   <svg className="i" viewBox="0 0 24 24">
@@ -676,10 +683,11 @@ export default function NyxbotPage() {
                   </svg>
                   {" Read-only sources"}
                 </div>
-              </a>
-              <a
+              </VisualLink>
+              <VisualLink
                 className="card clk"
                 href={s.siteHref("/solutions/back-office-clerk")}
+                effect="card"
               >
                 <div className="ic">
                   <svg className="i" viewBox="0 0 24 24">
@@ -711,10 +719,11 @@ export default function NyxbotPage() {
                   </svg>
                   {" Can’t: run commands"}
                 </div>
-              </a>
-              <a
+              </VisualLink>
+              <VisualLink
                 className="card clk"
                 href={s.siteHref("/solutions/callback-queue")}
+                effect="card"
               >
                 <div className="ic">
                   <svg className="i" viewBox="0 0 24 24">
@@ -746,7 +755,7 @@ export default function NyxbotPage() {
                   </svg>
                   {" Asks first: offer money back"}
                 </div>
-              </a>
+              </VisualLink>
             </div>
             {"\n  "}
           </div>

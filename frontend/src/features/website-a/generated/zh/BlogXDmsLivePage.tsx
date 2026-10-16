@@ -1,5 +1,6 @@
 // Generated from approved A, SHA-256 5ba81989df18ad10986c1f00cebdcb1e2efd294932853a7671685187a7e34d33.
 // Run: node scripts/website-a/generate.mjs <baseline.html>
+import { VisualLink, RevealFrame } from "../../visuals/elements";
 import { useWebsite } from "../../website-context";
 export default function BlogXDmsLivePage() {
   const s = useWebsite();
@@ -38,7 +39,7 @@ export default function BlogXDmsLivePage() {
       </section>
       {"\n"}
       <div className="wrap" style={{ maxWidth: "900px" }}>
-        <div
+        <RevealFrame
           className="cover"
           style={{
             background: "linear-gradient(135deg,#18181B,#3F3F46)",
@@ -50,7 +51,7 @@ export default function BlogXDmsLivePage() {
             <path d="m3 11 18-5v12L3 14v-3z"></path>
             <path d="M11.6 16.8a3 3 0 1 1-5.8-1.6"></path>
           </svg>
-        </div>
+        </RevealFrame>
       </div>
       {"\n"}
       <section className="s" style={{ paddingTop: "40px", border: "none" }}>
@@ -123,11 +124,12 @@ export default function BlogXDmsLivePage() {
             </a>
           </div>
           <div className="grid g3">
-            <a
+            <VisualLink
               className="card post-card"
               href={s.siteHref("/blog/what-is-nyxid")}
+              effect="card"
             >
-              <div
+              <RevealFrame
                 className="cover"
                 style={{
                   background: "linear-gradient(135deg,#A672FB,#5E00F5)",
@@ -137,7 +139,7 @@ export default function BlogXDmsLivePage() {
                   <path d="m12 2 10 5-10 5L2 7l10-5z"></path>
                   <path d="m2 17 10 5 10-5M2 12l10 5 10-5"></path>
                 </svg>
-              </div>
+              </RevealFrame>
               <div className="body">
                 <span className="badge b-v" style={{ alignSelf: "flex-start" }}>
                   {"指南"}
@@ -152,12 +154,13 @@ export default function BlogXDmsLivePage() {
                   <span>{"6 分钟阅读"}</span>
                 </div>
               </div>
-            </a>
-            <a
+            </VisualLink>
+            <VisualLink
               className="card post-card"
               href={s.siteHref("/blog/luna-bistro")}
+              effect="card"
             >
-              <div
+              <RevealFrame
                 className="cover"
                 style={{
                   background: "linear-gradient(135deg,#5A2AF1,#B59FF9)",
@@ -168,7 +171,7 @@ export default function BlogXDmsLivePage() {
                   <path d="M7 2v20"></path>
                   <path d="M21 15V2a5 5 0 0 0-5 5v6c0 1.1.9 2 2 2h3Zm0 0v7"></path>
                 </svg>
-              </div>
+              </RevealFrame>
               <div className="body">
                 <span className="badge b-v" style={{ alignSelf: "flex-start" }}>
                   {"客户故事"}
@@ -185,12 +188,13 @@ export default function BlogXDmsLivePage() {
                   <span>{"4 分钟阅读"}</span>
                 </div>
               </div>
-            </a>
-            <a
+            </VisualLink>
+            <VisualLink
               className="card post-card"
               href={s.siteHref("/blog/never-share-passwords")}
+              effect="card"
             >
-              <div
+              <RevealFrame
                 className="cover"
                 style={{
                   background: "linear-gradient(135deg,#1E0A68,#5A2AF1)",
@@ -200,7 +204,7 @@ export default function BlogXDmsLivePage() {
                   <rect x="3" y="11" width="18" height="11" rx="2"></rect>
                   <path d="M7 11V7a5 5 0 0 1 10 0v4"></path>
                 </svg>
-              </div>
+              </RevealFrame>
               <div className="body">
                 <span className="badge b-v" style={{ alignSelf: "flex-start" }}>
                   {"安全"}
@@ -217,7 +221,7 @@ export default function BlogXDmsLivePage() {
                   <span>{"5 分钟阅读"}</span>
                 </div>
               </div>
-            </a>
+            </VisualLink>
           </div>
         </div>
       </section>

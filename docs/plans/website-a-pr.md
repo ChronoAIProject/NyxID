@@ -1,50 +1,20 @@
-# Website A PR preparation
+# Website A + v4.1 PR preparation
 
-Per the owner's latest instruction, delivery consists of implementation commits pushed to `aelf-hzz780/NyxID`. The owner will create the organization PR manually. Connector PR write access and a fork PR are not delivery prerequisites. No PR URL or acceptance result is implied by this document.
+Delivery uses implementation commits on `aelf-hzz780/NyxID`, branch `codex/website-a-delivery`. The owner creates the organization PR manually. No merge or deployment is authorized here.
 
-Optional fork comparison:
-
-- Repository: `aelf-hzz780/NyxID`
-- Base: `codex/website-a-base`
-- Head: `codex/website-a-delivery`
-- Compare: https://github.com/aelf-hzz780/NyxID/compare/codex%2Fwebsite-a-base...codex%2Fwebsite-a-delivery?expand=1
-
-Organization PR prepared for manual creation by the owner:
-
-- Repository: `ChronoAIProject/NyxID`
-- Base: `main`
-- Head: `aelf-hzz780:codex/website-a-delivery`
-- Compare: https://github.com/ChronoAIProject/NyxID/compare/main...aelf-hzz780:codex%2Fwebsite-a-delivery?expand=1
-- Independent re-acceptance passed on fix commit `1ac8a2867`. The owner decides when to open/merge the organization PR; real-account/device coverage limits remain disclosed.
+- Optional fork comparison: https://github.com/aelf-hzz780/NyxID/compare/codex%2Fwebsite-a-base...codex%2Fwebsite-a-delivery?expand=1
+- Organization comparison: https://github.com/ChronoAIProject/NyxID/compare/main...aelf-hzz780:codex%2Fwebsite-a-delivery?expand=1
+- Upstream base: `8280098785b477a9980cc8aed98f43789d6fd3dc`.
+- Historical A acceptance: `1ac8a28675603279499fb1205790ca4bd67c4fa0`. v4.1 requires new independent acceptance.
 
 ## Title
 
-feat(website): deliver approved NyxID website A
+feat(website): integrate approved bilingual website and v4.1 visuals
 
 ## Body
 
-## Summary
+Integrate the approved website into 25 bilingual native React routes while preserving real authentication, full query propagation and native showcase/workflow/filter behavior. Add approved GradientText, SpecularButton, SpotlightCard and FadeContent effects with scoped styles, precise placement and lifecycle cleanup. Keep the homepage's original24 static tool cards. Public pages now independently default to the approved dark theme without altering application preferences.
 
-- Implement the approved product HTML as 25 bilingual public routes with its audience showcase, solution examples, integrations, pricing and articles. Keep the v4.1 homepage wall as the original 24-card static grid; no B effects.
-- Retain existing AuthFlow/login/register, invitation attribution, query propagation, trusted returns, authenticated root redirect and legacy blog URLs. Replace prototype-only success/trial actions with real registration/community links; unsupported newsletter submission is clearly unavailable.
-- Commit the source-migration tool, screenshots, runtime adaptations and review evidence in docs/plans/website-a-delivery.md and website-a-evidence. No auth/billing/backend changes, merge or deployment.
+Local validation:125 tests across16 files, full production build, scoped ESLint and deterministic68-file generation passed. Actual browser checks cover desktop/bilingual390px mobile, native Enter/query navigation, shader/gradient/fade output, offscreen recovery, filters and eight NyxBot sidebar states. Lifecycle tests cover reduced motion, visibility and partial renderer/network failures. See `docs/plans/website-v4.1-delivery.md` and evidence for commands and limits.
 
-## Test Plan
-
-- [x] 89 relevant frontend tests across 11 files; new regression tests cover the public path boundary, auth context and showcase/playback behavior. Backend tests are outside this frontend-only change.
-- [x] Full production build, including TypeScript, legal prerender, credential-accept and mock-footprint checks.
-- [x] Changed TypeScript ESLint; source generation reproduced byte-for-byte.
-- [x] 25 routes × English/Chinese = 50 desktop browser checks, auth entry/query comparison against production, interaction and original tool-wall geometry checks.
-- [x] Actual 390×844 browser checks of both repaired mobile login menus and full query preservation; bilingual custom CTA and all eight sidebar demo/language combinations checked. Initial viewport tooling limitation is resolved.
-- [ ] Physical-device touch/performance, Firefox and WebKit validation remain unverified.
-- [x] Independent re-acceptance of A-01–A-03 on `1ac8a2867`, including targeted tests, build, bilingual mobile/desktop navigation, CTA and sidebar layout.
-- [ ] Real-account OAuth/MFA completion remains unverified.
-
-## Checklist
-
-- [x] Native React/router/i18n integration with scoped CSS and animation names.
-- [x] No new hardcoded secrets or credentials; the existing public referral behavior is preserved.
-- [x] No mock login/provisioning, fake contact success or sensitive error disclosure.
-- [x] Documentation, production adaptation matrix, commands, screenshots and residual risks recorded.
-
-Review baseline: codex/website-a-base mirrors upstream commit 8280098785b477a9980cc8aed98f43789d6fd3dc. The fork main branch is 12 commits behind; this non-protected base keeps review scoped to the delivery without pushing main. Implementation commit: a0ae2b3f3bf3908387978c3ca2067344f36b6c46. The first independent acceptance found A-01–A-03; fixes are included in this branch and independent re-acceptance passed on `1ac8a2867` on October 15, 2026.
+**Open blocker:** the reused UnicornStudio scene still displays branding. No authorized watermark-free resource was found in the repository. No cover layer, branding DOM removal, SDK modification or purchase was performed. Obtain an authorized unbranded publication or approve a replacement before overall acceptance/merge. Independent v4.1 acceptance is pending; physical devices, cross-browser, real OAuth/MFA and production CWV remain unverified.

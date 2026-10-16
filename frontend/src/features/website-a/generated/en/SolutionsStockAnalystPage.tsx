@@ -1,5 +1,6 @@
 // Generated from approved A, SHA-256 5ba81989df18ad10986c1f00cebdcb1e2efd294932853a7671685187a7e34d33.
 // Run: node scripts/website-a/generate.mjs <baseline.html>
+import { VisualLink } from "../../visuals/elements";
 import { useWebsite } from "../../website-context";
 export default function SolutionsStockAnalystPage() {
   const s = useWebsite();
@@ -60,9 +61,13 @@ export default function SolutionsStockAnalystPage() {
                 marginTop: "28px",
               }}
             >
-              <a className="btn p lg" href={s.authHref("register")}>
+              <VisualLink
+                className="btn p lg"
+                href={s.authHref("register")}
+                effect="button"
+              >
                 {"Use this solution"}
-              </a>
+              </VisualLink>
               <a className="btn lg" href={s.siteHref("/how-it-works")}>
                 {"How it works"}
               </a>
@@ -398,9 +403,10 @@ export default function SolutionsStockAnalystPage() {
             </a>
           </div>
           <div className="grid g3">
-            <a
+            <VisualLink
               className="card sol feat"
               href={s.siteHref("/solutions/restaurant-manager")}
+              effect="card"
             >
               {"\n  "}
               <div className="top">
@@ -444,8 +450,12 @@ export default function SolutionsStockAnalystPage() {
                   </svg>
                 </span>
               </div>
-            </a>
-            <a className="card sol " href={s.siteHref("/solutions/help-desk")}>
+            </VisualLink>
+            <VisualLink
+              className="card sol "
+              href={s.siteHref("/solutions/help-desk")}
+              effect="card"
+            >
               {"\n  "}
               <div className="top">
                 <div className="ic">
@@ -487,10 +497,11 @@ export default function SolutionsStockAnalystPage() {
                   </svg>
                 </span>
               </div>
-            </a>
-            <a
+            </VisualLink>
+            <VisualLink
               className="card sol "
               href={s.siteHref("/solutions/appointment-booker")}
+              effect="card"
             >
               {"\n  "}
               <div className="top">
@@ -534,7 +545,7 @@ export default function SolutionsStockAnalystPage() {
                   </svg>
                 </span>
               </div>
-            </a>
+            </VisualLink>
           </div>
         </div>
       </section>

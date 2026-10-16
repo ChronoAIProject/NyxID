@@ -1,3 +1,6 @@
+> 历史方案 A 交付记录。当前升级为 A + v4.1，最新范围、验证和未解决水印见 [website-v4.1-delivery.md](website-v4.1-delivery.md)。旧 A 验收不证明 v4.1 已通过。
+> Historical A record. See the v4.1 delivery for current scope, evidence and the unresolved branding blocker.
+
 # 官网方案 A 交付 / Website A delivery
 
 ## 目标与范围 / Goal and scope

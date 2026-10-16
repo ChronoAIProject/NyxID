@@ -1,6 +1,7 @@
 // Generated from approved A, SHA-256 5ba81989df18ad10986c1f00cebdcb1e2efd294932853a7671685187a7e34d33.
 // Run: node scripts/website-a/generate.mjs <baseline.html>
 import { CodeExample } from "../../interactions";
+import { VisualLink, RevealFrame } from "../../visuals/elements";
 import { useWebsite } from "../../website-context";
 export default function AgentsPage() {
   const s = useWebsite();
@@ -26,9 +27,13 @@ export default function AgentsPage() {
             }
           </p>
           <div className="cta">
-            <a className="btn p lg" href={s.authHref("register")}>
+            <VisualLink
+              className="btn p lg"
+              href={s.authHref("register")}
+              effect="button"
+            >
               {"获取智能体密钥"}
-            </a>
+            </VisualLink>
             <a className="btn lg" href={s.siteHref("/blog/scoped-keys")}>
               {"阅读：限权密钥"}
             </a>
@@ -266,12 +271,13 @@ export default function AgentsPage() {
           <h2 className="h2" style={{ marginBottom: "28px" }}>
             {"资源"}
           </h2>
-          <div className="grid g4">
-            <a
+          <RevealFrame className="grid g4">
+            <VisualLink
               className="card clk"
               href="https://github.com/ChronoAIProject/NyxID"
               target="_blank"
               rel="noopener noreferrer"
+              effect="card"
             >
               <b>{"GitHub 源码"}</b>
               <p className="small" style={{ marginTop: "6px" }}>
@@ -283,10 +289,11 @@ export default function AgentsPage() {
                   <path d="M5 12h14M12 5l7 7-7 7"></path>
                 </svg>
               </span>
-            </a>
-            <a
+            </VisualLink>
+            <VisualLink
               className="card clk"
               href={s.siteHref("/docs/ai/guides/mcp-proxy")}
+              effect="card"
             >
               <b>{"MCP 设置指南"}</b>
               <p className="small" style={{ marginTop: "6px" }}>
@@ -298,10 +305,11 @@ export default function AgentsPage() {
                   <path d="M5 12h14M12 5l7 7-7 7"></path>
                 </svg>
               </span>
-            </a>
-            <a
+            </VisualLink>
+            <VisualLink
               className="card clk"
               href={s.siteHref("/docs/ai/guides/agent-isolation")}
+              effect="card"
             >
               <b>{"智能体隔离"}</b>
               <p className="small" style={{ marginTop: "6px" }}>
@@ -313,10 +321,11 @@ export default function AgentsPage() {
                   <path d="M5 12h14M12 5l7 7-7 7"></path>
                 </svg>
               </span>
-            </a>
-            <a
+            </VisualLink>
+            <VisualLink
               className="card clk"
               href={s.siteHref("/docs/shared/concepts/credential-nodes")}
+              effect="card"
             >
               <b>{"机器节点"}</b>
               <p className="small" style={{ marginTop: "6px" }}>
@@ -328,8 +337,8 @@ export default function AgentsPage() {
                   <path d="M5 12h14M12 5l7 7-7 7"></path>
                 </svg>
               </span>
-            </a>
-          </div>
+            </VisualLink>
+          </RevealFrame>
         </div>
       </section>
       {"\n"}

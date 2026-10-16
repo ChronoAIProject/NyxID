@@ -1,6 +1,7 @@
 import { lazy, Suspense, useEffect, useState } from "react";
 import type { SyntheticEvent } from "react";
 import { useLocation } from "@tanstack/react-router";
+import { WEBSITE_THEME } from "./website-theme";
 import { I18nextProvider, useTranslation } from "react-i18next";
 import { WebsiteContext } from "./website-context";
 import type { Language, WebsiteState } from "./website-context";
@@ -13,11 +14,15 @@ import {
 import { websiteI18n } from "./i18n";
 import integrations from "./generated/integrations.json";
 import "./website-a.css";
+import "./visuals/visuals.css";
+import { useVisualMotion } from "./visuals/motion";
+import { VisualMotionProvider } from "./visuals/motion-provider";
 
 const English = lazy(() => import("./generated/en"));
 const Chinese = lazy(() => import("./generated/zh"));
 
 function Website() {
+  const { mode } = useVisualMotion();
   const location = useLocation();
   const { i18n } = useTranslation(undefined, { i18n: websiteI18n });
   const language: Language = i18n.language === "zh" ? "zh" : "en";
@@ -132,7 +137,10 @@ function Website() {
     <WebsiteContext.Provider value={state}>
       <div
         className="website-a"
-        data-theme="dark"
+        data-theme={WEBSITE_THEME}
+        data-visual-version="4.1"
+        data-visual-route={state.route}
+        data-visual-motion={mode}
         lang={language === "zh" ? "zh-CN" : "en"}
       >
         <a href="#website-main" className="website-skip">
@@ -155,7 +163,9 @@ function Website() {
 export function WebsitePage() {
   return (
     <I18nextProvider i18n={websiteI18n}>
-      <Website />
+      <VisualMotionProvider>
+        <Website />
+      </VisualMotionProvider>
     </I18nextProvider>
   );
 }

@@ -5,6 +5,8 @@ import {
   CodeExample,
   CommunityAccess,
 } from "../../interactions";
+import { VisualLink, RevealFrame } from "../../visuals/elements";
+import { HeroSection, HeroTitle } from "../../visuals/hero";
 import { useWebsite } from "../../website-context";
 export default function HomePage() {
   const s = useWebsite();
@@ -12,18 +14,14 @@ export default function HomePage() {
   return (
     <>
       {"\n"}
-      <section
+      <HeroSection
         className="hero glowbg"
         style={{ position: "relative", paddingBottom: "56px" }}
       >
         {"\n  "}
         <div className="wrap">
           {"\n    "}
-          <h1 className="h1">
-            {"不止会聊天的"}
-            <br />
-            <span className="grad">{"AI。"}</span>
-          </h1>
+          <HeroTitle />
           {"\n    "}
           <p className="lead">
             {
@@ -112,9 +110,13 @@ export default function HomePage() {
                         className="sec-cta left"
                         style={{ marginTop: "28px" }}
                       >
-                        <a className="btn p" href={s.authHref("register")}>
+                        <VisualLink
+                          className="btn p"
+                          href={s.authHref("register")}
+                          effect="button"
+                        >
                           {"开始使用"}
-                        </a>
+                        </VisualLink>
                         <a className="btn" href={s.siteHref("/solutions")}>
                           {"查看方案 "}
                           <svg className="i" viewBox="0 0 24 24">
@@ -301,9 +303,13 @@ export default function HomePage() {
                         className="sec-cta left"
                         style={{ marginTop: "28px" }}
                       >
-                        <a className="btn p" href={s.authHref("register")}>
+                        <VisualLink
+                          className="btn p"
+                          href={s.authHref("register")}
+                          effect="button"
+                        >
                           {"开始使用"}
-                        </a>
+                        </VisualLink>
                         <a className="btn" href={s.siteHref("/nyxbot")}>
                           {"认识 NyxBot "}
                           <svg className="i" viewBox="0 0 24 24">
@@ -487,9 +493,13 @@ export default function HomePage() {
                         className="sec-cta left"
                         style={{ marginTop: "28px" }}
                       >
-                        <a className="btn p" href={s.authHref("register")}>
+                        <VisualLink
+                          className="btn p"
+                          href={s.authHref("register")}
+                          effect="button"
+                        >
                           {"开始使用"}
-                        </a>
+                        </VisualLink>
                         <a className="btn" href={s.siteHref("/agents")}>
                           {"接入你的智能体 "}
                           <svg className="i" viewBox="0 0 24 24">
@@ -587,15 +597,19 @@ export default function HomePage() {
           {"\n  "}
         </div>
         {"\n"}
-      </section>
+      </HeroSection>
       {"\n\n"}
       <section className="s" style={{ paddingTop: "24px" }}>
         {"\n  "}
         <div className="wrap">
           {"\n    "}
-          <div className="grid g3 doors">
+          <RevealFrame className="grid g3 doors">
             {"\n      "}
-            <a className="card eq door" href={s.siteHref("/how-it-works")}>
+            <VisualLink
+              className="card eq door"
+              href={s.siteHref("/how-it-works")}
+              effect="card"
+            >
               <div className="door-k">
                 <span className="ic">
                   <svg className="i" viewBox="0 0 24 24">
@@ -617,8 +631,12 @@ export default function HomePage() {
                   <path d="M5 12h14M12 5l7 7-7 7"></path>
                 </svg>
               </span>
-            </a>
-            <a className="card eq door" href={s.siteHref("/security")}>
+            </VisualLink>
+            <VisualLink
+              className="card eq door"
+              href={s.siteHref("/security")}
+              effect="card"
+            >
               <div className="door-k">
                 <span className="ic">
                   <svg className="i" viewBox="0 0 24 24">
@@ -640,8 +658,12 @@ export default function HomePage() {
                   <path d="M5 12h14M12 5l7 7-7 7"></path>
                 </svg>
               </span>
-            </a>
-            <a className="card eq door" href={s.siteHref("/solutions")}>
+            </VisualLink>
+            <VisualLink
+              className="card eq door"
+              href={s.siteHref("/solutions")}
+              effect="card"
+            >
               <div className="door-k">
                 <span className="ic">
                   <svg className="i" viewBox="0 0 24 24">
@@ -666,14 +688,18 @@ export default function HomePage() {
                   <path d="M5 12h14M12 5l7 7-7 7"></path>
                 </svg>
               </span>
-            </a>
+            </VisualLink>
             {"\n    "}
-          </div>
+          </RevealFrame>
           {"\n    "}
           <div className="sec-cta">
-            <a className="btn p" href={s.authHref("register")}>
+            <VisualLink
+              className="btn p"
+              href={s.authHref("register")}
+              effect="button"
+            >
               {"开始使用"}
-            </a>
+            </VisualLink>
             <a className="btn" href={s.siteHref("/how-it-works")}>
               {"了解更多 "}
               <svg className="i" viewBox="0 0 24 24">
@@ -712,9 +738,13 @@ export default function HomePage() {
             {"\n      "}
             <div style={{ marginTop: "24px" }}>
               <div className="sec-cta left">
-                <a className="btn p" href={s.authHref("register")}>
+                <VisualLink
+                  className="btn p"
+                  href={s.authHref("register")}
+                  effect="button"
+                >
                   {"开始使用"}
-                </a>
+                </VisualLink>
                 <a className="btn" href={s.siteHref("/agents")}>
                   {"了解更多 "}
                   <svg className="i" viewBox="0 0 24 24">
@@ -1338,9 +1368,13 @@ export default function HomePage() {
           </p>
           {"\n    "}
           <div className="sec-cta">
-            <a className="btn p" href={s.authHref("register")}>
+            <VisualLink
+              className="btn p"
+              href={s.authHref("register")}
+              effect="button"
+            >
               {"开始使用"}
-            </a>
+            </VisualLink>
             <a className="btn" href={s.siteHref("/integrations")}>
               {"查看全部集成 "}
               <svg className="i" viewBox="0 0 24 24">

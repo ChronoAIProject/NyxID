@@ -1,6 +1,7 @@
 // Generated from approved A, SHA-256 5ba81989df18ad10986c1f00cebdcb1e2efd294932853a7671685187a7e34d33.
 // Run: node scripts/website-a/generate.mjs <baseline.html>
 import { SolutionFilm } from "../../interactions";
+import { VisualLink } from "../../visuals/elements";
 import { useWebsite } from "../../website-context";
 export default function SolutionsPage() {
   const s = useWebsite();
@@ -168,12 +169,13 @@ export default function SolutionsPage() {
           </div>
           {"\n    "}
           <div className="grid g3" id="solGrid">
-            <a
+            <VisualLink
               className="card sol feat"
               href={s.siteHref("/solutions/restaurant-manager")}
               data-category="hosp"
               data-channels="Telegram"
               hidden={!s.solutionVisible("hosp", "Telegram")}
+              effect="card"
             >
               {"\n  "}
               <div className="top">
@@ -217,13 +219,14 @@ export default function SolutionsPage() {
                   </svg>
                 </span>
               </div>
-            </a>
-            <a
+            </VisualLink>
+            <VisualLink
               className="card sol "
               href={s.siteHref("/solutions/help-desk")}
               data-category="support"
               data-channels="Telegram,X"
               hidden={!s.solutionVisible("support", "Telegram,X")}
+              effect="card"
             >
               {"\n  "}
               <div className="top">
@@ -266,13 +269,14 @@ export default function SolutionsPage() {
                   </svg>
                 </span>
               </div>
-            </a>
-            <a
+            </VisualLink>
+            <VisualLink
               className="card sol "
               href={s.siteHref("/solutions/appointment-booker")}
               data-category="hosp"
               data-channels="Telegram"
               hidden={!s.solutionVisible("hosp", "Telegram")}
+              effect="card"
             >
               {"\n  "}
               <div className="top">
@@ -316,13 +320,14 @@ export default function SolutionsPage() {
                   </svg>
                 </span>
               </div>
-            </a>
-            <a
+            </VisualLink>
+            <VisualLink
               className="card sol "
               href={s.siteHref("/solutions/callback-queue")}
               data-category="support"
               data-channels="Phone"
               hidden={!s.solutionVisible("support", "Phone")}
+              effect="card"
             >
               {"\n  "}
               <div className="top">
@@ -364,13 +369,14 @@ export default function SolutionsPage() {
                   </svg>
                 </span>
               </div>
-            </a>
-            <a
+            </VisualLink>
+            <VisualLink
               className="card sol "
               href={s.siteHref("/solutions/stock-analyst")}
               data-category="research"
               data-channels="Telegram"
               hidden={!s.solutionVisible("research", "Telegram")}
+              effect="card"
             >
               {"\n  "}
               <div className="top">
@@ -413,13 +419,14 @@ export default function SolutionsPage() {
                   </svg>
                 </span>
               </div>
-            </a>
-            <a
+            </VisualLink>
+            <VisualLink
               className="card sol "
               href={s.siteHref("/solutions/news-aggregator")}
               data-category="research"
               data-channels="Telegram"
               hidden={!s.solutionVisible("research", "Telegram")}
+              effect="card"
             >
               {"\n  "}
               <div className="top">
@@ -464,13 +471,14 @@ export default function SolutionsPage() {
                   </svg>
                 </span>
               </div>
-            </a>
-            <a
+            </VisualLink>
+            <VisualLink
               className="card sol "
               href={s.siteHref("/solutions/desk-researcher")}
               data-category="research"
               data-channels="Telegram"
               hidden={!s.solutionVisible("research", "Telegram")}
+              effect="card"
             >
               {"\n  "}
               <div className="top">
@@ -513,13 +521,14 @@ export default function SolutionsPage() {
                   </svg>
                 </span>
               </div>
-            </a>
-            <a
+            </VisualLink>
+            <VisualLink
               className="card sol "
               href={s.siteHref("/solutions/x-lead-catcher")}
               data-category="sales"
               data-channels="X"
               hidden={!s.solutionVisible("sales", "X")}
+              effect="card"
             >
               {"\n  "}
               <div className="top">
@@ -562,13 +571,14 @@ export default function SolutionsPage() {
                   </svg>
                 </span>
               </div>
-            </a>
-            <a
+            </VisualLink>
+            <VisualLink
               className="card sol "
               href={s.siteHref("/solutions/back-office-clerk")}
               data-category="ops"
               data-channels="Telegram,Computer"
               hidden={!s.solutionVisible("ops", "Telegram,Computer")}
+              effect="card"
             >
               {"\n  "}
               <div className="top">
@@ -612,8 +622,8 @@ export default function SolutionsPage() {
                   </svg>
                 </span>
               </div>
-            </a>
-            <a
+            </VisualLink>
+            <VisualLink
               className="card sol"
               href={s.siteHref("/nyxbot")}
               style={{
@@ -622,6 +632,7 @@ export default function SolutionsPage() {
                 justifyContent: "center",
                 textAlign: "center",
               }}
+              effect="card"
             >
               <div className="ic">
                 <svg className="i" viewBox="0 0 24 24">
@@ -637,7 +648,7 @@ export default function SolutionsPage() {
               <span className="btn sm" style={{ marginTop: "6px" }}>
                 {"Ask NyxBot"}
               </span>
-            </a>
+            </VisualLink>
           </div>
           {"\n  "}
         </div>
@@ -666,9 +677,13 @@ export default function SolutionsPage() {
                 marginTop: "24px",
               }}
             >
-              <a className="btn p" href={s.authHref("register")}>
+              <VisualLink
+                className="btn p"
+                href={s.authHref("register")}
+                effect="button"
+              >
                 {"Get started"}
-              </a>
+              </VisualLink>
               <a className="btn" href={s.siteHref("/contact?topic=bundle")}>
                 {"Talk to us"}
               </a>

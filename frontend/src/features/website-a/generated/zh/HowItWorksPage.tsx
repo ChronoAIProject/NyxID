@@ -1,5 +1,6 @@
 // Generated from approved A, SHA-256 5ba81989df18ad10986c1f00cebdcb1e2efd294932853a7671685187a7e34d33.
 // Run: node scripts/website-a/generate.mjs <baseline.html>
+import { VisualLink, RevealFrame } from "../../visuals/elements";
 import { useWebsite } from "../../website-context";
 export default function HowItWorksPage() {
   const s = useWebsite();
@@ -700,9 +701,13 @@ export default function HowItWorksPage() {
             </h2>
           </div>
           {"\n  "}
-          <div className="grid g3">
+          <RevealFrame className="grid g3">
             {"\n    "}
-            <a className="card eq" href={s.siteHref("/nyxbot")}>
+            <VisualLink
+              className="card eq"
+              href={s.siteHref("/nyxbot")}
+              effect="card"
+            >
               <span className="badge b-v">{"无需代码"}</span>
               <h3
                 className="h3"
@@ -719,9 +724,13 @@ export default function HowItWorksPage() {
                   <path d="M5 12h14M12 5l7 7-7 7"></path>
                 </svg>
               </span>
-            </a>
+            </VisualLink>
             {"\n    "}
-            <a className="card eq" href={s.siteHref("/agents")}>
+            <VisualLink
+              className="card eq"
+              href={s.siteHref("/agents")}
+              effect="card"
+            >
               <span className="badge b-ro">{"低代码"}</span>
               <h3
                 className="h3"
@@ -740,9 +749,13 @@ export default function HowItWorksPage() {
                   <path d="M5 12h14M12 5l7 7-7 7"></path>
                 </svg>
               </span>
-            </a>
+            </VisualLink>
             {"\n    "}
-            <a className="card eq" href={s.siteHref("/agents")}>
+            <VisualLink
+              className="card eq"
+              href={s.siteHref("/agents")}
+              effect="card"
+            >
               <span className="badge b-m">{"你自己的代码"}</span>
               <h3
                 className="h3"
@@ -761,9 +774,9 @@ export default function HowItWorksPage() {
                   <path d="M5 12h14M12 5l7 7-7 7"></path>
                 </svg>
               </span>
-            </a>
+            </VisualLink>
             {"\n  "}
-          </div>
+          </RevealFrame>
           {"\n"}
         </div>
       </section>

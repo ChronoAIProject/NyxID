@@ -79,7 +79,7 @@ const pages = {
   "/blog/x-dms-live": BlogXDmsLivePage,
 };
 const titles: Record<string, string> = {
-  "/": "不止会聊天的 AI。",
+  "/": "AI，超越聊天。",
   "/nyxbot": "直接开口， NyxBot 来办。",
   "/solutions": "你的助手要做什么？",
   "/how-it-works": "NyxID 如何把 AI 安全地连接到你的世界",

@@ -1,5 +1,6 @@
 // Generated from approved A, SHA-256 5ba81989df18ad10986c1f00cebdcb1e2efd294932853a7671685187a7e34d33.
 // Run: node scripts/website-a/generate.mjs <baseline.html>
+import { VisualLink, RevealFrame } from "../../visuals/elements";
 import { useWebsite } from "../../website-context";
 export default function BlogPage() {
   const s = useWebsite();
@@ -28,11 +29,12 @@ export default function BlogPage() {
       <section className="s" style={{ paddingTop: "20px" }}>
         <div className="wrap">
           {"\n  "}
-          <a
+          <VisualLink
             className="card featpost clk"
             href={s.siteHref("/blog/what-is-nyxid")}
+            effect="card"
           >
-            <div
+            <RevealFrame
               className="cover"
               style={{ background: "linear-gradient(135deg,#A672FB,#5E00F5)" }}
             >
@@ -40,7 +42,7 @@ export default function BlogPage() {
                 <path d="m12 2 10 5-10 5L2 7l10-5z"></path>
                 <path d="m2 17 10 5 10-5M2 12l10 5 10-5"></path>
               </svg>
-            </div>
+            </RevealFrame>
             <div className="body">
               <span className="badge b-v" style={{ alignSelf: "flex-start" }}>
                 {"精选 · 指南"}
@@ -61,7 +63,7 @@ export default function BlogPage() {
                 </svg>
               </span>
             </div>
-          </a>
+          </VisualLink>
           {"\n  "}
           <div
             className="pills"
@@ -125,13 +127,14 @@ export default function BlogPage() {
           </div>
           {"\n  "}
           <div className="grid g3" id="blogGrid">
-            <a
+            <VisualLink
               className="card post-card"
               href={s.siteHref("/blog/luna-bistro")}
               data-category="stories"
               hidden={!s.postVisible("stories")}
+              effect="card"
             >
-              <div
+              <RevealFrame
                 className="cover"
                 style={{
                   background: "linear-gradient(135deg,#5A2AF1,#B59FF9)",
@@ -142,7 +145,7 @@ export default function BlogPage() {
                   <path d="M7 2v20"></path>
                   <path d="M21 15V2a5 5 0 0 0-5 5v6c0 1.1.9 2 2 2h3Zm0 0v7"></path>
                 </svg>
-              </div>
+              </RevealFrame>
               <div className="body">
                 <span className="badge b-v" style={{ alignSelf: "flex-start" }}>
                   {"客户故事"}
@@ -159,14 +162,15 @@ export default function BlogPage() {
                   <span>{"4 分钟阅读"}</span>
                 </div>
               </div>
-            </a>
-            <a
+            </VisualLink>
+            <VisualLink
               className="card post-card"
               href={s.siteHref("/blog/never-share-passwords")}
               data-category="security"
               hidden={!s.postVisible("security")}
+              effect="card"
             >
-              <div
+              <RevealFrame
                 className="cover"
                 style={{
                   background: "linear-gradient(135deg,#1E0A68,#5A2AF1)",
@@ -176,7 +180,7 @@ export default function BlogPage() {
                   <rect x="3" y="11" width="18" height="11" rx="2"></rect>
                   <path d="M7 11V7a5 5 0 0 1 10 0v4"></path>
                 </svg>
-              </div>
+              </RevealFrame>
               <div className="body">
                 <span className="badge b-v" style={{ alignSelf: "flex-start" }}>
                   {"安全"}
@@ -193,14 +197,15 @@ export default function BlogPage() {
                   <span>{"5 分钟阅读"}</span>
                 </div>
               </div>
-            </a>
-            <a
+            </VisualLink>
+            <VisualLink
               className="card post-card"
               href={s.siteHref("/blog/five-jobs")}
               data-category="guides"
               hidden={!s.postVisible("guides")}
+              effect="card"
             >
-              <div
+              <RevealFrame
                 className="cover"
                 style={{
                   background: "linear-gradient(135deg,#5A2AF1,#0EA5E9)",
@@ -209,7 +214,7 @@ export default function BlogPage() {
                 <svg className="i" viewBox="0 0 24 24">
                   <path d="M12 3l1.9 5.8L20 11l-6.1 2.2L12 19l-1.9-5.8L4 11l6.1-2.2z"></path>
                 </svg>
-              </div>
+              </RevealFrame>
               <div className="body">
                 <span className="badge b-v" style={{ alignSelf: "flex-start" }}>
                   {"指南"}
@@ -226,14 +231,15 @@ export default function BlogPage() {
                   <span>{"7 分钟阅读"}</span>
                 </div>
               </div>
-            </a>
-            <a
+            </VisualLink>
+            <VisualLink
               className="card post-card"
               href={s.siteHref("/blog/scoped-keys")}
               data-category="dev"
               hidden={!s.postVisible("dev")}
+              effect="card"
             >
-              <div
+              <RevealFrame
                 className="cover"
                 style={{
                   background: "linear-gradient(135deg,#27272A,#5A2AF1)",
@@ -243,7 +249,7 @@ export default function BlogPage() {
                   <circle cx="7.5" cy="15.5" r="5.5"></circle>
                   <path d="m21 2-9.6 9.6M15.5 7.5l3 3L22 7l-3-3"></path>
                 </svg>
-              </div>
+              </RevealFrame>
               <div className="body">
                 <span className="badge b-v" style={{ alignSelf: "flex-start" }}>
                   {"开发者"}
@@ -260,14 +266,15 @@ export default function BlogPage() {
                   <span>{"8 分钟阅读"}</span>
                 </div>
               </div>
-            </a>
-            <a
+            </VisualLink>
+            <VisualLink
               className="card post-card"
               href={s.siteHref("/blog/x-dms-live")}
               data-category="updates"
               hidden={!s.postVisible("updates")}
+              effect="card"
             >
-              <div
+              <RevealFrame
                 className="cover"
                 style={{
                   background: "linear-gradient(135deg,#18181B,#3F3F46)",
@@ -277,7 +284,7 @@ export default function BlogPage() {
                   <path d="m3 11 18-5v12L3 14v-3z"></path>
                   <path d="M11.6 16.8a3 3 0 1 1-5.8-1.6"></path>
                 </svg>
-              </div>
+              </RevealFrame>
               <div className="body">
                 <span className="badge b-v" style={{ alignSelf: "flex-start" }}>
                   {"产品更新"}
@@ -294,7 +301,7 @@ export default function BlogPage() {
                   <span>{"2 分钟阅读"}</span>
                 </div>
               </div>
-            </a>
+            </VisualLink>
           </div>
           {"\n  "}
           <div

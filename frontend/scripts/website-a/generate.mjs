@@ -83,6 +83,7 @@ function style(el) {
   return result;
 }
 let locale;
+let currentRoute;
 function html(str) {
   const el = dom.document.createElement("div");
   el.innerHTML = str;
@@ -98,6 +99,7 @@ function jsx(el) {
     id = el.id,
     cls = el.getAttribute("class") ?? "";
   if (el.hasAttribute("data-skip")) return "";
+  if (currentRoute === "" && tag === "h1" && el.closest(".hero")) return "<HeroTitle />";
   if (
     cls.split(" ").includes("ann") ||
     ["brand-guide", "design-guide", "site-map"].some(
@@ -254,7 +256,23 @@ function jsx(el) {
   if (el.hasAttribute("data-group"))
     attrs.push(`hidden={s.integrationGroupCount(${q(el.dataset.group)})===0}`);
   if (voids.has(tag)) return `<${tag} ${attrs.join(" ")} />`;
-  return `<${tag} ${attrs.join(" ")}>${jsxChildren(el)}</${tag}>`;
+  let component = tag;
+  if (currentRoute === "" && tag === "section" && el.classList.contains("hero")) component = "HeroSection";
+  if (tag === "a" && el.matches(".btn.p")) {
+    component = "VisualLink";
+    attrs.push('effect="button"');
+  } else if (tag === "a" && el.matches("a.card.door,a.card.sol,a.card.clk,a.card.eq,a.card.featpost,a.card.post-card,a.card.discord-card")) {
+    component = "VisualLink";
+    attrs.push('effect="card"');
+  }
+  const reveal = tag === "div" && (
+    (currentRoute === "" && el.matches(".doors")) ||
+    (currentRoute === "how-it-works" && el.matches(".grid.g3") && el.querySelector(":scope > a.card.eq")) ||
+    (currentRoute === "agents" && el.matches(".grid.g4") && el.querySelector(":scope > a.card.clk")) ||
+    (currentRoute.startsWith("blog") && el.matches(".cover"))
+  );
+  if (reveal) component = "RevealFrame";
+  return `<${component} ${attrs.join(" ")}>${jsxChildren(el)}</${component}>`;
 }
 const routes = [
   "",
@@ -349,6 +367,7 @@ for (locale of ["en", "zh"]) {
   );
   const exports = [];
   for (const [route, markup] of Object.entries(entries)) {
+    currentRoute = route;
     const tree = html(markup);
     // Remove internal review links and prototype-only pending forms.
     if (route === "nav") {
@@ -463,9 +482,13 @@ for (locale of ["en", "zh"]) {
     const imports = interactions.length
       ? `import {${interactions.join(",")}} from '../../interactions';\n`
       : "";
+    const visualComponents = ["VisualLink", "RevealFrame"].filter((name) => body.includes("<" + name));
+    const heroComponents = ["HeroSection", "HeroTitle"].filter((name) => body.includes("<" + name));
+    const visualImports = (visualComponents.length ? `import {${visualComponents.join(",")}} from '../../visuals/elements';\n` : "") +
+      (heroComponents.length ? `import {${heroComponents.join(",")}} from '../../visuals/hero';\n` : "");
     const pageSource =
       banner +
-      imports +
+      imports + visualImports +
       `import {useWebsite} from '../../website-context';\nexport default function ${component}(){const s=useWebsite(); void s; return <>${body}</>;}\n`;
     fs.writeFileSync(
       path.join(outDir, locale, component + ".tsx"),
@@ -481,7 +504,7 @@ for (locale of ["en", "zh"]) {
         .querySelectorAll("br")
         .forEach((br) => br.replaceWith(dom.document.createTextNode(" ")));
       pageTitles["/" + (route === "notfound" ? "404" : route)] =
-        heading.textContent.replace(/\s+/g, " ").trim();
+        route === "" ? (locale === "zh" ? "AI，超越聊天。" : "AI that does more than chat.") : heading.textContent.replace(/\s+/g, " ").trim();
     }
     exports.push(
       `${q("/" + (route === "notfound" ? "404" : route))}:${component}`,

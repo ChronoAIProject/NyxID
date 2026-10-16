@@ -1,5 +1,6 @@
 // Generated from approved A, SHA-256 5ba81989df18ad10986c1f00cebdcb1e2efd294932853a7671685187a7e34d33.
 // Run: node scripts/website-a/generate.mjs <baseline.html>
+import { VisualLink } from "../../visuals/elements";
 import { useWebsite } from "../../website-context";
 export default function WebsiteHeader() {
   const s = useWebsite();
@@ -159,9 +160,13 @@ export default function WebsiteHeader() {
           {"登录"}
         </a>
         {"\n    "}
-        <a className="btn p sm" href={s.authHref("register")}>
+        <VisualLink
+          className="btn p sm"
+          href={s.authHref("register")}
+          effect="button"
+        >
           {"开始使用"}
-        </a>
+        </VisualLink>
         {"\n    "}
         <button
           className="btn sm burger"
