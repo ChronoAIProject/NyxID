@@ -816,6 +816,8 @@ pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
             false,
         ),
         (MESSAGES, doc! {"conversation_id": 1, "seq": 1}, true),
+        // Bounded cross-account analytics scans by message time, never title/updated_at.
+        (MESSAGES, doc! {"created_at": 1, "role": 1}, false),
         // Late channel delivery reads one exact settled turn, including in
         // long-lived home threads; never scan the whole transcript per sweep.
         (

@@ -1398,3 +1398,41 @@ Admins and operators read `GET /api/v1/admin/assistant/feedback` with RFC3339
 hold per-day counts and up to 100 recent rows with their comment and context;
 rows written before the snapshot existed have `context: null`. Message text is
 never included.
+
+
+### Admin NyxBot activity
+
+Studio **Usage → NyxBot** separates assistant activity and feedback from the
+billing Dashboard and List. It is available to admins and operators; the broader
+usage-read permission does not grant assistant analytics or feedback access.
+
+`GET /api/v1/admin/assistant/analytics` accepts RFC3339 `from` and `to`, defaults
+to the last seven days, and rejects non-positive windows or windows longer than
+31 days. The upper bound is exclusive. The response includes the effective
+window, `generated_at`, `active_sessions`, `active_accounts`, `running_now`,
+`outcomes`, `daily_sessions`, and `daily_turns`. MongoDB reads have a ten-second
+execution limit and project only metadata, never transcript text.
+
+- Active sessions are distinct durable conversations with persisted `role=user`
+  input in the window, including channel input and steering. These are threads,
+  not sessions inferred from an inactivity timeout. Active accounts are distinct
+  conversation owners, which may differ from guest/channel actors.
+- Running now is a live snapshot independent of the historical window: an active
+  turn must have a heartbeat no older than 75 seconds, no requested Stop, and an
+  unexpired effective lease (explicit lease or started-at plus the turn TTL).
+  Legacy turns without heartbeats are not counted. The tab polls every 30 seconds.
+- Settled outcomes use distinct turn IDs from retained assistant replies in the
+  window, deduplicating voice copies. Completed, failed, and stopped are separate;
+  `error_code=cancelled` is stopped. Tool indicators count turns with recorded
+  activities/errors, not exact calls, since the stored activity list is bounded.
+- Feedback totals and the chart use the existing feedback endpoint's daily counts
+  across the whole period. The list's vote/model/agent filters and cursor do not
+  change the overview. Helpful rate is helpful votes divided by all retained votes,
+  with no value when there are no votes. It is not a task-success rate. Feedback
+  includes group replies; turn outcomes include specialist and automated work.
+
+Chart days are zero-filled in UTC. The UI's end date includes the whole selected
+day and is translated to the respective endpoints' exclusive/inclusive bounds.
+Feedback is grouped by original submission day; vote edits, withdrawals, and
+transcript deletion can change historical reports. List entries lead with votes
+and comments; message IDs and tool identifiers are available in reply details.

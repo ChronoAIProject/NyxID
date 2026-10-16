@@ -1106,7 +1106,7 @@ function usagePageSearch(search: Record<string, unknown>): Partial<
     "sort" | "metric" | "page" | "per_page"
   >
 > & {
-  tab?: "dashboard" | "list";
+  tab?: "dashboard" | "list" | "nyxbot";
   sample?: "overview" | "operations" | "explorer";
   mock?: string;
 } {
@@ -1116,7 +1116,9 @@ function usagePageSearch(search: Record<string, unknown>): Partial<
     metric,
     page,
     per_page,
-    tab: search.tab === "list" ? ("list" as const) : ("dashboard" as const),
+    tab: search.tab === "nyxbot"
+      ? ("nyxbot" as const)
+      : search.tab === "list" ? ("list" as const) : ("dashboard" as const),
     sample:
       import.meta.env.DEV &&
       import.meta.env.MODE === "test" &&
@@ -1132,6 +1134,10 @@ const adminUsageRoute = createRoute({
   component: AdminUsagePage,
   validateSearch: usagePageSearch,
   beforeLoad: ({ search, location }) => {
+    const { user, isLoading } = useAuthStore.getState();
+    if (!isLoading && search.tab === "nyxbot" && !hasAdminRead(user)) {
+      throw redirect({ to: "/admin/usage", search: { ...search, tab: "dashboard" }, replace: true });
+    }
     const params = new URLSearchParams(location.searchStr);
     if (
       ["period", "from", "to", "user", "service"].some((key) => params.has(key))

@@ -1099,6 +1099,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             post(handlers::platform_bots::repair),
         )
         .route(
+            "/assistant/analytics",
+            get(handlers::admin_assistant::analytics),
+        )
+        .route(
             "/assistant/feedback",
             get(handlers::assistant_feedback::admin),
         )

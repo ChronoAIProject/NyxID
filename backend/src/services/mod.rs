@@ -1,4 +1,5 @@
 pub mod action_description;
+pub mod admin_assistant_analytics;
 pub mod admin_audit_service;
 pub mod admin_usage_service;
 pub mod admin_user_service;
