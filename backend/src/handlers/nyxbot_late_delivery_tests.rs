@@ -661,3 +661,32 @@ async fn event_binding_rolls_back_with_admission_and_stale_claim_cannot_finish()
         .unwrap();
     assert_eq!(status(&f).await, "sent");
 }
+
+#[tokio::test]
+async fn late_capacity_failure_preserves_complete_partial_reply_and_wait_copy() {
+    let f = fixture("channel_late_capacity_complete").await;
+    settled(&f, true).await;
+    let text = "界".repeat(9000);
+    f.state
+        .db
+        .collection::<bson::Document>(crate::models::assistant_message::COLLECTION_NAME)
+        .update_one(
+            doc! {"conversation_id": &f.event.conversation_id, "turn_id": &f.event.turn_id},
+            doc! {"$set": {"text": &text, "error_code": "capacity_exceeded"}},
+        )
+        .await
+        .unwrap();
+    delivery::detach(&f.state.db, &f.event.id).await.unwrap();
+    late_delivery::sweep(&f.state).await.unwrap();
+    late_delivery::sweep(&f.state).await.unwrap();
+    let requests = sends(&f).await;
+    assert_eq!(requests.len(), 1);
+    let body: Value = serde_json::from_slice(&requests[0].body).unwrap();
+    assert_eq!(
+        body["text"],
+        format!(
+            "{text}\n\n{}",
+            crate::services::assistant_turn_observability::capacity_message(None)
+        )
+    );
+}

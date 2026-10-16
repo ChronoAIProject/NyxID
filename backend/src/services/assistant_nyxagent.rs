@@ -1,4 +1,5 @@
 //! NyxID-owned NyxAgent grammar, durable transcript, and recovery decisions.
+use super::assistant_engine_policy as policy;
 use chrono::{DateTime, Utc};
 use futures::TryStreamExt;
 use mongodb::{
@@ -1809,8 +1810,22 @@ pub(crate) struct OwnerTurnIds {
 
 /// This value is not executable until the caller has committed its transaction.
 pub(crate) struct OwnerTurnClaim {
+    pub(crate) reclaimed: Option<ActiveTurn>,
     pub conversation: AssistantConversation,
     pub credential: super::assistant_agent_credential_service::AssistantCredential,
+}
+
+impl OwnerTurnClaim {
+    pub(crate) fn log_reclaimed(&self) {
+        if let Some(turn) = self.reclaimed.as_ref() {
+            super::assistant_turn_observability::settled(
+                &self.conversation,
+                turn,
+                Some(&TurnError::internal("turn_lost", "lease_expiry")),
+                Utc::now(),
+            );
+        }
+    }
 }
 
 /// Shared owner admission. Platform callers join binding and receipt fences in
@@ -2201,8 +2216,29 @@ pub(crate) async fn begin_owner_turn_in_session(
         row.context_reset_at = Some(now);
         row.context_reset_reason = Some("credential_replaced".into());
     }
+    let reclaimed = row.active_turn.clone();
     if let Some(lost) = row.active_turn.take() {
         let lost_turn = lost.clone();
+        let lost_metadata = super::assistant_turn_observability::metadata(&lost_turn, now);
+        Box::pin(super::assistant_turn_observability::failed_in_session(
+            db,
+            session,
+            &row,
+            &lost_turn,
+            &TurnError::internal("turn_lost", "lease_expiry"),
+            now,
+        ))
+        .await?;
+        Box::pin(
+            super::assistant_turn_observability::run_metadata_in_session(
+                db,
+                session,
+                &row,
+                &lost_turn,
+                &lost_metadata,
+            ),
+        )
+        .await?;
         row.message_count += 1;
         let message = AssistantMessage {
             platform_delivery_recovery_queued: false,
@@ -2227,7 +2263,10 @@ pub(crate) async fn begin_owner_turn_in_session(
             status: "failed".into(),
             error_code: Some("turn_lost".into()),
             upstream_error_code: None,
+            turn_metadata: Some(lost_metadata.clone()),
             error_detail: Some(crate::models::assistant_message::AssistantErrorDetail {
+                attempts: lost_metadata.attempts,
+                capacity_wait_ms: lost_metadata.capacity_wait_ms,
                 stage: "lease_expiry".into(),
                 http_status: None,
                 upstream_request_id: None,
@@ -2331,6 +2370,22 @@ pub(crate) async fn begin_owner_turn_in_session(
         (None, None) => None,
     };
     row.active_turn = Some(ActiveTurn {
+        worker_instance: Some(super::assistant_engine_worker::instance().clone()),
+        model_attempt_id: None,
+        model_requests_active: 0,
+        model_attribution_uncertain: false,
+        model_refusal: None,
+        model_stream_fault: None,
+        model_stream_cancellation: None,
+        waiting_for_capacity: false,
+        capacity_wait_note_origin: None,
+        engine_request_started_at: None,
+        engine_attempts: 0,
+        capacity_wait_ms: 0,
+        capacity_wait_started_at: None,
+        capacity_wait_deadline: None,
+        capacity_accepted_at: None,
+        capacity_notice_claimed: false,
         platform_reply: platform.map(|origin| {
             crate::models::assistant_conversation::PlatformReplyRouting::Captured {
                 origin: Box::new(origin.clone()),
@@ -2360,6 +2415,7 @@ pub(crate) async fn begin_owner_turn_in_session(
         lease_expires_at: None,
         heartbeat_at: Some(now),
         trigger_run_id: start.trigger.as_ref().map(|c| c.run_id.clone()),
+        trigger_continuation: start.trigger.as_ref().is_some_and(|c| c.continuation),
         report_to,
         with_nyxbot,
         turn_id: turn_id.clone(),
@@ -2523,6 +2579,7 @@ pub(crate) async fn begin_owner_turn_in_session(
         }
     }
     let message = AssistantMessage {
+        turn_metadata: None,
         platform_delivery_recovery_queued: false,
         platform_reply: row
             .active_turn
@@ -2593,6 +2650,7 @@ pub(crate) async fn begin_owner_turn_in_session(
             .await?;
     }
     Ok(OwnerTurnAdmission::Started(Box::new(OwnerTurnClaim {
+        reclaimed,
         conversation: row,
         credential,
     })))
@@ -2663,27 +2721,25 @@ pub async fn begin_turn_with_voice(
             let start = &start;
             // MongoDB's retry driver stores and polls this callback through
             // several frames. Keep the turn/message/upload transaction on the heap.
-            let operation: AppResult<_> = Box::pin(async {
-                begin_owner_turn_in_session(
-                    db,
-                    session,
-                    &keys,
-                    user_id,
-                    start,
-                    &ids,
-                    &new_agent,
-                    learning_epoch,
-                    None,
-                    voice_request_id.as_deref(),
-                )
-                .await
-            })
+            let operation: AppResult<_> = Box::pin(begin_owner_turn_in_session(
+                db,
+                session,
+                &keys,
+                user_id,
+                start,
+                &ids,
+                &new_agent,
+                learning_epoch,
+                None,
+                voice_request_id.as_deref(),
+            ))
             .await;
             transactions::transaction_result(operation)
         })
         .await
         .map_err(transactions::map_transaction_error)?;
     let claim = claim.into_started()?;
+    claim.log_reclaimed();
     super::assistant_agent_credential_service::audit_provision(
         &audit_db,
         &audit_user,
@@ -2970,7 +3026,8 @@ async fn finish_turn_inner(
     let result = result.clone();
     let credential_id = credential_id.to_owned();
     let message_id = message_id.to_owned();
-    session
+    let log_row = row.clone();
+    let (error, settled) = session
         .start_transaction()
         .and_run2(async move |session| {
             let operation: AppResult<_> = async {
@@ -2986,7 +3043,23 @@ async fn finish_turn_inner(
                     .session(&mut *session)
                     .await?
                 {
-                    return Ok(saved.error_code.as_deref().map(TurnError::new));
+                    return Ok((saved.error_code.as_deref().map(|code| {
+                        let normalized = TurnError::new(code);
+                        let mut error = result.error.clone().unwrap_or_else(|| normalized.clone());
+                        error.code = normalized.code;
+                        error.message = normalized.message;
+                        error.upstream_code = saved.upstream_error_code.as_deref()
+                            .and_then(|code| TurnError::new(code).upstream_code);
+                        if let Some(detail) = saved.error_detail.as_ref() {
+                            error.metadata = Some(Box::new(crate::models::assistant_message::TurnMetadata {
+                                attempts: detail.attempts, capacity_wait_ms: detail.capacity_wait_ms,
+                            }));
+                        }
+                        if error.code == "capacity_exceeded" {
+                            error.message = super::assistant_turn_observability::capacity_message(error.capacity_wait_ms());
+                        }
+                        error
+                    }), None));
                 }
                 let collection = db.collection::<AssistantConversation>(CONVERSATIONS);
                 let mut active_filter = doc! {
@@ -3020,6 +3093,24 @@ async fn finish_turn_inner(
                 } else {
                     result.error.clone()
                 };
+                let mut error = error.map(|error| current.active_turn.as_ref().map_or_else(
+                    || error.clone(),
+                    |turn| super::assistant_model_observer::attribute(&error, turn, Utc::now()),
+                ));
+                let turn = current.active_turn.as_ref().expect("matched turn");
+                let turn_metadata = super::assistant_turn_observability::metadata(turn, Utc::now());
+                if let Some(error) = error.as_mut() {
+                    error.metadata = Some(Box::new(turn_metadata.clone()));
+                    if error.code == "capacity_exceeded" {
+                        error.message = super::assistant_turn_observability::capacity_message(error.capacity_wait_ms());
+                    }
+                    Box::pin(super::assistant_turn_observability::failed_in_session(
+                        &db, session, &current, turn, error, Utc::now(),
+                    )).await?;
+                }
+                Box::pin(super::assistant_turn_observability::run_metadata_in_session(
+                    &db, session, &current, turn, &turn_metadata,
+                )).await?;
                 // Retain the turn's tool activity on the reply; a call still in
                 // flight at settlement shares the turn's outcome.
                 let activities: Vec<TurnActivity> = current
@@ -3132,9 +3223,6 @@ async fn finish_turn_inner(
                     current.nyxagent_last_response_id = result.response_id.clone();
                     current.credential_api_key_id = credential_id.clone();
                 }
-                if let Some(error) = &error {
-                    tracing::warn!(conversation_id = %row.id, turn_id = %turn_id, stage = %error.stage, http_status = ?error.http_status, upstream_request_id = ?error.upstream_request_id, response_id = ?error.response_id, continuations, upstream_error_code = error.upstream_code.as_deref().unwrap_or(error.code), "Assistant turn failed");
-                }
                 let message = AssistantMessage {
                     platform_delivery_recovery_queued: false,
                     platform_reply: settled_turn.as_ref().and_then(|turn| turn.platform_reply.clone()),
@@ -3162,8 +3250,10 @@ async fn finish_turn_inner(
                     }
                     .into(),
                     error_code: error.as_ref().map(|e| e.code.into()),
-                    upstream_error_code: error.as_ref().and_then(|e| e.upstream_code.clone()),
+                    upstream_error_code: error.as_ref().and_then(|e| e.upstream_code.as_deref().map(str::to_owned)),
+                    turn_metadata: Some(turn_metadata.clone()),
                     error_detail: error.as_ref().map(|error| crate::models::assistant_message::AssistantErrorDetail {
+                        attempts: turn_metadata.attempts, capacity_wait_ms: turn_metadata.capacity_wait_ms,
                         stage: error.stage.into(),
                         http_status: error.http_status,
                         upstream_request_id: error.upstream_request_id.as_ref().map(|v| v.to_string()),
@@ -3196,13 +3286,17 @@ async fn finish_turn_inner(
                     .replace_one(doc! {"_id": &row.id, "user_id": &row.user_id}, current)
                     .session(&mut *session)
                     .await?;
-                Ok(error)
+                Ok((error, settled_turn))
             }
             .await;
             transactions::transaction_result(operation)
         })
         .await
-        .map_err(transactions::map_transaction_error)
+        .map_err(transactions::map_transaction_error)?;
+    if let Some(turn) = settled.as_ref() {
+        super::assistant_turn_observability::settled(&log_row, turn, error.as_ref(), Utc::now());
+    }
+    Ok(error)
 }
 
 /// Force a stopped turn through the same fenced settlement used by its worker.
@@ -3261,9 +3355,9 @@ pub async fn sweep_orphaned_turn_rows(db: &Database) -> AppResult<Vec<AssistantC
         .await?;
     let mut settled = Vec::new();
     while let Some(row) = cursor.try_next().await? {
-        let Some(turn) = row.active_turn.as_ref() else {
+        if row.active_turn.is_none() {
             continue;
-        };
+        }
         let result = finish_turn_inner(
             db,
             &row,
@@ -3284,7 +3378,6 @@ pub async fn sweep_orphaned_turn_rows(db: &Database) -> AppResult<Vec<AssistantC
             Err(AppError::NotFound(_)) => {}
             Err(error) => return Err(error),
         }
-        tracing::info!(conversation_id = %row.id, turn_id = %turn.turn_id, "Reclaimed stale assistant turn");
     }
     Ok(settled)
 }
@@ -5148,15 +5241,27 @@ pub fn upstream_body(model: &str, text: &str, session: Option<&str>, instruction
 #[derive(Clone, Debug, Serialize)]
 pub struct TurnError {
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub upstream_code: Option<String>,
+    #[serde(rename = "upstream_error_code")]
+    pub upstream_code: Option<Box<str>>,
     pub code: &'static str,
-    pub message: &'static str,
+    pub message: String,
+    #[serde(flatten)]
+    pub metadata: Option<Box<crate::models::assistant_message::TurnMetadata>>,
     pub stage: &'static str,
     pub http_status: Option<u16>,
     pub upstream_request_id: Option<Box<str>>,
     pub response_id: Option<Box<str>>,
 }
 impl TurnError {
+    pub fn attempts(&self) -> Option<u32> {
+        self.metadata.as_deref().and_then(|data| data.attempts)
+    }
+    pub fn capacity_wait_ms(&self) -> Option<u64> {
+        self.metadata
+            .as_deref()
+            .and_then(|data| data.capacity_wait_ms)
+    }
+
     /// A failure NyxID classified itself (preparation, timeouts, Stop, the
     /// sweep, settlement). It carries no upstream code and names its stage.
     pub fn internal(code: &str, stage: &'static str) -> Self {
@@ -5185,7 +5290,7 @@ impl TurnError {
                 .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
             && !code.starts_with("nyx_")
             && !code.starts_with("sk_"))
-        .then(|| code.to_owned());
+        .then(|| code.into());
         let (code, message) = match code {
             "session_busy" => (
                 "session_busy",
@@ -5193,7 +5298,7 @@ impl TurnError {
             ),
             "capacity_exceeded" => (
                 "capacity_exceeded",
-                "The assistant is busy. Try again shortly.",
+                "NyxBot is at capacity right now. Try again shortly.",
             ),
             "not_found" | "context_unavailable" => (
                 "context_unavailable",
@@ -5255,7 +5360,23 @@ impl TurnError {
                 "turn_lost",
                 "The assistant turn was interrupted. Check any actions before continuing.",
             ),
+            "internal_error" => (
+                "internal_error",
+                "NyxBot hit an internal error on this turn. Check which actions completed before retrying.",
+            ),
             "invalid_stream" => ("invalid_stream", "The assistant stream ended unexpectedly."),
+            "wallet_suspended" => (
+                "wallet_suspended",
+                "Your billing wallet is suspended. Contact support or check Billing & Usage.",
+            ),
+            "plan_entitlement_required" => (
+                "plan_entitlement_required",
+                "Your plan does not include this service. Check your plan in Billing & Usage.",
+            ),
+            "model_interrupted" => (
+                "model_interrupted",
+                "The model's response was interrupted. Some actions may already have completed — check them before retrying.",
+            ),
             "insufficient_credits" => (
                 "insufficient_credits",
                 "There aren't enough credits to run this turn.",
@@ -5267,7 +5388,8 @@ impl TurnError {
         };
         Self {
             code,
-            message,
+            message: message.into(),
+            metadata: None,
             upstream_code,
             stage: "stream",
             http_status: None,
@@ -5292,7 +5414,10 @@ pub enum RecoveryAction {
 impl Recovery {
     pub fn decide(&mut self, status: u16, code: &str, bound: bool) -> RecoveryAction {
         // A billing refusal is terminal: no new key, session or delay can fund the turn.
-        if code == "insufficient_credits" {
+        if matches!(
+            code,
+            "insufficient_credits" | "wallet_suspended" | "plan_entitlement_required"
+        ) {
             return RecoveryAction::Fail;
         }
         if (status == 401 || status == 403 || code == "agent_key_required") && !self.replaced {
@@ -5303,12 +5428,87 @@ impl Recovery {
             self.rebound = true;
             return RecoveryAction::Rebind;
         }
-        if matches!(code, "session_busy" | "capacity_exceeded") && self.retries < 4 {
-            self.retries += 1;
+        if admission_refusal(status, code) {
+            self.retries = self.retries.saturating_add(1);
             return RecoveryAction::Backoff;
         }
         RecoveryAction::Fail
     }
+}
+
+/// Only these responses prove that NyxAgent did not accept an execution.
+pub fn admission_refusal(status: u16, code: &str) -> bool {
+    matches!(
+        (status, code),
+        (503, "capacity_exceeded" | "draining") | (409, "session_busy")
+    )
+}
+
+pub fn retry_after(value: &str) -> Option<Duration> {
+    if value.is_empty() || !value.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    value
+        .parse::<u64>()
+        .ok()
+        .filter(|seconds| {
+            (policy::RETRY_AFTER_MIN.as_secs()..=policy::RETRY_AFTER_MAX.as_secs())
+                .contains(seconds)
+        })
+        .map(Duration::from_secs)
+}
+
+pub fn capacity_budget(
+    started: DateTime<Utc>,
+    run_deadline: Option<DateTime<Utc>>,
+    now: DateTime<Utc>,
+) -> Duration {
+    let deadline = match run_deadline {
+        Some(deadline) => deadline.min(
+            started
+                + chrono::Duration::from_std(policy::AUTOMATION_CAPACITY_CAP)
+                    .expect("bounded automation cap"),
+        ),
+        None => {
+            started
+                + chrono::Duration::from_std(policy::INTERACTIVE_CAPACITY_BUDGET)
+                    .expect("bounded interactive budget")
+        }
+    };
+    (deadline - now)
+        .to_std()
+        .unwrap_or_default()
+        .min(if run_deadline.is_some() {
+            policy::AUTOMATION_CAPACITY_CAP
+        } else {
+            policy::INTERACTIVE_CAPACITY_BUDGET
+        })
+}
+
+pub fn capacity_delay(retries: u32, retry_after: Option<Duration>, random: u64) -> Duration {
+    let cap = (policy::CAPACITY_BACKOFF_BASE.as_millis() as u64)
+        .saturating_mul(2_u64.saturating_pow(retries))
+        .min(policy::CAPACITY_BACKOFF_CAP.as_millis() as u64);
+    let jitter = Duration::from_millis(random % (cap + 1));
+    retry_after.map_or(jitter, |minimum| jitter.max(minimum))
+}
+
+pub async fn waiting_for_capacity(
+    db: &Database,
+    row: &AssistantConversation,
+    started: DateTime<Utc>,
+    deadline: DateTime<Utc>,
+) -> AppResult<()> {
+    let turn = row.active_turn.as_ref().expect("claimed turn");
+    db.collection::<bson::Document>(CONVERSATIONS).update_one(
+        doc! {"_id": &row.id, "active_turn.turn_id": &turn.turn_id, "active_turn.stop_requested": false},
+        vec![doc! {"$set": {
+            "active_turn.waiting_for_capacity": true,
+            "active_turn.capacity_wait_started_at": {"$cond": [{"$eq": ["$active_turn.waiting_for_capacity", true]}, "$active_turn.capacity_wait_started_at", bson::DateTime::from_chrono(started)]},
+            "active_turn.capacity_wait_deadline": {"$cond": [{"$eq": ["$active_turn.waiting_for_capacity", true]}, "$active_turn.capacity_wait_deadline", bson::DateTime::from_chrono(deadline)]},
+        }}],
+    ).await?;
+    Ok(())
 }
 
 /// Strict incremental Responses SSE decoder. Unknown event types are additive;

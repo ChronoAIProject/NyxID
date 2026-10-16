@@ -43,6 +43,7 @@ mod fixtures {
             retry_of: None,
             retry_claimed_by: None,
             activity_count: None,
+            turn_metadata: None,
             error_detail: None,
             specialist_id: None,
             upstream_error_code: None,

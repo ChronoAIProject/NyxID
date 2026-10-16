@@ -808,54 +808,129 @@ pub async fn append(
     recipients: &[String],
     extra_attachments: Vec<crate::models::assistant_conversation::TurnAttachment>,
 ) -> AppResult<crate::models::assistant_group::GroupMessage> {
+    append_with_hook(
+        db,
+        access,
+        role,
+        agent,
+        text,
+        request,
+        ids,
+        enqueue,
+        recipients,
+        extra_attachments,
+        #[cfg(test)]
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn append_with_hook(
+    db: &Database,
+    access: &Access,
+    role: &str,
+    agent: Option<&AssistantAgent>,
+    text: &str,
+    request: Option<&str>,
+    ids: &[String],
+    enqueue: Option<crate::models::assistant_group::GroupRequest>,
+    recipients: &[String],
+    extra_attachments: Vec<crate::models::assistant_conversation::TurnAttachment>,
+    #[cfg(test)] hook: Option<transactions::TransactionCollisionHook>,
+) -> AppResult<crate::models::assistant_group::GroupMessage> {
     use crate::models::assistant_group::{GroupMessage, MESSAGES_COLLECTION_NAME as MESSAGES};
     let name = display_name(db, &access.actor).await?;
-    let mut session = db.client().start_session().await?;
-    session.start_transaction().await?;
-    fence(db, access, &mut session).await?;
-    let now = Utc::now();
-    let group=db.collection::<AssistantGroup>(GROUPS).find_one_and_update(
-        doc! {"_id":&access.group.id,"participant_user_ids":&access.actor},
-        doc! {"$inc":{"message_count":1},"$set":{"updated_at":bson::DateTime::from_chrono(now),"last_message_at":bson::DateTime::from_chrono(now)}})
-        .return_document(mongodb::options::ReturnDocument::After).session(&mut session).await?.ok_or_else(missing)?;
-    let id = Uuid::new_v4().to_string();
-    let mut attachments =
-        super::assistant_upload_service::bind(db, &access.actor, &group.id, &id, ids, &mut session)
-            .await?;
-    attachments.extend(extra_attachments);
-    let message = GroupMessage {
-        activities: Vec::new(),
-        org_group: true,
-        id,
-        group_id: group.id,
-        user_id: group.user_id,
-        seq: group.message_count,
-        author_user_id: Some(access.actor.clone()),
-        author_display_name: Some(name),
-        request_id: request.map(str::to_owned),
-        role: role.into(),
-        agent_id: agent.map(|a| a.id.clone()),
-        agent_name: agent.map(|a| a.name.clone()),
-        text: text.into(),
-        recipient_agent_ids: recipients.to_vec(),
-        created_at: now,
-        attachments,
+    let db = db.clone();
+    let access = Access {
+        group: access.group.clone(),
+        actor: access.actor.clone(),
+        org: access.org.clone(),
     };
-    db.collection::<GroupMessage>(MESSAGES)
-        .insert_one(&message)
-        .session(&mut session)
-        .await?;
-    if let Some(mut request) = enqueue {
-        request.message_seq = message.seq;
-        db.collection::<crate::models::assistant_group::GroupRequest>(
-            crate::models::assistant_group::REQUESTS_COLLECTION_NAME,
-        )
-        .insert_one(request)
-        .session(&mut session)
-        .await?;
-    }
-    session.commit_transaction().await?;
-    Ok(message)
+    let role = role.to_owned();
+    let agent = agent.cloned();
+    let text = text.to_owned();
+    let request = request.map(str::to_owned);
+    let ids = ids.to_vec();
+    let recipients = recipients.to_vec();
+    let mut session = db.client().start_session().await?;
+    session
+        .start_transaction()
+        .and_run2(async move |session| {
+            let result: AppResult<GroupMessage> = Box::pin(async {
+                #[cfg(test)]
+                if let Some(hook) = &hook {
+                    hook.begin_attempt();
+                    db.collection::<AssistantGroup>(GROUPS)
+                        .find_one(doc! {"_id": &access.group.id})
+                        .session(&mut *session)
+                        .await?;
+                    hook.after_reads().await;
+                }
+                fence(&db, &access, session).await?;
+                let now = Utc::now();
+                let group = db
+                    .collection::<AssistantGroup>(GROUPS)
+                    .find_one_and_update(
+                        doc! {"_id": &access.group.id, "participant_user_ids": &access.actor},
+                        doc! {"$inc": {"message_count": 1}, "$set": {
+                            "updated_at": bson::DateTime::from_chrono(now),
+                            "last_message_at": bson::DateTime::from_chrono(now)
+                        }},
+                    )
+                    .return_document(mongodb::options::ReturnDocument::After)
+                    .session(&mut *session)
+                    .await?
+                    .ok_or_else(missing)?;
+                let id = Uuid::new_v4().to_string();
+                let mut attachments = super::assistant_upload_service::bind(
+                    &db,
+                    &access.actor,
+                    &group.id,
+                    &id,
+                    &ids,
+                    session,
+                )
+                .await?;
+                attachments.extend(extra_attachments.clone());
+                let message = GroupMessage {
+                    activities: Vec::new(),
+                    org_group: true,
+                    id,
+                    group_id: group.id,
+                    user_id: group.user_id,
+                    seq: group.message_count,
+                    author_user_id: Some(access.actor.clone()),
+                    author_display_name: Some(name.clone()),
+                    request_id: request.clone(),
+                    role: role.clone(),
+                    agent_id: agent.as_ref().map(|a| a.id.clone()),
+                    agent_name: agent.as_ref().map(|a| a.name.clone()),
+                    text: text.clone(),
+                    recipient_agent_ids: recipients.to_vec(),
+                    created_at: now,
+                    attachments,
+                };
+                db.collection::<GroupMessage>(MESSAGES)
+                    .insert_one(&message)
+                    .session(&mut *session)
+                    .await?;
+                if let Some(mut request) = enqueue.clone() {
+                    request.message_seq = message.seq;
+                    db.collection::<crate::models::assistant_group::GroupRequest>(
+                        crate::models::assistant_group::REQUESTS_COLLECTION_NAME,
+                    )
+                    .insert_one(request)
+                    .session(&mut *session)
+                    .await?;
+                }
+                Ok(message)
+            })
+            .await;
+            transactions::transaction_result(result)
+        })
+        .await
+        .map_err(transactions::map_transaction_error)
 }
 
 pub async fn request(

@@ -1,4 +1,5 @@
 use super::*;
+use crate::services::assistant_engine_policy as engine_policy;
 use crate::services::assistant_nyxagent::TurnResult;
 use crate::{
     models::{
@@ -82,7 +83,10 @@ fn failed_message_response_serializes_error_detail_as_rfc3339() {
         status: "failed".into(),
         error_code: Some("turn_lost".into()),
         upstream_error_code: None,
+        turn_metadata: None,
         error_detail: Some(AssistantErrorDetail {
+            attempts: None,
+            capacity_wait_ms: None,
             stage: "lease".into(),
             http_status: Some(504),
             upstream_request_id: Some("req".into()),
@@ -225,8 +229,38 @@ async fn setup_options_with_tool_gate(
                         engine::attach_routed_image(&image_state.db, &image_state.encryption_keys, OWNER, &row.id,
                             "camera__snapshot", "image/png", b"fixture pixels", true).await.unwrap();
                     }
+                    if matches!(failure, Some("http_capacity" | "http_capacity_long" | "http_draining" | "http_busy" | "http_slow_body")) {
+                        let status = if failure == Some("http_busy") { StatusCode::CONFLICT } else { StatusCode::SERVICE_UNAVAILABLE };
+                        let code = if failure == Some("http_draining") { "draining" } else if failure == Some("http_busy") { "session_busy" } else { "capacity_exceeded" };
+                        let body = async_stream::stream! {
+                            if failure == Some("http_slow_body") { tokio::time::sleep(Duration::from_secs(2)).await; }
+                            yield Ok::<_, Infallible>(axum::body::Bytes::from(json!({"error":{"code":code}}).to_string()));
+                        };
+                        return (status, [("content-type", "application/json"), ("retry-after", if failure == Some("http_capacity_long") { "33" } else { "1" })], Body::from_stream(body)).into_response();
+                    }
+                    let failure = if failure == Some("http_slow_accept") {
+                        tokio::time::sleep(engine_policy::ACK_DELAY + Duration::from_secs(1)).await;
+                        None
+                    } else { failure };
+                    if failure == Some("http_oversized") {
+                        return (StatusCode::SERVICE_UNAVAILABLE, "x".repeat(engine_policy::ADMISSION_ERROR_BODY_MAX_BYTES + 1)).into_response();
+                    }
                     if failure == Some("invalid_stream") {
                         return (StatusCode::OK, "not an event stream").into_response();
+                    }
+                    if matches!(failure, Some("http_credential" | "http_slow_credential")) {
+                        let body = async_stream::stream! {
+                            if failure == Some("http_slow_credential") { tokio::time::sleep(Duration::from_secs(2)).await; }
+                            yield Ok::<_, Infallible>(axum::body::Bytes::from_static(b"{\"error\":{\"code\":\"agent_key_required\"}}"));
+                        };
+                        return (StatusCode::UNAUTHORIZED, [("content-type", "application/json")], Body::from_stream(body)).into_response();
+                    }
+                    let failure = if failure == Some("http_delayed_accept") {
+                        tokio::time::sleep(Duration::from_secs(2)).await;
+                        None
+                    } else { failure };
+                    if failure == Some("http_budget") {
+                        return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"error":{"code":"tool_budget_exhausted"}}))).into_response();
                     }
                     if failure == Some("http_not_found") {
                         return (
@@ -1477,6 +1511,192 @@ async fn stale_fences_are_hidden_in_index_and_history_dtos() {
 }
 
 #[tokio::test]
+async fn panicking_turn_execution_settles_without_sweep_and_keeps_diagnostics_content_free() {
+    use crate::services::assistant_engine_worker as worker;
+    use tracing::instrument::WithSubscriber;
+
+    let (state, _, server) = setup(None, Duration::ZERO).await;
+    let capture = tempfile::NamedTempFile::new().unwrap();
+    let writer = capture.reopen().unwrap();
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_writer(move || writer.try_clone().unwrap())
+        .finish();
+    let dispatch = tracing::Dispatch::new(subscriber);
+    for payload in [
+        Box::new("PRIVATE panic prompt") as Box<dyn std::any::Any + Send>,
+        Box::new(String::from("PRIVATE panic reply")),
+        Box::new(vec!["PRIVATE opaque payload"]),
+    ] {
+        let row = engine::begin_turn(
+            &state.db,
+            OWNER,
+            &engine::TurnRequest {
+                acknowledgement_id: None,
+                retry_of: None,
+                attachment_ids: Vec::new(),
+                agent_id: None,
+                conversation_id: None,
+                text: "PRIVATE turn input".into(),
+                model: None,
+                access_mode: None,
+            },
+            &state.encryption_keys,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            row.active_turn.as_ref().unwrap().worker_instance.as_ref(),
+            Some(worker::instance())
+        );
+        let turn_id = row.active_turn.as_ref().unwrap().turn_id.clone();
+        let message_id = Uuid::new_v4().to_string();
+        let limiter = Arc::new(crate::mw::rate_limit::DirectChatRateLimiter::new(10, 60, 1));
+        let permit = limiter.try_acquire(OWNER).await.unwrap();
+        let (sender, mut receiver) = broadcast::channel(256);
+        let execution_state = state.clone();
+        let execution_row = row.clone();
+        let execution_message = message_id.clone();
+        let task = tokio::spawn(
+            async move {
+                let error = worker::contain::<TurnResult>(&execution_row, async move {
+                    tokio::task::yield_now().await;
+                    // Re-raise the concrete type so the panic hook runs, unlike resume_unwind.
+                    if let Some(value) = payload.downcast_ref::<&'static str>() {
+                        std::panic::panic_any(*value);
+                    } else if let Some(value) = payload.downcast_ref::<String>() {
+                        std::panic::panic_any(value.clone());
+                    } else {
+                        std::panic::panic_any(payload);
+                    }
+                })
+                .await
+                .unwrap_err();
+                assert_eq!((error.code, error.stage), ("internal_error", "panic"));
+                assert!(error.upstream_code.is_none());
+                let result = TurnResult {
+                    text: String::new(),
+                    session_id: None,
+                    response_id: None,
+                    error: Some(error),
+                };
+                let settled = complete_turn(
+                    &execution_state.db,
+                    &execution_row,
+                    &execution_row.active_turn.as_ref().unwrap().turn_id,
+                    &execution_message,
+                    "block",
+                    &result,
+                    permit,
+                    Events {
+                        sender,
+                        cursor: 0,
+                        reset_notified: false,
+                    },
+                    Duration::from_secs(engine::SETTLEMENT_GRACE_SECS),
+                    || {
+                        engine::finish_turn(
+                            &execution_state.db,
+                            &execution_row,
+                            &execution_row.credential_api_key_id,
+                            &execution_message,
+                            &result,
+                        )
+                    },
+                )
+                .await;
+                assert!(matches!(settled, SettledExecution::Saved { error: Some(error), .. } if error.code == "internal_error"));
+                result
+            }
+            .with_subscriber(dispatch.clone()),
+        );
+        let result = tokio::time::timeout(Duration::from_secs(30), task)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(limiter.try_acquire(OWNER).await.is_ok());
+        assert!(
+            engine::get(&state.db, OWNER, &row.id)
+                .await
+                .unwrap()
+                .active_turn
+                .is_none()
+        );
+        assert_eq!(engine::sweep_orphaned_turns(&state.db).await.unwrap(), 0);
+        let reply = engine::messages(&state.db, OWNER, &row.id, 10, None)
+            .await
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(reply.error_code.as_deref(), Some("internal_error"));
+        assert_eq!(reply.error_detail.as_ref().unwrap().stage, "panic");
+        assert!(reply.upstream_error_code.is_none());
+        assert_eq!(
+            engine::checkpoint(&state.db, OWNER, &row.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .error_code
+                .as_deref(),
+            Some("internal_error")
+        );
+        let mut terminal = None;
+        while let Ok(event) = receiver.try_recv() {
+            if event["event"] == "turn.completed" {
+                terminal = Some(event);
+            }
+        }
+        let terminal = terminal.expect("immediate terminal event");
+        assert_eq!(terminal["error"]["code"], "internal_error");
+        assert_eq!(terminal["error"]["stage"], "panic");
+        engine::finish_turn(
+            &state.db,
+            &row,
+            &row.credential_api_key_id,
+            &message_id,
+            &result,
+        )
+        .await
+        .unwrap();
+        let filter = doc! {"event_type": "assistant_turn_failed", "event_data.turn_id": &turn_id};
+        let audits = state
+            .db
+            .collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME);
+        assert_eq!(audits.count_documents(filter.clone()).await.unwrap(), 1);
+        let audit = audits.find_one(filter).await.unwrap().unwrap();
+        let data = audit.get_document("event_data").unwrap();
+        assert_eq!(data.get_str("code").unwrap(), "internal_error");
+        assert_eq!(data.get_str("stage").unwrap(), "panic");
+        assert_eq!(
+            data.get_document("worker_instance")
+                .unwrap()
+                .get_str("id")
+                .unwrap(),
+            worker::instance().id
+        );
+        assert!(!serde_json::to_string(&audit).unwrap().contains("PRIVATE"));
+    }
+    let logs = std::fs::read_to_string(capture.path()).unwrap();
+    assert_eq!(
+        logs.matches("Assistant turn execution panicked").count(),
+        3,
+        "{logs}"
+    );
+    for kind in ["static_str", "string", "opaque"] {
+        assert!(logs.contains(kind), "{logs}");
+    }
+    assert!(logs.contains("panic_file="), "{logs}");
+    assert!(logs.contains(&worker::instance().id), "{logs}");
+    assert!(logs.contains("Assistant turn settled"), "{logs}");
+    assert!(
+        !logs.contains("PRIVATE"),
+        "panic content must not enter diagnostics"
+    );
+    server.abort();
+}
+
+#[tokio::test]
 async fn settlement_recovers_the_actual_saved_reply_after_an_ambiguous_finish() {
     let (state, _, server) = setup(None, Duration::ZERO).await;
     let row = engine::begin_turn(
@@ -2335,13 +2555,21 @@ async fn cards_decided_during_a_turn_are_reported_to_the_next_turn_exactly_once(
 }
 
 #[test]
-fn proxy_errors_keep_only_the_insufficient_credits_code() {
+fn proxy_errors_keep_all_billing_refusal_subtypes() {
     assert_eq!(
         proxy_turn_error(AppError::InsufficientCredits).code,
         "insufficient_credits"
     );
+    for (error, code) in [
+        (AppError::WalletSuspended, "wallet_suspended"),
+        (
+            AppError::PlanEntitlementRequired("service".into()),
+            "plan_entitlement_required",
+        ),
+    ] {
+        assert_eq!(proxy_turn_error(error).code, code);
+    }
     for error in [
-        AppError::WalletSuspended,
         AppError::BillingNotConfigured("detail".into()),
         AppError::Internal("detail".into()),
     ] {
@@ -2350,13 +2578,17 @@ fn proxy_errors_keep_only_the_insufficient_credits_code() {
 }
 
 #[test]
-fn upstream_error_code_reads_nested_and_flat_insufficient_credits_envelopes() {
+fn upstream_error_code_reads_nested_and_flat_billing_refusal_envelopes() {
     let flat = json!({"error":"insufficient_credits","error_code":11300,"message":"x"});
     assert_eq!(upstream_error_code(402, &flat), "insufficient_credits");
     assert_eq!(upstream_error_code(400, &flat), "");
     assert_eq!(upstream_error_code(500, &flat), "");
     let other_flat = json!({"error":"wallet_suspended","message":"x"});
-    assert_eq!(upstream_error_code(402, &other_flat), "");
+    assert_eq!(upstream_error_code(402, &other_flat), "wallet_suspended");
+    assert_eq!(
+        upstream_error_code(402, &json!({"error":"plan_entitlement_required"})),
+        "plan_entitlement_required"
+    );
     let nested = json!({"error":{"code":"session_busy","message":"x"}});
     assert_eq!(upstream_error_code(409, &nested), "session_busy");
     let nested = json!({"error":{"code":"insufficient_credits"}});
@@ -3213,9 +3445,11 @@ async fn tool_images_continue_with_capability_bounds_and_graceful_fallback() {
         (false, 1, vec![], 1, 0),
         (true, 1, vec![], 2, 1),
         (true, 3, vec![], 3, 2),
-        (true, 1, vec!["", "http_not_found"], 2, 0),
+        (true, 1, vec!["", "http_not_found"], 3, 1),
+        (true, 1, vec!["", "http_capacity"], 3, 1),
         (true, 1, vec!["", "invalid_stream"], 2, 0),
         (true, 1, vec!["", "upstream_error"], 2, 0),
+        (true, 1, vec!["", "http_budget"], 2, 0),
         (true, 1, vec!["tool_budget_exhausted"], 3, 1),
         (true, 1, vec!["turn_timeout"], 3, 1),
     ] {
@@ -3308,7 +3542,7 @@ async fn tool_images_continue_with_capability_bounds_and_graceful_fallback() {
         if tool_rounds == 3 {
             assert!(reply.attachments[2].image_input.is_none());
         }
-        if failures.len() == 2 {
+        if failures.len() == 2 && sent == 0 {
             assert_eq!(reply.text, "Partial answer completed");
             assert!(stream.contains("image_input_unavailable"));
             assert!(row.nyxagent_session_id.is_none());
@@ -3996,4 +4230,786 @@ async fn denied_owner_action_queues_plain_narration_without_an_execution_continu
     assert!(event.text.contains("Do not execute or retry"));
     assert!(event.text.contains(acknowledgements::DECISION_NARRATION));
     f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn capacity_refusals_recover_after_old_retry_limit_and_slow_proof_respects_first_byte_bound()
+{
+    for code in ["http_capacity", "http_draining", "http_busy"] {
+        let (state, calls, server) = setup_script(None, Duration::ZERO, vec![code; 5]).await;
+        let reply = run_turn_to_reply(&state).await;
+        assert_eq!(reply.status, "completed");
+        assert_eq!(calls.lock().await.len(), 6);
+        server.abort();
+    }
+    short_bounds();
+    let (state, calls, server) = setup_script(None, Duration::ZERO, vec!["http_slow_body"]).await;
+    let reply = run_turn_to_reply(&state).await;
+    assert_eq!(reply.error_code.as_deref(), Some("first_byte_timeout"));
+    assert_eq!(calls.lock().await.len(), 1);
+    server.abort();
+}
+
+#[tokio::test]
+async fn stop_during_capacity_wait_releases_owner_permit_without_replay() {
+    let (state, calls, server) =
+        setup_script(None, Duration::ZERO, vec!["http_capacity_long"; 100]).await;
+    let response = turns(
+        State(state.clone()),
+        test_auth_user(OWNER),
+        turn_request(None),
+    )
+    .await
+    .unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let row = state
+                .db
+                .collection::<AssistantConversation>(
+                    crate::models::assistant_conversation::COLLECTION_NAME,
+                )
+                .find_one(doc! {"user_id": OWNER, "active_turn.waiting_for_capacity": true})
+                .await
+                .unwrap();
+            if let Some(row) = row {
+                break row;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let row = state
+        .db
+        .collection::<AssistantConversation>(crate::models::assistant_conversation::COLLECTION_NAME)
+        .find_one(doc! {"user_id": OWNER})
+        .await
+        .unwrap()
+        .unwrap();
+    let attempts = calls.lock().await.len();
+    let began = std::time::Instant::now();
+    stop(State(state.clone()), test_auth_user(OWNER), Path(row.id))
+        .await
+        .unwrap();
+    let events = drain(response).await;
+    assert!(began.elapsed() < Duration::from_secs(5));
+    assert!(events.contains("cancelled"));
+    assert_eq!(calls.lock().await.len(), attempts);
+    server.abort();
+}
+
+#[tokio::test]
+async fn capacity_wait_beyond_31_seconds_keeps_heartbeat_and_owner_slot() {
+    let (state, calls, server) =
+        setup_script(None, Duration::ZERO, vec!["http_capacity_long"]).await;
+    let started = std::time::Instant::now();
+    let response = turns(
+        State(state.clone()),
+        test_auth_user(OWNER),
+        turn_request(None),
+    )
+    .await
+    .unwrap();
+    tokio::time::sleep(Duration::from_secs(31)).await;
+    let row = state
+        .db
+        .collection::<AssistantConversation>(crate::models::assistant_conversation::COLLECTION_NAME)
+        .find_one(doc! {"user_id": OWNER})
+        .await
+        .unwrap()
+        .unwrap();
+    let turn = row.active_turn.as_ref().unwrap();
+    assert!(turn.waiting_for_capacity);
+    assert!(turn.capacity_wait_started_at.is_some());
+    assert!(turn.capacity_wait_deadline.is_some());
+    assert!((Utc::now() - turn.heartbeat_at.unwrap()).num_seconds() < 15);
+    assert_eq!(calls.lock().await.len(), 1);
+    let other = state.direct_chat_limiter.try_acquire(OWNER).await.unwrap();
+    assert!(matches!(
+        state.direct_chat_limiter.try_acquire(OWNER).await,
+        Err(AppError::RateLimited)
+    ));
+    drop(other);
+    let events = drain(response).await;
+    assert!(events.contains("waiting_for_capacity"));
+    assert!(events.contains("\"status\":\"completed\""));
+    assert!(started.elapsed() >= Duration::from_secs(33));
+    assert_eq!(calls.lock().await.len(), 2);
+    server.abort();
+}
+
+#[tokio::test]
+async fn slow_preparation_does_not_consume_first_request_admission_window() {
+    let (state, calls, server) = setup(None, Duration::ZERO).await;
+    let request = serde_json::from_value::<engine::TurnRequest>(json!({"text":"hello"})).unwrap();
+    let mut row = Box::pin(engine::begin_turn(
+        &state.db,
+        OWNER,
+        &request,
+        &state.encryption_keys,
+    ))
+    .await
+    .unwrap();
+    row.active_turn.as_mut().unwrap().started_at = Utc::now()
+        - chrono::Duration::from_std(
+            engine_policy::INTERACTIVE_CAPACITY_BUDGET + Duration::from_secs(1),
+        )
+        .unwrap();
+    let mut credential =
+        credentials::load_for_conversation(&state.db, &state.encryption_keys, OWNER, &row.id)
+            .await
+            .unwrap()
+            .unwrap();
+    let (sender, _receiver) = broadcast::channel(256);
+    let mut events = Events {
+        sender,
+        cursor: 0,
+        reset_notified: false,
+    };
+    let result = Box::pin(execute_turn(
+        &state,
+        &test_auth_user(OWNER),
+        &row,
+        "hello",
+        &mut credential,
+        Some(SERVER_TURN_POLICY),
+        &mut events,
+        "block",
+        &mut String::new(),
+        &mut None,
+    ))
+    .await;
+    assert!(result.unwrap().error.is_none());
+    assert_eq!(calls.lock().await.len(), 1);
+    server.abort();
+}
+
+#[tokio::test]
+async fn nyxagent_admission_retries_charge_only_the_accepted_execution() {
+    use crate::models::service_billing::BillingMetric;
+    use crate::services::channel_x_tests::billing::{
+        enable_billing_with_entitlement, settled as metered,
+    };
+    for (rejection, failures, expected_attempts) in [
+        (Some((503, "capacity_exceeded")), vec![], 2),
+        (Some((503, "provider_unavailable")), vec![], 1),
+        (None, vec!["turn_failed"], 1),
+        (None, vec!["http_oversized"], 1),
+    ] {
+        let (mut state, calls, server) = setup_script(rejection, Duration::ZERO, failures).await;
+        enable_billing_with_entitlement(&mut state, OWNER, "llm-nyx").await;
+        for metric in ["platform_requests", "platform_tokens"] {
+            state
+                .db
+                .collection::<bson::Document>("billing_rate_cache")
+                .insert_one(doc! {
+                    "_id": format!("{metric}:*"), "lago_metric_code": metric,
+                    "credits_per_unit_pico": if metric == "platform_tokens" { 1_i64 } else { 1_000_000_000_000_i64 },
+                    "credits_per_unit_micros": if metric == "platform_tokens" { 0_i64 } else { 1_000_000_i64 }, "synced_at": bson::DateTime::now(),
+                })
+                .await
+                .unwrap();
+        }
+        state
+            .db
+            .collection::<bson::Document>(SERVICES)
+            .update_one(
+                doc! {"slug": engine::SERVICE_SLUG},
+                doc! {"$set": {"billing": {
+                    "platform_billable": true, "platform_charge_nyxid_credentials_only": false,
+                    "platform_metric": "requests",
+                }}},
+            )
+            .await
+            .unwrap();
+        let reply = run_turn_to_reply(&state).await;
+        assert_eq!(
+            calls.lock().await.len(),
+            expected_attempts,
+            "{:?}",
+            reply.error_code
+        );
+        let rows = metered(&state).await;
+        let rows: Vec<_> = rows
+            .iter()
+            .filter(|row| row.metric == BillingMetric::Requests)
+            .collect();
+        assert_eq!(rows.len(), expected_attempts);
+        assert_eq!(rows.iter().map(|row| row.quantity.unwrap()).sum::<i64>(), 1);
+        let ids: std::collections::HashSet<_> =
+            rows.iter().map(|row| &row.billing_request_id).collect();
+        assert_eq!(ids.len(), expected_attempts);
+        server.abort();
+    }
+}
+
+#[tokio::test]
+async fn proxy_model_billing_refusals_settle_with_specific_code_and_original_upstream() {
+    use crate::services::{
+        assistant_acknowledgement_service::AssistantTurnFence,
+        channel_x_tests::billing::enable_billing_with_entitlement,
+    };
+    for code in [
+        "insufficient_credits",
+        "wallet_suspended",
+        "plan_entitlement_required",
+    ] {
+        let (mut state, _, server) = setup(None, Duration::ZERO).await;
+        enable_billing_with_entitlement(
+            &mut state,
+            OWNER,
+            if code == "plan_entitlement_required" {
+                "another-service"
+            } else {
+                "test-model"
+            },
+        )
+        .await;
+        state
+            .db
+            .collection::<bson::Document>(crate::models::billing_wallet::COLLECTION_NAME)
+            .update_one(
+                doc! {"owner_id": OWNER},
+                doc! {"$set": {"balance_credits": crate::models::credits::Credits::ZERO,
+                "suspended": code == "wallet_suspended"}},
+            )
+            .await
+            .unwrap();
+        let mut model = crate::models::downstream_service::test_helpers::dummy_service();
+        model.id = Uuid::new_v4().to_string();
+        model.slug = "test-model".into();
+        model.auth_method = "none".into();
+        model.requires_user_credential = false;
+        model.credential_encrypted.clear();
+        model.inference = Some(
+            serde_json::from_value(json!({"wire_protocol":"openai_responses","model_list":true}))
+                .unwrap(),
+        );
+        model.billing = Some(
+            serde_json::from_value(
+                json!({"platform_billable":true,"platform_charge_nyxid_credentials_only":false}),
+            )
+            .unwrap(),
+        );
+        state
+            .db
+            .collection::<DownstreamService>(SERVICES)
+            .insert_one(&model)
+            .await
+            .unwrap();
+        state
+            .db
+            .collection::<bson::Document>("billing_rate_cache")
+            .insert_one(doc! {
+                "_id":"platform_requests:*", "lago_metric_code":"platform_requests",
+                "credits_per_unit_micros":1_000_000_i64, "synced_at":bson::DateTime::now(),
+            })
+            .await
+            .unwrap();
+        let request =
+            serde_json::from_value::<engine::TurnRequest>(json!({"text":"hello"})).unwrap();
+        let row = Box::pin(engine::begin_turn(
+            &state.db,
+            OWNER,
+            &request,
+            &state.encryption_keys,
+        ))
+        .await
+        .unwrap();
+        let turn = row.active_turn.as_ref().unwrap();
+        let mut auth = test_auth_user(OWNER);
+        auth.api_key_id = Some(row.credential_api_key_id.clone());
+        auth.assistant_turn_fence = Some(AssistantTurnFence {
+            platform_origin: None,
+            platform_thread: false,
+            conversation_id: row.id.clone(),
+            turn_id: Some(turn.turn_id.clone()),
+            turn_live: true,
+            turn_stopped: false,
+        });
+        let mut request = Request::builder()
+            .method("POST")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"model":"test","stream":true}"#))
+            .unwrap();
+        request.extensions_mut().insert(SERVER_TURN_POLICY);
+        let error = Box::pin(super::super::proxy::execute_admin_proxy(
+            &state,
+            &auth,
+            &model.id,
+            "v1/responses",
+            request,
+            vec![],
+            &mut String::new(),
+        ))
+        .await
+        .unwrap_err();
+        assert_eq!(
+            crate::services::assistant_model_observer::refusal_code(&error),
+            Some(code)
+        );
+        let result = engine::TurnResult {
+            text: String::new(),
+            session_id: None,
+            response_id: None,
+            error: Some(engine::TurnError::new("turn_failed")),
+        };
+        let message_id = Uuid::new_v4().to_string();
+        for _ in 0..2 {
+            let settled = engine::finish_turn(
+                &state.db,
+                &row,
+                &row.credential_api_key_id,
+                &message_id,
+                &result,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert_eq!(settled.code, code);
+            assert_eq!(settled.upstream_code.as_deref(), Some("turn_failed"));
+        }
+        let messages = engine::messages(&state.db, OWNER, &row.id, 10, None)
+            .await
+            .unwrap();
+        let reply = messages
+            .iter()
+            .find(|message| message.role == "assistant")
+            .unwrap();
+        assert_eq!(reply.error_code.as_deref(), Some(code));
+        assert_eq!(reply.upstream_error_code.as_deref(), Some("turn_failed"));
+        server.abort();
+    }
+}
+
+#[tokio::test]
+async fn capacity_retry_after_never_extends_trigger_grace_deadline() {
+    for expired in [true, false] {
+        let (state, calls, server) =
+            setup_script(None, Duration::ZERO, vec!["http_capacity_long"]).await;
+        let request =
+            serde_json::from_value::<engine::TurnRequest>(json!({"text":"hello"})).unwrap();
+        let mut row = Box::pin(engine::begin_turn(
+            &state.db,
+            OWNER,
+            &request,
+            &state.encryption_keys,
+        ))
+        .await
+        .unwrap();
+        let run_id = Uuid::new_v4().to_string();
+        row.active_turn.as_mut().unwrap().trigger_run_id = Some(run_id.clone());
+        let now = Utc::now();
+        let date = bson::DateTime::from_chrono;
+        state.db.collection::<bson::Document>(crate::models::trigger_run::COLLECTION_NAME).insert_one(doc! {
+            "_id": &run_id, "trigger_id":"trigger", "user_id":OWNER,
+            "scheduled_at":date(now), "deadline":date(now + chrono::Duration::seconds(if expired { -1 } else { 2 })),
+            "outcome":"started", "fence":"", "lease_until":date(now + chrono::Duration::minutes(1)),
+            "expires_at":date(now + chrono::Duration::days(1)),
+        }).await.unwrap();
+        let mut credential =
+            credentials::load_for_conversation(&state.db, &state.encryption_keys, OWNER, &row.id)
+                .await
+                .unwrap()
+                .unwrap();
+        let (sender, _receiver) = broadcast::channel(256);
+        let mut events = Events {
+            sender,
+            cursor: 0,
+            reset_notified: false,
+        };
+        let began = std::time::Instant::now();
+        let error = Box::pin(execute_turn(
+            &state,
+            &test_auth_user(OWNER),
+            &row,
+            "hello",
+            &mut credential,
+            Some(SERVER_TURN_POLICY),
+            &mut events,
+            "block",
+            &mut String::new(),
+            &mut None,
+        ))
+        .await
+        .unwrap_err();
+        assert_eq!(error.code, "capacity_exceeded");
+        assert!(began.elapsed() < Duration::from_secs(5));
+        assert_eq!(calls.lock().await.len(), 1);
+        assert_eq!(error.http_status, Some(503));
+        server.abort();
+    }
+}
+
+#[tokio::test]
+async fn delayed_first_acceptance_emits_system_acknowledgement_without_model_or_checkpoint_text() {
+    let (state, calls, server) = setup_script(None, Duration::ZERO, vec!["http_slow_accept"]).await;
+    let response = turns(
+        State(state.clone()),
+        test_auth_user(OWNER),
+        turn_request(None),
+    )
+    .await
+    .unwrap();
+    let events = drain(response).await;
+    assert!(events.contains("\"engine_accepted\":true"));
+    assert!(
+        events.contains("\"capacity_wait_note_origin\":\"nyxid_system\""),
+        "{events}"
+    );
+    assert!(events.contains("\"waiting_for_capacity\":false"));
+    assert!(events.contains("\"status\":\"completed\""));
+    let captured = calls.lock().await;
+    assert_eq!(captured.len(), 1);
+    assert!(
+        !captured[0]
+            .body
+            .to_string()
+            .contains(engine_policy::CAPACITY_ACKNOWLEDGEMENT)
+    );
+    let row = state
+        .db
+        .collection::<AssistantConversation>(crate::models::assistant_conversation::COLLECTION_NAME)
+        .find_one(doc! {"user_id": OWNER})
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(row.active_turn.is_none());
+    let messages = engine::messages(&state.db, OWNER, &row.id, 20, None)
+        .await
+        .unwrap();
+    assert_eq!(messages.len(), 2);
+    assert!(!engine::bounded_recap(&messages).contains(engine_policy::CAPACITY_ACKNOWLEDGEMENT));
+    let checkpoint = engine::checkpoint(&state.db, OWNER, &row.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        !serde_json::to_string(&checkpoint)
+            .unwrap()
+            .contains(engine_policy::CAPACITY_ACKNOWLEDGEMENT)
+    );
+    server.abort();
+}
+
+#[tokio::test]
+async fn accepted_first_request_never_acknowledges_even_when_its_stream_is_slow() {
+    let (state, calls, server) =
+        setup(None, engine_policy::ACK_DELAY + Duration::from_secs(1)).await;
+    let response = turns(
+        State(state.clone()),
+        test_auth_user(OWNER),
+        turn_request(None),
+    )
+    .await
+    .unwrap();
+    let events = drain(response).await;
+    assert!(events.contains("\"engine_accepted\":true"));
+    assert!(!events.contains("\"capacity_wait_note_origin\":\"nyxid_system\""));
+    assert_eq!(calls.lock().await.len(), 1);
+    assert!(events.contains("\"status\":\"completed\""));
+    server.abort();
+}
+
+#[tokio::test]
+async fn continuations_admit_independently_and_keep_turn_scoped_recovery() {
+    for refusal in [
+        "http_capacity",
+        "http_draining",
+        "http_busy",
+        "http_credential",
+        "http_not_found",
+    ] {
+        let (state, calls, server) =
+            setup_script(None, Duration::ZERO, vec!["tool_budget_exhausted", refusal]).await;
+        let reply = run_turn_to_reply(&state).await;
+        assert_eq!(
+            reply.status, "completed",
+            "{refusal}: {:?}",
+            reply.error_code
+        );
+        let calls = calls.lock().await;
+        assert_eq!(calls.len(), 3, "{refusal}");
+        assert_ne!(
+            calls[0].headers["idempotency-key"],
+            calls[1].headers["idempotency-key"]
+        );
+        assert_eq!(
+            calls[1].headers["idempotency-key"],
+            calls[2].headers["idempotency-key"]
+        );
+        if refusal == "http_credential" {
+            assert_ne!(
+                calls[1].headers["authorization"],
+                calls[2].headers["authorization"]
+            );
+        } else {
+            assert_eq!(
+                calls[1].headers["authorization"],
+                calls[2].headers["authorization"]
+            );
+        }
+        if matches!(refusal, "http_credential" | "http_not_found") {
+            assert!(calls[2].body.get("conversation").is_none());
+        } else {
+            assert_eq!(calls[1].body, calls[2].body);
+        }
+        server.abort();
+    }
+}
+
+#[tokio::test]
+async fn accepted_stream_failure_never_resends_that_request() {
+    for failure in ["turn_failed", "upstream_error", "invalid_stream"] {
+        let (state, calls, server) = setup_script(None, Duration::ZERO, vec![failure]).await;
+        let reply = run_turn_to_reply(&state).await;
+        assert_eq!(reply.status, "failed");
+        assert_eq!(calls.lock().await.len(), 1);
+        server.abort();
+    }
+}
+
+#[tokio::test]
+async fn expired_or_nearly_expired_run_grace_preserves_dispatch_and_response_bounds() {
+    for (failure, expired, confirmation, expected_calls) in [
+        ("", true, false, 1), // Late pool admission / preparation still dispatches once.
+        ("http_delayed_accept", false, false, 1),
+        ("http_slow_body", false, false, 1), // Proven refusal after the deadline.
+        ("http_slow_credential", false, false, 2),
+        ("http_capacity", true, true, 2), // Confirmation ignores original grace.
+        ("tool_budget_exhausted", true, false, 3), // A new task request gets a fresh cap.
+    ] {
+        let failures = if failure == "tool_budget_exhausted" {
+            vec![failure, "http_capacity"]
+        } else {
+            vec![failure]
+        };
+        let (state, calls, server) = setup_script(None, Duration::ZERO, failures).await;
+        let request =
+            serde_json::from_value::<engine::TurnRequest>(json!({"text":"hello"})).unwrap();
+        let mut row = Box::pin(engine::begin_turn(
+            &state.db,
+            OWNER,
+            &request,
+            &state.encryption_keys,
+        ))
+        .await
+        .unwrap();
+        let run_id = Uuid::new_v4().to_string();
+        let turn = row.active_turn.as_mut().unwrap();
+        turn.trigger_run_id = Some(run_id.clone());
+        turn.trigger_continuation = confirmation;
+        let now = Utc::now();
+        let date = bson::DateTime::from_chrono;
+        state.db.collection::<bson::Document>(crate::models::trigger_run::COLLECTION_NAME).insert_one(doc! {
+            "_id": &run_id, "trigger_id":"trigger", "user_id":OWNER,
+            "scheduled_at":date(now), "deadline":date(now + chrono::Duration::milliseconds(if expired { -1 } else { 100 })),
+            "outcome":"started", "fence":"", "lease_until":date(now + chrono::Duration::minutes(1)),
+            "expires_at":date(now + chrono::Duration::days(1)),
+        }).await.unwrap();
+        let mut credential =
+            credentials::load_for_conversation(&state.db, &state.encryption_keys, OWNER, &row.id)
+                .await
+                .unwrap()
+                .unwrap();
+        let (sender, _receiver) = broadcast::channel(256);
+        let mut events = Events {
+            sender,
+            cursor: 0,
+            reset_notified: false,
+        };
+        let result = Box::pin(execute_turn(
+            &state,
+            &test_auth_user(OWNER),
+            &row,
+            "hello",
+            &mut credential,
+            Some(SERVER_TURN_POLICY),
+            &mut events,
+            "block",
+            &mut String::new(),
+            &mut None,
+        ))
+        .await;
+        if failure == "http_slow_body" {
+            let error = result.unwrap_err();
+            assert_eq!(error.code, "capacity_exceeded");
+            assert_eq!(error.http_status, Some(503));
+        } else {
+            assert!(result.unwrap().error.is_none(), "{failure}");
+        }
+        assert_eq!(calls.lock().await.len(), expected_calls, "{failure}");
+        server.abort();
+    }
+}
+
+#[tokio::test]
+async fn refused_admission_releases_minimal_funding_before_immediate_retry() {
+    use crate::models::{billing_wallet::BillingWallet, credits::Credits};
+    use crate::services::{
+        billing::SettlementGate, channel_x_tests::billing::enable_billing_with_entitlement,
+    };
+    let (mut state, calls, server) = setup(Some((503, "capacity_exceeded")), Duration::ZERO).await;
+    enable_billing_with_entitlement(&mut state, OWNER, "llm-nyx").await;
+    state
+        .db
+        .collection::<bson::Document>("billing_rate_cache")
+        .insert_one(doc! {
+            "_id": "platform_requests:*", "lago_metric_code": "platform_requests",
+            "credits_per_unit_pico": 1_000_000_000_000_i64,
+            "credits_per_unit_micros": 1_000_000_i64, "synced_at": bson::DateTime::now(),
+        })
+        .await
+        .unwrap();
+    state
+        .db
+        .collection::<bson::Document>(SERVICES)
+        .update_one(
+            doc! {"slug": engine::SERVICE_SLUG},
+            doc! {"$set": {"billing": {"platform_billable": true,
+            "platform_charge_nyxid_credentials_only": false, "platform_metric": "requests"}}},
+        )
+        .await
+        .unwrap();
+    let wallets = state
+        .db
+        .collection::<BillingWallet>(crate::models::billing_wallet::COLLECTION_NAME);
+    wallets
+        .update_one(
+            doc! {"owner_id": OWNER},
+            doc! {"$set": {
+                "balance_credits": Credits::from_whole(1), "overdraft_cap_credits": Credits::ZERO,
+            }},
+        )
+        .await
+        .unwrap();
+    let gate = Arc::new(SettlementGate {
+        entered: tokio::sync::Notify::new(),
+        release: tokio::sync::Semaphore::new(0),
+        fail: false,
+        used: std::sync::atomic::AtomicBool::new(false),
+    });
+    Arc::make_mut(&mut state.billing).settlement_gate = Some(gate.clone());
+    let row = Box::pin(engine::begin_turn(
+        &state.db,
+        OWNER,
+        &serde_json::from_value::<engine::TurnRequest>(json!({"text":"hello"})).unwrap(),
+        &state.encryption_keys,
+    ))
+    .await
+    .unwrap();
+    let credential =
+        credentials::load_for_conversation(&state.db, &state.encryption_keys, OWNER, &row.id)
+            .await
+            .unwrap()
+            .unwrap();
+    let auth = test_auth_user(OWNER);
+    let body = json!({"input": "hello", "stream": true});
+    let mut first = Box::pin(proxy(
+        &state,
+        &auth,
+        &credential,
+        "POST",
+        "v1/responses",
+        Some(body.clone()),
+        Some("refused-attempt"),
+        Some(SERVER_TURN_POLICY),
+    ));
+    tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::select! {
+            biased;
+            result = &mut first => panic!("Refusal returned before funding release: {:?}", result.map(|response| response.status())),
+            _ = gate.entered.notified() => {}
+        }
+    }).await.unwrap();
+    assert!(futures::poll!(first.as_mut()).is_pending());
+    assert_eq!(
+        wallets
+            .find_one(doc! {"owner_id": OWNER})
+            .await
+            .unwrap()
+            .unwrap()
+            .reserved_credits,
+        Credits::from_whole(1)
+    );
+    gate.release.add_permits(1);
+    assert_eq!(
+        first.await.unwrap().status(),
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    assert_eq!(
+        wallets
+            .find_one(doc! {"owner_id": OWNER})
+            .await
+            .unwrap()
+            .unwrap()
+            .reserved_credits,
+        Credits::ZERO
+    );
+    // No backoff: the very next admission must be able to reserve that credit.
+    let second = proxy(
+        &state,
+        &auth,
+        &credential,
+        "POST",
+        "v1/responses",
+        Some(body),
+        Some("accepted-attempt"),
+        Some(SERVER_TURN_POLICY),
+    )
+    .await
+    .unwrap();
+    assert_eq!(second.status(), StatusCode::OK);
+    axum::body::to_bytes(second.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(calls.lock().await.len(), 2);
+    server.abort();
+}
+
+#[tokio::test]
+async fn refused_admission_release_failure_stops_without_billing_attribution() {
+    use crate::services::{
+        billing::SettlementGate, channel_x_tests::billing::enable_billing_with_entitlement,
+    };
+    let (mut state, calls, server) = setup(Some((503, "capacity_exceeded")), Duration::ZERO).await;
+    enable_billing_with_entitlement(&mut state, OWNER, "llm-nyx").await;
+    state
+        .db
+        .collection::<bson::Document>("billing_rate_cache")
+        .insert_one(doc! {
+            "_id": "platform_requests:*", "lago_metric_code": "platform_requests",
+            "credits_per_unit_pico": 1_000_000_000_000_i64,
+            "credits_per_unit_micros": 1_000_000_i64, "synced_at": bson::DateTime::now(),
+        })
+        .await
+        .unwrap();
+    state
+        .db
+        .collection::<bson::Document>(SERVICES)
+        .update_one(
+            doc! {"slug": engine::SERVICE_SLUG},
+            doc! {"$set": {"billing": {"platform_billable": true,
+            "platform_charge_nyxid_credentials_only": false, "platform_metric": "requests"}}},
+        )
+        .await
+        .unwrap();
+    let gate = Arc::new(SettlementGate {
+        entered: tokio::sync::Notify::new(),
+        release: tokio::sync::Semaphore::new(1),
+        fail: true,
+        used: std::sync::atomic::AtomicBool::new(false),
+    });
+    Arc::make_mut(&mut state.billing).settlement_gate = Some(gate);
+    let reply = run_turn_to_reply(&state).await;
+    assert_eq!(calls.lock().await.len(), 1);
+    assert_eq!(reply.error_code.as_deref(), Some("assistant_unavailable"));
+    let row = engine::get(&state.db, OWNER, &reply.conversation_id)
+        .await
+        .unwrap();
+    assert!(row.active_turn.is_none());
+    let (_, _, pause) =
+        crate::services::trigger_schedule::failure_streak(None, 0, reply.error_code.as_deref());
+    assert!(!pause);
+    server.abort();
 }

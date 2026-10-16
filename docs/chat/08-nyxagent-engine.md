@@ -1,5 +1,15 @@
 # NyxAgent assistant engine
 
+Owner execution and settlement live in `services/assistant_nyxagent_runtime.rs`;
+HTTP adapters retain authentication and channel notice delivery. The shared
+`services/proxy_http_response.rs` relay owns bounded admission rejection capture,
+synchronous zero-usage funding release, and model stream observation. Both HTTP
+owner turns and the typed personal-platform egress use this relay; neither path
+may return a proven capacity refusal until its funding reservation is released.
+Scheduler jobs, shared owner admission, and terminal audit transactions box
+their large futures at call boundaries to keep nested polling within the
+worker's normal stack, including confirmation continuations.
+
 ## Turn diagnostics and context continuity
 
 Failed replies retain a normalized NyxID `error_code` and, only when the
@@ -1146,10 +1156,10 @@ error is null or a stable `{code,message}`. The additive `turn.notice` carries
 | Upstream result | NyxID action |
 | --- | --- |
 | Bound 404 `not_found` | Clear binding (`session_lost`), emit notice, retry once unbound with recap and same turn/idempotency key |
-| `session_busy`, `capacity_exceeded` | Four jittered delays of approximately 2/4/8/16 seconds, same body and key; fail after five requests |
+| 503 `capacity_exceeded` / `draining`, 409 `session_busy` | Retry proven refusals within a fixed window per request, measured from first dispatch: 120 seconds interactive, up to 600 seconds trigger. Original grace bounds the first ordinary trigger request; confirmation turns use 120 seconds. New explicit task/image requests get fresh windows within the total-turn cap. Full jitter up to 15 seconds; delta-seconds Retry-After (1–60) is a minimum. Same body/key for refusal retries; retry expiry never shortens a dispatched response/read bound |
 | 401/403 or `agent_key_required` | Replace credential, clear binding, emit notice, retry once with recap |
 | `stale_response`, `outcome_unknown` | Fail without retry; discard binding |
-| `insufficient_credits` (typed `AppError::InsufficientCredits`, nested `error.code`, NyxID's flat 402 `{"error":"insufficient_credits"}`, or `response.failed`) | Fail without credential replacement, retry, backoff or rebind, with the fixed message "There aren't enough credits to run this turn." During a rolling deploy old replicas keep reporting `assistant_unavailable`; existing failed rows are not backfilled |
+| `insufficient_credits`, `wallet_suspended`, `plan_entitlement_required` | Terminal billing refusal: no credential replacement, retry, backoff or rebind. Show top-up, suspended-wallet support/billing, or plan-entitlement guidance respectively |
 | `tool_budget_exhausted`, `turn_timeout` | Continue automatically on the same session, with the same grants/TriggerRun, up to `max_auto_continuations` (default 8, hard cap 32). Preserve context if the bound is reached |
 | Identical full call/result sequence and unchanged reply text | Stop with `continuation_no_progress`; preserve the session |
 | Other failed turn or invalid stream | Persist failed partial reply; discard binding immediately with `turn_failed` |
@@ -1616,3 +1626,186 @@ Admins and operators read `GET /api/v1/admin/assistant/feedback` with RFC3339
 hold per-day counts and up to 100 recent rows with their comment and context;
 rows written before the snapshot existed have `context: null`. Message text is
 never included.
+
+### Model failure attribution and capacity admission
+
+Only explicit pre-acceptance status/code pairs above prove a capacity refusal.
+Admission is scoped to each upstream request. Refusal retries keep the same request
+identity and fixed window from its first dispatch: 120 seconds for interactive,
+channel and event requests, or at most ten minutes for trigger requests. The first
+request of an ordinary trigger turn is also bounded by the run's grace deadline.
+Automatic task and image continuations are new requests with fresh windows;
+trigger confirmation continuation turns use the interactive window and ignore the
+original run deadline. Every request remains bounded by the existing total-turn cap.
+
+The admission deadline gates only another dispatch after a proven refusal and the
+backoff sleep. It does not prevent a first dispatch, even after late pool admission
+or slow preparation, and it never shortens the ordinary first-byte or rejection-body
+read bounds. An outstanding request may finish after the admission deadline within
+those bounds. `capacity_exceeded` requires a proven refusal; timeout or a broken
+connection retains its uncertain-outcome classification. A request that returned
+2xx is never resent if its stream later fails. Explicit continuations admit
+independently, and credential replacement and session rebind retain their existing
+once-per-turn recovery limits.
+Waiting holds the owner's pool slot. The independent ten-second heartbeat,
+250 ms Stop watcher, permit cancellation and total-turn cap remain active.
+`active_turn.waiting_for_capacity` and additive `turn.status` events let clients
+show the elapsed capacity wait and its bound without transcript rows.
+A worker process loss follows `turn_lost` recovery; it never replays the execution.
+An unwinding execution panic settles immediately as `internal_error` at stage
+`panic`, through the same fenced settlement as other failures.
+Only internally marked engine requests to the configured `llm-nyx` service with
+503 `capacity_exceeded`/`draining` or 409 `session_busy` settle zero platform and
+resale quantities. The proxy awaits the existing durable settlement and reservation
+release before returning the refusal to the retry loop. A release failure stops
+admission with a generic internal proxy error; it cannot trigger another funded
+attempt or be attributed as an insufficient-credit/entitlement refusal. Durable
+settlement recovery retains its existing retry path. Attempt telemetry/audit remains.
+Other errors and accepted executions retain normal accounting and distinct
+billing request IDs.
+
+The model observer captures the live turn and a UUID attempt at HTTP request
+admission for a conversation credential, a catalog inference service and a POST
+model endpoint. Today's NyxAgent model bridge uses this route; optional inference
+MCP tools use their separate direct forwarding path. Machine ingress is excluded.
+An admission CAS registers the attempt on the captured turn. Later facts require
+that exact attempt and turn; late writes cannot follow a newer attempt or turn.
+This extra admission write is necessary to make late-write suppression durable
+across replicas. A bounded active-request count is incremented atomically with
+admission and decremented at completion (with cancellation cleanup). If requests
+overlap, attribution stays uncertain for the rest of that turn: facts remain
+diagnostic only. Failed cleanup also errs toward diagnostic-only facts. Facts
+from older attempts are diagnostics only. A 2xx admission conditionally clears
+any refusal.
+
+Billing admission records only `insufficient_credits`, `wallet_suspended` or
+`plan_entitlement_required`. On successful SSE responses the supported protocols
+are Responses (`response.completed/failed/incomplete`), Chat Completions (`[DONE]`)
+and Anthropic Messages (`message_stop`). Missing usage is valid. Body/transport
+errors, provider error events and missing supported terminal events are abnormal;
+unsupported formats are `unknown`. Consumer cancellation is diagnostic only and
+cannot replace a recorded attributable provider fault. Faults are persisted
+before forwarding failure/EOF where possible; HTTP status is unchanged.
+Both the direct streaming path and the response wrapper use the bounded byte
+decoder, recognizing LF, CRLF (including chunk splits) and CR line endings. The
+observer limit applies to each frame in both transports. Forwarded bytes remain
+unchanged. The direct path keeps an independent, uncapped SSE usage parser
+for every service and HTTP status; model observation runs only for captured model
+requests. The diagnostic frame cap never drops billing usage from large
+`response.completed` events such as base64 image results. The response wrapper
+only observes faults and leaves usage collection to its transport.
+Oversized, invalid UTF-8, malformed data or incomplete framing makes terminal
+detection `unknown` for that attempt, even if a later frame appears valid; it
+cannot prove an interrupted stream. Repeated provider-error or unknown facts are
+recorded once per observer rather than on every later chunk.
+
+At settlement only a generic NyxAgent failure or broken stream can be attributed.
+A matching attempt's latest uncleared billing refusal within 120 seconds wins,
+then an attributable stream fault within 120 seconds (`model_interrupted`), then
+the generic error. Typed failures and Stop keep their cause. Attribution retains
+the original sanitized `upstream_error_code`, also exposed in the live terminal
+event and history. Details and its copied diagnostic ID include that code.
+Generic copy is “The assistant could not complete this turn. Try again.”;
+`model_interrupted` warns that some actions may already have completed and must
+be checked before retrying. Old rows and old clients remain readable; existing
+failed rows are not backfilled.
+
+### Capacity wait visibility and engine diagnostics
+
+Each request admission wait persists `capacity_wait_started_at` and its fixed
+`capacity_wait_deadline` as BSON dates on the active turn. Completed wait intervals
+accumulate in `capacity_wait_ms`, excluding execution time between requests. The first upstream
+request separately persists `engine_request_started_at`. If NyxAgent has not
+accepted a 2xx response ten seconds after that first request, the server marks
+`capacity_wait_note_origin = nyxid_system` and emits the same state to live clients.
+This includes capacity refusals and slow or unanswered connections. A turn accepted
+before the delay receives no acknowledgement, even if its stream is slow later.
+Live acceptance carries an additive `engine_accepted` marker; an older polling
+result cannot restore the waiting note after the client has seen acceptance.
+
+The web renders a pending bubble through the agent's ordinary reply renderer:
+“Got it — I'm a bit busy right now and will start on this shortly.” It shows elapsed
+time from the first request and the admission bound from server timestamps;
+reloading or opening another tab does not restart the timer. Acceptance changes
+the bubble into the streaming reply, exhaustion into the capacity error, and Stop
+clears it through the ordinary terminal state. Stop remains available throughout.
+
+At the same ten-second threshold, channel turns and event turns with a channel
+destination may send one acknowledgement with the same copy through the ordinary
+reply path. All automations, including chat result delivery, are excluded. A
+turn-fenced MongoDB claim precedes the external send. Concurrent workers cannot
+send twice; a crash after the claim can omit the remote acknowledgement because
+existing channel transports have no recipient idempotency protocol.
+
+The acknowledgement is a NyxID system note stored only as active-turn display
+metadata, without a transcript text row. It never enters model input, recap,
+checkpoints, question digests, feedback or reply settlement/delivery. Guest chats
+receive the same fixed copy, with no owner data. Slow admission alone does not
+increase `capacity_wait_ms`; that statistic starts only at a proven capacity refusal.
+
+All incident policy values live in `services/assistant_engine_policy.rs`, including
+acknowledgement delay, admission budgets, backoff, Retry-After bounds, attribution
+window, persistent-failure threshold and recurring dispatch jitter. The frontend
+uses server-provided dates and does not duplicate these tunables. No environment
+variables are added.
+
+The `nyxid::assistant_engine` tracing target emits one metadata-only line per
+engine attempt (origin, attempt number, HTTP status, sanitized upstream code,
+accepted/backoff/failed decision, elapsed capacity wait and remaining deadline)
+and one per committed settlement (final code/stage, original upstream code,
+status, attempts, wait, duration and optional trigger run). Prompts, replies and
+upstream prose are excluded. Attempt counts include engine dispatches and explicit
+continuations; model-provider requests have their separate attribution identities.
+Failed replies retain optional `attempts`/`capacity_wait_ms` in `error_detail`;
+all new settled replies also carry optional `turn_metadata`. Completed replies show
+Details only after a positive capacity wait or more than one attempt; failed replies
+keep full Details. Duration copy uses whole words with correct singular/plural,
+for example “waited 1 minute 20 seconds for capacity”. Zero or unknown waits omit
+the waited phrase. Old rows omit these fields. Billing remedies open the account
+panel over the current assistant view; previews outside the assistant shell omit it.
+
+`assistant_turn_failed` commits through the audit append path in the settlement
+transaction, including Stop and orphan recovery. `assistant_turn_capacity_wait`
+commits once per request accepted after a positive capacity wait; repeat acceptance
+callbacks do not append another event. Acceptance without an active wait is a
+single conditional update and opens no transaction. A
+successful turn without a wait emits neither event. Both event types are
+searchable in the admin audit filters. Capacity exhaustion keeps
+`capacity_exceeded`; its copy includes the measured wait (for example, “NyxBot is
+at capacity right now (waited 2 minutes). Try again shortly.”). Short automation
+grace windows report their actual seconds rather than claiming a two-minute wait.
+
+### Worker identity, panics and orphan recovery
+
+Every server process generates one engine worker UUID at startup and retains the
+standard `HOSTNAME` when it is valid bounded hostname metadata. Startup emits
+“NyxID engine worker started” with the UUID, hostname and version. New turns
+persist the pair in optional `active_turn.worker_instance` when claimed. Engine
+attempt and settlement logs identify the process writing the line; settlements
+also identify the process that claimed the turn. Old turns remain readable with
+no worker identity.
+
+Web, channel, event, team, group, voice and trigger turns share the detached
+runner. It polls execution under `AssertUnwindSafe(...).catch_unwind()`. A panic
+becomes `internal_error` / `panic` and enters ordinary settlement immediately,
+including its failed audit, terminal event, checkpoint and delivery hooks. The
+copy is “NyxBot hit an internal error on this turn. Check which actions completed
+before retrying.” Details shows stage `panic`. Completed actions are not replayed.
+The independent heartbeat stays alive during settlement and ends with the worker.
+
+A task-local panic hook suppresses the default hook only while polling contained
+execution, because the default hook would print payload text before the catch.
+The error-level `nyxid::assistant_engine` line includes only conversation/turn and
+worker identifiers, source location, and the fixed payload class (`static_str`,
+`string` or `opaque`). It never logs the payload. Other tasks retain their previous
+panic hook. Process aborts and terminated replicas cannot be caught and still use
+the stale-heartbeat sweep.
+
+`assistant_turn_failed` includes the claimed `worker_instance` and the
+`settled_by_worker_instance`, plus `heartbeat_age_ms` when a heartbeat exists.
+This includes stale stopped turns, whose final class remains `cancelled` / `stop`.
+The committed settlement log carries the same owner and heartbeat-age diagnostics,
+so a losing sweep race emits no false reclamation line. These identities let
+operators correlate a lost turn with startup logs and other activity from that
+process. A missing startup/activity record alone cannot prove a replica died;
+logs and deployment evidence are still needed when the process is absent.

@@ -171,6 +171,38 @@ pub async fn log_actor_event_in_session(
     audit_chain_service::append_chained_entry_in_session(db, session, entry, key).await
 }
 
+/// Append business metadata in the caller's transaction, using the process audit key.
+pub async fn log_actor_event_in_transaction(
+    db: &mongodb::Database,
+    session: &mut mongodb::ClientSession,
+    actor: &AuditActor,
+    event_type: &str,
+    event_data: serde_json::Value,
+) -> crate::errors::AppResult<()> {
+    if let Some(key) = audit_chain_hmac_key() {
+        return log_actor_event_in_session(db, session, key, actor, event_type, event_data).await;
+    }
+    // Match the existing pre-initialization behavior of write_audit_entry.
+    let entry = build_audit_entry(
+        Some(actor.user_id.clone()),
+        event_type.into(),
+        Some(event_data),
+        actor.ip_address.clone(),
+        actor.user_agent.clone(),
+        actor.api_key_id.clone(),
+        actor.api_key_name.clone(),
+    );
+    tracing::warn!(
+        event_type,
+        "audit-chain HMAC key is not initialized; writing legacy unchained audit entry"
+    );
+    db.collection::<AuditLog>(AUDIT_LOG)
+        .insert_one(entry)
+        .session(session)
+        .await?;
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn build_audit_entry(
     user_id: Option<String>,

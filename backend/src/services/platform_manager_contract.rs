@@ -817,6 +817,15 @@ pub trait PublicTurnProducer: Send + Sync {
 /// Part 3 supplies this service adapter over the existing metered proxy core.
 #[async_trait]
 pub trait NyxAgentEgress: Send + Sync {
+    /// Optional human-channel display note after the durable acknowledgement.
+    /// The adapter owns delivery authorization; the runtime cancels this task on acceptance.
+    fn admission_acknowledged(
+        &self,
+        _row: &crate::models::assistant_conversation::AssistantConversation,
+    ) -> Option<tokio::task::JoinHandle<()>> {
+        None
+    }
+
     async fn request(
         &self,
         authority: &NyxAgentExecutionContext,

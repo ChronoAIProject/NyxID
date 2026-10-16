@@ -1,5 +1,6 @@
 use super::*;
 use crate::models::trigger_run::RunOutcome;
+use crate::services::assistant_engine_policy as engine_policy;
 use crate::{
     models::{
         assistant_conversation::{AssistantConversation, COLLECTION_NAME as CONVERSATIONS},
@@ -118,7 +119,7 @@ async fn automation(state: &AppState, agent_id: &str, policy: Option<ThreadPolic
                 start: None,
                 end: None,
                 max_runs: None,
-                grace_seconds: None,
+                grace_seconds: Some(60),
             }),
             verification: TriggerVerification::Schedule,
             delivery: TriggerDelivery::Assistant {
@@ -669,6 +670,7 @@ async fn schedule_specialist_authority_threads_and_guest_refusal() {
         &second.id,
         RunOutcome::Skipped,
         Some("test_complete"),
+        &state.config.frontend_url,
     )
     .await
     .unwrap();
@@ -816,6 +818,7 @@ async fn webhook_nyxbot_defaults_to_dedicated_and_home_requires_explicit_policy(
                 &manual.id,
                 RunOutcome::Skipped,
                 Some("test_complete"),
+                &state.config.frontend_url,
             )
             .await
             .unwrap();
@@ -1224,6 +1227,17 @@ async fn confirmation_waits_and_resumes(kind: &str) {
                 .any(|e| e.id == ack_id)
         );
     }
+    // Human approval can arrive after grace; its new turn has an interactive
+    // admission window, independent of the original occurrence deadline.
+    state
+        .db
+        .collection::<Document>(RUNS)
+        .update_one(
+            doc! {"_id": &run.id},
+            doc! {"$set": {"deadline": schedules::date(Utc::now() - Duration::seconds(1))}},
+        )
+        .await
+        .unwrap();
     tick(&state).await.unwrap();
     assert_eq!(
         completed(&state, &trigger).await.outcome,
@@ -1769,9 +1783,15 @@ async fn schedule_queue_one_busy_grace_and_edit_fence() {
         .unwrap()
         .unwrap();
     assert_eq!(saved.outcome, RunOutcome::Skipped);
-    schedules::finish(&state.db, &one.id, RunOutcome::Completed, None)
-        .await
-        .unwrap();
+    schedules::finish(
+        &state.db,
+        &one.id,
+        RunOutcome::Completed,
+        None,
+        &state.config.frontend_url,
+    )
+    .await
+    .unwrap();
     let pending = schedules::enqueue_now(&state.db, &trigger).await.unwrap();
     let job = schedules::claim(&state.db, &pending.id, Utc::now())
         .await
@@ -1858,8 +1878,9 @@ async fn schedule_long_downtime_records_skips_without_a_catchup_burst() {
     let claim_elapsed = started.elapsed();
     eprintln!("S7 3-day 5-minute catch-up: {claim_elapsed:?}");
     assert!(claim_elapsed < std::time::Duration::from_secs(5));
-    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+    tokio::time::timeout(std::time::Duration::from_secs(40), async {
         loop {
+            tick(&state).await.unwrap();
             if state
                 .db
                 .collection::<TriggerRun>(RUNS)
@@ -2759,9 +2780,15 @@ async fn schedule_history_counter_tracks_inserts_and_trims_only_excess() {
         )
         .await
         .unwrap();
-    schedules::finish(&state.db, &run.id, RunOutcome::Completed, None)
-        .await
-        .unwrap();
+    schedules::finish(
+        &state.db,
+        &run.id,
+        RunOutcome::Completed,
+        None,
+        &state.config.frontend_url,
+    )
+    .await
+    .unwrap();
     assert_eq!(
         state
             .db
@@ -2780,9 +2807,15 @@ async fn schedule_history_counter_tracks_inserts_and_trims_only_excess() {
         .unwrap();
     assert_eq!(stored.get_i64("history_count").unwrap(), 1000);
     // A second finish is idempotent and must not trim another page.
-    schedules::finish(&state.db, &run.id, RunOutcome::Completed, None)
-        .await
-        .unwrap();
+    schedules::finish(
+        &state.db,
+        &run.id,
+        RunOutcome::Completed,
+        None,
+        &state.config.frontend_url,
+    )
+    .await
+    .unwrap();
     assert_eq!(
         state
             .db
@@ -2793,4 +2826,676 @@ async fn schedule_history_counter_tracks_inserts_and_trims_only_excess() {
         1000
     );
     server.abort();
+}
+
+#[test]
+fn terminal_failure_streak_resets_on_every_different_result() {
+    for code in [
+        "insufficient_credits",
+        "wallet_suspended",
+        "plan_entitlement_required",
+    ] {
+        assert!(schedules::failure_streak(None, 0, Some(code)).2);
+        let notice = schedules::pause_notice(code, "https://example.com");
+        assert!(notice.contains("Resume"));
+        assert!(notice.contains("panel=billing"));
+        assert!(!notice.contains("temporarily unavailable"));
+    }
+    for code in [
+        "credential_invalid",
+        "model_unavailable",
+        "model_not_configured",
+    ] {
+        let mut previous = None;
+        let mut count = 0;
+        for expected in 1..=engine_policy::PERSISTENT_FAILURE_PAUSE_THRESHOLD {
+            let (next, total, pause) =
+                schedules::failure_streak(previous.as_deref(), count, Some(code));
+            assert_eq!(total, expected);
+            assert_eq!(
+                pause,
+                expected >= engine_policy::PERSISTENT_FAILURE_PAUSE_THRESHOLD
+            );
+            previous = next;
+            count = total;
+        }
+        for intervening in [
+            None,
+            Some("capacity_exceeded"),
+            Some("model_interrupted"),
+            Some("outcome_unknown"),
+            Some("turn_lost"),
+        ] {
+            let (previous, count, pause) =
+                schedules::failure_streak(previous.as_deref(), count, intervening);
+            assert_eq!(count, 0);
+            assert!(!pause);
+            assert_eq!(
+                schedules::failure_streak(previous.as_deref(), count, Some(code)).1,
+                1
+            );
+        }
+    }
+}
+
+#[test]
+fn recurring_dispatch_offset_is_stable_bounded_and_post_instant() {
+    let at = chrono::DateTime::parse_from_rfc3339("2026-11-01T05:30:00Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    let mut spec = ScheduleSpec {
+        timing: ScheduleKind::Every {
+            amount: 1,
+            unit: IntervalUnit::Minutes,
+            anchor: at,
+        },
+        start: None,
+        end: None,
+        max_runs: None,
+        grace_seconds: Some(600),
+    };
+    let short_grace = engine_policy::DISPATCH_JITTER_MIN_GRACE.as_secs() as u32;
+    for grace in [
+        1,
+        short_grace - 1,
+        short_grace,
+        short_grace + 60,
+        engine_policy::AUTOMATION_CAPACITY_CAP.as_secs() as u32,
+    ] {
+        spec.grace_seconds = Some(grace);
+        for id in 0..100 {
+            let id = format!("trigger-{id}");
+            let offset = schedules::dispatch_offset(&id, &spec, at).unwrap();
+            assert_eq!(
+                offset,
+                schedules::dispatch_offset(&id, &spec.clone(), at).unwrap()
+            );
+            assert!(
+                offset <= Duration::seconds(60) / engine_policy::DISPATCH_JITTER_WINDOW_DIVISOR
+            );
+            assert!(offset <= Duration::from_std(engine_policy::DISPATCH_JITTER_MAX).unwrap());
+            assert!(
+                offset
+                    <= Duration::seconds(i64::from(grace))
+                        / engine_policy::DISPATCH_JITTER_WINDOW_DIVISOR
+            );
+            if grace < short_grace {
+                assert_eq!(offset, Duration::zero());
+            }
+        }
+    }
+    spec.timing = ScheduleKind::Cron {
+        expression: "30 1 * * *".into(),
+        timezone: "America/New_York".into(),
+    };
+    let offset = schedules::dispatch_offset("trigger", &spec, at).unwrap();
+    let next = schedules::compute::next(&spec, at).unwrap().unwrap();
+    assert!(at + offset < next);
+    spec.timing = ScheduleKind::At { at };
+    assert_eq!(
+        schedules::dispatch_offset("trigger", &spec, at).unwrap(),
+        Duration::zero()
+    );
+}
+
+#[tokio::test]
+async fn pause_transaction_deduplicates_runs_and_fences_resumed_generation() {
+    let (state, _, server) = setup("pause_transaction").await;
+    let agent = team::ensure_nyxbot(&state.db, OWNER).await.unwrap();
+    let trigger = automation(&state, &agent.id, None).await;
+    let mut run = schedules::enqueue_now(&state.db, &trigger).await.unwrap();
+    assert!(
+        run.dispatch_at.is_none(),
+        "Run now bypasses recurring dispatch offset"
+    );
+    let thread = schedules::run_thread(&state.db, &state.encryption_keys, &run, &trigger)
+        .await
+        .unwrap();
+    run.thread_id = Some(thread.id.clone());
+    run.outcome = RunOutcome::Started;
+    run.turn_id = Some(Uuid::new_v4().to_string());
+    run.trigger_generation = Some(trigger.updated_at);
+    state
+        .db
+        .collection::<TriggerRun>(RUNS)
+        .replace_one(doc! {"_id": &run.id}, &run)
+        .await
+        .unwrap();
+    let (a, b) = tokio::join!(
+        schedules::terminal_result(
+            &state.db,
+            &run,
+            Some("insufficient_credits"),
+            "https://example.com"
+        ),
+        schedules::terminal_result(
+            &state.db,
+            &run,
+            Some("insufficient_credits"),
+            "https://example.com"
+        )
+    );
+    a.unwrap();
+    b.unwrap();
+    let paused = state
+        .db
+        .collection::<Trigger>(TRIGGERS)
+        .find_one(doc! {"_id": &trigger.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(paused.status, TriggerStatus::Disabled);
+    assert_eq!(
+        paused.schedule_state.pause_reason.as_deref(),
+        Some("insufficient_credits")
+    );
+    assert_eq!(
+        state
+            .db
+            .collection::<Document>(schedules::WORK)
+            .count_documents(doc! {"kind": "pause_notice", "trigger_id": &trigger.id})
+            .await
+            .unwrap(),
+        1
+    );
+    let messages = engine::messages(&state.db, OWNER, &thread.id, 10, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        messages
+            .iter()
+            .filter(|message| message.text.contains("Automation paused:"))
+            .count(),
+        1
+    );
+    // A committed notice survives a crash; a claimed external send is never replayed.
+    let job = state
+        .db
+        .collection::<Document>(schedules::WORK)
+        .find_one(doc! {"kind": "pause_notice", "trigger_id": &trigger.id})
+        .await
+        .unwrap()
+        .unwrap();
+    state
+        .db
+        .collection::<Document>(schedules::WORK)
+        .update_one(
+            doc! {"_id": job.get_str("_id").unwrap()},
+            doc! {"$set": {"external_claimed": true}},
+        )
+        .await
+        .unwrap();
+    let job = schedules::claim(&state.db, job.get_str("_id").unwrap(), Utc::now())
+        .await
+        .unwrap()
+        .unwrap();
+    deliver_pause_notice(&state, &job).await.unwrap();
+    assert_eq!(
+        state
+            .db
+            .collection::<Document>(schedules::WORK)
+            .count_documents(doc! {"kind": "pause_notice"})
+            .await
+            .unwrap(),
+        0
+    );
+    let resumed = trigger_service::update(
+        &state.db,
+        &state.encryption_keys,
+        &paused,
+        trigger_service::UpdateInput {
+            status: Some(TriggerStatus::Active),
+            schedule: None,
+            overlap: None,
+            label: None,
+            delivery: None,
+        },
+    )
+    .await
+    .unwrap()
+    .trigger;
+    assert_eq!(resumed.schedule_state.terminal_failure_count, 0);
+    assert!(resumed.schedule_state.pause_reason.is_none());
+    let mut old = schedules::new_run(
+        &trigger,
+        Utc::now() + Duration::seconds(1),
+        Utc::now() + Duration::minutes(5),
+    );
+    old.outcome = RunOutcome::Started;
+    old.trigger_generation = Some(trigger.updated_at);
+    old.turn_id = Some(Uuid::new_v4().to_string());
+    state
+        .db
+        .collection::<TriggerRun>(RUNS)
+        .insert_one(&old)
+        .await
+        .unwrap();
+    schedules::terminal_result(
+        &state.db,
+        &old,
+        Some("wallet_suspended"),
+        "https://example.com",
+    )
+    .await
+    .unwrap();
+    let after = state
+        .db
+        .collection::<Trigger>(TRIGGERS)
+        .find_one(doc! {"_id": &trigger.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(after.status, TriggerStatus::Active);
+    assert_eq!(after.updated_at, resumed.updated_at);
+    server.abort();
+}
+
+#[tokio::test]
+async fn recurring_offset_delays_only_eligibility_and_late_wakeup_keeps_identity() {
+    let (state, _, server) = setup("dispatch_eligibility").await;
+    let agent = team::ensure_nyxbot(&state.db, OWNER).await.unwrap();
+    let trigger = automation(&state, &agent.id, None).await;
+    state
+        .db
+        .collection::<Document>(TRIGGERS)
+        .update_one(
+            doc! {"_id": &trigger.id},
+            doc! {"$set": {"schedule.grace_seconds": 600}},
+        )
+        .await
+        .unwrap();
+    let at = schedules::date(make_due(&state, &trigger).await).to_chrono();
+    let job = schedules::claim(&state.db, &format!("schedule:{}", trigger.id), Utc::now())
+        .await
+        .unwrap()
+        .unwrap();
+    let run = schedules::claim_occurrence(&state.db, &job, at)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(run.scheduled_at, at);
+    assert_eq!(run.id, schedules::run_id(&trigger.id, at));
+    assert_eq!(run.deadline, at + Duration::seconds(600));
+    let dispatch = run.dispatch_at.unwrap();
+    if dispatch > at {
+        assert!(
+            schedules::claim(&state.db, &run.id, dispatch - Duration::milliseconds(1))
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+    assert!(
+        schedules::claim(&state.db, &run.id, dispatch + Duration::seconds(10))
+            .await
+            .unwrap()
+            .is_some()
+    );
+    let saved = state
+        .db
+        .collection::<TriggerRun>(RUNS)
+        .find_one(doc! {"_id": &run.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(saved.scheduled_at, at);
+    assert!(saved.missed.is_none());
+    server.abort();
+}
+
+#[tokio::test]
+async fn persisted_failure_streak_resets_on_success_transient_and_edit() {
+    let (state, _, server) = setup("persisted_failure_streak").await;
+    let agent = team::ensure_nyxbot(&state.db, OWNER).await.unwrap();
+    let mut trigger = automation(&state, &agent.id, None).await;
+    for (index, (code, count)) in [
+        (Some("credential_invalid"), 1),
+        (None, 0),
+        (Some("credential_invalid"), 1),
+        (Some("capacity_exceeded"), 0),
+        (Some("credential_invalid"), 1),
+        (Some("credential_invalid"), 2),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let at = Utc::now() + Duration::seconds(index as i64);
+        let mut run = schedules::new_run(&trigger, at, at + Duration::minutes(5));
+        run.outcome = RunOutcome::Started;
+        run.turn_id = Some(Uuid::new_v4().to_string());
+        run.trigger_generation = Some(trigger.updated_at);
+        state
+            .db
+            .collection::<TriggerRun>(RUNS)
+            .insert_one(&run)
+            .await
+            .unwrap();
+        for _ in 0..2 {
+            schedules::terminal_result(&state.db, &run, code, "https://example.com")
+                .await
+                .unwrap();
+        }
+        let saved = state
+            .db
+            .collection::<Trigger>(TRIGGERS)
+            .find_one(doc! {"_id": &trigger.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(saved.status, TriggerStatus::Active);
+        assert_eq!(saved.schedule_state.terminal_failure_count, count);
+    }
+    trigger = trigger_service::update(
+        &state.db,
+        &state.encryption_keys,
+        &trigger,
+        trigger_service::UpdateInput {
+            label: Some("Edited".into()),
+            status: None,
+            schedule: None,
+            overlap: None,
+            delivery: None,
+        },
+    )
+    .await
+    .unwrap()
+    .trigger;
+    assert_eq!(trigger.schedule_state.terminal_failure_count, 0);
+    for count in 1..=i64::from(engine_policy::PERSISTENT_FAILURE_PAUSE_THRESHOLD) {
+        let at = Utc::now() + Duration::minutes(count);
+        let mut run = schedules::new_run(&trigger, at, at + Duration::minutes(5));
+        run.outcome = RunOutcome::Started;
+        run.turn_id = Some(Uuid::new_v4().to_string());
+        run.trigger_generation = Some(trigger.updated_at);
+        state
+            .db
+            .collection::<TriggerRun>(RUNS)
+            .insert_one(&run)
+            .await
+            .unwrap();
+        schedules::terminal_result(
+            &state.db,
+            &run,
+            Some("credential_invalid"),
+            "https://example.com",
+        )
+        .await
+        .unwrap();
+        let saved = state
+            .db
+            .collection::<Trigger>(TRIGGERS)
+            .find_one(doc! {"_id": &trigger.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            i64::from(saved.schedule_state.terminal_failure_count),
+            count
+        );
+        assert_eq!(
+            saved.status,
+            if count == i64::from(engine_policy::PERSISTENT_FAILURE_PAUSE_THRESHOLD) {
+                TriggerStatus::Disabled
+            } else {
+                TriggerStatus::Active
+            }
+        );
+    }
+    assert_eq!(
+        state
+            .db
+            .collection::<Document>(schedules::WORK)
+            .count_documents(doc! {"kind":"pause_notice"})
+            .await
+            .unwrap(),
+        1
+    );
+    server.abort();
+}
+
+#[tokio::test]
+async fn scheduler_terminal_paths_reset_admitted_failure_streaks() {
+    let (state, calls, server) = setup("scheduler_terminal_streak").await;
+    let agent = team::ensure_nyxbot(&state.db, OWNER).await.unwrap();
+    let trigger = automation(&state, &agent.id, None).await;
+    for (reason, count) in [
+        ("credential_invalid", 1),
+        ("confirmation_expired", 0),
+        ("credential_invalid", 1),
+        ("credential_invalid", 2),
+        ("turn_lost", 0),
+        ("credential_invalid", 1),
+        ("thread_deleted", 0),
+    ] {
+        let mut run = schedules::enqueue_now(&state.db, &trigger).await.unwrap();
+        let thread = schedules::run_thread(&state.db, &state.encryption_keys, &run, &trigger)
+            .await
+            .unwrap();
+        let turn = Uuid::new_v4().to_string();
+        run.thread_id = Some(thread.id.clone());
+        run.agent_id = Some(agent.id.clone());
+        run.turn_id = Some(turn.clone());
+        run.started_at = Some(Utc::now());
+        run.trigger_generation = Some(trigger.updated_at);
+        run.outcome = if reason == "confirmation_expired" {
+            RunOutcome::Waiting
+        } else {
+            RunOutcome::Started
+        };
+        if reason == "confirmation_expired" {
+            run.waiting_for = vec![Uuid::new_v4().to_string()];
+        } else if reason == "thread_deleted" {
+            state
+                .db
+                .collection::<Document>(CONVERSATIONS)
+                .delete_one(doc! {"_id": &thread.id})
+                .await
+                .unwrap();
+        } else if reason != "turn_lost" {
+            let reply = state
+                .db
+                .collection::<AssistantConversation>(CONVERSATIONS)
+                .find_one_and_update(
+                    doc! {"_id": &thread.id},
+                    doc! {"$inc": {"message_count": 1}},
+                )
+                .return_document(mongodb::options::ReturnDocument::After)
+                .await
+                .unwrap()
+                .unwrap();
+            state.db.collection::<Document>(crate::models::assistant_message::COLLECTION_NAME).insert_one(doc! {
+                "_id": Uuid::new_v4().to_string(), "conversation_id": &thread.id, "user_id": OWNER,
+                "seq": reply.message_count, "turn_id": &turn, "role": "assistant", "text": "",
+                "status": "failed", "error_code": reason, "created_at": schedules::date(Utc::now()),
+            }).await.unwrap();
+        }
+        state
+            .db
+            .collection::<TriggerRun>(RUNS)
+            .replace_one(doc! {"_id": &run.id}, &run)
+            .await
+            .unwrap();
+        let job = schedules::claim(&state.db, &run.id, Utc::now())
+            .await
+            .unwrap()
+            .unwrap();
+        // Exercise the real scheduler recovery/confirmation-expiry branches.
+        run_job_once(&state, &job).await.unwrap();
+        schedules::finish(
+            &state.db,
+            &run.id,
+            RunOutcome::Failed,
+            Some(reason),
+            &state.config.frontend_url,
+        )
+        .await
+        .unwrap();
+        let saved_run = state
+            .db
+            .collection::<TriggerRun>(RUNS)
+            .find_one(doc! {"_id": &run.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(saved_run.outcome, RunOutcome::Failed, "{reason}");
+        assert_eq!(saved_run.reason.as_deref(), Some(reason));
+        assert!(saved_run.terminal_result_recorded);
+        let saved = state
+            .db
+            .collection::<Trigger>(TRIGGERS)
+            .find_one(doc! {"_id": &trigger.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(saved.status, TriggerStatus::Active, "{reason}");
+        assert_eq!(
+            saved.schedule_state.terminal_failure_count, count,
+            "{reason}"
+        );
+        assert_eq!(
+            saved.schedule_state.terminal_failure_code.as_deref(),
+            if count > 0 {
+                Some("credential_invalid")
+            } else {
+                None
+            }
+        );
+    }
+    assert!(calls.lock().await.is_empty());
+    server.abort();
+}
+
+#[tokio::test]
+async fn terminal_finalizer_reset_is_fenced_to_admitted_generation() {
+    let (state, _, server) = setup("terminal_generation_reset").await;
+    let agent = team::ensure_nyxbot(&state.db, OWNER).await.unwrap();
+    let trigger = automation(&state, &agent.id, None).await;
+    let mut old = schedules::enqueue_now(&state.db, &trigger).await.unwrap();
+    old.outcome = RunOutcome::Started;
+    old.turn_id = Some(Uuid::new_v4().to_string());
+    old.trigger_generation = Some(trigger.updated_at);
+    state
+        .db
+        .collection::<TriggerRun>(RUNS)
+        .replace_one(doc! {"_id": &old.id}, &old)
+        .await
+        .unwrap();
+    state.db.collection::<Document>(TRIGGERS).update_one(doc! {"_id": &trigger.id}, doc! {"$set": {
+        "updated_at": schedules::date(trigger.updated_at + Duration::seconds(1)),
+        "schedule_state.terminal_failure_code": "credential_invalid", "schedule_state.terminal_failure_count": 2,
+    }}).await.unwrap();
+    schedules::finish(
+        &state.db,
+        &old.id,
+        RunOutcome::Failed,
+        Some("turn_lost"),
+        &state.config.frontend_url,
+    )
+    .await
+    .unwrap();
+    let saved = state
+        .db
+        .collection::<Trigger>(TRIGGERS)
+        .find_one(doc! {"_id": &trigger.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(saved.schedule_state.terminal_failure_count, 2);
+    assert_eq!(saved.status, TriggerStatus::Active);
+    server.abort();
+}
+
+#[tokio::test]
+async fn terminal_finalizers_pause_once_with_configured_absolute_links() {
+    for claimed in [false, true] {
+        let (mut state, _, server) = setup("finalizer_pause_links").await;
+        state.config.frontend_url = "https://configured.example".into();
+        let agent = team::ensure_nyxbot(&state.db, OWNER).await.unwrap();
+        let trigger = automation(&state, &agent.id, None).await;
+        let mut run = schedules::enqueue_now(&state.db, &trigger).await.unwrap();
+        let thread = schedules::run_thread(&state.db, &state.encryption_keys, &run, &trigger)
+            .await
+            .unwrap();
+        run.thread_id = Some(thread.id.clone());
+        run.turn_id = Some(Uuid::new_v4().to_string());
+        run.trigger_generation = Some(trigger.updated_at);
+        run.outcome = if claimed {
+            RunOutcome::Waiting
+        } else {
+            RunOutcome::Started
+        };
+        state
+            .db
+            .collection::<TriggerRun>(RUNS)
+            .replace_one(doc! {"_id": &run.id}, &run)
+            .await
+            .unwrap();
+        let job = schedules::claim(&state.db, &run.id, Utc::now())
+            .await
+            .unwrap()
+            .unwrap();
+        for _ in 0..2 {
+            if claimed {
+                schedules::finish_claimed(
+                    &state.db,
+                    &job,
+                    &run.id,
+                    RunOutcome::Failed,
+                    Some("insufficient_credits"),
+                    &state.config.frontend_url,
+                )
+                .await
+                .unwrap();
+            } else {
+                schedules::finish(
+                    &state.db,
+                    &run.id,
+                    RunOutcome::Failed,
+                    Some("insufficient_credits"),
+                    &state.config.frontend_url,
+                )
+                .await
+                .unwrap();
+            }
+        }
+        let saved = state
+            .db
+            .collection::<Trigger>(TRIGGERS)
+            .find_one(doc! {"_id": &trigger.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(saved.status, TriggerStatus::Disabled);
+        assert_eq!(
+            saved.schedule_state.pause_reason.as_deref(),
+            Some("insufficient_credits")
+        );
+        assert_eq!(
+            state
+                .db
+                .collection::<Document>(schedules::WORK)
+                .count_documents(doc! {
+                    "kind": "pause_notice", "trigger_id": &trigger.id,
+                })
+                .await
+                .unwrap(),
+            1
+        );
+        let messages = state
+            .db
+            .collection::<Document>(crate::models::assistant_message::COLLECTION_NAME);
+        let filter = doc! {"conversation_id": &thread.id, "role": "event"};
+        assert_eq!(messages.count_documents(filter.clone()).await.unwrap(), 1);
+        let notice = messages.find_one(filter).await.unwrap().unwrap();
+        let text = notice.get_str("text").unwrap();
+        assert!(
+            text.contains("https://configured.example/assistant?panel=billing&panelTab=overview"),
+            "{text}"
+        );
+        assert!(
+            text.contains("https://configured.example/assistant/automations"),
+            "{text}"
+        );
+        server.abort();
+    }
 }

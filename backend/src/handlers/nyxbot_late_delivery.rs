@@ -270,7 +270,25 @@ async fn process_inner(state: &AppState, event_id: &str, gateway_only: bool) -> 
     let Some(message) = state.db.collection::<AssistantMessage>(MESSAGES).find_one(doc! {
         "user_id": &event.user_id, "conversation_id": conversation_id, "turn_id": turn_id, "role": "assistant",
     }).await? else { return Ok(()); };
-    let text = answer(&message.text, message.status != "completed");
+    let text = if let Some(code) = message.error_code.as_deref() {
+        let failure = if code == "capacity_exceeded" {
+            crate::services::assistant_turn_observability::capacity_message(
+                message
+                    .error_detail
+                    .as_ref()
+                    .and_then(|detail| detail.capacity_wait_ms),
+            )
+        } else {
+            engine::TurnError::new(code).message
+        };
+        if message.text.trim().is_empty() {
+            failure
+        } else {
+            format!("{}\n\n{}", message.text.trim(), failure)
+        }
+    } else {
+        answer(&message.text, message.status != "completed")
+    };
     // Preflight above can be slow: re-resolve authority immediately before the
     // irreversible barrier. Concurrent losers never reach a provider.
     let Some((channel, thread)) = eligible(state, &event, &d, &conversation).await? else {

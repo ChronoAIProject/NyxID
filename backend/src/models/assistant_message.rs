@@ -46,6 +46,8 @@ pub struct AssistantMessage {
     /// Metadata-only failure diagnostics; never contains prompt or credential data.
     #[serde(default)]
     pub error_detail: Option<AssistantErrorDetail>,
+    #[serde(default)]
+    pub turn_metadata: Option<TurnMetadata>,
     /// Specialist identity for bounded access-denial notices.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub specialist_id: Option<String>,
@@ -86,6 +88,10 @@ pub struct AssistantMessage {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct AssistantErrorDetail {
+    #[serde(default)]
+    pub attempts: Option<u32>,
+    #[serde(default)]
+    pub capacity_wait_ms: Option<u64>,
     pub stage: String,
     pub http_status: Option<u16>,
     pub upstream_request_id: Option<String>,
@@ -133,4 +139,10 @@ pub struct Steering {
     pub outcome: String,
     pub code: Option<String>,
     pub http_status: u16,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct TurnMetadata {
+    pub attempts: Option<u32>,
+    pub capacity_wait_ms: Option<u64>,
 }

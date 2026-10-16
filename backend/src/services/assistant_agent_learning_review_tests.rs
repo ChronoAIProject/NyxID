@@ -1489,6 +1489,7 @@ async fn seed_learned_proposal(name: &str) -> SeededLearned {
                 status: "completed".into(),
                 error_code: None,
                 upstream_error_code: None,
+                turn_metadata: None,
                 error_detail: None,
                 created_at: now + chrono::Duration::seconds(seq),
                 activities: Vec::new(),

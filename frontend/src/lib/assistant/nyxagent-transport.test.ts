@@ -18,7 +18,8 @@ const reset = "2026-09-17T00:00:01Z";
 const afterReset = "2026-09-17T00:00:02Z";
 
 it.each([
-  ["turn_lost", "interrupted"], ["assistant_unavailable", "temporarily unavailable"],
+  ["turn_lost", "interrupted"], ["assistant_unavailable", "could not complete"],
+  ["internal_error", "NyxBot hit an internal error on this turn. Check which actions completed before retrying."],
   ["first_byte_timeout", "did not start"], ["invalid_stream", "ended unexpectedly"],
   ["output_too_large", "response limit"], ["nyxid_error", "authorize"],
   ["stale_response", "context changed"], ["context_unavailable", "could not be restored"],
@@ -1852,4 +1853,175 @@ it("persists decision continuation provenance through the request, optimistic tu
   release(); await sending;
   expect(transport.session(id).messages.find((row) => row.id === "u")?.continuation_of).toBe(card);
   expect(transport.session(id).expectedTurnCount).toBe(1);
+});
+
+
+it.each([
+  ["wallet_suspended", "Contact support"],
+  ["plan_entitlement_required", "Check your plan"],
+  ["model_interrupted", "Some actions may already have completed"],
+  ["model_unavailable", "Choose another model"],
+])("provides specific remedy copy for %s", (code, copy) => expect(storedError(code)).toContain(copy));
+
+it("carries upstream code from history to the diagnostic view", async () => {
+  const page = history();
+  page.messages[1] = { ...page.messages[1]!, status: "failed", error_code: "model_interrupted",
+    upstream_error_code: "turn_failed", error_detail: { stage: "stream", http_status: null, upstream_request_id: null, response_id: null, continuations: 0, turn_id: "turn", occurred_at: start } };
+  globalThis.__nyxidAssistantHttpMock = () => json(page);
+  const transport = new NyxAgentTransport();
+  await transport.history(id);
+  expect(transport.session(id).messages[1]?.errorDetail?.upstreamCode).toBe("turn_failed");
+});
+
+it("exposes live upstream diagnostics and capacity status before history refresh", async () => {
+  const page = history();
+  page.messages[1] = { ...page.messages[1]!, turn_metadata: { attempts: 1, capacity_wait_ms: 0 } };
+  const transport = new NyxAgentTransport();
+  globalThis.__nyxidAssistantHttpMock = ({ endpoint }) => endpoint.endsWith("/turns")
+    ? chunked(sseBytes(
+        runningStatus,
+        { event: "message.started", message_id: "live-reply", role: "assistant" },
+        { ...runningStatus, status: "waiting", waiting_for_capacity: true, capacity_wait_note_origin: "nyxid_system", engine_request_started_at: start },
+        { ...runningStatus, status: "running", waiting_for_capacity: false, engine_accepted: true },
+        { event: "turn.completed", turn_id: "turn", status: "failed", error: {
+          attempts: 7, capacity_wait_ms: 80_000, code: "model_interrupted", message: "fixed server copy", upstream_error_code: "turn_failed", stage: "stream", http_status: 200,
+        } },
+      ))
+    : json(page);
+  await transport.history(id);
+  const views: import("@/lib/assistant/chat-types").ChatMessage[] = [];
+  const unsubscribe = transport.subscribe(() => {
+    const messages = transport.session(id).messages;
+    const previous = messages.find((message) => message.id === page.messages[1]!.id);
+    if (previous) expect(previous.turnMetadata?.attempts).toBe(1);
+    const tail = messages.at(-1);
+    if (tail) views.push(tail);
+  });
+  await transport.send(id, "hello", vi.fn());
+  unsubscribe();
+  expect(views.some((view) => view.waitingForCapacity && view.systemNote === "capacity_wait")).toBe(true);
+  expect(views.some((view) => view.status === "streaming" && !view.systemNote)).toBe(true);
+  expect(views.some((view) => view.errorDetail?.upstreamCode === "turn_failed" && view.errorDetail.attempts === 7 && view.errorDetail.capacityWaitMs === 80_000 && view.status === "error")).toBe(true);
+});
+
+it("restores capacity timestamps and attempt diagnostics from persisted history", async () => {
+  const page = history();
+  page.conversation.active_turn = { turn_id: "waiting", started_at: start, activities: [], attachments: [], waiting_for_capacity: true,
+    capacity_wait_note_origin: "nyxid_system", engine_request_started_at: start, capacity_wait_started_at: start, capacity_wait_deadline: "2026-09-17T00:02:00Z" };
+  page.messages = [page.messages[0]!];
+  globalThis.__nyxidAssistantHttpMock = () => json(page);
+  const transport = new NyxAgentTransport();
+  await transport.history(id);
+  expect(transport.session(id).messages.at(-1)).toMatchObject({ waitingForCapacity: true, systemNote: "capacity_wait", content: "",
+    capacityWaitStartedAt: start, capacityWaitDeadline: "2026-09-17T00:02:00Z" });
+  page.conversation.active_turn = null;
+  page.messages.push({ ...history().messages[1]!, turn_metadata: { attempts: 7, capacity_wait_ms: 80_000 } });
+  await transport.history(id);
+  expect(transport.session(id).messages.at(-1)?.turnMetadata).toEqual({ attempts: 7, capacityWaitMs: 80_000 });
+  expect(storedError("capacity_exceeded", 120_000)).toContain("waited 2 minutes");
+  expect(storedError("capacity_exceeded", 119_999)).toContain("waited 2 minutes");
+  expect(storedError("capacity_exceeded", 120_001)).toContain("waited 2 minutes 1 second");
+});
+
+it("shows only the server-authorized pending note during an unanswered admission and removes it after Stop", async () => {
+  const page = history();
+  page.messages = [page.messages[0]!];
+  page.conversation.active_turn = { turn_id: "slow", started_at: start, activities: [], attachments: [],
+    waiting_for_capacity: false, engine_request_started_at: start, capacity_wait_deadline: "2026-09-17T00:01:49Z" };
+  globalThis.__nyxidAssistantHttpMock = () => json(page);
+  const transport = new NyxAgentTransport();
+  await transport.history(id);
+  expect(transport.session(id).messages.at(-1)?.systemNote).toBeUndefined();
+  page.conversation.active_turn.capacity_wait_note_origin = "nyxid_system";
+  await transport.history(id);
+  expect(transport.session(id).messages.at(-1)).toMatchObject({ systemNote: "capacity_wait", content: "", capacityWaitStartedAt: start, capacityWaitDeadline: "2026-09-17T00:01:49Z" });
+  await transport.stop(id);
+  page.conversation.active_turn = null;
+  page.messages.push({ ...history().messages[1]!, text: "", status: "failed", error_code: "cancelled" });
+  await transport.history(id);
+  expect(transport.session(id).messages.every((message) => !message.systemNote)).toBe(true);
+});
+
+it("never restores the pending acknowledgement from a poll that arrives after live acceptance", async () => {
+  const stale = history();
+  stale.messages = [stale.messages[0]!];
+  stale.conversation.active_turn = { turn_id: "turn", started_at: start, activities: [], attachments: [], waiting_for_capacity: true,
+    engine_request_started_at: start, capacity_wait_note_origin: "nyxid_system", capacity_wait_deadline: "2026-09-17T00:02:00Z" };
+  let controller!: ReadableStreamDefaultController<Uint8Array>;
+  let resolvePoll!: (response: Response) => void;
+  let deferPoll = false;
+  globalThis.__nyxidAssistantHttpMock = ({ endpoint }) => endpoint.endsWith("/turns")
+    ? new Response(new ReadableStream({ start(value) { controller = value; } }), { headers: { "content-type": "text/event-stream" } })
+    : deferPoll ? new Promise<Response>((resolve) => { resolvePoll = resolve; }) : json(history());
+  const transport = new NyxAgentTransport();
+  await transport.history(id);
+  const sending = transport.send(id, "hello", vi.fn());
+  await vi.waitFor(() => expect(controller).toBeDefined());
+  const emit = (event: Record<string, unknown>, cursor: number) => controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ ...event, cursor })}\n\n`));
+  emit(runningStatus, 1);
+  emit({ event: "message.started", message_id: "live-reply", role: "assistant" }, 2);
+  emit({ ...runningStatus, status: "waiting", waiting_for_capacity: true, capacity_wait_note_origin: "nyxid_system", engine_request_started_at: start }, 3);
+  await vi.waitFor(() => expect(transport.session(id).messages.at(-1)?.systemNote).toBe("capacity_wait"));
+  deferPoll = true;
+  const polling = transport.history(id);
+  await vi.waitFor(() => expect(resolvePoll).toBeDefined());
+  emit({ ...runningStatus, status: "running", waiting_for_capacity: false, engine_accepted: true }, 4);
+  await vi.waitFor(() => expect(transport.session(id).messages.at(-1)?.systemNote).toBeUndefined());
+  resolvePoll(json(stale));
+  await polling;
+  expect(transport.session(id).messages.at(-1)?.systemNote).toBeUndefined();
+  expect(transport.getHistory(id)?.conversation.active_turn?.waiting_for_capacity).toBe(false);
+  deferPoll = false;
+  emit({ event: "turn.completed", turn_id: "turn", status: "completed", error: null }, 5);
+  controller.close();
+  await sending;
+});
+
+
+it("describes a busy session separately from platform capacity", () => {
+  expect(storedError("session_busy", 120_000)).toBe("The assistant session is busy. Try again shortly.");
+  expect(storedError("capacity_exceeded", 120_000)).toContain("at capacity right now (waited 2 minutes)");
+});
+
+it("starts new turn status without the previous turn's activity or wait clock", async () => {
+  let controller!: ReadableStreamDefaultController<Uint8Array>;
+  let page = history();
+  globalThis.__nyxidAssistantHttpMock = ({ endpoint }) => endpoint.endsWith("/turns")
+    ? new Response(new ReadableStream({ start(value) { controller = value; } }), { headers: { "content-type": "text/event-stream" } })
+    : json(page);
+  const transport = new NyxAgentTransport();
+  await transport.history(id);
+  const sending = transport.send(id, "hello", vi.fn());
+  await vi.waitFor(() => expect(controller).toBeDefined());
+  const emit = (event: Record<string, unknown>, cursor: number) => controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ ...event, cursor })}\n\n`));
+  emit(runningStatus, 1);
+  emit({ event: "message.started", message_id: "live-reply", role: "assistant" }, 2);
+  await vi.waitFor(() => expect(transport.getConversation(id)?.active_turn?.turn_id).toBe("turn"));
+  const prior = {
+    turn_id: "turn", started_at: start,
+    activities: [{ id: "old-tool", label: "github__read", status: "completed" as const, started_at: start, ended_at: null }],
+    attachments: [{ id: "old-image", content_type: "image/png" as const, size: 10, label: "old" }],
+    waiting_for_capacity: true, capacity_wait_note_origin: "nyxid_system", engine_request_started_at: start,
+    capacity_wait_started_at: start, capacity_wait_deadline: afterReset,
+  };
+  page = { ...page, conversation: { ...page.conversation, active_turn: prior } };
+  await transport.history(id);
+  emit({ ...runningStatus, status: "waiting", waiting_for_capacity: true }, 3);
+  await vi.waitFor(() => expect(transport.getConversation(id)?.active_turn?.capacity_wait_note_origin).toBe("nyxid_system"));
+  expect(transport.getConversation(id)?.active_turn).toMatchObject(prior);
+  emit({ ...runningStatus, turn_id: "next-turn", status: "waiting", waiting_for_capacity: true }, 4);
+  await vi.waitFor(() => expect(transport.getConversation(id)?.active_turn?.turn_id).toBe("next-turn"));
+  const next = transport.getConversation(id)?.active_turn;
+  expect(next?.activities).toEqual([]);
+  expect(next?.attachments).toEqual([]);
+  expect(next?.started_at).not.toBe(start);
+  expect(next?.engine_request_started_at).toBeUndefined();
+  expect(next?.capacity_wait_started_at).toBeUndefined();
+  expect(next?.capacity_wait_deadline).toBeUndefined();
+  expect(next?.capacity_wait_note_origin).toBeUndefined();
+  expect(transport.session(id).messages.at(-1)?.toolCalls).toBeUndefined();
+  emit({ event: "turn.completed", turn_id: "next-turn", status: "completed", error: null }, 5);
+  page = history();
+  controller.close();
+  await sending;
 });

@@ -76,6 +76,7 @@ pub struct BoundedEventDecoder {
     previous_cr: bool,
     line_has_content: bool,
     discarding: bool,
+    max_bytes: Option<usize>,
 }
 
 #[derive(Debug)]
@@ -85,6 +86,13 @@ pub enum EventDecodeError {
 }
 
 impl BoundedEventDecoder {
+    pub fn with_max_bytes(max_bytes: usize) -> Self {
+        Self {
+            max_bytes: Some(max_bytes),
+            ..Self::default()
+        }
+    }
+
     pub fn has_incomplete_event(&self) -> bool {
         self.discarding || self.buffer.iter().any(|byte| !byte.is_ascii_whitespace())
     }
@@ -119,7 +127,7 @@ impl BoundedEventDecoder {
                 self.buffer.push(byte);
             }
         }
-        if self.buffer.len() >= 512 * 1024 {
+        if self.buffer.len() >= self.max_bytes.unwrap_or(512 * 1024) {
             self.buffer.clear();
             self.discarding = true;
             return Some(Err(EventDecodeError::TooLarge));
@@ -414,5 +422,51 @@ mod tests {
         let debug = format!("{:?}", event);
         assert!(debug.contains("test"));
         assert!(debug.contains("payload"));
+    }
+
+    #[test]
+    fn bounded_decoder_normalizes_all_line_endings_and_preserves_usage_data() {
+        for ending in ["\n", "\r\n", "\r"] {
+            let frame = format!(
+                "event: response.completed{ending}data: {{\"usage\":{{\"input_tokens\":7,\"output_tokens\":3}}}}{ending}{ending}"
+            );
+            let mut decoder = BoundedEventDecoder::default();
+            let events: Vec<_> = frame
+                .bytes()
+                .filter_map(|byte| decoder.push_byte(byte))
+                .collect();
+            assert_eq!(events.len(), 1);
+            let event = events.into_iter().next().unwrap().unwrap();
+            assert_eq!(event.event_type.as_deref(), Some("response.completed"));
+            let value: serde_json::Value = serde_json::from_str(&event.data).unwrap();
+            assert_eq!(value["usage"]["input_tokens"], 7);
+            assert_eq!(value["usage"]["output_tokens"], 3);
+            assert!(!decoder.has_incomplete_event());
+        }
+    }
+
+    #[test]
+    fn bounded_decoder_discards_oversize_and_invalid_utf8_then_resynchronizes() {
+        let limit =
+            crate::services::assistant_engine_policy::MODEL_STREAM_OBSERVER_MAX_BUFFER_BYTES;
+        let mut decoder = BoundedEventDecoder::with_max_bytes(limit);
+        let oversized = format!("data: {}\r\n\r\ndata: [DONE]\r\n\r\n", "x".repeat(limit));
+        let mut events = oversized.bytes().filter_map(|byte| decoder.push_byte(byte));
+        assert!(matches!(
+            events.next(),
+            Some(Err(EventDecodeError::TooLarge))
+        ));
+        assert_eq!(events.next().unwrap().unwrap().data, "[DONE]");
+        assert!(events.next().is_none());
+        let mut events = b"data: \xff\r\rdata: ok\r\r"
+            .iter()
+            .filter_map(|&byte| decoder.push_byte(byte));
+        assert!(matches!(
+            events.next(),
+            Some(Err(EventDecodeError::InvalidUtf8))
+        ));
+        assert_eq!(events.next().unwrap().unwrap().data, "ok");
+        assert!(events.next().is_none());
+        assert!(!decoder.has_incomplete_event());
     }
 }

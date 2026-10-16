@@ -82,6 +82,10 @@ pub enum DeliverTo {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ScheduleState {
     #[serde(default)]
+    pub terminal_failure_code: Option<String>,
+    #[serde(default)]
+    pub terminal_failure_count: u32,
+    #[serde(default)]
     pub last_run: Option<super::trigger_run::TriggerRun>,
     #[serde(default, with = "crate::models::bson_datetime::optional")]
     pub next_due_at: Option<DateTime<Utc>>,
