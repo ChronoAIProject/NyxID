@@ -184,6 +184,14 @@ file/document IDs or tokens, not multi-segment path parameters.
 
 The spec is fetched through a hardened path with DNS pinning, 5MB response size limit, redirect policy, and 60-second caching. Specs may be JSON or YAML: JSON is parsed first and behaves as before; any other body is read as a single YAML 1.2 document (`yes`/`no` stay strings, integer response codes become string keys, anchors, aliases and `<<` merge keys expand) and must be a mapping with an `openapi`, `swagger`, or `asyncapi` field, so text or HTML pages are never taken for a spec. Expanded YAML is bounded separately from the response size (1,000,000 nodes, 10 MiB of text, 64 levels of nesting), which rejects alias bombs. At most four YAML documents are parsed at once per server; a request that waits more than 10 seconds for a slot is answered with 429, while JSON specs never wait. Failures report `Spec was not valid JSON or YAML: <reason>`. The manual `POST /services/{id}/discover-endpoints` route uses the same parser.
 
+Manually registered endpoint names are case-sensitive and accept
+`^[a-z][a-zA-Z0-9_]*$`, with a maximum of 100 ASCII characters. NyxID preserves
+the supplied name when listing and resolving MCP tools. For example, a manual
+`readEventContext` endpoint under service slug `cmaeg` is exposed as
+`cmaeg__readEventContext`; its lowercase spelling is a different tool name.
+OpenAPI endpoint discovery keeps its existing name normalization. Services with
+protocol-defined mixed-case tool names should register those endpoints manually.
+
 ### Rich catalog metadata
 
 Catalog entries can include metadata to help AI agents understand what a service is and how it works:
