@@ -26,7 +26,7 @@ mod admission;
 mod async_watch;
 pub(crate) use async_watch::{AsyncContinuation, async_contract_binding};
 mod egress;
-pub(crate) use egress::HttpEgressGuard;
+pub(crate) use egress::{HttpEgressGuard, OwnedHttpEgressGuard};
 mod node_routes;
 mod pools;
 pub use admission::Admission;

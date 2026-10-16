@@ -48,11 +48,27 @@ pub enum BillingRoutePolicy {
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct BillingEgressPermit {
-    _private: (),
+    managed: Option<super::super::telnyx_platform_service::ManagedEgressProof>,
+}
+
+impl BillingEgressPermit {
+    pub(crate) fn managed_proof(
+        &self,
+    ) -> Option<&super::super::telnyx_platform_service::ManagedEgressProof> {
+        self.managed.as_ref()
+    }
+}
+
+pub(crate) fn managed_execution_permit(
+    proof: super::super::telnyx_platform_service::ManagedEgressProof,
+) -> BillingEgressPermit {
+    BillingEgressPermit {
+        managed: Some(proof),
+    }
 }
 
 pub(crate) fn internal_node_dispatch_permit() -> BillingEgressPermit {
-    BillingEgressPermit { _private: () }
+    BillingEgressPermit { managed: None }
 }
 
 pub(crate) fn enforce_billing_egress_classification(
@@ -61,7 +77,7 @@ pub(crate) fn enforce_billing_egress_classification(
 ) -> crate::errors::AppResult<BillingEgressPermit> {
     match policy {
         Some(BillingRoutePolicy::Metered(actual)) if actual == expected => {
-            Ok(BillingEgressPermit { _private: () })
+            Ok(BillingEgressPermit { managed: None })
         }
         Some(BillingRoutePolicy::Metered(actual)) => {
             Err(crate::errors::AppError::Internal(format!(
@@ -83,7 +99,7 @@ pub(crate) fn enforce_billing_exempt_egress_classification(
     policy: Option<BillingRoutePolicy>,
 ) -> crate::errors::AppResult<BillingEgressPermit> {
     match policy {
-        Some(BillingRoutePolicy::Exempt(_)) => Ok(BillingEgressPermit { _private: () }),
+        Some(BillingRoutePolicy::Exempt(_)) => Ok(BillingEgressPermit { managed: None }),
         Some(BillingRoutePolicy::Metered(actual)) => {
             Err(crate::errors::AppError::Internal(format!(
                 "metered billing route {} attempted exempt downstream forwarding",

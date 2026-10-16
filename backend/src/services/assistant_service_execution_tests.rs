@@ -17,6 +17,8 @@ mod compatibility;
 mod egress;
 #[path = "assistant_service_execution_journey_tests.rs"]
 mod journeys;
+#[path = "assistant_service_execution_managed_tests.rs"]
+mod managed;
 #[path = "assistant_service_execution_native_tests.rs"]
 mod native;
 #[path = "assistant_service_execution_receipt_tests.rs"]

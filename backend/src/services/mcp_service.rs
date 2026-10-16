@@ -4322,7 +4322,7 @@ fn json_body_uses_wrapper(endpoint: &McpToolEndpoint) -> bool {
 pub async fn execute_tool(
     http_client: &reqwest::Client,
     db: &mongodb::Database,
-    encryption_keys: &EncryptionKeys,
+    encryption_keys: &std::sync::Arc<EncryptionKeys>,
     node_ws_manager: &std::sync::Arc<NodeWsManager>,
     billing: &std::sync::Arc<crate::services::billing::BillingService>,
     user_id: &str,
@@ -4672,7 +4672,7 @@ fn resolve_tool_target(
 pub fn execute_tool_response<'a>(
     http_client: &'a reqwest::Client,
     db: &'a mongodb::Database,
-    encryption_keys: &'a EncryptionKeys,
+    encryption_keys: &'a std::sync::Arc<EncryptionKeys>,
     node_ws_manager: &'a std::sync::Arc<NodeWsManager>,
     billing: &'a std::sync::Arc<crate::services::billing::BillingService>,
     user_id: &'a str,
@@ -4936,7 +4936,7 @@ async fn collect_node_stream_response(
 pub fn execute_tool_resolved<'a>(
     http_client: &'a reqwest::Client,
     db: &'a mongodb::Database,
-    encryption_keys: &'a EncryptionKeys,
+    encryption_keys: &'a std::sync::Arc<EncryptionKeys>,
     node_ws_manager: &'a std::sync::Arc<NodeWsManager>,
     billing: &'a std::sync::Arc<crate::services::billing::BillingService>,
     user_id: &'a str,
@@ -4958,6 +4958,7 @@ pub fn execute_tool_resolved<'a>(
     catalog_service_slug: Option<&'a str>,
 ) -> futures::future::BoxFuture<'a, AppResult<McpToolExecutionOutcome>> {
     Box::pin(async move {
+        let managed = super::telnyx_platform_service::contract(&target.service).is_some();
         let lease = super::service_concurrency_service::acquire(
             db,
             &target.service,
@@ -4987,7 +4988,13 @@ pub fn execute_tool_resolved<'a>(
             has_server_credential,
             billing_context_builder,
             catalog_service_slug,
+            lease.clone(),
         );
+        // Preserve uncertain outcomes so approval redemption cannot replay
+        // a dispatched call after capacity-lease loss.
+        if managed {
+            return execution.await;
+        }
         match lease {
             Some(lease) => {
                 let mut outcome = lease.run(execution).await?;
@@ -5005,7 +5012,7 @@ pub fn execute_tool_resolved<'a>(
 fn execute_tool_resolved_boxed<'a>(
     http_client: &'a reqwest::Client,
     db: &'a mongodb::Database,
-    encryption_keys: &'a EncryptionKeys,
+    encryption_keys: &'a std::sync::Arc<EncryptionKeys>,
     node_ws_manager: &'a std::sync::Arc<NodeWsManager>,
     billing: &'a std::sync::Arc<crate::services::billing::BillingService>,
     user_id: &'a str,
@@ -5025,6 +5032,7 @@ fn execute_tool_resolved_boxed<'a>(
     has_server_credential: bool,
     billing_context_builder: McpBillingRouteContextBuilder,
     catalog_service_slug: Option<&'a str>,
+    service_lease: Option<super::service_concurrency_service::Lease>,
 ) -> futures::future::BoxFuture<'a, AppResult<McpToolExecutionOutcome>> {
     Box::pin(execute_tool_resolved_inner(
         http_client,
@@ -5049,6 +5057,7 @@ fn execute_tool_resolved_boxed<'a>(
         has_server_credential,
         billing_context_builder,
         catalog_service_slug,
+        service_lease,
     ))
 }
 
@@ -5056,7 +5065,7 @@ fn execute_tool_resolved_boxed<'a>(
 async fn execute_tool_resolved_inner(
     http_client: &reqwest::Client,
     db: &mongodb::Database,
-    encryption_keys: &EncryptionKeys,
+    encryption_keys: &std::sync::Arc<EncryptionKeys>,
     node_ws_manager: &std::sync::Arc<NodeWsManager>,
     billing: &std::sync::Arc<crate::services::billing::BillingService>,
     user_id: &str,
@@ -5076,6 +5085,7 @@ async fn execute_tool_resolved_inner(
     has_server_credential: bool,
     billing_context_builder: McpBillingRouteContextBuilder,
     catalog_service_slug: Option<&str>,
+    service_lease: Option<super::service_concurrency_service::Lease>,
 ) -> AppResult<McpToolExecutionOutcome> {
     super::org_agent_service::authorize_service_with_access(
         db,
@@ -5466,6 +5476,64 @@ async fn execute_tool_resolved_inner(
         &billing_ctx.billing_request_id,
         billing_ctx.credential_class,
     );
+    if super::telnyx_platform_service::contract(&target.service).is_some() {
+        if node_route.is_some() || !delegated.is_empty() || !server_owned_headers.is_empty() {
+            return Err(AppError::BadRequest(
+                "This Telnyx platform operation requires direct managed execution".into(),
+            ));
+        }
+        let managed_guard = super::assistant_service_execution::OwnedHttpEgressGuard::for_managed(
+            assistant_admission.as_ref(),
+            None,
+            db,
+            encryption_keys.clone(),
+            &target,
+            (method.as_str(), &path),
+            (&billing_ctx, &resource_owner_id, assistant_chat.as_ref()),
+        );
+        destination_audit.dispatch();
+        let managed = match super::telnyx_platform_service::execute(
+            db,
+            billing.clone(),
+            billing_ctx,
+            target,
+            method.as_str(),
+            &path,
+            query.as_deref(),
+            body.as_deref().unwrap_or_default(),
+            service_lease,
+            managed_guard,
+        )
+        .await
+        {
+            Ok(response) => response,
+            Err(super::telnyx_platform_service::ManagedExecutionError::OutcomeUnknown(error)) => {
+                return Ok(McpToolExecutionOutcome::ProviderOutcomeUnknown(error));
+            }
+            Err(super::telnyx_platform_service::ManagedExecutionError::Rejected(error)) => {
+                request_audit.admission_error(&error);
+                return Err(error);
+            }
+        };
+        destination_audit.complete(managed.status);
+        request_audit.response(managed.status);
+        if let (Some(chat), Some(admission)) =
+            (assistant_chat.as_ref(), assistant_admission.as_ref())
+        {
+            if let Some(receipt) = &automatic_receipt {
+                receipt.record(db, chat).await;
+            } else {
+                admission.receipt(db, chat, assistant_auto).await;
+            }
+        }
+        return Ok(McpToolExecutionOutcome::Response(ToolResponse {
+            concurrency: None,
+            status: managed.status,
+            text: String::from_utf8(managed.body.to_vec())
+                .map_err(|_| AppError::Internal("Invalid managed response encoding".into()))?,
+            media: None,
+        }));
+    }
     let metered = billing
         .open(&billing_ctx)
         .await

@@ -1033,6 +1033,7 @@ mod tests {
             .expect("create transaction id index");
 
         let billing = ServiceBilling {
+            managed_execution: None,
             platform_billable: true,
             platform_charge_nyxid_credentials_only: false,
             platform_metric: None,
@@ -1346,6 +1347,7 @@ mod tests {
         };
         create_usage_transaction_index(&db).await;
         let billing = ServiceBilling {
+            managed_execution: None,
             platform_billable: true,
             platform_charge_nyxid_credentials_only: false,
             platform_metric: None,

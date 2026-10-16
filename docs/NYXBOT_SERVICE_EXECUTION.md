@@ -138,6 +138,14 @@ service approval receipt takes precedence when both gates allow an action
 automatically. HTTP streams must finish cleanly; HEAD and bodyless successful
 responses complete without polling a body.
 
+Managed Telnyx HTTP and MCP calls retain the same final authority check inside
+the worker that owns their funded execution. A proven refusal before the provider
+send releases that execution's reservation and produces no success receipt.
+After dispatch, Stop or caller disconnect does not cancel settlement or turn an
+uncertain outcome into a retryable operation. See
+[Telnyx platform billing](TELNYX_PLATFORM_BILLING.md) for its funding and recovery
+contract.
+
 `assistant_service_execution` is private server state with absolute TTL and an
 owner/conversation/key/turn/kind index. Input admissions, selections, model grants,
 attempt markers, job plans, card bindings and outage buckets expire within their

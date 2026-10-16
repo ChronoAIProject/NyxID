@@ -277,8 +277,8 @@ async fn real_gateway_connect_failure_records_evidence_and_selects_next_preferen
 }
 
 struct CallbackEgress {
-    state: crate::AppState,
-    owner: String,
+    callback_url: String,
+    client: reqwest::Client,
     tool: String,
 }
 #[async_trait::async_trait]
@@ -292,53 +292,51 @@ impl contract::NyxAgentEgress for CallbackEgress {
         if request.method != "POST" {
             return Ok(Response::new(Body::from("{}")));
         }
-        let first = Box::pin(model(
-            &self.state,
-            &self.owner,
-            &key.api_key_id,
-            generation("model round one"),
-        ))
-        .await
-        .expect("initial or resumed model callback must resolve successfully");
-        if !first.status().is_success() {
-            let status = first.status();
-            let body = to_bytes(first.into_body(), 8192).await.unwrap();
+        let first = self
+            .client
+            .post(format!(
+                "{}/api/v1/llm/openai/v1/chat/completions",
+                self.callback_url
+            ))
+            .header("x-api-key", key.raw_key.as_str())
+            .json(&generation("model round one"))
+            .send()
+            .await
+            .expect("initial or resumed model callback must resolve successfully");
+        let status = first.status();
+        let body = first.bytes().await.unwrap();
+        assert!(body.len() <= if status.is_success() { 4096 } else { 8192 });
+        if !status.is_success() {
             let refusal: Value = serde_json::from_slice(&body).unwrap();
             assert_eq!(status, StatusCode::CONFLICT, "{refusal}");
             assert_eq!(refusal["error"], "acknowledgement_required", "{refusal}");
             return Err(AppError::Internal("provider callback refused".into()));
         }
-        to_bytes(first.into_body(), 4096).await.unwrap();
-        let mut tool = Request::builder()
-            .uri(format!("/api/v1/proxy/s/{}/read", self.tool))
-            .body(Body::empty())
-            .unwrap();
-        tool.extensions_mut().insert(
-            crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
-                crate::services::billing::BillingIngress::Proxy,
-            ),
-        );
-        let result = Box::pin(crate::handlers::proxy::proxy_request_by_slug(
-            State(self.state.clone()),
-            auth(&self.state, &self.owner, &key.api_key_id).await,
-            Default::default(),
-            Path((self.tool.clone(), "read".into())),
-            tool,
-        ))
-        .await
-        .expect("tool callback after admitted model use must succeed");
+        let result = self
+            .client
+            .get(format!(
+                "{}/api/v1/proxy/s/{}/read",
+                self.callback_url, self.tool
+            ))
+            .header("x-api-key", key.raw_key.as_str())
+            .send()
+            .await
+            .expect("tool callback after admitted model use must succeed");
         assert_eq!(result.status(), StatusCode::OK);
-        to_bytes(result.into_body(), 4096).await.unwrap();
-        let next = Box::pin(model(
-            &self.state,
-            &self.owner,
-            &key.api_key_id,
-            generation("tool result and next model round"),
-        ))
-        .await
-        .expect("subsequent model round must retain its bounded turn consent");
+        assert!(result.bytes().await.unwrap().len() <= 4096);
+        let next = self
+            .client
+            .post(format!(
+                "{}/api/v1/llm/openai/v1/chat/completions",
+                self.callback_url
+            ))
+            .header("x-api-key", key.raw_key.as_str())
+            .json(&generation("tool result and next model round"))
+            .send()
+            .await
+            .expect("subsequent model round must retain its bounded turn consent");
         assert_eq!(next.status(), StatusCode::OK);
-        to_bytes(next.into_body(), 4096).await.unwrap();
+        assert!(next.bytes().await.unwrap().len() <= 4096);
         let terminal = json!({"type":"response.completed","sequence_number":1,"response":{
             "id":"resp_1234567890abcdef1234567890abcdef_1234567890abcdef1234567890abcdef",
             "conversation":{"id":"conv_1234567890abcdef1234567890abcdef"},"status":"completed",
@@ -400,9 +398,20 @@ async fn actual_bootstrap_card_allow_resumes_model_tool_model_and_new_turn_asks_
     endpoint(&f, &id, &server.uri()).await;
     let _tool_id = connected(&f.state.db, &f.owner, "tool", &server.uri()).await;
     let tool = "tool".to_owned();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let callback_url = format!("http://{}", listener.local_addr().unwrap());
+    let (_, router) = crate::routes::build_router();
+    let router = router.with_state(f.state.clone());
+    let _callback_server = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    }));
     let egress = CallbackEgress {
-        state: f.state.clone(),
-        owner: f.owner.clone(),
+        callback_url,
+        client: reqwest::Client::builder()
+            .no_proxy()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+            .unwrap(),
         tool,
     };
     let initial = execute(&f, &f.row, &egress).await.unwrap();
@@ -572,7 +581,8 @@ async fn gateway_legacy_personal_connection_precedes_org_without_an_org_card() {
 
 struct InterruptedCallback {
     state: crate::AppState,
-    owner: String,
+    callback_url: String,
+    client: reqwest::Client,
     stop: bool,
     cancelled_stream: bool,
 }
@@ -587,13 +597,23 @@ impl contract::NyxAgentEgress for InterruptedCallback {
         if request.method != "POST" {
             return Ok(Response::new(Body::from("{}")));
         }
-        let _ = Box::pin(model(
-            &self.state,
-            &self.owner,
-            &key.api_key_id,
-            generation("bootstrap"),
-        ))
-        .await;
+        let callback = self
+            .client
+            .post(format!(
+                "{}/api/v1/llm/openai/v1/chat/completions",
+                self.callback_url
+            ))
+            .header("x-api-key", key.raw_key.as_str())
+            .json(&generation("bootstrap"))
+            .send()
+            .await
+            .expect("bootstrap callback must return its policy refusal");
+        let status = callback.status();
+        let body = callback.bytes().await.unwrap();
+        assert!(body.len() <= 8192);
+        let refusal: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(status, StatusCode::CONFLICT, "{refusal}");
+        assert_eq!(refusal["error"], "acknowledgement_required", "{refusal}");
         if self.stop {
             self.state
                 .db
@@ -629,12 +649,24 @@ async fn actual_bootstrap_deny_and_stop_do_not_dispatch_or_turn_failure_into_wai
         let id = connection(&f, &owner, "org-model", Some(&c)).await;
         let server = MockServer::start().await;
         endpoint(&f, &id, &server.uri()).await;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let callback_url = format!("http://{}", listener.local_addr().unwrap());
+        let (_, router) = crate::routes::build_router();
+        let router = router.with_state(f.state.clone());
+        let _callback_server = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        }));
         let outcome = execute(
             &f,
             &f.row,
             &InterruptedCallback {
                 state: f.state.clone(),
-                owner: f.owner.clone(),
+                callback_url,
+                client: reqwest::Client::builder()
+                    .no_proxy()
+                    .timeout(std::time::Duration::from_secs(10))
+                    .build()
+                    .unwrap(),
                 stop,
                 cancelled_stream,
             },

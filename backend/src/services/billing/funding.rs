@@ -57,6 +57,23 @@ pub(super) async fn reserve_and_open_public(
     reserve_and_open_durable(db, ctx, wallet, layers).await
 }
 
+pub(super) async fn reserve_and_open_managed(
+    db: &mongodb::Database,
+    ctx: &BillingRouteContext,
+    wallet: &crate::models::billing_wallet::BillingWallet,
+    layers: Vec<LayerReservation>,
+) -> AppResult<super::reservation::BillingReservation> {
+    if ctx.managed_admission.is_none()
+        || ctx.public_admission.is_some()
+        || ctx.pool_attempt.is_some()
+    {
+        return Err(AppError::BillingNotConfigured(
+            "Invalid managed admission".into(),
+        ));
+    }
+    reserve_and_open_durable(db, ctx, wallet, layers).await
+}
+
 async fn reserve_and_open_durable(
     db: &mongodb::Database,
     ctx: &BillingRouteContext,
@@ -125,6 +142,17 @@ async fn reserve_and_open_durable(
                     "expires_at":{"$gt":bson::DateTime::from_chrono(now)},"maximum":{"$gte":gross.decimal()},
                 },doc! {"$set":{"state":"funded"}}).session(&mut *session).await?.matched_count != 1 {
                     return Err(AppError::Conflict("Public funding authority changed".into()));
+                }
+            } else if let Some(admission) = &ctx.managed_admission {
+                use crate::models::managed_execution::{COLLECTION_NAME,ManagedExecution};
+                let gross=layers.iter().map(|layer| layer.reserved_credits).try_fold(Credits::ZERO,Credits::checked_add)?;
+                if admission.expires_at <= now || db.collection::<ManagedExecution>(COLLECTION_NAME).update_one(doc! {
+                    "_id":&admission.execution_id,"state":"prepared","billing_request_id":&ctx.billing_request_id,
+                    "billing_owner_id":&ctx.billing_owner_id,"actor_user_id":&ctx.actor_user_id,
+                    "route_digest":&admission.route_digest,"expires_at":{"$gt":bson::DateTime::from_chrono(now)},
+                },doc! {"$set":{"state":"funded","maximum":gross.decimal(),"updated_at":bson::DateTime::from_chrono(now)}})
+                    .session(&mut *session).await?.matched_count != 1 {
+                    return Err(AppError::Conflict("Managed funding authority changed".into()));
                 }
             } else if ctx.pool_attempt.as_ref().is_none_or(|attempt| attempt.lease_until <= now) {
                 return Err(AppError::BillingProviderUnavailable("Pool admission expired".into()));
@@ -223,8 +251,31 @@ async fn reserve_and_open_durable(
                 db.collection::<PublicCallReservation>(CALLS).update_one(doc! {"_id":&admission.call_id,"state":"funded"},
                     doc! {"$set":{"meter_row_ids":ids}}).session(&mut *session).await?;
             }
+            if let Some(admission)=&ctx.managed_admission {
+                use crate::models::managed_execution::{COLLECTION_NAME,ManagedExecution};
+                let ids:Vec<_>=rows.iter().map(|row|row.id.clone()).collect();
+                if ids.is_empty() { return Err(AppError::BillingNotConfigured("Managed meter is missing".into())); }
+                if db.collection::<ManagedExecution>(COLLECTION_NAME).update_one(doc! {"_id":&admission.execution_id,"state":"funded"},
+                    doc! {"$set":{"meter_row_ids":ids}}).session(&mut *session).await?.matched_count != 1 {
+                    return Err(AppError::Conflict("Managed funding authority changed".into()));
+                }
+            }
             if !rows.is_empty() {
-                db.collection::<UsageMeterRow>(USAGE_METER).insert_many(rows).session(&mut *session).await?;
+                if let Some(admission)=&ctx.managed_admission {
+                    let mut documents = Vec::with_capacity(rows.len());
+                    for mut row in rows {
+                        if let Some(funding) = row.funding.as_mut() {
+                            funding.settlement_rate = Some(Credits::from_pico(super::amounts::rate_pico(
+                                funding.credits_per_unit_pico, funding.credits_per_unit_micros))?);
+                        }
+                        let mut document = bson::to_document(&row).map_err(|_| AppError::Internal("Managed meter encoding failed".into()))?;
+                        document.insert("managed_execution_id", &admission.execution_id);
+                        documents.push(document);
+                    }
+                    db.collection::<Document>(USAGE_METER).insert_many(documents).session(&mut *session).await?;
+                } else {
+                    db.collection::<UsageMeterRow>(USAGE_METER).insert_many(rows).session(&mut *session).await?;
+                }
             }
             Ok(reservation)
         }.await;

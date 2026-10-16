@@ -2,6 +2,7 @@ use super::*;
 
 /// Private admission carried from the confirmation gate to concrete egress.
 /// It is deliberately not deserializable from HTTP headers or MCP arguments.
+#[derive(Clone)]
 pub struct Admission {
     pub(super) connection: String,
     pub(super) binding: String,

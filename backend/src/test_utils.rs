@@ -29,6 +29,8 @@ use crate::services::platform_settings_service::BrokerPolicy;
 use crate::services::provider_token_exchange_service::TokenExchangeCache;
 use crate::services::ssh_service::SshSessionManager;
 
+mod mongo_readiness;
+
 const TEST_DB_NAME_PREFIX: &str = "nyxid_test_";
 const TEST_DB_MAX_NAME_LEN: usize = 63;
 const TEST_DB_CREATED_AT_HEX_LEN: usize = 16;
@@ -486,29 +488,28 @@ async fn probe_test_mongo_uri(
     let Ok(client) = mongodb::Client::with_options(options) else {
         return None;
     };
+    // A busy shared mongod can take longer than five seconds to accept a
+    // write. Keep the original operations in flight within one bounded budget.
+    let readiness = mongo_readiness::Readiness::new();
     let db = client.database(TEST_DB_PROBE_NAME);
-    if db.run_command(doc! { "ping": 1 }).await.is_err() {
-        return None;
-    }
+    readiness
+        .run("ping", db.run_command(doc! { "ping": 1 }).into_future())
+        .await
+        .ok()?;
 
     // Unique doc id per call so concurrent probes against the shared probe
     // database don't collide on a duplicate `_id`.
     let probe = db.collection::<mongodb::bson::Document>("__probe");
     let probe_id = Uuid::new_v4().to_string();
-    let write_ready = tokio::time::timeout(
-        Duration::from_secs(5),
-        probe.insert_one(doc! { "_id": probe_id.clone() }),
-    )
-    .await;
-    if !matches!(write_ready, Ok(Ok(_))) {
-        return None;
-    }
-    let _ = tokio::time::timeout(
-        Duration::from_secs(5),
-        probe.delete_one(doc! { "_id": probe_id }),
-    )
-    .await;
-
+    readiness
+        .run(
+            "write probe",
+            probe
+                .insert_one(doc! { "_id": probe_id.clone() })
+                .into_future(),
+        )
+        .await
+        .ok()?;
     // Pin only after this candidate proves writable, but before publishing a
     // run lease or registering a destructive cleanup target. A concurrent
     // probe that loses the race may retry the URI that won; it must never
@@ -520,9 +521,9 @@ async fn probe_test_mongo_uri(
     // Register before sweeping. A process that cannot publish its own live
     // lease must never decide that another process's databases are abandoned.
     let process = test_db_process();
-    if !matches!(
-        tokio::time::timeout(
-            STALE_TEST_DB_METADATA_TIMEOUT,
+    let lease_ready = readiness
+        .run(
+            "run lease",
             renew_test_db_run_record(
                 &client,
                 &process.run_id,
@@ -530,11 +531,20 @@ async fn probe_test_mongo_uri(
                 unix_time_secs(),
             ),
         )
-        .await,
-        Ok(Ok(true))
-    ) {
+        .await
+        .ok()?;
+    if !lease_ready {
+        eprintln!(
+            "MongoDB test readiness: initial run lease was rejected after {:.3}s",
+            readiness.elapsed().as_secs_f64(),
+        );
         return None;
     }
+    let _ = tokio::time::timeout(
+        Duration::from_secs(5),
+        probe.delete_one(doc! { "_id": probe_id }),
+    )
+    .await;
     ensure_test_db_heartbeat(uri);
     sweep_stale_test_databases_once(&client, unix_time_secs()).await;
     register_test_db_for_cleanup(uri, db_name);

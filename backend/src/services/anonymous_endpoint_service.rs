@@ -611,6 +611,7 @@ mod tests {
     fn enabled_rules_reject_resale_billing() {
         let mut service = compatible_service();
         service.billing = Some(crate::models::service_billing::ServiceBilling {
+            managed_execution: None,
             platform_billable: false,
             platform_charge_nyxid_credentials_only: false,
             platform_metric: None,
