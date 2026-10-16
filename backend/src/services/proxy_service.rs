@@ -102,7 +102,7 @@ pub struct EffectiveActor {
 }
 
 impl EffectiveActor {
-    fn from_user_id(user_id: impl Into<String>) -> Self {
+    pub(crate) fn from_user_id(user_id: impl Into<String>) -> Self {
         Self {
             user_id: user_id.into(),
         }
