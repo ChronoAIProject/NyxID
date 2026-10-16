@@ -2,7 +2,7 @@ name: CodeQL
 
 on:
   pull_request:
-    branches: [main, dev, 'rollup-*']
+    branches: [main, dev, 'rollup-*', 'feat/**']
   push:
     branches: [dev]
   schedule:
