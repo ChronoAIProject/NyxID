@@ -270,6 +270,7 @@ pub fn authority_from_restriction_claims(
         allow_all_services: restrictions.allow_all_services,
         allowed_node_ids: restrictions.allowed_node_ids.clone(),
         allow_all_nodes: restrictions.allow_all_nodes,
+        protected_consent: None,
         assistant_forward: None,
     };
     authority_from_claims(&claims)
@@ -380,6 +381,7 @@ mod tests {
             allow_all_services: Some(false),
             allowed_node_ids: Some(Vec::new()),
             allow_all_nodes: Some(false),
+            protected_consent: None,
             assistant_forward: None,
         };
 
@@ -550,6 +552,7 @@ mod tests {
             allow_all_services: Some(false),
             allowed_node_ids: Some(Vec::new()),
             allow_all_nodes: Some(false),
+            protected_consent: None,
             assistant_forward: None,
         }
     }

@@ -370,8 +370,14 @@ jobs:
     needs: changes
     if: inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-latest
+    # Workspace all-target analysis exhausted 16 GiB RAM + 3 GiB swap.
+    # Retain every target while bounding simultaneous compiler memory use.
+    env:
+      CARGO_BUILD_JOBS: 1
     steps:
       - uses: actions/checkout@v6
+      - name: Prepare backend memory reserve
+        run: bash .github/scripts/prepare-backend-runner.sh
       - name: Install system dependencies
         timeout-minutes: 5
         run: bash .github/scripts/install-linux-build-deps.sh
@@ -379,7 +385,8 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Check Clippy with resource samples
+        run: python3 .github/scripts/ci_resources.py clippy cargo clippy --workspace --all-targets -- -D warnings
 
   # ---------------------------------------------------------------------------
   # Rust: backend tests

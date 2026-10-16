@@ -50,6 +50,7 @@ pub enum NodeIntent {
 pub struct BillingRouteContext {
     pub ingress: BillingIngress,
     pub pool_attempt: Option<crate::models::usage_meter::PoolAttemptAccounting>,
+    pub machine_usage: Option<crate::models::usage_meter::MachineUsageAttribution>,
     /// An internal durable public call reservation; never accepted from HTTP.
     pub(crate) public_admission: Option<PublicBillingAdmission>,
     pub billing_request_id: String,
@@ -179,6 +180,7 @@ impl BillingRouteContext {
             public_admission: None,
             ingress,
             pool_attempt: None,
+            machine_usage: None,
             billing_request_id,
             billing_owner_id,
             actor_user_id,
@@ -330,6 +332,8 @@ impl BillingRouteContext {
                 BillingMetric::Requests => 1,
                 BillingMetric::Bytes => self.request_bytes.saturating_add(response_bytes),
                 BillingMetric::Images | BillingMetric::VoiceSeconds => 0,
+                // Machine runtime is reserved only by dedicated admission.
+                BillingMetric::MachineRunningSeconds => 0,
             };
         }
         if self.requested_voice_seconds > 0 {
@@ -345,6 +349,8 @@ impl BillingRouteContext {
             }
             BillingMetric::Images => self.requested_images,
             BillingMetric::VoiceSeconds => self.requested_voice_seconds.max(0),
+            // Dedicated Machine admission reserves a finite runtime window.
+            BillingMetric::MachineRunningSeconds => 0,
             // Cache quantities are already covered by the input estimate.
             BillingMetric::CacheReadTokens
             | BillingMetric::CacheWriteTokens
@@ -643,6 +649,30 @@ mod tests {
             BillingMetric::Images,
         ] {
             assert_eq!(ctx.estimated_quantity(metric), 1);
+        }
+    }
+
+    #[test]
+    fn native_text_bound_does_not_reserve_machine_runtime() {
+        let ctx = context_for(CredentialClass::UserOwned).with_request_body(Some(&[b'x'; 400]));
+        assert_eq!(
+            ctx.estimated_quantity(BillingMetric::MachineRunningSeconds),
+            0
+        );
+        let ctx = ctx.with_native_text_bound(320, 64, 4096);
+        for (metric, expected) in [
+            (BillingMetric::Tokens, 384),
+            (BillingMetric::InputTokens, 320),
+            (BillingMetric::OutputTokens, 64),
+            (BillingMetric::CacheReadTokens, 320),
+            (BillingMetric::CacheWriteTokens, 320),
+            (BillingMetric::Requests, 1),
+            (BillingMetric::Bytes, 4496),
+            (BillingMetric::Images, 0),
+            (BillingMetric::VoiceSeconds, 0),
+            (BillingMetric::MachineRunningSeconds, 0),
+        ] {
+            assert_eq!(ctx.estimated_quantity(metric), expected, "{metric:?}");
         }
     }
 

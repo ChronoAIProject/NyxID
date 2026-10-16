@@ -593,9 +593,13 @@ async fn pending_expiry_is_not_retained_and_owner_purge_removes_tombstones() {
             .unwrap()
             .is_none()
     );
-    crate::services::admin_user_service::delete_current_user_cascade(&state.db, &owner)
-        .await
-        .unwrap();
+    crate::services::admin_user_service::delete_current_user_cascade(
+        &state.db,
+        &owner,
+        crate::services::admin_user_service::ACCOUNT_DELETION_POLICY_VERSION,
+    )
+    .await
+    .unwrap();
     assert_eq!(
         state
             .db

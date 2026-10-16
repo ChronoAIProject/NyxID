@@ -45,10 +45,13 @@ struct State {
     finished: Option<Instant>,
     started: Instant,
     timed_out: bool,
+    stop_reason: Option<&'static str>,
+    output_unavailable: Option<&'static str>,
 }
 
 pub struct Job {
-    scope: super::cancellation::Scope,
+    scope: Option<super::cancellation::Scope>,
+    external: Option<nyxid_machine::authority::ExternalAuthority>,
     // Selected by the supervisor, never supplied by the command request.
     uid: u32,
     state: Mutex<State>,
@@ -91,6 +94,36 @@ impl Jobs {
         roots: &Roots,
         gateway_env: &BTreeMap<String, String>,
     ) -> Result<Value> {
+        self.start_inner(request, identity, roots, gateway_env, None)
+            .await
+    }
+
+    pub async fn start_external(
+        &self,
+        request: Exec,
+        identity: &Identity,
+        roots: &Roots,
+        gateway_env: &BTreeMap<String, String>,
+        authority: &nyxid_machine::authority::ExternalAuthority,
+    ) -> Result<Value> {
+        self.start_inner(
+            request,
+            identity,
+            roots,
+            gateway_env,
+            Some(authority.clone()),
+        )
+        .await
+    }
+
+    async fn start_inner(
+        &self,
+        request: Exec,
+        identity: &Identity,
+        roots: &Roots,
+        gateway_env: &BTreeMap<String, String>,
+        external: Option<nyxid_machine::authority::ExternalAuthority>,
+    ) -> Result<Value> {
         if uuid::Uuid::parse_str(&request.job_id).is_err()
             || request.command.is_empty()
             || request.command.len() > 32768
@@ -122,23 +155,46 @@ impl Jobs {
                 std::process::Stdio::null()
             });
         let mut jobs = self.jobs.lock().await;
-        let mut expired = Vec::new();
+        let mut finished = Vec::new();
+        let mut retained_bytes = 0usize;
         for (id, job) in jobs.iter() {
-            if job
-                .state
-                .lock()
-                .await
-                .finished
-                .is_some_and(|at| at.elapsed() > Duration::from_secs(3600))
-            {
-                expired.push(id.clone());
+            let mut state = job.state.lock().await;
+            expire_output(&mut state);
+            if state.output_unavailable.is_none() {
+                retained_bytes = retained_bytes.saturating_add(self.output_bytes);
+            }
+            if let Some(at) = state.finished {
+                finished.push((at, id.clone(), job.clone()));
             }
         }
-        for id in expired {
-            jobs.remove(&id);
+        finished.sort_by_key(|(at, _, _)| *at);
+        for (_, id, job) in &finished {
+            if retained_bytes.saturating_add(self.output_bytes) > MAX_OUTPUT_CACHE_BYTES {
+                let mut state = job.state.lock().await;
+                if state.output_unavailable.is_none() {
+                    discard_output(&mut state, "capacity_evicted");
+                    retained_bytes = retained_bytes.saturating_sub(self.output_bytes);
+                }
+            }
+            if jobs.len() >= 1024 {
+                jobs.remove(id);
+            }
         }
-        if jobs.len() >= 1024 || jobs.contains_key(&request.job_id) {
+        if retained_bytes.saturating_add(self.output_bytes) > MAX_OUTPUT_CACHE_BYTES
+            || jobs.len() >= 1024
+            || jobs.contains_key(&request.job_id)
+        {
             bail!("job retention limit reached or duplicate job id");
+        }
+        // The request's bounded temporary environment is known before any
+        // process effect. Protect its non-empty values in the existing session
+        // registry before capture starts; exhaustion must refuse admission.
+        // The registry remains live for completed-job and paginated reads too.
+        {
+            let mut redactor = self.redactor.lock().await;
+            for value in request.env.values().filter(|value| !value.is_empty()) {
+                redactor.register(value).map_err(anyhow::Error::msg)?;
+            }
         }
         let mut child = command.spawn().context("command could not start")?;
         let pid = child.id().context("command process unavailable")? as i32;
@@ -148,7 +204,8 @@ impl Jobs {
         let mut stdin = child.stdin.take();
         let (cancel, mut cancelled) = watch::channel(false);
         let job = Arc::new(Job {
-            scope: request.scope,
+            scope: external.is_none().then_some(request.scope),
+            external,
             uid: identity.uid,
             state: Mutex::new(State {
                 stdout: OutputRing::with_head(self.output_bytes / 2),
@@ -157,6 +214,8 @@ impl Jobs {
                 finished: None,
                 started: Instant::now(),
                 timed_out: false,
+                stop_reason: None,
+                output_unavailable: None,
             }),
             cancel,
             changed: Notify::new(),
@@ -200,6 +259,15 @@ impl Jobs {
             state.exit_code = Some(status.ok().and_then(|s| s.code()).unwrap_or(-1));
             state.finished = Some(Instant::now());
             state.timed_out = timed_out;
+            state.stop_reason = Some(if timed_out {
+                "timeout"
+            } else if *cancelled.borrow() {
+                "cancelled"
+            } else if state.exit_code == Some(-1) {
+                "signal"
+            } else {
+                "completed"
+            });
             drop(state);
             active.changed.notify_waiters();
         });
@@ -245,8 +313,10 @@ impl Jobs {
         let mut ids = Vec::new();
         for (id, job) in jobs.iter() {
             if scope.is_none_or(|s| {
-                s.conversation_id == job.scope.conversation_id
-                    && (s.turn_id.is_empty() || s.turn_id == job.scope.turn_id)
+                job.scope.as_ref().is_some_and(|job_scope| {
+                    s.conversation_id == job_scope.conversation_id
+                        && (s.turn_id.is_empty() || s.turn_id == job_scope.turn_id)
+                })
             }) {
                 if job.running.load(Ordering::Acquire) {
                     signal_group(job.pid, libc::SIGKILL);
@@ -287,12 +357,17 @@ impl Jobs {
         }
     }
 
-    pub async fn finished(&self, id: &str) -> bool {
-        let job = self.jobs.lock().await.get(id).cloned();
-        match job {
-            Some(job) => job.state.lock().await.finished.is_some(),
-            None => false,
-        }
+    /// Bounded terminal metadata only. Safe to persist after output expires.
+    pub async fn terminal_metadata(&self, id: &str) -> Option<Value> {
+        let job = self.jobs.lock().await.get(id).cloned()?;
+        let state = job.state.lock().await;
+        let finished = state.finished?;
+        Some(json!({
+            "exit_code":state.exit_code,
+            "timed_out":state.timed_out,
+            "stop_reason":state.stop_reason,
+            "duration_ms":finished.duration_since(state.started).as_millis().min(u64::MAX as u128) as u64,
+        }))
     }
 
     pub async fn any_running(&self) -> bool {
@@ -322,6 +397,67 @@ impl Jobs {
             .await
     }
 
+    /// View sharing excludes child identity. This never mutates the original
+    /// execution binding used by renewal or precise child revocation.
+    pub async fn authorize_external(
+        &self,
+        id: &str,
+        authority: &nyxid_machine::authority::ExternalAuthority,
+    ) -> Result<()> {
+        let job = self
+            .jobs
+            .lock()
+            .await
+            .get(id)
+            .cloned()
+            .context(super::MachineError::JobNotFound)?;
+        let binding = job
+            .external
+            .as_ref()
+            .context(super::MachineError::JobNotFound)?;
+        if !binding.principal.same_principal(&authority.principal)
+            || binding.grant_id != authority.grant_id
+            || binding.grant_revision != authority.grant_revision
+            || binding.assignment_revision != authority.assignment_revision
+            || binding.node_id != authority.node_id
+            || binding.runtime_id != authority.runtime_id
+            || binding.runtime_generation != authority.runtime_generation
+            || binding.credential_epoch != authority.credential_epoch
+            || authority.job_id.as_deref() != Some(id)
+        {
+            return Err(super::MachineError::JobNotFound.into());
+        }
+        Ok(())
+    }
+
+    /// Legacy Assistant readers must never reinterpret an external job ID.
+    pub async fn authorize_assistant(&self, id: &str) -> Result<()> {
+        let jobs = self.jobs.lock().await;
+        let job = jobs.get(id).context(super::MachineError::JobNotFound)?;
+        anyhow::ensure!(job.external.is_none(), super::MachineError::JobNotFound);
+        Ok(())
+    }
+
+    pub async fn authorize_owner(&self, id: &str, owner_id: &str) -> Result<()> {
+        let jobs = self.jobs.lock().await;
+        let job = jobs.get(id).context(super::MachineError::JobNotFound)?;
+        // Shared legacy Assistant jobs predate local owner bindings. Their
+        // first-party proof is issued only after the backend's persisted ACL.
+        anyhow::ensure!(
+            job.external.as_ref().is_none_or(|a| a.owner_id == owner_id),
+            super::MachineError::JobNotFound
+        );
+        Ok(())
+    }
+
+    pub async fn sweep_output(&self) {
+        let jobs: Vec<_> = self.jobs.lock().await.values().cloned().collect();
+        for job in jobs {
+            let mut state = job.state.lock().await;
+            expire_output(&mut state);
+        }
+    }
+
     pub async fn foreground_result(&self, id: &str, wait: u64) -> Result<Value> {
         self.result_view(id, wait, 0, 0, true).await
     }
@@ -348,7 +484,13 @@ impl Jobs {
             let _ = tokio::time::timeout(Duration::from_secs(wait), notified).await;
         }
         let redactor = self.redactor.lock().await;
-        let state = job.state.lock().await;
+        let mut state = job.state.lock().await;
+        expire_output(&mut state);
+        if let Some(reason) = state.output_unavailable {
+            return Ok(
+                json!({"job_id":id,"status":"finished","exit_code":state.exit_code,"stdout":"","stderr":"","stdout_bytes":state.stdout.total_bytes(),"stderr_bytes":state.stderr.total_bytes(),"output_offset":state.stdout.total_bytes(),"stderr_offset":state.stderr.total_bytes(),"truncated":true,"output_available":false,"output_unavailable_reason":reason,"timed_out":state.timed_out}),
+            );
+        }
         let read = |ring: &OutputRing, offset| {
             if summary {
                 let (bytes, truncated) = ring.summary_redacted(3000, &redactor);
@@ -360,8 +502,24 @@ impl Jobs {
         let (next, stdout, out_truncated) = read(&state.stdout, offset);
         let (err_next, stderr, err_truncated) = read(&state.stderr, stderr_offset);
         Ok(
-            json!({"job_id":id,"status":if state.finished.is_some(){"finished"}else{"running"},"exit_code":state.exit_code,"stdout":String::from_utf8_lossy(&stdout),"stderr":String::from_utf8_lossy(&stderr),"stdout_bytes":state.stdout.total_bytes(),"stderr_bytes":state.stderr.total_bytes(),"output_offset":next,"stderr_offset":err_next,"truncated":out_truncated||err_truncated,"timed_out":state.timed_out,"duration_ms":state.finished.unwrap_or_else(Instant::now).duration_since(state.started).as_millis() as u64}),
+            json!({"job_id":id,"status":if state.finished.is_some(){"finished"}else{"running"},"exit_code":state.exit_code,"stdout":String::from_utf8_lossy(&stdout),"stderr":String::from_utf8_lossy(&stderr),"stdout_bytes":state.stdout.total_bytes(),"stderr_bytes":state.stderr.total_bytes(),"output_offset":next,"stderr_offset":err_next,"truncated":out_truncated||err_truncated,"output_available":true,"timed_out":state.timed_out,"duration_ms":state.finished.unwrap_or_else(Instant::now).duration_since(state.started).as_millis() as u64}),
         )
+    }
+}
+
+const MAX_OUTPUT_CACHE_BYTES: usize = 32 * 1024 * 1024;
+fn discard_output(state: &mut State, reason: &'static str) {
+    state.stdout.discard();
+    state.stderr.discard();
+    state.output_unavailable = Some(reason);
+}
+fn expire_output(state: &mut State) {
+    if state.output_unavailable.is_none()
+        && state
+            .finished
+            .is_some_and(|at| at.elapsed() >= Duration::from_secs(3600))
+    {
+        discard_output(state, "expired");
     }
 }
 
@@ -413,6 +571,381 @@ async fn terminate(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn env_request(id: &str, command: &str, value: &str, background: bool) -> Exec {
+        Exec {
+            scope: Default::default(),
+            job_id: id.into(),
+            command: command.into(),
+            cwd: None,
+            env: BTreeMap::from([
+                ("API_TOKEN".into(), value.into()),
+                ("EMPTY_VALUE".into(), String::new()),
+            ]),
+            stdin: None,
+            timeout_secs: Some(10),
+            background,
+        }
+    }
+
+    fn external_authority(job_id: &str) -> nyxid_machine::authority::ExternalAuthority {
+        use nyxid_machine::authority::{Capabilities, ExternalAuthority, ExternalPrincipal};
+        let id = || uuid::Uuid::new_v4().to_string();
+        let owner = id();
+        let until = chrono::Utc::now().timestamp_millis() + 30_000;
+        ExternalAuthority {
+            principal: ExternalPrincipal::ApiKey {
+                user_id: owner.clone(),
+                api_key_id: id(),
+                api_key_credential_id: Some(id()),
+            },
+            oauth_consent: None,
+            context_id: id(),
+            generation: 1,
+            mode: "shared_legacy".into(),
+            owner_id: owner.clone(),
+            actor_id: owner,
+            node_id: id(),
+            runtime_id: id(),
+            runtime_generation: None,
+            credential_epoch: None,
+            grant_id: id(),
+            grant_revision: 1,
+            assignment_revision: 1,
+            lease_id: id(),
+            job_id: Some(job_id.into()),
+            expires_at_ms: until,
+            auth_expires_at_ms: until,
+            job_expires_at_ms: until,
+            funding_expires_at_ms: None,
+            capabilities: Capabilities {
+                shell: true,
+                ..Default::default()
+            },
+            file_roots: vec![],
+            services: vec![],
+        }
+    }
+
+    async fn assert_env_foreground(external: bool) {
+        let root = tempfile::tempdir().unwrap();
+        let roots = Roots::new(&[root.path().into()], &[]).unwrap();
+        let jobs = Jobs::new(
+            &Default::default(),
+            Arc::new(Mutex::new(Redactor::default())),
+        );
+        let identity = Identity::resolve(None).unwrap();
+        let id = uuid::Uuid::new_v4().to_string();
+        let value = "synthetic-supplied-env-foreground-49a7b52f";
+        let request = env_request(
+            &id,
+            "printf 'out:%s:end' \"$API_TOKEN\"; printf 'err:%s:end' \"$API_TOKEN\" >&2; test -z \"$EMPTY_VALUE\"",
+            value,
+            false,
+        );
+        let result = if external {
+            let authority = external_authority(&id);
+            let result = jobs
+                .start_external(request, &identity, &roots, &BTreeMap::new(), &authority)
+                .await
+                .unwrap();
+            jobs.authorize_external(&id, &authority).await.unwrap();
+            assert!(jobs.authorize_assistant(&id).await.is_err());
+            result
+        } else {
+            let result = jobs
+                .start(request, &identity, &roots, &BTreeMap::new())
+                .await
+                .unwrap();
+            jobs.authorize_assistant(&id).await.unwrap();
+            result
+        };
+        assert_eq!(result["exit_code"], 0);
+        assert_eq!(result["stdout"], "out:[redacted]:end");
+        assert_eq!(result["stderr"], "err:[redacted]:end");
+        let retained = jobs.result(&id, 0, 0, 0).await.unwrap();
+        assert_eq!(retained["stdout"], result["stdout"]);
+        assert_eq!(retained["stderr"], result["stderr"]);
+    }
+
+    #[tokio::test]
+    async fn supplied_env_is_redacted_by_ordinary_foreground_executor() {
+        assert_env_foreground(false).await;
+    }
+
+    #[tokio::test]
+    async fn supplied_env_is_redacted_by_external_foreground_executor() {
+        assert_env_foreground(true).await;
+    }
+
+    async fn assert_env_background(external: bool) {
+        let root = tempfile::tempdir().unwrap();
+        let roots = Roots::new(&[root.path().into()], &[]).unwrap();
+        let jobs = Jobs::new(
+            &Default::default(),
+            Arc::new(Mutex::new(Redactor::default())),
+        );
+        let identity = Identity::resolve(None).unwrap();
+        let id = uuid::Uuid::new_v4().to_string();
+        let value = "synthetic-supplied-env-background-49a7b52f";
+        // The replacement crosses a 3000-byte result page. Both pipe consumers
+        // run through the executor; no manual registry setup supplies protection.
+        let request = env_request(
+            &id,
+            "head -c 2995 /dev/zero | tr '\\000' x; printf '%s' \"$API_TOKEN\"; head -c 3500 /dev/zero | tr '\\000' y; printf '%s' \"$API_TOKEN\" >&2",
+            value,
+            true,
+        );
+        let result = if external {
+            jobs.start_external(
+                request,
+                &identity,
+                &roots,
+                &BTreeMap::new(),
+                &external_authority(&id),
+            )
+            .await
+            .unwrap()
+        } else {
+            jobs.start(request, &identity, &roots, &BTreeMap::new())
+                .await
+                .unwrap()
+        };
+        assert_eq!(result, json!({"job_id":id}));
+        assert_eq!(
+            jobs.result(&id, 10, 0, 0).await.unwrap()["status"],
+            "finished"
+        );
+        // A later job must not inherit the temporary environment. Its admission
+        // must not make the completed job's retained output unsafe either.
+        let later = jobs
+            .start(
+                Exec {
+                    env: BTreeMap::new(),
+                    ..env_request(
+                        &uuid::Uuid::new_v4().to_string(),
+                        "printf '%s' \"${API_TOKEN-unset}\"",
+                        "",
+                        false,
+                    )
+                },
+                &identity,
+                &roots,
+                &BTreeMap::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(later["stdout"], "unset");
+        let mut offset = 0;
+        let mut stderr_offset = 0;
+        let mut stdout = String::new();
+        let mut stderr = String::new();
+        let mut pages = 0;
+        loop {
+            let page = jobs.result(&id, 0, offset, stderr_offset).await.unwrap();
+            stdout.push_str(page["stdout"].as_str().unwrap());
+            stderr.push_str(page["stderr"].as_str().unwrap());
+            offset = page["output_offset"].as_u64().unwrap();
+            stderr_offset = page["stderr_offset"].as_u64().unwrap();
+            pages += 1;
+            if offset == page["stdout_bytes"].as_u64().unwrap()
+                && stderr_offset == page["stderr_bytes"].as_u64().unwrap()
+            {
+                break;
+            }
+            assert!(pages < 10);
+        }
+        assert!(pages >= 3);
+        assert_eq!(
+            stdout,
+            format!("{}[redacted]{}", "x".repeat(2995), "y".repeat(3500))
+        );
+        assert_eq!(stderr, "[redacted]");
+        // Every arbitrary offset inside the former value sees only the
+        // already-scrubbed cache; the value cannot be recovered by pagination.
+        for offset in 2995..2995 + value.len() as u64 {
+            let page = jobs.result(&id, 0, offset, 0).await.unwrap();
+            assert!(!page.to_string().contains("synthetic-supplied"));
+        }
+    }
+
+    #[tokio::test]
+    async fn supplied_env_is_redacted_by_ordinary_background_and_paginated_reads() {
+        assert_env_background(false).await;
+    }
+
+    #[tokio::test]
+    async fn supplied_env_is_redacted_by_external_background_and_paginated_reads() {
+        assert_env_background(true).await;
+    }
+
+    #[tokio::test]
+    async fn supplied_env_fragments_are_held_by_actual_capture_until_complete() {
+        let root = tempfile::tempdir().unwrap();
+        let roots = Roots::new(&[root.path().into()], &[]).unwrap();
+        let jobs = Jobs::new(
+            &Default::default(),
+            Arc::new(Mutex::new(Redactor::default())),
+        );
+        let id = uuid::Uuid::new_v4().to_string();
+        let value = "synthetic-fragmented-env-123456789";
+        // A FIFO gates the second half until both actual pipe consumers have
+        // captured the first half. This forces fragmentation without timing sleeps.
+        jobs.start(env_request(&id,
+            "mkfifo release; head -c 17000 /dev/zero | tr '\\000' x; printf '%.18s' \"$API_TOKEN\"; head -c 17000 /dev/zero | tr '\\000' y >&2; printf '%.18s' \"$API_TOKEN\" >&2; IFS= read -r gate < release; printf '%s' \"$API_TOKEN\" | cut -c 19-; printf '%s' \"$API_TOKEN\" | cut -c 19- >&2",
+            value, true), &Identity::resolve(None).unwrap(), &roots, &BTreeMap::new()).await.unwrap();
+        let job = jobs.jobs.lock().await[&id].clone();
+        let captured_prefix = 17_018 - jobs.redactor.lock().await.max_pattern_bytes() as u64;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let state = job.state.lock().await;
+                if state.stdout.total_bytes() >= captured_prefix
+                    && state.stderr.total_bytes() >= captured_prefix
+                {
+                    break;
+                }
+                drop(state);
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let during = jobs.result(&id, 0, 16990, 16990).await.unwrap();
+        tokio::fs::write(root.path().join("release"), b"go\n")
+            .await
+            .unwrap();
+        let result = jobs.result(&id, 10, 16990, 16990).await.unwrap();
+        assert_eq!(result["status"], "finished");
+        assert!(!during.to_string().contains("synthetic"));
+        assert_eq!(result["stdout"], "xxxxxxxxxx[redacted]\n");
+        assert_eq!(result["stderr"], "yyyyyyyyyy[redacted]\n");
+    }
+
+    #[tokio::test]
+    async fn supplied_env_registry_exhaustion_refuses_before_executor_effects() {
+        let root = tempfile::tempdir().unwrap();
+        let roots = Roots::new(&[root.path().into()], &[]).unwrap();
+        let registry = Arc::new(Mutex::new(Redactor::default()));
+        let jobs = Jobs::new(&Default::default(), registry.clone());
+        // Fill the pre-existing bounded session registry, then exercise actual
+        // admission with the value which could not be protected.
+        let mut rejected = None;
+        for index in 0..100 {
+            let value = format!("synthetic-capacity-{index}-{}", "q".repeat(14000));
+            if registry.lock().await.register(&value).is_err() {
+                rejected = Some(value);
+                break;
+            }
+        }
+        let value = rejected.expect("registry must have a finite byte bound");
+        let result = jobs
+            .start(
+                env_request(
+                    &uuid::Uuid::new_v4().to_string(),
+                    "touch must-not-exist; printf '%s' \"$API_TOKEN\"",
+                    &value,
+                    false,
+                ),
+                &Identity::resolve(None).unwrap(),
+                &roots,
+                &BTreeMap::new(),
+            )
+            .await;
+        assert!(result.is_err(), "unprotected input must not execute");
+        assert!(!root.path().join("must-not-exist").exists());
+        assert!(jobs.jobs.lock().await.is_empty());
+        assert_eq!(
+            jobs.permits.available_permits(),
+            nyxid_machine::config::Config::default().max_jobs
+        );
+    }
+    #[tokio::test]
+    async fn output_expires_on_read_without_waiting_for_sweep_or_new_job() {
+        let root = tempfile::tempdir().unwrap();
+        let roots = Roots::new(&[root.path().into()], &[]).unwrap();
+        let jobs = Jobs::new(
+            &Default::default(),
+            Arc::new(Mutex::new(Redactor::default())),
+        );
+        let id = uuid::Uuid::new_v4().to_string();
+        jobs.start(
+            Exec {
+                scope: Default::default(),
+                job_id: id.clone(),
+                command: "printf private-output".into(),
+                cwd: None,
+                env: BTreeMap::new(),
+                stdin: None,
+                timeout_secs: Some(10),
+                background: false,
+            },
+            &Identity::resolve(None).unwrap(),
+            &roots,
+            &BTreeMap::new(),
+        )
+        .await
+        .unwrap();
+        let job = jobs.jobs.lock().await[&id].clone();
+        job.state.lock().await.finished = Some(Instant::now() - Duration::from_secs(3600));
+        let result = jobs.result(&id, 0, 0, 0).await.unwrap();
+        assert_eq!(result["output_available"], false);
+        assert_eq!(result["output_unavailable_reason"], "expired");
+        assert_eq!(result["stdout"], "");
+        assert_eq!(result["stdout_bytes"], 14);
+        jobs.sweep_output().await;
+        assert_eq!(
+            jobs.result(&id, 0, 0, 0).await.unwrap()["output_unavailable_reason"],
+            "expired"
+        );
+    }
+
+    #[tokio::test]
+    async fn aggregate_output_cache_evicts_old_terminal_bytes_before_admission() {
+        let root = tempfile::tempdir().unwrap();
+        let roots = Roots::new(&[root.path().into()], &[]).unwrap();
+        let jobs = Jobs::new(
+            &Default::default(),
+            Arc::new(Mutex::new(Redactor::default())),
+        );
+        let identity = Identity::resolve(None).unwrap();
+        let mut ids = Vec::new();
+        for _ in 0..33 {
+            let id = uuid::Uuid::new_v4().to_string();
+            jobs.start(
+                Exec {
+                    scope: Default::default(),
+                    job_id: id.clone(),
+                    command: "printf output".into(),
+                    cwd: None,
+                    env: BTreeMap::new(),
+                    stdin: None,
+                    timeout_secs: Some(10),
+                    background: false,
+                },
+                &identity,
+                &roots,
+                &BTreeMap::new(),
+            )
+            .await
+            .unwrap();
+            ids.push(id);
+        }
+        assert_eq!(
+            jobs.result(&ids[0], 0, 0, 0).await.unwrap()["output_unavailable_reason"],
+            "capacity_evicted"
+        );
+        assert_eq!(
+            jobs.result(&ids[32], 0, 0, 0).await.unwrap()["stdout"],
+            "output"
+        );
+        let mut retained = 0;
+        for job in jobs.jobs.lock().await.values() {
+            if job.state.lock().await.output_unavailable.is_none() {
+                retained += jobs.output_bytes;
+            }
+        }
+        assert!(retained <= MAX_OUTPUT_CACHE_BYTES);
+    }
     #[tokio::test]
     async fn background_jobs_retain_output_and_cancel_process_groups() {
         let temp = tempfile::tempdir().unwrap();
@@ -448,6 +981,10 @@ mod tests {
         assert!(*jobs.jobs.lock().await[&id].cancel.borrow());
         let result = jobs.result(&id, 5, 0, 0).await.unwrap();
         assert_eq!(result["status"], "finished");
+        let terminal = jobs.terminal_metadata(&id).await.unwrap();
+        assert_eq!(terminal["stop_reason"], "cancelled");
+        assert_eq!(terminal.as_object().unwrap().len(), 4);
+        assert!(terminal.get("stdout").is_none() && terminal.get("stderr").is_none());
         assert!(!jobs.running(&id).await);
         assert!(jobs.result("missing", 0, 0, 0).await.is_err());
     }

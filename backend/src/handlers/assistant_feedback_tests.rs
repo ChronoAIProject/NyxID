@@ -550,25 +550,73 @@ async fn feedback_put_rejects_unknown_conversation_as_not_found() {
 #[tokio::test]
 async fn feedback_route_limits_one_user_burst() {
     let f = fixture("feedback-s4-limit", false).await;
-    let mut limited = false;
-    for i in 0..31 {
-        let path =
-            format!("/api/v1/assistant/nyxagent/conversations/missing-{i}/messages/m/feedback");
-        if request(
+    use crate::models::coordination::{RATE_WINDOW_COLLECTION_NAME, RateWindowRecord};
+
+    let path = "/api/v1/assistant/nyxagent/conversations/missing/messages/m/feedback";
+    assert_eq!(
+        request(
             &f.state,
             "PUT",
-            &path,
+            path,
             &f.human_token,
-            Some(json!({"vote":"up"})),
+            Some(json!({"vote":"up"}))
         )
         .await
-        .0 == StatusCode::TOO_MANY_REQUESTS
-        {
-            limited = true;
-            break;
+        .0,
+        StatusCode::NOT_FOUND
+    );
+    let windows = f
+        .state
+        .db
+        .collection::<RateWindowRecord>(RATE_WINDOW_COLLECTION_NAME);
+    let window = windows
+        .find_one(doc! {"namespace": "assistant_feedback"})
+        .await
+        .unwrap()
+        .expect("the route must use the shared feedback limiter");
+
+    // MongoDB aligns these windows to minute boundaries. Prepare the last
+    // allowed request, then verify both sides of the exact 30-request limit.
+    // Only a persisted window rollover permits restarting this assertion.
+    for _ in 0..3 {
+        let prepared = windows
+            .find_one_and_update(doc! {"_id": &window.id}, doc! {"$set": {"count": 29_i64}})
+            .return_document(mongodb::options::ReturnDocument::After)
+            .await
+            .unwrap()
+            .unwrap();
+        for (expected_status, expected_count) in [
+            (StatusCode::NOT_FOUND, 30),
+            (StatusCode::TOO_MANY_REQUESTS, 30),
+        ] {
+            let status = request(
+                &f.state,
+                "PUT",
+                path,
+                &f.human_token,
+                Some(json!({"vote":"up"})),
+            )
+            .await
+            .0;
+            let observed = windows
+                .find_one(doc! {"_id": &window.id})
+                .await
+                .unwrap()
+                .unwrap();
+            if observed.window_start != prepared.window_start {
+                assert!(observed.window_start > prepared.window_start);
+                assert_eq!(status, StatusCode::NOT_FOUND);
+                assert_eq!(observed.count, 1);
+                break;
+            }
+            assert_eq!(status, expected_status);
+            assert_eq!(observed.count, expected_count);
+            if status == StatusCode::TOO_MANY_REQUESTS {
+                return;
+            }
         }
     }
-    assert!(limited);
+    panic!("feedback limit could not be checked within one persisted rate window");
 }
 
 #[tokio::test]

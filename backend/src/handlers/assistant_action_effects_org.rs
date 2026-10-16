@@ -197,6 +197,8 @@ pub struct DeleteAssistantAccountRequest {
     /// control: the effect route is mounted and reachable, so the server has
     /// to verify the confirmation itself for it to mean anything.
     pub confirm_email: String,
+    #[serde(default)]
+    pub deletion_policy_version: String,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, ToSchema)]
@@ -578,6 +580,7 @@ struct ConfirmedAccountDeleteFingerprint<'a> {
     action: &'static str,
     user_id: &'a str,
     confirm_email: &'a str,
+    deletion_policy_version: &'a str,
 }
 
 #[derive(Serialize)]
@@ -933,6 +936,10 @@ async fn delete_account(
     tele: TelemetryContext,
     Json(body): Json<DeleteAssistantAccountRequest>,
 ) -> AppResult<Json<AssistantAccountResponse>> {
+    super::login_client_context::require_first_party_human(&auth_user)?;
+    crate::services::admin_user_service::validate_account_deletion_policy(
+        &body.deletion_policy_version,
+    )?;
     let action_request_id = normalize_action_request_id(body.action_request_id)?;
     let user_id = auth_user.user_id.to_string();
     let user = require_user(&state, &user_id).await?;
@@ -950,6 +957,7 @@ async fn delete_account(
         action: ACCOUNT_DELETE_ACTION,
         user_id: &user_id,
         confirm_email: &confirm_email,
+        deletion_policy_version: &body.deletion_policy_version,
     })?;
     let receipt = reserve_or_replay(
         &state.db,
@@ -977,8 +985,14 @@ async fn delete_account(
             true
         }
         ReceiptOutcome::Reserved(receipt) => {
-            let _ =
-                users::delete_me(State(state.clone()), auth_user, tele, HeaderMap::new()).await?;
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                crate::services::admin_user_service::ACCOUNT_DELETION_POLICY_HEADER,
+                axum::http::HeaderValue::from_static(
+                    crate::services::admin_user_service::ACCOUNT_DELETION_POLICY_VERSION,
+                ),
+            );
+            let _ = users::delete_me(State(state.clone()), auth_user, tele, headers).await?;
             mark_completed(&state.db, &receipt).await?;
             false
         }
@@ -4354,7 +4368,7 @@ mod wave4_effect_tests {
         // Wrong confirmation must be refused.
         let (status, _) = post(
             state.clone(),
-            json!({ "actionRequestId": "delete-wrong", "confirmEmail": "someone@else.test" }),
+            json!({ "actionRequestId": "delete-wrong", "deletionPolicyVersion":"machine-data", "confirmEmail": "someone@else.test" }),
         )
         .await;
         assert!(
@@ -4365,7 +4379,7 @@ mod wave4_effect_tests {
         // Empty confirmation must be refused too.
         let (status, _) = post(
             state.clone(),
-            json!({ "actionRequestId": "delete-empty", "confirmEmail": "   " }),
+            json!({ "actionRequestId": "delete-empty", "deletionPolicyVersion":"machine-data", "confirmEmail": "   " }),
         )
         .await;
         assert!(
@@ -4530,15 +4544,33 @@ mod wave4_effect_tests {
             action: ACCOUNT_DELETE_ACTION,
             user_id: "user-1",
             confirm_email: "owner@example.test",
+            deletion_policy_version:
+                crate::services::admin_user_service::ACCOUNT_DELETION_POLICY_VERSION,
         })
         .unwrap();
         let second = fingerprint_canonical(&ConfirmedAccountDeleteFingerprint {
             action: ACCOUNT_DELETE_ACTION,
             user_id: "user-1",
             confirm_email: "someone@else.test",
+            deletion_policy_version:
+                crate::services::admin_user_service::ACCOUNT_DELETION_POLICY_VERSION,
         })
         .unwrap();
         assert_ne!(first, second);
+    }
+
+    #[test]
+    fn account_delete_fingerprint_binds_the_acknowledged_policy() {
+        let fingerprint = |policy| {
+            fingerprint_canonical(&ConfirmedAccountDeleteFingerprint {
+                action: ACCOUNT_DELETE_ACTION,
+                user_id: "user-1",
+                confirm_email: "owner@example.test",
+                deletion_policy_version: policy,
+            })
+            .unwrap()
+        };
+        assert_ne!(fingerprint("machine-data"), fingerprint("previous-policy"));
     }
 
     #[tokio::test]
@@ -5314,6 +5346,8 @@ mod wave4_effect_tests {
                 action: ACCOUNT_DELETE_ACTION,
                 user_id: id_a,
                 confirm_email: "owner@example.test",
+                deletion_policy_version:
+                    crate::services::admin_user_service::ACCOUNT_DELETION_POLICY_VERSION,
             }
         );
         fingerprint_case!(
@@ -5650,8 +5684,9 @@ mod wave4_effect_tests {
                 changed_field_count += 1;
             }
         }
+        // Account deletion now also binds the acknowledged policy version.
         assert_eq!(
-            changed_field_count, 93,
+            changed_field_count, 94,
             "adding or removing a bound semantic field requires reviewing this count"
         );
     }

@@ -1,6 +1,6 @@
 import { useFormContext } from "react-hook-form";
 import { useEndpoints } from "@/hooks/use-endpoints";
-import { BILLING_METRICS, metricLabel } from "@/schemas/billing-metrics";
+import { SERVICE_BILLING_METRICS, metricLabel } from "@/schemas/billing-metrics";
 import type { SharedServiceFormData } from "@/schemas/services";
 import type { DownstreamService } from "@/types/api";
 import { Badge } from "@/components/ui/badge";
@@ -44,7 +44,7 @@ export function BillingLaneFields({
 }) {
   const form = useFormContext<BillingLaneFormData>();
   const inference = form.watch("inference");
-  const suggestedMetrics = BILLING_METRICS.filter(
+  const suggestedMetrics = SERVICE_BILLING_METRICS.filter(
     (metric) =>
       metric !== "voice_seconds" ||
       inference?.voice?.billing_metrics.includes(metric),
@@ -135,7 +135,7 @@ export function BillingLaneFields({
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
-                      {BILLING_METRICS.filter(
+                      {SERVICE_BILLING_METRICS.filter(
                         (metric) =>
                           suggestedMetrics.includes(metric) ||
                           metric === lane.metric,
@@ -211,7 +211,7 @@ export function BillingLaneFields({
                                   </SelectTrigger>
                                 </FormControl>
                                 <SelectContent>
-                                  {BILLING_METRICS.filter(
+                                  {SERVICE_BILLING_METRICS.filter(
                                     (metric) =>
                                       suggestedMetrics.includes(metric) ||
                                       metric === input.value,

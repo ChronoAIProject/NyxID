@@ -47,15 +47,10 @@ pub fn normalize_code(code: &str) -> AppResult<String> {
     Ok(normalized)
 }
 
-pub async fn validate_choices(
-    db: &Database,
-    owner: &str,
-    mut choices: Choices,
-) -> AppResult<Choices> {
-    if choices.name.is_empty()
-        || choices.name.len() > 64
-        || !choices
-            .name
+pub fn validate_machine_name(name: &str) -> AppResult<()> {
+    if name.is_empty()
+        || name.len() > 64
+        || !name
             .bytes()
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-')
     {
@@ -63,6 +58,15 @@ pub async fn validate_choices(
             "Machine name must contain 1–64 lowercase letters, numbers or hyphens".into(),
         ));
     }
+    Ok(())
+}
+
+pub async fn validate_choices(
+    db: &Database,
+    owner: &str,
+    mut choices: Choices,
+) -> AppResult<Choices> {
+    validate_machine_name(&choices.name)?;
     if !matches!(choices.location.as_str(), "this_computer" | "vm" | "docker") {
         return Err(AppError::ValidationError(
             "Choose this_computer, vm or docker".into(),

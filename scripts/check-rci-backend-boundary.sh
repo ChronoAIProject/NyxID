@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+if ! command -v rg >/dev/null 2>&1; then
+  echo "backend boundary check requires ripgrep (rg); install it before checking" >&2
+  exit 1
+fi
+
 forbidden_source='nyxid[-_]crypto|x25519[-_]dalek|chacha20poly1305|XChaCha20Poly1305|hkdf::|\bHkdf\b|\bhkdf\s*='
 if rg -n "$forbidden_source" backend/Cargo.toml backend/src; then
   echo "backend must not contain RCI crypto crate/import/direct dependency references" >&2

@@ -315,9 +315,9 @@ pub(super) async fn validate(
             if expected.len() != 64 || expected != &actual {
                 return Err(changed());
             }
-            // Binding CRUD uses the same parent authority version in its transaction.
-            mutations::update_one(db, doc! {"_id": &parent.id}, doc! {}, Some(&mut *session))
-                .await?;
+            // Conflict with binding/security changes on the reviewed parent,
+            // without treating unchanged child issuance as source revocation.
+            mutations::fence_child_consent_in_session(db, parent, &mut *session).await?;
         }
         Selection::New(input) if input.connection_snapshots.is_some() => {
             let snapshots = input.connection_snapshots.as_ref().expect("checked");

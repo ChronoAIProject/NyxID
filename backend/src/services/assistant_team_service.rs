@@ -971,11 +971,23 @@ async fn create_specialist_inner(
         super::org_agent_service::require_creation_enabled(db, actor).await?;
     }
     let planned = if let Some(a) = authority {
+        let db = db.clone();
+        let a = a.clone();
         let mut session = db.client().start_session().await?;
-        session.start_transaction().await?;
-        let row =
-            super::platform_provisioning_service::fence_authority(db, a, &mut session).await?;
-        session.abort_transaction().await?;
+        let row = session
+            .start_transaction()
+            .and_run2(async move |session| {
+                let row = transactions::transaction_result(
+                    super::platform_provisioning_service::fence_authority(&db, &a, session).await,
+                )?;
+                // The preflight only checks authority; roll back its fences.
+                // The runner also awaits rollback on rejection and retries
+                // transient write conflicts before returning an assessment.
+                session.abort_transaction().await?;
+                Ok(row)
+            })
+            .await
+            .map_err(transactions::map_transaction_error)?;
         Some(row)
     } else {
         None

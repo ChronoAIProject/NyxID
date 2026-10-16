@@ -6,6 +6,7 @@ mod admin_billing_tests;
 pub mod admin_feature_flags;
 pub mod admin_groups;
 pub mod admin_helpers;
+pub mod admin_machine_runtime_billing;
 pub mod admin_nodes;
 pub mod admin_ownership;
 pub mod admin_platform_credentials;
@@ -181,6 +182,10 @@ mod assistant_titles;
 pub mod assistant_voice;
 
 pub mod machine_access;
+pub mod machine_external_execution;
+pub mod remote_machine;
+pub mod remote_machine_bootstrap;
+pub mod remote_machine_usage;
 
 pub mod admin_utility_inference;
 
@@ -193,5 +198,8 @@ mod service_preference_tests;
 
 pub mod catalog_icons;
 
+pub mod machine_external_grant;
+
+pub mod admin_remote_machine_platform;
 #[cfg(test)]
 mod tools_manager_tests;
