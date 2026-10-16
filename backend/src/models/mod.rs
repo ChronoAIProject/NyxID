@@ -199,3 +199,5 @@ pub mod remote_machine_event;
 pub mod platform_installation;
 pub mod platform_manager_delivery;
 pub mod remote_machine_storage;
+
+pub mod platform_public_contract;

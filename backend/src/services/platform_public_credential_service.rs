@@ -41,6 +41,13 @@ pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
     db.collection::<PlatformPublicTurn>(TURNS)
         .create_index(
             IndexModel::builder()
+                .keys(doc! {"proof_record_id":1})
+                .build(),
+        )
+        .await?;
+    db.collection::<PlatformPublicTurn>(TURNS)
+        .create_index(
+            IndexModel::builder()
                 .keys(doc! {"expires_at":1})
                 .options(
                     IndexOptions::builder()
@@ -123,7 +130,14 @@ pub(crate) async fn issue_context(
     store: Arc<dyn ManagerIngressTurnStore>,
     admitted: &PublicIngress,
 ) -> AppResult<PublicExecutionContext> {
-    let (_, evidence) = policy::verified_readiness()?;
+    let (_, evidence) = policy::verified_readiness(
+        &state.db,
+        &admitted.manager,
+        admitted.public_policy_revision,
+        None,
+        None,
+    )
+    .await?;
     if evidence.manager != admitted.manager
         || evidence.public_policy_revision != admitted.public_policy_revision
         || admitted.sender_id <= 0
@@ -195,6 +209,7 @@ pub(crate) async fn issue_context(
         )
     };
     let context = PublicExecutionContext {
+        proof_record_id: evidence.proof_record_id.clone(),
         ingress: admitted.clone(),
         public_session_id: row.id.clone(),
         turn: TurnRef {
@@ -210,37 +225,90 @@ pub(crate) async fn issue_context(
             .min(evidence.expires_at),
         limits: evidence.limits,
     };
-    policy::verified_context(&context)?;
+    policy::verified_context(&state.db, &context).await?;
     let db = state.db.clone();
     let mut session = db.client().start_session().await?;
-    session.start_transaction().and_run((db,store,context,row,key),|session,(db,store,context,row,key)|Box::pin(async move {
-        let result:AppResult<_>=async {
-            let manager=&context.ingress.manager;
-            let receipt=db.collection::<PlatformManagerIngress>(RECEIPTS).find_one(doc! {
-                "_id":&context.ingress.ingress.receipt_id,"claim_id":&context.ingress.ingress.claim_id,"phase":"admitted",
-            }).session(&mut *session).await?.ok_or_else(denied)?;
-            let controls=super::platform_bot_runtime_control_service::fence_manager_in_session(
-                db,session,&manager.profile_id,&manager.manager_bot_id,manager.telegram_bot_id,Some(&receipt.observation_id),
-            ).await?.ok_or_else(denied)?;
-            let selected=controls.public_policy.as_ref().ok_or_else(denied)?;
-            if controls.manager_authority_epoch!=manager.manager_authority_epoch
-                || controls.public_policy_revision!=context.ingress.public_policy_revision || !controls.public_enabled
-                || controls.retired || controls.emergency_stopped
-                || selected.sponsor_owner_user_id!=context.sponsor_owner_user_id
-                || selected.nyxagent_profile!=context.nyxagent_profile {return Err(denied());}
-            if db.collection::<Document>(crate::models::platform_personal_binding::COLLECTION_NAME).count_documents(doc! {
-                "platform_config_id":&manager.profile_id,"manager_bot_id":&manager.manager_bot_id,
-                "telegram_sender_id":context.ingress.sender_id,"state":"active",
-            }).session(&mut *session).await?>0 {return Err(denied());}
-            if !super::coordination_service::RateWindowStore::admit_in_session(db,"public_turn_starts",
-                &format!("{}:{}",manager.profile_id,context.ingress.sender_id),10,std::time::Duration::from_secs(3600),session,
-            ).await? {return Err(AppError::RateLimited);}
-            install_turn_in_session(db,session,context,row,key.as_ref()).await?;
-            store.claim_public_execution(db,session,context).await?;
-            budget::fence_context(db,session,context,&row.credential_api_key_id).await?;
-            Ok(context.clone())
-        }.await;tx::transaction_result(result)
-    })).await.map_err(tx::map_transaction_error)
+    session
+        .start_transaction()
+        .and_run(
+            (db, store, context, row, key),
+            |session, (db, store, context, row, key)| {
+                Box::pin(async move {
+                    let result: AppResult<_> = async {
+                        let manager = &context.ingress.manager;
+                        let receipt = db
+                            .collection::<PlatformManagerIngress>(RECEIPTS)
+                            .find_one(doc! {
+                                "_id": &context.ingress.ingress.receipt_id,
+                                "claim_id": &context.ingress.ingress.claim_id, "phase": "admitted",
+                            })
+                            .session(&mut *session)
+                            .await?
+                            .ok_or_else(denied)?;
+                        let controls =
+                            super::platform_bot_runtime_control_service::fence_manager_in_session(
+                                db,
+                                session,
+                                &manager.profile_id,
+                                &manager.manager_bot_id,
+                                manager.telegram_bot_id,
+                                Some(&receipt.observation_id),
+                            )
+                            .await?
+                            .ok_or_else(denied)?;
+                        let selected = controls.public_policy.as_ref().ok_or_else(denied)?;
+                        if controls.manager_authority_epoch != manager.manager_authority_epoch
+                            || controls.public_policy_revision
+                                != context.ingress.public_policy_revision
+                            || !controls.public_enabled
+                            || controls.retired
+                            || controls.emergency_stopped
+                            || selected.sponsor_owner_user_id != context.sponsor_owner_user_id
+                            || selected.nyxagent_profile != context.nyxagent_profile
+                        {
+                            return Err(denied());
+                        }
+                        let personal_links = db
+                            .collection::<Document>(
+                                crate::models::platform_personal_binding::COLLECTION_NAME,
+                            )
+                            .count_documents(doc! {
+                                "platform_config_id": &manager.profile_id,
+                                "manager_bot_id": &manager.manager_bot_id,
+                                "telegram_sender_id": context.ingress.sender_id, "state": "active",
+                            })
+                            .session(&mut *session)
+                            .await?;
+                        if personal_links > 0 {
+                            return Err(denied());
+                        }
+                        let admitted =
+                            super::coordination_service::RateWindowStore::admit_in_session(
+                                db,
+                                "public_turn_starts",
+                                &format!("{}:{}", manager.profile_id, context.ingress.sender_id),
+                                10,
+                                std::time::Duration::from_secs(3600),
+                                session,
+                            )
+                            .await?;
+                        if !admitted {
+                            return Err(AppError::RateLimited);
+                        }
+                        policy::verified_context_in_session(db, session, context).await?;
+                        install_turn_in_session(db, session, context, row, key.as_ref()).await?;
+                        store.claim_public_execution(db, session, context).await?;
+                        budget::fence_context(db, session, context, &row.credential_api_key_id)
+                            .await?;
+                        Ok(context.clone())
+                    }
+                    .await;
+                    tx::transaction_result(result)
+                })
+            },
+        )
+        .await
+        .map_err(tx::map_transaction_error)
 }
 
 /// Caller owns claim/controls/scope fences and transaction commit. Reuse never
@@ -362,7 +430,7 @@ impl PublicRuntime {
         context: &PublicExecutionContext,
         input: TurnInput,
     ) -> AppResult<PreparedPublicTurn> {
-        let proof = policy::verified_context(context)?;
+        let proof = policy::verified_context(db, context).await?;
         if input.text.is_empty()
             || input.text.len() > context.limits.max_input_bytes as usize
             || input.text.len() > context.limits.max_context_bytes as usize
@@ -398,6 +466,7 @@ impl PublicRuntime {
         let outer = super::platform_public_proxy_service::load_outer_catalog(db).await?;
         let outer_digest = super::platform_public_proxy_service::catalog_digest(&outer)?;
         let row = PlatformPublicTurn {
+            proof_record_id: context.proof_record_id.clone(),
             id: context.turn.turn_id.clone(),
             public_session_id: context.public_session_id.clone(),
             conversation_id: context.turn.conversation_id.clone(),
@@ -408,6 +477,7 @@ impl PublicRuntime {
             credential_api_key_id: credential.api_key_id.clone(),
             input_ciphertext: ciphertext,
             reply_ciphertext: vec![],
+            reply_digest: String::new(),
             reply_id: None,
             outcome: None,
             max_output_bytes: context.limits.max_output_bytes,
@@ -429,7 +499,8 @@ impl PublicRuntime {
                 |session, (db, context, key, row)| {
                     Box::pin(async move {
                         let result: AppResult<_> = async {
-                            let proof = policy::verified_context(context)?;
+                            let proof =
+                                policy::verified_context_in_session(db, session, context).await?;
                             budget::reserve_loop_in_session(
                                 db,
                                 session,
@@ -488,7 +559,7 @@ impl PublicNyxAgentRuntime for PublicRuntime {
         context: &PublicExecutionContext,
         expected_key_id: &str,
     ) -> AppResult<RuntimeCredential> {
-        policy::verified_context(context)?;
+        policy::verified_context(db, context).await?;
         let row = db
             .collection::<PlatformPublicSession>(SESSIONS)
             .find_one(
@@ -507,19 +578,68 @@ impl PublicNyxAgentRuntime for PublicRuntime {
         let cipher =
             crypto::encrypt_runtime_key(&self.state.encryption_keys, &credential.raw_key).await?;
         let mut session = db.client().start_session().await?;
-        session.start_transaction().and_run((db.clone(),context.clone(),expected_key_id.to_owned(),key,cipher),|session,(db,context,old,key,cipher)|Box::pin(async move {
-            let result:AppResult<_>=async {
-                budget::fence_context(db,session,context,old).await?;
-                tx::insert_one(db,key,Some(&mut *session)).await?;
-                if tx::update_one(db,doc! {"_id":&*old,"purpose":"public_nyxbot","is_active":true},doc! {"$set":{"is_active":false}},Some(&mut *session)).await?.matched_count!=1 {return Err(denied());}
-                if db.collection::<PlatformPublicSession>(SESSIONS).update_one(doc! {"_id":&context.public_session_id,"credential_api_key_id":&*old,"upstream_may_exist":false},doc! {"$set":{"credential_api_key_id":&key.id,"credential_ciphertext":bson::Binary {subtype:bson::spec::BinarySubtype::Generic,bytes:cipher.clone()},"upstream_binding_ciphertext":bson::Binary {subtype:bson::spec::BinarySubtype::Generic,bytes:vec![]}}}).session(&mut *session).await?.matched_count!=1 {return Err(denied());}
-                let loops=db.collection::<Document>(crate::models::platform_public_budget::LOOPS);
-                if loops.count_documents(doc! {"public_session_id":&context.public_session_id,"turn_id":&context.turn.turn_id,"calls":{"$gt":0}}).session(&mut *session).await?>0 {return Err(denied());}
-                loops.update_one(doc! {"public_session_id":&context.public_session_id,"turn_id":&context.turn.turn_id,"credential_api_key_id":&*old},doc! {"$set":{"credential_api_key_id":&key.id}}).session(&mut *session).await?;
-                db.collection::<PlatformPublicTurn>(TURNS).update_one(doc! {"_id":&context.turn.turn_id,"credential_api_key_id":&*old,"reply_id":bson::Bson::Null},doc! {"$set":{"credential_api_key_id":&key.id}}).session(&mut *session).await?;
-                Ok(())
-            }.await;tx::transaction_result(result)
-        })).await.map_err(tx::map_transaction_error)?;
+        session
+            .start_transaction()
+            .and_run(
+                (db.clone(), context.clone(), expected_key_id.to_owned(), key, cipher),
+                |session, (db, context, old, key, cipher)| {
+                    Box::pin(async move {
+                        let result: AppResult<_> = async {
+                            policy::verified_context_in_session(db, session, context).await?;
+                            budget::fence_context(db, session, context, old).await?;
+                            tx::insert_one(db, key, Some(&mut *session)).await?;
+                            let revoked = tx::update_one(
+                                db,
+                                doc! {"_id": &*old, "purpose": "public_nyxbot", "is_active": true},
+                                doc! {"$set": {"is_active": false}},
+                                Some(&mut *session),
+                            ).await?;
+                            if revoked.matched_count != 1 {
+                                return Err(denied());
+                            }
+                            let replaced = db.collection::<PlatformPublicSession>(SESSIONS)
+                                .update_one(
+                                    doc! {"_id": &context.public_session_id,
+                                        "credential_api_key_id": &*old, "upstream_may_exist": false},
+                                    doc! {"$set": {
+                                        "credential_api_key_id": &key.id,
+                                        "credential_ciphertext": bson::Binary {
+                                            subtype: bson::spec::BinarySubtype::Generic, bytes: cipher.clone(),
+                                        },
+                                        "upstream_binding_ciphertext": bson::Binary {
+                                            subtype: bson::spec::BinarySubtype::Generic, bytes: vec![],
+                                        },
+                                    }},
+                                ).session(&mut *session).await?;
+                            if replaced.matched_count != 1 {
+                                return Err(denied());
+                            }
+                            let loops = db.collection::<Document>(crate::models::platform_public_budget::LOOPS);
+                            let used = loops.count_documents(doc! {
+                                "public_session_id": &context.public_session_id,
+                                "turn_id": &context.turn.turn_id, "calls": {"$gt": 0},
+                            }).session(&mut *session).await?;
+                            if used > 0 {
+                                return Err(denied());
+                            }
+                            loops.update_one(
+                                doc! {"public_session_id": &context.public_session_id,
+                                    "turn_id": &context.turn.turn_id, "credential_api_key_id": &*old},
+                                doc! {"$set": {"credential_api_key_id": &key.id}},
+                            ).session(&mut *session).await?;
+                            db.collection::<PlatformPublicTurn>(TURNS).update_one(
+                                doc! {"_id": &context.turn.turn_id,
+                                    "credential_api_key_id": &*old, "reply_id": bson::Bson::Null},
+                                doc! {"$set": {"credential_api_key_id": &key.id}},
+                            ).session(&mut *session).await?;
+                            Ok(())
+                        }.await;
+                        tx::transaction_result(result)
+                    })
+                },
+            )
+            .await
+            .map_err(tx::map_transaction_error)?;
         Ok(credential)
     }
 
@@ -530,7 +650,7 @@ impl PublicNyxAgentRuntime for PublicRuntime {
         key_id: &str,
         binding: &ObservedUpstreamBinding,
     ) -> AppResult<()> {
-        policy::verified_context(context)?;
+        policy::verified_context(db, context).await?;
         if binding.session_id.is_none() && binding.response_id.is_none() {
             return Err(denied());
         }
@@ -550,10 +670,33 @@ impl PublicNyxAgentRuntime for PublicRuntime {
         let encoded=Zeroizing::new(serde_json::to_string(&serde_json::json!({"session_id":binding.session_id,"response_id":binding.response_id})).map_err(|_|denied())?);
         let cipher = crypto::encrypt_runtime_key(&self.state.encryption_keys, &encoded).await?;
         let mut session = db.client().start_session().await?;
-        session.start_transaction().and_run((db.clone(),context.clone(),key_id.to_owned(),cipher),|session,(db,context,key,cipher)|Box::pin(async move {
-            let result:AppResult<_>=async {budget::fence_context(db,session,context,key).await?;
-                db.collection::<PlatformPublicSession>(SESSIONS).update_one(doc! {"_id":&context.public_session_id,"credential_api_key_id":&*key},doc! {"$set":{"upstream_may_exist":true,"upstream_binding_ciphertext":bson::Binary {subtype:bson::spec::BinarySubtype::Generic,bytes:cipher.clone()}}}).session(session).await?;Ok(())}.await;tx::transaction_result(result)
-        })).await.map_err(tx::map_transaction_error)
+        session
+            .start_transaction()
+            .and_run(
+                (db.clone(), context.clone(), key_id.to_owned(), cipher),
+                |session, (db, context, key, cipher)| {
+                    Box::pin(async move {
+                        let result: AppResult<_> = async {
+                            policy::verified_context_in_session(db, session, context).await?;
+                            budget::fence_context(db, session, context, key).await?;
+                            db.collection::<PlatformPublicSession>(SESSIONS)
+                                .update_one(
+                                    doc! {"_id": &context.public_session_id, "credential_api_key_id": &*key},
+                                    doc! {"$set": {
+                                        "upstream_may_exist": true,
+                                        "upstream_binding_ciphertext": bson::Binary {
+                                            subtype: bson::spec::BinarySubtype::Generic, bytes: cipher.clone(),
+                                        },
+                                    }},
+                                ).session(session).await?;
+                            Ok(())
+                        }.await;
+                        tx::transaction_result(result)
+                    })
+                },
+            )
+            .await
+            .map_err(tx::map_transaction_error)
     }
 
     async fn settle(
@@ -573,6 +716,7 @@ impl PublicNyxAgentRuntime for PublicRuntime {
             redact_intent_bearers(&result.text)
         };
         let text_bytes = text.len();
+        let digest = reply_digest(&self.state, &text)?;
         let cipher =
             crypto::encrypt_runtime_key(&self.state.encryption_keys, &Zeroizing::new(text)).await?;
         let reply = ReplyRef {
@@ -590,8 +734,9 @@ impl PublicNyxAgentRuntime for PublicRuntime {
                     cipher,
                     text_bytes,
                     result.error.is_some(),
+                    digest,
                 ),
-                |session, (db, context, reply, cipher, text_bytes, failed)| {
+                |session, (db, context, reply, cipher, text_bytes, failed, digest)| {
                     Box::pin(async move {
                         let result: AppResult<_> = async {
                             let cleared = settle_reply_in_session(
@@ -601,10 +746,18 @@ impl PublicNyxAgentRuntime for PublicRuntime {
                                 reply,
                                 cipher,
                                 *text_bytes,
+                                digest,
                             )
                             .await?;
                             if *failed && cleared {
-                                expire_ambiguous_session_in_session(db, session, context).await?;
+                                db.collection::<PlatformPublicTurn>(TURNS)
+                                    .update_one(
+                                        doc! {"_id": &context.turn.turn_id, "reply_id": &reply.reply_id},
+                                        doc! {"$set": {"outcome": "failed"}},
+                                    )
+                                    .session(&mut *session)
+                                    .await?;
+                                revoke_ambiguous_session_in_session(db, session, context).await?;
                             }
                             Ok(())
                         }
@@ -621,24 +774,45 @@ impl PublicNyxAgentRuntime for PublicRuntime {
 
 /// Settlement calls this after compare-clearing its own active turn. A stale
 /// duplicate cannot revoke a successor turn or a replaced credential.
-async fn expire_ambiguous_session_in_session(
+async fn revoke_ambiguous_session_in_session(
     db: &Database,
     session: &mut ClientSession,
     context: &PublicExecutionContext,
 ) -> AppResult<()> {
-    let retained=db.collection::<PlatformPublicTurn>(TURNS).find_one(doc! {
-        "_id":&context.turn.turn_id,"public_session_id":&context.public_session_id,
-        "receipt_id":&context.ingress.ingress.receipt_id,"claim_id":&context.ingress.ingress.claim_id,
-        "sponsor_owner_user_id":&context.sponsor_owner_user_id,"policy_digest":&context.policy_digest,
-    }).session(&mut *session).await?.ok_or_else(denied)?;
-    if db.collection::<PlatformPublicSession>(SESSIONS).update_one(doc! {
-        "_id":&context.public_session_id,"credential_api_key_id":&retained.credential_api_key_id,
-        "sponsor_owner_user_id":&context.sponsor_owner_user_id,"policy_digest":&context.policy_digest,
-        "upstream_may_exist":true,"active_turn":bson::Bson::Null,"revoked_at":bson::Bson::Null,
-    },vec![doc! {"$set":{"expires_at":"$$NOW"}}]).session(&mut *session).await?.matched_count==1 {
-        super::platform_public_agent_service::revoke_in_session(db,session,
-            &PublicRevocationScope::Session {public_session_id:context.public_session_id.clone()},
-            PublicRevocationReason::SessionExpired).await?;
+    let retained = db
+        .collection::<PlatformPublicTurn>(TURNS)
+        .find_one(doc! {
+            "_id": &context.turn.turn_id, "public_session_id": &context.public_session_id,
+            "receipt_id": &context.ingress.ingress.receipt_id, "claim_id": &context.ingress.ingress.claim_id,
+            "sponsor_owner_user_id": &context.sponsor_owner_user_id, "policy_digest": &context.policy_digest,
+        })
+        .session(&mut *session)
+        .await?
+        .ok_or_else(denied)?;
+    // Revocation ends access. Keep the original absolute deadline so cleanup
+    // tombstones also block an already dispatched request that arrives later.
+    let fenced = db
+        .collection::<PlatformPublicSession>(SESSIONS)
+        .update_one(
+            doc! {
+                "_id": &context.public_session_id, "credential_api_key_id": &retained.credential_api_key_id,
+                "sponsor_owner_user_id": &context.sponsor_owner_user_id, "policy_digest": &context.policy_digest,
+                "upstream_may_exist": true, "active_turn": bson::Bson::Null, "revoked_at": bson::Bson::Null,
+            },
+            doc! {"$inc": {"effect_revision": 1_i64}},
+        )
+        .session(&mut *session)
+        .await?;
+    if fenced.matched_count == 1 {
+        super::platform_public_agent_service::revoke_in_session(
+            db,
+            session,
+            &PublicRevocationScope::Session {
+                public_session_id: context.public_session_id.clone(),
+            },
+            PublicRevocationReason::SessionExpired,
+        )
+        .await?;
     }
     Ok(())
 }
@@ -654,11 +828,15 @@ fn redact_intent_bearers(text: &str) -> String {
     output
 }
 
-pub(crate) async fn load_public_reply(
-    state: &AppState,
-    destination: &ReplyDestination,
-    reply: &ReplyRef,
-) -> AppResult<Zeroizing<String>> {
+fn reply_digest(state: &AppState, body: &str) -> AppResult<String> {
+    use hmac::Mac;
+    let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(state.auth_device_hmac_key.as_slice())
+        .map_err(|_| denied())?;
+    mac.update(b"nyxid-public-reply.v1\0");
+    mac.update(body.as_bytes());
+    Ok(hex::encode(mac.finalize().into_bytes()))
+}
+fn reply_filter(destination: &ReplyDestination, reply: &ReplyRef) -> AppResult<Document> {
     let ReplyAuthority::Public {
         ingress,
         public_session_id,
@@ -675,9 +853,116 @@ pub(crate) async fn load_public_reply(
     {
         return Err(denied());
     }
-    policy::verified_readiness()?;
-    let row=state.db.collection::<PlatformPublicTurn>(TURNS).find_one(doc! {"_id":&turn.turn_id,"conversation_id":&turn.conversation_id,"public_session_id":public_session_id,"receipt_id":&ingress.ingress.receipt_id,"claim_id":&ingress.ingress.claim_id,"reply_id":&reply.reply_id,"expires_at":{"$gt":bson::DateTime::now()}}).await?.ok_or_else(denied)?;
-    crypto::decrypt_runtime_key(&state.encryption_keys, &row.reply_ciphertext).await
+    Ok(
+        doc! {"_id":&turn.turn_id,"conversation_id":&turn.conversation_id,"public_session_id":public_session_id,"receipt_id":&ingress.ingress.receipt_id,
+        "claim_id":&ingress.ingress.claim_id,"reply_id":&reply.reply_id,"expires_at":{"$gt":bson::DateTime::now()}},
+    )
+}
+pub(crate) async fn load_public_reply(
+    state: &AppState,
+    destination: &ReplyDestination,
+    reply: &ReplyRef,
+) -> AppResult<Zeroizing<String>> {
+    let filter = reply_filter(destination, reply)?;
+    let ReplyAuthority::Public {
+        ingress,
+        public_session_id,
+        ..
+    } = &destination.authority
+    else {
+        return Err(denied());
+    };
+    let session = state
+        .db
+        .collection::<PlatformPublicSession>(SESSIONS)
+        .find_one(doc! {"_id":public_session_id})
+        .await?
+        .ok_or_else(denied)?;
+    let row = state
+        .db
+        .collection::<PlatformPublicTurn>(TURNS)
+        .find_one(filter)
+        .await?
+        .ok_or_else(denied)?;
+    policy::verified_readiness(
+        &state.db,
+        &ingress.manager,
+        ingress.public_policy_revision,
+        Some(&session.policy_digest),
+        Some(&row.proof_record_id),
+    )
+    .await?;
+    let text = crypto::decrypt_runtime_key(&state.encryption_keys, &row.reply_ciphertext).await?;
+    if row.reply_digest != reply_digest(state, &text)? {
+        return Err(denied());
+    }
+    Ok(text)
+}
+
+/// Select only a saved failure marker. The notice body is fixed by NyxID and
+/// separately fenced at delivery; this never decrypts a revoked transcript.
+pub(crate) async fn public_failure_notice_expiry(
+    db: &Database,
+    destination: &ReplyDestination,
+    reply: &ReplyRef,
+) -> AppResult<Option<chrono::DateTime<Utc>>> {
+    let mut filter = reply_filter(destination, reply)?;
+    filter.insert("outcome", "failed");
+    if db
+        .collection::<PlatformPublicTurn>(TURNS)
+        .count_documents(filter)
+        .limit(1)
+        .await?
+        != 1
+    {
+        return Ok(None);
+    }
+    let ReplyAuthority::Public {
+        ingress,
+        public_session_id,
+        ..
+    } = &destination.authority
+    else {
+        return Err(denied());
+    };
+    let receipt = db
+        .collection::<PlatformManagerIngress>(RECEIPTS)
+        .find_one(doc! {
+            "_id": &ingress.ingress.receipt_id, "claim_id": &ingress.ingress.claim_id,
+            "phase": "settled", "reply_id": &reply.reply_id,
+            "execution.public_session_id": public_session_id,
+            "execution.conversation_id": &reply.turn.conversation_id,
+            "execution.turn_id": &reply.turn.turn_id,
+        })
+        .await?
+        .ok_or_else(denied)?;
+    Ok(Some(destination.expires_at.min(
+        receipt.settled_at.ok_or_else(denied)? + Duration::minutes(2),
+    )))
+}
+/// The body was decrypted before delivery admission. Compare its HMAC against
+/// the immutable settled row without nested transactions or remote KMS calls.
+pub(crate) async fn fence_public_reply_body_in_session(
+    state: &AppState,
+    session: &mut ClientSession,
+    destination: &ReplyDestination,
+    reply: &ReplyRef,
+    body: &str,
+) -> AppResult<()> {
+    let mut filter = reply_filter(destination, reply)?;
+    filter.insert("reply_digest", reply_digest(state, body)?);
+    if state
+        .db
+        .collection::<PlatformPublicTurn>(TURNS)
+        .update_one(filter, doc! {"$inc":{"reply_body_fence":1_i64}})
+        .session(session)
+        .await?
+        .matched_count
+        != 1
+    {
+        return Err(denied());
+    }
+    Ok(())
 }
 
 #[derive(serde::Deserialize)]
@@ -729,6 +1014,7 @@ async fn settle_reply_in_session(
     reply: &ReplyRef,
     ciphertext: &[u8],
     text_bytes: usize,
+    digest: &str,
 ) -> AppResult<bool> {
     let row=db.collection::<PlatformPublicTurn>(TURNS).find_one(doc! {
         "_id":&context.turn.turn_id,"public_session_id":&context.public_session_id,
@@ -736,15 +1022,25 @@ async fn settle_reply_in_session(
         "claim_id":&context.ingress.ingress.claim_id,"sponsor_owner_user_id":&context.sponsor_owner_user_id,
         "policy_digest":&context.policy_digest,
     }).session(&mut *session).await?.ok_or_else(denied)?;
-    if reply.turn != context.turn || text_bytes > row.max_output_bytes as usize {
+    if reply.turn != context.turn {
         return Err(denied());
     }
-    if let Some(existing)=&row.reply_id {
-        if *existing!=reply.reply_id {return Err(denied());}
-    } else if db.collection::<PlatformPublicTurn>(TURNS).update_one(
+    if let Some(existing) = &row.reply_id {
+        if *existing != reply.reply_id {
+            return Err(denied());
+        }
+        // The original reply and ingress settlement committed together. A late
+        // result for that reply is a read of the saved reference, and must not
+        // clear a successor or replace the original body, digest or outcome.
+        return Ok(false);
+    }
+    if text_bytes > row.max_output_bytes as usize {
+        return Err(denied());
+    }
+    if db.collection::<PlatformPublicTurn>(TURNS).update_one(
         doc! {"_id":&row.id,"reply_id":bson::Bson::Null},
         doc! {"$set":{"reply_id":&reply.reply_id,"reply_ciphertext":bson::Binary {
-            subtype:bson::spec::BinarySubtype::Generic,bytes:ciphertext.to_vec()},"outcome":"settled"}},
+            subtype:bson::spec::BinarySubtype::Generic,bytes:ciphertext.to_vec()},"outcome":"settled","reply_digest":digest}},
     ).session(&mut *session).await?.matched_count!=1 {return Err(denied());}
     ManagerIngressTurnStore::settle_public_execution(
         &super::platform_manager_ingress_service::IngressTurnStore,
@@ -932,10 +1228,47 @@ pub(crate) async fn interrupt_turn_in_session(
     context: &PublicExecutionContext,
     expired: bool,
 ) -> AppResult<()> {
-    let mut filter = doc! {"_id":&context.public_session_id,"sponsor_owner_user_id":&context.sponsor_owner_user_id,
-    "policy_digest":&context.policy_digest,"active_turn.conversation_id":&context.turn.conversation_id,
-    "active_turn.turn_id":&context.turn.turn_id,"active_turn.receipt_id":&context.ingress.ingress.receipt_id,
-    "active_turn.claim_id":&context.ingress.ingress.claim_id};
+    interrupt_identity_in_session(
+        db,
+        session,
+        &InterruptionIdentity::from_context(context),
+        expired,
+    )
+    .await
+}
+
+/// Settlement/recovery identity has no execution proof or inference authority.
+#[derive(Clone)]
+struct InterruptionIdentity {
+    public_session_id: String,
+    sponsor_owner_user_id: String,
+    policy_digest: String,
+    turn: TurnRef,
+    ingress: IngressClaim,
+}
+
+impl InterruptionIdentity {
+    fn from_context(context: &PublicExecutionContext) -> Self {
+        Self {
+            public_session_id: context.public_session_id.clone(),
+            sponsor_owner_user_id: context.sponsor_owner_user_id.clone(),
+            policy_digest: context.policy_digest.clone(),
+            turn: context.turn.clone(),
+            ingress: context.ingress.ingress.clone(),
+        }
+    }
+}
+
+async fn interrupt_identity_in_session(
+    db: &Database,
+    session: &mut ClientSession,
+    identity: &InterruptionIdentity,
+    expired: bool,
+) -> AppResult<()> {
+    let mut filter = doc! {"_id":&identity.public_session_id,"sponsor_owner_user_id":&identity.sponsor_owner_user_id,
+    "policy_digest":&identity.policy_digest,"active_turn.conversation_id":&identity.turn.conversation_id,
+    "active_turn.turn_id":&identity.turn.turn_id,"active_turn.receipt_id":&identity.ingress.receipt_id,
+    "active_turn.claim_id":&identity.ingress.claim_id};
     if expired {
         filter.insert("$expr", doc! {"$lte":["$active_turn.expires_at","$$NOW"]});
     }
@@ -956,25 +1289,25 @@ pub(crate) async fn interrupt_turn_in_session(
         "public_prepare_failed"
     };
     let changed=db.collection::<Document>(RECEIPTS).update_one(doc! {
-        "_id":&context.ingress.ingress.receipt_id,"claim_id":&context.ingress.ingress.claim_id,
-        "phase":"executing","audience.kind":"public","execution.public_session_id":&context.public_session_id,
-        "execution.conversation_id":&context.turn.conversation_id,"execution.turn_id":&context.turn.turn_id,
-        "execution.payer_user_id":&context.sponsor_owner_user_id,"execution.public_policy_digest":&context.policy_digest,
+        "_id":&identity.ingress.receipt_id,"claim_id":&identity.ingress.claim_id,
+        "phase":"executing","audience.kind":"public","execution.public_session_id":&identity.public_session_id,
+        "execution.conversation_id":&identity.turn.conversation_id,"execution.turn_id":&identity.turn.turn_id,
+        "execution.payer_user_id":&identity.sponsor_owner_user_id,"execution.public_policy_digest":&identity.policy_digest,
         "reply_id":bson::Bson::Null,
     },vec![doc! {"$set":{"phase":"interrupted","interrupted_reason":reason,"settled_at":"$$NOW"}}])
         .session(&mut *session).await?;
     if changed.matched_count != 1 {
         return Err(denied());
     }
-    db.collection::<Document>(TURNS).update_one(doc! {"_id":&context.turn.turn_id,
-        "public_session_id":&context.public_session_id,"receipt_id":&context.ingress.ingress.receipt_id,
-        "claim_id":&context.ingress.ingress.claim_id,"reply_id":bson::Bson::Null},doc! {"$set":{"outcome":reason}})
+    db.collection::<Document>(TURNS).update_one(doc! {"_id":&identity.turn.turn_id,
+        "public_session_id":&identity.public_session_id,"receipt_id":&identity.ingress.receipt_id,
+        "claim_id":&identity.ingress.claim_id,"reply_id":bson::Bson::Null},doc! {"$set":{"outcome":reason}})
         .session(&mut *session).await?;
     if let Some(loop_row) = db
         .collection::<crate::models::platform_public_budget::PublicBudgetLoop>(
             crate::models::platform_public_budget::LOOPS,
         )
-        .find_one(doc! {"public_session_id":&row.id,"turn_id":&context.turn.turn_id})
+        .find_one(doc! {"public_session_id":&row.id,"turn_id":&identity.turn.turn_id})
         .session(&mut *session)
         .await?
     {
@@ -1003,46 +1336,31 @@ pub(crate) async fn recover_expired_turn(
     let Some(turn) = &row.active_turn else {
         return Ok(());
     };
-    let context = PublicExecutionContext {
-        ingress: PublicIngress {
-            ingress: IngressClaim {
-                receipt_id: turn.receipt_id.clone(),
-                claim_id: turn.claim_id.clone(),
-            },
-            manager: ManagerAuthority {
-                profile_id: row.profile_id.clone(),
-                manager_bot_id: row.manager_bot_id.clone(),
-                telegram_bot_id: row.telegram_bot_id,
-                manager_authority_epoch: row.manager_authority_epoch,
-            },
-            sender_id: row.sender_id,
-            chat_id: row.chat_id,
-            public_policy_revision: row.public_policy_revision,
-        },
+    let identity = InterruptionIdentity {
         public_session_id: row.id.clone(),
+        sponsor_owner_user_id: row.sponsor_owner_user_id.clone(),
+        policy_digest: row.policy_digest.clone(),
         turn: TurnRef {
             conversation_id: turn.conversation_id.clone(),
             turn_id: turn.turn_id.clone(),
         },
-        sponsor_owner_user_id: row.sponsor_owner_user_id.clone(),
-        policy_digest: row.policy_digest.clone(),
-        nyxagent_profile: row.nyxagent_profile.clone(),
-        model_operations: vec![],
-        // Recovery performs no inference/admission and never uses these limits.
-        limits: PublicExecutionLimits {
-            max_duration_secs: 0,
-            max_model_calls: 0,
-            max_tool_calls: 0,
-            max_continuations: 0,
-            max_input_tokens: 0,
-            max_output_tokens: 0,
-            max_input_bytes: 0,
-            max_context_bytes: 0,
-            max_output_bytes: 0,
+        ingress: IngressClaim {
+            receipt_id: turn.receipt_id.clone(),
+            claim_id: turn.claim_id.clone(),
         },
-        expires_at: turn.expires_at,
     };
-    interrupt_turn(db, &context, true).await
+    let mut session = db.client().start_session().await?;
+    session
+        .start_transaction()
+        .and_run((db.clone(), identity), |session, (db, identity)| {
+            Box::pin(async move {
+                tx::transaction_result(
+                    interrupt_identity_in_session(db, session, identity, true).await,
+                )
+            })
+        })
+        .await
+        .map_err(tx::map_transaction_error)
 }
 
 #[cfg(test)]
@@ -1081,6 +1399,7 @@ pub(crate) mod tests {
             expires_at: expires,
         };
         let context = PublicExecutionContext {
+            proof_record_id: "test-proof".into(),
             ingress: PublicIngress {
                 ingress: IngressClaim {
                     receipt_id: uuid::Uuid::new_v4().to_string(),
@@ -1263,6 +1582,62 @@ pub(crate) mod tests {
         db.drop().await.unwrap();
     }
     #[tokio::test]
+    async fn public_reply_body_fence_rejects_altered_content_and_original_tuple_changes() {
+        let db = crate::test_utils::connect_transaction_test_database("public_reply_body").await;
+        let (row, context) = prepared_recovery_fixture(&db).await;
+        let state = crate::test_utils::test_app_state(db.clone());
+        let body = "Public FAQ reply";
+        let reply = ReplyRef {
+            turn: context.turn.clone(),
+            reply_id: uuid::Uuid::new_v4().to_string(),
+        };
+        let settled = db.collection::<Document>(TURNS).update_one(doc! {"_id":&context.turn.turn_id},
+            doc! {"$set":{"reply_id":&reply.reply_id,"reply_digest":reply_digest(&state,body).unwrap(),"outcome":"settled"}}).await.unwrap();
+        assert_eq!(settled.matched_count, 1, "prepared turn must be settled");
+        let destination = ReplyDestination {
+            manager: context.ingress.manager.clone(),
+            sender_id: context.ingress.sender_id,
+            chat_id: context.ingress.chat_id,
+            authority: ReplyAuthority::Public {
+                ingress: context.ingress.clone(),
+                public_session_id: row.id,
+                turn: context.turn.clone(),
+            },
+            expires_at: row.expires_at,
+        };
+        let mut session = db.client().start_session().await.unwrap();
+        session.start_transaction().await.unwrap();
+        fence_public_reply_body_in_session(&state, &mut session, &destination, &reply, body)
+            .await
+            .unwrap();
+        session.commit_transaction().await.unwrap();
+        session.start_transaction().await.unwrap();
+        assert!(
+            fence_public_reply_body_in_session(
+                &state,
+                &mut session,
+                &destination,
+                &reply,
+                "Altered reply"
+            )
+            .await
+            .is_err()
+        );
+        session.abort_transaction().await.unwrap();
+        let mut changed = destination.clone();
+        if let ReplyAuthority::Public { ingress, .. } = &mut changed.authority {
+            ingress.ingress.claim_id = uuid::Uuid::new_v4().to_string();
+        }
+        session.start_transaction().await.unwrap();
+        assert!(
+            fence_public_reply_body_in_session(&state, &mut session, &changed, &reply, body)
+                .await
+                .is_err()
+        );
+        session.abort_transaction().await.unwrap();
+        db.drop().await.unwrap();
+    }
+    #[tokio::test]
     async fn public_reply_and_ingress_settle_together_after_revoke_with_persisted_bounds() {
         let db = crate::test_utils::connect_transaction_test_database("public_settle_exact").await;
         let (mut row, _, mut context) = fixture();
@@ -1276,6 +1651,7 @@ pub(crate) mod tests {
             expires_at: context.expires_at,
         });
         let retained = PlatformPublicTurn {
+            proof_record_id: "test-proof".into(),
             id: context.turn.turn_id.clone(),
             public_session_id: row.id.clone(),
             conversation_id: context.turn.conversation_id.clone(),
@@ -1286,6 +1662,7 @@ pub(crate) mod tests {
             credential_api_key_id: row.credential_api_key_id.clone(),
             input_ciphertext: vec![1],
             reply_ciphertext: vec![],
+            reply_digest: String::new(),
             reply_id: None,
             outcome: None,
             max_output_bytes: 5,
@@ -1348,15 +1725,31 @@ pub(crate) mod tests {
         let mut session = db.client().start_session().await.unwrap();
         session.start_transaction().await.unwrap();
         assert!(
-            settle_reply_in_session(&db, &mut session, &context, &reply, &[2], 6)
-                .await
-                .is_err()
+            settle_reply_in_session(
+                &db,
+                &mut session,
+                &context,
+                &reply,
+                &[2],
+                6,
+                "local-test-digest"
+            )
+            .await
+            .is_err()
         );
         session.abort_transaction().await.unwrap();
         session.start_transaction().await.unwrap();
-        settle_reply_in_session(&db, &mut session, &context, &reply, &[2], 5)
-            .await
-            .unwrap();
+        settle_reply_in_session(
+            &db,
+            &mut session,
+            &context,
+            &reply,
+            &[2],
+            5,
+            "local-test-digest",
+        )
+        .await
+        .unwrap();
         session.abort_transaction().await.unwrap();
         assert!(
             db.collection::<PlatformPublicTurn>(TURNS)
@@ -1368,14 +1761,30 @@ pub(crate) mod tests {
                 .is_none()
         );
         session.start_transaction().await.unwrap();
-        settle_reply_in_session(&db, &mut session, &context, &reply, &[2], 5)
-            .await
-            .unwrap();
+        settle_reply_in_session(
+            &db,
+            &mut session,
+            &context,
+            &reply,
+            &[2],
+            5,
+            "local-test-digest",
+        )
+        .await
+        .unwrap();
         session.commit_transaction().await.unwrap();
         session.start_transaction().await.unwrap();
-        settle_reply_in_session(&db, &mut session, &context, &reply, &[3], 5)
-            .await
-            .unwrap();
+        settle_reply_in_session(
+            &db,
+            &mut session,
+            &context,
+            &reply,
+            &[3],
+            5,
+            "local-test-digest",
+        )
+        .await
+        .unwrap();
         session.commit_transaction().await.unwrap();
         assert_eq!(
             db.collection::<PlatformPublicTurn>(TURNS)
@@ -1434,6 +1843,7 @@ pub(crate) mod tests {
         let (row, context) = recovery_fixture(db).await;
         db.collection::<PlatformPublicTurn>(TURNS)
             .insert_one(PlatformPublicTurn {
+                proof_record_id: "test-proof".into(),
                 id: context.turn.turn_id.clone(),
                 public_session_id: row.id.clone(),
                 conversation_id: context.turn.conversation_id.clone(),
@@ -1444,6 +1854,7 @@ pub(crate) mod tests {
                 credential_api_key_id: row.credential_api_key_id.clone(),
                 input_ciphertext: vec![1],
                 reply_ciphertext: vec![],
+                reply_digest: String::new(),
                 reply_id: None,
                 outcome: None,
                 max_output_bytes: context.limits.max_output_bytes,
@@ -1545,11 +1956,19 @@ pub(crate) mod tests {
         };
         session.start_transaction().await.unwrap();
         assert!(
-            settle_reply_in_session(&db, &mut session, &context, &reply, &[2], 1)
-                .await
-                .unwrap()
+            settle_reply_in_session(
+                &db,
+                &mut session,
+                &context,
+                &reply,
+                &[2],
+                1,
+                "local-test-digest"
+            )
+            .await
+            .unwrap()
         );
-        expire_ambiguous_session_in_session(&db, &mut session, &context)
+        revoke_ambiguous_session_in_session(&db, &mut session, &context)
             .await
             .unwrap();
         session.abort_transaction().await.unwrap();
@@ -1600,6 +2019,7 @@ pub(crate) mod tests {
             .unwrap()
             .unwrap();
         assert!(saved.active_turn.is_none() && saved.revoked_at.is_some());
+        assert_eq!(saved.expires_at, row.expires_at);
         assert!(saved.upstream_may_exist && saved.upstream_binding_ciphertext.is_empty());
         assert!(saved.credential_ciphertext.is_empty());
         assert!(
@@ -1698,18 +2118,31 @@ pub(crate) mod tests {
             response_id: Some("response".into()),
             error: None,
         };
-        runtime
+        let SettledExecution::Saved(original_reply) = runtime
             .settle(&db, &context, &reply_id, &result)
             .await
+            .unwrap();
+        let original_turn = db
+            .collection::<Document>(TURNS)
+            .find_one(doc! {"_id": &context.turn.turn_id})
+            .await
+            .unwrap()
+            .unwrap();
+        let original_receipt = db
+            .collection::<Document>(RECEIPTS)
+            .find_one(doc! {"_id": &context.ingress.ingress.receipt_id})
+            .await
+            .unwrap()
             .unwrap();
         result.error = Some(super::super::assistant_nyxagent::TurnError::internal(
             "assistant_unavailable",
             "public_execution",
         ));
-        runtime
+        let SettledExecution::Saved(duplicate) = runtime
             .settle(&db, &context, &reply_id, &result)
             .await
             .unwrap();
+        assert_eq!(duplicate, original_reply);
         let idle = db
             .collection::<PlatformPublicSession>(SESSIONS)
             .find_one(doc! {"_id":&row.id})
@@ -1722,10 +2155,25 @@ pub(crate) mod tests {
         next.ingress.ingress.receipt_id = uuid::Uuid::new_v4().to_string();
         next.ingress.ingress.claim_id = uuid::Uuid::new_v4().to_string();
         install_turn_attempt(&db, &next, &idle).await.unwrap();
-        runtime
+        let successor_before = db
+            .collection::<Document>(SESSIONS)
+            .find_one(doc! {"_id": &row.id})
+            .await
+            .unwrap()
+            .unwrap();
+        let SettledExecution::Saved(duplicate) = runtime
             .settle(&db, &context, &reply_id, &result)
             .await
             .unwrap();
+        assert_eq!(duplicate, original_reply);
+        assert_eq!(
+            db.collection::<Document>(SESSIONS)
+                .find_one(doc! {"_id": &row.id})
+                .await
+                .unwrap()
+                .unwrap(),
+            successor_before
+        );
         let active = db
             .collection::<PlatformPublicSession>(SESSIONS)
             .find_one(doc! {"_id":&row.id})
@@ -1746,10 +2194,25 @@ pub(crate) mod tests {
             .await
             .unwrap();
         db.collection::<PlatformPublicSession>(SESSIONS).update_one(doc! {"_id":&row.id},doc! {"$set":{"credential_api_key_id":&replacement.id,"active_turn":bson::to_bson(&row.active_turn).unwrap()}}).await.unwrap();
-        runtime
+        let replaced_before = db
+            .collection::<Document>(SESSIONS)
+            .find_one(doc! {"_id": &row.id})
+            .await
+            .unwrap()
+            .unwrap();
+        let SettledExecution::Saved(duplicate) = runtime
             .settle(&db, &context, &reply_id, &result)
             .await
             .unwrap();
+        assert_eq!(duplicate, original_reply);
+        assert_eq!(
+            db.collection::<Document>(SESSIONS)
+                .find_one(doc! {"_id": &row.id})
+                .await
+                .unwrap()
+                .unwrap(),
+            replaced_before
+        );
         let replaced = db
             .collection::<PlatformPublicSession>(SESSIONS)
             .find_one(doc! {"_id":&row.id})
@@ -1765,6 +2228,38 @@ pub(crate) mod tests {
                 .unwrap()
                 .unwrap()
                 .is_active
+        );
+        assert_eq!(
+            db.collection::<Document>(TURNS)
+                .find_one(doc! {"_id": &context.turn.turn_id})
+                .await
+                .unwrap()
+                .unwrap(),
+            original_turn,
+            "late failures must preserve the original ciphertext, HMAC and outcome"
+        );
+        assert_eq!(
+            db.collection::<Document>(RECEIPTS)
+                .find_one(doc! {"_id": &context.ingress.ingress.receipt_id})
+                .await
+                .unwrap()
+                .unwrap(),
+            original_receipt
+        );
+        let retained = db
+            .collection::<PlatformPublicTurn>(TURNS)
+            .find_one(doc! {"_id": &context.turn.turn_id})
+            .await
+            .unwrap()
+            .unwrap();
+        let text =
+            crypto::decrypt_runtime_key(&runtime.state.encryption_keys, &retained.reply_ciphertext)
+                .await
+                .unwrap();
+        assert_eq!(text.as_str(), "safe reply");
+        assert_eq!(
+            retained.reply_digest,
+            reply_digest(&runtime.state, &text).unwrap()
         );
         db.drop().await.unwrap();
     }
@@ -1833,10 +2328,30 @@ pub(crate) mod tests {
         db.drop().await.unwrap();
     }
     #[tokio::test]
-    async fn expired_active_turn_recovers_without_waiting_for_the_session_expiry() {
+    async fn expired_pre_prepare_turn_recovers_without_execution_proof() {
+        assert_expired_turn_recovery(false).await;
+    }
+
+    #[tokio::test]
+    async fn expired_prepared_turn_recovers_without_waiting_for_session_expiry() {
+        assert_expired_turn_recovery(true).await;
+    }
+
+    async fn assert_expired_turn_recovery(prepared: bool) {
         let db = crate::test_utils::connect_transaction_test_database("public_turn_lease_recovery")
             .await;
-        let (row, context) = recovery_fixture(&db).await;
+        let (row, context) = if prepared {
+            prepared_recovery_fixture(&db).await
+        } else {
+            recovery_fixture(&db).await
+        };
+        assert_eq!(
+            db.collection::<Document>(TURNS)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            u64::from(prepared)
+        );
         recover_expired_turn(&db, &row).await.unwrap();
         assert!(
             db.collection::<PlatformPublicSession>(SESSIONS)
@@ -1880,6 +2395,24 @@ pub(crate) mod tests {
             receipt.get_str("interrupted_reason").unwrap(),
             "public_turn_expired"
         );
+        let retained = db
+            .collection::<PlatformPublicTurn>(TURNS)
+            .find_one(doc! {"_id": &context.turn.turn_id})
+            .await
+            .unwrap();
+        if prepared {
+            assert_eq!(
+                retained.unwrap().outcome.as_deref(),
+                Some("public_turn_expired")
+            );
+        } else {
+            assert!(
+                retained.is_none(),
+                "recovery must not fabricate an execution record"
+            );
+        }
+        // Repeated recovery remains safe after the exact tuple has been cleared.
+        recover_expired_turn(&db, &expired).await.unwrap();
         db.drop().await.unwrap();
     }
 }

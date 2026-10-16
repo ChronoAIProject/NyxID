@@ -135,7 +135,9 @@ async fn reserve_and_open_durable(
                 if admission.expires_at <= now { return Err(AppError::BillingProviderUnavailable("Public admission expired".into())); }
                 let gross=layers.iter().map(|layer| layer.reserved_credits).try_fold(Credits::ZERO,Credits::checked_add)?;
                 let digest=crate::services::platform_public_budget_service::route_digest(&ctx)?;
-                if db.collection::<PublicCallReservation>(CALLS).update_one(doc! {
+                if ctx.public_probe {
+                    crate::services::platform_public_contract_service::fund_probe_in_session(&db, session, &ctx, &layers).await?;
+                } else if db.collection::<PublicCallReservation>(CALLS).update_one(doc! {
                     "_id":&admission.call_id,"state":"prepared","billing_request_id":&ctx.billing_request_id,
                     "sponsor_owner_user_id":&ctx.billing_owner_id,"credential_api_key_id":&ctx.api_key_id,
                     "route_digest":digest,"model_id":&admission.model_id,
@@ -245,11 +247,14 @@ async fn reserve_and_open_durable(
                     resale.lago_metric_code.clone(), Some(&reservation), None));
             }
             if let Some(admission)=&ctx.public_admission {
-                use crate::models::platform_public_budget::{CALLS,PublicCallReservation};
+                use crate::models::platform_public_budget::CALLS;
                 let ids:Vec<_>=rows.iter().map(|row|row.id.clone()).collect();
                 if ids.is_empty() { return Err(AppError::BillingProviderUnavailable("Public meter is missing".into())); }
-                db.collection::<PublicCallReservation>(CALLS).update_one(doc! {"_id":&admission.call_id,"state":"funded"},
-                    doc! {"$set":{"meter_row_ids":ids}}).session(&mut *session).await?;
+                let collection = if ctx.public_probe { crate::models::platform_public_contract::PROBES } else { CALLS };
+                if db.collection::<Document>(collection).update_one(doc! {"_id":&admission.call_id,"state":"funded"},
+                    doc! {"$set":{"meter_row_ids":ids}}).session(&mut *session).await?.matched_count != 1 {
+                    return Err(AppError::Conflict("Public meter authority changed".into()));
+                }
             }
             if let Some(admission)=&ctx.managed_admission {
                 use crate::models::managed_execution::{COLLECTION_NAME,ManagedExecution};

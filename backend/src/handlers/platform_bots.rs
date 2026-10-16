@@ -695,6 +695,8 @@ impl PublicPolicyField {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuntimeInput {
+    #[serde(default, deserialize_with = "present")]
+    public_deployment_digest: Option<String>,
     #[serde(default)]
     initialize: bool,
     #[serde(default, deserialize_with = "present")]
@@ -714,6 +716,7 @@ pub struct RuntimeInput {
 impl RuntimeInput {
     fn patch(self) -> manager_contract::RuntimePatch {
         manager_contract::RuntimePatch {
+            public_deployment_digest: self.public_deployment_digest,
             initialize: self.initialize,
             expected_profile_generation: self.expected_profile_generation,
             expected: manager_contract::ExpectedRuntimeRevisions {
@@ -744,6 +747,7 @@ pub struct PublicReviewInput {
 impl PublicReviewInput {
     fn patch(self) -> manager_contract::RuntimePatch {
         manager_contract::RuntimePatch {
+            public_deployment_digest: None,
             initialize: self.initialize,
             expected_profile_generation: self.expected_profile_generation,
             expected: manager_contract::ExpectedRuntimeRevisions {
@@ -775,6 +779,7 @@ pub struct PublicPolicyResponse {
 }
 #[derive(Serialize)]
 pub struct RuntimeResponse {
+    activated_policy_digest: Option<String>,
     manager_authority_epoch: i64,
     personal_control_revision: i64,
     public_policy_revision: i64,
@@ -788,6 +793,7 @@ impl From<crate::models::platform_bot_runtime_controls::PlatformBotRuntimeContro
 {
     fn from(r: crate::models::platform_bot_runtime_controls::PlatformBotRuntimeControls) -> Self {
         Self {
+            activated_policy_digest: None,
             manager_authority_epoch: r.manager_authority_epoch,
             personal_control_revision: r.personal_control_revision,
             public_policy_revision: r.public_policy_revision,
@@ -811,6 +817,7 @@ pub struct PublicReadinessResponse {
     checked_at: Option<String>,
     expires_at: Option<String>,
     evidence_digest: Option<String>,
+    policy_digest: Option<String>,
 }
 impl PublicReadinessResponse {
     fn unavailable(reason: manager_contract::UnavailableReason) -> Self {
@@ -831,6 +838,11 @@ impl PublicReadinessResponse {
             PublicQuotaLimited => "public_quota_limited",
             RuntimeUninitialized => "runtime_uninitialized",
             SponsorUnavailable => "sponsor_unavailable",
+            PublicContractUnsupported => "public_contract_unsupported",
+            PublicAuthorityRejected => "public_authority_rejected",
+            ProfileUnavailable => "profile_unavailable",
+            ProofExpired => "proof_expired",
+            PublicTurnFailed => "public_turn_failed",
         };
         Self {
             status: "unavailable",
@@ -838,6 +850,7 @@ impl PublicReadinessResponse {
             checked_at: None,
             expires_at: None,
             evidence_digest: None,
+            policy_digest: None,
         }
     }
     fn from_readiness(r: manager_contract::PublicReadiness) -> Self {
@@ -849,6 +862,7 @@ impl PublicReadinessResponse {
                 checked_at: Some(e.checked_at.to_rfc3339()),
                 expires_at: Some(e.expires_at.to_rfc3339()),
                 evidence_digest: Some(e.evidence_digest),
+                policy_digest: Some(e.policy_digest),
             },
         }
     }
@@ -878,6 +892,44 @@ fn runtime_response(
     }
 }
 
+async fn runtime_status(
+    db: &mongodb::Database,
+    row: Option<crate::models::platform_bot_runtime_controls::PlatformBotRuntimeControls>,
+) -> AppResult<ManagerRuntimeResponse> {
+    let readiness = if let Some(r) = &row {
+        if !r.retired && !r.emergency_stopped && r.public_enabled && r.public_policy.is_some() {
+            Some(
+                crate::services::platform_public_policy::assess_enabled(
+                    db,
+                    &runtime_controls::policy(r),
+                )
+                .await?,
+            )
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    let activation = if let Some(row) = &row {
+        db.collection::<crate::models::platform_public_contract::PublicDeploymentActivation>(
+            crate::models::platform_public_contract::ACTIVATIONS,
+        )
+        .find_one(mongodb::bson::doc! {"_id": &row.platform_config_id})
+        .await?
+    } else {
+        None
+    };
+    let mut response = runtime_response(row);
+    if let Some(runtime) = &mut response.runtime {
+        runtime.activated_policy_digest = activation.map(|active| active.policy_digest);
+    }
+    if let Some(readiness) = readiness {
+        response.public_readiness = PublicReadinessResponse::from_readiness(readiness);
+    }
+    Ok(response)
+}
+
 pub async fn get_runtime(
     State(state): State<AppState>,
     auth: AuthUser,
@@ -888,9 +940,13 @@ pub async fn get_runtime(
     configs::get(&state.db, &id.to_string()).await?;
     Ok((
         private_headers(),
-        Json(runtime_response(
-            runtime_controls::get(&state.db, &id.to_string()).await?,
-        )),
+        Json(
+            runtime_status(
+                &state.db,
+                runtime_controls::get(&state.db, &id.to_string()).await?,
+            )
+            .await?,
+        ),
     ))
 }
 pub async fn put_runtime(
@@ -910,7 +966,10 @@ pub async fn put_runtime(
         producers.public.as_ref(),
     )
     .await?;
-    Ok((private_headers(), Json(runtime_response(Some(row)))))
+    Ok((
+        private_headers(),
+        Json(runtime_status(&state.db, Some(row)).await?),
+    ))
 }
 pub async fn clear_runtime_emergency_stop(
     State(state): State<AppState>,
@@ -932,7 +991,10 @@ pub async fn clear_runtime_emergency_stop(
         },
     )
     .await?;
-    Ok((private_headers(), Json(runtime_response(Some(row)))))
+    Ok((
+        private_headers(),
+        Json(runtime_status(&state.db, Some(row)).await?),
+    ))
 }
 #[derive(Serialize)]
 pub struct PublicProfileResponse {

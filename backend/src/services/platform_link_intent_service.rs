@@ -1306,6 +1306,7 @@ mod tests {
             .unwrap();
         let turn = public.active_turn.as_ref().unwrap();
         let context = PublicExecutionContext {
+            proof_record_id: "test-proof".into(),
             ingress: PublicIngress {
                 ingress: IngressClaim {
                     receipt_id: turn.receipt_id.clone(),

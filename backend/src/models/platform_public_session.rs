@@ -104,19 +104,6 @@ impl std::fmt::Debug for PublicRevocationMarker {
     }
 }
 
-#[derive(Clone, Serialize, Deserialize)]
-pub struct PublicReadinessRecord {
-    #[serde(rename = "_id")]
-    pub id: String,
-    pub profile_id: String,
-    pub public_policy_revision: i64,
-    pub candidate_digest: String,
-    pub status: String,
-    pub proof_gaps: Vec<String>,
-    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
-    pub checked_at: DateTime<Utc>,
-}
-
 impl std::fmt::Debug for PlatformPublicSession {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("PlatformPublicSession { [REDACTED] }")
