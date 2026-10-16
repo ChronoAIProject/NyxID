@@ -246,10 +246,10 @@ impl Client {
             if !notification.status().is_success() {
                 return Ok(rejection(notification.status()));
             }
-            if let Some(guard) = guard {
-                if !guard().await {
-                    return Err(Error::PreDispatchRejected);
-                }
+            if let Some(guard) = guard
+                && !guard().await
+            {
+                return Err(Error::PreDispatchRejected);
             }
             operation_dispatched = true;
             let response = self

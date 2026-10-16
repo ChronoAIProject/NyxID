@@ -1640,3 +1640,8 @@ detached jobs and independently authorized catalog/platform declarations retain
 their existing authority semantics. Preferences are checked before the card; a
 model declaration is not human target selection. See
 [NyxBot execution](NYXBOT_SERVICE_EXECUTION.md).
+
+Externally authorized Remote Machine jobs use their existing source and machine
+grants instead of NyxBot chat consent. Signed gateway requests retain exact
+service declarations, streaming and billing attribution, with live source,
+grant, runtime and lease checks before dispatch.

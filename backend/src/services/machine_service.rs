@@ -191,6 +191,7 @@ pub fn metadata(node: &Node) -> Value {
     })
 }
 
+#[cfg(test)]
 pub fn issue_job<'a>(
     db: &'a Database,
     chat: &'a ChatAuthority,

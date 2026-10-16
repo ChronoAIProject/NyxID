@@ -592,6 +592,35 @@ fn selector_is_leading_exact_and_header_binding_excludes_only_control_metadata()
 }
 
 #[test]
+fn held_execution_fingerprint_binds_credentials_within_the_process_and_preserves_pool_projection() {
+    let mut target = super::super::proxy_service::ProxyTarget {
+        service: test_utils::test_auto_connected_catalog_service(),
+        base_url: "https://example.invalid".into(),
+        auth_method: "bearer".into(),
+        auth_key_name: "Authorization".into(),
+        credential: super::super::api_key_credential_service::generate_secret().to_string(),
+        catalog_default_headers: Vec::new(),
+        user_service_default_headers: Vec::new(),
+        ws_frame_injections: Vec::new(),
+        connection_id: None,
+        target_id: None,
+        workspace_destinations_pending: false,
+    };
+    let held = execution_digest(&target);
+    let pool = execution_projection_digest(&target, false);
+    assert!(
+        held == execution_digest(&target),
+        "unchanged held authority"
+    );
+    assert!(pool == execution_projection_digest(&target, false));
+    target.credential = super::super::api_key_credential_service::generate_secret().to_string();
+    assert!(held != execution_digest(&target), "replacement must differ");
+    assert!(pool == execution_projection_digest(&target, false));
+    target.base_url.push_str("/different");
+    assert!(pool != execution_projection_digest(&target, false));
+}
+
+#[test]
 fn raw_inference_is_conservative_about_state_and_provider_effects() {
     let good = json!({"model":"test", "input":"hello", "store":false,
         "tools":[{"type":"function", "name":"lookup", "parameters":{"type":"object"}}]});

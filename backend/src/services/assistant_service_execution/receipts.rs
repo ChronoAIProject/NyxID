@@ -99,7 +99,11 @@ impl Decision {
                 return response;
             }
             use futures::StreamExt;
-            let (parts, body) = response.into_parts();
+            let (mut parts, body) = response.into_parts();
+            // A fixed length lets Hyper stop polling after the last data frame.
+            // Drive this wrapper through the upstream's clean EOF before the
+            // response completes, including for a known-length provider body.
+            parts.headers.remove(axum::http::header::CONTENT_LENGTH);
             let stream = async_stream::stream! {
                 let mut source = body.into_data_stream();
                 while let Some(chunk) = source.next().await {

@@ -1239,6 +1239,7 @@ pub(crate) async fn session_connection(
     }
 }
 
+#[cfg(test)]
 pub(crate) async fn authorize_ssh_access(
     state: &AppState,
     auth_user: &AuthUser,
@@ -1251,6 +1252,7 @@ pub(crate) async fn authorize_ssh_access(
     authorize_ssh_access_for_operation(state, auth_user, service_id, &operation).await
 }
 
+#[cfg(test)]
 pub(crate) async fn authorize_ssh_access_for_operation(
     state: &AppState,
     auth_user: &AuthUser,

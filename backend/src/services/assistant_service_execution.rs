@@ -53,8 +53,10 @@ use request_identity::selection_fingerprint;
 use request_identity::stateless_inference;
 pub use request_identity::{bind_headers, http_operation};
 pub use resolution::resolve_implicit_for_request;
+#[cfg(test)]
+use selection::owner_selector;
 use selection::scope;
-pub use selection::{bind_owner_selection, live_authority, owner_selector};
+pub use selection::{bind_owner_selection, live_authority};
 pub(crate) use selection::{live_connection_authority, require_catalog_only_selection};
 
 pub const COLLECTION: &str = "assistant_service_execution";
@@ -625,16 +627,37 @@ async fn check_inner(
 fn execution_digest(target: &super::proxy_service::ProxyTarget) -> String {
     execution_projection_digest(target, true)
 }
+
+/// Held execution projections never leave this process. A random process key
+/// binds credential equality without producing a reusable unkeyed fingerprint.
+/// Persisted consent and connection bindings use their separate versioned inputs.
+fn held_credential_fingerprint(credential: &[u8]) -> String {
+    use hmac::{Hmac, Mac};
+    use rand::{RngCore, rngs::OsRng};
+    use std::sync::LazyLock;
+    use zeroize::Zeroizing;
+
+    static KEY: LazyLock<Zeroizing<[u8; 32]>> = LazyLock::new(|| {
+        let mut key = Zeroizing::new([0; 32]);
+        OsRng.fill_bytes(key.as_mut());
+        key
+    });
+    let mut mac = Hmac::<sha2::Sha256>::new_from_slice(KEY.as_ref())
+        .expect("HMAC-SHA256 accepts a 32-byte key");
+    mac.update(b"nyxid:assistant-held-execution-credential:v1\0");
+    mac.update(credential);
+    hex::encode(mac.finalize().into_bytes())
+}
+
 fn execution_projection_digest(
     target: &super::proxy_service::ProxyTarget,
     credential: bool,
 ) -> String {
-    use sha2::{Digest, Sha256};
     digest(
         json!({"url": target.base_url, "target": target.target_id, "auth_method": target.auth_method,
         "auth_key_name": target.auth_key_name, "auth_scheme": target.service.auth_scheme,
         "custom_user_agent": target.service.custom_user_agent, "category": target.service.service_category,
-        "requires_user_credential": target.service.requires_user_credential, "credential": credential.then(|| hex::encode(Sha256::digest(target.credential.as_bytes()))),
+        "requires_user_credential": target.service.requires_user_credential, "credential": credential.then(|| held_credential_fingerprint(target.credential.as_bytes())),
         "catalog_headers": target.catalog_default_headers, "connection_headers": target.user_service_default_headers,
         "identity": [target.service.identity_propagation_mode.clone(), target.service.delegation_token_scope.clone()],
         "identity_fields": [target.service.identity_include_user_id, target.service.identity_include_email, target.service.identity_include_name,

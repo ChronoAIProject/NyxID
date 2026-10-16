@@ -326,6 +326,14 @@ async fn actual_node_only_exhaustion_records_outage_only_after_all_routes_fail()
         for all_fail in [false, true] {
             let f = orchestrator_fixture("node_exhaustion_evidence").await;
             let c = catalog(&f).await;
+            f.state
+                .db
+                .collection("service_endpoints")
+                .insert_one(test_utils::test_service_endpoint(
+                    &c, "read", "GET", "/read",
+                ))
+                .await
+                .unwrap();
             // This connection uses a node-owned credential, not a catalog master key.
             f.state
                 .db

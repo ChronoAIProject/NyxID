@@ -45,6 +45,7 @@ async fn signed_call(
     let mut request = nyxid_machine::Request {
         version: 1,
         authority: None,
+        external_authority: None,
         request_id: uuid::Uuid::new_v4().to_string(),
         node_id: node.id.clone(),
         operation: nyxid_machine::Operation::ServiceCall,
@@ -111,6 +112,22 @@ async fn actual_job_launch_detached_gateway_and_revocation_preserve_personal_pla
             let mut catalog = test_utils::test_auto_connected_catalog_service();
             catalog.slug = slug.clone();
             catalog.base_url = server.uri();
+            catalog.auth_method = "bearer".into();
+            catalog.auth_key_name = "Authorization".into();
+            catalog.platform_key = Some(crate::models::downstream_service::PlatformKeyConfig {
+                enabled: true,
+                audience: crate::models::downstream_service::PlatformKeyAudience::Public,
+                allowed_owner_ids: vec![],
+            });
+            catalog.credential_encrypted = f
+                .state
+                .encryption_keys
+                .encrypt(b"platform-test-credential")
+                .await
+                .unwrap();
+            assert!(crate::services::platform_key_service::has_platform_key(
+                &catalog
+            ));
             let id = catalog.id.clone();
             f.state
                 .db
@@ -240,7 +257,44 @@ async fn actual_job_launch_detached_gateway_and_revocation_preserve_personal_pla
                 .await
                 .unwrap();
         } else {
+            let target = Box::pin(crate::services::proxy_service::resolve_proxy_target(
+                &f.state.db,
+                &f.state.encryption_keys,
+                &f.owner,
+                &id,
+                crate::mw::rate_limit::PlatformUserRateLimitPolicy::disabled(),
+            ))
+            .await
+            .unwrap();
+            let persisted = f
+                .state
+                .db
+                .collection::<crate::models::machine_job::MachineJob>(JOBS)
+                .find_one(doc! {"_id":&job})
+                .await
+                .unwrap()
+                .unwrap();
+            let ingress = crate::services::machine_gateway_service::Ingress {
+                declared_id: id.clone(),
+                git: None,
+                job: Some((&persisted).into()),
+            };
+            let held = crate::services::assistant_service_execution::HttpEgressGuard::for_proxy(
+                None,
+                Some(&ingress),
+                &f.state.db,
+                &f.state.encryption_keys,
+                &target,
+                "POST",
+                "/upload",
+            )
+            .expect("catalog-only assistant job must have a final egress guard");
+            held.revalidate().await.unwrap();
             f.state.db.collection::<Document>(JOBS).update_one(doc! {"_id":&job},doc! {"$set":{"expires_at":bson::DateTime::from_chrono(chrono::Utc::now()-chrono::Duration::seconds(1))}}).await.unwrap();
+            assert!(
+                held.revalidate().await.is_err(),
+                "held catalog authority must expire before send"
+            );
         }
         assert!(signed_call(&f, &n, &job, &slug).await.is_err());
         assert_eq!(server.received_requests().await.unwrap().len(), 1);

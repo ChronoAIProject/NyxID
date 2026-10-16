@@ -39,7 +39,9 @@ async fn result(response: Response, error: bool) -> Value {
     let body: Value = serde_json::from_slice(&bytes).unwrap();
     assert!(body.get("error").is_none(), "{body}");
     assert_eq!(body["result"]["isError"], error, "{body}");
-    serde_json::from_str(body["result"]["content"][0]["text"].as_str().unwrap()).unwrap()
+    serde_json::from_str(body["result"]["content"][0]["text"].as_str().unwrap()).unwrap_or_else(
+        |error| panic!("Expected structured tool result: {error}; envelope: {body}"),
+    )
 }
 
 async fn direct_call(f: &Fixture, auth: &McpAuthContext, name: &str, args: Value) -> Response {

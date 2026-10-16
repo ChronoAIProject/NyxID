@@ -1,21 +1,23 @@
 use super::*;
 
-pub async fn live_authority(
-    db: &Database,
-    original: &acks::ChatAuthority,
-    route: &str,
-) -> AppResult<acks::ChatAuthority> {
-    reload_live_authority(db, original, route, None, false).await
+pub fn live_authority<'a>(
+    db: &'a Database,
+    original: &'a acks::ChatAuthority,
+    route: &'a str,
+) -> futures::future::BoxFuture<'a, AppResult<acks::ChatAuthority>> {
+    Box::pin(async move { reload_live_authority(db, original, route, None, false).await })
 }
 
-pub(crate) async fn live_connection_authority(
-    db: &Database,
-    original: &acks::ChatAuthority,
-    route: &str,
-    connection: &str,
+pub(crate) fn live_connection_authority<'a>(
+    db: &'a Database,
+    original: &'a acks::ChatAuthority,
+    route: &'a str,
+    connection: &'a str,
     require_service_grant: bool,
-) -> AppResult<acks::ChatAuthority> {
-    reload_live_authority(db, original, route, Some(connection), require_service_grant).await
+) -> futures::future::BoxFuture<'a, AppResult<acks::ChatAuthority>> {
+    Box::pin(async move {
+        reload_live_authority(db, original, route, Some(connection), require_service_grant).await
+    })
 }
 
 async fn reload_live_authority(

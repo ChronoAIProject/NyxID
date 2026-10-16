@@ -59,7 +59,10 @@ async fn completion_receipt_selects_approval_and_rejects_failed_or_abandoned_str
             "dropped" => Body::from_stream(source.chain(futures::stream::pending())),
             _ => Body::from_stream(source),
         };
-        let response = axum::response::Response::new(body);
+        let response = axum::response::Response::builder()
+            .header("content-length", "4")
+            .body(body)
+            .unwrap();
         let approval = HttpApprovalReceipt::new(
             Some(acks::AutoAllowed {
                 class: acks::OwnerActionClass::Read,
@@ -79,6 +82,7 @@ async fn completion_receipt_selects_approval_and_rejects_failed_or_abandoned_str
                 approval,
             )
             .await;
+        assert!(!response.headers().contains_key("content-length"));
         if outcome == "dropped" {
             drop(response);
         } else {
@@ -167,6 +171,9 @@ async fn actual_http_receipts_choose_one_approval_on_success_head_and_bodyless_s
             .await
             .unwrap();
         assert_eq!(response.status().as_u16(), status, "{method} {path}");
+        if method == "GET" {
+            assert!(!response.headers().contains_key("content-length"));
+        }
         response.bytes().await.unwrap();
         let rows = receipts(&f).await;
         assert_eq!(rows.len(), index + 1, "{method} {path}");

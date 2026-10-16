@@ -95,100 +95,108 @@ pub(super) async fn verified_unavailable(
 /// Record only classified transport evidence attached to the private admission.
 /// A credential/config replacement cannot inherit an earlier outage exemption.
 impl Admission {
-    pub async fn exhausted_node_routes(
-        &self,
-        db: &Database,
-        chat: &acks::ChatAuthority,
-        failures: &NodeFailureEvidence,
-    ) -> AppResult<()> {
-        if failures.attempted && !failures.disqualified && (!failures.dispatched || self.read) {
-            self.record_unavailable(
-                db,
-                chat,
-                if failures.dispatched {
-                    "read_temporary"
-                } else {
-                    "node_pre_dispatch"
-                },
-            )
-            .await?;
-        }
-        Ok(())
+    pub fn exhausted_node_routes<'a>(
+        &'a self,
+        db: &'a Database,
+        chat: &'a acks::ChatAuthority,
+        failures: &'a NodeFailureEvidence,
+    ) -> futures::future::BoxFuture<'a, AppResult<()>> {
+        Box::pin(async move {
+            if failures.attempted && !failures.disqualified && (!failures.dispatched || self.read) {
+                self.record_unavailable(
+                    db,
+                    chat,
+                    if failures.dispatched {
+                        "read_temporary"
+                    } else {
+                        "node_pre_dispatch"
+                    },
+                )
+                .await?;
+            }
+            Ok(())
+        })
     }
 
-    pub async fn transport_failure(
-        &self,
-        db: &Database,
-        chat: &acks::ChatAuthority,
-        error: &crate::services::proxy_service::ForwardRequestError,
-    ) -> AppResult<()> {
-        if let crate::services::proxy_service::ForwardRequestError::Transport(error) = error {
-            if error.is_connect() {
-                self.record_unavailable(db, chat, "pre_dispatch").await?;
-            } else if self.read && error.is_timeout() {
+    pub fn transport_failure<'a>(
+        &'a self,
+        db: &'a Database,
+        chat: &'a acks::ChatAuthority,
+        error: &'a crate::services::proxy_service::ForwardRequestError,
+    ) -> futures::future::BoxFuture<'a, AppResult<()>> {
+        Box::pin(async move {
+            if let crate::services::proxy_service::ForwardRequestError::Transport(error) = error {
+                if error.is_connect() {
+                    self.record_unavailable(db, chat, "pre_dispatch").await?;
+                } else if self.read && error.is_timeout() {
+                    self.record_unavailable(db, chat, "read_temporary").await?;
+                }
+            }
+            Ok(())
+        })
+    }
+
+    pub fn response<'a>(
+        &'a self,
+        db: &'a Database,
+        chat: &'a acks::ChatAuthority,
+        status: u16,
+    ) -> futures::future::BoxFuture<'a, AppResult<()>> {
+        Box::pin(async move {
+            if self.read && matches!(status, 429 | 502 | 503 | 504) {
                 self.record_unavailable(db, chat, "read_temporary").await?;
             }
-        }
-        Ok(())
+            Ok(())
+        })
     }
 
-    pub async fn response(
-        &self,
-        db: &Database,
-        chat: &acks::ChatAuthority,
-        status: u16,
-    ) -> AppResult<()> {
-        if self.read && matches!(status, 429 | 502 | 503 | 504) {
-            self.record_unavailable(db, chat, "read_temporary").await?;
-        }
-        Ok(())
-    }
-
-    pub(crate) async fn record_unavailable(
-        &self,
-        db: &Database,
-        chat: &acks::ChatAuthority,
-        evidence: &str,
-    ) -> AppResult<()> {
-        chat.ensure_live_turn(db, None, None, "assistant.service_failure")
-            .await?;
-        if self.binding != connection_binding(db, &self.connection, &self.api_key_id).await? {
-            return Ok(());
-        }
-        let fingerprint = digest(
-            json!({"connection":self.connection,"operation":self.operation,"binding":self.binding}),
-        );
-        let bucket = digest(
-            json!({"user":chat.user_id,"conversation":chat.conversation_id,
-            "key":chat.api_key_id,"turn":chat.turn_id,"kind":"unavailable_bucket"}),
-        );
-        let now = bson::DateTime::now();
-        let entry = doc! {"fingerprint":&fingerprint,"connection_id":&self.connection,"operation":&self.operation,
-        "binding":&self.binding,"selection_operation": selection_fingerprint(&self.operation_identity), "evidence":evidence,"expires_at":bson::DateTime::from_chrono(Utc::now()+Duration::seconds(60))};
-        // One atomic per-turn array. Deduplication, expiry removal and capacity
-        // admission happen in the same update under concurrent failures.
-        let update = vec![doc! {"$set": {
-            "user_id":&chat.user_id,"conversation_id":&chat.conversation_id,"api_key_id":&chat.api_key_id,
-            "turn_id":&chat.turn_id,"kind":"unavailable_bucket",
-            "expires_at":bson::DateTime::from_chrono(Utc::now()+Duration::minutes(35)),
-            "entries":{"$let":{"vars":{"remaining":{"$filter":{"input":{"$ifNull":["$entries",[]]},"as":"entry",
-                "cond":{"$and":[{"$gt":["$$entry.expires_at",now]},{"$ne":["$$entry.fingerprint",&fingerprint]}]}}}},
-                "in":{"$cond":[{"$lt":[{"$size":"$$remaining"},MAX_EVIDENCE as i64]},
-                    {"$concatArrays":["$$remaining",{"$literal":[entry]}]},"$$remaining"]}}},
-        }}];
-        let collection = db.collection::<Document>(COLLECTION);
-        let result = collection
-            .update_one(doc! {"_id": &bucket}, update.clone())
-            .upsert(true)
-            .await;
-        match result {
-            Ok(_) => {}
-            Err(error) if crate::services::service_pool_service::is_duplicate_key(&error) => {
-                collection.update_one(doc! {"_id": &bucket}, update).await?;
+    pub(crate) fn record_unavailable<'a>(
+        &'a self,
+        db: &'a Database,
+        chat: &'a acks::ChatAuthority,
+        evidence: &'a str,
+    ) -> futures::future::BoxFuture<'a, AppResult<()>> {
+        Box::pin(async move {
+            chat.ensure_live_turn(db, None, None, "assistant.service_failure")
+                .await?;
+            if self.binding != connection_binding(db, &self.connection, &self.api_key_id).await? {
+                return Ok(());
             }
-            Err(error) => return Err(error.into()),
-        }
-        Ok(())
+            let fingerprint = digest(
+                json!({"connection":self.connection,"operation":self.operation,"binding":self.binding}),
+            );
+            let bucket = digest(
+                json!({"user":chat.user_id,"conversation":chat.conversation_id,
+            "key":chat.api_key_id,"turn":chat.turn_id,"kind":"unavailable_bucket"}),
+            );
+            let now = bson::DateTime::now();
+            let entry = doc! {"fingerprint":&fingerprint,"connection_id":&self.connection,"operation":&self.operation,
+            "binding":&self.binding,"selection_operation": selection_fingerprint(&self.operation_identity), "evidence":evidence,"expires_at":bson::DateTime::from_chrono(Utc::now()+Duration::seconds(60))};
+            // One atomic per-turn array. Deduplication, expiry removal and capacity
+            // admission happen in the same update under concurrent failures.
+            let update = vec![doc! {"$set": {
+                "user_id":&chat.user_id,"conversation_id":&chat.conversation_id,"api_key_id":&chat.api_key_id,
+                "turn_id":&chat.turn_id,"kind":"unavailable_bucket",
+                "expires_at":bson::DateTime::from_chrono(Utc::now()+Duration::minutes(35)),
+                "entries":{"$let":{"vars":{"remaining":{"$filter":{"input":{"$ifNull":["$entries",[]]},"as":"entry",
+                    "cond":{"$and":[{"$gt":["$$entry.expires_at",now]},{"$ne":["$$entry.fingerprint",&fingerprint]}]}}}},
+                    "in":{"$cond":[{"$lt":[{"$size":"$$remaining"},MAX_EVIDENCE as i64]},
+                        {"$concatArrays":["$$remaining",{"$literal":[entry]}]},"$$remaining"]}}},
+            }}];
+            let collection = db.collection::<Document>(COLLECTION);
+            let result = collection
+                .update_one(doc! {"_id": &bucket}, update.clone())
+                .upsert(true)
+                .await;
+            match result {
+                Ok(_) => {}
+                Err(error) if crate::services::service_pool_service::is_duplicate_key(&error) => {
+                    collection.update_one(doc! {"_id": &bucket}, update).await?;
+                }
+                Err(error) => return Err(error.into()),
+            }
+            Ok(())
+        })
     }
 }
 
@@ -237,21 +245,23 @@ pub(super) async fn pool_predispatch_failure(
     Ok(None)
 }
 
-pub async fn observe_transport(
-    db: &Database,
-    chat: Option<&acks::ChatAuthority>,
-    admission: Option<&Admission>,
+pub fn observe_transport<'a>(
+    db: &'a Database,
+    chat: Option<&'a acks::ChatAuthority>,
+    admission: Option<&'a Admission>,
     result: Result<reqwest::Response, crate::services::proxy_service::ForwardRequestError>,
-) -> AppResult<reqwest::Response> {
-    if let (Some(chat), Some(admission)) = (chat, admission) {
-        match &result {
-            Ok(response) => {
-                admission
-                    .response(db, chat, response.status().as_u16())
-                    .await?
+) -> futures::future::BoxFuture<'a, AppResult<reqwest::Response>> {
+    Box::pin(async move {
+        if let (Some(chat), Some(admission)) = (chat, admission) {
+            match &result {
+                Ok(response) => {
+                    admission
+                        .response(db, chat, response.status().as_u16())
+                        .await?
+                }
+                Err(error) => admission.transport_failure(db, chat, error).await?,
             }
-            Err(error) => admission.transport_failure(db, chat, error).await?,
         }
-    }
-    result.map_err(crate::services::proxy_service::ForwardRequestError::into_app_error)
+        result.map_err(crate::services::proxy_service::ForwardRequestError::into_app_error)
+    })
 }

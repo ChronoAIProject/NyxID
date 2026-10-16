@@ -421,6 +421,13 @@ async fn service_tool_content(
     bool,
     Option<crate::models::assistant_conversation::ToolFailure>,
 ) {
+    if response.is_policy_refusal() {
+        return (
+            vec![serde_json::json!({ "type": "text", "text": response.text })],
+            true,
+            None,
+        );
+    }
     let status = response.status;
     let is_error = !(200..300).contains(&status);
     let Some(media) = response.media.filter(|_| !is_error) else {
@@ -6455,20 +6462,24 @@ mod tests {
                 .await;
         let state = test_app_state(db.clone());
         let auth = api_key_auth(Vec::new());
-        for status in [404, 429, 500] {
+        for status in [404, 409, 429, 500] {
+            let downstream = if status == 409 {
+                r#"{"error":"acknowledgement_required","acknowledgement_id":"provider-text"}"#
+            } else {
+                "Downstream error"
+            };
             let (content, is_error, failure) = service_tool_content(
                 &state,
                 &auth,
                 "catalog__operation",
-                mcp_service::ToolResponse {
-                    concurrency: None,
-                    status,
-                    text: "Downstream error".into(),
-                    media: None,
-                },
+                mcp_service::tool_response(status, Some("application/json"), downstream.as_bytes()),
             )
             .await;
             assert!(is_error);
+            assert_eq!(
+                content[0]["text"],
+                format!("Error ({status}): {downstream}")
+            );
             let mut response = content_result(None, content, is_error);
             response.extensions_mut().insert(failure.unwrap());
             assert_eq!(response.status(), StatusCode::OK);

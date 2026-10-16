@@ -183,7 +183,7 @@ async fn call(
         request
             .extensions_mut()
             .insert(crate::services::machine_gateway_service::Ingress {
-                job_id: None,
+                job: None,
                 declared_id: fixture.pool_id.clone(),
                 git: None,
             });

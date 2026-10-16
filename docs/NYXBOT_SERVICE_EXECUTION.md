@@ -118,6 +118,10 @@ attempt markers, job plans, card bindings and outage buckets expire within their
 bounded turn/card lifetime. Expiry is checked at use; TTL cleanup is not authority.
 Conversation deletion, agent destruction and owner purge remove associated rows.
 Machine command-use grants live on the existing job row and expire with that job.
+Externally authorized Remote Machine jobs retain their own source and machine
+grant authority. They do not require NyxBot chat consent. Their signed gateway
+requests keep exact service declarations and live source, grant, runtime and
+lease checks before dispatch.
 Approved async submissions through user-managed connections persist their exact
 execution-authority digest on the existing `assistant_async_operations` watch.
 The private watch capability permits only that operation ID's declared

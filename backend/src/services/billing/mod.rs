@@ -690,16 +690,18 @@ impl BillingService {
     /// A private sender fence proved that the operation was never sent. Undo
     /// pre-send bookkeeping before releasing its reservation; transport errors
     /// and cancellation after dispatch must use the ordinary settlement path.
-    pub(crate) async fn reject_before_send(
-        &self,
-        metered: &MeteredProxyContext,
-        reason: &str,
+    pub(crate) fn reject_before_send<'a>(
+        &'a self,
+        metered: &'a MeteredProxyContext,
+        reason: &'a str,
         previously_dispatched: bool,
-    ) -> AppResult<()> {
-        if previously_dispatched {
-            return self.fail(metered, reason).await;
-        }
-        meter::reject_before_send(&self.db, metered, reason).await
+    ) -> futures::future::BoxFuture<'a, AppResult<()>> {
+        Box::pin(async move {
+            if previously_dispatched {
+                return self.fail(metered, reason).await;
+            }
+            meter::reject_before_send(&self.db, metered, reason).await
+        })
     }
 }
 

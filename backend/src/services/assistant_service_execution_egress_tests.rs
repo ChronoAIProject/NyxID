@@ -248,7 +248,22 @@ async fn actual_proxy_and_mcp_delayed_exchange_revocation_prevents_operation_sen
                     .await
                     .unwrap();
             } else {
-                f.state.db.collection::<Document>("user_api_keys").update_one(doc!{"_id":&key},vec![doc!{"$set":{"credential_epoch":{"$add":[{"$ifNull":["$credential_epoch",0]},1]}}}]).await.unwrap();
+                let before =
+                    crate::services::user_api_key_service::get_api_key(&f.state.db, &owner, &key)
+                        .await
+                        .unwrap()
+                        .credential_epoch;
+                f.state.db.collection::<Document>("user_api_keys").update_one(doc!{"_id":&key},vec![doc!{"$set":{"credential_epoch":{"$add":[{"$ifNull":["$credential_epoch",1]},1]}}}]).await.unwrap();
+                let after =
+                    crate::services::user_api_key_service::get_api_key(&f.state.db, &owner, &key)
+                        .await
+                        .unwrap()
+                        .credential_epoch;
+                assert_eq!(
+                    after,
+                    before + 1,
+                    "replace must change actual credential generation"
+                );
             }
             release.notify_one();
             let result = tokio::time::timeout(std::time::Duration::from_secs(10), request)

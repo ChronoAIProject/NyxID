@@ -240,81 +240,87 @@ pub async fn prepare(
 
 /// Reuse the job's existing detached authority, then check exact service and
 /// credential generation. No synthetic live turn and no owner-consent bypass.
-pub async fn validate(
-    db: &mongodb::Database,
-    job_id: &str,
-    connection: &str,
-    owner: &str,
-) -> AppResult<crate::mw::auth::AuthUser> {
-    let job = db
-        .collection::<crate::models::machine_job::MachineJob>("machine_jobs")
-        .find_one(doc! {"_id":job_id,
-        "state":"running","expires_at":{"$gt":bson::DateTime::now()}})
-        .await?
-        .ok_or(AppError::MachineAuthorityStale)?;
-    let auth = Box::pin(super::machine_gateway_service::job_auth(db, &job)).await?;
-    validate_lease(db, &job).await?;
-    super::org_agent_service::authorize_execution(db, &auth, Some(connection)).await?;
-    if !auth.allow_all_services && !auth.allowed_service_ids.iter().any(|id| id == connection) {
-        return Err(AppError::MachinePermissionRevoked);
-    }
-    let access = super::org_service::resolve_owner_access(db, &job.user_id, owner).await?;
-    let can_proxy = match &access {
-        super::org_service::OwnerAccess::Direct
-        | super::org_service::OwnerAccess::AsOrgAdmin { .. } => true,
-        super::org_service::OwnerAccess::AsOrgMember { role, .. } => role.can_proxy(),
-        super::org_service::OwnerAccess::Forbidden => false,
-    };
-    if !can_proxy || !access.allows_resource(connection) {
-        return Err(AppError::MachinePermissionRevoked);
-    }
-    let row = db
-        .collection::<Document>("machine_jobs")
-        .find_one(doc! {"_id":job_id})
-        .await?
-        .ok_or(AppError::MachineAuthorityStale)?;
-    if let Ok(grant) = row.get_document("service_use") {
-        let binding = execution::connection_binding(db, connection, &job.api_key_id).await?;
-        if grant.get_str("job_id") != Ok(job_id)
-            || grant.get_str("api_key_id") != Ok(job.api_key_id.as_str())
-            || !grant.get_array("bindings").is_ok_and(|rows| {
-                rows.iter().any(|row| {
-                    row.as_document().is_some_and(|r| {
-                        r.get_str("connection_id") == Ok(connection)
-                            && r.get_str("owner") == Ok(owner)
-                            && r.get_str("binding") == Ok(binding.as_str())
+pub fn validate<'a>(
+    db: &'a mongodb::Database,
+    job_id: &'a str,
+    connection: &'a str,
+    owner: &'a str,
+) -> futures::future::BoxFuture<'a, AppResult<crate::mw::auth::AuthUser>> {
+    Box::pin(async move {
+        let job = db
+            .collection::<crate::models::machine_job::MachineJob>("machine_jobs")
+            .find_one(doc! {"_id":job_id,
+            "state":"running","expires_at":{"$gt":bson::DateTime::now()}})
+            .await?
+            .ok_or(AppError::MachineAuthorityStale)?;
+        let auth = Box::pin(super::machine_gateway_service::job_auth(db, &job)).await?;
+        validate_lease(db, &job).await?;
+        super::org_agent_service::authorize_execution(db, &auth, Some(connection)).await?;
+        if !auth.allow_all_services && !auth.allowed_service_ids.iter().any(|id| id == connection) {
+            return Err(AppError::MachinePermissionRevoked);
+        }
+        let access = super::org_service::resolve_owner_access(db, &job.user_id, owner).await?;
+        let can_proxy = match &access {
+            super::org_service::OwnerAccess::Direct
+            | super::org_service::OwnerAccess::AsOrgAdmin { .. } => true,
+            super::org_service::OwnerAccess::AsOrgMember { role, .. } => role.can_proxy(),
+            super::org_service::OwnerAccess::Forbidden => false,
+        };
+        if !can_proxy || !access.allows_resource(connection) {
+            return Err(AppError::MachinePermissionRevoked);
+        }
+        let row = db
+            .collection::<Document>("machine_jobs")
+            .find_one(doc! {"_id":job_id})
+            .await?
+            .ok_or(AppError::MachineAuthorityStale)?;
+        if let Ok(grant) = row.get_document("service_use") {
+            let binding = execution::connection_binding(db, connection, &job.api_key_id).await?;
+            if grant.get_str("job_id") != Ok(job_id)
+                || grant.get_str("api_key_id") != Ok(job.api_key_id.as_str())
+                || !grant.get_array("bindings").is_ok_and(|rows| {
+                    rows.iter().any(|row| {
+                        row.as_document().is_some_and(|r| {
+                            r.get_str("connection_id") == Ok(connection)
+                                && r.get_str("owner") == Ok(owner)
+                                && r.get_str("binding") == Ok(binding.as_str())
+                        })
                     })
                 })
-            })
-        {
-            return Err(AppError::MachineAuthorityStale);
+            {
+                return Err(AppError::MachineAuthorityStale);
+            }
+        } else if owner != job.user_id {
+            return Err(AppError::MachinePermissionRevoked);
         }
-    } else if owner != job.user_id {
-        return Err(AppError::MachinePermissionRevoked);
-    }
-    Ok(auth)
+        Ok(auth)
+    })
 }
 
-pub async fn validate_catalog(
-    db: &mongodb::Database,
-    job_id: &str,
-    catalog: &str,
-) -> AppResult<()> {
-    let job = db
-        .collection::<crate::models::machine_job::MachineJob>("machine_jobs")
-        .find_one(doc! {"_id":job_id,"state":"running","expires_at":{"$gt":bson::DateTime::now()}})
-        .await?
-        .ok_or(AppError::MachineAuthorityStale)?;
-    if !job.services.iter().any(|service| service.id == catalog) {
-        return Err(AppError::MachinePermissionRevoked);
-    }
-    let auth = Box::pin(super::machine_gateway_service::job_auth(db, &job)).await?;
-    validate_lease(db, &job).await?;
-    super::org_agent_service::authorize_execution(db, &auth, Some(catalog)).await?;
-    if !auth.allow_all_services && !auth.allowed_service_ids.iter().any(|id| id == catalog) {
-        return Err(AppError::MachinePermissionRevoked);
-    }
-    Ok(())
+pub fn validate_catalog<'a>(
+    db: &'a mongodb::Database,
+    job_id: &'a str,
+    catalog: &'a str,
+) -> futures::future::BoxFuture<'a, AppResult<()>> {
+    Box::pin(async move {
+        let job = db
+            .collection::<crate::models::machine_job::MachineJob>("machine_jobs")
+            .find_one(
+                doc! {"_id":job_id,"state":"running","expires_at":{"$gt":bson::DateTime::now()}},
+            )
+            .await?
+            .ok_or(AppError::MachineAuthorityStale)?;
+        if !job.services.iter().any(|service| service.id == catalog) {
+            return Err(AppError::MachinePermissionRevoked);
+        }
+        let auth = Box::pin(super::machine_gateway_service::job_auth(db, &job)).await?;
+        validate_lease(db, &job).await?;
+        super::org_agent_service::authorize_execution(db, &auth, Some(catalog)).await?;
+        if !auth.allow_all_services && !auth.allowed_service_ids.iter().any(|id| id == catalog) {
+            return Err(AppError::MachinePermissionRevoked);
+        }
+        Ok(())
+    })
 }
 
 async fn validate_lease(

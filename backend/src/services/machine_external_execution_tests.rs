@@ -1,5 +1,8 @@
 //! Authenticated source -> transactional grant/job/lease -> signed Node dispatch.
 //! The peer verifies production signatures but does not claim Linux execution.
+#[path = "machine_external_gateway_policy_tests.rs"]
+mod gateway_policy;
+
 use super::*;
 use crate::{
     crypto::token::{agent_key_display_prefix, hash_token},

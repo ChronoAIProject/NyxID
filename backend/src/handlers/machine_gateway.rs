@@ -557,7 +557,7 @@ async fn authorize_and_execute(
         .insert(crate::services::machine_gateway_service::Ingress {
             declared_id: selected.id.clone(),
             git,
-            job_id: Some(job.id.clone()),
+            job: Some((&job).into()),
         });
     let (grant_id, principal_kind) = match &job.binding {
         Some(crate::models::machine_job::MachineJobBinding::External {

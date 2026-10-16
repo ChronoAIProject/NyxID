@@ -2346,7 +2346,7 @@ pub(crate) async fn proxy_request_by_slug_inner(
     if request
         .extensions()
         .get::<crate::services::machine_gateway_service::Ingress>()
-        .is_none_or(|ingress| ingress.job_id.is_none())
+        .is_none_or(|ingress| ingress.job_id().is_none())
     {
         auth_user
             .ensure_live_assistant_turn(&state.db, "proxy.slug")
@@ -4256,7 +4256,7 @@ async fn execute_resolved_proxy_inner(
     // the way to the upstream connection instead of materializing the body.
     let stream_upload = machine_ingress
         .as_ref()
-        .is_some_and(|ingress| ingress.job_id.is_some())
+        .is_some_and(|ingress| ingress.job_id().is_some())
         && !is_ws
         && crate::services::machine_gateway_service::can_stream(&target, &all_headers, machine_git);
     let (body_bytes, ws_request, mut streaming_body, upload_meter) = if is_ws {
@@ -4372,7 +4372,7 @@ async fn execute_resolved_proxy_inner(
     *assistant_decision_slot = Some(
         if let Some(job) = machine_ingress
             .as_ref()
-            .and_then(|ingress| ingress.job_id.as_deref())
+            .and_then(|ingress| ingress.assistant_job_id())
         {
             crate::services::assistant_service_execution::check_job_http(
                 state,
@@ -5096,33 +5096,18 @@ async fn execute_resolved_proxy_inner(
             }
         };
 
-        if let (Some(chat), Some(admission), Some(id)) = (
-            auth_user.assistant_chat.as_deref(),
-            assistant_decision.admission.as_ref(),
-            resolved_user_service_id.as_deref(),
-        ) {
-            let validation = async {
-                crate::services::assistant_service_execution::verify_resolved(
+        if let Some(admission) = assistant_decision.admission.as_ref() {
+            let validation = admission
+                .http_egress(
                     &state.db,
                     &state.encryption_keys,
-                    chat,
-                    id,
                     &target,
                     method.as_str(),
                     path,
                 )
-                .await?;
-                admission.revalidate(&state.db, id, Some(&target)).await?;
-                crate::services::assistant_service_execution::verify_node_route(
-                    &state.db,
-                    chat,
-                    id,
-                    node_route.as_ref(),
-                    &target,
-                )
-                .await
-            }
-            .await;
+                .routed(node_route.as_ref())
+                .revalidate()
+                .await;
             if let Err(error) = validation {
                 if let Some(reservation) = durable_reservation.as_ref() {
                     durable_operation_grant_service::mark_pre_dispatch_rejected(
@@ -5339,7 +5324,7 @@ async fn execute_resolved_proxy_inner(
             }
             let start = std::time::Instant::now();
             if resolved_user_service_id.is_none() {
-                if let Some(job) = machine_ingress.as_ref().and_then(|i| i.job_id.as_deref()) {
+                if let Some(job) = machine_ingress.as_ref().and_then(|i| i.assistant_job_id()) {
                     if let Err(error) =
                         crate::services::assistant_job_service_use::validate_catalog(
                             &state.db,
@@ -5365,36 +5350,17 @@ async fn execute_resolved_proxy_inner(
                 }
             }
             if let Some(admission) = assistant_decision.admission.as_ref() {
-                let revalidation = async {
-                    let id = resolved_user_service_id
-                        .as_deref()
-                        .ok_or(AppError::AssistantTurnRequired)?;
-                    if let Some(chat) = auth_user.assistant_chat.as_deref() {
-                        crate::services::assistant_service_execution::verify_resolved(
-                            &state.db,
-                            &state.encryption_keys,
-                            chat,
-                            id,
-                            &target,
-                            method.as_str(),
-                            path,
-                        )
-                        .await?;
-                    }
-                    admission.revalidate(&state.db, id, Some(&target)).await?;
-                    if let Some(chat) = auth_user.assistant_chat.as_deref() {
-                        crate::services::assistant_service_execution::verify_node_route(
-                            &state.db,
-                            chat,
-                            id,
-                            Some(node_route),
-                            &target,
-                        )
-                        .await?;
-                    }
-                    Ok::<_, AppError>(())
-                }
-                .await;
+                let revalidation = admission
+                    .http_egress(
+                        &state.db,
+                        &state.encryption_keys,
+                        &target,
+                        method.as_str(),
+                        path,
+                    )
+                    .routed(Some(node_route))
+                    .revalidate()
+                    .await;
                 if let Err(error) = revalidation {
                     if let Some(reservation) = durable_reservation.as_ref() {
                         durable_operation_grant_service::mark_pre_dispatch_rejected(
@@ -5434,19 +5400,19 @@ async fn execute_resolved_proxy_inner(
                 )
                 .await?;
             }
-            if let Some(admission) = assistant_decision.admission.as_ref() {
-                if let Err(error) = admission
-                    .http_egress(
-                        &state.db,
-                        &state.encryption_keys,
-                        &target,
-                        method.as_str(),
-                        path,
-                    )
-                    .routed(Some(node_route))
-                    .revalidate()
-                    .await
-                {
+            if let Some(guard) =
+                crate::services::assistant_service_execution::HttpEgressGuard::for_proxy(
+                    assistant_decision.admission.as_ref(),
+                    machine_ingress.as_ref(),
+                    &state.db,
+                    &state.encryption_keys,
+                    &target,
+                    method.as_str(),
+                    path,
+                )
+                .map(|guard| guard.routed(Some(node_route)))
+            {
+                if let Err(error) = guard.revalidate().await {
                     if let Some(reservation) = durable_reservation.as_ref() {
                         durable_operation_grant_service::mark_send_rejected(&state.db, reservation)
                             .await;
@@ -6184,7 +6150,7 @@ async fn execute_resolved_proxy_inner(
         );
 
         if resolved_user_service_id.is_none() {
-            if let Some(job) = machine_ingress.as_ref().and_then(|i| i.job_id.as_deref()) {
+            if let Some(job) = machine_ingress.as_ref().and_then(|i| i.assistant_job_id()) {
                 if let Err(error) = crate::services::assistant_job_service_use::validate_catalog(
                     &state.db,
                     job,
@@ -6209,36 +6175,17 @@ async fn execute_resolved_proxy_inner(
             }
         }
         if let Some(admission) = assistant_decision.admission.as_ref() {
-            let revalidation = async {
-                let id = resolved_user_service_id
-                    .as_deref()
-                    .ok_or(AppError::AssistantTurnRequired)?;
-                if let Some(chat) = auth_user.assistant_chat.as_deref() {
-                    crate::services::assistant_service_execution::verify_resolved(
-                        &state.db,
-                        &state.encryption_keys,
-                        chat,
-                        id,
-                        &target,
-                        method.as_str(),
-                        path,
-                    )
-                    .await?;
-                }
-                admission.revalidate(&state.db, id, Some(&target)).await?;
-                if let Some(chat) = auth_user.assistant_chat.as_deref() {
-                    crate::services::assistant_service_execution::verify_node_route(
-                        &state.db,
-                        chat,
-                        id,
-                        node_route.as_ref(),
-                        &target,
-                    )
-                    .await?;
-                }
-                Ok::<_, AppError>(())
-            }
-            .await;
+            let revalidation = admission
+                .http_egress(
+                    &state.db,
+                    &state.encryption_keys,
+                    &target,
+                    method.as_str(),
+                    path,
+                )
+                .routed(node_route.as_ref())
+                .revalidate()
+                .await;
             if let Err(error) = revalidation {
                 if let Some(reservation) = durable_reservation.as_ref() {
                     durable_operation_grant_service::mark_pre_dispatch_rejected(
@@ -6273,19 +6220,19 @@ async fn execute_resolved_proxy_inner(
         if let Some(reservation) = durable_reservation.as_ref() {
             durable_operation_grant_service::mark_dispatched(&state.db, reservation, None).await?;
         }
-        if let Some(admission) = assistant_decision.admission.as_ref() {
-            if let Err(error) = admission
-                .http_egress(
-                    &state.db,
-                    &state.encryption_keys,
-                    &target,
-                    method.as_str(),
-                    path,
-                )
-                .routed(node_route.as_ref())
-                .revalidate()
-                .await
-            {
+        if let Some(guard) =
+            crate::services::assistant_service_execution::HttpEgressGuard::for_proxy(
+                assistant_decision.admission.as_ref(),
+                machine_ingress.as_ref(),
+                &state.db,
+                &state.encryption_keys,
+                &target,
+                method.as_str(),
+                path,
+            )
+            .map(|guard| guard.routed(node_route.as_ref()))
+        {
+            if let Err(error) = guard.revalidate().await {
                 if let Some(reservation) = durable_reservation.as_ref() {
                     durable_operation_grant_service::mark_send_rejected(&state.db, reservation)
                         .await;
@@ -6412,7 +6359,7 @@ async fn execute_resolved_proxy_inner(
 
     // Reuse the shared reqwest::Client from AppState for connection pooling.
     if resolved_user_service_id.is_none() {
-        if let Some(job) = machine_ingress.as_ref().and_then(|i| i.job_id.as_deref()) {
+        if let Some(job) = machine_ingress.as_ref().and_then(|i| i.assistant_job_id()) {
             if let Err(error) = crate::services::assistant_job_service_use::validate_catalog(
                 &state.db,
                 job,
@@ -6437,36 +6384,17 @@ async fn execute_resolved_proxy_inner(
         }
     }
     if let Some(admission) = assistant_decision.admission.as_ref() {
-        let revalidation = async {
-            let id = resolved_user_service_id
-                .as_deref()
-                .ok_or(AppError::AssistantTurnRequired)?;
-            if let Some(chat) = auth_user.assistant_chat.as_deref() {
-                crate::services::assistant_service_execution::verify_resolved(
-                    &state.db,
-                    &state.encryption_keys,
-                    chat,
-                    id,
-                    &target,
-                    method.as_str(),
-                    path,
-                )
-                .await?;
-            }
-            admission.revalidate(&state.db, id, Some(&target)).await?;
-            if let Some(chat) = auth_user.assistant_chat.as_deref() {
-                crate::services::assistant_service_execution::verify_node_route(
-                    &state.db,
-                    chat,
-                    id,
-                    node_route.as_ref(),
-                    &target,
-                )
-                .await?;
-            }
-            Ok::<_, AppError>(())
-        }
-        .await;
+        let revalidation = admission
+            .http_egress(
+                &state.db,
+                &state.encryption_keys,
+                &target,
+                method.as_str(),
+                path,
+            )
+            .routed(node_route.as_ref())
+            .revalidate()
+            .await;
         if let Err(error) = revalidation {
             if let Some(reservation) = durable_reservation.as_ref() {
                 durable_operation_grant_service::mark_pre_dispatch_rejected(
@@ -6505,17 +6433,16 @@ async fn execute_resolved_proxy_inner(
     destination_audit.dispatch();
     let target_admission_ms = elapsed_ms(exchange_started_at);
     let downstream_started_at = std::time::Instant::now();
-    let egress_guard = assistant_decision.admission.as_ref().map(|admission| {
-        admission
-            .http_egress(
-                &state.db,
-                &state.encryption_keys,
-                &target,
-                method.as_str(),
-                path,
-            )
-            .routed(node_route.as_ref())
-    });
+    let egress_guard = crate::services::assistant_service_execution::HttpEgressGuard::for_proxy(
+        assistant_decision.admission.as_ref(),
+        machine_ingress.as_ref(),
+        &state.db,
+        &state.encryption_keys,
+        &target,
+        method.as_str(),
+        path,
+    )
+    .map(|guard| guard.routed(node_route.as_ref()));
     let downstream_result = until_client_disconnect(
         &downstream_cancellation,
         Box::pin(proxy_service::forward_request_with_egress_guard(
@@ -12338,7 +12265,7 @@ mod proxy_resolution_integration_tests {
                 .extensions_mut()
                 .insert(crate::services::machine_gateway_service::Ingress {
                     declared_id: service.id.clone(),
-                    job_id: None,
+                    job: None,
                     git: None,
                 });
             let result = tokio::time::timeout(
