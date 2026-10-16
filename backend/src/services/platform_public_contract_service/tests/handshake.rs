@@ -94,10 +94,7 @@ async fn discovery(
         .into_response()
 }
 
-async fn readiness(
-    State(mock): State<ExternalRuntime>,
-    request: Request<Body>,
-) -> axum::response::Response {
+async fn readiness(mock: ExternalRuntime, request: Request<Body>) -> axum::response::Response {
     let raw = Zeroizing::new(
         request.headers()["x-nyxid-public-authority"]
             .to_str()
@@ -477,9 +474,13 @@ impl Handshake {
             callback_statuses: Arc::new(Mutex::new(vec![])),
             cleanup_authorities: Arc::new(Mutex::new(vec![])),
         };
+        let readiness_mock = runtime.clone();
         let runtime_app = axum::Router::new()
             .route("/v1/public/profiles", post(discovery))
-            .route("/v1/public/readiness", post(readiness))
+            .route(
+                "/v1/public/readiness",
+                post(move |request: Request<Body>| readiness(readiness_mock.clone(), request)),
+            )
             .route("/v1/public/cleanup", post(cleanup_request))
             .with_state(runtime.clone());
         let runtime_task = tokio::spawn(async move {
