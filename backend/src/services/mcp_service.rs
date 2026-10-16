@@ -5532,6 +5532,7 @@ async fn execute_tool_resolved_inner(
             text: String::from_utf8(managed.body.to_vec())
                 .map_err(|_| AppError::Internal("Invalid managed response encoding".into()))?,
             media: None,
+            origin: ToolResponseOrigin::Downstream,
         }));
     }
     let metered = billing
