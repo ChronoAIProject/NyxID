@@ -1123,14 +1123,27 @@ async fn stop_persists_partial_reply_clears_binding_and_emits_cancelled() {
     )
     .await
     .unwrap();
+    let mut body = response.into_body().into_data_stream();
+    let mut bytes = Vec::new();
+    // Observe the consumed partial delta before exercising Stop.
     tokio::time::timeout(Duration::from_secs(5), async {
-        while calls.lock().await.is_empty() {
-            tokio::time::sleep(Duration::from_millis(10)).await;
+        loop {
+            let chunk = body.next().await.unwrap().unwrap();
+            bytes.extend_from_slice(&chunk);
+            assert!(bytes.len() <= 100_000);
+            let received_partial = String::from_utf8_lossy(&bytes)
+                .lines()
+                .filter_map(|line| line.strip_prefix("data: "))
+                .filter_map(|data| serde_json::from_str::<Value>(data).ok())
+                .any(|event| event["event"] == "block.delta" && event["text"] == "Partial answer");
+            if received_partial {
+                break;
+            }
         }
     })
     .await
-    .unwrap();
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    .expect("the partial reply must reach the caller before Stop");
+    assert_eq!(calls.lock().await.len(), 1);
     let row = engine::list(&state.db, OWNER, 1, None, None)
         .await
         .unwrap()
@@ -1146,14 +1159,15 @@ async fn stop_persists_partial_reply_clears_binding_and_emits_cancelled() {
         .unwrap(),
         StatusCode::NO_CONTENT
     );
-    let bytes = tokio::time::timeout(
+    let remaining = tokio::time::timeout(
         Duration::from_secs(5),
-        axum::body::to_bytes(response.into_body(), 100_000),
+        axum::body::to_bytes(Body::from_stream(body), 100_000 - bytes.len()),
     )
     .await
     .unwrap()
     .unwrap();
-    let events = String::from_utf8(bytes.to_vec()).unwrap();
+    bytes.extend_from_slice(&remaining);
+    let events = String::from_utf8(bytes).unwrap();
     assert!(events.contains("\"status\":\"cancelled\""));
     assert!(
         stopped_at.elapsed()
