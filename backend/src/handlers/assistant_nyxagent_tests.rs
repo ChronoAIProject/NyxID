@@ -3007,6 +3007,7 @@ async fn channel_thread_execution_rechecks_orphaned_binding_before_upstream() {
         partition: "thread_v1_removed".into(),
         platform: "telegram".into(),
         thread: Some(Box::new(ThreadTurnBinding {
+            sender_kind: None,
             child_id: "removed-child".into(),
             source_message_id: "source".into(),
             sender_id: "owner".into(),

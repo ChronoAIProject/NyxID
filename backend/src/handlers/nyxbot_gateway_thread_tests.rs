@@ -40,6 +40,9 @@ impl Fixture {
         row.gateway_channel_id = Some("cmaeg1.ch.test".into());
         row.gateway_bot_id = Some("ou_bot".into());
         row.gateway_version = Some(1);
+        row.gateway_bot_mentions.supported = true;
+        row.gateway_bot_mentions.enabled = true;
+        row.gateway_bot_mentions.checked_at = Some(Utc::now());
         row.gateway_threads.supported = true;
         row.gateway_threads.version = Some(1);
         row.gateway_threads.enabled = true;
@@ -561,7 +564,7 @@ async fn gateway_negotiation_requires_advertisement_and_echo_and_backs_off_legac
         .collection::<NyxbotChannel>(CHANNELS)
         .update_one(
             doc! {"_id":&f.row.id},
-            doc! {"$unset":{"gateway_threads":""}},
+            doc! {"$unset":{"gateway_threads":""}, "$set":{"gateway_bot_mentions.supported":false,"gateway_bot_mentions.enabled":false,"gateway_bot_mentions.checked_at":bson::DateTime::now()}},
         )
         .await
         .unwrap();
@@ -872,4 +875,52 @@ async fn gateway_complete_thread_reply_uses_one_token_and_reconstructs_every_par
         .unwrap();
     assert!(record.get_bool("complete").unwrap());
     assert_eq!(record.get_array("parts").unwrap().len(), requests.len());
+}
+
+#[tokio::test]
+async fn external_bot_mention_in_followed_thread_is_a_guest_and_spends_the_parent_budget() {
+    let f = Box::pin(Fixture::new("external_bot_follow")).await;
+    let (human, id) = f.input("start", ThreadAddress::Mention, false, true).await;
+    assert!(f.send(&human, &id).await.contains("Here is your answer"));
+    let child = f.children().await.remove(0);
+    settle(&f.state, child.conversation_id.as_deref().unwrap()).await;
+    // A delivered app actor, not a sender who has linked an OAuth account.
+    let (mut body, id) = f
+        .input("exact mention", ThreadAddress::Mention, false, true)
+        .await;
+    let activity = &mut body["event_context"]["activity"];
+    activity["actor"]["kind"] = json!("bot");
+    activity["actor"]["id"] = json!("ou_foreign_bot");
+    activity["thread"]["sender_kind"] = json!("bot");
+    f.state.db.collection::<ChannelMessage>(MESSAGES).update_one(doc! {"_id": &id},
+        doc! {"$set":{"sender_platform_id":"ou_foreign_bot","thread_context":bson::to_bson(&activity["thread"]).unwrap()}}).await.unwrap();
+    let text = f.send(&body, &id).await;
+    assert!(text.contains("Here is your answer"), "{text}");
+    assert!(text.contains("\"thread_reply\":true"), "{text}");
+    let children = f.children().await;
+    assert_eq!(children.len(), 1);
+    assert_eq!(children[0].id, child.id);
+    assert_eq!(
+        children[0].follow.follow_expires_at, child.follow.follow_expires_at,
+        "a bot cannot renew follow"
+    );
+    let conversation = crate::services::assistant_nyxagent::get(
+        &f.state.db,
+        OWNER,
+        children[0].conversation_id.as_deref().unwrap(),
+    )
+    .await
+    .unwrap();
+    assert!(conversation.guest_turn);
+    assert!(
+        conversation
+            .channel
+            .as_ref()
+            .unwrap()
+            .thread
+            .as_ref()
+            .unwrap()
+            .guest
+    );
+    assert_eq!(f.calls.lock().await.len(), 2);
 }

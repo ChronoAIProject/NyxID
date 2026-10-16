@@ -147,6 +147,7 @@ async fn channel(state: &AppState, transport: &str) -> (NyxbotChannel, String) {
     let agent = key(state, "agent").await;
     let now = Utc::now();
     let row = NyxbotChannel {
+        gateway_bot_mentions: Default::default(),
         gateway_threads: Default::default(),
         follow_capacity_revision: 0,
         follow_binding_generation: 0,
@@ -1156,6 +1157,8 @@ async fn inbound_of(
 
 fn admission(channel_id: &str, event_id: &str) -> NyxbotEvent {
     NyxbotEvent {
+        native_bot_budget_claimed: false,
+        retry_request_sha256: None,
         delivery: None,
         resolved_thread_id: None,
         resolved_conversation_id: None,
@@ -1303,6 +1306,8 @@ async fn lost_chat_app_messages_are_reported_to_the_agent_once() {
     // Once a message reaches the agent again, the channel is healthy.
     let arrived = inbound(&state, &route_id, "7", "delivered", None, 0).await;
     let admitted = NyxbotEvent {
+        native_bot_budget_claimed: false,
+        retry_request_sha256: None,
         delivery: None,
         resolved_thread_id: None,
         resolved_conversation_id: None,
@@ -2615,7 +2620,7 @@ async fn direct_group_messages_need_a_mention_or_a_reply_to_the_bot() {
             "sender": {"platform_id": sender.0, "display_name": sender.1},
             "content": {"type": "text", "text": text},
             "timestamp": "2026-09-28T00:00:00Z",
-            "raw_platform_data": {"event": {"message": {"mentions": mentions}}},
+            "raw_platform_data": {"event": {"sender":{"sender_type":"user","sender_id":{"open_id":sender.0}},"message": {"mentions": mentions}}},
         });
         let bytes = serde_json::to_vec(&body).unwrap();
         let token = crate::crypto::jwt::generate_relay_callback_token(
@@ -2796,7 +2801,13 @@ fn telegram_mentions_and_replies_to_the_bot_are_recognised() {
         Some(false)
     );
     assert_eq!(
-        chats::raw_addressed(&bot, &message(json!({"text": "hey @Helper_Bot, hi"})), None),
+        chats::raw_addressed(
+            &bot,
+            &message(
+                json!({"text": "hey @Helper_Bot, hi","entities":[{"type":"mention","offset":4,"length":11}]})
+            ),
+            None
+        ),
         Some(true)
     );
     assert_eq!(
@@ -2814,7 +2825,9 @@ fn telegram_mentions_and_replies_to_the_bot_are_recognised() {
     assert_eq!(
         chats::raw_addressed(
             &bot,
-            &message(json!({"entities": [{"type": "text_mention", "user": {"id": 123}}]})),
+            &message(
+                json!({"entities": [{"type": "text_mention", "offset":0,"length":5,"user": {"id": 123}}]})
+            ),
             None
         ),
         Some(true)
@@ -2855,6 +2868,7 @@ fn telegram_mentions_and_replies_to_the_bot_are_recognised() {
     let mut row: NyxbotChannel = {
         let now = Utc::now();
         NyxbotChannel {
+            gateway_bot_mentions: Default::default(),
             gateway_threads: Default::default(),
             follow_capacity_revision: 0,
             follow_binding_generation: 0,
@@ -3149,6 +3163,7 @@ async fn direct_private(
         "sender": {"platform_id": sender, "display_name": "Alice"},
         "content": {"type": "text", "text": text},
         "timestamp": "2026-09-28T00:00:00Z",
+        "raw_platform_data":{"event":{"sender":{"sender_type":"user","sender_id":{"open_id":sender}}}},
     });
     let bytes = serde_json::to_vec(&body).unwrap();
     let token = crate::crypto::jwt::generate_relay_callback_token(
@@ -3897,12 +3912,19 @@ async fn mock_gateway(
         let (calls, version) = (calls.clone(), version.clone());
         move |Path(id): Path<String>, Json(body): Json<Value>| async move {
             let expected = body["expected_version"].as_i64().unwrap_or_default();
-            calls.lock().await.push(("PUT".into(), id, body));
+            calls.lock().await.push(("PUT".into(), id, body.clone()));
             if refuse.load(Ordering::SeqCst) {
                 return (StatusCode::CONFLICT, Json(json!({"code": "conflict"})));
             }
             version.store(expected + 1, Ordering::SeqCst);
-            (StatusCode::OK, Json(json!({"version": expected + 1})))
+            // Return the authored policy as the gateway's source definition.
+            // This keeps the mock faithful to an acknowledged management write;
+            // incomplete echoes intentionally exercise GET reconciliation in the
+            // dedicated management tests.
+            (
+                StatusCode::OK,
+                Json(json!({"version": expected + 1, "definition": body})),
+            )
         }
     };
     let read = {
@@ -4405,6 +4427,11 @@ async fn org_group_bots_moved_to_a_specialist_keep_answering() {
     let (row, _) = connect(&state, OWNER, None, &bot_id, &nyxbot)
         .await
         .unwrap();
+    // Exact native mention admission needs the receiving app's verified open ID.
+    TEST_BOT_USER_IDS
+        .lock()
+        .unwrap()
+        .insert(bot_id.clone(), "ou_bot".into());
     state
         .db
         .collection::<NyxbotChannel>(CHANNELS)
@@ -4424,7 +4451,7 @@ async fn org_group_bots_moved_to_a_specialist_keep_answering() {
             "sender": {"platform_id": sender},
             "content": {"type": "text", "text": text},
             "timestamp": "2026-09-30T00:00:00Z",
-            "raw_platform_data": {"event": {"message": {"mentions":
+            "raw_platform_data": {"event": {"sender":{"sender_type":"user","sender_id":{"open_id":sender}},"message": {"mentions":
                 [{"key": "@_user_1", "id": {"open_id": "ou_bot"}, "name": "chronoai-office-nyxbot"}]}}},
         });
         let bytes = serde_json::to_vec(&body).unwrap();
@@ -4754,6 +4781,7 @@ async fn org_group_bots_moved_to_a_specialist_keep_answering() {
         StatusCode::FORBIDDEN
     );
     assert_eq!(model_calls.load(std::sync::atomic::Ordering::SeqCst), 4);
+    TEST_BOT_USER_IDS.lock().unwrap().remove(&bot_id);
     model_server.abort();
     server.abort();
 }
@@ -4813,6 +4841,8 @@ async fn the_telegram_account_that_created_a_bot_through_nyxid_is_its_owner() {
             .is_empty()
     );
     let sender = |id: &'static str| Sender {
+        kind: crate::models::channel_thread::ThreadSenderKind::Human,
+        owner_eligible: true,
         id,
         display_name: None,
     };
@@ -4901,10 +4931,10 @@ async fn lark_groups_count_only_mentions_of_the_bot_itself() {
         chats::raw_addressed(&bot, &raw(&[]), Some("ou_bot")),
         Some(false)
     );
-    // Without the bot's own ID (its lookup failed), any mention counts.
+    // Without the receiving open_id there is no positive addressing evidence.
     assert_eq!(
         chats::raw_addressed(&bot, &raw(&["ou_calvin"]), None),
-        Some(true)
+        Some(false)
     );
     // The bot's own ID is looked up once, per app.
     TEST_BOT_USER_IDS
@@ -5164,3 +5194,6 @@ async fn watch_completions_are_bound_from_the_causing_turns_snapshot() {
     assert_eq!(turn.report_to, None);
     server.abort();
 }
+
+#[path = "nyxbot_mentions_tests.rs"]
+mod mentions_tests;

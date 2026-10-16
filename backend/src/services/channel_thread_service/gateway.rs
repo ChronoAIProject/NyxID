@@ -54,11 +54,19 @@ pub async fn retain(
     };
     if facts.version != 1
         || facts.kind != ThreadKind::Native
-        || facts.sender_kind != ThreadSenderKind::Human
+        || !matches!(
+            facts.sender_kind,
+            ThreadSenderKind::Human | ThreadSenderKind::Bot
+        )
         || facts.parent_chat_id.is_some()
         || !facts.participant_hashes.is_empty()
         || facts.sender_hash.is_some()
-        || activity["actor"]["kind"] != "human"
+        || activity["actor"]["kind"].as_str()
+            != Some(match facts.sender_kind {
+                ThreadSenderKind::Human => "human",
+                ThreadSenderKind::Bot => "bot",
+                _ => "unknown",
+            })
         || activity["source"]["type"] != "nyxid_relay"
         || activity["source"]["platform"].as_str() != Some(channel.platform.as_str())
         || activity["source"]["route_id"].as_str() != channel.route_id.as_deref()
@@ -81,7 +89,12 @@ pub async fn retain(
         "user_id":owner,"agent_api_key_id":&channel.route_api_key_id,
         "conversation_id":&channel.route_id,"platform":&channel.platform,"sender_platform_id":sender,
     }).await? else { return Ok(false); };
-    if !super::resolution::source_matches(&facts, &source) {
+    if source
+        .thread_context
+        .as_ref()
+        .is_some_and(|old| old.sender_kind != facts.sender_kind)
+        || !super::resolution::source_matches(&facts, &source)
+    {
         return Ok(false);
     }
     // Whole projection is replaced only on this source, before selection. Bodies,
