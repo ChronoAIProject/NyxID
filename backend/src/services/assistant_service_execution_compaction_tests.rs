@@ -200,12 +200,24 @@ async fn stateful_model_approval_keeps_exact_account_and_semantic_body() {
         if path == "chat/completions" {
             changed_body["messages"] = json!([{"role":"user","content":"different context"}]);
         } else {
-            changed_body["input"] = json!("different context");
+            // Preserve any account handle: removing it can independently admit
+            // a stateless request without using this exact-action card.
+            changed_body["instructions"] = json!("different context");
         }
+        assert!(
+            !stateless_inference(path, &changed_body),
+            "path={path} original={body} changed={changed_body}"
+        );
         let (status, refusal) =
             model_call(&f, "compact-a", path, &changed_body, Some(&acknowledgement)).await;
-        assert_eq!(status, 409, "{refusal}");
-        assert_eq!(refusal["error"], "acknowledgement_invalid", "{refusal}");
+        assert_eq!(
+            status, 409,
+            "path={path} original={body} changed={changed_body}: {refusal}"
+        );
+        assert_eq!(
+            refusal["error"], "acknowledgement_invalid",
+            "path={path} original={body} changed={changed_body}: {refusal}"
+        );
         let mut changed_model = body.clone();
         changed_model["model"] = json!("another-model");
         let (status, refusal) = model_call(
