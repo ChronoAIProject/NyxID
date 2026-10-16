@@ -3720,7 +3720,7 @@ fn execute_resolved_proxy<'a>(
         let mut assistant_decision = None;
         let mut assistant_approval = None;
         let receipt_method = request.method().clone();
-        let execution = execute_resolved_proxy_boxed(
+        let preparation = execute_resolved_proxy_boxed(
             state,
             auth_user,
             service_id,
@@ -3733,6 +3733,14 @@ fn execute_resolved_proxy<'a>(
             &mut assistant_decision,
             &mut assistant_approval,
         );
+        // Finish preparation before polling forwarding, so their large debug
+        // poll frames never overlap. The lease guards both phases together.
+        let execution = async move {
+            match preparation.await? {
+                ProxyExecutionPhase::Complete(response) => Ok(response),
+                ProxyExecutionPhase::Forward(forwarding) => forwarding.await,
+            }
+        };
         // The managed worker classifies lease loss after dispatch as pending.
         // An outer cancellation would hide that identity behind a retryable 429.
         let response = if managed {
@@ -3764,6 +3772,22 @@ fn execute_resolved_proxy<'a>(
     })
 }
 
+enum ProxyExecutionPhase<'a> {
+    Complete(Response),
+    Forward(futures::future::BoxFuture<'a, AppResult<Response>>),
+}
+
+// Construct forwarding outside the authorization poll frame as well: boxing at
+// the await site still leaves the unboxed forwarding temporary on that stack.
+fn box_proxy_forwarding<'a, F>(
+    make: impl FnOnce() -> F,
+) -> futures::future::BoxFuture<'a, AppResult<Response>>
+where
+    F: std::future::Future<Output = AppResult<Response>> + Send + 'a,
+{
+    Box::pin(make())
+}
+
 // Keep construction of the large dispatch future outside the guard's poll frame.
 #[allow(clippy::too_many_arguments)]
 fn execute_resolved_proxy_boxed<'a>(
@@ -3780,7 +3804,7 @@ fn execute_resolved_proxy_boxed<'a>(
     assistant_approval: &'a mut Option<
         crate::services::assistant_service_execution::HttpApprovalReceipt,
     >,
-) -> futures::future::BoxFuture<'a, AppResult<Response>> {
+) -> futures::future::BoxFuture<'a, AppResult<ProxyExecutionPhase<'a>>> {
     Box::pin(execute_resolved_proxy_inner(
         state,
         auth_user,
@@ -3797,21 +3821,21 @@ fn execute_resolved_proxy_boxed<'a>(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn execute_resolved_proxy_inner(
-    state: &AppState,
-    auth_user: &AuthUser,
-    service_id: &str,
-    path: &str,
+async fn execute_resolved_proxy_inner<'a>(
+    state: &'a AppState,
+    auth_user: &'a AuthUser,
+    service_id: &'a str,
+    path: &'a str,
     request: Request<Body>,
     mut extra_outbound_headers: Vec<(String, String)>,
-    resolved_slug: &mut String,
+    resolved_slug: &'a mut String,
     resolved: ResolvedProxyExecution,
     service_lease: Option<crate::services::service_concurrency_service::Lease>,
-    assistant_decision_slot: &mut Option<crate::services::assistant_service_execution::Decision>,
-    assistant_approval_slot: &mut Option<
+    assistant_decision_slot: &'a mut Option<crate::services::assistant_service_execution::Decision>,
+    assistant_approval_slot: &'a mut Option<
         crate::services::assistant_service_execution::HttpApprovalReceipt,
     >,
-) -> AppResult<Response> {
+) -> AppResult<ProxyExecutionPhase<'a>> {
     let permission_ingress = request.extensions().get::<PermissionIngress>().cloned();
     let ornn_preflight = request
         .extensions()
@@ -4413,7 +4437,9 @@ async fn execute_resolved_proxy_inner(
         .as_ref()
         .expect("service decision was just installed");
     if let Some(refusal) = assistant_decision.refusal.as_ref() {
-        return Ok((axum::http::StatusCode::CONFLICT, axum::Json(refusal)).into_response());
+        return Ok(ProxyExecutionPhase::Complete(
+            (axum::http::StatusCode::CONFLICT, axum::Json(refusal)).into_response(),
+        ));
     }
     if let (Some(chat), Some(id)) = (
         auth_user.assistant_chat.as_deref(),
@@ -4974,7 +5000,7 @@ async fn execute_resolved_proxy_inner(
         apply_agent_attribution_headers(&mut response, auth_user.api_key_id.as_deref(), None);
         destination_audit.complete(managed.status);
         request_audit.response(managed.status);
-        return Ok(response);
+        return Ok(ProxyExecutionPhase::Complete(response));
     }
     // Billing and durable-grant admission carry their own database state.
     // Do not reserve it in every proxy poll, including early scope refusals.
@@ -5125,133 +5151,48 @@ async fn execute_resolved_proxy_inner(
     let collect_realtime_llm_usage =
         websocket_realtime_usage_enabled(catalog_service_slug.as_deref(), &metered);
 
-    // === WebSocket Passthrough ===
-    // If this is a WS upgrade request, branch into the WS path now that
-    // target, credentials, and identity headers are fully resolved.
-    if let Some(ws_request) = ws_request {
-        if target.auth_method == nyxid_service_adapters::ifttt_mcp::AUTH_METHOD {
-            return Err(AppError::BadRequest(
-                "IFTTT OAuth does not support WebSocket upgrades".into(),
-            ));
-        }
-        if target.auth_method == nyxid_service_adapters::ifttt::AUTH_METHOD {
-            return Err(AppError::BadRequest(
-                nyxid_service_adapters::ifttt::Error::Method.to_string(),
-            ));
-        }
-        // WS connections are not compatible with per-request approval.
-        if enforce_approval {
-            return Err(AppError::BadRequest(
-                "WebSocket connections are not supported for services requiring approval"
-                    .to_string(),
-            ));
-        }
-
-        let (mut parts, _body) = ws_request.into_parts();
-        let ws_upgrade = match WebSocketUpgrade::from_request_parts(&mut parts, &()).await {
-            Ok(ws) => ws,
-            Err(rejection) => {
-                let response = rejection.into_response();
-                request_audit.denied(response.status().as_u16());
-                return observe_model_response(model_request, path, response).await;
-            }
-        };
-
-        if let Some(admission) = assistant_decision.admission.as_ref() {
-            let validation = admission
-                .http_egress(
-                    &state.db,
-                    &state.encryption_keys,
-                    &target,
-                    method.as_str(),
-                    path,
-                )
-                .projected(&assistant_projection)
-                .routed(node_route.as_ref())
-                .revalidate()
-                .await;
-            if let Err(error) = validation {
-                if let Some(reservation) = durable_reservation.as_ref() {
-                    durable_operation_grant_service::mark_pre_dispatch_rejected(
-                        &state.db,
-                        reservation,
-                        "assistant authority changed before WebSocket connect",
-                    )
-                    .await;
+    // Own local projections needed after preparation returns. All live audit,
+    // admission, lease and cancellation guards move into this continuation.
+    let forwarding_path = path.to_owned();
+    let forwarding_owner = service_owner_for_approval.to_owned();
+    Ok(ProxyExecutionPhase::Forward(box_proxy_forwarding(
+        move || async move {
+            let path = forwarding_path.as_str();
+            let service_owner_for_approval = forwarding_owner.as_str();
+            // === WebSocket Passthrough ===
+            // If this is a WS upgrade request, branch into the WS path now that
+            // target, credentials, and identity headers are fully resolved.
+            if let Some(ws_request) = ws_request {
+                if target.auth_method == nyxid_service_adapters::ifttt_mcp::AUTH_METHOD {
+                    return Err(AppError::BadRequest(
+                        "IFTTT OAuth does not support WebSocket upgrades".into(),
+                    ));
                 }
-                state
-                    .billing
-                    .reject_before_send(&metered, "assistant_authority_changed", false)
-                    .await?;
-                return Err(error);
-            }
-        }
+                if target.auth_method == nyxid_service_adapters::ifttt::AUTH_METHOD {
+                    return Err(AppError::BadRequest(
+                        nyxid_service_adapters::ifttt::Error::Method.to_string(),
+                    ));
+                }
+                // WS connections are not compatible with per-request approval.
+                if enforce_approval {
+                    return Err(AppError::BadRequest(
+                        "WebSocket connections are not supported for services requiring approval"
+                            .to_string(),
+                    ));
+                }
 
-        // Node-routed WS passthrough: tunnel through the management WS.
-        if let Some(ref node_route) = node_route {
-            let proxy_actor_user_id = auth_user.proxy_resolution_user_id();
-            let result = Box::pin(handle_ws_passthrough_via_node(
-                ws_upgrade,
-                state,
-                auth_user,
-                service_id,
-                path,
-                &target,
-                &delegated,
-                &identity_headers,
-                query.as_deref(),
-                node_route,
-                &ws_forward_headers,
-                service_owner_for_approval,
-                &proxy_actor_user_id,
-                collect_realtime_llm_usage,
-                metered.clone(),
-                billing_egress_permit,
-                service_lease,
-                assistant_decision
-                    .admission
-                    .as_ref()
-                    .map(|admission| {
-                        admission
-                            .http_egress(
-                                &state.db,
-                                &state.encryption_keys,
-                                &target,
-                                method.as_str(),
-                                path,
-                            )
-                            .projected(&assistant_projection)
-                            .routed(Some(node_route))
-                    })
-                    .as_ref(),
-            ))
-            .await
-            .inspect(|response| request_audit.response(response.status().as_u16()));
-            return result;
-        }
+                let (mut parts, _body) = ws_request.into_parts();
+                let ws_upgrade = match WebSocketUpgrade::from_request_parts(&mut parts, &()).await {
+                    Ok(ws) => ws,
+                    Err(rejection) => {
+                        let response = rejection.into_response();
+                        request_audit.denied(response.status().as_u16());
+                        return observe_model_response(model_request, path, response).await;
+                    }
+                };
 
-        // Direct WS passthrough: connect to downstream directly.
-        let result = Box::pin(handle_ws_passthrough(
-            ws_upgrade,
-            state,
-            auth_user,
-            service_id,
-            path,
-            &target,
-            &delegated,
-            &identity_headers,
-            query.as_deref(),
-            &ws_forward_headers,
-            caller_token.as_deref(),
-            collect_realtime_llm_usage,
-            metered.clone(),
-            billing_egress_permit,
-            service_lease,
-            assistant_decision
-                .admission
-                .as_ref()
-                .map(|admission| {
-                    admission
+                if let Some(admission) = assistant_decision.admission.as_ref() {
+                    let validation = admission
                         .http_egress(
                             &state.db,
                             &state.encryption_keys,
@@ -5261,132 +5202,1283 @@ async fn execute_resolved_proxy_inner(
                         )
                         .projected(&assistant_projection)
                         .routed(node_route.as_ref())
-                })
-                .as_ref(),
-        ))
-        .await
-        .inspect(|response| request_audit.response(response.status().as_u16()));
-        return result;
-    }
-
-    // === Node Proxy Routing (v2: failover + streaming + metrics + HMAC signing) ===
-    // node_route was resolved earlier (before credential check) to allow node-backed
-    // users to bypass credential requirements.
-    let mut had_dispatched_failure = false;
-    if let Some(ref node_route) = node_route {
-        crate::services::destination_routing::validate_node_outbound_destination(
-            &target,
-            method.as_str(),
-            path,
-            &delegated,
-        )?;
-        let prepared = proxy_service::prepare_node_request(
-            &target,
-            path,
-            query.as_deref(),
-            node_forward_headers,
-            &identity_headers,
-            &delegated,
-            caller_token.as_deref(),
-            &extra_outbound_headers,
-        )?;
-        let node_location_context = AsyncLocationContext::new(
-            &target.base_url,
-            &prepared.path,
-            prepared.query.as_deref(),
-            caller_proxy_prefix.clone(),
-        )
-        .map(|context| context.pin_pool_member(pool_authority.as_ref()));
-
-        // Build base node request (will be cloned for failover retries)
-        let node_request = NodeProxyRequest {
-            target_id: target.target_id.clone(),
-            request_id: uuid::Uuid::new_v4().to_string(),
-            service_id: service_id.to_string(),
-            service_slug: target.service.slug.clone(),
-            base_url: target.base_url.clone(),
-            method: method_str.clone(),
-            path: prepared.path,
-            query: prepared.query,
-            headers: prepared.headers,
-            body: body.as_ref().map(|b| b.to_vec()),
-        };
-
-        // Try primary node, then fallbacks
-        let all_node_ids: Vec<&str> = std::iter::once(node_route.node_id.as_str())
-            .chain(node_route.fallback_node_ids.iter().map(|s| s.as_str()))
-            .take(if stream_upload { 1 } else { usize::MAX })
-            .collect();
-
-        let mut last_error: Option<AppError> = None;
-        let mut first_dispatch_admission_ms = None;
-        let mut node_failure_evidence =
-            crate::services::assistant_service_execution::NodeFailureEvidence::default();
-        for node_id in &all_node_ids {
-            // Generate a new request_id for each attempt to avoid correlation conflicts
-            let mut attempt_request = node_request.clone();
-            attempt_request.request_id = uuid::Uuid::new_v4().to_string();
-
-            // Resolve signing secret for this specific node. When HMAC signing is
-            // enabled, unsigned requests are treated as a routing failure rather
-            // than silently downgrading integrity guarantees.
-            let signing_secret = if state.config.node_hmac_signing_enabled || stream_upload {
-                match node_service::get_node_signing_secret(
-                    &state.db,
-                    state.encryption_keys.as_ref(),
-                    node_id,
-                )
-                .await
-                {
-                    Ok(secret) => Some(secret),
-                    Err(AppError::NodeNotFound(message)) => {
-                        node_failure_evidence.disqualify();
-                        last_error = Some(AppError::NodeNotFound(message));
-                        continue;
-                    }
-                    Err(AppError::NodeOffline(message)) => {
-                        // Missing signing authority is not a provider outage.
-                        node_failure_evidence.disqualify();
-                        tracing::warn!(
-                            node_id = %node_id,
-                            "Skipping node route because signing secret is missing"
-                        );
-                        last_error = Some(AppError::NodeOffline(message));
-                        continue;
-                    }
-                    Err(error) => {
+                        .revalidate()
+                        .await;
+                    if let Err(error) = validation {
                         if let Some(reservation) = durable_reservation.as_ref() {
                             durable_operation_grant_service::mark_pre_dispatch_rejected(
                                 &state.db,
                                 reservation,
-                                "node signing preparation failed before dispatch",
+                                "assistant authority changed before WebSocket connect",
+                            )
+                            .await;
+                        }
+                        state
+                            .billing
+                            .reject_before_send(&metered, "assistant_authority_changed", false)
+                            .await?;
+                        return Err(error);
+                    }
+                }
+
+                // Node-routed WS passthrough: tunnel through the management WS.
+                if let Some(ref node_route) = node_route {
+                    let proxy_actor_user_id = auth_user.proxy_resolution_user_id();
+                    let result = Box::pin(handle_ws_passthrough_via_node(
+                        ws_upgrade,
+                        state,
+                        auth_user,
+                        service_id,
+                        path,
+                        &target,
+                        &delegated,
+                        &identity_headers,
+                        query.as_deref(),
+                        node_route,
+                        &ws_forward_headers,
+                        service_owner_for_approval,
+                        &proxy_actor_user_id,
+                        collect_realtime_llm_usage,
+                        metered.clone(),
+                        billing_egress_permit,
+                        service_lease,
+                        assistant_decision
+                            .admission
+                            .as_ref()
+                            .map(|admission| {
+                                admission
+                                    .http_egress(
+                                        &state.db,
+                                        &state.encryption_keys,
+                                        &target,
+                                        method.as_str(),
+                                        path,
+                                    )
+                                    .projected(&assistant_projection)
+                                    .routed(Some(node_route))
+                            })
+                            .as_ref(),
+                    ))
+                    .await
+                    .inspect(|response| request_audit.response(response.status().as_u16()));
+                    return result;
+                }
+
+                // Direct WS passthrough: connect to downstream directly.
+                let result = Box::pin(handle_ws_passthrough(
+                    ws_upgrade,
+                    state,
+                    auth_user,
+                    service_id,
+                    path,
+                    &target,
+                    &delegated,
+                    &identity_headers,
+                    query.as_deref(),
+                    &ws_forward_headers,
+                    caller_token.as_deref(),
+                    collect_realtime_llm_usage,
+                    metered.clone(),
+                    billing_egress_permit,
+                    service_lease,
+                    assistant_decision
+                        .admission
+                        .as_ref()
+                        .map(|admission| {
+                            admission
+                                .http_egress(
+                                    &state.db,
+                                    &state.encryption_keys,
+                                    &target,
+                                    method.as_str(),
+                                    path,
+                                )
+                                .projected(&assistant_projection)
+                                .routed(node_route.as_ref())
+                        })
+                        .as_ref(),
+                ))
+                .await
+                .inspect(|response| request_audit.response(response.status().as_u16()));
+                return result;
+            }
+
+            // === Node Proxy Routing (v2: failover + streaming + metrics + HMAC signing) ===
+            // node_route was resolved earlier (before credential check) to allow node-backed
+            // users to bypass credential requirements.
+            let mut had_dispatched_failure = false;
+            if let Some(ref node_route) = node_route {
+                crate::services::destination_routing::validate_node_outbound_destination(
+                    &target,
+                    method.as_str(),
+                    path,
+                    &delegated,
+                )?;
+                let prepared = proxy_service::prepare_node_request(
+                    &target,
+                    path,
+                    query.as_deref(),
+                    node_forward_headers,
+                    &identity_headers,
+                    &delegated,
+                    caller_token.as_deref(),
+                    &extra_outbound_headers,
+                )?;
+                let node_location_context = AsyncLocationContext::new(
+                    &target.base_url,
+                    &prepared.path,
+                    prepared.query.as_deref(),
+                    caller_proxy_prefix.clone(),
+                )
+                .map(|context| context.pin_pool_member(pool_authority.as_ref()));
+
+                // Build base node request (will be cloned for failover retries)
+                let node_request = NodeProxyRequest {
+                    target_id: target.target_id.clone(),
+                    request_id: uuid::Uuid::new_v4().to_string(),
+                    service_id: service_id.to_string(),
+                    service_slug: target.service.slug.clone(),
+                    base_url: target.base_url.clone(),
+                    method: method_str.clone(),
+                    path: prepared.path,
+                    query: prepared.query,
+                    headers: prepared.headers,
+                    body: body.as_ref().map(|b| b.to_vec()),
+                };
+
+                // Try primary node, then fallbacks
+                let all_node_ids: Vec<&str> = std::iter::once(node_route.node_id.as_str())
+                    .chain(node_route.fallback_node_ids.iter().map(|s| s.as_str()))
+                    .take(if stream_upload { 1 } else { usize::MAX })
+                    .collect();
+
+                let mut last_error: Option<AppError> = None;
+                let mut first_dispatch_admission_ms = None;
+                let mut node_failure_evidence =
+                    crate::services::assistant_service_execution::NodeFailureEvidence::default();
+                for node_id in &all_node_ids {
+                    // Generate a new request_id for each attempt to avoid correlation conflicts
+                    let mut attempt_request = node_request.clone();
+                    attempt_request.request_id = uuid::Uuid::new_v4().to_string();
+
+                    // Resolve signing secret for this specific node. When HMAC signing is
+                    // enabled, unsigned requests are treated as a routing failure rather
+                    // than silently downgrading integrity guarantees.
+                    let signing_secret = if state.config.node_hmac_signing_enabled || stream_upload
+                    {
+                        match node_service::get_node_signing_secret(
+                            &state.db,
+                            state.encryption_keys.as_ref(),
+                            node_id,
+                        )
+                        .await
+                        {
+                            Ok(secret) => Some(secret),
+                            Err(AppError::NodeNotFound(message)) => {
+                                node_failure_evidence.disqualify();
+                                last_error = Some(AppError::NodeNotFound(message));
+                                continue;
+                            }
+                            Err(AppError::NodeOffline(message)) => {
+                                // Missing signing authority is not a provider outage.
+                                node_failure_evidence.disqualify();
+                                tracing::warn!(
+                                    node_id = %node_id,
+                                    "Skipping node route because signing secret is missing"
+                                );
+                                last_error = Some(AppError::NodeOffline(message));
+                                continue;
+                            }
+                            Err(error) => {
+                                if let Some(reservation) = durable_reservation.as_ref() {
+                                    durable_operation_grant_service::mark_pre_dispatch_rejected(
+                                        &state.db,
+                                        reservation,
+                                        "node signing preparation failed before dispatch",
+                                    )
+                                    .await;
+                                }
+                                return Err(error);
+                            }
+                        }
+                    } else {
+                        None
+                    };
+
+                    if target.target_id.is_some()
+                        && let Err(error) = state
+                            .node_ws_manager
+                            .require_http_signature_v2(node_id, signing_secret.is_some())
+                            .await
+                    {
+                        if let Some(reservation) = durable_reservation.as_ref() {
+                            durable_operation_grant_service::mark_pre_dispatch_rejected(
+                                &state.db,
+                                reservation,
+                                "node lacks HTTP destination signature v2",
                             )
                             .await;
                         }
                         return Err(error);
                     }
+                    let start = std::time::Instant::now();
+                    if resolved_user_service_id.is_none()
+                        && let Some(job) =
+                            machine_ingress.as_ref().and_then(|i| i.assistant_job_id())
+                        && let Err(error) =
+                            crate::services::assistant_job_service_use::validate_catalog(
+                                &state.db,
+                                job,
+                                &target.service.id,
+                            )
+                            .await
+                    {
+                        state
+                            .billing
+                            .fail(&metered, "machine_authority_changed")
+                            .await?;
+                        if let Some(reservation) = durable_reservation.as_ref() {
+                            durable_operation_grant_service::mark_pre_dispatch_rejected(
+                                &state.db,
+                                reservation,
+                                "machine authority changed before dispatch",
+                            )
+                            .await;
+                        }
+                        return Err(error);
+                    }
+                    if let Some(admission) = assistant_decision.admission.as_ref() {
+                        let revalidation = admission
+                            .http_egress(
+                                &state.db,
+                                &state.encryption_keys,
+                                &target,
+                                method.as_str(),
+                                path,
+                            )
+                            .projected(&assistant_projection)
+                            .routed(Some(node_route))
+                            .revalidate()
+                            .await;
+                        if let Err(error) = revalidation {
+                            if let Some(reservation) = durable_reservation.as_ref() {
+                                durable_operation_grant_service::mark_pre_dispatch_rejected(
+                                    &state.db,
+                                    reservation,
+                                    "assistant authority changed before dispatch",
+                                )
+                                .await;
+                            }
+                            state
+                                .billing
+                                .reject_before_send(
+                                    &metered,
+                                    "assistant_authority_changed",
+                                    had_dispatched_failure,
+                                )
+                                .await?;
+                            return Err(error);
+                        }
+                    }
+                    if let Err(error) = state.billing.mark_forwarded(&metered).await {
+                        if let Some(reservation) = durable_reservation.as_ref() {
+                            durable_operation_grant_service::mark_pre_dispatch_rejected(
+                                &state.db,
+                                reservation,
+                                "billing admission failed before dispatch",
+                            )
+                            .await;
+                        }
+                        return Err(error);
+                    }
+                    if let Some(reservation) = durable_reservation.as_ref() {
+                        durable_operation_grant_service::mark_dispatched(
+                            &state.db,
+                            reservation,
+                            Some(node_id),
+                        )
+                        .await?;
+                    }
+                    if let Some(guard) =
+                        crate::services::assistant_service_execution::HttpEgressGuard::for_proxy(
+                            assistant_decision.admission.as_ref(),
+                            machine_ingress.as_ref(),
+                            &state.db,
+                            &state.encryption_keys,
+                            &target,
+                            method.as_str(),
+                            path,
+                        )
+                        .map(|guard| {
+                            guard
+                                .projected(&assistant_projection)
+                                .routed(Some(node_route))
+                        })
+                        && let Err(error) = guard.revalidate().await
+                    {
+                        if let Some(reservation) = durable_reservation.as_ref() {
+                            durable_operation_grant_service::mark_send_rejected(
+                                &state.db,
+                                reservation,
+                            )
+                            .await;
+                        }
+                        state
+                            .billing
+                            .reject_before_send(
+                                &metered,
+                                "assistant_authority_changed",
+                                had_dispatched_failure,
+                            )
+                            .await?;
+                        return Err(error);
+                    }
+                    if let Some(accounting) = &pool_accounting {
+                        accounting
+                            .node_dispatched
+                            .store(true, std::sync::atomic::Ordering::Release);
+                    }
+                    mark_pool_attempt_dispatched(pool_dispatch_state.as_ref());
+                    destination_audit.dispatch();
+                    let target_admission_ms = *first_dispatch_admission_ms
+                        .get_or_insert_with(|| elapsed_ms(exchange_started_at));
+                    let downstream_started_at = std::time::Instant::now();
+                    let result = if let Some(upload) = streaming_body.take() {
+                        let mut parameters =
+                            serde_json::to_value(&attempt_request).map_err(|_| {
+                                AppError::Internal("Upload metadata encoding failed".into())
+                            })?;
+                        parameters["headers"] = serde_json::to_value(
+                            attempt_request
+                                .headers
+                                .iter()
+                                .cloned()
+                                .collect::<std::collections::BTreeMap<_, _>>(),
+                        )
+                        .map_err(|_| AppError::Internal("Upload headers encoding failed".into()))?;
+                        parameters["git"] = serde_json::json!(machine_git);
+                        parameters["max_bytes"] = serde_json::json!(
+                            upload_meter
+                                .as_ref()
+                                .map_or(state.config.proxy_max_body_size, |meter| meter.limit)
+                        );
+                        let mut signed = nyxid_machine::Request {
+                            external_authority: None,
+                            version: 1,
+                            authority: None,
+                            request_id: attempt_request.request_id,
+                            node_id: (*node_id).into(),
+                            operation: nyxid_machine::Operation::ProxyUpload,
+                            parameters,
+                            timestamp: chrono::Utc::now().timestamp(),
+                            nonce: uuid::Uuid::new_v4().to_string(),
+                            signature: String::new(),
+                        };
+                        signed.signature = nyxid_machine::signing::sign(
+                            &signed,
+                            signing_secret.as_ref().ok_or_else(|| {
+                                AppError::NodeOffline(
+                                    "Credential node signing is unavailable".into(),
+                                )
+                            })?,
+                        );
+                        state.node_dispatch.proxy_upload(signed, upload).await
+                    } else {
+                        state
+                            .node_dispatch
+                            .send_proxy_request_classified(
+                                node_id,
+                                attempt_request,
+                                signing_secret.as_ref().map(|secret| secret.as_slice()),
+                                billing_egress_permit,
+                            )
+                            .await
+                    };
+                    // A streamed body can exceed its limit after provider dispatch.
+                    // Keep it on the normal failure path so durable grants record the
+                    // uncertain outcome and the upload is never retried on another node.
+                    let result = match upload_meter.as_ref().filter(|meter| meter.exceeded()) {
+                        Some(meter) => Err(NodeProxyFailure::after_dispatch(meter.error())),
+                        None => result,
+                    };
+                    let request_body_len = upload_meter
+                        .as_ref()
+                        .map_or(request_body_len, |meter| meter.bytes());
+                    let latency_ms = start.elapsed().as_millis() as u64;
+
+                    match result {
+                        Ok(proxy_response) => {
+                            // Record success metrics (fire-and-forget)
+                            let db_clone = state.db.clone();
+                            let nid = node_id.to_string();
+                            tokio::spawn(async move {
+                                let _ =
+                                    node_metrics_service::record_success(db_clone, nid, latency_ms)
+                                        .await;
+                            });
+
+                            if let Some(accounting) = pool_accounting.clone() {
+                                let usage =
+                                    should_capture_llm_usage(&target.service, platform_metric)
+                                        .then(|| llm_usage_service::UsageAuditContext {
+                                            db: state.db.clone(),
+                                            user_id: user_id_str.clone(),
+                                            provider_slug: None,
+                                            service_id: Some(service_id.to_owned()),
+                                            model: None,
+                                            path: path.to_owned(),
+                                            api_key_id: auth_user.api_key_id.clone(),
+                                            api_key_name: auth_user.api_key_name.clone(),
+                                        });
+                                let mut response = pool_attempt::node_response(
+                                    state,
+                                    auth_user,
+                                    accounting,
+                                    proxy_response,
+                                    metered.clone(),
+                                    request_body_len,
+                                    path,
+                                    downstream_cancellation.clone(),
+                                    node_location_context.as_ref(),
+                                    pool_attempt::Observability {
+                                        usage,
+                                        diagnostics: None,
+                                    },
+                                )
+                                .await?;
+                                audit_service::log_for_user(
+                                    state.db.clone(),
+                                    auth_user,
+                                    "proxy_request",
+                                    Some(node_proxy_audit_event_data(
+                                        service_id,
+                                        &method_str,
+                                        path,
+                                        response.status().as_u16(),
+                                        node_id,
+                                        service_owner_for_approval,
+                                        &auth_user.proxy_resolution_user_id(),
+                                        target.connection_id.as_deref(),
+                                    )),
+                                );
+                                apply_agent_attribution_headers(
+                                    &mut response,
+                                    auth_user.api_key_id.as_deref(),
+                                    target.connection_id.as_deref(),
+                                );
+                                destination_audit.complete(response.status().as_u16());
+                                return observe_model_response(model_request, path, response).await;
+                            }
+
+                            let response_result: AppResult<Response> = async {
+                            let response = match proxy_response {
+                            ProxyResponseType::Complete(node_response) => {
+                                let response_len = node_response.body.len() as i64;
+                                let request_len = request_body_len;
+                                let usage = (node_response.body.len() <= USAGE_CAPTURE_MAX_BYTES && should_capture_llm_usage(&target.service, platform_metric))
+                                    .then(|| llm_usage_service::usage_from_body(&node_response.body, path, (200..300).contains(&node_response.status))).flatten();
+                                settle_meter_async(
+                                    state.billing.clone(),
+                                    metered.clone(),
+                                    llm_platform_usage(usage.as_ref(), request_len + response_len),
+                                    None,
+                                    None,
+                                )
+                                .await;
+                                let status = StatusCode::from_u16(node_response.status)
+                                    .unwrap_or(StatusCode::BAD_GATEWAY);
+                                ProxyExchangeDiagnostics::new(
+                                    exchange_started_at,
+                                    target_admission_ms,
+                                    None,
+                                    &method,
+                                    status,
+                                    "buffered",
+                                    &all_headers,
+                                )
+                                .emit("completed");
+                                let mut response_builder = Response::builder().status(status);
+                                for (name, value) in &node_response.headers {
+                                    let name_lower = name.to_lowercase();
+                                    if let Ok(hn) =
+                                        axum::http::header::HeaderName::from_bytes(name.as_bytes())
+                                        && let Some(hv) = forwarded_response_header_value(
+                                            &name_lower,
+                                            value.as_bytes(),
+                                            false,
+                                            node_location_context.as_ref(),
+                                        )
+                                    {
+                                        response_builder = response_builder.header(hn, hv);
+                                    }
+                                }
+                                response_builder
+                                    .body(Body::from(node_response.body))
+                                    .map_err(|e| {
+                                        AppError::Internal(format!("Failed to build response: {e}"))
+                                    })?
+                            }
+                            ProxyResponseType::Streaming(mut rx) => {
+                                let idle_timeout_secs = state.config.proxy_stream_idle_timeout_secs;
+                                let idle_timeout = std::time::Duration::from_secs(idle_timeout_secs);
+
+                                // Wait for the Start chunk
+                                let first = tokio::time::timeout(idle_timeout, rx.recv())
+                                    .await
+                                    .map_err(|_| AppError::NodeProxyTimeout)?
+                                    .ok_or_else(|| {
+                                        AppError::NodeOffline("Stream closed before start".to_string())
+                                    })?;
+
+                                let (status, resp_headers) = match first {
+                                    StreamChunk::Start { status, headers } => (status, headers),
+                                    StreamChunk::Error(e) => {
+                                        return Err(AppError::Internal(format!("Stream error: {e}")));
+                                    }
+                                    _ => {
+                                        return Err(AppError::Internal(
+                                            "Expected stream start chunk".to_string(),
+                                        ));
+                                    }
+                                };
+
+                                let http_status =
+                                    StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY);
+                                let stream_diagnostics = ProxyExchangeDiagnostics::new(
+                                    exchange_started_at,
+                                    target_admission_ms,
+                                    Some(elapsed_ms(downstream_started_at)),
+                                    &method,
+                                    http_status,
+                                    if node_is_sse_headers(&resp_headers) {
+                                        "sse"
+                                    } else {
+                                        "binary_stream"
+                                    },
+                                    &all_headers,
+                                );
+                                let mut response_builder = Response::builder().status(http_status);
+
+                                // Detect SSE so we can skip content-length (length unknown).
+                                // For non-SSE streaming (video, audio, large files), keep
+                                // content-length for client download progress / seeking.
+                                let node_is_sse = resp_headers.iter().any(|(k, v)| {
+                                    k.eq_ignore_ascii_case("content-type")
+                                        && crate::mw::security_headers::is_sse_media_type(v)
+                                });
+
+                                for (name, value) in &resp_headers {
+                                    let name_lower = name.to_lowercase();
+                                    if let Ok(hn) =
+                                        axum::http::header::HeaderName::from_bytes(name.as_bytes())
+                                        && let Some(hv) = forwarded_response_header_value(
+                                            &name_lower,
+                                            value.as_bytes(),
+                                            node_is_sse,
+                                            node_location_context.as_ref(),
+                                        )
+                                    {
+                                        response_builder = response_builder.header(hn, hv);
+                                    }
+                                }
+
+                                // Same anti-buffering opt-out as the direct path:
+                                let service_id_owned = service_id.to_string();
+                                let node_id_owned = node_id.to_string();
+                                let stream_billing = state.billing.clone();
+                                let stream_metered = metered.clone();
+                                let request_len = request_body_len;
+                                let usage_path = path.to_string();
+                                let capture_usage = should_capture_llm_usage(&target.service, platform_metric);
+
+                                // Convert the mpsc receiver into a streaming body.
+                                let mut exchange_diagnostics =
+                                    ProxyStreamDiagnostics::new(stream_diagnostics);
+                                let stream = async_stream::stream! {
+                                    let mut response_len: i64 = 0;
+                                    let mut captured = (capture_usage && !node_is_sse).then(Vec::new);
+                                    let mut usage_events = llm_usage_service::BoundedUsageEvents::default();
+                                    loop {
+                                        match tokio::time::timeout(idle_timeout, rx.recv()).await {
+                                            Ok(Some(StreamChunk::Data(bytes))) => {
+                                                response_len += bytes.len() as i64;
+                                                if capture_usage && node_is_sse { usage_events.push(&bytes); }
+                                                if let Some(buffer) = captured.as_mut() {
+                                                    if buffer.len() + bytes.len() <= USAGE_CAPTURE_MAX_BYTES { buffer.extend_from_slice(&bytes); }
+                                                    else { captured = None; }
+                                                }
+                                                yield Ok::<_, std::io::Error>(bytes::Bytes::from(bytes));
+                                            }
+                                            Ok(Some(StreamChunk::End)) => {
+                                                exchange_diagnostics.finish("completed");
+                                                break;
+                                            }
+                                            Ok(Some(StreamChunk::Error(e))) => {
+                                                tracing::error!(
+                                                    service_id = %service_id_owned,
+                                                    node_id = %node_id_owned,
+                                                    error = %e,
+                                                    "Stream error from node"
+                                                );
+                                                yield Err(std::io::Error::other(format!(
+                                                    "node stream error: {e}"
+                                                )));
+                                                exchange_diagnostics.finish("body_error");
+                                                break;
+                                            }
+                                            Ok(Some(StreamChunk::Start { .. })) => {
+                                                // Duplicate start, ignore
+                                            }
+                                            Ok(None) => {
+                                                exchange_diagnostics.finish("upstream_error");
+                                                break;
+                                            }
+                                            Err(_) => {
+                                                tracing::warn!(
+                                                    service_id = %service_id_owned,
+                                                    node_id = %node_id_owned,
+                                                    idle_timeout_secs,
+                                                    "Node proxy stream idle timeout reached"
+                                                );
+                                                exchange_diagnostics.finish("upstream_error");
+                                                break;
+                                            }
+                                        }
+                                    }
+                                    let mut usage = if node_is_sse { usage_events.finalize_success((200..300).contains(&status)) } else { captured.as_deref().and_then(|b| llm_usage_service::usage_from_body(b, &usage_path, (200..300).contains(&status))) };
+                                    if !(200..300).contains(&status) && let Some(usage) = usage.as_mut() { usage.images = 0; }
+                                    settle_meter_async(
+                                        stream_billing,
+                                        stream_metered,
+                                        llm_platform_usage(usage.as_ref(), request_len + response_len),
+                                        None,
+                                        None,
+                                    )
+                                    .await;
+                                };
+
+                                response_builder
+                                    .body(Body::from_stream(stream))
+                                    .map_err(|e| {
+                                        AppError::Internal(format!("Failed to build response: {e}"))
+                                    })?
+                            }
+                            };
+                            Ok(response)
+                        }
+                        .await;
+                            let mut response = match response_result {
+                                Ok(response) => response,
+                                Err(error) => {
+                                    emit_preheader_diagnostics(
+                                        exchange_started_at,
+                                        target_admission_ms,
+                                        &method,
+                                        &all_headers,
+                                        "upstream_error",
+                                    );
+                                    if let Some(reservation) = durable_reservation.as_ref() {
+                                        Box::pin(finish_durable_operation(
+                                            state,
+                                            auth_user,
+                                            reservation,
+                                            DurableExecutionStatus::OutcomeUncertain,
+                                            None,
+                                            Some(node_id),
+                                            "node response failed after dispatch",
+                                        ))
+                                        .await;
+                                        return Err(AppError::DurableOperationOutcomeUncertain);
+                                    }
+                                    return Err(error);
+                                }
+                            };
+
+                            let proxy_actor_user_id = auth_user.proxy_resolution_user_id();
+                            audit_service::log_for_user(
+                                state.db.clone(),
+                                auth_user,
+                                "proxy_request",
+                                Some(node_proxy_audit_event_data(
+                                    service_id,
+                                    &method_str,
+                                    path,
+                                    response.status().as_u16(),
+                                    node_id,
+                                    service_owner_for_approval,
+                                    &proxy_actor_user_id,
+                                    target.connection_id.as_deref(),
+                                )),
+                            );
+
+                            apply_agent_attribution_headers(
+                                &mut response,
+                                auth_user.api_key_id.as_deref(),
+                                target.connection_id.as_deref(),
+                            );
+
+                            if let Some(reservation) = durable_reservation.as_ref() {
+                                let response_status = response.status().as_u16();
+                                let terminal_status = if response.status().is_success() {
+                                    DurableExecutionStatus::Completed
+                                } else {
+                                    DurableExecutionStatus::Failed
+                                };
+                                Box::pin(finish_durable_operation(
+                                    state,
+                                    auth_user,
+                                    reservation,
+                                    terminal_status,
+                                    Some(response_status),
+                                    Some(node_id),
+                                    "downstream response received",
+                                ))
+                                .await;
+                            }
+
+                            destination_audit.complete(response.status().as_u16());
+                            request_audit.response(response.status().as_u16());
+                            return observe_model_response(model_request, path, response).await;
+                        }
+                        Err(NodeProxyFailure {
+                            error: err @ AppError::NodeCredentialMissing(_),
+                            dispatched,
+                        }) => {
+                            if !dispatched {
+                                destination_audit.denied();
+                            }
+                            had_dispatched_failure |= dispatched;
+                            node_failure_evidence.record(&err, dispatched);
+                            // A different fallback node may have the credential
+                            // configured locally, so we still try the rest of
+                            // the pool. Preserve the original error class in
+                            // `last_error` so if every attempt ends up reporting
+                            // a missing credential the caller sees the specific
+                            // 8004 / 502 rather than a generic `NodeOffline` —
+                            // which is the contract issue #418 asks for.
+                            tracing::warn!(
+                                node_id = %node_id,
+                                "Node rejected proxy request: credential missing locally, trying next"
+                            );
+
+                            let db_clone = state.db.clone();
+                            let nid = node_id.to_string();
+                            let err_msg = "Node credential missing".to_string();
+                            tokio::spawn(async move {
+                                let _ = node_metrics_service::record_error(db_clone, nid, err_msg)
+                                    .await;
+                            });
+
+                            if let Some(reservation) = durable_reservation.as_ref() {
+                                Box::pin(finish_durable_operation(
+                                    state,
+                                    auth_user,
+                                    reservation,
+                                    DurableExecutionStatus::Failed,
+                                    None,
+                                    Some(node_id),
+                                    "node rejected the request before downstream credential use",
+                                ))
+                                .await;
+                                return Err(if is_pool_attempt {
+                                    pool_node_failure(err, dispatched)
+                                } else {
+                                    err
+                                });
+                            }
+                            if stream_upload || !should_retry_node_failure(&method, dispatched) {
+                                emit_preheader_diagnostics(
+                                    exchange_started_at,
+                                    target_admission_ms,
+                                    &method,
+                                    &all_headers,
+                                    "upstream_error",
+                                );
+                                return Err(if is_pool_attempt {
+                                    pool_node_failure(err, dispatched)
+                                } else {
+                                    err
+                                });
+                            }
+                            last_error = Some(err);
+                            continue;
+                        }
+                        Err(NodeProxyFailure {
+                            error: err @ (AppError::NodeOffline(_) | AppError::NodeProxyTimeout),
+                            dispatched,
+                        }) => {
+                            if !dispatched {
+                                destination_audit.denied();
+                            }
+                            had_dispatched_failure |= dispatched;
+                            node_failure_evidence.record(&err, dispatched);
+                            // Record error metrics (fire-and-forget)
+                            let db_clone = state.db.clone();
+                            let nid = node_id.to_string();
+                            let err_msg = "Node offline or timeout".to_string();
+                            tokio::spawn(async move {
+                                let _ = node_metrics_service::record_error(db_clone, nid, err_msg)
+                                    .await;
+                            });
+
+                            if let Some(reservation) = durable_reservation.as_ref() {
+                                Box::pin(finish_durable_operation(
+                                    state,
+                                    auth_user,
+                                    reservation,
+                                    DurableExecutionStatus::OutcomeUncertain,
+                                    None,
+                                    Some(node_id),
+                                    "node transport failed after dispatch",
+                                ))
+                                .await;
+                                return Err(AppError::DurableOperationOutcomeUncertain);
+                            }
+                            if stream_upload || !should_retry_node_failure(&method, dispatched) {
+                                emit_preheader_diagnostics(
+                                    exchange_started_at,
+                                    target_admission_ms,
+                                    &method,
+                                    &all_headers,
+                                    "upstream_error",
+                                );
+                                tracing::warn!(
+                                    node_id = %node_id,
+                                    method = %method,
+                                    "Not retrying unsafe proxy request after possible node dispatch"
+                                );
+                                return Err(if is_pool_attempt {
+                                    pool_node_failure(err, dispatched)
+                                } else {
+                                    err
+                                });
+                            }
+                            tracing::warn!(node_id = %node_id, "Node proxy failed, trying next");
+                            last_error = Some(err);
+                            continue;
+                        }
+                        Err(failure) => {
+                            let NodeProxyFailure {
+                                error: e,
+                                dispatched,
+                            } = failure;
+                            if !dispatched {
+                                destination_audit.denied();
+                                if target.target_id.is_some()
+                                    && matches!(e, AppError::NodeHttpSignatureUnsupported)
+                                {
+                                    if let Some(reservation) = durable_reservation.as_ref() {
+                                        durable_operation_grant_service::mark_pre_dispatch_rejected(
+                                        &state.db,
+                                        reservation,
+                                        "node lost HTTP destination signature v2 before dispatch",
+                                    )
+                                    .await;
+                                    }
+                                    return Err(e);
+                                }
+                            }
+                            if let Some(reservation) = durable_reservation.as_ref() {
+                                Box::pin(finish_durable_operation(
+                                    state,
+                                    auth_user,
+                                    reservation,
+                                    DurableExecutionStatus::OutcomeUncertain,
+                                    None,
+                                    Some(node_id),
+                                    "node request failed after dispatch",
+                                ))
+                                .await;
+                                return Err(AppError::DurableOperationOutcomeUncertain);
+                            }
+                            emit_preheader_diagnostics(
+                                exchange_started_at,
+                                target_admission_ms,
+                                &method,
+                                &all_headers,
+                                if dispatched {
+                                    "upstream_error"
+                                } else {
+                                    "connect_error"
+                                },
+                            );
+                            return Err(if is_pool_attempt {
+                                pool_node_failure(e, dispatched)
+                            } else {
+                                e
+                            });
+                        }
+                    }
                 }
-            } else {
-                None
+
+                // All nodes failed.
+                //
+                // Hard-fail when:
+                //   * The service is explicitly node-routed (Route via Node) — falling
+                //     back to direct routing would violate the routing contract and
+                //     silently bypass node isolation, local credentials, or
+                //     private-network access. (ChronoAIProject/NyxID#328)
+                //   * No server-side credential is available, so direct routing
+                //     cannot succeed anyway.
+                if node_routing_required || !has_server_credential {
+                    if let (Some(chat), Some(admission)) = (
+                        auth_user.assistant_chat.as_deref(),
+                        assistant_decision.admission.as_ref(),
+                    ) {
+                        admission
+                            .exhausted_node_routes(&state.db, chat, &node_failure_evidence)
+                            .await?;
+                    }
+                    emit_preheader_diagnostics(
+                        exchange_started_at,
+                        first_dispatch_admission_ms
+                            .unwrap_or_else(|| elapsed_ms(exchange_started_at)),
+                        &method,
+                        &all_headers,
+                        if had_dispatched_failure {
+                            "upstream_error"
+                        } else {
+                            "connect_error"
+                        },
+                    );
+                    if let Some(reservation) = durable_reservation.as_ref() {
+                        durable_operation_grant_service::mark_pre_dispatch_rejected(
+                            &state.db,
+                            reservation,
+                            "no dispatchable node accepted the request",
+                        )
+                        .await;
+                    }
+                    audit_service::log_for_user(
+                        state.db.clone(),
+                        auth_user,
+                        "proxy_request_denied",
+                        Some(serde_json::json!({
+                            "service_id": service_id,
+                            "reason": "all_node_routes_failed",
+                            "node_routing_required": node_routing_required,
+                            "attempted_node_ids": all_node_ids,
+                        })),
+                    );
+                    let error = last_error.unwrap_or_else(|| {
+                        AppError::NodeOffline(if node_routing_required {
+                            "Service is configured to route via a node, but all node routes failed"
+                                .to_string()
+                        } else {
+                            "All node routes failed and no server-side credential is available"
+                                .to_string()
+                        })
+                    });
+                    return Err(if is_pool_attempt {
+                        pool_node_failure(error, had_dispatched_failure)
+                    } else {
+                        error
+                    });
+                }
+
+                // Fall through to standard proxy with server-side credential.
+                // Reachable only when the service is NOT explicitly node-routed
+                // (e.g. opportunistic NodeServiceBinding fallback).
+                if let Some(err) = last_error {
+                    tracing::warn!(
+                        service_id = %service_id,
+                        error = %err,
+                        "All node proxies failed, falling through to standard proxy"
+                    );
+                }
+            }
+            // === END Node Proxy Routing ===
+
+            // method, query, all_headers, body were already extracted above
+            let reqwest_method = match method {
+                Method::GET => reqwest::Method::GET,
+                Method::POST => reqwest::Method::POST,
+                Method::PUT => reqwest::Method::PUT,
+                Method::DELETE => reqwest::Method::DELETE,
+                Method::PATCH => reqwest::Method::PATCH,
+                Method::HEAD => reqwest::Method::HEAD,
+                Method::OPTIONS => reqwest::Method::OPTIONS,
+                _ => return Err(AppError::BadRequest("Unsupported HTTP method".to_string())),
             };
 
-            if target.target_id.is_some()
-                && let Err(error) = state
-                    .node_ws_manager
-                    .require_http_signature_v2(node_id, signing_secret.is_some())
-                    .await
+            // Convert axum HeaderMap to reqwest HeaderMap
+            let mut reqwest_headers = reqwest::header::HeaderMap::new();
+            for (name, value) in all_headers.iter() {
+                if let Ok(reqwest_name) =
+                    reqwest::header::HeaderName::from_bytes(name.as_str().as_bytes())
+                    && let Ok(reqwest_value) =
+                        reqwest::header::HeaderValue::from_bytes(value.as_bytes())
+                {
+                    reqwest_headers.insert(reqwest_name, reqwest_value);
+                }
+            }
+
+            // OpenAI Codex: use the specialized ChatGPT HTTP client for supported
+            // model endpoints. It sets the required Codex headers (originator,
+            // User-Agent, etc.), while preserving the caller's requested response mode.
+            let is_codex = target.service.slug == "llm-openai-codex";
+
+            if is_codex
+                && !is_pool_attempt
+                && target.target_id.is_none()
+                && is_codex_transport_path(path)
+                && let Some(body_ref) = body.as_ref()
             {
+                let body_json: serde_json::Value = serde_json::from_slice(body_ref)
+                    .map_err(|e| AppError::BadRequest(format!("Invalid JSON body: {e}")))?;
+
+                // Use the ChatGPT translator to normalize the request. This handles
+                // both Chat Completions format (messages → input + instructions) and
+                // Responses API format (enriched with store=false, etc.).
+                let translator = chatgpt_translator::ChatgptTranslator;
+                let translated =
+                <chatgpt_translator::ChatgptTranslator as crate::services::llm_gateway_service::LlmTranslator>::translate_request(
+                    &translator, path, &body_json,
+                )?;
+                let is_chat_completions_path = is_chat_completions_proxy_path(path);
+
+                let bearer_token = delegated
+                    .iter()
+                    .find(|c| c.injection_method == "bearer")
+                    .map(|c| c.credential.clone())
+                    .ok_or_else(|| {
+                        AppError::BadRequest(
+                            "No bearer token for Codex. Connect the provider first.".to_string(),
+                        )
+                    })?;
+
+                let is_streaming = body_json
+                    .get("stream")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                let request_len = serde_json::to_vec(&translated.body)
+                    .map(|bytes| bytes.len() as i64)
+                    .unwrap_or(request_body_len);
+                let model = body_json
+                    .get("model")
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string);
+                let usage_complete = chatgpt_usage_callback(
+                    state.billing.clone(),
+                    metered.clone(),
+                    request_len,
+                    billing_ctx.resale.as_ref().map(|spec| spec.metric),
+                    model.clone(),
+                );
+
+                if resolved_user_service_id.is_none()
+                    && let Some(job) = machine_ingress.as_ref().and_then(|i| i.assistant_job_id())
+                    && let Err(error) =
+                        crate::services::assistant_job_service_use::validate_catalog(
+                            &state.db,
+                            job,
+                            &target.service.id,
+                        )
+                        .await
+                {
+                    state
+                        .billing
+                        .fail(&metered, "machine_authority_changed")
+                        .await?;
+                    if let Some(reservation) = durable_reservation.as_ref() {
+                        durable_operation_grant_service::mark_pre_dispatch_rejected(
+                            &state.db,
+                            reservation,
+                            "machine authority changed before dispatch",
+                        )
+                        .await;
+                    }
+                    return Err(error);
+                }
+                if let Some(admission) = assistant_decision.admission.as_ref() {
+                    let revalidation = admission
+                        .http_egress(
+                            &state.db,
+                            &state.encryption_keys,
+                            &target,
+                            method.as_str(),
+                            path,
+                        )
+                        .projected(&assistant_projection)
+                        .routed(node_route.as_ref())
+                        .revalidate()
+                        .await;
+                    if let Err(error) = revalidation {
+                        if let Some(reservation) = durable_reservation.as_ref() {
+                            durable_operation_grant_service::mark_pre_dispatch_rejected(
+                                &state.db,
+                                reservation,
+                                "assistant authority changed before dispatch",
+                            )
+                            .await;
+                        }
+                        state
+                            .billing
+                            .reject_before_send(
+                                &metered,
+                                "assistant_authority_changed",
+                                had_dispatched_failure,
+                            )
+                            .await?;
+                        return Err(error);
+                    }
+                }
+                if let Err(error) = state.billing.mark_forwarded(&metered).await {
+                    if let Some(reservation) = durable_reservation.as_ref() {
+                        durable_operation_grant_service::mark_pre_dispatch_rejected(
+                            &state.db,
+                            reservation,
+                            "billing admission failed before dispatch",
+                        )
+                        .await;
+                    }
+                    return Err(error);
+                }
                 if let Some(reservation) = durable_reservation.as_ref() {
-                    durable_operation_grant_service::mark_pre_dispatch_rejected(
+                    durable_operation_grant_service::mark_dispatched(&state.db, reservation, None)
+                        .await?;
+                }
+                if let Some(guard) =
+                    crate::services::assistant_service_execution::HttpEgressGuard::for_proxy(
+                        assistant_decision.admission.as_ref(),
+                        machine_ingress.as_ref(),
                         &state.db,
-                        reservation,
-                        "node lacks HTTP destination signature v2",
+                        &state.encryption_keys,
+                        &target,
+                        method.as_str(),
+                        path,
                     )
+                    .map(|guard| {
+                        guard
+                            .projected(&assistant_projection)
+                            .routed(node_route.as_ref())
+                    })
+                    && let Err(error) = guard.revalidate().await
+                {
+                    if let Some(reservation) = durable_reservation.as_ref() {
+                        durable_operation_grant_service::mark_send_rejected(&state.db, reservation)
+                            .await;
+                    }
+                    state
+                        .billing
+                        .reject_before_send(
+                            &metered,
+                            "assistant_authority_changed",
+                            had_dispatched_failure,
+                        )
+                        .await?;
+                    return Err(error);
+                }
+                mark_pool_attempt_dispatched(pool_dispatch_state.as_ref());
+                destination_audit.dispatch();
+                let response_result = until_client_disconnect(
+                    &downstream_cancellation,
+                    Box::pin(chatgpt_translator::send_to_chatgpt(
+                        &translated.body,
+                        &bearer_token,
+                        is_streaming,
+                        is_chat_completions_path,
+                        query.as_deref(),
+                        Some(llm_usage_service::UsageAuditContext {
+                            db: state.db.clone(),
+                            user_id: user_id_str.clone(),
+                            provider_slug: None,
+                            service_id: Some(service_id.to_string()),
+                            model,
+                            path: path.to_string(),
+                            api_key_id: auth_user.api_key_id.clone(),
+                            api_key_name: auth_user.api_key_name.clone(),
+                        }),
+                        Some(usage_complete),
+                        billing_egress_permit,
+                    )),
+                )
+                .await;
+                let mut response = match response_result {
+                    Ok(Ok(response)) => response,
+                    Ok(Err(error)) => {
+                        if let Some(reservation) = durable_reservation.as_ref() {
+                            Box::pin(finish_durable_operation(
+                                state,
+                                auth_user,
+                                reservation,
+                                DurableExecutionStatus::OutcomeUncertain,
+                                None,
+                                None,
+                                "direct transport failed after dispatch",
+                            ))
+                            .await;
+                            return Err(AppError::DurableOperationOutcomeUncertain);
+                        }
+                        if is_pool_attempt {
+                            return Err(error);
+                        }
+                        return Err(error);
+                    }
+                    Err(_) => {
+                        if let Some(reservation) = durable_reservation.as_ref() {
+                            Box::pin(finish_durable_operation(
+                                state,
+                                auth_user,
+                                reservation,
+                                DurableExecutionStatus::OutcomeUncertain,
+                                None,
+                                None,
+                                "client disconnected after dispatch",
+                            ))
+                            .await;
+                            return Err(AppError::DurableOperationOutcomeUncertain);
+                        }
+                        return Err(proxy_client_disconnected(service_id));
+                    }
+                };
+
+                let status = response.status();
+
+                audit_service::log_for_user(
+                    state.db.clone(),
+                    auth_user,
+                    "proxy_request",
+                    Some(serde_json::json!({
+                        "service_id": service_id,
+                        "method": method.as_str(),
+                        "path": path,
+                        "response_status": status.as_u16(),
+                        "acting_client_id": &auth_user.acting_client_id,
+                        "codex_transport": true,
+                        "connection_id": target.connection_id.as_deref(),
+                    })),
+                );
+
+                apply_agent_attribution_headers(
+                    &mut response,
+                    auth_user.api_key_id.as_deref(),
+                    target.connection_id.as_deref(),
+                );
+
+                if let Some(reservation) = durable_reservation.as_ref() {
+                    Box::pin(finish_durable_operation(
+                        state,
+                        auth_user,
+                        reservation,
+                        if status.is_success() {
+                            DurableExecutionStatus::Completed
+                        } else {
+                            DurableExecutionStatus::Failed
+                        },
+                        Some(status.as_u16()),
+                        None,
+                        "downstream response received",
+                    ))
                     .await;
                 }
-                return Err(error);
+
+                destination_audit.complete(response.status().as_u16());
+                request_audit.response(response.status().as_u16());
+                return observe_model_response(model_request, path, response).await;
             }
-            let start = std::time::Instant::now();
+
+            // Reuse the shared reqwest::Client from AppState for connection pooling.
             if resolved_user_service_id.is_none()
                 && let Some(job) = machine_ingress.as_ref().and_then(|i| i.assistant_job_id())
                 && let Err(error) = crate::services::assistant_job_service_use::validate_catalog(
@@ -5420,7 +6512,7 @@ async fn execute_resolved_proxy_inner(
                         path,
                     )
                     .projected(&assistant_projection)
-                    .routed(Some(node_route))
+                    .routed(node_route.as_ref())
                     .revalidate()
                     .await;
                 if let Err(error) = revalidation {
@@ -5455,14 +6547,14 @@ async fn execute_resolved_proxy_inner(
                 return Err(error);
             }
             if let Some(reservation) = durable_reservation.as_ref() {
-                durable_operation_grant_service::mark_dispatched(
-                    &state.db,
-                    reservation,
-                    Some(node_id),
-                )
-                .await?;
+                durable_operation_grant_service::mark_dispatched(&state.db, reservation, None)
+                    .await?;
             }
-            if let Some(guard) =
+            mark_pool_attempt_dispatched(pool_dispatch_state.as_ref());
+            destination_audit.dispatch();
+            let target_admission_ms = elapsed_ms(exchange_started_at);
+            let downstream_started_at = std::time::Instant::now();
+            let egress_guard =
                 crate::services::assistant_service_execution::HttpEgressGuard::for_proxy(
                     assistant_decision.admission.as_ref(),
                     machine_ingress.as_ref(),
@@ -5475,1333 +6567,301 @@ async fn execute_resolved_proxy_inner(
                 .map(|guard| {
                     guard
                         .projected(&assistant_projection)
-                        .routed(Some(node_route))
-                })
-                && let Err(error) = guard.revalidate().await
-            {
-                if let Some(reservation) = durable_reservation.as_ref() {
-                    durable_operation_grant_service::mark_send_rejected(&state.db, reservation)
-                        .await;
-                }
-                state
-                    .billing
-                    .reject_before_send(
-                        &metered,
-                        "assistant_authority_changed",
-                        had_dispatched_failure,
-                    )
-                    .await?;
-                return Err(error);
-            }
-            if let Some(accounting) = &pool_accounting {
-                accounting
-                    .node_dispatched
-                    .store(true, std::sync::atomic::Ordering::Release);
-            }
-            mark_pool_attempt_dispatched(pool_dispatch_state.as_ref());
-            destination_audit.dispatch();
-            let target_admission_ms =
-                *first_dispatch_admission_ms.get_or_insert_with(|| elapsed_ms(exchange_started_at));
-            let downstream_started_at = std::time::Instant::now();
-            let result = if let Some(upload) = streaming_body.take() {
-                let mut parameters = serde_json::to_value(&attempt_request)
-                    .map_err(|_| AppError::Internal("Upload metadata encoding failed".into()))?;
-                parameters["headers"] = serde_json::to_value(
-                    attempt_request
-                        .headers
-                        .iter()
-                        .cloned()
-                        .collect::<std::collections::BTreeMap<_, _>>(),
-                )
-                .map_err(|_| AppError::Internal("Upload headers encoding failed".into()))?;
-                parameters["git"] = serde_json::json!(machine_git);
-                parameters["max_bytes"] = serde_json::json!(
-                    upload_meter
-                        .as_ref()
-                        .map_or(state.config.proxy_max_body_size, |meter| meter.limit)
-                );
-                let mut signed = nyxid_machine::Request {
-                    external_authority: None,
-                    version: 1,
-                    authority: None,
-                    request_id: attempt_request.request_id,
-                    node_id: (*node_id).into(),
-                    operation: nyxid_machine::Operation::ProxyUpload,
-                    parameters,
-                    timestamp: chrono::Utc::now().timestamp(),
-                    nonce: uuid::Uuid::new_v4().to_string(),
-                    signature: String::new(),
-                };
-                signed.signature = nyxid_machine::signing::sign(
-                    &signed,
-                    signing_secret.as_ref().ok_or_else(|| {
-                        AppError::NodeOffline("Credential node signing is unavailable".into())
-                    })?,
-                );
-                state.node_dispatch.proxy_upload(signed, upload).await
-            } else {
-                state
-                    .node_dispatch
-                    .send_proxy_request_classified(
-                        node_id,
-                        attempt_request,
-                        signing_secret.as_ref().map(|secret| secret.as_slice()),
-                        billing_egress_permit,
-                    )
-                    .await
-            };
-            // A streamed body can exceed its limit after provider dispatch.
-            // Keep it on the normal failure path so durable grants record the
-            // uncertain outcome and the upload is never retried on another node.
-            let result = match upload_meter.as_ref().filter(|meter| meter.exceeded()) {
-                Some(meter) => Err(NodeProxyFailure::after_dispatch(meter.error())),
-                None => result,
+                        .routed(node_route.as_ref())
+                });
+            let downstream_result = until_client_disconnect(
+                &downstream_cancellation,
+                Box::pin(proxy_service::forward_request_with_egress_guard(
+                    if is_pool_attempt
+                        || operation_scoped
+                        || permission_ingress.is_some()
+                        || target.service.offering_kind
+                            == crate::models::downstream_service::OfferingKind::Tool
+                    {
+                        proxy_service::no_redirect_http_client()
+                    } else {
+                        &state.http_client
+                    },
+                    &target,
+                    reqwest_method,
+                    path,
+                    query.as_deref(),
+                    reqwest_headers,
+                    match streaming_body.take() {
+                        Some(stream) => proxy_service::ProxyBody::Streaming(stream),
+                        None => proxy_service::ProxyBody::Buffered(body),
+                    },
+                    identity_headers,
+                    delegated,
+                    caller_token.as_deref(),
+                    &state.token_exchange_cache,
+                    &state.cloud_response_cache,
+                    extra_outbound_headers,
+                    billing_egress_permit,
+                    egress_guard.as_ref(),
+                )),
+            )
+            .await;
+            let downstream_result = match upload_meter.as_ref().filter(|meter| meter.exceeded()) {
+                Some(meter) => Ok(Err(proxy_service::ForwardRequestError::from(meter.error()))),
+                None => downstream_result,
             };
             let request_body_len = upload_meter
                 .as_ref()
                 .map_or(request_body_len, |meter| meter.bytes());
-            let latency_ms = start.elapsed().as_millis() as u64;
-
-            match result {
-                Ok(proxy_response) => {
-                    // Record success metrics (fire-and-forget)
-                    let db_clone = state.db.clone();
-                    let nid = node_id.to_string();
-                    tokio::spawn(async move {
-                        let _ =
-                            node_metrics_service::record_success(db_clone, nid, latency_ms).await;
-                    });
-
-                    if let Some(accounting) = pool_accounting.clone() {
-                        let usage = should_capture_llm_usage(&target.service, platform_metric)
-                            .then(|| llm_usage_service::UsageAuditContext {
-                                db: state.db.clone(),
-                                user_id: user_id_str.clone(),
-                                provider_slug: None,
-                                service_id: Some(service_id.to_owned()),
-                                model: None,
-                                path: path.to_owned(),
-                                api_key_id: auth_user.api_key_id.clone(),
-                                api_key_name: auth_user.api_key_name.clone(),
-                            });
-                        let mut response = pool_attempt::node_response(
-                            state,
-                            auth_user,
-                            accounting,
-                            proxy_response,
-                            metered.clone(),
-                            request_body_len,
-                            path,
-                            downstream_cancellation.clone(),
-                            node_location_context.as_ref(),
-                            pool_attempt::Observability {
-                                usage,
-                                diagnostics: None,
-                            },
+            if let (Some(chat), Some(admission)) = (
+                auth_user.assistant_chat.as_deref(),
+                assistant_decision.admission.as_ref(),
+            ) {
+                match &downstream_result {
+                    Ok(Ok(response)) => {
+                        admission
+                            .response(&state.db, chat, response.status().as_u16())
+                            .await?
+                    }
+                    Ok(Err(error)) => admission.transport_failure(&state.db, chat, error).await?,
+                    Err(_) => {}
+                }
+            }
+            let downstream_response = match downstream_result {
+                Ok(Ok(response)) => response,
+                Ok(Err(proxy_service::ForwardRequestError::PreDispatchRejected(error))) => {
+                    if let Some(reservation) = durable_reservation.as_ref() {
+                        durable_operation_grant_service::mark_send_rejected(&state.db, reservation)
+                            .await;
+                    }
+                    state
+                        .billing
+                        .reject_before_send(
+                            &metered,
+                            "assistant_authority_changed",
+                            had_dispatched_failure,
                         )
                         .await?;
-                        audit_service::log_for_user(
-                            state.db.clone(),
-                            auth_user,
-                            "proxy_request",
-                            Some(node_proxy_audit_event_data(
-                                service_id,
-                                &method_str,
-                                path,
-                                response.status().as_u16(),
-                                node_id,
-                                service_owner_for_approval,
-                                &auth_user.proxy_resolution_user_id(),
-                                target.connection_id.as_deref(),
-                            )),
-                        );
-                        apply_agent_attribution_headers(
-                            &mut response,
-                            auth_user.api_key_id.as_deref(),
-                            target.connection_id.as_deref(),
-                        );
-                        destination_audit.complete(response.status().as_u16());
-                        return observe_model_response(model_request, path, response).await;
-                    }
-
-                    let response_result: AppResult<Response> = async {
-                        let response = match proxy_response {
-                        ProxyResponseType::Complete(node_response) => {
-                            let response_len = node_response.body.len() as i64;
-                            let request_len = request_body_len;
-                            let usage = (node_response.body.len() <= USAGE_CAPTURE_MAX_BYTES && should_capture_llm_usage(&target.service, platform_metric))
-                                .then(|| llm_usage_service::usage_from_body(&node_response.body, path, (200..300).contains(&node_response.status))).flatten();
-                            settle_meter_async(
-                                state.billing.clone(),
-                                metered.clone(),
-                                llm_platform_usage(usage.as_ref(), request_len + response_len),
-                                None,
-                                None,
-                            )
-                            .await;
-                            let status = StatusCode::from_u16(node_response.status)
-                                .unwrap_or(StatusCode::BAD_GATEWAY);
-                            ProxyExchangeDiagnostics::new(
-                                exchange_started_at,
-                                target_admission_ms,
-                                None,
-                                &method,
-                                status,
-                                "buffered",
-                                &all_headers,
-                            )
-                            .emit("completed");
-                            let mut response_builder = Response::builder().status(status);
-                            for (name, value) in &node_response.headers {
-                                let name_lower = name.to_lowercase();
-                                if let Ok(hn) =
-                                    axum::http::header::HeaderName::from_bytes(name.as_bytes())
-                                    && let Some(hv) = forwarded_response_header_value(
-                                        &name_lower,
-                                        value.as_bytes(),
-                                        false,
-                                        node_location_context.as_ref(),
-                                    )
-                                {
-                                    response_builder = response_builder.header(hn, hv);
-                                }
-                            }
-                            response_builder
-                                .body(Body::from(node_response.body))
-                                .map_err(|e| {
-                                    AppError::Internal(format!("Failed to build response: {e}"))
-                                })?
-                        }
-                        ProxyResponseType::Streaming(mut rx) => {
-                            let idle_timeout_secs = state.config.proxy_stream_idle_timeout_secs;
-                            let idle_timeout = std::time::Duration::from_secs(idle_timeout_secs);
-
-                            // Wait for the Start chunk
-                            let first = tokio::time::timeout(idle_timeout, rx.recv())
-                                .await
-                                .map_err(|_| AppError::NodeProxyTimeout)?
-                                .ok_or_else(|| {
-                                    AppError::NodeOffline("Stream closed before start".to_string())
-                                })?;
-
-                            let (status, resp_headers) = match first {
-                                StreamChunk::Start { status, headers } => (status, headers),
-                                StreamChunk::Error(e) => {
-                                    return Err(AppError::Internal(format!("Stream error: {e}")));
-                                }
-                                _ => {
-                                    return Err(AppError::Internal(
-                                        "Expected stream start chunk".to_string(),
-                                    ));
-                                }
-                            };
-
-                            let http_status =
-                                StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY);
-                            let stream_diagnostics = ProxyExchangeDiagnostics::new(
-                                exchange_started_at,
-                                target_admission_ms,
-                                Some(elapsed_ms(downstream_started_at)),
-                                &method,
-                                http_status,
-                                if node_is_sse_headers(&resp_headers) {
-                                    "sse"
-                                } else {
-                                    "binary_stream"
-                                },
-                                &all_headers,
-                            );
-                            let mut response_builder = Response::builder().status(http_status);
-
-                            // Detect SSE so we can skip content-length (length unknown).
-                            // For non-SSE streaming (video, audio, large files), keep
-                            // content-length for client download progress / seeking.
-                            let node_is_sse = resp_headers.iter().any(|(k, v)| {
-                                k.eq_ignore_ascii_case("content-type")
-                                    && crate::mw::security_headers::is_sse_media_type(v)
-                            });
-
-                            for (name, value) in &resp_headers {
-                                let name_lower = name.to_lowercase();
-                                if let Ok(hn) =
-                                    axum::http::header::HeaderName::from_bytes(name.as_bytes())
-                                    && let Some(hv) = forwarded_response_header_value(
-                                        &name_lower,
-                                        value.as_bytes(),
-                                        node_is_sse,
-                                        node_location_context.as_ref(),
-                                    )
-                                {
-                                    response_builder = response_builder.header(hn, hv);
-                                }
-                            }
-
-                            // Same anti-buffering opt-out as the direct path:
-                            let service_id_owned = service_id.to_string();
-                            let node_id_owned = node_id.to_string();
-                            let stream_billing = state.billing.clone();
-                            let stream_metered = metered.clone();
-                            let request_len = request_body_len;
-                            let usage_path = path.to_string();
-                            let capture_usage = should_capture_llm_usage(&target.service, platform_metric);
-
-                            // Convert the mpsc receiver into a streaming body.
-                            let mut exchange_diagnostics =
-                                ProxyStreamDiagnostics::new(stream_diagnostics);
-                            let stream = async_stream::stream! {
-                                let mut response_len: i64 = 0;
-                                let mut captured = (capture_usage && !node_is_sse).then(Vec::new);
-                                let mut usage_events = llm_usage_service::BoundedUsageEvents::default();
-                                loop {
-                                    match tokio::time::timeout(idle_timeout, rx.recv()).await {
-                                        Ok(Some(StreamChunk::Data(bytes))) => {
-                                            response_len += bytes.len() as i64;
-                                            if capture_usage && node_is_sse { usage_events.push(&bytes); }
-                                            if let Some(buffer) = captured.as_mut() {
-                                                if buffer.len() + bytes.len() <= USAGE_CAPTURE_MAX_BYTES { buffer.extend_from_slice(&bytes); }
-                                                else { captured = None; }
-                                            }
-                                            yield Ok::<_, std::io::Error>(bytes::Bytes::from(bytes));
-                                        }
-                                        Ok(Some(StreamChunk::End)) => {
-                                            exchange_diagnostics.finish("completed");
-                                            break;
-                                        }
-                                        Ok(Some(StreamChunk::Error(e))) => {
-                                            tracing::error!(
-                                                service_id = %service_id_owned,
-                                                node_id = %node_id_owned,
-                                                error = %e,
-                                                "Stream error from node"
-                                            );
-                                            yield Err(std::io::Error::other(format!(
-                                                "node stream error: {e}"
-                                            )));
-                                            exchange_diagnostics.finish("body_error");
-                                            break;
-                                        }
-                                        Ok(Some(StreamChunk::Start { .. })) => {
-                                            // Duplicate start, ignore
-                                        }
-                                        Ok(None) => {
-                                            exchange_diagnostics.finish("upstream_error");
-                                            break;
-                                        }
-                                        Err(_) => {
-                                            tracing::warn!(
-                                                service_id = %service_id_owned,
-                                                node_id = %node_id_owned,
-                                                idle_timeout_secs,
-                                                "Node proxy stream idle timeout reached"
-                                            );
-                                            exchange_diagnostics.finish("upstream_error");
-                                            break;
-                                        }
-                                    }
-                                }
-                                let mut usage = if node_is_sse { usage_events.finalize_success((200..300).contains(&status)) } else { captured.as_deref().and_then(|b| llm_usage_service::usage_from_body(b, &usage_path, (200..300).contains(&status))) };
-                                if !(200..300).contains(&status) && let Some(usage) = usage.as_mut() { usage.images = 0; }
-                                settle_meter_async(
-                                    stream_billing,
-                                    stream_metered,
-                                    llm_platform_usage(usage.as_ref(), request_len + response_len),
-                                    None,
-                                    None,
-                                )
-                                .await;
-                            };
-
-                            response_builder
-                                .body(Body::from_stream(stream))
-                                .map_err(|e| {
-                                    AppError::Internal(format!("Failed to build response: {e}"))
-                                })?
-                        }
-                        };
-                        Ok(response)
-                    }
-                    .await;
-                    let mut response = match response_result {
-                        Ok(response) => response,
-                        Err(error) => {
-                            emit_preheader_diagnostics(
-                                exchange_started_at,
-                                target_admission_ms,
-                                &method,
-                                &all_headers,
-                                "upstream_error",
-                            );
-                            if let Some(reservation) = durable_reservation.as_ref() {
-                                Box::pin(finish_durable_operation(
-                                    state,
-                                    auth_user,
-                                    reservation,
-                                    DurableExecutionStatus::OutcomeUncertain,
-                                    None,
-                                    Some(node_id),
-                                    "node response failed after dispatch",
-                                ))
-                                .await;
-                                return Err(AppError::DurableOperationOutcomeUncertain);
-                            }
-                            return Err(error);
-                        }
-                    };
-
-                    let proxy_actor_user_id = auth_user.proxy_resolution_user_id();
-                    audit_service::log_for_user(
-                        state.db.clone(),
-                        auth_user,
-                        "proxy_request",
-                        Some(node_proxy_audit_event_data(
-                            service_id,
-                            &method_str,
-                            path,
-                            response.status().as_u16(),
-                            node_id,
-                            service_owner_for_approval,
-                            &proxy_actor_user_id,
-                            target.connection_id.as_deref(),
-                        )),
-                    );
-
-                    apply_agent_attribution_headers(
-                        &mut response,
-                        auth_user.api_key_id.as_deref(),
-                        target.connection_id.as_deref(),
-                    );
-
-                    if let Some(reservation) = durable_reservation.as_ref() {
-                        let response_status = response.status().as_u16();
-                        let terminal_status = if response.status().is_success() {
-                            DurableExecutionStatus::Completed
-                        } else {
-                            DurableExecutionStatus::Failed
-                        };
-                        Box::pin(finish_durable_operation(
-                            state,
-                            auth_user,
-                            reservation,
-                            terminal_status,
-                            Some(response_status),
-                            Some(node_id),
-                            "downstream response received",
-                        ))
-                        .await;
-                    }
-
-                    destination_audit.complete(response.status().as_u16());
-                    request_audit.response(response.status().as_u16());
-                    return observe_model_response(model_request, path, response).await;
+                    return Err(error);
                 }
-                Err(NodeProxyFailure {
-                    error: err @ AppError::NodeCredentialMissing(_),
-                    dispatched,
-                }) => {
-                    if !dispatched {
-                        destination_audit.denied();
-                    }
-                    had_dispatched_failure |= dispatched;
-                    node_failure_evidence.record(&err, dispatched);
-                    // A different fallback node may have the credential
-                    // configured locally, so we still try the rest of
-                    // the pool. Preserve the original error class in
-                    // `last_error` so if every attempt ends up reporting
-                    // a missing credential the caller sees the specific
-                    // 8004 / 502 rather than a generic `NodeOffline` —
-                    // which is the contract issue #418 asks for.
-                    tracing::warn!(
-                        node_id = %node_id,
-                        "Node rejected proxy request: credential missing locally, trying next"
-                    );
-
-                    let db_clone = state.db.clone();
-                    let nid = node_id.to_string();
-                    let err_msg = "Node credential missing".to_string();
-                    tokio::spawn(async move {
-                        let _ = node_metrics_service::record_error(db_clone, nid, err_msg).await;
-                    });
-
-                    if let Some(reservation) = durable_reservation.as_ref() {
-                        Box::pin(finish_durable_operation(
-                            state,
-                            auth_user,
-                            reservation,
-                            DurableExecutionStatus::Failed,
-                            None,
-                            Some(node_id),
-                            "node rejected the request before downstream credential use",
-                        ))
-                        .await;
-                        return Err(if is_pool_attempt {
-                            pool_node_failure(err, dispatched)
-                        } else {
-                            err
-                        });
-                    }
-                    if stream_upload || !should_retry_node_failure(&method, dispatched) {
-                        emit_preheader_diagnostics(
-                            exchange_started_at,
-                            target_admission_ms,
-                            &method,
-                            &all_headers,
-                            "upstream_error",
-                        );
-                        return Err(if is_pool_attempt {
-                            pool_node_failure(err, dispatched)
-                        } else {
-                            err
-                        });
-                    }
-                    last_error = Some(err);
-                    continue;
-                }
-                Err(NodeProxyFailure {
-                    error: err @ (AppError::NodeOffline(_) | AppError::NodeProxyTimeout),
-                    dispatched,
-                }) => {
-                    if !dispatched {
-                        destination_audit.denied();
-                    }
-                    had_dispatched_failure |= dispatched;
-                    node_failure_evidence.record(&err, dispatched);
-                    // Record error metrics (fire-and-forget)
-                    let db_clone = state.db.clone();
-                    let nid = node_id.to_string();
-                    let err_msg = "Node offline or timeout".to_string();
-                    tokio::spawn(async move {
-                        let _ = node_metrics_service::record_error(db_clone, nid, err_msg).await;
-                    });
-
-                    if let Some(reservation) = durable_reservation.as_ref() {
-                        Box::pin(finish_durable_operation(
-                            state,
-                            auth_user,
-                            reservation,
-                            DurableExecutionStatus::OutcomeUncertain,
-                            None,
-                            Some(node_id),
-                            "node transport failed after dispatch",
-                        ))
-                        .await;
-                        return Err(AppError::DurableOperationOutcomeUncertain);
-                    }
-                    if stream_upload || !should_retry_node_failure(&method, dispatched) {
-                        emit_preheader_diagnostics(
-                            exchange_started_at,
-                            target_admission_ms,
-                            &method,
-                            &all_headers,
-                            "upstream_error",
-                        );
-                        tracing::warn!(
-                            node_id = %node_id,
-                            method = %method,
-                            "Not retrying unsafe proxy request after possible node dispatch"
-                        );
-                        return Err(if is_pool_attempt {
-                            pool_node_failure(err, dispatched)
-                        } else {
-                            err
-                        });
-                    }
-                    tracing::warn!(node_id = %node_id, "Node proxy failed, trying next");
-                    last_error = Some(err);
-                    continue;
-                }
-                Err(failure) => {
-                    let NodeProxyFailure {
-                        error: e,
-                        dispatched,
-                    } = failure;
-                    if !dispatched {
-                        destination_audit.denied();
-                        if target.target_id.is_some()
-                            && matches!(e, AppError::NodeHttpSignatureUnsupported)
-                        {
-                            if let Some(reservation) = durable_reservation.as_ref() {
-                                durable_operation_grant_service::mark_pre_dispatch_rejected(
-                                    &state.db,
-                                    reservation,
-                                    "node lost HTTP destination signature v2 before dispatch",
-                                )
-                                .await;
-                            }
-                            return Err(e);
-                        }
-                    }
-                    if let Some(reservation) = durable_reservation.as_ref() {
-                        Box::pin(finish_durable_operation(
-                            state,
-                            auth_user,
-                            reservation,
-                            DurableExecutionStatus::OutcomeUncertain,
-                            None,
-                            Some(node_id),
-                            "node request failed after dispatch",
-                        ))
-                        .await;
-                        return Err(AppError::DurableOperationOutcomeUncertain);
-                    }
+                Ok(Err(error)) => {
                     emit_preheader_diagnostics(
                         exchange_started_at,
                         target_admission_ms,
                         &method,
                         &all_headers,
-                        if dispatched {
-                            "upstream_error"
-                        } else {
-                            "connect_error"
-                        },
+                        "upstream_error",
                     );
-                    return Err(if is_pool_attempt {
-                        pool_node_failure(e, dispatched)
-                    } else {
-                        e
-                    });
+                    if let Some(reservation) = durable_reservation.as_ref() {
+                        Box::pin(finish_durable_operation(
+                            state,
+                            auth_user,
+                            reservation,
+                            DurableExecutionStatus::OutcomeUncertain,
+                            None,
+                            None,
+                            "direct transport failed after dispatch",
+                        ))
+                        .await;
+                        return Err(AppError::DurableOperationOutcomeUncertain);
+                    }
+                    if is_pool_attempt {
+                        return Err(encode_pool_attempt_error(error));
+                    }
+                    return Err(error.into_app_error());
                 }
-            }
-        }
+                Err(_) => {
+                    emit_preheader_diagnostics(
+                        exchange_started_at,
+                        target_admission_ms,
+                        &method,
+                        &all_headers,
+                        "client_disconnect",
+                    );
+                    if let Some(reservation) = durable_reservation.as_ref() {
+                        Box::pin(finish_durable_operation(
+                            state,
+                            auth_user,
+                            reservation,
+                            DurableExecutionStatus::OutcomeUncertain,
+                            None,
+                            None,
+                            "client disconnected after dispatch",
+                        ))
+                        .await;
+                        return Err(AppError::DurableOperationOutcomeUncertain);
+                    }
+                    return Err(proxy_client_disconnected(service_id));
+                }
+            };
 
-        // All nodes failed.
-        //
-        // Hard-fail when:
-        //   * The service is explicitly node-routed (Route via Node) — falling
-        //     back to direct routing would violate the routing contract and
-        //     silently bypass node isolation, local credentials, or
-        //     private-network access. (ChronoAIProject/NyxID#328)
-        //   * No server-side credential is available, so direct routing
-        //     cannot succeed anyway.
-        if node_routing_required || !has_server_credential {
-            if let (Some(chat), Some(admission)) = (
-                auth_user.assistant_chat.as_deref(),
-                assistant_decision.admission.as_ref(),
-            ) {
-                admission
-                    .exhausted_node_routes(&state.db, chat, &node_failure_evidence)
-                    .await?;
-            }
-            emit_preheader_diagnostics(
-                exchange_started_at,
-                first_dispatch_admission_ms.unwrap_or_else(|| elapsed_ms(exchange_started_at)),
-                &method,
-                &all_headers,
-                if had_dispatched_failure {
-                    "upstream_error"
-                } else {
-                    "connect_error"
-                },
-            );
+            // Convert reqwest Response back to axum Response
+            let status = StatusCode::from_u16(downstream_response.status().as_u16())
+                .unwrap_or(StatusCode::BAD_GATEWAY);
+            let direct_location_context = AsyncLocationContext::from_downstream_request(
+                &target.base_url,
+                downstream_response.url().clone(),
+                caller_proxy_prefix,
+            )
+            .map(|context| context.pin_pool_member(pool_authority.as_ref()));
+
             if let Some(reservation) = durable_reservation.as_ref() {
-                durable_operation_grant_service::mark_pre_dispatch_rejected(
-                    &state.db,
+                Box::pin(finish_durable_operation(
+                    state,
+                    auth_user,
                     reservation,
-                    "no dispatchable node accepted the request",
-                )
+                    if status.is_success() {
+                        DurableExecutionStatus::Completed
+                    } else {
+                        DurableExecutionStatus::Failed
+                    },
+                    Some(status.as_u16()),
+                    None,
+                    "downstream response received",
+                ))
                 .await;
             }
+
+            // Same exact, case-insensitive media-type test the response-header
+            // middleware uses, so `content-length` stripping and SSE usage
+            // observation agree with the anti-buffering mark.
+            let is_sse = downstream_response
+                .headers()
+                .get("content-type")
+                .and_then(|v| v.to_str().ok())
+                .is_some_and(crate::mw::security_headers::is_sse_media_type);
+            let bounded_admission_body = nyxagent_admission && matches!(status.as_u16(), 409 | 503);
+            let should_stream = !bounded_admission_body
+                && (machine_ingress.is_some()
+                    || should_stream_response(&downstream_response, status, is_sse));
+            let exchange_diagnostics = ProxyExchangeDiagnostics::new(
+                exchange_started_at,
+                target_admission_ms,
+                Some(elapsed_ms(downstream_started_at)),
+                &method,
+                status,
+                if is_sse {
+                    "sse"
+                } else if should_stream {
+                    "binary_stream"
+                } else {
+                    "buffered"
+                },
+                &all_headers,
+            );
+            let usage_context = (should_capture_llm_usage(&target.service, platform_metric)
+                || model_request.is_some())
+            .then(|| llm_usage_service::UsageAuditContext {
+                db: state.db.clone(),
+                user_id: user_id_str.clone(),
+                provider_slug: None,
+                service_id: Some(service_id.to_string()),
+                model: None,
+                path: path.to_string(),
+                api_key_id: auth_user.api_key_id.clone(),
+                api_key_name: auth_user.api_key_name.clone(),
+            });
+
+            if let Some(accounting) = pool_accounting {
+                let mut response = pool_attempt::direct_response(
+                    state,
+                    auth_user,
+                    accounting,
+                    downstream_response,
+                    metered,
+                    request_body_len,
+                    path,
+                    downstream_cancellation,
+                    direct_location_context.as_ref(),
+                    pool_attempt::Observability {
+                        usage: usage_context,
+                        diagnostics: Some(exchange_diagnostics),
+                    },
+                )
+                .await?;
+                audit_service::log_for_user(
+                    state.db.clone(),
+                    auth_user,
+                    "proxy_request",
+                    Some(serde_json::json!({
+                        "service_id": service_id, "method": method.as_str(), "path": path,
+                        "response_status": status.as_u16(), "acting_client_id": &auth_user.acting_client_id,
+                        "connection_id": target.connection_id.as_deref(),
+                    })),
+                );
+                apply_agent_attribution_headers(
+                    &mut response,
+                    auth_user.api_key_id.as_deref(),
+                    target.connection_id.as_deref(),
+                );
+                destination_audit.complete(status.as_u16());
+                return observe_model_response(model_request, path, response).await;
+            }
+
+            let mut response_builder = Response::builder().status(status);
+
+            // Forward only allowlisted response headers.
+            // Skip content-length for SSE (length unknown). Keep it for other
+            // streaming responses — clients need it for download progress / seeking.
+            for (name, value) in downstream_response.headers().iter() {
+                let name_lower = name.as_str().to_lowercase();
+                if let Ok(header_name) =
+                    axum::http::header::HeaderName::from_bytes(name.as_str().as_bytes())
+                    && let Some(header_value) = forwarded_response_header_value(
+                        &name_lower,
+                        value.as_bytes(),
+                        is_sse,
+                        direct_location_context.as_ref(),
+                    )
+                {
+                    response_builder = response_builder.header(header_name, header_value);
+                }
+            }
+
+            let mut response = crate::services::proxy_http_response::relay_response(
+                state,
+                crate::services::proxy_http_response::HttpResponseContext {
+                    service_id: service_id.to_string(),
+                    path: path.to_string(),
+                    nyxagent_admission,
+                    model_request: model_request.clone(),
+                    response_builder,
+                    status,
+                    is_sse,
+                    should_stream,
+                    usage_context,
+                    metered,
+                    request_body_len,
+                    resale_metric: billing_ctx.resale.as_ref().map(|spec| spec.metric),
+                    downstream_cancellation,
+                    exchange_diagnostics,
+                },
+                downstream_response,
+            )
+            .await?;
+
+            // Audit log the proxy request
             audit_service::log_for_user(
                 state.db.clone(),
                 auth_user,
-                "proxy_request_denied",
+                "proxy_request",
                 Some(serde_json::json!({
                     "service_id": service_id,
-                    "reason": "all_node_routes_failed",
-                    "node_routing_required": node_routing_required,
-                    "attempted_node_ids": all_node_ids,
+                    "method": method.as_str(),
+                    "path": path,
+                    "response_status": status.as_u16(),
+                    "acting_client_id": &auth_user.acting_client_id,
+                    "connection_id": target.connection_id.as_deref(),
                 })),
             );
-            let error = last_error.unwrap_or_else(|| {
-                AppError::NodeOffline(if node_routing_required {
-                    "Service is configured to route via a node, but all node routes failed"
-                        .to_string()
-                } else {
-                    "All node routes failed and no server-side credential is available".to_string()
-                })
-            });
-            return Err(if is_pool_attempt {
-                pool_node_failure(error, had_dispatched_failure)
-            } else {
-                error
-            });
-        }
 
-        // Fall through to standard proxy with server-side credential.
-        // Reachable only when the service is NOT explicitly node-routed
-        // (e.g. opportunistic NodeServiceBinding fallback).
-        if let Some(err) = last_error {
-            tracing::warn!(
-                service_id = %service_id,
-                error = %err,
-                "All node proxies failed, falling through to standard proxy"
+            apply_agent_attribution_headers(
+                &mut response,
+                auth_user.api_key_id.as_deref(),
+                target.connection_id.as_deref(),
             );
-        }
-    }
-    // === END Node Proxy Routing ===
 
-    // method, query, all_headers, body were already extracted above
-    let reqwest_method = match method {
-        Method::GET => reqwest::Method::GET,
-        Method::POST => reqwest::Method::POST,
-        Method::PUT => reqwest::Method::PUT,
-        Method::DELETE => reqwest::Method::DELETE,
-        Method::PATCH => reqwest::Method::PATCH,
-        Method::HEAD => reqwest::Method::HEAD,
-        Method::OPTIONS => reqwest::Method::OPTIONS,
-        _ => return Err(AppError::BadRequest("Unsupported HTTP method".to_string())),
-    };
-
-    // Convert axum HeaderMap to reqwest HeaderMap
-    let mut reqwest_headers = reqwest::header::HeaderMap::new();
-    for (name, value) in all_headers.iter() {
-        if let Ok(reqwest_name) = reqwest::header::HeaderName::from_bytes(name.as_str().as_bytes())
-            && let Ok(reqwest_value) = reqwest::header::HeaderValue::from_bytes(value.as_bytes())
-        {
-            reqwest_headers.insert(reqwest_name, reqwest_value);
-        }
-    }
-
-    // OpenAI Codex: use the specialized ChatGPT HTTP client for supported
-    // model endpoints. It sets the required Codex headers (originator,
-    // User-Agent, etc.), while preserving the caller's requested response mode.
-    let is_codex = target.service.slug == "llm-openai-codex";
-
-    if is_codex
-        && !is_pool_attempt
-        && target.target_id.is_none()
-        && is_codex_transport_path(path)
-        && let Some(body_ref) = body.as_ref()
-    {
-        let body_json: serde_json::Value = serde_json::from_slice(body_ref)
-            .map_err(|e| AppError::BadRequest(format!("Invalid JSON body: {e}")))?;
-
-        // Use the ChatGPT translator to normalize the request. This handles
-        // both Chat Completions format (messages → input + instructions) and
-        // Responses API format (enriched with store=false, etc.).
-        let translator = chatgpt_translator::ChatgptTranslator;
-        let translated =
-            <chatgpt_translator::ChatgptTranslator as crate::services::llm_gateway_service::LlmTranslator>::translate_request(
-                &translator, path, &body_json,
-            )?;
-        let is_chat_completions_path = is_chat_completions_proxy_path(path);
-
-        let bearer_token = delegated
-            .iter()
-            .find(|c| c.injection_method == "bearer")
-            .map(|c| c.credential.clone())
-            .ok_or_else(|| {
-                AppError::BadRequest(
-                    "No bearer token for Codex. Connect the provider first.".to_string(),
-                )
-            })?;
-
-        let is_streaming = body_json
-            .get("stream")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        let request_len = serde_json::to_vec(&translated.body)
-            .map(|bytes| bytes.len() as i64)
-            .unwrap_or(request_body_len);
-        let model = body_json
-            .get("model")
-            .and_then(|value| value.as_str())
-            .map(str::to_string);
-        let usage_complete = chatgpt_usage_callback(
-            state.billing.clone(),
-            metered.clone(),
-            request_len,
-            billing_ctx.resale.as_ref().map(|spec| spec.metric),
-            model.clone(),
-        );
-
-        if resolved_user_service_id.is_none()
-            && let Some(job) = machine_ingress.as_ref().and_then(|i| i.assistant_job_id())
-            && let Err(error) = crate::services::assistant_job_service_use::validate_catalog(
-                &state.db,
-                job,
-                &target.service.id,
-            )
-            .await
-        {
-            state
-                .billing
-                .fail(&metered, "machine_authority_changed")
-                .await?;
-            if let Some(reservation) = durable_reservation.as_ref() {
-                durable_operation_grant_service::mark_pre_dispatch_rejected(
-                    &state.db,
-                    reservation,
-                    "machine authority changed before dispatch",
-                )
-                .await;
-            }
-            return Err(error);
-        }
-        if let Some(admission) = assistant_decision.admission.as_ref() {
-            let revalidation = admission
-                .http_egress(
-                    &state.db,
-                    &state.encryption_keys,
-                    &target,
-                    method.as_str(),
-                    path,
-                )
-                .projected(&assistant_projection)
-                .routed(node_route.as_ref())
-                .revalidate()
-                .await;
-            if let Err(error) = revalidation {
-                if let Some(reservation) = durable_reservation.as_ref() {
-                    durable_operation_grant_service::mark_pre_dispatch_rejected(
-                        &state.db,
-                        reservation,
-                        "assistant authority changed before dispatch",
-                    )
-                    .await;
-                }
-                state
-                    .billing
-                    .reject_before_send(
-                        &metered,
-                        "assistant_authority_changed",
-                        had_dispatched_failure,
-                    )
-                    .await?;
-                return Err(error);
-            }
-        }
-        if let Err(error) = state.billing.mark_forwarded(&metered).await {
-            if let Some(reservation) = durable_reservation.as_ref() {
-                durable_operation_grant_service::mark_pre_dispatch_rejected(
-                    &state.db,
-                    reservation,
-                    "billing admission failed before dispatch",
-                )
-                .await;
-            }
-            return Err(error);
-        }
-        if let Some(reservation) = durable_reservation.as_ref() {
-            durable_operation_grant_service::mark_dispatched(&state.db, reservation, None).await?;
-        }
-        if let Some(guard) =
-            crate::services::assistant_service_execution::HttpEgressGuard::for_proxy(
-                assistant_decision.admission.as_ref(),
-                machine_ingress.as_ref(),
-                &state.db,
-                &state.encryption_keys,
-                &target,
-                method.as_str(),
-                path,
-            )
-            .map(|guard| {
-                guard
-                    .projected(&assistant_projection)
-                    .routed(node_route.as_ref())
-            })
-            && let Err(error) = guard.revalidate().await
-        {
-            if let Some(reservation) = durable_reservation.as_ref() {
-                durable_operation_grant_service::mark_send_rejected(&state.db, reservation).await;
-            }
-            state
-                .billing
-                .reject_before_send(
-                    &metered,
-                    "assistant_authority_changed",
-                    had_dispatched_failure,
-                )
-                .await?;
-            return Err(error);
-        }
-        mark_pool_attempt_dispatched(pool_dispatch_state.as_ref());
-        destination_audit.dispatch();
-        let response_result = until_client_disconnect(
-            &downstream_cancellation,
-            Box::pin(chatgpt_translator::send_to_chatgpt(
-                &translated.body,
-                &bearer_token,
-                is_streaming,
-                is_chat_completions_path,
-                query.as_deref(),
-                Some(llm_usage_service::UsageAuditContext {
-                    db: state.db.clone(),
-                    user_id: user_id_str.clone(),
-                    provider_slug: None,
-                    service_id: Some(service_id.to_string()),
-                    model,
-                    path: path.to_string(),
-                    api_key_id: auth_user.api_key_id.clone(),
-                    api_key_name: auth_user.api_key_name.clone(),
-                }),
-                Some(usage_complete),
-                billing_egress_permit,
-            )),
-        )
-        .await;
-        let mut response = match response_result {
-            Ok(Ok(response)) => response,
-            Ok(Err(error)) => {
-                if let Some(reservation) = durable_reservation.as_ref() {
-                    Box::pin(finish_durable_operation(
-                        state,
-                        auth_user,
-                        reservation,
-                        DurableExecutionStatus::OutcomeUncertain,
-                        None,
-                        None,
-                        "direct transport failed after dispatch",
-                    ))
-                    .await;
-                    return Err(AppError::DurableOperationOutcomeUncertain);
-                }
-                if is_pool_attempt {
-                    return Err(error);
-                }
-                return Err(error);
-            }
-            Err(_) => {
-                if let Some(reservation) = durable_reservation.as_ref() {
-                    Box::pin(finish_durable_operation(
-                        state,
-                        auth_user,
-                        reservation,
-                        DurableExecutionStatus::OutcomeUncertain,
-                        None,
-                        None,
-                        "client disconnected after dispatch",
-                    ))
-                    .await;
-                    return Err(AppError::DurableOperationOutcomeUncertain);
-                }
-                return Err(proxy_client_disconnected(service_id));
-            }
-        };
-
-        let status = response.status();
-
-        audit_service::log_for_user(
-            state.db.clone(),
-            auth_user,
-            "proxy_request",
-            Some(serde_json::json!({
-                "service_id": service_id,
-                "method": method.as_str(),
-                "path": path,
-                "response_status": status.as_u16(),
-                "acting_client_id": &auth_user.acting_client_id,
-                "codex_transport": true,
-                "connection_id": target.connection_id.as_deref(),
-            })),
-        );
-
-        apply_agent_attribution_headers(
-            &mut response,
-            auth_user.api_key_id.as_deref(),
-            target.connection_id.as_deref(),
-        );
-
-        if let Some(reservation) = durable_reservation.as_ref() {
-            Box::pin(finish_durable_operation(
-                state,
-                auth_user,
-                reservation,
-                if status.is_success() {
-                    DurableExecutionStatus::Completed
-                } else {
-                    DurableExecutionStatus::Failed
-                },
-                Some(status.as_u16()),
-                None,
-                "downstream response received",
-            ))
-            .await;
-        }
-
-        destination_audit.complete(response.status().as_u16());
-        request_audit.response(response.status().as_u16());
-        return observe_model_response(model_request, path, response).await;
-    }
-
-    // Reuse the shared reqwest::Client from AppState for connection pooling.
-    if resolved_user_service_id.is_none()
-        && let Some(job) = machine_ingress.as_ref().and_then(|i| i.assistant_job_id())
-        && let Err(error) = crate::services::assistant_job_service_use::validate_catalog(
-            &state.db,
-            job,
-            &target.service.id,
-        )
-        .await
-    {
-        state
-            .billing
-            .fail(&metered, "machine_authority_changed")
-            .await?;
-        if let Some(reservation) = durable_reservation.as_ref() {
-            durable_operation_grant_service::mark_pre_dispatch_rejected(
-                &state.db,
-                reservation,
-                "machine authority changed before dispatch",
-            )
-            .await;
-        }
-        return Err(error);
-    }
-    if let Some(admission) = assistant_decision.admission.as_ref() {
-        let revalidation = admission
-            .http_egress(
-                &state.db,
-                &state.encryption_keys,
-                &target,
-                method.as_str(),
-                path,
-            )
-            .projected(&assistant_projection)
-            .routed(node_route.as_ref())
-            .revalidate()
-            .await;
-        if let Err(error) = revalidation {
-            if let Some(reservation) = durable_reservation.as_ref() {
-                durable_operation_grant_service::mark_pre_dispatch_rejected(
-                    &state.db,
-                    reservation,
-                    "assistant authority changed before dispatch",
-                )
-                .await;
-            }
-            state
-                .billing
-                .reject_before_send(
-                    &metered,
-                    "assistant_authority_changed",
-                    had_dispatched_failure,
-                )
-                .await?;
-            return Err(error);
-        }
-    }
-    if let Err(error) = state.billing.mark_forwarded(&metered).await {
-        if let Some(reservation) = durable_reservation.as_ref() {
-            durable_operation_grant_service::mark_pre_dispatch_rejected(
-                &state.db,
-                reservation,
-                "billing admission failed before dispatch",
-            )
-            .await;
-        }
-        return Err(error);
-    }
-    if let Some(reservation) = durable_reservation.as_ref() {
-        durable_operation_grant_service::mark_dispatched(&state.db, reservation, None).await?;
-    }
-    mark_pool_attempt_dispatched(pool_dispatch_state.as_ref());
-    destination_audit.dispatch();
-    let target_admission_ms = elapsed_ms(exchange_started_at);
-    let downstream_started_at = std::time::Instant::now();
-    let egress_guard = crate::services::assistant_service_execution::HttpEgressGuard::for_proxy(
-        assistant_decision.admission.as_ref(),
-        machine_ingress.as_ref(),
-        &state.db,
-        &state.encryption_keys,
-        &target,
-        method.as_str(),
-        path,
-    )
-    .map(|guard| {
-        guard
-            .projected(&assistant_projection)
-            .routed(node_route.as_ref())
-    });
-    let downstream_result = until_client_disconnect(
-        &downstream_cancellation,
-        Box::pin(proxy_service::forward_request_with_egress_guard(
-            if is_pool_attempt
-                || operation_scoped
-                || permission_ingress.is_some()
-                || target.service.offering_kind
-                    == crate::models::downstream_service::OfferingKind::Tool
-            {
-                proxy_service::no_redirect_http_client()
-            } else {
-                &state.http_client
-            },
-            &target,
-            reqwest_method,
-            path,
-            query.as_deref(),
-            reqwest_headers,
-            match streaming_body.take() {
-                Some(stream) => proxy_service::ProxyBody::Streaming(stream),
-                None => proxy_service::ProxyBody::Buffered(body),
-            },
-            identity_headers,
-            delegated,
-            caller_token.as_deref(),
-            &state.token_exchange_cache,
-            &state.cloud_response_cache,
-            extra_outbound_headers,
-            billing_egress_permit,
-            egress_guard.as_ref(),
-        )),
-    )
-    .await;
-    let downstream_result = match upload_meter.as_ref().filter(|meter| meter.exceeded()) {
-        Some(meter) => Ok(Err(proxy_service::ForwardRequestError::from(meter.error()))),
-        None => downstream_result,
-    };
-    let request_body_len = upload_meter
-        .as_ref()
-        .map_or(request_body_len, |meter| meter.bytes());
-    if let (Some(chat), Some(admission)) = (
-        auth_user.assistant_chat.as_deref(),
-        assistant_decision.admission.as_ref(),
-    ) {
-        match &downstream_result {
-            Ok(Ok(response)) => {
-                admission
-                    .response(&state.db, chat, response.status().as_u16())
-                    .await?
-            }
-            Ok(Err(error)) => admission.transport_failure(&state.db, chat, error).await?,
-            Err(_) => {}
-        }
-    }
-    let downstream_response = match downstream_result {
-        Ok(Ok(response)) => response,
-        Ok(Err(proxy_service::ForwardRequestError::PreDispatchRejected(error))) => {
-            if let Some(reservation) = durable_reservation.as_ref() {
-                durable_operation_grant_service::mark_send_rejected(&state.db, reservation).await;
-            }
-            state
-                .billing
-                .reject_before_send(
-                    &metered,
-                    "assistant_authority_changed",
-                    had_dispatched_failure,
-                )
-                .await?;
-            return Err(error);
-        }
-        Ok(Err(error)) => {
-            emit_preheader_diagnostics(
-                exchange_started_at,
-                target_admission_ms,
-                &method,
-                &all_headers,
-                "upstream_error",
-            );
-            if let Some(reservation) = durable_reservation.as_ref() {
-                Box::pin(finish_durable_operation(
-                    state,
-                    auth_user,
-                    reservation,
-                    DurableExecutionStatus::OutcomeUncertain,
-                    None,
-                    None,
-                    "direct transport failed after dispatch",
-                ))
-                .await;
-                return Err(AppError::DurableOperationOutcomeUncertain);
-            }
-            if is_pool_attempt {
-                return Err(encode_pool_attempt_error(error));
-            }
-            return Err(error.into_app_error());
-        }
-        Err(_) => {
-            emit_preheader_diagnostics(
-                exchange_started_at,
-                target_admission_ms,
-                &method,
-                &all_headers,
-                "client_disconnect",
-            );
-            if let Some(reservation) = durable_reservation.as_ref() {
-                Box::pin(finish_durable_operation(
-                    state,
-                    auth_user,
-                    reservation,
-                    DurableExecutionStatus::OutcomeUncertain,
-                    None,
-                    None,
-                    "client disconnected after dispatch",
-                ))
-                .await;
-                return Err(AppError::DurableOperationOutcomeUncertain);
-            }
-            return Err(proxy_client_disconnected(service_id));
-        }
-    };
-
-    // Convert reqwest Response back to axum Response
-    let status = StatusCode::from_u16(downstream_response.status().as_u16())
-        .unwrap_or(StatusCode::BAD_GATEWAY);
-    let direct_location_context = AsyncLocationContext::from_downstream_request(
-        &target.base_url,
-        downstream_response.url().clone(),
-        caller_proxy_prefix,
-    )
-    .map(|context| context.pin_pool_member(pool_authority.as_ref()));
-
-    if let Some(reservation) = durable_reservation.as_ref() {
-        Box::pin(finish_durable_operation(
-            state,
-            auth_user,
-            reservation,
-            if status.is_success() {
-                DurableExecutionStatus::Completed
-            } else {
-                DurableExecutionStatus::Failed
-            },
-            Some(status.as_u16()),
-            None,
-            "downstream response received",
-        ))
-        .await;
-    }
-
-    // Same exact, case-insensitive media-type test the response-header
-    // middleware uses, so `content-length` stripping and SSE usage
-    // observation agree with the anti-buffering mark.
-    let is_sse = downstream_response
-        .headers()
-        .get("content-type")
-        .and_then(|v| v.to_str().ok())
-        .is_some_and(crate::mw::security_headers::is_sse_media_type);
-    let bounded_admission_body = nyxagent_admission && matches!(status.as_u16(), 409 | 503);
-    let should_stream = !bounded_admission_body
-        && (machine_ingress.is_some()
-            || should_stream_response(&downstream_response, status, is_sse));
-    let exchange_diagnostics = ProxyExchangeDiagnostics::new(
-        exchange_started_at,
-        target_admission_ms,
-        Some(elapsed_ms(downstream_started_at)),
-        &method,
-        status,
-        if is_sse {
-            "sse"
-        } else if should_stream {
-            "binary_stream"
-        } else {
-            "buffered"
+            destination_audit.complete(response.status().as_u16());
+            request_audit.response(response.status().as_u16());
+            Ok(response)
         },
-        &all_headers,
-    );
-    let usage_context = (should_capture_llm_usage(&target.service, platform_metric)
-        || model_request.is_some())
-    .then(|| llm_usage_service::UsageAuditContext {
-        db: state.db.clone(),
-        user_id: user_id_str.clone(),
-        provider_slug: None,
-        service_id: Some(service_id.to_string()),
-        model: None,
-        path: path.to_string(),
-        api_key_id: auth_user.api_key_id.clone(),
-        api_key_name: auth_user.api_key_name.clone(),
-    });
-
-    if let Some(accounting) = pool_accounting {
-        let mut response = pool_attempt::direct_response(
-            state,
-            auth_user,
-            accounting,
-            downstream_response,
-            metered,
-            request_body_len,
-            path,
-            downstream_cancellation,
-            direct_location_context.as_ref(),
-            pool_attempt::Observability {
-                usage: usage_context,
-                diagnostics: Some(exchange_diagnostics),
-            },
-        )
-        .await?;
-        audit_service::log_for_user(
-            state.db.clone(),
-            auth_user,
-            "proxy_request",
-            Some(serde_json::json!({
-                "service_id": service_id, "method": method.as_str(), "path": path,
-                "response_status": status.as_u16(), "acting_client_id": &auth_user.acting_client_id,
-                "connection_id": target.connection_id.as_deref(),
-            })),
-        );
-        apply_agent_attribution_headers(
-            &mut response,
-            auth_user.api_key_id.as_deref(),
-            target.connection_id.as_deref(),
-        );
-        destination_audit.complete(status.as_u16());
-        return observe_model_response(model_request, path, response).await;
-    }
-
-    let mut response_builder = Response::builder().status(status);
-
-    // Forward only allowlisted response headers.
-    // Skip content-length for SSE (length unknown). Keep it for other
-    // streaming responses — clients need it for download progress / seeking.
-    for (name, value) in downstream_response.headers().iter() {
-        let name_lower = name.as_str().to_lowercase();
-        if let Ok(header_name) =
-            axum::http::header::HeaderName::from_bytes(name.as_str().as_bytes())
-            && let Some(header_value) = forwarded_response_header_value(
-                &name_lower,
-                value.as_bytes(),
-                is_sse,
-                direct_location_context.as_ref(),
-            )
-        {
-            response_builder = response_builder.header(header_name, header_value);
-        }
-    }
-
-    let mut response = crate::services::proxy_http_response::relay_response(
-        state,
-        crate::services::proxy_http_response::HttpResponseContext {
-            service_id: service_id.to_string(),
-            path: path.to_string(),
-            nyxagent_admission,
-            model_request: model_request.clone(),
-            response_builder,
-            status,
-            is_sse,
-            should_stream,
-            usage_context,
-            metered,
-            request_body_len,
-            resale_metric: billing_ctx.resale.as_ref().map(|spec| spec.metric),
-            downstream_cancellation,
-            exchange_diagnostics,
-        },
-        downstream_response,
-    )
-    .await?;
-
-    // Audit log the proxy request
-    audit_service::log_for_user(
-        state.db.clone(),
-        auth_user,
-        "proxy_request",
-        Some(serde_json::json!({
-            "service_id": service_id,
-            "method": method.as_str(),
-            "path": path,
-            "response_status": status.as_u16(),
-            "acting_client_id": &auth_user.acting_client_id,
-            "connection_id": target.connection_id.as_deref(),
-        })),
-    );
-
-    apply_agent_attribution_headers(
-        &mut response,
-        auth_user.api_key_id.as_deref(),
-        target.connection_id.as_deref(),
-    );
-
-    destination_audit.complete(response.status().as_u16());
-    request_audit.response(response.status().as_u16());
-    Ok(response)
+    )))
 }
 
 /// Attach agent/connection attribution headers to a proxy response.

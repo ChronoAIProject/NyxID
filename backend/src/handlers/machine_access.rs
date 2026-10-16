@@ -29,6 +29,12 @@ pub struct MachineOption {
     separated: Option<nyxid_machine::context::Support>,
     saved_login_ids: Option<Vec<String>>,
     revocation_pending: bool,
+    delivery_pending: bool,
+    quarantine_pending: bool,
+    execution_revocation_pending: bool,
+    revocation_initialization_pending: bool,
+    revocation_expires_at: Option<String>,
+    revocation_diagnostic: Option<&'static str>,
 }
 pub async fn options(
     state: &AppState,
@@ -48,15 +54,8 @@ pub async fn options(
     let nodes:Vec<crate::models::node::Node>=state.db.collection(crate::models::node::COLLECTION_NAME)
         .find(doc!{"user_id":{"$in":owners},"is_active":true,"machine":{"$ne":mongodb::bson::Bson::Null}})
         .sort(doc!{"name":1,"_id":1}).limit(500).await?.try_collect().await?;
-    let pending: Vec<mongodb::bson::Document> = state
-        .db
-        .collection::<mongodb::bson::Document>(crate::models::machine_access::OUTBOX)
-        .find(doc! {"agent_id":&agent.id,"pending":true})
-        .projection(doc! {"node_id":1})
-        .limit(500)
-        .await?
-        .try_collect()
-        .await?;
+    let node_ids = nodes.iter().map(|node| node.id.clone()).collect::<Vec<_>>();
+    let pending = access::revocation_status(&state.db, &agent.id, &node_ids).await?;
     Ok(nodes
         .into_iter()
         .filter_map(|node| {
@@ -67,9 +66,42 @@ pub async fn options(
                 .cloned()
                 .unwrap_or_default();
             Some(MachineOption {
-                revocation_pending: pending
-                    .iter()
-                    .any(|p| p.get_str("node_id").ok() == Some(node.id.as_str())),
+                revocation_pending: pending.get(&node.id).is_some_and(|p| {
+                    !profile.authority_timing_v1
+                        || p.get_bool("execution_pending").unwrap_or(true)
+                        || p.get_bool("quarantine_pending").unwrap_or(false)
+                }),
+                delivery_pending: pending.contains_key(&node.id),
+                quarantine_pending: pending
+                    .get(&node.id)
+                    .is_some_and(|p| p.get_bool("quarantine_pending").unwrap_or(false)),
+                execution_revocation_pending: pending.get(&node.id).is_some_and(|p| {
+                    !profile.authority_timing_v1 || p.get_bool("execution_pending").unwrap_or(true)
+                }),
+                revocation_initialization_pending: pending
+                    .get(&node.id)
+                    .is_some_and(|p| p.get_bool("initialization_pending").unwrap_or(true)),
+                revocation_expires_at: (profile.authority_timing_v1
+                    && pending.get(&node.id).is_some_and(|p| {
+                        !p.get_bool("invalid_deadline").unwrap_or(true)
+                            && !p.get_bool("initialization_pending").unwrap_or(true)
+                    }))
+                .then(|| {
+                    pending
+                        .get(&node.id)
+                        .and_then(|p| p.get_datetime("expires_at").ok())
+                        .map(|d| d.to_chrono().to_rfc3339())
+                })
+                .flatten(),
+                revocation_diagnostic: pending.get(&node.id).and_then(|p| {
+                    if p.get_bool("invalid_deadline").unwrap_or(true) {
+                        Some("revocation_deadline_invalid")
+                    } else if !profile.authority_timing_v1 {
+                        Some("authority_timing_upgrade_required")
+                    } else {
+                        None
+                    }
+                }),
                 node_id: node.id,
                 name: node.name,
                 revision: policy.revision,
@@ -513,7 +545,7 @@ pub async fn native(
         None,
     );
     Ok((
-        json!({"revision":policy.revision,"machine":node,"revocation":"pending until node acknowledges or authority lease expires (at most 45 seconds)"}),
+        json!({"revision":policy.revision,"machine":node,"revocation":"Earlier commands stop after machine acknowledgement or the reported recovery time. Reconnect and refresh machine status; browser cleanup requires acknowledgement"}),
         false,
     ))
 }

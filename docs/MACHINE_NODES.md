@@ -1601,19 +1601,68 @@ accepts `--browser`. The node's local ceiling always wins. Computer access and
 developer-browser access require a browser grant. Saved logins additionally
 require their existing login grant and secure-browser confirmation checks.
 
-V2 agent work carries signed context and revision metadata with a 45-second
-lease, renewed every ten seconds; v1 nodes retain their shared behavior without leases. Revocation is committed with a durable outbox and cancels local
-operations, background process groups and service streams. Disconnected nodes
-stop leased work on expiry. Completed external effects cannot be undone. The
-UI reports pending delivery and the 45-second lease-expiry cancellation bound rather than
-promising instantaneous distributed cancellation. Context IDs currently partition authority,
-not files or cookies; enforced per-agent workspaces and browsers are later phases.
+V2 agent work carries signed context, revision and actual daemon runtime metadata
+with an authority lease of at most 45 seconds, renewed every ten seconds. Every
+new tool call automatically acquires live, runtime-bound authority from current
+permissions and the connected node profile. Re-reading capabilities or
+`machine_list` is observational; it does not refresh authority. A changed runtime
+requires a fresh admission, never renewal or replay of the old runtime's lease.
+Browserless `shared_legacy` shell/files machines remain supported; enabling a
+browser or switching to separated mode is not a recovery step.
+
+The node verifies the existing HMAC-signed request timestamp (whole seconds) and
+expiry together. `authority_timing_v1` profiles support a bounded 5,000 ms
+server/node clock difference: the timestamp represents its whole-second interval,
+expiry must be no later than that interval's upper end plus 45,000 ms, and
+validation uses node UTC plus 5,000 ms as conservative server time. The resulting
+remaining duration becomes a monotonic deadline capped at 45 seconds. Uncertainty
+is consumed from the usable duration (normally about 40 seconds), never added to
+cancellation time. Chat, external grants and first-party owner job reads/cancel
+use the same timing rule. Excess skew, overlong lifetime and expired authority
+fail closed. Locks/persistence cannot activate an expired lease; successful
+revision writes survive an expired activation. Renewal cannot revive a stopped
+or expired lease, cross a grant revision change, or cross a runtime change.
+
+Revocation commits a durable outbox and cancels local operations, background
+process groups and service streams when delivered. Disconnected nodes stop work
+by their last accepted local lease deadline. Completed external effects cannot
+be undone. The API distinguishes these states:
+
+- `execution_revocation_pending`: earlier work has not yet reached its proven
+  expiry bound. Committed rows use first observation plus 45 seconds and a
+  separate 2-second allowance for an already in-flight older replica renewal.
+  Renewal reservation on updated replicas is transactionally fenced against
+  both the assignment revision and current runtime.
+- `delivery_pending`: revision/fence delivery still needs a real node ACK. It
+  remains durable and retries even after execution expiry; expiry never claims
+  ACK or clears this row.
+- `quarantine_pending`: required browser cleanup still needs acknowledgement.
+  Execution lease expiry cannot satisfy cleanup or unlock its browser context.
+- `revocation_pending`: execution or cleanup remains pending. A timing-aware node
+  may report false while `delivery_pending` stays true. Nodes without
+  `authority_timing_v1` stay ACK-only and report upgrade guidance.
+
+Rows written before deadline tracking have no trustworthy creation time. New
+rows also start their window only after commit is visible, because enqueue time
+can precede a slow commit while older replicas still see the old grant. The first
+status read or dispatcher visit durably starts one conservative 47-second window;
+subsequent reads do not restart it. Each pass first reads at most 128 committed
+row IDs, then initializes only those observed rows with MongoDB's `$$NOW` plus
+47 seconds. Status expiry comparison also uses MongoDB's `$$NOW`, so clock
+differences between application replicas cannot shorten that window. Remaining
+rows stay pending, and the API suppresses an expiry time for the entire machine
+until every pending row has a deadline. The editor displays a neutral status
+check while these bounded passes complete. An existing null or wrong-type
+deadline stays pending with `revocation_deadline_invalid`, requiring operator
+inspection. The editor refreshes pending status every three seconds on an active
+page for at most one minute; idle/background polling stops. **Refresh machine
+status** performs another observation without changing permissions.
 
 Unsupported authority, revoked permissions and expired authority return distinct
 `machine_authority_unsupported`, `machine_permission_revoked` and
 `machine_authority_stale` errors (numeric definitions remain in `errors/mod.rs`).
-Update an old node before editing capabilities; request a missing grant through
-NyxBot; refresh authority after expiry. Owner Stop and takeover remain independent.
+Use the [node recovery procedure](NYXID_NODE.md#recovering-machine-authority)
+for repeated stale-authority failures. Owner Stop and takeover remain independent.
 
 V2 admission allows 128 active operation leases per node (local jobs are capped
 at 64, default 4). Idle connections, expired leases and other nodes do not count;

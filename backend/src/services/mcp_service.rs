@@ -5061,6 +5061,17 @@ fn execute_tool_resolved_boxed<'a>(
     ))
 }
 
+// Keep forwarding-only temporaries off the authorization/acknowledgement stack.
+// Invoke the constructor outside the caller's poll frame before boxing.
+fn box_mcp_forwarding<'a, F>(
+    make: impl FnOnce() -> F,
+) -> futures::future::BoxFuture<'a, AppResult<McpToolExecutionOutcome>>
+where
+    F: std::future::Future<Output = AppResult<McpToolExecutionOutcome>> + Send + 'a,
+{
+    Box::pin(make())
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn execute_tool_resolved_inner(
     http_client: &reqwest::Client,
@@ -5233,292 +5244,706 @@ async fn execute_tool_resolved_inner(
         }
     }
 
-    let PreparedProxyCall {
-        automatic_receipt,
-        async_submission: _,
-        async_continuation: _,
-        acknowledgement_id: _,
-        endpoint_target: _,
-        method,
-        path,
-        query,
-        parameter_headers,
-        server_owned_headers,
-        body,
-        body_content_type: _,
-        is_generic_proxy_endpoint,
-    } = prepared;
+    box_mcp_forwarding(move || async move {
+        let PreparedProxyCall {
+            automatic_receipt,
+            async_submission: _,
+            async_continuation: _,
+            acknowledgement_id: _,
+            endpoint_target: _,
+            method,
+            path,
+            query,
+            parameter_headers,
+            server_owned_headers,
+            body,
+            body_content_type: _,
+            is_generic_proxy_endpoint,
+        } = prepared;
 
-    proxy_service::validate_ifttt_request(
-        &target,
-        &method,
-        &path,
-        query.as_deref(),
-        body.as_deref(),
-        node_route.is_some(),
-    )?;
+        proxy_service::validate_ifttt_request(
+            &target,
+            &method,
+            &path,
+            query.as_deref(),
+            body.as_deref(),
+            node_route.is_some(),
+        )?;
 
-    // Build identity headers if configured on the service (CR-8)
-    let mut identity_headers = Vec::new();
-    if target.service.identity_propagation_mode != "none" {
-        // Resolve the propagation principal — a human user OR a service account.
-        // MCP tool calls are reachable by SA tokens (authenticate_mcp accepts
-        // `claims.sa` and uses the SA id), and an SA has no users doc; without this
-        // fallback the identity token would never be emitted for an SA on this path.
-        let principal: Option<identity_service::Principal> = match db
-            .collection::<User>(USERS)
-            .find_one(doc! { "_id": user_id })
-            .await?
-        {
-            Some(user) => Some(identity_service::Principal::from(&user)),
-            None => db
-                .collection::<ServiceAccount>(SERVICE_ACCOUNTS)
+        // Build identity headers if configured on the service (CR-8)
+        let mut identity_headers = Vec::new();
+        if target.service.identity_propagation_mode != "none" {
+            // Resolve the propagation principal — a human user OR a service account.
+            // MCP tool calls are reachable by SA tokens (authenticate_mcp accepts
+            // `claims.sa` and uses the SA id), and an SA has no users doc; without this
+            // fallback the identity token would never be emitted for an SA on this path.
+            let principal: Option<identity_service::Principal> = match db
+                .collection::<User>(USERS)
                 .find_one(doc! { "_id": user_id })
                 .await?
-                .as_ref()
-                .map(identity_service::Principal::from),
-        };
+            {
+                Some(user) => Some(identity_service::Principal::from(&user)),
+                None => db
+                    .collection::<ServiceAccount>(SERVICE_ACCOUNTS)
+                    .find_one(doc! { "_id": user_id })
+                    .await?
+                    .as_ref()
+                    .map(identity_service::Principal::from),
+            };
 
-        if let Some(ref principal) = principal {
-            if matches!(
-                target.service.identity_propagation_mode.as_str(),
-                "headers" | "both"
-            ) {
-                identity_headers =
-                    identity_service::build_identity_headers(principal, &target.service);
+            if let Some(ref principal) = principal {
+                if matches!(
+                    target.service.identity_propagation_mode.as_str(),
+                    "headers" | "both"
+                ) {
+                    identity_headers =
+                        identity_service::build_identity_headers(principal, &target.service);
+                }
+
+                if matches!(
+                    target.service.identity_propagation_mode.as_str(),
+                    "jwt" | "both"
+                ) {
+                    match identity_service::generate_identity_assertion(
+                        jwt_keys,
+                        config,
+                        principal,
+                        &target.service,
+                        db,
+                    )
+                    .await
+                    {
+                        Ok(assertion) => {
+                            identity_headers.push(("X-NyxID-Identity-Token".to_string(), assertion));
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                service_id = %service.service_id,
+                                error = %e,
+                                "Failed to generate identity assertion for MCP tool"
+                            );
+                        }
+                    }
+                }
             }
 
-            if matches!(
-                target.service.identity_propagation_mode.as_str(),
-                "jwt" | "both"
+            match crate::services::rbac_helpers::resolve_user_rbac(db, user_id).await {
+                Ok(rbac) => {
+                    if !rbac.role_slugs.is_empty() {
+                        identity_headers
+                            .push(("X-NyxID-User-Roles".to_string(), rbac.role_slugs.join(",")));
+                    }
+                    if !rbac.permissions.is_empty() {
+                        identity_headers.push((
+                            "X-NyxID-User-Permissions".to_string(),
+                            rbac.permissions.join(","),
+                        ));
+                    }
+                    if !rbac.group_slugs.is_empty() {
+                        identity_headers.push((
+                            "X-NyxID-User-Groups".to_string(),
+                            rbac.group_slugs.join(","),
+                        ));
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        user_id = %user_id,
+                        error = %e,
+                        "Failed to resolve RBAC for delegation headers"
+                    );
+                }
+            }
+        }
+
+        // Build before the direct/node split, exactly as the REST proxy does.
+        if target.service.inject_delegation_token {
+            // See the REST proxy: delegated tokens cannot carry operation limits.
+            if exec_ctx
+                .operation_scopes
+                .is_some_and(|scopes| !scopes.is_empty())
+            {
+                return Err(AppError::ApiKeyScopeForbidden(
+                    "Services that receive a delegation token are unavailable to operation-scoped keys"
+                        .into(),
+                ));
+            }
+            let subject = uuid::Uuid::parse_str(user_id)
+                .map_err(|_| AppError::Internal("Invalid authenticated MCP subject".into()))?;
+            match identity_service::generate_proxy_delegation_token(
+                jwt_keys,
+                config,
+                &subject,
+                &target.service.delegation_token_scope,
+                &target.service.slug,
+                catalog_service_slug,
+                Some(&exec_ctx.delegation_restrictions),
             ) {
-                match identity_service::generate_identity_assertion(
-                    jwt_keys,
-                    config,
-                    principal,
-                    &target.service,
+                Ok(token) => identity_headers.push(("X-NyxID-Delegation-Token".into(), token)),
+                Err(_) => tracing::warn!(service_id = %service.service_id,
+                    "Failed to generate delegation token for MCP tool"),
+            }
+        }
+
+        identity_headers.extend(parameter_headers);
+
+        // Resolve delegated credentials (only for platform services).
+        // When a node route exists, swallow errors -- the node agent may inject
+        // the credential locally, matching proxy.rs:891 behavior.
+        let delegated = match &service.source {
+            McpToolSource::UserManaged { .. } | McpToolSource::Internal => Vec::new(),
+            McpToolSource::Platform {
+                downstream_service_id,
+            } => {
+                // This principal is resolved from authentication, just like REST's
+                // AuthUser::proxy_resolution_user_id: a service account uses its
+                // verified effective owner. It is not the later billing payer.
+                let delegated_owner =
+                    proxy_service::delegated_credential_owner(billing_principal_user_id, None);
+                match delegation_service::resolve_delegated_credentials(
                     db,
+                    encryption_keys,
+                    delegated_owner,
+                    downstream_service_id,
+                    Some(connection_expiry_notifier),
                 )
                 .await
                 {
-                    Ok(assertion) => {
-                        identity_headers.push(("X-NyxID-Identity-Token".to_string(), assertion));
-                    }
-                    Err(e) => {
-                        tracing::warn!(
+                    Ok(creds) => creds,
+                    Err(e) if node_route.is_some() => {
+                        tracing::debug!(
                             service_id = %service.service_id,
                             error = %e,
-                            "Failed to generate identity assertion for MCP tool"
+                            "Server-side provider credentials unavailable; \
+                             node agent will inject credentials"
                         );
+                        vec![]
+                    }
+                    Err(e) => {
+                        return Err(AppError::BadRequest(format!(
+                            "Provider credentials not available: {e}"
+                        )));
                     }
                 }
             }
-        }
+        };
 
-        match crate::services::rbac_helpers::resolve_user_rbac(db, user_id).await {
-            Ok(rbac) => {
-                if !rbac.role_slugs.is_empty() {
-                    identity_headers
-                        .push(("X-NyxID-User-Roles".to_string(), rbac.role_slugs.join(",")));
-                }
-                if !rbac.permissions.is_empty() {
-                    identity_headers.push((
-                        "X-NyxID-User-Permissions".to_string(),
-                        rbac.permissions.join(","),
-                    ));
-                }
-                if !rbac.group_slugs.is_empty() {
-                    identity_headers.push((
-                        "X-NyxID-User-Groups".to_string(),
-                        rbac.group_slugs.join(","),
-                    ));
-                }
-            }
-            Err(e) => {
-                tracing::warn!(
-                    user_id = %user_id,
-                    error = %e,
-                    "Failed to resolve RBAC for delegation headers"
+        proxy_service::validate_ifttt_delegation(&target, &delegated)?;
+
+        // Content-Type header
+        let req_headers = if is_generic_proxy_endpoint {
+            let mut h = reqwest::header::HeaderMap::new();
+            if body.is_some() {
+                h.insert(
+                    reqwest::header::CONTENT_TYPE,
+                    "application/json".parse().unwrap(),
                 );
             }
-        }
-    }
-
-    // Build before the direct/node split, exactly as the REST proxy does.
-    if target.service.inject_delegation_token {
-        // See the REST proxy: delegated tokens cannot carry operation limits.
-        if exec_ctx
-            .operation_scopes
-            .is_some_and(|scopes| !scopes.is_empty())
-        {
-            return Err(AppError::ApiKeyScopeForbidden(
-                "Services that receive a delegation token are unavailable to operation-scoped keys"
-                    .into(),
-            ));
-        }
-        let subject = uuid::Uuid::parse_str(user_id)
-            .map_err(|_| AppError::Internal("Invalid authenticated MCP subject".into()))?;
-        match identity_service::generate_proxy_delegation_token(
-            jwt_keys,
-            config,
-            &subject,
-            &target.service.delegation_token_scope,
-            &target.service.slug,
-            catalog_service_slug,
-            Some(&exec_ctx.delegation_restrictions),
-        ) {
-            Ok(token) => identity_headers.push(("X-NyxID-Delegation-Token".into(), token)),
-            Err(_) => tracing::warn!(service_id = %service.service_id,
-                "Failed to generate delegation token for MCP tool"),
-        }
-    }
-
-    identity_headers.extend(parameter_headers);
-
-    // Resolve delegated credentials (only for platform services).
-    // When a node route exists, swallow errors -- the node agent may inject
-    // the credential locally, matching proxy.rs:891 behavior.
-    let delegated = match &service.source {
-        McpToolSource::UserManaged { .. } | McpToolSource::Internal => Vec::new(),
-        McpToolSource::Platform {
-            downstream_service_id,
-        } => {
-            // This principal is resolved from authentication, just like REST's
-            // AuthUser::proxy_resolution_user_id: a service account uses its
-            // verified effective owner. It is not the later billing payer.
-            let delegated_owner =
-                proxy_service::delegated_credential_owner(billing_principal_user_id, None);
-            match delegation_service::resolve_delegated_credentials(
+            h
+        } else {
+            build_downstream_request_headers(endpoint, body.is_some())?
+        };
+        let resource_owner_id = billing_context_builder.effective_owner_id.clone();
+        let billing_ctx = billing_context_builder
+            .build(
+                billing.as_ref(),
+                user_id,
+                billing_principal_user_id,
+                exec_ctx.api_key_id,
+                &target,
+                node_route.as_ref(),
+                has_server_credential,
+                // Generic dispatch exists only for services without endpoint rows,
+                // so it can never select an operation price.
+                (!is_generic_proxy_endpoint).then_some(endpoint.name.as_str()),
+            )
+            .await?;
+        let billing_ctx = billing_ctx.with_request_body(body.as_deref());
+        let attribution = exec_ctx.attribution.clone().unwrap_or_else(|| {
+            super::service_insights_activity::RequestAttribution {
+                actor: super::audit_service::AuditActor {
+                    user_id: user_id.into(),
+                    api_key_id: exec_ctx.api_key_id.map(str::to_owned),
+                    api_key_name: None,
+                    ip_address: None,
+                    user_agent: None,
+                },
+                auth_kind: if exec_ctx.api_key_id.is_some() {
+                    "api_key"
+                } else {
+                    "unknown"
+                }
+                .into(),
+                oauth_client_id: None,
+                acting_client_id: None,
+                api_key_credential_id: None,
+            }
+        });
+        let mut request_audit = super::service_insights_activity::RequestAudit::from_attribution(
+            db,
+            attribution,
+            billing_ctx.user_service_id.as_deref(),
+            &target.service.id,
+            &resource_owner_id,
+            &billing_ctx.billing_request_id,
+            billing_ctx.credential_class,
+        );
+        if super::telnyx_platform_service::contract(&target.service).is_some() {
+            if node_route.is_some() || !delegated.is_empty() || !server_owned_headers.is_empty() {
+                return Err(AppError::BadRequest(
+                    "This Telnyx platform operation requires direct managed execution".into(),
+                ));
+            }
+            let managed_guard = super::assistant_service_execution::OwnedHttpEgressGuard::for_managed(
+                assistant_admission.as_ref(),
+                None,
                 db,
-                encryption_keys,
-                delegated_owner,
-                downstream_service_id,
-                Some(connection_expiry_notifier),
+                encryption_keys.clone(),
+                &target,
+                (method.as_str(), &path),
+                (&billing_ctx, &resource_owner_id, assistant_chat.as_ref()),
+            );
+            destination_audit.dispatch();
+            let managed = match super::telnyx_platform_service::execute(
+                db,
+                billing.clone(),
+                billing_ctx,
+                target,
+                method.as_str(),
+                &path,
+                query.as_deref(),
+                body.as_deref().unwrap_or_default(),
+                service_lease,
+                managed_guard,
             )
             .await
             {
-                Ok(creds) => creds,
-                Err(e) if node_route.is_some() => {
-                    tracing::debug!(
-                        service_id = %service.service_id,
-                        error = %e,
-                        "Server-side provider credentials unavailable; \
-                         node agent will inject credentials"
-                    );
-                    vec![]
+                Ok(response) => response,
+                Err(super::telnyx_platform_service::ManagedExecutionError::OutcomeUnknown(error)) => {
+                    return Ok(McpToolExecutionOutcome::ProviderOutcomeUnknown(error));
                 }
-                Err(e) => {
-                    return Err(AppError::BadRequest(format!(
-                        "Provider credentials not available: {e}"
-                    )));
+                Err(super::telnyx_platform_service::ManagedExecutionError::Rejected(error)) => {
+                    request_audit.admission_error(&error);
+                    return Err(error);
+                }
+            };
+            destination_audit.complete(managed.status);
+            request_audit.response(managed.status);
+            if let (Some(chat), Some(admission)) =
+                (assistant_chat.as_ref(), assistant_admission.as_ref())
+            {
+                if let Some(receipt) = &automatic_receipt {
+                    receipt.record(db, chat).await;
+                } else {
+                    admission.receipt(db, chat, assistant_auto).await;
                 }
             }
+            return Ok(McpToolExecutionOutcome::Response(ToolResponse {
+                concurrency: None,
+                status: managed.status,
+                text: String::from_utf8(managed.body.to_vec())
+                    .map_err(|_| AppError::Internal("Invalid managed response encoding".into()))?,
+                media: None,
+                origin: ToolResponseOrigin::Downstream,
+            }));
         }
-    };
+        let metered = billing
+            .open(&billing_ctx)
+            .await
+            .inspect_err(|error| request_audit.admission_error(error))?;
+        let request_len = body.as_ref().map(|body| body.len() as i64).unwrap_or(0);
 
-    proxy_service::validate_ifttt_delegation(&target, &delegated)?;
+        // -------------------------------------------------------------------
+        // Route through node when a node route exists (primary + fallbacks).
+        // Always attempt all nodes regardless of primary connection state --
+        // send_proxy_request returns NodeOffline for disconnected nodes, then
+        // we try fallbacks. Only fall through to direct forward_request when
+        // all nodes fail AND the server holds a real credential.
+        // -------------------------------------------------------------------
+        if let Some(ref nr) = node_route {
+            let method_str = method.to_string();
 
-    // Content-Type header
-    let req_headers = if is_generic_proxy_endpoint {
-        let mut h = reqwest::header::HeaderMap::new();
-        if body.is_some() {
-            h.insert(
-                reqwest::header::CONTENT_TYPE,
-                "application/json".parse().unwrap(),
-            );
-        }
-        h
-    } else {
-        build_downstream_request_headers(endpoint, body.is_some())?
-    };
-    let resource_owner_id = billing_context_builder.effective_owner_id.clone();
-    let billing_ctx = billing_context_builder
-        .build(
-            billing.as_ref(),
-            user_id,
-            billing_principal_user_id,
-            exec_ctx.api_key_id,
-            &target,
-            node_route.as_ref(),
-            has_server_credential,
-            // Generic dispatch exists only for services without endpoint rows,
-            // so it can never select an operation price.
-            (!is_generic_proxy_endpoint).then_some(endpoint.name.as_str()),
-        )
-        .await?;
-    let billing_ctx = billing_ctx.with_request_body(body.as_deref());
-    let attribution = exec_ctx.attribution.clone().unwrap_or_else(|| {
-        super::service_insights_activity::RequestAttribution {
-            actor: super::audit_service::AuditActor {
-                user_id: user_id.into(),
-                api_key_id: exec_ctx.api_key_id.map(str::to_owned),
-                api_key_name: None,
-                ip_address: None,
-                user_agent: None,
-            },
-            auth_kind: if exec_ctx.api_key_id.is_some() {
-                "api_key"
-            } else {
-                "unknown"
+            let base_headers = req_headers
+                .iter()
+                .filter_map(|(name, value)| {
+                    value
+                        .to_str()
+                        .ok()
+                        .map(|value| (name.to_string(), value.to_string()))
+                })
+                .collect();
+            super::destination_routing::validate_node_outbound_destination(
+                &target,
+                method.as_str(),
+                &path,
+                &delegated,
+            )?;
+            let prepared = proxy_service::prepare_node_request(
+                &target,
+                &path,
+                query.as_deref(),
+                base_headers,
+                &identity_headers,
+                &delegated,
+                exec_ctx.caller_token,
+                &server_owned_headers,
+            )?;
+            let node_request = NodeProxyRequest {
+                target_id: target.target_id.clone(),
+                request_id: uuid::Uuid::new_v4().to_string(),
+                service_id: target.service.id.clone(),
+                service_slug: target.service.slug.clone(),
+                base_url: target.base_url.clone(),
+                method: method_str,
+                path: prepared.path,
+                query: prepared.query,
+                headers: prepared.headers,
+                body: body.as_ref().map(|b| b.to_vec()),
+            };
+
+            let all_node_ids: Vec<&str> = std::iter::once(nr.node_id.as_str())
+                .chain(nr.fallback_node_ids.iter().map(|s| s.as_str()))
+                .collect();
+
+            let mut last_error: Option<AppError> = None;
+            let mut node_failure_evidence =
+                super::assistant_service_execution::NodeFailureEvidence::default();
+            for nid in &all_node_ids {
+                let mut attempt = node_request.clone();
+                attempt.request_id = uuid::Uuid::new_v4().to_string();
+
+                let signing_secret = if config.node_hmac_signing_enabled {
+                    match node_service::get_node_signing_secret(db, encryption_keys, nid).await {
+                        Ok(secret) => Some(secret),
+                        Err(e @ AppError::NodeNotFound(_) | e @ AppError::NodeOffline(_)) => {
+                            // Signing preparation failures are not credential outages.
+                            node_failure_evidence.disqualify();
+                            last_error = Some(e);
+                            continue;
+                        }
+                        Err(e) => return Err(e),
+                    }
+                } else {
+                    None
+                };
+
+                if target.target_id.is_some() {
+                    node_ws_manager
+                        .require_http_signature_v2(nid, signing_secret.is_some())
+                        .await?;
+                }
+                destination_audit.dispatch();
+                if let Some(admission) = assistant_admission.as_ref() {
+                    let validation = admission
+                        .http_egress(db, encryption_keys, &target, method.as_str(), &path)
+                        .routed(node_route.as_ref())
+                        .revalidate()
+                        .await;
+                    if let Err(error) = validation {
+                        billing
+                            .reject_before_send(&metered, "assistant_authority_changed", false)
+                            .await?;
+                        return Err(error);
+                    }
+                }
+                billing.mark_forwarded(&metered).await?;
+                if let Some(admission) = assistant_admission.as_ref()
+                    && let Err(error) = admission
+                        .http_egress(db, encryption_keys, &target, method.as_str(), &path)
+                        .routed(node_route.as_ref())
+                        .revalidate()
+                        .await
+                {
+                    billing
+                        .reject_before_send(&metered, "assistant_authority_changed", false)
+                        .await?;
+                    return Err(error);
+                }
+                match node_ws_manager
+                    .send_proxy_request_classified(
+                        nid,
+                        attempt,
+                        signing_secret.as_ref().map(|s| s.as_slice()),
+                        billing_egress_permit,
+                    )
+                    .await
+                {
+                    Ok(ProxyResponseType::Complete(resp)) => {
+                        billing
+                            .settle(
+                                &metered,
+                                mcp_platform_usage_for_path(
+                                    &resp.body,
+                                    request_len,
+                                    &target.service,
+                                    &path,
+                                    resp.status,
+                                ),
+                                None,
+                                None,
+                            )
+                            .await?;
+                        destination_audit.complete(resp.status);
+                        request_audit.response(resp.status);
+                        if (200..300).contains(&resp.status)
+                            && let (Some(chat), Some(admission)) =
+                                (assistant_chat.as_ref(), assistant_admission.as_ref())
+                        {
+                            if let Some(receipt) = &automatic_receipt {
+                                receipt.record(db, chat).await;
+                            } else {
+                                admission.receipt(db, chat, assistant_auto).await;
+                            }
+                        }
+                        return Ok(McpToolExecutionOutcome::Response(tool_response(
+                            resp.status,
+                            header_value(&resp.headers, "content-type"),
+                            &resp.body[..exec_ctx
+                                .response_body_limit
+                                .map_or(resp.body.len(), |n| resp.body.len().min(n + 1))],
+                        )));
+                    }
+                    Ok(ProxyResponseType::Streaming(rx)) => {
+                        let (status, headers, body_buf) = match collect_node_stream_response(
+                            rx,
+                            exec_ctx.response_body_limit,
+                        )
+                        .await
+                        {
+                            Ok(response) => response,
+                            Err(error) => {
+                                return Ok(McpToolExecutionOutcome::ProviderOutcomeUnknown(error));
+                            }
+                        };
+                        billing
+                            .settle(
+                                &metered,
+                                mcp_platform_usage_for_path(
+                                    &body_buf,
+                                    request_len,
+                                    &target.service,
+                                    &path,
+                                    status,
+                                ),
+                                None,
+                                None,
+                            )
+                            .await?;
+                        destination_audit.complete(status);
+                        request_audit.response(status);
+                        if (200..300).contains(&status)
+                            && let (Some(chat), Some(admission)) =
+                                (assistant_chat.as_ref(), assistant_admission.as_ref())
+                        {
+                            if let Some(receipt) = &automatic_receipt {
+                                receipt.record(db, chat).await;
+                            } else {
+                                admission.receipt(db, chat, assistant_auto).await;
+                            }
+                        }
+                        return Ok(McpToolExecutionOutcome::Response(tool_response(
+                            status,
+                            header_value(&headers, "content-type"),
+                            &body_buf,
+                        )));
+                    }
+                    Err(failure) => match node_dispatch_failure_disposition(failure.dispatched) {
+                        NodeDispatchFailureDisposition::StopProviderOutcomeUnknown => {
+                            return Ok(McpToolExecutionOutcome::ProviderOutcomeUnknown(
+                                failure.error,
+                            ));
+                        }
+                        NodeDispatchFailureDisposition::TryFallback => {
+                            destination_audit.denied();
+                            node_failure_evidence.record(&failure.error, failure.dispatched);
+                            last_error = Some(failure.error);
+                            continue;
+                        }
+                    },
+                }
             }
-            .into(),
-            oauth_client_id: None,
-            acting_client_id: None,
-            api_key_credential_id: None,
+
+            if matches!(
+                last_error.as_ref(),
+                Some(AppError::NodeHttpSignatureUnsupported)
+            ) {
+                return Err(AppError::NodeHttpSignatureUnsupported);
+            }
+            // All nodes failed. Fall through to direct only when the server
+            // holds a decrypt-able credential. node_managed keys and node-only
+            // platform services have no server credential.
+            if !has_server_credential {
+                if let (Some(chat), Some(admission)) =
+                    (assistant_chat.as_ref(), assistant_admission.as_ref())
+                {
+                    admission
+                        .exhausted_node_routes(db, chat, &node_failure_evidence)
+                        .await?;
+                }
+                return Err(last_error
+                    .unwrap_or_else(|| AppError::NodeOffline("All node routes failed".to_string())));
+            }
+            // else: fall through to direct forward_request
         }
-    });
-    let mut request_audit = super::service_insights_activity::RequestAudit::from_attribution(
-        db,
-        attribution,
-        billing_ctx.user_service_id.as_deref(),
-        &target.service.id,
-        &resource_owner_id,
-        &billing_ctx.billing_request_id,
-        billing_ctx.credential_class,
-    );
-    if super::telnyx_platform_service::contract(&target.service).is_some() {
-        if node_route.is_some() || !delegated.is_empty() || !server_owned_headers.is_empty() {
-            return Err(AppError::BadRequest(
-                "This Telnyx platform operation requires direct managed execution".into(),
-            ));
-        }
-        let managed_guard = super::assistant_service_execution::OwnedHttpEgressGuard::for_managed(
-            assistant_admission.as_ref(),
-            None,
-            db,
-            encryption_keys.clone(),
-            &target,
-            (method.as_str(), &path),
-            (&billing_ctx, &resource_owner_id, assistant_chat.as_ref()),
-        );
+
+        // -------------------------------------------------------------------
+        // Direct proxy (no node, or node offline with server credential fallback)
+        // -------------------------------------------------------------------
         destination_audit.dispatch();
-        let managed = match super::telnyx_platform_service::execute(
-            db,
-            billing.clone(),
-            billing_ctx,
-            target,
-            method.as_str(),
+        if let Some(admission) = assistant_admission.as_ref() {
+            let validation = admission
+                .http_egress(db, encryption_keys, &target, method.as_str(), &path)
+                .routed(node_route.as_ref())
+                .revalidate()
+                .await;
+            if let Err(error) = validation {
+                billing
+                    .reject_before_send(&metered, "assistant_authority_changed", false)
+                    .await?;
+                return Err(error);
+            }
+        }
+        billing.mark_forwarded(&metered).await?;
+        let egress_guard = assistant_admission.as_ref().map(|admission| {
+            admission
+                .http_egress(db, encryption_keys, &target, method.as_str(), &path)
+                .routed(node_route.as_ref())
+        });
+        let response = match proxy_service::forward_request_with_egress_guard(
+            http_client,
+            &target,
+            method,
             &path,
             query.as_deref(),
-            body.as_deref().unwrap_or_default(),
-            service_lease,
-            managed_guard,
+            req_headers,
+            proxy_service::ProxyBody::Buffered(body),
+            identity_headers,
+            delegated,
+            exec_ctx.caller_token,
+            token_exchange_cache,
+            cloud_response_cache,
+            server_owned_headers,
+            billing_egress_permit,
+            egress_guard.as_ref(),
         )
         .await
         {
             Ok(response) => response,
-            Err(super::telnyx_platform_service::ManagedExecutionError::OutcomeUnknown(error)) => {
-                return Ok(McpToolExecutionOutcome::ProviderOutcomeUnknown(error));
-            }
-            Err(super::telnyx_platform_service::ManagedExecutionError::Rejected(error)) => {
-                request_audit.admission_error(&error);
+            Err(proxy_service::ForwardRequestError::PreDispatchRejected(error)) => {
+                billing
+                    .reject_before_send(&metered, "assistant_authority_changed", false)
+                    .await?;
                 return Err(error);
             }
+            Err(proxy_service::ForwardRequestError::Application(error)) => return Err(error),
+            Err(error @ proxy_service::ForwardRequestError::OutcomeUnknown) => {
+                return Ok(McpToolExecutionOutcome::ProviderOutcomeUnknown(
+                    error.into_app_error(),
+                ));
+            }
+            Err(proxy_service::ForwardRequestError::Transport(error))
+                if direct_transport_failure_is_pre_dispatch(&error) =>
+            {
+                if error.is_connect()
+                    && let (Some(chat), Some(admission)) =
+                        (assistant_chat.as_ref(), assistant_admission.as_ref())
+                {
+                    admission
+                        .record_unavailable(db, chat, "pre_dispatch")
+                        .await?;
+                }
+                tracing::warn!(
+                    connect = error.is_connect(),
+                    builder = error.is_builder(),
+                    request = error.is_request(),
+                    "Provider was unreachable before direct dispatch"
+                );
+                return Ok(McpToolExecutionOutcome::ProviderUnreachable(
+                    AppError::Internal("Proxy request failed".to_string()),
+                ));
+            }
+            Err(proxy_service::ForwardRequestError::Transport(error)) => {
+                tracing::error!(
+                    timeout = error.is_timeout(),
+                    body = error.is_body(),
+                    decode = error.is_decode(),
+                    "Direct provider outcome is unknown"
+                );
+                return Ok(McpToolExecutionOutcome::ProviderOutcomeUnknown(
+                    AppError::Internal("Direct provider outcome is unknown".to_string()),
+                ));
+            }
         };
-        destination_audit.complete(managed.status);
-        request_audit.response(managed.status);
-        if let (Some(chat), Some(admission)) =
-            (assistant_chat.as_ref(), assistant_admission.as_ref())
+
+        let status = response.status().as_u16();
+        if let (Some(chat), Some(admission)) = (assistant_chat.as_ref(), assistant_admission.as_ref()) {
+            admission.response(db, chat, status).await?;
+        }
+        // Images are read as bytes; everything else keeps charset-aware decoding.
+        let image_type = tool_image_type(
+            response
+                .headers()
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok()),
+        );
+        let read = if let Some(limit) = exec_ctx.response_body_limit {
+            let mut response = response;
+            let mut bytes = Vec::new();
+            let result: Result<_, reqwest::Error> = async {
+                while let Some(chunk) = response.chunk().await? {
+                    let take = chunk.len().min((limit + 1).saturating_sub(bytes.len()));
+                    bytes.extend_from_slice(&chunk[..take]);
+                    if bytes.len() > limit {
+                        break;
+                    }
+                }
+                Ok((String::from_utf8_lossy(&bytes).into_owned(), None))
+            }
+            .await;
+            result
+        } else {
+            match image_type {
+                Some(content_type) => response.bytes().await.map(|bytes| {
+                    let media = tool_media(status, Some(content_type), &bytes);
+                    (String::from_utf8_lossy(&bytes).to_string(), media)
+                }),
+                None => response.text().await.map(|text| (text, None)),
+            }
+        };
+        let (body_text, media) = match read {
+            Ok(read) => read,
+            Err(error) => {
+                tracing::error!(
+                    timeout = error.is_timeout(),
+                    body = error.is_body(),
+                    decode = error.is_decode(),
+                    "Failed to read downstream response"
+                );
+                return Ok(McpToolExecutionOutcome::ProviderOutcomeUnknown(
+                    AppError::Internal("Failed to read downstream response".to_string()),
+                ));
+            }
+        };
+        billing
+            .settle(
+                &metered,
+                mcp_platform_usage_for_path(
+                    body_text.as_bytes(),
+                    request_len,
+                    &target.service,
+                    &path,
+                    status,
+                ),
+                None,
+                None,
+            )
+            .await?;
+
+        destination_audit.complete(status);
+        request_audit.response(status);
+        if (200..300).contains(&status)
+            && let (Some(chat), Some(admission)) =
+                (assistant_chat.as_ref(), assistant_admission.as_ref())
         {
             if let Some(receipt) = &automatic_receipt {
                 receipt.record(db, chat).await;
@@ -5526,426 +5951,15 @@ async fn execute_tool_resolved_inner(
                 admission.receipt(db, chat, assistant_auto).await;
             }
         }
-        return Ok(McpToolExecutionOutcome::Response(ToolResponse {
+        Ok(McpToolExecutionOutcome::Response(ToolResponse {
             concurrency: None,
-            status: managed.status,
-            text: String::from_utf8(managed.body.to_vec())
-                .map_err(|_| AppError::Internal("Invalid managed response encoding".into()))?,
-            media: None,
+            status,
+            text: body_text,
+            media,
             origin: ToolResponseOrigin::Downstream,
-        }));
-    }
-    let metered = billing
-        .open(&billing_ctx)
-        .await
-        .inspect_err(|error| request_audit.admission_error(error))?;
-    let request_len = body.as_ref().map(|body| body.len() as i64).unwrap_or(0);
-
-    // -------------------------------------------------------------------
-    // Route through node when a node route exists (primary + fallbacks).
-    // Always attempt all nodes regardless of primary connection state --
-    // send_proxy_request returns NodeOffline for disconnected nodes, then
-    // we try fallbacks. Only fall through to direct forward_request when
-    // all nodes fail AND the server holds a real credential.
-    // -------------------------------------------------------------------
-    if let Some(ref nr) = node_route {
-        let method_str = method.to_string();
-
-        let base_headers = req_headers
-            .iter()
-            .filter_map(|(name, value)| {
-                value
-                    .to_str()
-                    .ok()
-                    .map(|value| (name.to_string(), value.to_string()))
-            })
-            .collect();
-        super::destination_routing::validate_node_outbound_destination(
-            &target,
-            method.as_str(),
-            &path,
-            &delegated,
-        )?;
-        let prepared = proxy_service::prepare_node_request(
-            &target,
-            &path,
-            query.as_deref(),
-            base_headers,
-            &identity_headers,
-            &delegated,
-            exec_ctx.caller_token,
-            &server_owned_headers,
-        )?;
-        let node_request = NodeProxyRequest {
-            target_id: target.target_id.clone(),
-            request_id: uuid::Uuid::new_v4().to_string(),
-            service_id: target.service.id.clone(),
-            service_slug: target.service.slug.clone(),
-            base_url: target.base_url.clone(),
-            method: method_str,
-            path: prepared.path,
-            query: prepared.query,
-            headers: prepared.headers,
-            body: body.as_ref().map(|b| b.to_vec()),
-        };
-
-        let all_node_ids: Vec<&str> = std::iter::once(nr.node_id.as_str())
-            .chain(nr.fallback_node_ids.iter().map(|s| s.as_str()))
-            .collect();
-
-        let mut last_error: Option<AppError> = None;
-        let mut node_failure_evidence =
-            super::assistant_service_execution::NodeFailureEvidence::default();
-        for nid in &all_node_ids {
-            let mut attempt = node_request.clone();
-            attempt.request_id = uuid::Uuid::new_v4().to_string();
-
-            let signing_secret = if config.node_hmac_signing_enabled {
-                match node_service::get_node_signing_secret(db, encryption_keys, nid).await {
-                    Ok(secret) => Some(secret),
-                    Err(e @ AppError::NodeNotFound(_) | e @ AppError::NodeOffline(_)) => {
-                        // Signing preparation failures are not credential outages.
-                        node_failure_evidence.disqualify();
-                        last_error = Some(e);
-                        continue;
-                    }
-                    Err(e) => return Err(e),
-                }
-            } else {
-                None
-            };
-
-            if target.target_id.is_some() {
-                node_ws_manager
-                    .require_http_signature_v2(nid, signing_secret.is_some())
-                    .await?;
-            }
-            destination_audit.dispatch();
-            if let Some(admission) = assistant_admission.as_ref() {
-                let validation = admission
-                    .http_egress(db, encryption_keys, &target, method.as_str(), &path)
-                    .routed(node_route.as_ref())
-                    .revalidate()
-                    .await;
-                if let Err(error) = validation {
-                    billing
-                        .reject_before_send(&metered, "assistant_authority_changed", false)
-                        .await?;
-                    return Err(error);
-                }
-            }
-            billing.mark_forwarded(&metered).await?;
-            if let Some(admission) = assistant_admission.as_ref()
-                && let Err(error) = admission
-                    .http_egress(db, encryption_keys, &target, method.as_str(), &path)
-                    .routed(node_route.as_ref())
-                    .revalidate()
-                    .await
-            {
-                billing
-                    .reject_before_send(&metered, "assistant_authority_changed", false)
-                    .await?;
-                return Err(error);
-            }
-            match node_ws_manager
-                .send_proxy_request_classified(
-                    nid,
-                    attempt,
-                    signing_secret.as_ref().map(|s| s.as_slice()),
-                    billing_egress_permit,
-                )
-                .await
-            {
-                Ok(ProxyResponseType::Complete(resp)) => {
-                    billing
-                        .settle(
-                            &metered,
-                            mcp_platform_usage_for_path(
-                                &resp.body,
-                                request_len,
-                                &target.service,
-                                &path,
-                                resp.status,
-                            ),
-                            None,
-                            None,
-                        )
-                        .await?;
-                    destination_audit.complete(resp.status);
-                    request_audit.response(resp.status);
-                    if (200..300).contains(&resp.status)
-                        && let (Some(chat), Some(admission)) =
-                            (assistant_chat.as_ref(), assistant_admission.as_ref())
-                    {
-                        if let Some(receipt) = &automatic_receipt {
-                            receipt.record(db, chat).await;
-                        } else {
-                            admission.receipt(db, chat, assistant_auto).await;
-                        }
-                    }
-                    return Ok(McpToolExecutionOutcome::Response(tool_response(
-                        resp.status,
-                        header_value(&resp.headers, "content-type"),
-                        &resp.body[..exec_ctx
-                            .response_body_limit
-                            .map_or(resp.body.len(), |n| resp.body.len().min(n + 1))],
-                    )));
-                }
-                Ok(ProxyResponseType::Streaming(rx)) => {
-                    let (status, headers, body_buf) = match collect_node_stream_response(
-                        rx,
-                        exec_ctx.response_body_limit,
-                    )
-                    .await
-                    {
-                        Ok(response) => response,
-                        Err(error) => {
-                            return Ok(McpToolExecutionOutcome::ProviderOutcomeUnknown(error));
-                        }
-                    };
-                    billing
-                        .settle(
-                            &metered,
-                            mcp_platform_usage_for_path(
-                                &body_buf,
-                                request_len,
-                                &target.service,
-                                &path,
-                                status,
-                            ),
-                            None,
-                            None,
-                        )
-                        .await?;
-                    destination_audit.complete(status);
-                    request_audit.response(status);
-                    if (200..300).contains(&status)
-                        && let (Some(chat), Some(admission)) =
-                            (assistant_chat.as_ref(), assistant_admission.as_ref())
-                    {
-                        if let Some(receipt) = &automatic_receipt {
-                            receipt.record(db, chat).await;
-                        } else {
-                            admission.receipt(db, chat, assistant_auto).await;
-                        }
-                    }
-                    return Ok(McpToolExecutionOutcome::Response(tool_response(
-                        status,
-                        header_value(&headers, "content-type"),
-                        &body_buf,
-                    )));
-                }
-                Err(failure) => match node_dispatch_failure_disposition(failure.dispatched) {
-                    NodeDispatchFailureDisposition::StopProviderOutcomeUnknown => {
-                        return Ok(McpToolExecutionOutcome::ProviderOutcomeUnknown(
-                            failure.error,
-                        ));
-                    }
-                    NodeDispatchFailureDisposition::TryFallback => {
-                        destination_audit.denied();
-                        node_failure_evidence.record(&failure.error, failure.dispatched);
-                        last_error = Some(failure.error);
-                        continue;
-                    }
-                },
-            }
-        }
-
-        if matches!(
-            last_error.as_ref(),
-            Some(AppError::NodeHttpSignatureUnsupported)
-        ) {
-            return Err(AppError::NodeHttpSignatureUnsupported);
-        }
-        // All nodes failed. Fall through to direct only when the server
-        // holds a decrypt-able credential. node_managed keys and node-only
-        // platform services have no server credential.
-        if !has_server_credential {
-            if let (Some(chat), Some(admission)) =
-                (assistant_chat.as_ref(), assistant_admission.as_ref())
-            {
-                admission
-                    .exhausted_node_routes(db, chat, &node_failure_evidence)
-                    .await?;
-            }
-            return Err(last_error
-                .unwrap_or_else(|| AppError::NodeOffline("All node routes failed".to_string())));
-        }
-        // else: fall through to direct forward_request
-    }
-
-    // -------------------------------------------------------------------
-    // Direct proxy (no node, or node offline with server credential fallback)
-    // -------------------------------------------------------------------
-    destination_audit.dispatch();
-    if let Some(admission) = assistant_admission.as_ref() {
-        let validation = admission
-            .http_egress(db, encryption_keys, &target, method.as_str(), &path)
-            .routed(node_route.as_ref())
-            .revalidate()
-            .await;
-        if let Err(error) = validation {
-            billing
-                .reject_before_send(&metered, "assistant_authority_changed", false)
-                .await?;
-            return Err(error);
-        }
-    }
-    billing.mark_forwarded(&metered).await?;
-    let egress_guard = assistant_admission.as_ref().map(|admission| {
-        admission
-            .http_egress(db, encryption_keys, &target, method.as_str(), &path)
-            .routed(node_route.as_ref())
-    });
-    let response = match proxy_service::forward_request_with_egress_guard(
-        http_client,
-        &target,
-        method,
-        &path,
-        query.as_deref(),
-        req_headers,
-        proxy_service::ProxyBody::Buffered(body),
-        identity_headers,
-        delegated,
-        exec_ctx.caller_token,
-        token_exchange_cache,
-        cloud_response_cache,
-        server_owned_headers,
-        billing_egress_permit,
-        egress_guard.as_ref(),
-    )
+        }))
+    })
     .await
-    {
-        Ok(response) => response,
-        Err(proxy_service::ForwardRequestError::PreDispatchRejected(error)) => {
-            billing
-                .reject_before_send(&metered, "assistant_authority_changed", false)
-                .await?;
-            return Err(error);
-        }
-        Err(proxy_service::ForwardRequestError::Application(error)) => return Err(error),
-        Err(error @ proxy_service::ForwardRequestError::OutcomeUnknown) => {
-            return Ok(McpToolExecutionOutcome::ProviderOutcomeUnknown(
-                error.into_app_error(),
-            ));
-        }
-        Err(proxy_service::ForwardRequestError::Transport(error))
-            if direct_transport_failure_is_pre_dispatch(&error) =>
-        {
-            if error.is_connect()
-                && let (Some(chat), Some(admission)) =
-                    (assistant_chat.as_ref(), assistant_admission.as_ref())
-            {
-                admission
-                    .record_unavailable(db, chat, "pre_dispatch")
-                    .await?;
-            }
-            tracing::warn!(
-                connect = error.is_connect(),
-                builder = error.is_builder(),
-                request = error.is_request(),
-                "Provider was unreachable before direct dispatch"
-            );
-            return Ok(McpToolExecutionOutcome::ProviderUnreachable(
-                AppError::Internal("Proxy request failed".to_string()),
-            ));
-        }
-        Err(proxy_service::ForwardRequestError::Transport(error)) => {
-            tracing::error!(
-                timeout = error.is_timeout(),
-                body = error.is_body(),
-                decode = error.is_decode(),
-                "Direct provider outcome is unknown"
-            );
-            return Ok(McpToolExecutionOutcome::ProviderOutcomeUnknown(
-                AppError::Internal("Direct provider outcome is unknown".to_string()),
-            ));
-        }
-    };
-
-    let status = response.status().as_u16();
-    if let (Some(chat), Some(admission)) = (assistant_chat.as_ref(), assistant_admission.as_ref()) {
-        admission.response(db, chat, status).await?;
-    }
-    // Images are read as bytes; everything else keeps charset-aware decoding.
-    let image_type = tool_image_type(
-        response
-            .headers()
-            .get(reqwest::header::CONTENT_TYPE)
-            .and_then(|value| value.to_str().ok()),
-    );
-    let read = if let Some(limit) = exec_ctx.response_body_limit {
-        let mut response = response;
-        let mut bytes = Vec::new();
-        let result: Result<_, reqwest::Error> = async {
-            while let Some(chunk) = response.chunk().await? {
-                let take = chunk.len().min((limit + 1).saturating_sub(bytes.len()));
-                bytes.extend_from_slice(&chunk[..take]);
-                if bytes.len() > limit {
-                    break;
-                }
-            }
-            Ok((String::from_utf8_lossy(&bytes).into_owned(), None))
-        }
-        .await;
-        result
-    } else {
-        match image_type {
-            Some(content_type) => response.bytes().await.map(|bytes| {
-                let media = tool_media(status, Some(content_type), &bytes);
-                (String::from_utf8_lossy(&bytes).to_string(), media)
-            }),
-            None => response.text().await.map(|text| (text, None)),
-        }
-    };
-    let (body_text, media) = match read {
-        Ok(read) => read,
-        Err(error) => {
-            tracing::error!(
-                timeout = error.is_timeout(),
-                body = error.is_body(),
-                decode = error.is_decode(),
-                "Failed to read downstream response"
-            );
-            return Ok(McpToolExecutionOutcome::ProviderOutcomeUnknown(
-                AppError::Internal("Failed to read downstream response".to_string()),
-            ));
-        }
-    };
-    billing
-        .settle(
-            &metered,
-            mcp_platform_usage_for_path(
-                body_text.as_bytes(),
-                request_len,
-                &target.service,
-                &path,
-                status,
-            ),
-            None,
-            None,
-        )
-        .await?;
-
-    destination_audit.complete(status);
-    request_audit.response(status);
-    if (200..300).contains(&status)
-        && let (Some(chat), Some(admission)) =
-            (assistant_chat.as_ref(), assistant_admission.as_ref())
-    {
-        if let Some(receipt) = &automatic_receipt {
-            receipt.record(db, chat).await;
-        } else {
-            admission.receipt(db, chat, assistant_auto).await;
-        }
-    }
-    Ok(McpToolExecutionOutcome::Response(ToolResponse {
-        concurrency: None,
-        status,
-        text: body_text,
-        media,
-        origin: ToolResponseOrigin::Downstream,
-    }))
 }
 
 #[cfg(test)]

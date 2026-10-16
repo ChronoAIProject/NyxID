@@ -13,6 +13,12 @@ export const machineAccessSchema = z.object({
   separated_setup_note: z.string().nullish(),
   separated: z.object({ available: z.boolean(), landlock_abi: z.number().nullable(), reason: z.string().nullable() }).nullish(),
   revocation_pending: z.boolean().optional(),
+  delivery_pending: z.boolean().optional(),
+  quarantine_pending: z.boolean().optional(),
+  execution_revocation_pending: z.boolean().optional(),
+  revocation_initialization_pending: z.boolean().optional(),
+  revocation_expires_at: z.string().nullish(),
+  revocation_diagnostic: z.enum(["revocation_deadline_invalid", "authority_timing_upgrade_required"]).nullish(),
   saved_login_ids: z.array(z.string()).nullable(),
 });
 export const machineSelectionSchema = z.object({

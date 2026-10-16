@@ -725,6 +725,65 @@ returned to the model. Human capture uses X11 on Linux and ScreenCaptureKit on
 macOS; Linux owner input uses XTest, independently of capture and agent cua
 calls. macOS owner input uses a separate cua session. Idle sessions close.
 
+### Recovering machine authority
+
+Each new machine tool call automatically acquires live authority bound to the
+connected daemon's current runtime and current permissions. Reading capabilities
+or `machine_list` only observes state; it is **not an authority refresh**. Updating
+or restarting changes the runtime, and an old lease must never be renewed into
+that new runtime.
+
+For repeated `machine_authority_stale` failures or pending permission changes:
+
+1. Stop the affected turn if a command's outcome is ambiguous. Inspect activity
+   and, when safe, use a read-only check to establish whether the command already
+   changed anything. Never blindly replay an ambiguous command.
+2. Update the node to a version with clock-safe authority timing, reconnect it,
+   and confirm the expected machine/runtime in Machine activity and daemon logs.
+   A browserless shared shell/files container needs no browser to recover.
+3. Synchronize UTC on both server and node hosts. A Docker container shares its
+   host's clock: fix the **Docker host clock**, rather than trying to set time
+   inside the container. Authority timing permits at most five seconds of clock
+   difference and fails closed beyond that bound.
+4. Inspect the error's `reason` and `request_id` when present, plus Machine
+   activity operation/activity/job IDs, runtime ID, assignment revision and UTC
+   time. Refresh machine status. Distinguish earlier commands stopping from
+   acknowledgement still pending and browser cleanup still pending. A displayed
+   expiry time only bounds execution; cleanup requires actual acknowledgement.
+   Offline acknowledgement may remain pending after earlier commands stop.
+5. Make a **fresh harmless tool call** (for example a bounded file listing within
+   allowed roots) after the required permission/cleanup state permits it. This
+   call acquires fresh authority automatically. If it fails, retain its reason
+   and request ID for diagnosis; do not reuse an old acknowledgement or lease.
+
+Useful fixed diagnostics include `authority_clock_skew` (check host clocks),
+`authority_lifetime_invalid` (check signing/issuance timing), `authority_expired`
+(check delay/backpressure), `authority_runtime_mismatch` (check current daemon
+connection/profile), `authority_revision_stale` (check current permissions),
+`authority_binding_invalid`/`authority_context_mismatch` (check UUID/identity and
+context bindings), `authority_store_unavailable` (check daemon-owned private
+state directory, permissions and free disk), and `context_quarantine_pending`
+(restore cleanup on the node). Invalid UUIDs, malformed identities, expired
+source/funding authority and private-store failures can also refuse execution;
+not every stale-authority error proves a runtime mismatch. A malformed store can
+prevent daemon startup before any tool response. Check daemon logs rather than
+repeatedly retrying commands. Capacity refusal is a separate busy outcome.
+
+**Never delete `machine-authority-v2.json`, `machine-authority-v3.json` or context
+journals to recover access.** Never lower revisions, manually clear database
+pending/cleanup flags, bypass quarantine, or replay old leases. These files and
+rows prevent old permissions and cancelled work from returning. Repair ownership,
+permissions or disk availability without discarding their security state. Share
+only metadata diagnostics; do not dump configuration, keys, command output or
+credentials into support logs.
+
+For pending rows without a deadline, the first committed observation starts a single conservative
+47-second execution recovery window, initialized and checked against MongoDB's
+clock rather than individual application replicas. A null/malformed recorded deadline requires
+administrator inspection. Older nodes without timing support require an update
+and real acknowledgement. See [authority timing and pending states](MACHINE_NODES.md#per-agent-capabilities-m12)
+for protocol details and rolling-upgrade limits.
+
 ### Saved website logins
 
 Save labels, exact HTTPS origins, usernames, passwords and optional TOTP on the

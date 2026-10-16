@@ -214,6 +214,17 @@ pub fn check<'a>(
     ))
 }
 
+// Service-choice temporaries need not occupy the stack while confirmation
+// polls its nested MongoDB transaction. Preserve same-task drop semantics.
+fn box_confirmation<'a, F>(
+    make: impl FnOnce() -> F,
+) -> futures::future::BoxFuture<'a, AppResult<Decision>>
+where
+    F: std::future::Future<Output = AppResult<Decision>> + Send + 'a,
+{
+    Box::pin(make())
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn check_inner(
     db: &Database,
@@ -566,74 +577,77 @@ async fn check_inner(
             automatic: None,
         });
     }
-    let summary = if org {
-        let owner = db
-            .collection::<crate::models::user::User>("users")
-            .find_one(doc! {"_id": effective_owner, "is_active": true})
-            .await?
-            .ok_or_else(|| AppError::Forbidden("Organization unavailable".into()))?;
-        format!(
-            "Organization connection {} ({}) in {}: {}",
-            super::assistant_nyxagent::identifier(&service.slug),
-            connection_id,
-            super::assistant_nyxagent::identifier(
-                owner
-                    .display_name
-                    .as_deref()
-                    .unwrap_or(owner.slug.as_deref().unwrap_or(&owner.id))
-            ),
-            summary
-        )
-    } else {
-        summary.to_owned()
-    };
-    let gate = acks::confirmation_needed(db, chat, facts, org && !model_consent).await?;
-    if gate.ask().is_some() {
-        // Legacy idle calls can retain their existing automatic behavior, but
-        // cannot mint or redeem turn-bound consent without an admitted turn.
-        scope(chat)?;
-    }
-    if let Some(need) = gate.ask()
-        && let Some(refusal) =
-            acks::confirm_action(db, chat, "nyxid.service_execution", &args, &need, &summary)
+    box_confirmation(move || async move {
+        let summary = if org {
+            let owner = db
+                .collection::<crate::models::user::User>("users")
+                .find_one(doc! {"_id": effective_owner, "is_active": true})
                 .await?
-    {
-        if refusal["error"] == "acknowledgement_required"
-            && let Some(id) = refusal["acknowledgement_id"].as_str()
-        {
-            db.collection::<Document>(COLLECTION).update_one(doc! {"_id": id}, doc! {"$setOnInsert": {
-                        "kind": "card_binding", "user_id": &chat.user_id, "conversation_id": &chat.conversation_id,
-                        "api_key_id": &chat.api_key_id, "turn_id": &chat.turn_id, "connection_id": connection_id,
-                        "owner_id": effective_owner, "catalog_service_id": &service.catalog_service_id,
-                        "binding": &binding, "operation": bson::to_bson(operation).map_err(|_| AppError::Internal("Operation binding failed".into()))?,
-                        "expires_at": bson::DateTime::from_chrono(Utc::now() + Duration::minutes(25)),
-                    }}).upsert(true).await?;
+                .ok_or_else(|| AppError::Forbidden("Organization unavailable".into()))?;
+            format!(
+                "Organization connection {} ({}) in {}: {}",
+                super::assistant_nyxagent::identifier(&service.slug),
+                connection_id,
+                super::assistant_nyxagent::identifier(
+                    owner
+                        .display_name
+                        .as_deref()
+                        .unwrap_or(owner.slug.as_deref().unwrap_or(&owner.id))
+                ),
+                summary
+            )
+        } else {
+            summary.to_owned()
+        };
+        let gate = acks::confirmation_needed(db, chat, facts, org && !model_consent).await?;
+        if gate.ask().is_some() {
+            // Legacy idle calls can retain their existing automatic behavior, but
+            // cannot mint or redeem turn-bound consent without an admitted turn.
+            scope(chat)?;
         }
-        return Ok(Decision {
-            refusal: Some(refusal),
-            admission: None,
-            automatic: None,
-        });
-    }
-    Ok(Decision {
-        refusal: None,
-        admission: Some(Admission {
-            connection: connection_id.into(),
-            binding,
-            execution: target.map(|target| execution_projection_digest(target, !pool)),
-            execution_credential: !pool,
-            operation: digest(operation.clone()),
-            operation_identity: operation.clone(),
-            native_execution: None,
-            read: facts.class == acks::OwnerActionClass::Read,
-            api_key_id: chat.api_key_id.clone(),
-            summary: summary.to_owned(),
-            job_id: None,
-            async_continuation: None,
-            chat: chat.clone(),
-        }),
-        automatic: gate.auto_allowed(),
+        if let Some(need) = gate.ask()
+            && let Some(refusal) =
+                acks::confirm_action(db, chat, "nyxid.service_execution", &args, &need, &summary)
+                    .await?
+        {
+            if refusal["error"] == "acknowledgement_required"
+                && let Some(id) = refusal["acknowledgement_id"].as_str()
+            {
+                db.collection::<Document>(COLLECTION).update_one(doc! {"_id": id}, doc! {"$setOnInsert": {
+                            "kind": "card_binding", "user_id": &chat.user_id, "conversation_id": &chat.conversation_id,
+                            "api_key_id": &chat.api_key_id, "turn_id": &chat.turn_id, "connection_id": connection_id,
+                            "owner_id": effective_owner, "catalog_service_id": &service.catalog_service_id,
+                            "binding": &binding, "operation": bson::to_bson(operation).map_err(|_| AppError::Internal("Operation binding failed".into()))?,
+                            "expires_at": bson::DateTime::from_chrono(Utc::now() + Duration::minutes(25)),
+                        }}).upsert(true).await?;
+            }
+            return Ok(Decision {
+                refusal: Some(refusal),
+                admission: None,
+                automatic: None,
+            });
+        }
+        Ok(Decision {
+            refusal: None,
+            admission: Some(Admission {
+                connection: connection_id.into(),
+                binding,
+                execution: target.map(|target| execution_projection_digest(target, !pool)),
+                execution_credential: !pool,
+                operation: digest(operation.clone()),
+                operation_identity: operation.clone(),
+                native_execution: None,
+                read: facts.class == acks::OwnerActionClass::Read,
+                api_key_id: chat.api_key_id.clone(),
+                summary: summary.to_owned(),
+                job_id: None,
+                async_continuation: None,
+                chat: chat.clone(),
+            }),
+            automatic: gate.auto_allowed(),
+        })
     })
+    .await
 }
 
 fn execution_digest(target: &super::proxy_service::ProxyTarget) -> String {

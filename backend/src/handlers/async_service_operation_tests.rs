@@ -1283,131 +1283,182 @@ fn snapshot(row: &crate::models::assistant_conversation::AssistantConversation) 
 /// conversation's stale marker, never create NyxBot involvement.
 #[tokio::test]
 async fn async_carriers_prove_report_targets_from_the_live_turn_snapshot_only() {
-    use crate::models::assistant_conversation::REPORT_PROVENANCE_V1;
     let a = AsyncFixture::build(true).await;
-    // Admission is exercised explicitly below; park automatic wake-ups so the
-    // sweep cannot consume the result event before its provenance is checked.
-    let limit = crate::handlers::assistant_team::team_pool_limit(&a.f.state, &a.f.owner).await + 1;
-    let mut permits = Vec::new();
-    for _ in 0..limit {
-        permits.push(
-            a.f.state
-                .direct_chat_limiter
-                .try_acquire_pool("assistant_team", &a.f.owner, limit)
-                .await
-                .unwrap()
-                .unwrap(),
-        );
-    }
-    let db = a.f.state.db.clone();
-    let owner = a.f.owner.clone();
-    let id = a.f.row.id.clone();
-    let keys = a.f.state.encryption_keys.clone();
-    let nb = "nyxa-0123456789abcdef0123456789abcdef";
-    let live_turn = a.f.row.active_turn.as_ref().unwrap().turn_id.clone();
+    check_async_carrier_report_targets(a).await;
+}
 
-    // (a) A direct turn's operation carries a validated None: its result never
-    // involves NyxBot, even beside a stale legacy marker on the conversation.
-    let w = submit_from(&a, &live_turn).await;
-    assert_eq!(w.delivery.report_provenance, REPORT_PROVENANCE_V1);
-    assert_eq!(w.delivery.report_to, None);
-    db.collection::<bson::Document>(CONVERSATIONS)
-        .update_one(doc! {"_id": &id}, doc! {"$set": {"report_to": nb}})
-        .await
-        .unwrap();
-    finish_live(&a, &a.f.row).await;
-    let event = complete(&a).await;
-    assert!(event.bound && event.report_to.is_none());
-    let claimed = event_turn(&a).await;
-    assert_eq!(snapshot(&claimed), None);
-    // apply_delivery restores transport context only, never the target.
-    let mut tampered = w.clone();
-    tampered.delivery.report_to = Some(nb.into());
-    let mut restored = claimed.clone();
-    restored.report_to = None;
-    watches::apply_delivery(&mut restored, &tampered);
-    assert_eq!(snapshot(&restored), None);
-    assert_eq!(restored.report_to, None);
-    finish_live(&a, &claimed).await;
-    assert_eq!(
-        engine::messages(&db, &owner, &id, 100, None)
-            .await
-            .unwrap()
-            .into_iter()
-            .rev()
-            .find(|m| m.role == "assistant")
-            .unwrap()
-            .report_to,
-        None
-    );
+// Finish setup and each lifecycle case before polling the next case. Boxed
+// constructors keep their debug construction temporaries out of the shared
+// driver, without moving execution or the retained pool permits to another task.
+fn check_async_carrier_report_targets(a: AsyncFixture) -> futures::future::BoxFuture<'static, ()> {
+    Box::pin(async move {
+        // Admission is exercised explicitly below; park automatic wake-ups so the
+        // sweep cannot consume the result event before its provenance is checked.
+        let limit =
+            crate::handlers::assistant_team::team_pool_limit(&a.f.state, &a.f.owner).await + 1;
+        let mut permits = Vec::new();
+        for _ in 0..limit {
+            permits.push(
+                a.f.state
+                    .direct_chat_limiter
+                    .try_acquire_pool("assistant_team", &a.f.owner, limit)
+                    .await
+                    .unwrap()
+                    .unwrap(),
+            );
+        }
+        check_direct_carrier(&a).await;
+        check_assigned_carrier(&a).await;
+        for provenance in [0_i32, 7] {
+            check_unproven_carrier(&a, provenance).await;
+        }
+        check_disagreeing_carrier(&a).await;
+    })
+}
 
-    // (b) A proven assigned operation keeps its target through intervening
-    // direct work; a child submitted from its continuation derives the target
-    // from the admitted live turn, not from the parent's stored field.
-    let row = engine::begin_turn(&db, &owner, &user_start(&id, "assigned"), &keys)
-        .await
-        .unwrap();
-    let turn_id = row.active_turn.as_ref().unwrap().turn_id.clone();
-    db.collection::<bson::Document>(CONVERSATIONS)
-        .update_one(
-            doc! {"_id": &id, "active_turn.turn_id": &turn_id},
-            doc! {"$set": {"active_turn.report_to": nb}},
+// Construct begin_turn outside the case's poll frame as well: its transaction
+// future is large in debug builds, and every case subsequently performs deep MCP
+// calls on the same 1.5 MiB test thread.
+fn carrier_turn<'a>(
+    a: &'a AsyncFixture,
+    text: &'a str,
+) -> futures::future::BoxFuture<'a, crate::models::assistant_conversation::AssistantConversation> {
+    Box::pin(async move {
+        engine::begin_turn(
+            &a.f.state.db,
+            &a.f.owner,
+            &user_start(&a.f.row.id, text),
+            &a.f.state.encryption_keys,
         )
         .await
-        .unwrap();
-    let assigned = submit_from(&a, &turn_id).await;
-    assert_eq!(assigned.delivery.report_to.as_deref(), Some(nb));
-    assert_eq!(assigned.delivery.report_provenance, REPORT_PROVENANCE_V1);
-    finish_live(&a, &row).await;
-    let direct = engine::begin_turn(&db, &owner, &user_start(&id, "unrelated"), &keys)
-        .await
-        .unwrap();
-    assert_eq!(snapshot(&direct), None);
-    assert_eq!(direct.report_to, None);
-    finish_live(&a, &direct).await;
-    let event = complete(&a).await;
-    assert!(event.bound && event.report_to.as_deref() == Some(nb));
-    let claimed = event_turn(&a).await;
-    assert_eq!(snapshot(&claimed).as_deref(), Some(nb));
-    // The parent's stored field is not what a child inherits.
-    db.collection::<bson::Document>(WATCHES)
-        .update_one(
-            doc! {"_id": &assigned.id},
-            doc! {"$set": {"delivery.report_to": "nyxa-other"}},
-        )
-        .await
-        .unwrap();
-    let child = submit_from(&a, &claimed.active_turn.as_ref().unwrap().turn_id).await;
-    assert_eq!(child.delivery.report_to.as_deref(), Some(nb));
-    assert_eq!(child.delivery.report_provenance, REPORT_PROVENANCE_V1);
-    assert_eq!(child.delivery.origin, assigned.delivery.origin);
-    finish_live(&a, &claimed).await;
-    assert_eq!(
-        engine::messages(&db, &owner, &id, 100, None)
-            .await
-            .unwrap()
-            .into_iter()
-            .rev()
-            .find(|m| m.role == "assistant")
-            .unwrap()
-            .report_to
-            .as_deref(),
-        Some(nb)
-    );
-    watches::cancel(&db, &owner, &id).await.unwrap();
-    db.collection::<bson::Document>(WATCHES)
-        .delete_many(doc! {"_id": &child.id})
-        .await
-        .unwrap();
+        .unwrap()
+    })
+}
 
-    // (c) Legacy and unknown-version carriers prove nothing; a bound event
-    // whose carrier disagrees resolves to None; an old legacy parent gives a
-    // new child nothing either.
-    for provenance in [0_i32, 7] {
-        let row = engine::begin_turn(&db, &owner, &user_start(&id, "legacy"), &keys)
+fn check_direct_carrier(a: &AsyncFixture) -> futures::future::BoxFuture<'_, ()> {
+    Box::pin(async move {
+        use crate::models::assistant_conversation::REPORT_PROVENANCE_V1;
+        let db = a.f.state.db.clone();
+        let owner = a.f.owner.clone();
+        let id = a.f.row.id.clone();
+        let nb = "nyxa-0123456789abcdef0123456789abcdef";
+        let live_turn = a.f.row.active_turn.as_ref().unwrap().turn_id.clone();
+
+        // (a) A direct turn's operation carries a validated None: its result never
+        // involves NyxBot, even beside a stale legacy marker on the conversation.
+        let w = submit_from(a, &live_turn).await;
+        assert_eq!(w.delivery.report_provenance, REPORT_PROVENANCE_V1);
+        assert_eq!(w.delivery.report_to, None);
+        db.collection::<bson::Document>(CONVERSATIONS)
+            .update_one(doc! {"_id": &id}, doc! {"$set": {"report_to": nb}})
             .await
             .unwrap();
-        let w = submit_from(&a, &row.active_turn.as_ref().unwrap().turn_id).await;
+        finish_live(a, &a.f.row).await;
+        let event = complete(a).await;
+        assert!(event.bound && event.report_to.is_none());
+        let claimed = event_turn(a).await;
+        assert_eq!(snapshot(&claimed), None);
+        // apply_delivery restores transport context only, never the target.
+        let mut tampered = w.clone();
+        tampered.delivery.report_to = Some(nb.into());
+        let mut restored = claimed.clone();
+        restored.report_to = None;
+        watches::apply_delivery(&mut restored, &tampered);
+        assert_eq!(snapshot(&restored), None);
+        assert_eq!(restored.report_to, None);
+        finish_live(a, &claimed).await;
+        assert_eq!(
+            engine::messages(&db, &owner, &id, 100, None)
+                .await
+                .unwrap()
+                .into_iter()
+                .rev()
+                .find(|m| m.role == "assistant")
+                .unwrap()
+                .report_to,
+            None
+        );
+    })
+}
+
+fn check_assigned_carrier(a: &AsyncFixture) -> futures::future::BoxFuture<'_, ()> {
+    Box::pin(async move {
+        use crate::models::assistant_conversation::REPORT_PROVENANCE_V1;
+        let db = a.f.state.db.clone();
+        let owner = a.f.owner.clone();
+        let id = a.f.row.id.clone();
+        let nb = "nyxa-0123456789abcdef0123456789abcdef";
+
+        // (b) A proven assigned operation keeps its target through intervening
+        // direct work; a child submitted from its continuation derives the target
+        // from the admitted live turn, not from the parent's stored field.
+        let row = carrier_turn(a, "assigned").await;
+        let turn_id = row.active_turn.as_ref().unwrap().turn_id.clone();
+        db.collection::<bson::Document>(CONVERSATIONS)
+            .update_one(
+                doc! {"_id": &id, "active_turn.turn_id": &turn_id},
+                doc! {"$set": {"active_turn.report_to": nb}},
+            )
+            .await
+            .unwrap();
+        let assigned = submit_from(a, &turn_id).await;
+        assert_eq!(assigned.delivery.report_to.as_deref(), Some(nb));
+        assert_eq!(assigned.delivery.report_provenance, REPORT_PROVENANCE_V1);
+        finish_live(a, &row).await;
+        let direct = carrier_turn(a, "unrelated").await;
+        assert_eq!(snapshot(&direct), None);
+        assert_eq!(direct.report_to, None);
+        finish_live(a, &direct).await;
+        let event = complete(a).await;
+        assert!(event.bound && event.report_to.as_deref() == Some(nb));
+        let claimed = event_turn(a).await;
+        assert_eq!(snapshot(&claimed).as_deref(), Some(nb));
+        // The parent's stored field is not what a child inherits.
+        db.collection::<bson::Document>(WATCHES)
+            .update_one(
+                doc! {"_id": &assigned.id},
+                doc! {"$set": {"delivery.report_to": "nyxa-other"}},
+            )
+            .await
+            .unwrap();
+        let child = submit_from(a, &claimed.active_turn.as_ref().unwrap().turn_id).await;
+        assert_eq!(child.delivery.report_to.as_deref(), Some(nb));
+        assert_eq!(child.delivery.report_provenance, REPORT_PROVENANCE_V1);
+        assert_eq!(child.delivery.origin, assigned.delivery.origin);
+        finish_live(a, &claimed).await;
+        assert_eq!(
+            engine::messages(&db, &owner, &id, 100, None)
+                .await
+                .unwrap()
+                .into_iter()
+                .rev()
+                .find(|m| m.role == "assistant")
+                .unwrap()
+                .report_to
+                .as_deref(),
+            Some(nb)
+        );
+        watches::cancel(&db, &owner, &id).await.unwrap();
+        db.collection::<bson::Document>(WATCHES)
+            .delete_many(doc! {"_id": &child.id})
+            .await
+            .unwrap();
+    })
+}
+
+fn check_unproven_carrier(a: &AsyncFixture, provenance: i32) -> futures::future::BoxFuture<'_, ()> {
+    Box::pin(async move {
+        use crate::models::assistant_conversation::REPORT_PROVENANCE_V1;
+        let db = a.f.state.db.clone();
+        let owner = a.f.owner.clone();
+        let id = a.f.row.id.clone();
+        let nb = "nyxa-0123456789abcdef0123456789abcdef";
+
+        // (c) Legacy and unknown-version carriers prove nothing; a bound event
+        // whose carrier disagrees resolves to None; an old legacy parent gives a
+        // new child nothing either.
+        let row = carrier_turn(a, "legacy").await;
+        let w = submit_from(a, &row.active_turn.as_ref().unwrap().turn_id).await;
         db.collection::<bson::Document>(WATCHES)
             .update_one(
                 doc! {"_id": &w.id},
@@ -1415,46 +1466,53 @@ async fn async_carriers_prove_report_targets_from_the_live_turn_snapshot_only() 
             )
             .await
             .unwrap();
-        finish_live(&a, &row).await;
-        let event = complete(&a).await;
+        finish_live(a, &row).await;
+        let event = complete(a).await;
         assert!(!event.bound && event.report_to.is_none(), "{provenance}");
-        let claimed = event_turn(&a).await;
+        let claimed = event_turn(a).await;
         assert_eq!(snapshot(&claimed), None, "{provenance}");
-        let child = submit_from(&a, &claimed.active_turn.as_ref().unwrap().turn_id).await;
+        let child = submit_from(a, &claimed.active_turn.as_ref().unwrap().turn_id).await;
         assert_eq!(child.delivery.report_to, None);
         assert_eq!(child.delivery.report_provenance, REPORT_PROVENANCE_V1);
-        finish_live(&a, &claimed).await;
+        finish_live(a, &claimed).await;
         watches::cancel(&db, &owner, &id).await.unwrap();
         db.collection::<bson::Document>(WATCHES)
             .delete_many(doc! {"_id": &child.id})
             .await
             .unwrap();
-    }
-    let row = engine::begin_turn(&db, &owner, &user_start(&id, "assigned again"), &keys)
-        .await
-        .unwrap();
-    let turn_id = row.active_turn.as_ref().unwrap().turn_id.clone();
-    db.collection::<bson::Document>(CONVERSATIONS)
-        .update_one(
-            doc! {"_id": &id, "active_turn.turn_id": &turn_id},
-            doc! {"$set": {"active_turn.report_to": nb}},
-        )
-        .await
-        .unwrap();
-    let w = submit_from(&a, &turn_id).await;
-    finish_live(&a, &row).await;
-    let event = complete(&a).await;
-    assert!(event.bound && event.report_to.as_deref() == Some(nb));
-    db.collection::<bson::Document>(WATCHES)
-        .update_one(
-            doc! {"_id": &w.id},
-            doc! {"$set": {"delivery.report_to": "nyxa-other"}},
-        )
-        .await
-        .unwrap();
-    let claimed = event_turn(&a).await;
-    assert_eq!(snapshot(&claimed), None);
-    finish_live(&a, &claimed).await;
+    })
+}
+
+fn check_disagreeing_carrier(a: &AsyncFixture) -> futures::future::BoxFuture<'_, ()> {
+    Box::pin(async move {
+        let db = a.f.state.db.clone();
+        let id = a.f.row.id.clone();
+        let nb = "nyxa-0123456789abcdef0123456789abcdef";
+
+        let row = carrier_turn(a, "assigned again").await;
+        let turn_id = row.active_turn.as_ref().unwrap().turn_id.clone();
+        db.collection::<bson::Document>(CONVERSATIONS)
+            .update_one(
+                doc! {"_id": &id, "active_turn.turn_id": &turn_id},
+                doc! {"$set": {"active_turn.report_to": nb}},
+            )
+            .await
+            .unwrap();
+        let w = submit_from(a, &turn_id).await;
+        finish_live(a, &row).await;
+        let event = complete(a).await;
+        assert!(event.bound && event.report_to.as_deref() == Some(nb));
+        db.collection::<bson::Document>(WATCHES)
+            .update_one(
+                doc! {"_id": &w.id},
+                doc! {"$set": {"delivery.report_to": "nyxa-other"}},
+            )
+            .await
+            .unwrap();
+        let claimed = event_turn(a).await;
+        assert_eq!(snapshot(&claimed), None);
+        finish_live(a, &claimed).await;
+    })
 }
 
 #[path = "async_service_policy_tests.rs"]
