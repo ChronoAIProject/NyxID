@@ -397,8 +397,11 @@ async fn refused(admitted: bool, drift: &str) {
 #[tokio::test]
 async fn actual_managed_http_and_mcp_success_settles_once_and_records_one_receipt() {
     for mcp in [false, true] {
-        let (f, id, _) = fixture(!mcp).await;
-        super::receipts::require_approval(&f, &id).await;
+        let (f, id, catalog) = fixture(!mcp).await;
+        // Catalog-backed HTTP resolves approval policy under the catalog ID;
+        // direct MCP execution retains the connection's service-action receipt.
+        let approval_id = if mcp { &id } else { &catalog };
+        super::receipts::require_approval(&f, approval_id).await;
         let mut provider = nyxid_service_adapters::test_support::scripted_fixture(
             "api.telnyx.com",
             vec![response(true)],
@@ -421,7 +424,8 @@ async fn actual_managed_http_and_mcp_success_settles_once_and_records_one_receip
                 .scope(hooks, call(&f, &id, mcp))
                 .await
                 .unwrap(),
-            200
+            200,
+            "mcp={mcp}"
         );
         assert_eq!(execution(&f).await.state, ManagedExecutionState::Settled);
         assert_eq!(wallet(&f).await.reserved_credits, Credits::ZERO);
@@ -429,7 +433,7 @@ async fn actual_managed_http_and_mcp_success_settles_once_and_records_one_receip
             wallet(&f).await.pending_lago_debits,
             Credits::from_pico(105).unwrap()
         );
-        assert_eq!(receipt_count(&f).await, 1);
+        assert_eq!(receipt_count(&f).await, 1, "mcp={mcp}");
         let receipt = f
             .state
             .db
@@ -446,7 +450,8 @@ async fn actual_managed_http_and_mcp_success_settles_once_and_records_one_receip
                 "nyxid.service_execution"
             } else {
                 "service_approval"
-            }
+            },
+            "mcp={mcp}"
         );
         let sent = provider.requests.try_recv().unwrap();
         assert!(sent.starts_with(b"POST /v2/ai/openai/chat/completions HTTP/1.1\r\n"));

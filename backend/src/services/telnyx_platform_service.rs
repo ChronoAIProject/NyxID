@@ -377,80 +377,84 @@ pub(crate) use worker::{Pause, TEST_HOOKS, TestHooks};
 /// The spawned exchange owns its credential and accounting work. Dropping the
 /// caller future detaches the join handle; provider usage still gets settled.
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn execute(
-    db: &Database,
+pub(crate) fn execute<'a>(
+    db: &'a Database,
     billing: Arc<BillingService>,
     ctx: BillingRouteContext,
     target: ProxyTarget,
-    method: &str,
-    path: &str,
-    query: Option<&str>,
-    body: &[u8],
+    method: &'a str,
+    path: &'a str,
+    query: Option<&'a str>,
+    body: &'a [u8],
     lease: Option<super::service_concurrency_service::Lease>,
     guard: super::assistant_service_execution::OwnedHttpEgressGuard,
-) -> Result<ManagedResponse, ManagedExecutionError> {
-    let target = worker::SecretTarget(target);
-    validate_catalog(&target.service)?;
-    let mut c = contract(&target.service)
-        .ok_or_else(|| invalid("managed contract is missing"))?
-        .clone();
-    if ctx.credential_class != CredentialClass::NyxidManagedMaster
-        || ctx.node_intent != NodeIntent::Direct
-        || ctx.pool_attempt.is_some()
-        || target.target_id.is_some()
-        || target.base_url.trim_end_matches('/') != "https://api.telnyx.com/v2"
-        || target.auth_method != "bearer"
-        || target.credential.is_empty()
-        || !target.catalog_default_headers.is_empty()
-        || !target.user_service_default_headers.is_empty()
-    {
-        return Err(invalid(
-            "managed execution requires a server-held platform credential and a direct route",
+) -> futures::future::BoxFuture<'a, Result<ManagedResponse, ManagedExecutionError>> {
+    // Keep managed preparation and join state out of the shared HTTP/MCP
+    // dispatch future, including ordinary calls that never select this path.
+    Box::pin(async move {
+        let target = worker::SecretTarget(target);
+        validate_catalog(&target.service)?;
+        let mut c = contract(&target.service)
+            .ok_or_else(|| invalid("managed contract is missing"))?
+            .clone();
+        if ctx.credential_class != CredentialClass::NyxidManagedMaster
+            || ctx.node_intent != NodeIntent::Direct
+            || ctx.pool_attempt.is_some()
+            || target.target_id.is_some()
+            || target.base_url.trim_end_matches('/') != "https://api.telnyx.com/v2"
+            || target.auth_method != "bearer"
+            || target.credential.is_empty()
+            || !target.catalog_default_headers.is_empty()
+            || !target.user_service_default_headers.is_empty()
+        {
+            return Err(invalid(
+                "managed execution requires a server-held platform credential and a direct route",
+            )
+            .into());
+        }
+        if Utc::now() - c.tariff_verified_at > Duration::days(30) {
+            return Err(AppError::BillingProviderUnavailable(
+                "Telnyx tariff verification has expired".into(),
+            )
+            .into());
+        }
+        let body = validate_request(&c, method, path, query, body)?;
+        // Reserve the configured maximum, but reject provider usage beyond this
+        // individual request's smaller generation cap as incomplete evidence.
+        c.max_output_tokens = serde_json::from_slice::<ChatRequest>(&body)
+            .map_err(|_| invalid("invalid normalized request"))?
+            .max_tokens;
+        let request_digest = digest(&[&body]);
+        let catalog_digest = catalog_digest(&target)?;
+        let handle = super::managed_execution_service::prepare(
+            db,
+            &billing,
+            ctx,
+            &hex::encode(request_digest),
+            &hex::encode(catalog_digest),
         )
-        .into());
-    }
-    if Utc::now() - c.tariff_verified_at > Duration::days(30) {
-        return Err(AppError::BillingProviderUnavailable(
-            "Telnyx tariff verification has expired".into(),
-        )
-        .into());
-    }
-    let body = validate_request(&c, method, path, query, body)?;
-    // Reserve the configured maximum, but reject provider usage beyond this
-    // individual request's smaller generation cap as incomplete evidence.
-    c.max_output_tokens = serde_json::from_slice::<ChatRequest>(&body)
-        .map_err(|_| invalid("invalid normalized request"))?
-        .max_tokens;
-    let request_digest = digest(&[&body]);
-    let catalog_digest = catalog_digest(&target)?;
-    let handle = super::managed_execution_service::prepare(
-        db,
-        &billing,
-        ctx,
-        &hex::encode(request_digest),
-        &hex::encode(catalog_digest),
-    )
-    .await?;
-    let execution_id = handle.execution_id().to_owned();
-    let worker = tokio::spawn(worker::run(worker::Exchange {
-        db: db.clone(),
-        billing,
-        target,
-        contract: c,
-        body,
-        handle,
-        proof: ManagedEgressProof {
-            catalog: catalog_digest,
-            request: request_digest,
-        },
-        lease,
-        guard,
-        #[cfg(test)]
-        hooks: worker::TEST_HOOKS.try_with(Clone::clone).ok(),
-    }));
-    worker.await.map_err(|_| {
-        ManagedExecutionError::OutcomeUnknown(AppError::ManagedExecutionPending(execution_id))
-    })?
+        .await?;
+        let execution_id = handle.execution_id().to_owned();
+        let worker = tokio::spawn(worker::run(worker::Exchange {
+            db: db.clone(),
+            billing,
+            target,
+            contract: c,
+            body,
+            handle,
+            proof: ManagedEgressProof {
+                catalog: catalog_digest,
+                request: request_digest,
+            },
+            lease,
+            guard,
+            #[cfg(test)]
+            hooks: worker::TEST_HOOKS.try_with(Clone::clone).ok(),
+        }));
+        worker.await.map_err(|_| {
+            ManagedExecutionError::OutcomeUnknown(AppError::ManagedExecutionPending(execution_id))
+        })?
+    })
 }
 
 #[cfg(test)]
