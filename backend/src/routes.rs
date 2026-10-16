@@ -1732,6 +1732,8 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         );
 
     let billing_routes = Router::new()
+        .route("/executions", get(handlers::managed_executions::list))
+        .route("/executions/{id}", get(handlers::managed_executions::get))
         .route("/usage", get(handlers::billing::get_usage))
         .route(
             "/wallet",

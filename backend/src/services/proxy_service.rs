@@ -3267,6 +3267,7 @@ async fn load_catalog_service_for_user_service(
 #[derive(Clone, Default)]
 struct CatalogProxyAuthorization {
     auth_scheme: Option<String>,
+    platform_key: Option<crate::models::downstream_service::PlatformKeyConfig>,
     platform_key_configured: bool,
     no_auth_platform_service: bool,
     offering_kind: crate::models::downstream_service::OfferingKind,
@@ -3300,6 +3301,7 @@ async fn load_catalog_proxy_authorization_for_user_service(
     super::retired_service_service::require_available(&service)?;
     Ok(CatalogProxyAuthorization {
         auth_scheme: service.auth_scheme.clone(),
+        platform_key: service.platform_key.clone(),
         platform_key_configured: service.platform_key.is_some(),
         no_auth_platform_service: super::platform_key_service::no_auth_platform_service(&service),
         offering_kind: service.offering_kind,
@@ -3321,6 +3323,7 @@ fn apply_catalog_proxy_authorization(
 ) {
     service.offering_kind = authorization.offering_kind;
     service.auth_scheme = authorization.auth_scheme.clone();
+    service.platform_key = authorization.platform_key.clone();
     service.concurrency_policy = authorization.concurrency_policy.clone();
     service.inference = authorization.inference.clone();
     service.proxy_operation_policy = authorization.policy.clone();
@@ -4140,8 +4143,16 @@ pub(crate) async fn forward_request_with_extra_outbound_headers(
     token_exchange_cache: &TokenExchangeCache,
     cloud_response_cache: &CloudResponseCache,
     extra_outbound_headers: Vec<(String, String)>,
-    _billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
+    billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
 ) -> Result<reqwest::Response, ForwardRequestError> {
+    if super::telnyx_platform_service::contract(&target.service).is_some() {
+        let proof = billing_egress_permit.managed_proof().ok_or_else(|| {
+            AppError::BillingProviderUnavailable(
+                "Managed services require funded execution admission".into(),
+            )
+        })?;
+        proof.validate(target, method.as_str(), path, query, &body)?;
+    }
     super::destination_routing::validate_outbound_destination(
         target,
         method.as_str(),
@@ -7837,6 +7848,50 @@ mod tests {
 
         assert!(svc.token_exchange_config.is_none());
         assert_eq!(svc.auth_method, "bearer");
+    }
+
+    #[test]
+    fn managed_contract_and_restricted_audience_survive_user_service_projection() {
+        let mut user_service = make_user_service_token_exchange();
+        user_service.auth_method = "bearer".into();
+        user_service.credential_binding = Some("platform".into());
+        let contract = crate::models::service_billing::ManagedExecutionContract {
+            model: "verified/model".into(),
+            max_input_tokens: 8192,
+            max_output_tokens: 512,
+            max_request_bytes: 4096,
+            max_response_bytes: 65536,
+            tariff_version: "v1".into(),
+            tariff_source: "https://api.telnyx.com/v2/pricing/products/inference".into(),
+            tariff_verified_at: Utc::now(),
+        };
+        let mut service = build_minimal_downstream_service(
+            &user_service,
+            &make_endpoint(),
+            Utc::now(),
+            None,
+            Some(crate::models::service_billing::ServiceBilling {
+                managed_execution: Some(contract.clone()),
+                ..Default::default()
+            }),
+        );
+        let config = crate::models::downstream_service::PlatformKeyConfig {
+            enabled: true,
+            audience: crate::models::downstream_service::PlatformKeyAudience::Restricted,
+            allowed_owner_ids: vec!["pilot".into()],
+        };
+        apply_catalog_proxy_authorization(
+            &mut service,
+            &CatalogProxyAuthorization {
+                platform_key: Some(config.clone()),
+                service_category: Some("internal".into()),
+                requires_user_credential: Some(false),
+                ..Default::default()
+            },
+        );
+        assert_eq!(service.platform_key, Some(config));
+        assert_eq!(service.billing.unwrap().managed_execution, Some(contract));
+        assert!(!service.requires_user_credential);
     }
 
     // ─── body auth method guard regression tests ─────────────────────

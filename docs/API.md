@@ -34,6 +34,7 @@ This document describes every HTTP endpoint exposed by the NyxID backend. All en
   - [Service Endpoints](#service-endpoints)
   - [MCP Config](#mcp-config)
   - [Service Pools](#service-pools)
+  - [Managed Execution Status](#managed-execution-status)
   - [Proxy](#proxy)
   - [Proxy Service Discovery](#proxy-service-discovery)
   - [LLM Gateway](#llm-gateway)
@@ -167,6 +168,7 @@ CLI text errors preserve the existing `Error: ...` line and append the accepted 
 | 6004 | `external_token_invalid`   | 400         | External provider token verification failed (signature, expiry, audience, or claims) |
 | 6005 | `external_provider_not_configured` | 400  | Provider hint missing or provider not configured on the server |
 | 7000 | `approval_required`        | 403         | User approval required (proxy/LLM requests block until decision; this code is used for async status polling) |
+| 12800 | `managed_execution_pending` | 409       | Provider outcome requires verification; inspect the execution UUID in the message and do not retry automatically |
 
 ---
 
@@ -3902,6 +3904,53 @@ returns `eligible: false` with `reason: "credential_unavailable"`; other
 connections remain in the response. Repair that connection before selecting it.
 Priority execution skips such members before dispatch. Database and data
 integrity errors still fail the request.
+
+### Managed Execution Status
+
+The Telnyx platform offering reserves NyxID credits before provider dispatch and
+settles validated token usage. These authenticated reads expose execution
+metadata without prompts, completions, provider credentials, or raw usage
+responses. Existing credential-type and scope checks still apply. A person can
+read their own acting executions and liabilities funded by their personal
+wallet, including their service accounts; a service account can see only its
+own acting executions. There is no caller-selected billing owner.
+
+#### GET /api/v1/billing/executions
+
+**Auth: Required.** Returns a JSON array of the latest 50 visible executions,
+ordered by descending `created_at` and then descending ID. It accepts no
+pagination or owner selection parameters.
+
+#### GET /api/v1/billing/executions/{id}
+
+**Auth: Required.** Returns one visible execution. An invalid UUID, absent row,
+or inaccessible execution returns `404`.
+
+Both endpoints use this metadata shape:
+
+```json
+{
+  "id": "0e8569b5-16ba-4205-a91f-047ace6c6588",
+  "service_slug": "telnyx-platform",
+  "model": "THE_VERIFIED_MODEL_ID",
+  "state": "pending",
+  "maximum_credits": "0.001",
+  "pending_reason": "outcome_unknown",
+  "created_at": "2026-10-16T00:00:00Z",
+  "updated_at": "2026-10-16T00:00:01Z"
+}
+```
+
+`maximum_credits` is an exact decimal string containing the reservation ceiling.
+`service_slug` and `pending_reason` may be null. States are `prepared`, `funded`,
+`dispatch_admitted`, `pending`, `evidence_ready`, `cancelling`, `released`, and
+`settled`. A pending execution retains possible liability; reading its status
+does not replay the provider call or resolve missing evidence. Successful HTTP
+execution responses include `X-NyxID-Execution-Id`; uncertain outcomes return
+`managed_execution_pending` with the UUID in the error message.
+
+See [Telnyx platform billing](TELNYX_PLATFORM_BILLING.md) for the supported
+operation, funding behavior, activation requirements, and recovery limits.
 
 ### Proxy
 

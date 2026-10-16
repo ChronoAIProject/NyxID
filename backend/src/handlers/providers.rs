@@ -886,13 +886,13 @@ pub async fn link_service(
         admin_required: authority == CatalogAuthority::Admin,
         catalog_base_url: state.config.base_url.clone(),
     };
-    crate::services::provider_link_service::link_with_authority(
+    Box::pin(crate::services::provider_link_service::link_with_authority(
         &state.db,
         &provider_id,
         &service_id,
         None,
         Some((&target, &mutation_authority)),
-    )
+    ))
     .await?;
     audit_service::log_for_user(
         state.db.clone(),

@@ -756,6 +756,11 @@ pub enum AppError {
     #[error("Billing provider unavailable: {0}")]
     BillingProviderUnavailable(String),
 
+    #[error(
+        "Managed execution {0} is pending usage verification; inspect its status and do not retry automatically"
+    )]
+    ManagedExecutionPending(String),
+
     #[error("Plan entitlement required: {0}")]
     PlanEntitlementRequired(String),
 
@@ -890,7 +895,8 @@ impl AppError {
             Self::DurableGrantContractDrift
             | Self::DurableOperationDuplicate
             | Self::DurableOperationConflict
-            | Self::DurableOperationOutcomeUncertain => StatusCode::CONFLICT,
+            | Self::DurableOperationOutcomeUncertain
+            | Self::ManagedExecutionPending(_) => StatusCode::CONFLICT,
             Self::DurableGrantQuotaExhausted => StatusCode::TOO_MANY_REQUESTS,
             Self::DeviceCodeNotFound => StatusCode::BAD_REQUEST,
             Self::DeviceCodeExpired => StatusCode::GONE,
@@ -1021,6 +1027,7 @@ impl AppError {
             Self::VoiceQueueFull => 12500,
             Self::VoiceProviderUnavailable => 12501,
             Self::ToolOperationNotPublished => 12700,
+            Self::ManagedExecutionPending(_) => 12800,
             // 12101 is already the public upload-retention code.
             Self::AssistantTurnRequired => 12102,
             Self::AssistantModelUnavailable => 12103,
@@ -1499,6 +1506,7 @@ impl AppError {
             Self::InsufficientCredits => "insufficient_credits",
             Self::BillingNotConfigured(_) => "billing_not_configured",
             Self::BillingProviderUnavailable(_) => "billing_provider_unavailable",
+            Self::ManagedExecutionPending(_) => "managed_execution_pending",
             Self::PlanEntitlementRequired(_) => "plan_entitlement_required",
             Self::AnonymousIncompatibleBilling(_) => "anonymous_incompatible_billing",
             Self::WalletSuspended => "wallet_suspended",
@@ -2020,6 +2028,17 @@ mod tests {
     }
 
     #[test]
+    fn managed_execution_pending_is_a_conflict_with_a_stable_status_reference() {
+        let id = uuid::Uuid::new_v4().to_string();
+        let error = AppError::ManagedExecutionPending(id.clone());
+        assert_eq!(error.status_code(), StatusCode::CONFLICT);
+        assert_eq!(error.error_code(), 12800);
+        assert_eq!(error.error_key(), "managed_execution_pending");
+        assert!(error.response_body().message.contains(&id));
+        assert!(error.response_body().message.contains("do not retry"));
+    }
+
+    #[test]
     fn assistant_model_unavailable_contract() {
         let error = AppError::AssistantModelUnavailable;
         assert_eq!(error.status_code(), StatusCode::BAD_REQUEST);
@@ -2040,6 +2059,7 @@ mod tests {
     #[test]
     fn error_codes_unique() {
         let codes = vec![
+            AppError::ManagedExecutionPending("".into()).error_code(),
             AppError::AssistantTurnActive.error_code(),
             AppError::AssistantTurnRequired.error_code(),
             AppError::AssistantModelUnavailable.error_code(),

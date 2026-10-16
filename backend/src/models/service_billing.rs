@@ -1,6 +1,24 @@
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
+/// Dedicated, server-managed Telnyx text-chat offering. Presence requires the
+/// managed execution runner; generic proxy settlement cannot price this contract.
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ManagedExecutionContract {
+    pub model: String,
+    /// Verified complete model context ceiling, used as the input reservation
+    /// bound rather than estimating tokens from request bytes.
+    pub max_input_tokens: u64,
+    pub max_output_tokens: u64,
+    pub max_request_bytes: u64,
+    pub max_response_bytes: u64,
+    pub tariff_version: String,
+    pub tariff_source: String,
+    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+    pub tariff_verified_at: chrono::DateTime<chrono::Utc>,
+}
+
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum BillingMetric {
@@ -140,6 +158,8 @@ impl BillingMetric {
 
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
 pub struct ServiceBilling {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub managed_execution: Option<ManagedExecutionContract>,
     /// Opt-in platform-layer charging. Services default to free (metered
     /// for observability, never charged); admins enable this on the
     /// platform-operated services that should bill wallet credits.
@@ -186,6 +206,7 @@ pub struct ServiceBilling {
 impl Default for ServiceBilling {
     fn default() -> Self {
         Self {
+            managed_execution: None,
             platform_billable: false,
             platform_charge_nyxid_credentials_only: false,
             platform_metric: None,
@@ -423,6 +444,7 @@ mod tests {
     #[test]
     fn active_resale_spec_requires_metric_code() {
         let mut billing = ServiceBilling {
+            managed_execution: None,
             platform_billable: false,
             platform_charge_nyxid_credentials_only: false,
             platform_metric: None,

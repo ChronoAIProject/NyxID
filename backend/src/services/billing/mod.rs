@@ -428,12 +428,35 @@ impl BillingService {
     }
 
     pub async fn open(&self, ctx: &BillingRouteContext) -> AppResult<MeteredProxyContext> {
+        if ctx.managed_billing.is_some() || ctx.managed_admission.is_some() {
+            return Err(crate::errors::AppError::BillingNotConfigured(
+                "Managed execution requires its validated admission".into(),
+            ));
+        }
         self.open_with_requirement(ctx, false).await
     }
 
     /// Paid push channels cannot fall back to uncharged provider activity when
     /// billing is enabled but its catalog price, wallet, or provider is missing.
     pub async fn open_required(&self, ctx: &BillingRouteContext) -> AppResult<MeteredProxyContext> {
+        if ctx.managed_billing.is_some() || ctx.managed_admission.is_some() {
+            return Err(crate::errors::AppError::BillingNotConfigured(
+                "Managed execution requires its validated admission".into(),
+            ));
+        }
+        self.open_with_requirement(ctx, true).await
+    }
+
+    pub(crate) async fn open_managed(
+        &self,
+        ctx: &BillingRouteContext,
+    ) -> AppResult<MeteredProxyContext> {
+        crate::services::managed_execution_service::validate_route(ctx)?;
+        if ctx.managed_admission.is_none() || !self.config.billing_enabled {
+            return Err(crate::errors::AppError::BillingNotConfigured(
+                "Managed execution requires enabled billing and durable admission".into(),
+            ));
+        }
         self.open_with_requirement(ctx, true).await
     }
 
@@ -466,6 +489,7 @@ impl BillingService {
         required: bool,
     ) -> AppResult<MeteredProxyContext> {
         let public = ctx.public_admission.is_some();
+        let managed = ctx.managed_admission.is_some();
         if public && (!required || !self.config.billing_enabled || ctx.pool_attempt.is_some()) {
             return Err(crate::errors::AppError::BillingProviderUnavailable(
                 "Public funding requires enabled billing".into(),
@@ -475,7 +499,9 @@ impl BillingService {
             ctx.require_platform_price()?;
             if self.lago.is_none() {
                 return Err(crate::errors::AppError::BillingNotConfigured(
-                    "The billing provider (Lago) is not configured; configure Lago before enabling paid channels".into(),
+                    if managed { "Managed execution requires a configured billing provider" } else {
+                        "The billing provider (Lago) is not configured; configure Lago before enabling paid channels"
+                    }.into(),
                 ));
             }
         }
@@ -483,7 +509,7 @@ impl BillingService {
             // Staged rollout: charging applies only to owners covered by the
             // billing feature flag. Everyone else is metered for
             // observability but never charged on either layer.
-            let rollout_enabled = if required {
+            let rollout_enabled = if required && !managed {
                 // Autonomous channels have a persisted owner but no acting
                 // organization member. Use the owner's rollout baseline.
                 let owner = self
@@ -519,16 +545,18 @@ impl BillingService {
                     .await?;
                 if required && !chargeable {
                     return Err(crate::errors::AppError::BillingNotConfigured(
-                        "A provisioned Lago billing wallet and subscription are required for paid channels, including grant or allowance funding".into(),
+                        if managed { "Managed execution requires a provisioned billing wallet and subscription" } else {
+                            "A provisioned Lago billing wallet and subscription are required for paid channels, including grant or allowance funding"
+                        }.into(),
                     ));
                 }
                 chargeable
             } else {
                 false
             };
-            if public && (!rollout_enabled || !platform_billable) {
+            if (public || managed) && (!rollout_enabled || !platform_billable) {
                 return Err(crate::errors::AppError::BillingProviderUnavailable(
-                    "Public sponsor funding is unavailable".into(),
+                    "Required execution funding is unavailable".into(),
                 ));
             }
             let mut ctx = ctx.clone();
@@ -566,10 +594,17 @@ impl BillingService {
             && reservation.is_none()
         {
             return Err(crate::errors::AppError::BillingNotConfigured(
-                "Channel billing could not reserve funding".into(),
+                if managed {
+                    "Managed execution could not reserve funding"
+                } else {
+                    "Channel billing could not reserve funding"
+                }
+                .into(),
             ));
         }
-        if (ctx.pool_attempt.is_some() || ctx.public_admission.is_some()) && reservation.is_some() {
+        if (ctx.pool_attempt.is_some() || ctx.public_admission.is_some() || managed)
+            && reservation.is_some()
+        {
             // Pool funding and meter rows committed together; cancellation at
             // any later await can recover from the durable attempt lease.
             return Ok(MeteredProxyContext::from_route(&ctx));
@@ -710,6 +745,7 @@ mod tests {
         insert_wallet(&db, owner_id).await;
         let service = BillingService::new(db.clone(), std::sync::Arc::new(test_app_config()));
         let billing = ServiceBilling {
+            managed_execution: None,
             platform_billable: true,
             platform_charge_nyxid_credentials_only: false,
             platform_metric: None,

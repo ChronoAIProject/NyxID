@@ -284,6 +284,7 @@ async fn ensure_core_indexes(db: &Database) -> Result<(), mongodb::error::Error>
         .await?;
     crate::services::platform_public_agent_service::ensure_indexes(db).await?;
     crate::services::platform_public_budget_service::ensure_indexes(db).await?;
+    crate::services::managed_execution_service::ensure_indexes(db).await?;
     crate::services::platform_public_credential_service::ensure_indexes(db).await?;
     crate::services::platform_provisioning_service::ensure_indexes(db).await?;
     crate::services::platform_inference_service::ensure_indexes(db).await?;

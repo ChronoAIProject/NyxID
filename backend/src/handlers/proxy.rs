@@ -3630,6 +3630,8 @@ fn execute_resolved_proxy<'a>(
 ) -> futures::future::BoxFuture<'a, AppResult<Response>> {
     Box::pin(async move {
         *resolved_slug = resolved.target.service.slug.clone();
+        let managed =
+            crate::services::telnyx_platform_service::contract(&resolved.target.service).is_some();
         let lease = crate::services::service_concurrency_service::acquire(
             &state.db,
             &resolved.target.service,
@@ -3647,6 +3649,11 @@ fn execute_resolved_proxy<'a>(
             resolved,
             lease.clone(),
         );
+        // The managed worker classifies lease loss after dispatch as pending.
+        // An outer cancellation would hide that identity behind a retryable 429.
+        if managed {
+            return execution.await;
+        }
         match lease {
             Some(lease) => {
                 let response = lease.run(execution).await?;
@@ -4739,6 +4746,47 @@ async fn execute_resolved_proxy_inner(
     };
     let mut billing_ctx = billing_ctx.with_request_body(body.as_deref());
     billing_ctx.pool_attempt = pool_accounting.as_ref().map(|ctx| ctx.metadata.clone());
+    if crate::services::telnyx_platform_service::contract(&target.service).is_some() {
+        // Scheduled writes require a separate durable-grant lifecycle. Reject
+        // unsupported execution surfaces before either billing or dispatch.
+        if scheduled_api_key_id.is_some()
+            || permission_ingress.is_some()
+            || is_ws
+            || streaming_body.is_some()
+            || node_route.is_some()
+            || !delegated.is_empty()
+            || !extra_outbound_headers.is_empty()
+        {
+            return Err(AppError::BadRequest(
+                "This Telnyx platform operation supports direct HTTP and MCP calls only".into(),
+            ));
+        }
+        destination_audit.dispatch();
+        let managed = crate::services::telnyx_platform_service::execute(
+            &state.db,
+            state.billing.clone(),
+            billing_ctx,
+            target,
+            method.as_str(),
+            path,
+            query.as_deref(),
+            body.as_deref().unwrap_or_default(),
+            service_lease,
+        )
+        .await
+        .map_err(|error| error.into_app_error())
+        .inspect_err(|error| request_audit.admission_error(error))?;
+        let mut response = Response::builder()
+            .status(managed.status)
+            .header("content-type", "application/json")
+            .header("x-nyxid-execution-id", managed.execution_id)
+            .body(Body::from(managed.body))
+            .map_err(|_| AppError::Internal("Could not construct managed response".into()))?;
+        apply_agent_attribution_headers(&mut response, auth_user.api_key_id.as_deref(), None);
+        destination_audit.complete(managed.status);
+        request_audit.response(managed.status);
+        return Ok(response);
+    }
     // Billing and durable-grant admission carry their own database state.
     // Do not reserve it in every proxy poll, including early scope refusals.
     let metered = match Box::pin(state.billing.open(&billing_ctx)).await {
@@ -8329,6 +8377,7 @@ mod tests {
 
     fn token_resale_metered_context(credential_class: CredentialClass) -> MeteredProxyContext {
         let billing = ServiceBilling {
+            managed_execution: None,
             platform_billable: false,
             platform_charge_nyxid_credentials_only: false,
             platform_metric: None,
