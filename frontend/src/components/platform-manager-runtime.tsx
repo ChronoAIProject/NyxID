@@ -18,6 +18,7 @@ import { Input } from "@/components/ui/input";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Badge } from "@/components/ui/badge";
 import { ErrorBanner } from "@/components/shared/error-banner";
+import { ApiError } from "@/lib/api-client";
 import {
   Form,
   FormField,
@@ -29,6 +30,8 @@ import {
 } from "@/components/ui/form";
 
 const reasons: Record<NonNullable<PublicReadiness["reason"]>, string> = {
+  public_turn_failed:
+    "The public turn failed. Try again to start a fresh turn.",
   mode_disabled: "Public access is not available on this server.",
   manager_unavailable: "The manager is unavailable.",
   emergency_stopped:
@@ -42,13 +45,28 @@ const reasons: Record<NonNullable<PublicReadiness["reason"]>, string> = {
   insufficient_funds: "The sponsor has insufficient credits.",
   capacity_limited: "Public capacity is currently full.",
   public_not_ready: "The restricted public runtime is not ready.",
-  public_quota_limited: "The public quota is exhausted.",
+  public_quota_limited:
+    "The public budget cannot admit this profile’s bounded turn, or today’s quota is exhausted. Increase the configured cap or choose a lower-cost public profile.",
   runtime_uninitialized: "Choose the settings below to enable this bot.",
   sponsor_unavailable: "The sponsor organization is unavailable.",
+  public_contract_unsupported:
+    "The deployed NyxAgent does not support public bots yet. Upgrade it to a version with the public runtime contract, then refresh profiles and validate again.",
+  public_authority_rejected:
+    "NyxAgent rejected the public authority assertion. Verify that its version supports the public contract and that it trusts this NyxID issuer, JWKS and audience, then validate again.",
   profile_unavailable: "The selected public profile is unavailable.",
   proof_expired:
-    "Public readiness has expired. Validate again before enabling.",
+    "Public readiness needs a fresh check. Enabled bots refresh it automatically on the next public message; validate again to check it now.",
 };
+function runtimeFailure(error: unknown, fallback: string): string {
+  if (!(error instanceof ApiError)) return fallback;
+  if (error.errorCode === 11300)
+    return "The sponsor has insufficient credits for the readiness check. Add credits to the sponsor organization and validate again.";
+  if (error.errorCode === 11302)
+    return "Billing could not authorize the readiness check. Check sponsor billing and the public model’s synchronized prices, then validate again.";
+  if (error.status === 429)
+    return "Public validation is temporarily limited. Wait a moment, check the remaining public budget, and validate again.";
+  return fallback;
+}
 export function ManagerRuntimeSettings({
   profile,
 }: {
@@ -102,15 +120,15 @@ function RuntimeForm({
     resolver: zodResolver(publicSetupSchema),
     defaultValues: {
       source: "nyxagent",
-      profile: policy?.profile ?? "nyxagent/chat",
+      profile: policy?.profile ?? "",
       total_daily_credits:
         policy?.total_daily_credits ??
         profile.guide?.limits.daily_credits ??
-        "1",
+        "10",
       sender_daily_credits:
         policy?.sender_daily_credits ??
         profile.guide?.anonymous_daily_credits ??
-        "0.1",
+        "0.5",
       sponsor_owner_user_id:
         policy?.sponsor_owner_user_id ?? profile.funding_owner_user_id,
     },
@@ -126,6 +144,7 @@ function RuntimeForm({
       ...expected,
       public_policy: {
         ...rest,
+        ...(rest.profile ? {} : { profile: undefined }),
         ...(sponsor_owner_user_id !==
         (policy?.sponsor_owner_user_id ?? profile.funding_owner_user_id)
           ? { sponsor_owner_user_id }
@@ -147,24 +166,27 @@ function RuntimeForm({
         setReadiness(result.readiness);
         if (
           !policy &&
-          result.default_profile &&
-          !result.profiles.some((row) => row.id === form.getValues("profile"))
+          !form.getFieldState("profile").isDirty &&
+          result.default_profile
         )
           form.setValue("profile", result.default_profile, {
             shouldDirty: false,
             shouldTouch: false,
           });
       }
-    } catch {
+    } catch (error) {
       setError(
-        "Could not discover public NyxAgent profiles. Personal access can be enabled separately in Advanced.",
+        runtimeFailure(
+          error,
+          "Could not discover public NyxAgent profiles. Check NyxAgent connectivity and public contract compatibility, then refresh profiles.",
+        ),
       );
     }
   }
   async function enable(values: PublicSetup) {
     setError(undefined);
     try {
-      const body = publicBody(values);
+      let body = publicBody(values);
       const discovery = await mutation.mutateAsync({
         action: "profiles",
         body,
@@ -172,9 +194,27 @@ function RuntimeForm({
       if (!("profiles" in discovery)) throw new Error();
       setProfiles(discovery.profiles);
       setReadiness(discovery.readiness);
+      if (discovery.profiles.length === 0) {
+        setError(reasons[discovery.readiness.reason ?? "public_not_ready"]);
+        return;
+      }
+      if (
+        !policy &&
+        !form.getFieldState("profile").isDirty &&
+        discovery.default_profile
+      ) {
+        values = { ...values, profile: discovery.default_profile };
+        form.setValue("profile", values.profile, {
+          shouldDirty: false,
+          shouldTouch: false,
+        });
+        body = publicBody(values);
+      }
       if (!discovery.profiles.some((row) => row.id === values.profile)) {
         setError(
-          "The requested public profile is unavailable. Choose an advertised profile in Advanced, or explicitly enable personal access only.",
+          values.profile
+            ? reasons.profile_unavailable
+            : "Choose an advertised public profile in Advanced. This runtime has no public default.",
         );
         return;
       }
@@ -187,7 +227,7 @@ function RuntimeForm({
         Date.parse(proof.public_readiness.expires_at) <= Date.now()
       ) {
         setError(
-          "Public access is unavailable. Settings were not enabled. You can explicitly enable personal access in Advanced.",
+          `Public access is unavailable. Settings were not enabled. ${reasons[proof.public_readiness.reason ?? "public_not_ready"]}`,
         );
         return;
       }
@@ -197,11 +237,17 @@ function RuntimeForm({
           ...body,
           ...(!runtime ? { personal_enabled: true } : {}),
           public_enabled: true,
+          ...(proof.public_readiness.policy_digest
+            ? { public_deployment_digest: proof.public_readiness.policy_digest }
+            : {}),
         },
       });
-    } catch {
+    } catch (error) {
       setError(
-        "Could not enable public access. Reload the current settings before retrying; no personal-only fallback was selected.",
+        runtimeFailure(
+          error,
+          "Could not enable public access. Reload the current settings and check NyxAgent readiness and callback connectivity before retrying.",
+        ),
       );
     }
   }
@@ -310,7 +356,7 @@ function RuntimeForm({
         </p>
         <p role="status" className="text-muted-foreground">
           {readiness.status === "ready"
-            ? "Readiness was verified. Enable validates the exact settings again."
+            ? "Readiness was verified. Apply activates this deployment. A changed deployment ends existing public sessions so senders can start fresh."
             : reasons[readiness.reason!]}
         </p>
         {error && <ErrorBanner message={error} />}
@@ -319,13 +365,13 @@ function RuntimeForm({
             type="submit"
             variant="primary"
             isLoading={pending}
-            disabled={
-              stopped || (!!runtime?.public_enabled && !form.formState.isDirty)
-            }
+            disabled={stopped}
           >
             {runtime
               ? runtime.public_enabled
-                ? "Save public settings"
+                ? form.formState.isDirty
+                  ? "Save public settings"
+                  : "Validate and apply public deployment"
                 : "Enable public guide"
               : "Enable bot"}
           </Button>
@@ -355,7 +401,9 @@ function RuntimeForm({
                   >
                     {!profiles.some((row) => row.id === field.value) && (
                       <option value={field.value}>
-                        {field.value} (unverified draft)
+                        {field.value
+                          ? `${field.value} (unverified draft)`
+                          : "Use the advertised public default"}
                       </option>
                     )}
                     {profiles.map((row) => (

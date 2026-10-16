@@ -108,6 +108,7 @@ pub struct ExpectedRuntimeRevisions {
 
 #[derive(Clone, Debug)]
 pub struct RuntimePatch {
+    pub public_deployment_digest: Option<String>,
     pub initialize: bool,
     pub expected_profile_generation: Option<i64>,
     pub expected: ExpectedRuntimeRevisions,
@@ -197,6 +198,11 @@ pub enum UnavailableReason {
     PublicQuotaLimited,
     RuntimeUninitialized,
     SponsorUnavailable,
+    PublicContractUnsupported,
+    PublicAuthorityRejected,
+    ProfileUnavailable,
+    ProofExpired,
+    PublicTurnFailed,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -295,6 +301,7 @@ pub struct PublicExecutionLimits {
 /// Part 3 derives this from admitted state. It carries no credential material.
 #[derive(Clone, Debug)]
 pub struct PublicExecutionContext {
+    pub proof_record_id: String,
     pub ingress: PublicIngress,
     pub public_session_id: String,
     pub turn: TurnRef,
@@ -322,7 +329,7 @@ pub struct TurnInput {
 }
 
 /// References existing retained replies; this is not a durable body replay queue.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReplyRef {
     pub turn: TurnRef,
     pub reply_id: String,
@@ -471,22 +478,10 @@ pub struct PublicReadinessEvidence {
     pub manager: ManagerAuthority,
     pub public_policy_revision: i64,
     pub policy_digest: String,
-    #[expect(
-        dead_code,
-        reason = "Deployed-contract verification is unavailable; see docs/plans/2026-10-15-public-personal-nyxbot-upstream-evidence.md"
-    )]
     pub proof_record_id: String,
-    #[expect(
-        dead_code,
-        reason = "Deployed-contract verification is unavailable; see docs/plans/2026-10-15-public-personal-nyxbot-upstream-evidence.md"
-    )]
     pub candidate_digest: String,
     pub evidence_digest: String,
     pub sponsor_owner_user_id: String,
-    #[expect(
-        dead_code,
-        reason = "Deployed-contract verification is unavailable; see docs/plans/2026-10-15-public-personal-nyxbot-upstream-evidence.md"
-    )]
     pub nyxagent_build: String,
     pub nyxagent_profile: String,
     pub model_operations: Vec<PublicModelOperation>,
@@ -498,10 +493,6 @@ pub struct PublicReadinessEvidence {
 #[derive(Clone, Debug)]
 #[allow(clippy::large_enum_variant)] // Readiness carries one bounded proof across the producer boundary.
 pub enum PublicReadiness {
-    #[expect(
-        dead_code,
-        reason = "Public activation awaits deployed-contract verification; see docs/plans/2026-10-15-public-personal-nyxbot-upstream-evidence.md"
-    )]
     Ready(PublicReadinessEvidence),
     Unavailable(UnavailableReason),
 }

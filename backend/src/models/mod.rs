@@ -184,3 +184,5 @@ pub mod catalog_icon;
 pub mod platform_installation;
 
 pub mod platform_manager_delivery;
+
+pub mod platform_public_contract;

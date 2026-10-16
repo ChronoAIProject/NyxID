@@ -52,6 +52,8 @@ pub struct BillingRouteContext {
     pub pool_attempt: Option<crate::models::usage_meter::PoolAttemptAccounting>,
     /// An internal durable public call reservation; never accepted from HTTP.
     pub(crate) public_admission: Option<PublicBillingAdmission>,
+    /// Internal readiness probe uses the same durable funding transaction.
+    pub(crate) public_probe: bool,
     pub billing_request_id: String,
     pub billing_owner_id: String,
     pub actor_user_id: String,
@@ -177,6 +179,7 @@ impl BillingRouteContext {
         }
         Self {
             public_admission: None,
+            public_probe: false,
             ingress,
             pool_attempt: None,
             billing_request_id,

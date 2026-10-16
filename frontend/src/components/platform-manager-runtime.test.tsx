@@ -1,6 +1,7 @@
 import { beforeEach, expect, it, vi } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { ManagerRuntimeSettings } from "./platform-manager-runtime";
+import { ApiError } from "@/lib/api-client";
 import type { ManagerRuntime } from "@/schemas/platform-runtime";
 import type { PlatformProfile } from "@/schemas/platform-onboarding";
 const sponsor = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
@@ -64,9 +65,11 @@ beforeEach(() => {
 it("does no automatic paid discovery and initializes both lanes with the exact creation CAS", async () => {
   render(<ManagerRuntimeSettings profile={profile} />);
   expect(mutateAsync).not.toHaveBeenCalled();
-  expect(screen.getByLabelText("Total public budget per day")).toHaveValue("1");
+  expect(screen.getByLabelText("Total public budget per day")).toHaveValue(
+    "10",
+  );
   expect(screen.getByLabelText("Free quota per person per day")).toHaveValue(
-    "0.1",
+    "0.5",
   );
   fireEvent.click(screen.getByRole("button", { name: "Enable bot" }));
   await waitFor(() => expect(mutateAsync).toHaveBeenCalledTimes(3));
@@ -83,11 +86,49 @@ it("does no automatic paid discovery and initializes both lanes with the exact c
       public_policy: {
         source: "nyxagent",
         profile: "nyxagent/chat",
-        total_daily_credits: "1",
-        sender_daily_credits: "0.1",
+        total_daily_credits: "10",
+        sender_daily_credits: "0.5",
       },
     },
   });
+});
+
+it("explains rejected public authority without blaming the selected profile", async () => {
+  mutateAsync.mockResolvedValue({
+    profiles: [],
+    default_profile: null,
+    readiness: { ...unavailable, reason: "public_authority_rejected" },
+  });
+  render(<ManagerRuntimeSettings profile={profile} />);
+  fireEvent.click(screen.getByRole("button", { name: "Enable bot" }));
+  await waitFor(() =>
+    expect(screen.getByRole("status")).toHaveTextContent(
+      /NyxAgent rejected the public authority assertion/,
+    ),
+  );
+  expect(mutateAsync).toHaveBeenCalledTimes(1);
+});
+
+it("gives an actionable sponsor funding error and does not enable after a failed probe", async () => {
+  mutateAsync.mockImplementation(async ({ action }) => {
+    if (action === "profiles")
+      return {
+        profiles: [{ id: "public-guide", label: "Public guide" }],
+        default_profile: "public-guide",
+        readiness: unavailable,
+      };
+    throw new ApiError(402, {
+      error: "insufficient_credits",
+      error_code: 11300,
+      message: "Insufficient billing credits",
+    });
+  });
+  render(<ManagerRuntimeSettings profile={profile} />);
+  fireEvent.click(screen.getByRole("button", { name: "Enable bot" }));
+  expect(
+    await screen.findByText(/Add credits to the sponsor organization/),
+  ).toBeInTheDocument();
+  expect(mutateAsync).toHaveBeenCalledTimes(2);
 });
 
 it("does not enable either lane on unavailable public proof, with explicit personal-only initialization available", async () => {
@@ -95,6 +136,7 @@ it("does not enable either lane on unavailable public proof, with explicit perso
     action === "profiles"
       ? {
           profiles: [{ id: "nyxagent/chat", label: "Chat" }],
+          default_profile: "nyxagent/chat",
           readiness: unavailable,
         }
       : { public_readiness: unavailable },
@@ -191,4 +233,140 @@ it("preserves legacy saved monetary limits and distinguishes unsupported routes"
   expect(
     screen.queryByRole("button", { name: "Enable bot" }),
   ).not.toBeInTheDocument();
+});
+
+it("reports an unsupported public runtime without blaming the selected profile or enabling anything", async () => {
+  mutateAsync.mockResolvedValue({
+    profiles: [],
+    default_profile: null,
+    readiness: { ...unavailable, reason: "public_contract_unsupported" },
+  });
+  render(<ManagerRuntimeSettings profile={profile} />);
+  fireEvent.click(screen.getByRole("button", { name: "Enable bot" }));
+  expect(
+    (
+      await screen.findAllByText(
+        /Upgrade it to a version with the public runtime contract/,
+      )
+    ).length,
+  ).toBeGreaterThan(0);
+  expect(
+    screen.queryByText(/requested public profile is unavailable/i),
+  ).not.toBeInTheDocument();
+  expect(mutateAsync.mock.calls.map(([x]) => x.action)).toEqual(["profiles"]);
+});
+
+it("requires an explicit selection when discovery advertises no public default", async () => {
+  mutateAsync.mockResolvedValue({
+    profiles: [{ id: "public/guide", label: "Guide" }],
+    default_profile: null,
+    readiness: unavailable,
+  });
+  render(<ManagerRuntimeSettings profile={profile} />);
+  fireEvent.click(screen.getByRole("button", { name: "Enable bot" }));
+  expect(
+    await screen.findByText(/This runtime has no public default/),
+  ).toBeInTheDocument();
+  expect(mutateAsync.mock.calls.map(([x]) => x.action)).toEqual(["profiles"]);
+});
+
+it("uses the advertised public default for first enable and omits a guessed profile from discovery", async () => {
+  mutateAsync.mockImplementation(async ({ action }) =>
+    action === "profiles"
+      ? {
+          profiles: [{ id: "public/guide", label: "Public guide" }],
+          default_profile: "public/guide",
+          readiness: unavailable,
+        }
+      : action === "readiness"
+        ? { public_readiness: ready() }
+        : query.data,
+  );
+  render(<ManagerRuntimeSettings profile={profile} />);
+  fireEvent.click(screen.getByRole("button", { name: "Enable bot" }));
+  await waitFor(() => expect(mutateAsync).toHaveBeenCalledTimes(3));
+  expect(
+    mutateAsync.mock.calls[0]![0].body.public_policy.profile,
+  ).toBeUndefined();
+  expect(mutateAsync.mock.calls[1]![0].body.public_policy.profile).toBe(
+    "public/guide",
+  );
+  expect(mutateAsync.mock.calls[2]![0].body.public_policy.profile).toBe(
+    "public/guide",
+  );
+});
+
+it("rejects expired readiness without sending an update", async () => {
+  mutateAsync.mockImplementation(async ({ action }) =>
+    action === "profiles"
+      ? {
+          profiles: [{ id: "public/guide", label: "Public guide" }],
+          default_profile: "public/guide",
+          readiness: unavailable,
+        }
+      : {
+          public_readiness: {
+            ...ready(),
+            expires_at: new Date(Date.now() - 1000).toISOString(),
+            reason: "proof_expired",
+          },
+        },
+  );
+  render(<ManagerRuntimeSettings profile={profile} />);
+  fireEvent.click(screen.getByRole("button", { name: "Enable bot" }));
+  expect(
+    await screen.findByText(/Settings were not enabled/),
+  ).toBeInTheDocument();
+  expect(mutateAsync.mock.calls.map(([x]) => x.action)).toEqual([
+    "profiles",
+    "readiness",
+  ]);
+});
+
+it("allows applying a changed deployment with unchanged public settings and binds the validated digest", async () => {
+  query.data.runtime = {
+    manager_authority_epoch: 1,
+    personal_control_revision: 2,
+    public_policy_revision: 3,
+    personal_enabled: false,
+    public_enabled: true,
+    emergency_stopped: false,
+    activated_policy_digest: "a".repeat(64),
+    public_policy: {
+      source: "nyxagent",
+      profile: "nyxagent/chat",
+      sponsor_owner_user_id: sponsor,
+      total_daily_credits: "10",
+      sender_daily_credits: "0.5",
+    },
+  };
+  mutateAsync.mockImplementation(async ({ action }) =>
+    action === "profiles"
+      ? {
+          profiles: [{ id: "nyxagent/chat", label: "Public guide" }],
+          default_profile: "nyxagent/chat",
+          readiness: unavailable,
+        }
+      : action === "readiness"
+        ? { public_readiness: { ...ready(), policy_digest: "b".repeat(64) } }
+        : query.data,
+  );
+  render(<ManagerRuntimeSettings profile={profile} />);
+  const apply = screen.getByRole("button", {
+    name: "Validate and apply public deployment",
+  });
+  expect(apply).toBeEnabled();
+  fireEvent.click(apply);
+  await waitFor(() => expect(mutateAsync).toHaveBeenCalledTimes(3));
+  expect(mutateAsync.mock.calls[2]![0].body).toMatchObject({
+    public_enabled: true,
+    public_deployment_digest: "b".repeat(64),
+    expected_public_policy_revision: 3,
+  });
+  expect(mutateAsync.mock.calls[2]![0].body).not.toHaveProperty(
+    "personal_enabled",
+  );
+  expect(screen.getByRole("status")).toHaveTextContent(
+    "A changed deployment ends existing public sessions so senders can start fresh",
+  );
 });

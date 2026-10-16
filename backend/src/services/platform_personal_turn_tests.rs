@@ -593,10 +593,10 @@ async fn execution_factory_resumes_exact_input_once_across_competing_workers() {
 
 #[tokio::test]
 async fn execution_factory_selects_public_prepare_and_rejects_ordinary_context_before_owner_io() {
-    let db = mongodb::Client::with_uri_str("mongodb://127.0.0.1:1/?serverSelectionTimeoutMS=25")
-        .await
-        .unwrap()
-        .database("no_owner_io");
+    // Public readiness is now a scoped transactional lookup. Use a real DB to
+    // distinguish missing public authority from a failed connection, then
+    // assert neither branch creates owner history, credentials or public work.
+    let db = crate::test_utils::connect_transaction_test_database("public_execution_factory").await;
     let state = crate::test_utils::test_app_state(db.clone());
     let egress = Arc::new(CountingEgress(std::sync::atomic::AtomicUsize::new(0)));
     let execution = runtime::producer(
@@ -625,6 +625,7 @@ async fn execution_factory_selects_public_prepare_and_rejects_ordinary_context_b
         .await;
     assert!(matches!(result, Err(AppError::AssistantTurnRequired)));
     let public = contract::PublicExecutionContext {
+        proof_record_id: "test-proof".into(),
         ingress: contract::PublicIngress {
             ingress: contract::IngressClaim {
                 receipt_id: uuid::Uuid::new_v4().to_string(),
@@ -669,8 +670,27 @@ async fn execution_factory_selects_public_prepare_and_rejects_ordinary_context_b
             sender,
         )
         .await;
-    assert!(matches!(result, Err(AppError::Conflict(_))));
+    assert!(matches!(
+        result,
+        Err(AppError::Conflict(message)) if message == "Public runtime unavailable; validate the deployed public contract before enabling"
+    ));
     assert_eq!(egress.0.load(std::sync::atomic::Ordering::SeqCst), 0);
+    for collection in [
+        CONVERSATIONS,
+        CREDENTIALS,
+        crate::models::assistant_message::COLLECTION_NAME,
+        crate::models::platform_public_turn::COLLECTION_NAME,
+    ] {
+        assert_eq!(
+            db.collection::<bson::Document>(collection)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0,
+            "rejected execution must leave {collection} empty"
+        );
+    }
+    db.drop().await.unwrap();
 }
 
 async fn claimed_input(

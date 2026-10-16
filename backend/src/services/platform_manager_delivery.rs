@@ -105,6 +105,9 @@ pub(crate) fn fixed_text(reason: UnavailableReason) -> &'static str {
         UnavailableReason::PublicQuotaLimited => {
             "Public chat has reached a daily limit. Try again after midnight UTC, or send /link to use your own NyxBot."
         }
+        UnavailableReason::PublicTurnFailed => {
+            "The public guide could not finish this turn. Please try again to start fresh, or send /link to use your own NyxBot."
+        }
         UnavailableReason::SponsorUnavailable => {
             "Public chat funding is unavailable. Send /link to use your own NyxBot when personal linking is enabled."
         }
@@ -485,10 +488,10 @@ async fn enqueue(
             .await?;
     }
     if let Some(ingress) = ingress
-        && matches!(
+        && (matches!(
             stored.reference,
             DeliveryReference::Reply { .. } | DeliveryReference::PublicReply { .. }
-        )
+        ) || matches!(&stored.reference, DeliveryReference::Fixed { reason } if reason == "PublicTurnFailed"))
     {
         state
             .db
@@ -570,6 +573,120 @@ async fn fence_transport_in_session(
         return Err(refused());
     }
     Ok(Some((receipt, controls, profile.observation_id)))
+}
+
+/// Fixed system notice after a saved public failure. No execution proof,
+/// transcript body or credential is admitted by this path.
+async fn fence_public_failure_notice(
+    state: &AppState,
+    session: &mut mongodb::ClientSession,
+    delivery: &Delivery,
+    receipt: &PlatformManagerIngress,
+    controls: &PlatformBotRuntimeControls,
+) -> AppResult<()> {
+    use crate::models::{
+        platform_public_contract::{ACTIVATIONS, PublicDeploymentActivation},
+        platform_public_session::{COLLECTION_NAME as SESSIONS, PlatformPublicSession},
+        platform_public_turn::{COLLECTION_NAME as TURNS, PlatformPublicTurn},
+    };
+    let IngressAudience::Public {
+        public_policy_revision,
+    } = &receipt.audience
+    else {
+        return Err(refused());
+    };
+    if receipt.phase != IngressPhase::Settled
+        || !controls.public_enabled
+        || controls.emergency_stopped
+        || controls.retired
+        || *public_policy_revision != controls.public_policy_revision
+        || delivery.sender_id <= 0
+        || delivery.sender_id != delivery.chat_id
+    {
+        return Err(refused());
+    }
+    let notice_expires_at = receipt.settled_at.ok_or_else(refused)? + Duration::minutes(2);
+    if delivery.expires_at > notice_expires_at {
+        return Err(refused());
+    }
+    let execution = receipt.execution.as_ref().ok_or_else(refused)?;
+    let public_session_id = execution.public_session_id.as_ref().ok_or_else(refused)?;
+    let policy_digest = execution
+        .public_policy_digest
+        .as_ref()
+        .ok_or_else(refused)?;
+    let reply_id = receipt.reply_id.as_ref().ok_or_else(refused)?;
+    let settled_receipt = state.db.collection::<PlatformManagerIngress>(INGRESS)
+        .update_one(doc! {
+            "_id": &receipt.id, "claim_id": &receipt.claim_id, "phase": "settled", "reply_id": reply_id,
+            "execution.public_session_id": public_session_id, "execution.turn_id": &execution.turn_id,
+            "execution.conversation_id": &execution.conversation_id,
+            "execution.payer_user_id": &execution.payer_user_id, "execution.public_policy_digest": policy_digest,
+            "$expr": {"$gt": [{"$dateAdd": {"startDate": "$settled_at", "unit": "minute", "amount": 2}}, "$$NOW"]},
+        }, doc! {"$inc": {"effect_revision": 1_i64}})
+        .session(&mut *session).await?;
+    if settled_receipt.matched_count != 1 {
+        return Err(refused());
+    }
+    let turn = state
+        .db
+        .collection::<PlatformPublicTurn>(TURNS)
+        .update_one(
+            doc! {
+                "_id": &execution.turn_id, "conversation_id": &execution.conversation_id,
+                "public_session_id": public_session_id, "receipt_id": &receipt.id,
+                "claim_id": &receipt.claim_id, "reply_id": reply_id, "outcome": "failed",
+                "policy_digest": policy_digest, "sponsor_owner_user_id": &execution.payer_user_id,
+                "$expr": {"$gt": ["$expires_at", "$$NOW"]},
+            },
+            doc! {"$inc": {"failure_notice_fence": 1_i64}},
+        )
+        .session(&mut *session)
+        .await?;
+    if turn.matched_count != 1 {
+        return Err(refused());
+    }
+    let public = state.db.collection::<PlatformPublicSession>(SESSIONS)
+        .find_one_and_update(doc! {
+            "_id": public_session_id, "profile_id": &delivery.profile_id,
+            "manager_bot_id": &delivery.manager_bot_id, "telegram_bot_id": delivery.telegram_bot_id,
+            "manager_authority_epoch": delivery.manager_authority_epoch,
+            "sender_id": delivery.sender_id, "chat_id": delivery.chat_id,
+            "public_policy_revision": public_policy_revision,
+            "sponsor_owner_user_id": &execution.payer_user_id, "policy_digest": policy_digest,
+            "$expr": {"$gt": ["$expires_at", "$$NOW"]},
+        }, doc! {"$inc": {"effect_revision": 1_i64}})
+        .session(&mut *session).await?.ok_or_else(refused)?;
+    let selected = controls.public_policy.as_ref().ok_or_else(refused)?;
+    if selected.sponsor_owner_user_id != public.sponsor_owner_user_id
+        || selected.nyxagent_profile != public.nyxagent_profile
+        || !super::platform_public_agent_service::fence_failure_notice_scopes_in_session(
+            &state.db, session, &public,
+        )
+        .await?
+    {
+        return Err(refused());
+    }
+    let active = state.db.collection::<PublicDeploymentActivation>(ACTIVATIONS)
+        .update_one(doc! {
+            "_id": &delivery.profile_id, "policy_digest": policy_digest,
+            "binding": bson::to_bson(&super::platform_public_policy::binding(&controls::policy(controls))?)
+                .map_err(|_| refused())?,
+        }, doc! {"$inc": {"effect_revision": 1_i64}})
+        .session(&mut *session).await?;
+    let sponsor = state
+        .db
+        .collection::<bson::Document>(crate::models::user::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": &public.sponsor_owner_user_id, "is_active": true, "user_type": "org"},
+            doc! {"$inc": {"public_failure_notice_fence": 1_i64}},
+        )
+        .session(&mut *session)
+        .await?;
+    if active.matched_count != 1 || sponsor.matched_count != 1 {
+        return Err(refused());
+    }
+    Ok(())
 }
 
 async fn validate_in_session(
@@ -685,6 +802,19 @@ async fn validate_in_session(
                 return Err(refused());
             }
         }
+        DeliveryReference::Fixed { reason } if reason == "PublicTurnFailed" => {
+            if body != fixed_text(UnavailableReason::PublicTurnFailed) {
+                return Err(refused());
+            }
+            fence_public_failure_notice(
+                state,
+                session,
+                row,
+                receipt.as_ref().ok_or_else(refused)?,
+                &controls,
+            )
+            .await?;
+        }
         DeliveryReference::Fixed { .. } | DeliveryReference::Handoff => {
             // Fixed responses cannot expose account-specific or model text.
             if receipt.as_ref().ok_or_else(refused)?.audience == IngressAudience::Control {
@@ -709,15 +839,14 @@ async fn validate_in_session(
                 return Err(refused());
             }
             let reply = public_reply_ref(row)?;
-            let canonical = super::platform_public_credential_service::load_public_reply(
+            super::platform_public_credential_service::fence_public_reply_body_in_session(
                 state,
+                session,
                 &destination,
                 &reply,
+                body,
             )
             .await?;
-            if canonical.as_str() != body {
-                return Err(refused());
-            }
         }
         DeliveryReference::PublicSignup { .. } => return Err(refused()),
     }
@@ -1525,7 +1654,12 @@ fn fixed_reason(reason: &str) -> Option<UnavailableReason> {
         TransportUnavailable,
         PublicDisabled,
         PublicNotReady,
+        PublicContractUnsupported,
+        PublicAuthorityRejected,
+        ProfileUnavailable,
+        ProofExpired,
         PublicQuotaLimited,
+        PublicTurnFailed,
         SponsorUnavailable,
         RuntimeUninitialized,
         EngineUnavailable,

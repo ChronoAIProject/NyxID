@@ -372,3 +372,5 @@ pub mod tools_manager_service;
 
 pub mod platform_manager_delivery;
 pub mod platform_manager_transport;
+
+pub mod platform_public_contract_service;

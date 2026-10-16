@@ -1541,6 +1541,7 @@ async fn handle_public_rpc(
                 "protocolVersion":negotiated_protocol_version(request.params.as_ref()),
                 "capabilities":{"tools":{"listChanged":false}},
                 "serverInfo":{"name":"nyxid-public","version":env!("CARGO_PKG_VERSION")},
+                "_meta":authority.metadata(),
                 "instructions":public::INSTRUCTIONS,
             }),
         ),
@@ -5700,8 +5701,20 @@ mod tests {
 
     #[tokio::test]
     async fn public_credentials_never_resolve_ordinary_inventory_or_session_fallback() {
-        let db =
-            crate::test_utils::connect_transaction_test_database("public_mcp_closed_auth").await;
+        use mongodb::event::{EventHandler, command::CommandEvent};
+        let commands =
+            std::sync::Arc::new(std::sync::Mutex::new(Vec::<mongodb::bson::Document>::new()));
+        let recorded = commands.clone();
+        let handler = EventHandler::callback(move |event| {
+            if let CommandEvent::Started(event) = event {
+                recorded.lock().unwrap().push(event.command);
+            }
+        });
+        let db = crate::test_utils::connect_transaction_test_database_with_command_handler(
+            "public_mcp_closed_auth",
+            handler,
+        )
+        .await;
         let owner = uuid::Uuid::new_v4().to_string();
         db.collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
             .insert_one(crate::test_utils::test_user(
@@ -5736,9 +5749,10 @@ mod tests {
             )
             .await
             .unwrap();
-        // No connected service or conversation is present. A public key must
-        // fail at the deployment-proof boundary before ordinary resolution.
-        let state = crate::test_utils::test_app_state(db);
+        // A purpose marker alone has no trusted session/turn binding. Reject it
+        // at that exact public authority gate, before any ordinary resolution.
+        let state = crate::test_utils::test_app_state(db.clone());
+        commands.lock().unwrap().clear();
         for (name, value) in [
             ("x-api-key", key.full_key.clone()),
             ("authorization", format!("Bearer {}", key.full_key)),
@@ -5750,9 +5764,32 @@ mod tests {
                 .await
                 .err()
                 .expect("unproven public runtime denied");
-            assert_eq!(failure.status(), StatusCode::CONFLICT);
+            assert_eq!(failure.status(), StatusCode::FORBIDDEN);
+            let body = axum::body::to_bytes(failure.into_body(), 4096)
+                .await
+                .unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(body["error"], "forbidden");
+            assert_eq!(body["message"], "Public tool or arguments are not allowed");
             assert!(authenticate_mcp(&state, &headers, true).await.is_err());
         }
+        let observed = commands.lock().unwrap().clone();
+        for command in observed {
+            if let Ok(collection) = command.get_str("find") {
+                assert!(
+                    ![
+                        USER_SERVICES,
+                        USER_ENDPOINTS,
+                        crate::models::assistant_conversation::COLLECTION_NAME,
+                        crate::models::assistant_agent_credential::COLLECTION_NAME,
+                        MCP_SESSION_COLLECTION,
+                    ]
+                    .contains(&collection),
+                    "unbound public credentials must not query ordinary authority: {collection}"
+                );
+            }
+        }
+        db.drop().await.unwrap();
     }
     use crate::models::approval_grant::{ApprovalGrant, COLLECTION_NAME as APPROVAL_GRANTS};
     use crate::models::approval_request::{ApprovalRequest, COLLECTION_NAME as APPROVAL_REQUESTS};
