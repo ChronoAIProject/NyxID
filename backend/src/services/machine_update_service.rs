@@ -77,6 +77,7 @@ pub fn legacy_companion(node: &Node) -> bool {
 }
 
 pub async fn owner_node(db: &Database, actor: &str, id: &str) -> AppResult<Node> {
+    super::remote_machine_service::guard_legacy_node_mutation(db, id, "update").await?;
     let node = super::node_service::get_node_by_id(db, id)
         .await?
         .filter(|n| n.is_active && n.machine.as_ref().is_some_and(|m| m.enabled()))
@@ -99,6 +100,7 @@ pub async fn get(db: &Database, node: &Node) -> AppResult<MachineUpdate> {
 }
 
 pub async fn policy(db: &Database, node: &Node, automatic: bool) -> AppResult<()> {
+    super::remote_machine_service::guard_legacy_node_mutation(db, &node.id, "update").await?;
     // Ownership transfer cannot inherit an earlier owner's automatic-update consent.
     if let Some(mut previous) = db
         .collection::<MachineUpdate>(COLLECTION_NAME)
@@ -165,7 +167,9 @@ pub async fn begin(
     conversation: Option<&str>,
     automatic: bool,
     manual: bool,
+    provenance: &super::nyxbot_watch_service::ReportProvenance,
 ) -> AppResult<MachineUpdate> {
+    super::remote_machine_service::guard_legacy_node_mutation(db, &node.id, "update").await?;
     if automatic && !idle(db, &node.id).await? {
         return Err(AppError::Conflict("Machine is busy".into()));
     }
@@ -199,7 +203,7 @@ pub async fn begin(
         "updated_at": bson::DateTime::from_chrono(now),
     }};
     let watch = conversation.map(|conversation| {
-        doc! {
+        let mut watch = doc! {
             "_id": uuid::Uuid::new_v4().to_string(),
             "user_id": actor,
             "kind": "machine_update",
@@ -208,7 +212,9 @@ pub async fn begin(
             "status": "pending",
             "created_at": bson::DateTime::from_chrono(now),
             "expires_at": bson::DateTime::from_chrono(deadline + Duration::hours(1)),
-        }
+        };
+        watch.extend(provenance.fields());
+        watch
     });
     let mut session = db.client().start_session().await?;
     let database = db.clone();

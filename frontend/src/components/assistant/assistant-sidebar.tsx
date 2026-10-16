@@ -179,6 +179,7 @@ function ConversationRow({
             className="h-3 w-3 shrink-0 text-text-tertiary"
           />
           <span className="min-w-0 truncate">{shownTitle}</span>
+          {conversation.platform_thread && <span className="shrink-0 rounded bg-muted px-1 text-10 text-muted-foreground">Telegram</span>}
         </span>
         {showDraft && (
           <span

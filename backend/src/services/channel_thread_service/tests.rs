@@ -49,6 +49,14 @@ async fn telegram_topics_chains_human_evidence_and_utf16_mentions() {
         raw["message"]["reply_to_message"] = json!({"message_id": 7, "from": {"id": 123}});
         let input = parsed(platform, raw.clone()).await;
         let facts = a.thread_facts(&input, &b, None).unwrap();
+        assert_eq!(
+            facts.address,
+            ThreadAddress::Mention,
+            "an exact native mention takes priority over reply evidence"
+        );
+        raw["message"]["entities"] = json!([]);
+        let input = parsed(platform, raw.clone()).await;
+        let facts = a.thread_facts(&input, &b, None).unwrap();
         assert_eq!(facts.address, ThreadAddress::ReplyToBot);
         assert_eq!(facts.parent_message_id.as_deref(), Some("7"));
         assert!(
@@ -235,6 +243,19 @@ async fn structured_mentions_mark_only_other_users_without_retaining_identities(
             {"key":"@_user_1","id":{"open_id":"ou_other", "user_id":"ou_bot"}},
             {"key":"@_user_2","id":{"open_id":"ou_other"}}
         ]);
+        let facts = lark
+            .thread_facts(
+                &parsed(platform, raw.clone()).await,
+                &lark_bot,
+                Some("ou_bot"),
+            )
+            .unwrap();
+        assert!(
+            facts.mentions_others,
+            "user_id cannot substitute for open_id"
+        );
+        assert_eq!(facts.address, ThreadAddress::NotAddressed);
+        raw["event"]["message"]["mentions"][0]["id"]["open_id"] = json!("ou_bot");
         let facts = lark
             .thread_facts(&parsed(platform, raw).await, &lark_bot, Some("ou_bot"))
             .unwrap();

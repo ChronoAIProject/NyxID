@@ -20,7 +20,7 @@ nyxid login --base-url <BASE_URL>
 
 Plain `nyxid login` deliberately defaults to selectable **device-code v2**, on desktop too. It is the only terminal-originated flow where the approving human sees the requester attribution panel (IP, timezone, origin, screen) and chooses between a full account session and a restricted Agent Key (#1535). This is why 0.16.0 (`78cb26b`) changed the default; that commit message omitted the rationale. The legacy local-callback flow always grants a full account session without a requester review step.
 
-The CLI prints the code and opens only the bare `verification_uri`, never `verification_uri_complete`. Manual entry keeps the deliberate code-transfer step used by GitHub CLI. To paste instead of retyping, opt into `-c` / `--clipboard`:
+The CLI prints the code separately and opens a URL without any login code. Without approval preferences it uses the bare `verification_uri`; with preferences, only those hints are added. The JSON field `verification_uri_complete` is retained for compatibility but also excludes the code. Manual entry keeps the deliberate code-transfer step used by GitHub CLI. To paste instead of retyping, opt into `-c` / `--clipboard`:
 
 ```bash
 nyxid login --clipboard --base-url <BASE_URL>
@@ -52,7 +52,7 @@ nyxid login resume <REQUEST_ID> --profile work --once --output json
 ```
 
 The first command creates one request and returns its human code, bare verification
-URL, expiry, poll interval and nonsecret local resume handle. It opens no browser
+URL, a code-free `verification_uri_complete` with any approval preferences, expiry, poll interval and nonsecret local resume handle. It opens no browser
 and never waits for approval. The poll secret stays in a mode-0600 local pending
 file. A handle works only on the same machine/profile/destination; it cannot
 redeem a login remotely. `--once` performs at most one eligible poll and preserves

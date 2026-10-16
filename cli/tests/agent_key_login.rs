@@ -119,10 +119,9 @@ async fn full_login_stores_only_restricted_credential_and_safe_metadata() {
         .expect("approval link is displayed");
     let link = url::Url::parse(link).unwrap();
     assert_eq!(link.path(), "/login/agent-key");
-    assert_eq!(
-        link.query_pairs().collect::<Vec<_>>(),
-        vec![("user_code".into(), "ABCD-EFGH".into())]
-    );
+    assert!(link.query().is_none());
+    assert!(link.fragment().is_none());
+    assert!(text.contains("enter the code above"));
     assert!(!text.contains(SECRET));
     assert!(!text.contains("nyx_akl_requester-only"));
     assert_eq!(std::fs::read_to_string(dir.join("token")).unwrap(), SECRET);
@@ -544,6 +543,63 @@ async fn status_section_401_surfaces_rejection_without_refresh() {
         String::from_utf8_lossy(&result.stderr).contains("Your Agent Key credential was rejected")
     );
     assert_eq!(server.received_requests().await.unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn logout_unsafe_transport_clears_locally_without_proxying_credentials() {
+    for restricted in [false, true] {
+        let proxy = MockServer::start().await;
+        let home = tempfile::tempdir().unwrap();
+        let dir = profile(home.path());
+        std::fs::create_dir_all(&dir).unwrap();
+        let token = uuid::Uuid::new_v4().to_string();
+        let refresh = uuid::Uuid::new_v4().to_string();
+        for (name, value) in [
+            ("base_url", "http://cleartext-fixture.invalid"),
+            ("access_token", token.as_str()),
+            ("refresh_token", refresh.as_str()),
+            ("token", token.as_str()),
+        ] {
+            std::fs::write(dir.join(name), value).unwrap();
+        }
+        if restricted {
+            std::fs::write(dir.join("auth_kind"), "agent_key").unwrap();
+            std::fs::write(dir.join("agent_key.json"), identity().to_string()).unwrap();
+        }
+        let proxy_url = proxy.uri();
+        let output = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            command(home.path())
+                .args(["logout", "--profile", "home-agent"])
+                .env("HTTP_PROXY", &proxy_url)
+                .env("http_proxy", &proxy_url)
+                .env("HTTPS_PROXY", &proxy_url)
+                .env("https_proxy", &proxy_url)
+                .env("ALL_PROXY", &proxy_url)
+                .env("all_proxy", &proxy_url)
+                .env("NO_PROXY", "")
+                .env("no_proxy", "")
+                .output(),
+        )
+        .await
+        .expect("logout must not wait on a remote destination")
+        .unwrap();
+        let text = output_text(&output);
+        assert!(output.status.success(), "local logout must complete");
+        assert!(text.contains("could not be confirmed"));
+        assert!(!text.contains(&token));
+        assert!(!text.contains(&refresh));
+        assert!(proxy.received_requests().await.unwrap().is_empty());
+        for file in [
+            "access_token",
+            "refresh_token",
+            "token",
+            "auth_kind",
+            "agent_key.json",
+        ] {
+            assert!(!dir.join(file).exists(), "{file} should be cleared");
+        }
+    }
 }
 
 #[tokio::test]

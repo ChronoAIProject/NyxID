@@ -1,4 +1,5 @@
 import { useSyncExternalStore } from "react";
+import { useRouterState } from "@tanstack/react-router";
 import { Toaster as SonnerToaster } from "sonner";
 
 const mql =
@@ -20,16 +21,18 @@ function useIsMobile() {
 /* ── NyxID Toast ── */
 export function Toaster() {
   const mobile = useIsMobile();
+  const pathname = useRouterState({ select: (state) => state.location.pathname });
+  const atTop = pathname === "/assistant" || pathname.startsWith("/assistant/");
   return (
     <SonnerToaster
       theme="dark"
-      position={mobile ? "top-center" : "bottom-right"}
+      position={mobile ? "top-center" : atTop ? "top-right" : "bottom-right"}
       gap={8}
       toastOptions={{
         classNames: {
           toast:
             "group !rounded-xl !border !text-13 !shadow-lg !shadow-primary/5 !gap-3 !p-3 !border-border [&:not([data-type])]:!bg-card [&:not([data-type])]:!text-foreground [&_[data-icon]]:!flex [&_[data-icon]]:!h-[22px] [&_[data-icon]]:!w-[22px] [&_[data-icon]]:!shrink-0 [&_[data-icon]]:!items-center [&_[data-icon]]:!justify-center [&_[data-icon]]:!rounded-[6px] [&_[data-icon]>svg]:!h-3 [&_[data-icon]>svg]:!w-3 [&_[data-icon]]:!m-0",
-          description: "!text-12 !mt-0",
+          description: "!text-12 !mt-0 whitespace-pre-line break-words",
           actionButton: "!bg-primary !text-primary-foreground",
           cancelButton: "!bg-muted !text-muted-foreground",
           // Typed backgrounds mix the accent INTO the solid card color

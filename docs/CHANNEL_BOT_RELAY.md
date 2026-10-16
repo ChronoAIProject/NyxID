@@ -12,6 +12,13 @@ Combined with [Agent Isolation](./AGENT_ISOLATION.md), the same NyxID user can w
 
 For Telegram's optional native bot creation, see [Telegram bot creation](TELEGRAM_NEW.md). The **Telegram** option uses the separate `telegram-new` adapter; **Telegram bot token** uses the existing `telegram` adapter and token setup. These are display labels; platform identifiers and existing connections remain unchanged.
 
+Ordinary and native thread text replies accept one complete logical reply and
+split it only when required by the destination's limit. HTTP 200 confirms
+platform acceptance of every generated part; partial or uncertain delivery
+returns an error. A single reply token covers the whole request. See the
+[complete-reply contract](CHANNEL_COMPLETE_REPLIES.md) for the 2 MiB wire bound,
+64-part preflight, metadata-only tracking and coordinated CMAEG rollout.
+
 ## Telegram manager channels
 
 A configured Telegram bot-creation manager can also be registered using its existing token as a `telegram` channel. It reports `credential_source: "telegram_manager"` and retains the manager's single webhook. Manager setup events stay in the creation workflow; ordinary messages use the channel's exact or default conversation routes. See [Telegram manager setup and limitations](TELEGRAM_NEW.md#using-the-manager-as-a-channel-bot).
@@ -460,11 +467,11 @@ sequenceDiagram
 graph TD
     MSG[Inbound Message] --> R{Routing Service}
 
-    R -->|Step 1| EC{Exact conversation<br/>match?}
-    EC -->|Yes| AGENT[Route to bound agent]
-    EC -->|No| SS{Step 2: Sender-specific<br/>match in group?}
-    SS -->|Yes| AGENT
-    SS -->|No| DA{Step 3: Default agent<br/>for this bot?}
+    R -->|Step 1| SS{Sender-specific match<br/>in this conversation?}
+    SS -->|Yes| AGENT[Route to bound agent]
+    SS -->|No| EC{Step 2: Exact conversation<br/>match without sender?}
+    EC -->|Yes| AGENT
+    EC -->|No| DA{Step 3: Default agent<br/>for this bot?}
     DA -->|Yes| AGENT
     DA -->|No| UNROUTED[Log as unrouted<br/>Optional: send 'not configured' reply]
 
@@ -892,7 +899,7 @@ The service materializes every source before dispatch. At the adapter boundary, 
 
 | Adapter | Native upload/send path |
 |---|---|
-| Telegram / telegram-new | Multipart `sendPhoto`, `sendDocument`, `sendAudio`, `sendVideo`; captions, reply anchor and topic ID preserved. Text goes first. |
+| Telegram / telegram-new | Multipart `sendPhoto`, `sendDocument`, `sendAudio`, `sendVideo`; captions, reply anchor and topic ID preserved. A photo-specific parsed 400 can fall back once to `sendDocument` (see below). Text goes first for mixed public requests. |
 | Discord | One multipart message with `files[n]` and `payload_json`; text/captions joined into message content. Deferred interaction follow-ups retain their existing routing. |
 | Slack | `files.getUploadURLExternal` → PUT bytes → `files.completeUploadExternal` with channel/thread and initial comment; `files.info` resolves the share timestamp. Text goes first. |
 | Lark / Feishu | `im/v1/images` or `im/v1/files`, then an image/file message. Audio/video use file upload (`file_type=stream`). Text/captions are preceding text messages. |
@@ -904,6 +911,158 @@ Editing a media send targets the returned media message ID. Telegram uses `editM
 The result is the last platform message ID; Slack may omit it if no share timestamp is available. Lark/Feishu need `im:resource`; Slack needs file read/write scopes; existing X OAuth connections need fresh consent to `media.write`. Platform size/type restrictions can be stricter than NyxID's cap.
 
 Send idempotency fingerprints include attachment kind, source URL or SHA-256 of decoded bytes, filename, MIME type and caption. Changing any of them with the same key returns 409. The source URL identifies URL-based content; changing bytes behind the same URL cannot be detected on an already-completed replay. A multi-message send can partially succeed before a later upload fails; NyxID cannot roll back a platform send. Existing claim/retry semantics apply.
+
+### Image outcomes and Telegram document fallback
+
+Media senders distinguish definite refusals from uncertain delivery. A completed
+HTTP non-2xx response, including **408 and 5xx**, or a parsed platform error is
+definite. A missing/unreadable response, malformed successful JSON or missing
+successful receipt is uncertain (`Media upload or delivery failed`). Definite
+failures are never automatically retried. NyxBot records failed images and may
+continue to the next image; an uncertain image stops the remaining batch and is
+never resent. Shared WhatsApp Graph calls retain their specific timeout,
+response-size, invalid-JSON and unknown-acceptance diagnostics. NyxBot's image
+path recognizes those exact locally authored errors as uncertain without
+changing text-send, verification or credential-check diagnostics. X limits
+media-specific refusal parsing to upload/status responses without usable data;
+partial `errors` alongside a successful `data` result remain usable.
+
+The only retry is Telegram/telegram-new's image fallback: a parsed `ok:false`,
+`error_code:400` photo response with HTTP 400 or 2xx and a photo-specific marker
+(`PHOTO_INVALID_DIMENSIONS`, `PHOTO_SAVE_FILE_INVALID`, `PHOTO_EXT_INVALID`,
+`PHOTO_CROP_SIZE_SMALL`, or `IMAGE_PROCESS_FAILED`) sends the same bytes
+once with `sendDocument`. The caption, chat, reply anchor and forum topic are
+preserved, and the document outcome is final. Chat/thread/reply-target and rights
+errors, 403, 429, 5xx and transport failures never trigger fallback. Deny markers
+take precedence when a description also contains a photo marker. NyxID always
+materializes URL sources and uploads multipart bytes, so file-ID/URL-source
+errors, padding errors and empty-file errors never trigger this fallback.
+
+`/channel-relay/reply`, `/thread-reply` and `/send` can return additive
+`delivered_as: ["file"]` for that substitution. The outbound row and audit record
+`file`; NyxBot's image claim records `sent` with `as_document`, without a failure
+line. Older adapters omit `delivered_as`.
+
+NyxBot uses the existing route-key reply, bound-thread and initiated-send paths
+to send tool images before text, one per message. It sends images itself on
+gateway channels; no CMA attachment-block renderer is required. Chat-delivered
+automations consume one initiate limiter token for their result text, with none
+for its bounded image batch; public `/send` still consumes one per request.
+Each X DM image is a separately billed request using the ordinary channel
+billing context. A billing refusal suspends the channel through the existing
+path and skips the remaining images; X public replies do not support images.
+
+### Per-image delivery claims, audiences and topics (P15)
+
+Property P15: **one send per source image and resolved audience, for the
+image's whole lifetime, across every NyxBot path** (automatic replies on
+direct and gateway transports, followed threads, event and duplicate-question
+chats, chat-delivered automations and explicit `nyxid__post_to_chat
+include_images` posts). Uncertain or in-progress sends are never retried and
+never reported as delivered.
+
+Release 0.71.0 includes #1889 and its v1 image claims. Before any v2 claim,
+new replicas read `nyxbot_image_deliveries` for the same owner, conversation,
+turn and NyxBot channel, across every destination alias (`inbound:`, `thread:`,
+`chat:`, `initiated:`). A sent item reports `previously_delivered`; sending,
+unknown, or a pending item in a sending batch reports `in_progress_or_unknown`.
+Failures and unrecognized skips retain their old outcome. Only a pending batch
+or a skip code v1 set before dispatch (`deadline`, `after_unknown`, `billing`)
+permits a new v2 attempt. No new code rewrites the v1 rows; their existing
+seven-day `expires_at` TTL stays. Existing conversation/user deletion still
+purges their metadata.
+
+This guard is deliberately conservative across all audiences of the same bot
+for that turn: it can suppress a second chat's image during the seven-day
+window. It covers old-replica sends completed before the new replica reads.
+An old 0.71.0 replica and a new replica can still race between the read and
+claim during rolling deployment; concurrent duplicates remain a rollout risk.
+There is no mixed-fleet guarantee and no data repair is needed. Rollback to
+0.71.0 restores its old behavior and ignores v2 claims, so it does not preserve
+the new delivery invariant. Remove the v1 read path and collection/index one
+release after this change ships, at least seven days after deployment; track
+that sunset in the PR description.
+
+**Claim (v2).** `nyxbot_image_deliveries_v2` holds one document per (source
+image, audience): `_id = sha256("v2\0{owner}\0{attachment_id}\0{audience_key}")`
+plus plain `user_id`, `conversation_id`, `attachment_id`, `audience_key`,
+`state`, `attempt`, `code` and `created_at`, with cleanup indexes on
+`attachment_id` and `(user_id, conversation_id)` and **no TTL**
+(`services/channel_image_delivery.rs`, `models/nyxbot_image_delivery.rs`).
+States move `pending` -> `sending{attempt}` -> `sent | failed{code} |
+skipped{code} | unknown` through compare-and-set on the attempt token. Only the
+winner of the `pending -> sending` race dispatches; success is reported only
+after an acknowledged matching completion write, an ambiguous write settles
+locally as `unknown`, and a claim found `sending` reports
+`in_progress_or_unknown`. A later caller reports an existing claim's durable
+state (`previously_delivered`, the same failure or skip code, in progress or
+unknown) without resending and without repeating another path's failure line.
+A definite refusal before any provider request (cancelled, deadline,
+after-unknown, billing preflight or another pre-dispatch error) releases its
+own `sending{attempt}` back to `pending` with an attempt-token CAS, clearing
+attempt and code. This call reports the skip or failure; a later post or
+automation may acquire the pending image. Unsupported audiences, missing
+anchors and unavailable sources remain permanent refusals. Once provider I/O
+begins, even a timeout or failed settlement retains the durable barrier and
+never releases it for retry.
+Claims live as long as their source image: they are deleted in the same
+transactions that delete `assistant_attachments` (retention, conversation and
+group deletion, user purge), a sender that finds its source gone after claiming
+deletes the claim and reports `unavailable`, and a bounded orphan sweep on the
+assistant upload-retention cadence removes only claims whose source attachment
+no longer exists. Claims hold identifiers, states and codes only.
+
+**Audience.** The audience is the outbound target actually sent to, resolved
+by `services/channel_image_audience.rs` after the adapter's own normalization
+and fallback, and serialized as
+`"{channel_bot_id}\u{1f}{platform_chat_id}\u{1f}{native_thread_or_empty}"`
+with the real `ChannelBot.id` (never a gateway partition or `NyxbotChannel`
+id). Per adapter:
+
+| Platform | Chat | Audience boundary | Not a boundary |
+| --- | --- | --- | --- |
+| Telegram, telegram-new | chat id | forum topic `message_thread_id` (normalized to a decimal string) | reply chains (`reply_to_message_id`) |
+| Slack | channel id | a root thread (`thread_ts`, else the replied-to message, as the adapter posts it) is distinct from the top-level channel | — |
+| Discord | channel id (threads are channels) | — | — |
+| Lark, Feishu | chat id | — | thread replies share the chat audience |
+| WhatsApp | normalized `wa_id` digits | — | — |
+| X | DM conversation id | — | public replies carry no images |
+| Aurinko, device, OpenClaw and other adapters | chat id or no image delivery, per the adapter's declared capability | — | — |
+
+The Telegram and Slack adapters build their outbound `message_thread_id` /
+`thread_ts` from the same `native_thread` function the audience uses, so the
+key and the provider payload cannot drift.
+
+Inbound Telegram thread keys and follow-scope classification remain unchanged.
+Native `message_thread_id` and gateway `conversation.thread_id` continue to
+select existing conversations, including reply chains. Separate additive
+`telegram_topic` evidence selects the outbound target and image audience:
+native messages require `is_topic_message: true`; gateway version 1 facts
+must declare a topic and positive decimal native ID. Explicit reply-chain
+evidence sends at chat level without changing its inbound partition. Legacy
+anchors without evidence retain their old outbound target. Old replicas ignore
+the additive field and reuse the same conversation keys; there is no migration.
+The image guarantee applies only after every replica is upgraded.
+
+**Topics.** Agent-initiated posts (`nyxid__post_to_chat` and chat-delivered
+automation results) keep the thread's native topic
+(the separate Telegram topic evidence, falling back to legacy
+`platform_thread_id`, or a Slack root thread) for text and images through the adapter's `reply_context`; a topic is
+therefore its own audience, and the parent chat is another.
+
+**Explicit posts and automations.** `include_images` (default false) sends the
+calling turn's own tool images (trusted `TurnAttachment` metadata of the exact
+live turn, `chat_tool_image` only, deduplicated, at most 8) before the text,
+each behind a turn-fence recheck and its claim; the text follows a final fence
+recheck and nothing further is sent after Stop or replacement. Multi-turn
+automation runs keep `TriggerRun.image_refs` (at most 16, oldest terminal
+evicted against the run's configured audience, else `image_refs_truncated`)
+and deliver first sends for refs whose claim is absent or `pending`, newest
+first and at most eight, reporting the other claim states without consuming
+that budget; an omitted-images line names the count. Unavailable image
+metadata never blocks the final text: the text is sent and the image counts as
+failed. The text/stream delivery barrier (`channel_turn_delivery.rs`) is
+separate and unchanged.
 
 ### ADR-013 metadata boundary
 
@@ -953,6 +1112,18 @@ Query prefilling uses the same declared field names. `field1` and `field2` are s
 Manual forms require a valid form and an explicit submit. Managed entry points use the catalog's flow discriminator: `meta_embedded_signup` for Meta, `oauth_connection` for OAuth, plus the dedicated Telegram creation component. Prefilled manual credentials reveal the manual form when managed onboarding is also available. A flow marked `managed_only` never falls back to a manual credential form. The backend still enforces provider configuration, ownership, organization admin access, and credential validity.
 
 The standalone completion screen keeps the user on the page until **Open channel bot** is selected. Callback URLs and returned instructions display independently of one-time secrets. A generated Verify Token is shown only when the create response includes one. Provider authorization windows remain separate steps; "one click" means opening the provider or submitting a completely prefilled credential form, not skipping consent or webhook configuration.
+
+### Returning to an assistant chat
+
+NyxBot setup links may carry one owner-scoped `return_to` identifier (`nyxa-…`
+or `nyxg-…`). The setup page preserves it through request URL updates and
+offers Back to chat on completion, cancellation, expiry and error. In-chat
+Telegram setup keeps the request in component state and resumes the current
+request on remount, retains its actor-scoped request ID, and polls that ID through
+completion while preserving the chat URL and composer. Rendered setup anchors
+preserve the same strictly validated raw target for new-tab navigation; modal
+setup ignores it. Duplicates, encoded targets and surrounding whitespace are
+refused. No arbitrary URL is accepted or assigned, and the assistant page performs its normal ownership check.
 
 ### Add or extend a form
 
@@ -1014,6 +1185,12 @@ NyxID sends a normalized message to the agent's callback URL.
 
 The payload normalizes messages into a common format so agents can handle all platforms with one code path. For agents that need platform-specific features (Telegram inline keyboards, Discord embeds/components, Lark interactive cards), the full original webhook JSON is included in `raw_platform_data`. Most agents ignore it; advanced integrations read it directly.
 
+`conversation.platform_id` and `conversation.type` describe the actual inbound event after platform webhook verification and adapter parsing. They are independent of the selected route's configured conversation ID/type: a default route configured as `"*"` / `"private"` can receive a group message, whose callback must contain the actual chat ID and `"group"`. `conversation.id` continues to identify the selected NyxID routing rule for async replies. Consumers that previously classified groups using the route's configured type may observe a corrected conversation scope; downstream history partitioning should use the actual platform context.
+
+Native mention metadata passes through unchanged in the signed `raw_platform_data`: Lark/Feishu `event.message.mentions` (including native `id.open_id` and placeholder `key`) and Telegram `message.entities` / `message.caption_entities` (including native UTF-16 offsets). NyxID does not resolve these mentions into specialist routes or infer targets from display names. Consumers can interpret native mentions within their own trusted bot/group context. The relay contract adds no normalized mention field and preserves Lark placeholders in `content.text`; NyxID's direct NyxBot consumer renders bounded, unambiguous placeholders as names for input text.
+
+A sender needs no additional NyxID OAuth/channel binding merely to address a receiving bot. The receiving bot still needs platform registration, authenticated event delivery, and an agent callback route. Mentioning a bot or specialist does not establish the sender's NyxID identity, grant protected command/tool authority, prove another bot's group membership, or authorize another owner's credentials. External runtimes retain responsibility for specialist selection and execution authorization. For NyxID-hosted agents, the receiving NyxBot channel and its live chat override select the existing linked agent; native mention labels never select another owner's agent. Provider delivery rules apply before this relay; for example, Telegram documents specific [bot-to-bot communication settings and group delivery conditions](https://core.telegram.org/bots/features#bot-to-bot-communication). Raw mention passthrough cannot cause an undelivered provider event to reach NyxID.
+
 - **`agent.api_key_id`** is the primary agent identifier. Same `ApiKey._id` from agent isolation (PR #132). A shared callback endpoint dispatches based on this value. Use for routing/authorization.
 - **`agent.name`** is the human-readable label from key creation (e.g., `"claude-support-bot"`). For logging and display only -- never use for authorization.
 - **`sender.platform_id`** is the platform-native user ID. The agent is responsible for mapping this to its own users. If the agent uses NyxID OAuth, it already has `nyxid_user_id` in its user table from login time -- it can match `sender.platform_id` against platform identities it collected during onboarding. NyxID doesn't need to do this lookup because the agent already has the data.
@@ -1029,9 +1206,9 @@ The payload normalizes messages into a common format so agents can handle all pl
 | `platform` | string | No | Which messaging platform the message came from: `telegram`, `discord`, `lark`, or `feishu`. |
 | `agent.api_key_id` | UUID | No | The `ApiKey._id` assigned to this conversation route. This is the agent's identity from agent isolation. A shared callback endpoint dispatches based on this. |
 | `agent.name` | string | No | Human-readable name of the API key (e.g., `"claude-support-bot"`). For logging and display only. |
-| `conversation.id` | UUID | No | NyxID's internal ID for the conversation route (from `channel_conversations`). Stable across all messages in the same chat. |
-| `conversation.platform_id` | string | No | The platform's native conversation identifier (Telegram `chat_id`, Discord `channel_id`, Lark `chat_id`). |
-| `conversation.type` | string | No | Conversation kind: `private` (1:1 DM), `group` (multi-user chat), or `channel` (broadcast). |
+| `conversation.id` | UUID | No | NyxID's internal ID for the selected conversation route (from `channel_conversations`). A default route can serve several platform chats. |
+| `conversation.platform_id` | string | No | The actual inbound event's native conversation identifier (Telegram `chat_id`, Discord `channel_id`, Lark `chat_id`), even when the selected route uses `"*"`. |
+| `conversation.type` | string | No | The actual inbound event's conversation kind after adapter parsing: `private` (1:1 DM), `group` (multi-user chat), or `channel` (broadcast). The route's configured type does not override it. HTTP Event Gateway callbacks use their separate `device` contract. |
 | `sender.platform_id` | string | No | The message author's ID on the platform. The agent maps this to its own users. |
 | `sender.display_name` | string | Yes | Display name from the platform (Telegram `first_name`, Discord `username`). `null` if not provided. |
 | `content.type` | string | No | Content kind: `text`, `image`, `file`, `audio`, `video`, `location`, `sticker`, or `unknown`. |
@@ -1055,6 +1232,58 @@ The payload normalizes messages into a common format so agents can handle all pl
 | `X-NyxID-Timestamp` | ISO 8601 timestamp (for replay protection) |
 | `X-NyxID-Platform` | Platform identifier (`telegram`, `discord`, `lark`, `feishu`) |
 | `X-NyxID-User-Token` | Short-lived access token for the bot owner (`JWT_RELAY_ACCESS_TTL_SECS`, default `300`s). The agent uses it as `Authorization: Bearer <token>` to call NyxID's **proxy / LLM gateway / MCP** (and approval *status* polling) on behalf of the user. It is a relay token: it is **rejected** on account, admin, key-management, session, channel-reply, and other non-proxy endpoints; it inherits the originating agent key's service/node allowlist; on MCP it is stateless (no session is minted, so it re-authenticates every call); and it stops working the moment that agent key is revoked/deactivated. To *reply* to a conversation, use the agent API key or the per-callback `reply_token`, not this token. Absent if token generation fails. |
+
+**NyxID-hosted native bot mentions.** A delivered Telegram/Lark/Feishu message
+that positively and exactly mentions the receiving native bot may start a guest
+turn for that bot's linked specialist or live chat override. The native group
+must already have owner-enabled settings: explicit `members:everyone`, or the
+ordinary default after the verified owner has talked there. Bot input never
+creates a settings row, proves owner presence, redeems owner link codes, decides
+cards or queues owner work. Private, self, unknown/system, reply-only, broadcast,
+plain-name and unaddressed bot input stays closed, including with
+`reply_mode:all`. A bot remains a guest if its ID overlaps a legacy owner ID.
+Guest service, privacy, approval and machine restrictions continue through late
+text/image delivery.
+
+Automated turns atomically spend an allowance on the existing group/topic row
+(`max_group_handoffs`, default six) and the owner's hourly
+`max_group_handoffs_per_hour` handoff window. Only an admitted authenticated
+human message resets the chat allowance; there is no timer refill. Replays and
+uncertain/busy attempts are never refunded, and exhausted bot budgets do not
+block human turns. Bots may use an existing active followed child but cannot
+open or renew following. The budget is metadata in MongoDB and is shared across
+replicas.
+
+A human message that receives a proven pre-execution busy response may retry
+after capacity returns. Its original request digest, deadline and reset claim
+are retained with encrypted event context until the existing event expiry;
+concurrent retries atomically claim one resumption and never refill bot hops
+again. Changed requests and failed, dispatched or uncertain attempts cannot
+use that retry path. Bot busy attempts remain consumed and silent.
+
+For these NyxID-hosted native group messages, the event claim uses the stored
+native message ID scoped to the receiving installation and actual chat. A
+provider redelivery with a new NyxID relay UUID therefore cannot start another
+bot turn or repeat a human turn/reset during the existing 24-hour event
+retention window. The source
+lookup checks the stored owner, receiving bot, route key, sender and chat;
+unrelated source rows cannot supply that identity. Native gateway events retain
+their existing provider event identity. The generic relay's human-message
+delivery semantics are unchanged.
+
+Gateway sources opt in through scoped `admission.bot_messages:native_mentions`
+and pinned receiving identity only after authenticated capability discovery
+advertises `native_bot_mentions_v1`. Existing connections reconcile through the
+normal management sweep without sender OAuth or manual reconnect. Old gateways
+keep their existing human-compatible source policy. Deploy CMA readers and
+upgrade every NyxID replica before enabling
+`CMAEG_NATIVE_BOT_MENTIONS_WRITES_ENABLED`; NyxID's sweep can then author
+opt-ins. This keeps execution and delayed delivery on replicas that retain bot
+guest identity and share the durable budget. Before an old-reader rollback,
+remove opt-ins with the current
+reader and clear gateway caches; disabling the write flag alone does not remove
+stored policy. No separate thread-follow gateway upgrade is required for basic
+mentions. Provider bot-to-bot delivery settings still apply before either server.
 
 #### Callback Authentication (JWT)
 

@@ -44,6 +44,9 @@ pub struct Claims {
     /// Registered OAuth client that received this access token.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_id: Option<String>,
+    /// Exact consent version approved for Machine access; never inferred by readers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protected_consent: Option<crate::models::consent::ProtectedConsentRef>,
     /// User's roles (present when "roles" scope is requested)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub roles: Option<Vec<String>>,
@@ -403,12 +406,14 @@ pub fn generate_access_token(
         mtls_x5t_s256,
         restrictions,
         None,
+        None,
     )
 }
 
 /// Generate an access token bound to the registered OAuth client that
 /// completed the authorization-code flow.
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 pub fn generate_oauth_access_token(
     keys: &JwtKeys,
     config: &AppConfig,
@@ -432,6 +437,36 @@ pub fn generate_oauth_access_token(
         mtls_x5t_s256,
         restrictions,
         Some(client_id),
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn generate_oauth_access_token_with_consent(
+    keys: &JwtKeys,
+    config: &AppConfig,
+    user_id: &Uuid,
+    scope: &str,
+    rbac: Option<&RbacClaimData>,
+    ttl_override_secs: Option<i64>,
+    dpop_jkt: Option<&str>,
+    mtls_x5t_s256: Option<&str>,
+    restrictions: Option<AccessTokenRestrictions<'_>>,
+    client_id: &str,
+    protected_consent: Option<&crate::models::consent::ProtectedConsentRef>,
+) -> Result<String, AppError> {
+    generate_access_token_for_client(
+        keys,
+        config,
+        user_id,
+        scope,
+        rbac,
+        ttl_override_secs,
+        dpop_jkt,
+        mtls_x5t_s256,
+        restrictions,
+        Some(client_id),
+        protected_consent,
     )
 }
 
@@ -447,6 +482,7 @@ fn generate_access_token_for_client(
     mtls_x5t_s256: Option<&str>,
     restrictions: Option<AccessTokenRestrictions<'_>>,
     client_id: Option<&str>,
+    protected_consent: Option<&crate::models::consent::ProtectedConsentRef>,
 ) -> Result<String, AppError> {
     let now = Utc::now().timestamp();
     let cnf = if dpop_jkt.is_some() || mtls_x5t_s256.is_some() {
@@ -503,6 +539,7 @@ fn generate_access_token_for_client(
             .as_ref()
             .map(|restriction| restriction.allow_all_nodes)
             .or_else(|| client_id.map(|_| true)),
+        protected_consent: protected_consent.cloned(),
         assistant_forward: None,
     };
 
@@ -574,6 +611,7 @@ pub fn generate_assistant_forward_access_token(
         allow_all_services: Some(false),
         allowed_node_ids: Some(Vec::new()),
         allow_all_nodes: Some(false),
+        protected_consent: None,
         assistant_forward: Some(true),
     };
 
@@ -644,6 +682,7 @@ pub fn generate_relay_access_token(
         allow_all_services: None,
         allowed_node_ids: None,
         allow_all_nodes: None,
+        protected_consent: None,
         assistant_forward: None,
     };
 
@@ -757,6 +796,7 @@ pub fn generate_refresh_token(
         allow_all_services: None,
         allowed_node_ids: None,
         allow_all_nodes: None,
+        protected_consent: None,
         assistant_forward: None,
     };
 
@@ -812,6 +852,7 @@ pub fn reissue_refresh_token(
         allow_all_services: None,
         allowed_node_ids: None,
         allow_all_nodes: None,
+        protected_consent: None,
         assistant_forward: None,
     };
 
@@ -909,6 +950,7 @@ pub fn generate_delegated_access_token_for_client(
         allow_all_services: restrictions.and_then(|r| r.allow_all_services),
         allowed_node_ids: restrictions.and_then(|r| r.allowed_node_ids.as_ref().cloned()),
         allow_all_nodes: restrictions.and_then(|r| r.allow_all_nodes),
+        protected_consent: None,
         assistant_forward: None,
     };
 
@@ -1057,6 +1099,7 @@ pub fn generate_service_account_token(
         allow_all_services: None,
         allowed_node_ids: None,
         allow_all_nodes: None,
+        protected_consent: None,
         assistant_forward: None,
     };
 
@@ -1709,6 +1752,7 @@ mod tests {
             allow_all_services: None,
             allowed_node_ids: None,
             allow_all_nodes: None,
+            protected_consent: None,
             assistant_forward: None,
         };
 
@@ -1828,6 +1872,7 @@ mod tests {
             allow_all_services: None,
             allowed_node_ids: None,
             allow_all_nodes: None,
+            protected_consent: None,
             assistant_forward: None,
         };
         let json = serde_json::to_string(&claims).unwrap();

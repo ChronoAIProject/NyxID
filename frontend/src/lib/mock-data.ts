@@ -2,8 +2,13 @@ import { mockSetupResponse } from "@/lib/assistant/mock-setup-journeys";
 import { ApiError } from "@/lib/api-client";
 
 // Keep the manually selected demo engine across chat navigation and reloads.
+const MOCK_MODEL_CONTROLS_STORAGE = "nyxid.mock-model-controls";
 const MOCK_NYXBOT_STORAGE = "nyxid.mock-nyxbot";
 if (import.meta.env.DEV && typeof window !== "undefined") {
+  const modelControls = new URLSearchParams(window.location.search).get("modelControls");
+  if (modelControls === "1" || modelControls === "0") {
+    sessionStorage.setItem(MOCK_MODEL_CONTROLS_STORAGE, modelControls);
+  }
   const selection = new URLSearchParams(window.location.search).get("nyxbot");
   if (selection === "1" || selection === "0") {
     sessionStorage.setItem(MOCK_NYXBOT_STORAGE, selection);
@@ -14,6 +19,11 @@ const mockNyxbotEnabled =
   (import.meta.env.DEV &&
     typeof window !== "undefined" &&
     sessionStorage.getItem(MOCK_NYXBOT_STORAGE) === "1");
+
+const mockModelControlsEnabled =
+  globalThis.__nyxidAssistantHttpFaults?.modelControlsEnabled ??
+  (import.meta.env.DEV && typeof window !== "undefined" &&
+    sessionStorage.getItem(MOCK_MODEL_CONTROLS_STORAGE) === "1");
 
 // ── Mock User ──
 const MOCK_USER = {
@@ -30,7 +40,9 @@ const MOCK_USER = {
     billing_available: true,
     enabled_features: [
       "experimental:ai-assistant",
+      ...(mockModelControlsEnabled ? ["assistant:model-controls"] : []),
       ...(mockNyxbotEnabled ? ["assistant:nyxagent-engine"] : []),
+      ...(globalThis.__nyxidAssistantHttpFaults?.voiceEnabled ? ["assistant:voice"] : []),
     ],
   },
 };

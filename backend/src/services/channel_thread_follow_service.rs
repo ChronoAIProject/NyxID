@@ -84,6 +84,22 @@ pub fn eligible_for_facts(
     facts: &ChannelThreadFacts,
     sender: &str,
 ) -> Option<bool> {
+    if facts.sender_kind == ThreadSenderKind::Bot {
+        let allowed = matches!(settings.kind.as_deref(), Some("group" | "channel"))
+            && matches!(
+                facts.address,
+                crate::models::channel_thread::ThreadAddress::Mention
+            )
+            && match settings.members.as_deref() {
+                Some("everyone") => true,
+                None => settings.owner_seen,
+                _ => false,
+            };
+        return (!sender.is_empty() && allowed).then_some(true);
+    }
+    if facts.sender_kind != ThreadSenderKind::Human {
+        return None;
+    }
     if facts.kind == ThreadKind::Email {
         if channel.owner_sender_ids.iter().any(|id| id == sender) {
             return Some(false);
@@ -199,7 +215,10 @@ pub async fn select(
             super::feature_flag_service::NYXBOT_THREAD_FOLLOW_FLAG_KEY,
         )
         .await?;
-    if target.facts().sender_kind != ThreadSenderKind::Human {
+    if !matches!(
+        target.facts().sender_kind,
+        ThreadSenderKind::Human | ThreadSenderKind::Bot
+    ) {
         return Ok(Selection::Quiet);
     }
     let db = db.clone();
@@ -241,6 +260,12 @@ pub async fn select(
             let rows = db.collection::<NyxbotThread>(THREADS);
             let mut child = rows.find_one(doc! {"channel_id":channel_id,"partition":&key})
                 .session(&mut *session).await?;
+            // Only humans open/renew following. A bot can answer in an already
+            // active child, otherwise it uses the ordinary addressed chat path.
+            if target.facts().sender_kind == ThreadSenderKind::Bot
+                && !child.as_ref().is_some_and(follows) {
+                return Ok(Selection::Legacy);
+            }
             if child.as_ref().is_some_and(|child| !supported_child(child)) {
                 return Ok(Selection::Quiet);
             }
@@ -265,7 +290,7 @@ pub async fn select(
             if stop && !guest && (active || addressed) {
                 if let Some(mut child) = child {
                     stop_in_session(db, &mut child, "owner", session).await?;
-                    let binding = binding(&child, source, sender, guest, agent);
+                    let binding = binding(&child, source, sender, guest, agent, target.facts().sender_kind);
                     return Ok(Selection::Stopped(Box::new(child), binding));
                 }
                 return Ok(Selection::Quiet);
@@ -273,7 +298,7 @@ pub async fn select(
             if !(active || addressed || child.is_some() && settings.reply_mode.as_deref()==Some("all")) {
                 return Ok(if child.is_none() && settings.reply_mode.as_deref()==Some("all") {Selection::Legacy}else{Selection::Quiet});
             }
-            if !active && addressed && enabled {
+            if !active && addressed && enabled && target.facts().sender_kind == ThreadSenderKind::Human {
                 reserve(db, &channel, &settings, parent_id, &key, target, sender, agent, &mut child, session).await?;
             }
             let mut child = child.ok_or_else(not_found)?;
@@ -283,7 +308,7 @@ pub async fn select(
                     .return_document(ReturnDocument::After).session(&mut *session).await?.ok_or_else(not_found)?;
             }
 
-            let binding = binding(&child, source, sender, guest, agent);
+            let binding = binding(&child, source, sender, guest, agent, target.facts().sender_kind);
             // Policy is a request-lifetime projection, never a child snapshot.
             child.agent_id = Some(agent.into());
             child.members = settings.members;
@@ -301,8 +326,10 @@ fn binding(
     sender: &str,
     guest: bool,
     agent: &str,
+    sender_kind: ThreadSenderKind,
 ) -> ThreadTurnBinding {
     ThreadTurnBinding {
+        sender_kind: Some(sender_kind),
         child_id: child.id.clone(),
         source_message_id: source.into(),
         sender_id: sender.into(),

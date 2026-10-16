@@ -86,6 +86,8 @@ const BROKER_POLICY_REFRESH_INTERVAL_SECS: u64 = 5;
 /// Shared application state available to all handlers via Axum's State extractor.
 #[derive(Clone)]
 pub struct AppState {
+    #[cfg(test)]
+    pub(crate) local_machine_platform: Option<Arc<crate::test_utils::LocalMachinePlatform>>,
     pub db: DbHandle,
     pub config: AppConfig,
     pub jwt_keys: JwtKeys,
@@ -108,6 +110,10 @@ pub struct AppState {
         Arc<services::developer_webhook_service::DeveloperWebhookDispatcher>,
     /// Versioned encryption keys for AES-256-GCM (current + optional previous for rotation)
     pub encryption_keys: Arc<EncryptionKeys>,
+    /// Trusted workload-ticket verification for managed Node bootstrap. The
+    /// default remains closed until a real provider is integrated and accepted.
+    pub managed_bootstrap_verifier:
+        Arc<dyn services::remote_machine_bootstrap::BootstrapTicketVerifier>,
     /// WebSocket connection manager for credential nodes
     pub node_ws_manager: Arc<NodeWsManager>,
     /// Process and address identity used to fence node ownership.
@@ -372,6 +378,8 @@ async fn server_main() {
         other => other,
     };
 
+    services::assistant_engine_worker::initialize();
+
     // Load configuration
     let mut config = AppConfig::from_env();
     config.validate_ssh_runtime_config();
@@ -387,6 +395,9 @@ async fn server_main() {
         .await
         .expect("Failed to connect to database");
     services::assistant_nyxagent::warn_at_startup(&db).await;
+    services::assistant_access_policy::ensure_cutover(&db)
+        .await
+        .expect("Failed to read the immutable assistant skill-routing cutover");
 
     // Load JWT signing keys early: DB-backed CLI subcommands may audit-log
     // before the server state is built, and the audit-chain key can fall back
@@ -634,6 +645,20 @@ async fn server_main() {
         tracing::warn!("Unified collection migration encountered errors: {e}");
     }
 
+    // Retire pre-upgrade owner asks in bounded pending-row batches. The sweep is
+    // idempotent; failures retry on policy writes or the next startup.
+    if services::assistant_acknowledgement_service::retire_full_access_confirmations(
+        &db, None, None,
+    )
+    .await
+    .is_err()
+    {
+        tracing::error!(
+            code = "assistant_full_access_retirement_failed",
+            "Failed to retire obsolete Full-access confirmations; continuing startup"
+        );
+    }
+
     // --- Server startup ---
     tracing::info!("Starting NyxID authentication server");
     tracing::info!(port = config.port, issuer = %config.jwt_issuer, "Configuration loaded");
@@ -828,6 +853,8 @@ async fn server_main() {
         ),
     );
     let state = AppState {
+        #[cfg(test)]
+        local_machine_platform: None,
         db: db.clone(),
         config: config.clone(),
         jwt_keys,
@@ -840,6 +867,8 @@ async fn server_main() {
         connection_expiry_notifier,
         developer_webhook_dispatcher,
         encryption_keys: encryption_keys.clone(),
+        managed_bootstrap_verifier:
+            services::remote_machine_bootstrap_verifier::configured_verifier(),
         node_ws_manager,
         replica_identity,
         node_dispatch,
@@ -1049,12 +1078,20 @@ async fn server_main() {
 
     // NyxBot: destroy idle subagents and retry deferred team wake-ups.
     handlers::assistant_team::spawn_sweeps(state.clone());
+    services::platform_manager_transport::spawn_sweeps(
+        state.clone(),
+        services::platform_manager_transport::compose(
+            state.clone(),
+            handlers::assistant_team::owner_turn_settled_hook(state.clone()),
+        ),
+    );
     handlers::trigger_scheduler::spawn(state.clone());
     // Live assistant changes: one change stream for this process, and the
     // NyxBot reaction to finished links and new bots.
     handlers::nyxbot::spawn_live_dispatch(state.clone());
     handlers::machine_update::spawn(state.clone());
     services::machine_access_service::spawn(state.clone());
+    services::remote_machine_manager::spawn(state.clone());
     {
         let live = state.assistant_live.clone();
         let db = state.db.clone();
@@ -1480,7 +1517,11 @@ async fn server_main() {
             "X-API-Key".parse().unwrap(),
             "X-NyxID-Client".parse().unwrap(),
             "X-NyxID-Client-Version".parse().unwrap(),
+            "X-NyxID-Account-Deletion-Policy".parse().unwrap(),
         ]))
+        .expose_headers([axum::http::HeaderName::from_static(
+            mw::assistant_trace::TRACE_HEADER,
+        )])
         .allow_credentials(true);
 
     // Build router — public OAuth routes get open CORS (per RFC 9207),
@@ -1538,7 +1579,8 @@ async fn server_main() {
     .layer(Extension(global_rate_limiter))
     .layer(Extension(trusted_proxy_ranges))
     .layer(Extension(rate_limit_exempt_ips))
-    .layer(TraceLayer::new_for_http());
+    .layer(TraceLayer::new_for_http())
+    .layer(axum_mw::from_fn(mw::assistant_trace::assistant_trace));
 
     // Bind both listeners before serving. Internal routes never enter the
     // public router and therefore cannot be exposed by an ingress path rule.

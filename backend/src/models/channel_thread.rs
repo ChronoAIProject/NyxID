@@ -39,9 +39,18 @@ pub enum ThreadAddress {
     Unknown,
 }
 
+/// Outbound Telegram topic evidence, independent of the inbound thread key.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum TelegramTopic {
+    Chat,
+    Topic { id: String },
+}
+
 #[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ChannelThreadFacts {
+    pub telegram_topic: Option<TelegramTopic>,
     pub version: u8,
     pub kind: ThreadKind,
     pub chat_id: String,

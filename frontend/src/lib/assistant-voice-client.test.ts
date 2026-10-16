@@ -232,7 +232,9 @@ describe("voice media boundaries", () => {
       }),
     });
     expect(snapshots).toHaveBeenLastCalledWith(
-      expect.objectContaining({ session: expect.objectContaining({ generation: 2 }) }),
+      expect.objectContaining({
+        session: expect.objectContaining({ generation: 2 }),
+      }),
     );
     expect(client.isClosed).toBe(false);
     await client.end();
@@ -284,8 +286,14 @@ it("Grok refuses automatic mode before creating a provider session", async () =>
 });
 
 it.each([
-  ["NotAllowedError", "Microphone permission was denied"],
-  ["NotFoundError", "No microphone found"],
+  [
+    "NotAllowedError",
+    "Microphone access was denied. Allow it in your browser settings, then try again.",
+  ],
+  [
+    "NotFoundError",
+    "No microphone was found. Connect a microphone and try again.",
+  ],
 ])("explains %s before contacting the server", async (name, message) => {
   microphone.mockRejectedValue(
     new DOMException("private device information", name),
@@ -414,4 +422,111 @@ it("bounds ICE gathering and cancels without creating a session", async () => {
   expect(error).toHaveBeenCalledWith("WebRTC negotiation failed");
   expect(mocks.create).not.toHaveBeenCalled();
   expect(track.stop).toHaveBeenCalled();
+});
+
+it("acquires microphone before saving preferences and identifies settings failure without contacting provider", async () => {
+  const error = vi.fn();
+  const save = vi.fn(async () => {
+    expect(microphone).toHaveBeenCalledOnce();
+    throw new Error("private detail");
+  });
+  const client = new AssistantVoiceClient("thread", vi.fn(), error);
+  const started = client.start(preferences, "openai_live", save);
+  expect(microphone).toHaveBeenCalledOnce();
+  await started;
+  expect(error).toHaveBeenCalledWith(
+    "Voice preferences could not be saved. Please try again.",
+  );
+  expect(mocks.create).not.toHaveBeenCalled();
+  expect(track.stop).toHaveBeenCalledOnce();
+});
+
+it.each(["openai_live", "xai_realtime"] as const)(
+  "uses the gesture-prepared selected microphone for %s without recapture, then releases that owner on end",
+  async (protocol) => {
+    const { PreparedMicrophone } = await import("./microphone-capture");
+    const prepared = new PreparedMicrophone("usb");
+    expect(microphone).toHaveBeenCalledOnce();
+    const client = new AssistantVoiceClient("thread", vi.fn(), vi.fn());
+    try {
+      await client.start(
+        {
+          ...preferences,
+          input_mode:
+            protocol === "xai_realtime" ? "push_to_talk" : "automatic",
+        },
+        protocol,
+        undefined,
+        prepared,
+        "different-current-selection",
+      );
+      expect(microphone).toHaveBeenCalledOnce();
+      expect(microphone).toHaveBeenCalledWith(
+        expect.objectContaining({
+          audio: expect.objectContaining({ deviceId: { exact: "usb" } }),
+        }),
+      );
+      if (protocol === "openai_live")
+        expect(Peer.current.addTrack).toHaveBeenCalled();
+      expect(track.enabled).toBe(false);
+      Socket.current.snapshot();
+      expect(track.enabled).toBe(false); // Backend admission alone is insufficient.
+      if (protocol === "xai_realtime") client.hold(true);
+      else
+        Peer.current.channel.onmessage?.({
+          data: JSON.stringify({ type: "session.started" }),
+        });
+      expect(track.enabled).toBe(true);
+    } finally {
+      await client.end();
+      prepared.close();
+    }
+    expect(prepared.isClosed).toBe(true);
+    expect(track.stop).toHaveBeenCalledOnce();
+  },
+);
+
+it.each(["openai_live", "xai_realtime"] as const)(
+  "opens the selected microphone synchronously on a direct %s start",
+  async (protocol) => {
+    const client = new AssistantVoiceClient("thread", vi.fn(), vi.fn());
+    const starting = client.start(
+      {
+        ...preferences,
+        input_mode: protocol === "xai_realtime" ? "push_to_talk" : "automatic",
+      },
+      protocol,
+      undefined,
+      undefined,
+      "selected-usb",
+    );
+    try {
+      expect(microphone).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({
+          audio: expect.objectContaining({
+            deviceId: { exact: "selected-usb" },
+          }),
+        }),
+      );
+      await starting;
+      expect(mocks.create).toHaveBeenCalledOnce();
+    } finally {
+      await client.end();
+      await starting;
+    }
+    expect(track.stop).toHaveBeenCalledOnce();
+  },
+);
+
+it("cancelled gesture preparation cannot create a metered voice session", async () => {
+  const { PreparedMicrophone } = await import("./microphone-capture");
+  const prepared = new PreparedMicrophone();
+  await prepared.ready;
+  prepared.close();
+  const error = vi.fn();
+  const client = new AssistantVoiceClient("thread", vi.fn(), error);
+  await client.start(preferences, "openai_live", undefined, prepared);
+  expect(mocks.create).not.toHaveBeenCalled();
+  expect(mocks.post).not.toHaveBeenCalled();
+  expect(client.isClosed).toBe(true);
 });

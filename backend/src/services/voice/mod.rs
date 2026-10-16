@@ -3,8 +3,11 @@ pub mod confirmation;
 #[cfg(test)]
 mod confirmation_tests;
 mod control;
+#[cfg(test)]
+mod credential_tests;
 pub mod credentials;
 pub mod diagnostics;
+pub mod dictation;
 pub mod grok;
 pub mod grok_runtime;
 pub mod openai;

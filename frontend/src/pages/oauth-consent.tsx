@@ -1,6 +1,9 @@
-import { useQuery } from "@tanstack/react-query";
+import { MachineGrantConsent } from "@/components/shared/machine-grant-consent";
+import { readMachineConsentScope } from "@/schemas/machine-grants";
+import { readProtectedConsentRequest } from "@/hooks/use-machine-grants";
 import {
   useCallback,
+  useEffect,
   useLayoutEffect,
   useMemo,
   useRef,
@@ -33,7 +36,6 @@ import { NyxidIcon } from "@/components/brand/nyxid-icon";
 import { DetailRow } from "@/components/shared/detail-row";
 import { ErrorBanner } from "@/components/shared/error-banner";
 import { useUserServices } from "@/hooks/use-user-services";
-import { api } from "@/lib/api-client";
 import { cn } from "@/lib/utils";
 import {
   oauthConsentServiceAccessSchema,
@@ -161,14 +163,20 @@ export function OAuthConsentPage({
 }
 
 function StoredIncrementalConsent({ handle }: { readonly handle: string }) {
-  const { data, isPending, isError } = useQuery({
-    queryKey: ["oauth-consent-request", handle],
-    queryFn: () =>
-      api.get<{ token: string }>(
-        `/users/me/oauth-consent-requests/${encodeURIComponent(handle)}`,
-      ),
-    retry: false,
-  });
+  const owner = useAuthStore((state) => state.user?.id);
+  const [request, setRequest] = useState<{ token?: string; owner?: string; failed?: boolean }>({});
+  useEffect(() => {
+    if (!owner) return;
+    const abort = new AbortController();
+    void readProtectedConsentRequest(handle, abort.signal).then((token) => {
+      if (!abort.signal.aborted) setRequest({ token, owner });
+    }).catch(() => {
+      if (!abort.signal.aborted) setRequest({ failed: true, owner });
+    });
+    return () => abort.abort();
+  }, [handle, owner]);
+  const isPending = !request.token && !request.failed || request.owner !== owner;
+  const isError = request.failed === true;
   if (isPending || isError) {
     return (
       <main className="mx-auto flex min-h-dvh max-w-xl items-center px-4">
@@ -181,7 +189,7 @@ function StoredIncrementalConsent({ handle }: { readonly handle: string }) {
     );
   }
   const parsed = readIncrementalConsentRequest(
-    new URLSearchParams({ consent_request: data.token }),
+    new URLSearchParams({ consent_request: request.token ?? "" }),
   );
   return parsed ? (
     <OAuthIncrementalConsentPage {...parsed} />
@@ -330,6 +338,8 @@ function StandardConsentPage({
     search.get("external_subject_external_user_id") ?? "";
   const bindingGrantId = search.get("binding_grant_id") ?? "";
   const consentRequest = search.get("consent_request") ?? "";
+  const [preparedMachineRequest, setPreparedMachineRequest] = useState<string | null>(null);
+  const machineScope = scope.split(/\s+/).includes("machine") || Boolean(readMachineConsentScope(consentRequest)?.scope.split(/\s+/).includes("machine"));
   // Server-resolved hints: the app's declared default services matched to
   // this user (fixed on the consent screen), and declared services the
   // user has no match for (informational only).
@@ -338,19 +348,16 @@ function StandardConsentPage({
   const currentBindingAllowsAllServices =
     search.get("current_binding_allow_all_services") === "true";
   const isLarkBinding = externalSubjectPlatform.toLowerCase() === "lark";
-  // Agent apps (Claude, Codex and other MCP clients) request `proxy`. They
-  // read every service by default and only write where the user explicitly
-  // allows it; binding reviews keep their own grant flow.
+  // Agent apps requesting `proxy` choose service grants; binding reviews
+  // keep their own grant flow.
   const agentAccess = !bindingReview && scope.split(/\s+/).includes("proxy");
   const [allowAllServices, setAllowAllServices] = useState(
     bindingReview && currentBindingAllowsAllServices,
   );
-  // Every service is readable by default; services the app asked for can
-  // never be turned off.
-  const [defaultLevel, setDefaultLevel] = useState<AccessLevel>("read");
+  const [defaultLevel, setDefaultLevel] = useState<AccessLevel>("off");
   const [levelOverrides, setLevelOverrides] = useState<
     Readonly<Record<string, AccessLevel>>
-  >({});
+  >(() => Object.fromEntries(preselectServiceIds.map((id) => [id, "allow"])));
   const [customize, setCustomize] = useState(bindingReview);
   const [selectedServiceIds, setSelectedServiceIds] = useState<
     readonly string[]
@@ -486,20 +493,17 @@ function StandardConsentPage({
         secondary: serviceSecondaryText(service),
         orgName: serviceOrgName(service),
         requiredByApp:
-          preselectServiceIds.includes(service.id) ||
           resourceSelectedServiceIds.includes(service.id) ||
           requiredServiceIds.includes(service.id),
       })),
-    [
-      selectableServices,
-      preselectServiceIds,
-      resourceSelectedServiceIds,
-      requiredServiceIds,
-    ],
+    [selectableServices, resourceSelectedServiceIds, requiredServiceIds],
   );
   const grant = agentGrant(accessRows, defaultLevel, levelOverrides);
   const submittedAccess = agentAccess
-    ? { allow_all_services: grant.allowAll, allowed_service_ids: grant.readIds }
+    ? {
+        allow_all_services: grant.allowAll,
+        allowed_service_ids: grant.serviceIds,
+      }
     : serviceAccess;
 
   function changeDefaultLevel(level: AccessLevel) {
@@ -978,6 +982,7 @@ function StandardConsentPage({
         </details>
       </div>
 
+      {machineScope && <MachineGrantConsent consentRequest={consentRequest} onPrepared={setPreparedMachineRequest} disabled={Boolean(preview)} allowedServiceIds={submittedAccess.allow_all_services ? undefined : submittedAccess.allowed_service_ids} />}
       <form
         method="POST"
         action="/oauth/authorize/decision"
@@ -999,7 +1004,7 @@ function StandardConsentPage({
           value={codeChallengeMethod}
         />
         <input type="hidden" name="nonce" value={nonce} />
-        <input type="hidden" name="consent_request" value={consentRequest} />
+        <input type="hidden" name="consent_request" value={preparedMachineRequest ?? consentRequest} />
         {prompt && <input type="hidden" name="prompt" value={prompt} />}
         {externalSubjectPlatform && (
           <input
@@ -1047,26 +1052,13 @@ function StandardConsentPage({
             value={resource}
           />
         ))}
-        {agentAccess && (
-          <input type="hidden" name="write_access" value={grant.writeMode} />
-        )}
-        {agentAccess &&
-          grant.writeMode === "selected" &&
-          grant.writeIds.map((serviceId) => (
-            <input
-              key={`write-${serviceId}`}
-              type="hidden"
-              name="write_service_ids"
-              value={serviceId}
-            />
-          ))}
 
         <Button
           type="submit"
           variant="primary"
           name="decision"
           value="allow"
-          disabled={Boolean(preview)}
+          disabled={Boolean(preview) || (machineScope && !preparedMachineRequest)}
           className={cn("w-full", agentAccess && "lg:w-auto lg:min-w-44")}
         >
           {bindingReview ? "Update access" : "Allow access"}

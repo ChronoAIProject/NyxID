@@ -180,9 +180,11 @@ nyxid login --base-url http://localhost:3001 --agent-key --no-wait --output json
   --expiry-days 30 --platform codex
 ```
 
-Share **`verification_uri_complete`** from the JSON result. The CLI constructs and
-encodes the link; no JavaScript wrapper is needed. It also returns the public
-`user_code`, bare `verification_uri`, local `request_id`, expiry and poll interval.
+Share **`verification_uri_complete`** and **`user_code` separately** from the JSON
+result. The human must copy/paste the code into the approval page. Never append it
+to the link. The CLI constructs a URL with approval preferences only; the field
+name is retained for compatibility. It also returns the bare `verification_uri`,
+local `request_id`, expiry and poll interval.
 The polling secret stays local; `--no-wait` neither opens a browser nor polls.
 
 `--scopes` requests NyxID permissions. `--service` requests catalog slugs;

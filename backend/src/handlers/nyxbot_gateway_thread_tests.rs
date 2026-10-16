@@ -9,6 +9,7 @@ use crate::{
         channel_thread_service as threads,
     },
 };
+use futures::TryStreamExt;
 use wiremock::{Mock, MockServer, ResponseTemplate, matchers::*};
 
 struct Fixture {
@@ -39,6 +40,9 @@ impl Fixture {
         row.gateway_channel_id = Some("cmaeg1.ch.test".into());
         row.gateway_bot_id = Some("ou_bot".into());
         row.gateway_version = Some(1);
+        row.gateway_bot_mentions.supported = true;
+        row.gateway_bot_mentions.enabled = true;
+        row.gateway_bot_mentions.checked_at = Some(Utc::now());
         row.gateway_threads.supported = true;
         row.gateway_threads.version = Some(1);
         row.gateway_threads.enabled = true;
@@ -560,7 +564,7 @@ async fn gateway_negotiation_requires_advertisement_and_echo_and_backs_off_legac
         .collection::<NyxbotChannel>(CHANNELS)
         .update_one(
             doc! {"_id":&f.row.id},
-            doc! {"$unset":{"gateway_threads":""}},
+            doc! {"$unset":{"gateway_threads":""}, "$set":{"gateway_bot_mentions.supported":false,"gateway_bot_mentions.enabled":false,"gateway_bot_mentions.checked_at":bson::DateTime::now()}},
         )
         .await
         .unwrap();
@@ -625,4 +629,298 @@ async fn gateway_negotiation_requires_advertisement_and_echo_and_backs_off_legac
     assert!(threads::gateway::negotiated(
         &load_channel(&f.state, OWNER, &f.row.id).await.unwrap()
     ));
+}
+
+#[tokio::test]
+async fn nyxbot_followed_thread_images_use_native_components_before_direct_or_gateway_text() {
+    use crate::models::{
+        assistant_attachment::AssistantAttachment, assistant_conversation::TurnAttachment,
+    };
+    for gateway in [false, true] {
+        let f = Box::pin(Fixture::new("nyxbot_follow_images")).await;
+        let (body, id) = f.input("start", ThreadAddress::Mention, false, true).await;
+        assert!(f.send(&body, &id).await.contains("Here is your answer"));
+        let child = f.children().await.remove(0);
+        let mut row = engine::get(
+            &f.state.db,
+            OWNER,
+            child.conversation_id.as_deref().unwrap(),
+        )
+        .await
+        .unwrap();
+        let origin = row.channel.clone().unwrap();
+        let turn_id = Uuid::new_v4().to_string();
+        row.active_turn=Some(bson::from_document(doc! {"turn_id":&turn_id,"origin":"event","started_at":bson::DateTime::now(),"stop_requested":false}).unwrap());
+        if !gateway {
+            f.state
+                .db
+                .collection::<bson::Document>(CHANNELS)
+                .update_one(doc! {"_id":&f.row.id}, doc! {"$set":{"transport":"direct"}})
+                .await
+                .unwrap();
+        }
+        let mut attachments = Vec::new();
+        for _ in 0..2 {
+            let attachment = AssistantAttachment {
+                id: Uuid::new_v4().to_string(),
+                origin: "tool".into(),
+                user_id: OWNER.into(),
+                conversation_id: row.id.clone(),
+                turn_id: turn_id.clone(),
+                content_type: "image/png".into(),
+                size: 6,
+                data_encrypted: f.state.encryption_keys.encrypt(b"pixels").await.unwrap(),
+                created_at: Utc::now(),
+            };
+            f.state
+                .db
+                .collection::<AssistantAttachment>(
+                    crate::models::assistant_attachment::COLLECTION_NAME,
+                )
+                .insert_one(&attachment)
+                .await
+                .unwrap();
+            attachments.push(TurnAttachment {
+                id: attachment.id,
+                label: "private label".into(),
+                content_type: "image/png".into(),
+                size: 6,
+                origin: "tool".into(),
+                pages: None,
+                chat_delivery: None,
+                image_input: None,
+            });
+        }
+        Mock::given(path("/open-apis/im/v1/images"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"code":0,"data":{"image_key":"image"}})),
+            )
+            .expect(2)
+            .mount(&f.platform)
+            .await;
+        let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let seen = count.clone();
+        Mock::given(path("/open-apis/im/v1/messages/om_root/reply")).and(body_partial_json(json!({"reply_in_thread":true})))
+            .respond_with(move |r:&wiremock::Request| {
+                let body:Value=r.body_json().unwrap();
+                if body["msg_type"]=="image" {seen.fetch_add(1,std::sync::atomic::Ordering::SeqCst);}else{assert_eq!(seen.load(std::sync::atomic::Ordering::SeqCst),2);}
+                assert!(!body.to_string().contains("private label"));
+                ResponseTemplate::new(200).set_body_json(json!({"code":0,"data":{"message_id":format!("om_sent_{}",Uuid::new_v4().simple())}}))
+            }).expect(if gateway{2}else{3}).mount(&f.platform).await;
+        let seen = count.clone();
+        Mock::given(path("/events/cmaeg1.ev.sealed-reference/replies"))
+            .respond_with(move |r: &wiremock::Request| {
+                assert_eq!(seen.load(std::sync::atomic::Ordering::SeqCst), 2);
+                let body: Value = r.body_json().unwrap();
+                assert_eq!(body["thread_reply"], true);
+                assert_eq!(body["text"], "event result");
+                ResponseTemplate::new(200).set_body_json(json!({"ok":true}))
+            })
+            .expect(u64::from(gateway))
+            .mount(&f.gateway)
+            .await;
+        deliver_to(
+            &f.state,
+            &row,
+            &origin,
+            "event result",
+            Some(&images::ImageSendPlan { attachments }),
+        )
+        .await;
+        assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 2);
+        let requests = f.platform.received_requests().await.unwrap();
+        let replies: Vec<_> = requests
+            .iter()
+            .filter(|request| request.url.path().ends_with("/reply"))
+            .collect();
+        for request in replies {
+            assert_eq!(
+                request.url.path(),
+                "/open-apis/im/v1/messages/om_root/reply"
+            );
+            let body: Value = request.body_json().unwrap();
+            assert_eq!(body["reply_in_thread"], true);
+            if body["msg_type"] == "image" {
+                let content: Value =
+                    serde_json::from_str(body["content"].as_str().unwrap()).unwrap();
+                assert_eq!(content["image_key"], "image");
+            }
+        }
+        assert!(
+            !requests
+                .iter()
+                .any(|request| request.url.path() == "/open-apis/im/v1/messages")
+        );
+        f.platform.verify().await;
+        f.gateway.verify().await;
+        let claims = f
+            .state
+            .db
+            .collection::<crate::models::nyxbot_image_delivery::NyxbotImageDelivery>(
+                crate::models::nyxbot_image_delivery::COLLECTION_NAME,
+            )
+            .find(doc! {"conversation_id":&row.id})
+            .await
+            .unwrap()
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap();
+        assert_eq!(claims.len(), 2);
+        assert!(
+            claims
+                .iter()
+                .all(|i| i.state == crate::models::nyxbot_image_delivery::ImageDeliveryState::Sent)
+        );
+        f.state.db.drop().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn gateway_complete_thread_reply_uses_one_token_and_reconstructs_every_part() {
+    use crate::handlers::channel_relay::{
+        AsyncReplyBody, AsyncReplyRequest, async_reply_with_test_adapter,
+    };
+    let f = Box::pin(Fixture::new("nyx_gw_complete_reply")).await;
+    let (body, id) = f.input("start", ThreadAddress::Mention, false, true).await;
+    assert!(f.send(&body, &id).await.contains("Here is your answer"));
+    let counter = std::sync::atomic::AtomicUsize::new(1);
+    Mock::given(method("POST"))
+        .and(path("/open-apis/im/v1/messages/om_root/reply"))
+        .and(body_partial_json(json!({"reply_in_thread":true})))
+        .respond_with(move |_: &wiremock::Request| ResponseTemplate::new(200).set_body_json(json!({
+            "code":0,"data":{"message_id":format!("om_part_{}", counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst))}
+        }))).mount(&f.platform).await;
+    let token = crate::crypto::jwt::generate_relay_reply_token(
+        &f.state.jwt_keys,
+        &f.state.config,
+        &f.row.route_api_key_id,
+        f.row.route_id.as_deref().unwrap(),
+        &id,
+        "lark",
+    )
+    .unwrap();
+    let mut headers = HeaderMap::new();
+    headers.insert("authorization", format!("Bearer {token}").parse().unwrap());
+    let adapter = thread_follow::TEST_ADAPTERS
+        .lock()
+        .unwrap()
+        .get(&f.row.channel_bot_id)
+        .cloned()
+        .unwrap();
+    let text = format!(
+        "{}\n\nhttps://example.com/complete-link",
+        "界🦉\\*\n\n".repeat(8000)
+    );
+    let request = || AsyncReplyRequest {
+        message_id: id.clone(),
+        thread_reply: true,
+        reply: AsyncReplyBody {
+            text: Some(text.clone()),
+            metadata: None,
+            attachments: vec![],
+        },
+    };
+    let result = Box::pin(async_reply_with_test_adapter(
+        &f.state,
+        &headers,
+        request(),
+        adapter.as_ref(),
+    ))
+    .await
+    .unwrap();
+    assert!(
+        result
+            .0
+            .platform_message_id
+            .unwrap()
+            .starts_with("om_part_")
+    );
+    let requests: Vec<_> = f
+        .platform
+        .received_requests()
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|r| r.url.path() == "/open-apis/im/v1/messages/om_root/reply")
+        .collect();
+    assert!(requests.len() > 1);
+    let mut reconstructed = String::new();
+    for request in &requests {
+        let body: Value = serde_json::from_slice(&request.body).unwrap();
+        assert_eq!(body["reply_in_thread"], true);
+        let content = body["content"].as_str().unwrap();
+        assert!(content.len() <= 30 * 1024);
+        let content: Value = serde_json::from_str(content).unwrap();
+        reconstructed.push_str(content["text"].as_str().unwrap());
+    }
+    assert_eq!(reconstructed, text);
+    assert!(
+        Box::pin(async_reply_with_test_adapter(
+            &f.state,
+            &headers,
+            request(),
+            adapter.as_ref()
+        ))
+        .await
+        .is_err()
+    );
+    let record = f
+        .state
+        .db
+        .collection::<bson::Document>(crate::models::channel_reply_delivery::COLLECTION_NAME)
+        .find_one(doc! {"inbound_message_id": &id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(record.get_bool("complete").unwrap());
+    assert_eq!(record.get_array("parts").unwrap().len(), requests.len());
+}
+
+#[tokio::test]
+async fn external_bot_mention_in_followed_thread_is_a_guest_and_spends_the_parent_budget() {
+    let f = Box::pin(Fixture::new("external_bot_follow")).await;
+    let (human, id) = f.input("start", ThreadAddress::Mention, false, true).await;
+    assert!(f.send(&human, &id).await.contains("Here is your answer"));
+    let child = f.children().await.remove(0);
+    settle(&f.state, child.conversation_id.as_deref().unwrap()).await;
+    // A delivered app actor, not a sender who has linked an OAuth account.
+    let (mut body, id) = f
+        .input("exact mention", ThreadAddress::Mention, false, true)
+        .await;
+    let activity = &mut body["event_context"]["activity"];
+    activity["actor"]["kind"] = json!("bot");
+    activity["actor"]["id"] = json!("ou_foreign_bot");
+    activity["thread"]["sender_kind"] = json!("bot");
+    f.state.db.collection::<ChannelMessage>(MESSAGES).update_one(doc! {"_id": &id},
+        doc! {"$set":{"sender_platform_id":"ou_foreign_bot","thread_context":bson::to_bson(&activity["thread"]).unwrap()}}).await.unwrap();
+    let text = f.send(&body, &id).await;
+    assert!(text.contains("Here is your answer"), "{text}");
+    assert!(text.contains("\"thread_reply\":true"), "{text}");
+    let children = f.children().await;
+    assert_eq!(children.len(), 1);
+    assert_eq!(children[0].id, child.id);
+    assert_eq!(
+        children[0].follow.follow_expires_at, child.follow.follow_expires_at,
+        "a bot cannot renew follow"
+    );
+    let conversation = crate::services::assistant_nyxagent::get(
+        &f.state.db,
+        OWNER,
+        children[0].conversation_id.as_deref().unwrap(),
+    )
+    .await
+    .unwrap();
+    assert!(conversation.guest_turn);
+    assert!(
+        conversation
+            .channel
+            .as_ref()
+            .unwrap()
+            .thread
+            .as_ref()
+            .unwrap()
+            .guest
+    );
+    assert_eq!(f.calls.lock().await.len(), 2);
 }

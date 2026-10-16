@@ -108,6 +108,7 @@ pub async fn in_progress(
         .collect())
 }
 
+/// An unbound event: it proves nothing about NyxBot involvement.
 pub fn event(kind: &str, text: String, agent_id: Option<&str>) -> AgentEvent {
     AgentEvent {
         id: Uuid::new_v4().to_string(),
@@ -116,8 +117,21 @@ pub fn event(kind: &str, text: String, agent_id: Option<&str>) -> AgentEvent {
         agent_id: agent_id.map(str::to_owned),
         question_key: None,
         reply_to: Vec::new(),
+        bound: false,
+        report_to: None,
         created_at: Utc::now(),
     }
+}
+
+/// An event whose producer proved `report_to` from a validated source; `None`
+/// proves new owner work.
+pub fn bound_event(
+    kind: &str,
+    text: String,
+    agent_id: Option<&str>,
+    report_to: Option<&str>,
+) -> AgentEvent {
+    event(kind, text, agent_id).bound_to(report_to)
 }
 
 fn not_found() -> AppError {
@@ -542,6 +556,7 @@ async fn create_thread_with_kind(
 ) -> AppResult<AssistantConversation> {
     let now = Utc::now();
     let mut row = AssistantConversation {
+        platform_thread: None,
         machine_previews: false,
         platform_cleanup_pending: false,
         platform_cleanup_id: None,
@@ -609,7 +624,7 @@ async fn create_thread_with_kind(
         )
         .session(&mut *session)
         .await?;
-    if !automation_thread && actor == agent.user_id {
+    if !automation_thread && row.platform_thread.is_none() && actor == agent.user_id {
         db.collection::<AssistantAgent>(AGENTS)
             .update_one(
                 doc! {"_id": &agent.id, "home_conversation_id": bson::Bson::Null},
@@ -648,13 +663,15 @@ pub async fn home_thread_for(
         && let Some(row) = db
             .collection::<AssistantConversation>(CONVERSATIONS)
             .find_one(doc! {"_id": id, "user_id": actor,
-            "channel": bson::Bson::Null, "automation_thread": {"$ne": true}})
+            "channel": bson::Bson::Null, "platform_thread": bson::Bson::Null,
+            "automation_thread": {"$ne": true}})
             .await?
     {
         return Ok(row);
     }
     let mut own = thread_filter_for(actor, agent);
     own.insert("channel", bson::Bson::Null);
+    own.insert("platform_thread", bson::Bson::Null);
     own.insert("automation_thread", doc! {"$ne": true});
     let newest = db
         .collection::<AssistantConversation>(CONVERSATIONS)
@@ -954,11 +971,23 @@ async fn create_specialist_inner(
         super::org_agent_service::require_creation_enabled(db, actor).await?;
     }
     let planned = if let Some(a) = authority {
+        let db = db.clone();
+        let a = a.clone();
         let mut session = db.client().start_session().await?;
-        session.start_transaction().await?;
-        let row =
-            super::platform_provisioning_service::fence_authority(db, a, &mut session).await?;
-        session.abort_transaction().await?;
+        let row = session
+            .start_transaction()
+            .and_run2(async move |session| {
+                let row = transactions::transaction_result(
+                    super::platform_provisioning_service::fence_authority(&db, &a, session).await,
+                )?;
+                // The preflight only checks authority; roll back its fences.
+                // The runner also awaits rollback on rejection and retries
+                // transient write conflicts before returning an assessment.
+                session.abort_transaction().await?;
+                Ok(row)
+            })
+            .await
+            .map_err(transactions::map_transaction_error)?;
         Some(row)
     } else {
         None
@@ -1368,6 +1397,14 @@ pub async fn set_agent_policy(
     )
     .await;
     super::org_agent_service::audit_change(db, &actor.user_id, &updated, "policy").await;
+    if current.access_mode_override != updated.access_mode_override {
+        super::assistant_acknowledgement_service::retire_full_access_confirmations(
+            db,
+            None,
+            Some(&updated.id),
+        )
+        .await?;
+    }
     Ok(updated)
 }
 
@@ -1809,6 +1846,10 @@ pub async fn destroy(db: &Database, owner: &str, agent_id: &str) -> AppResult<As
                     .delete_many(doc! {"user_id": &row.user_id, "conversation_id": &row.id})
                     .session(&mut *session)
                     .await?;
+                    db.collection::<bson::Document>(super::assistant_service_execution::COLLECTION)
+                        .delete_many(doc! {"user_id":&row.user_id,"conversation_id":&row.id})
+                        .session(&mut *session)
+                        .await?;
                     db.collection::<bson::Document>(ACKS)
                         .update_many(
                             doc! {"user_id": &row.user_id, "conversation_id": &row.id,

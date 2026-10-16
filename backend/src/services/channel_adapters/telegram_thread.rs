@@ -37,7 +37,8 @@ impl TelegramAdapter {
             .ok_or_else(threads::unavailable)?;
         let mut reply = reply.clone();
         // Ignore conflicting caller routing metadata, including non-topic IDs.
-        reply.metadata = Some(serde_json::json!({ "message_thread_id": facts.native_thread_id }));
+        reply.metadata = crate::services::channel_image_audience::facts_thread("telegram", &facts)
+            .map(|id| serde_json::json!({ "message_thread_id": id }));
         reply.reply_to_platform_message_id = Some(facts.message_id);
         self.send_reply(http, credentials, &facts.chat_id, &reply)
             .await

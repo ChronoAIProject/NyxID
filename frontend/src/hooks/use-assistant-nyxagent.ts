@@ -46,37 +46,58 @@ function liveSend(
   attachmentIds?: string[],
   attachments?: readonly import("@/schemas/assistant-nyxagent").NyxAgentAttachment[],
   adoptExisting?: boolean,
+  acknowledgementId?: string,
+  model?: string,
 ) {
   const actorId = currentCreditsActor();
   const onFailed = (id: string, turnId: string, code: string) =>
     notifyTurnCredits(id, turnId, code, actorId);
-  if (attachmentIds?.length) {
+  if (attachmentIds?.length || acknowledgementId) {
     return nyxAgentTransport.send(conversationId, text, onAdopt, onFailed, {
       ...(!conversationId && agent ? { agent } : {}),
       attachmentIds,
       attachments,
       adoptExisting,
+      acknowledgementId,
+      model,
     });
   }
-  return conversationId || !agent
-    ? nyxAgentTransport.send(conversationId, text, onAdopt, onFailed)
-    : nyxAgentTransport.send(undefined, text, onAdopt, onFailed, { agent });
+  if (!model && (conversationId || !agent)) {
+    return nyxAgentTransport.send(conversationId, text, onAdopt, onFailed);
+  }
+  return nyxAgentTransport.send(conversationId, text, onAdopt, onFailed, {
+    ...(!conversationId && agent ? { agent } : {}),
+    ...(model ? { model } : {}),
+  });
 }
 
 /** The user-visible turn that resumes the assistant after an allowed card. */
 export function continuationText(acknowledgement: NyxAgentAcknowledgement): string {
+  const narration = "Then tell the user in one or two plain sentences what you did and the result.";
+  const instruction = continuationInstruction(acknowledgement);
+  return `${instruction} ${narration}`;
+}
+
+function continuationInstruction(acknowledgement: NyxAgentAcknowledgement): string {
   switch (acknowledgement.kind) {
     case "service":
       return `Approved: this chat may use ${
         acknowledgement.service_name ?? acknowledgement.service_slug ?? "the service"
       }. Continue.`;
     case "skills":
-      return `Skill proposal reviewed: ${acknowledgement.summary} NyxBot will resolve the exact version and ask you to confirm attaching it on a separate card. Do not request the skill again.`;
+      // An unrouted skills card attaches nothing and wakes nobody.
+      return acknowledgement.decider === "orchestrator"
+        ? `Skill proposal reviewed: ${acknowledgement.summary} NyxBot will resolve the exact version and apply the governing mode to attach it (automatic in Full access, otherwise an owner card). Do not request the skill again.`
+        : `Skill proposal reviewed: ${acknowledgement.summary} Nothing was attached and nobody else was asked; the user adds the skill from this agent's Skills editor. Do not request the skill again.`;
     case "operations":
       return `Approved: ${acknowledgement.summary} Continue within the updated operation scope.`;
+    case "machine":
+    case "saved_login":
+      return `Approved: ${acknowledgement.summary} Continue within the updated machine and saved-login grants.`;
     case "account":
       return "Approved: account management for this chat. Continue.";
     case "action":
+      if (acknowledgement.authored_skill) return `The skill publication was allowed: ${acknowledgement.summary}. Check the attached skills and tell the user which skill/version was attached to which agent. Do not publish it again.`;
       return `Confirmed: ${acknowledgement.summary} (acknowledgement_id ${acknowledgement.id}). Retry it now.`;
   }
 }
@@ -237,7 +258,7 @@ export function useNyxAgentAssistantChat({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [history.data]);
   const send = useCallback(
-    async (text: string, uploads?: UploadedMessage) => {
+    async (text: string, uploads?: UploadedMessage, model?: string) => {
       let draft: string | undefined;
       try {
         const id = selectedConversationId ?? uploads?.conversationId;
@@ -248,12 +269,15 @@ export function useNyxAgentAssistantChat({
         await liveSend(
           id, text, onConversationAdopted, draftAgent,
           uploads?.attachmentIds, uploads?.attachments, Boolean(id && !selectedConversationId),
+          undefined, model,
         );
       } finally {
         if (draft) setSendingDraft((current) => (current === draft ? undefined : current));
-        // A new thread changes its agent's summary. (Model routing is
-        // server-side, so there is no profile list to refresh.)
-        await queryClient.invalidateQueries({ queryKey: agentsKey }, { cancelRefetch: false });
+        // Provisioning on the first send can make the live model list available.
+        await Promise.all([
+          queryClient.invalidateQueries({ queryKey: agentsKey }, { cancelRefetch: false }),
+          queryClient.invalidateQueries({ queryKey: nyxBotQueryKeys.models(userId) }),
+        ]);
       }
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -287,14 +311,14 @@ export function useNyxAgentAssistantChat({
     new Map<string, { owner: string | undefined; acknowledgements: NyxAgentAcknowledgement[] }>(),
   );
   const decision = useMutation({
-    mutationFn: async ({ id, choice }: { id: string; choice: "allow" | "deny" }) => {
+    mutationFn: async ({ id, choice, acceptReducedScope }: { id: string; choice: "allow" | "deny"; acceptReducedScope?: boolean }) => {
       if (!selectedConversationId) throw new Error("Choose a conversation first.");
       const now = Date.now();
       if (now - lastDecision.current < 750) {
         throw new Error("Please wait a moment before deciding again.");
       }
       lastDecision.current = now;
-      return nyxAgentTransport.decide(selectedConversationId, id, choice);
+      return nyxAgentTransport.decide(selectedConversationId, id, choice, acceptReducedScope);
     },
     onSuccess: (acknowledgement, { choice }) => {
       // An allowed card resumes the assistant: the refusal told it to retry after
@@ -315,7 +339,8 @@ export function useNyxAgentAssistantChat({
         });
         return;
       }
-      void send(continuationText(acknowledgement)).catch(() => undefined);
+      void liveSend(selectedConversationId, continuationText(acknowledgement), onConversationAdopted,
+        undefined, undefined, undefined, undefined, acknowledgement.id).catch(() => undefined);
     },
     onSettled: async () => {
       await Promise.all([
@@ -343,6 +368,7 @@ export function useNyxAgentAssistantChat({
         conversationId,
         continuationForAll(queued.acknowledgements),
         onConversationAdopted,
+        undefined, undefined, undefined, undefined, queued.acknowledgements[0]?.id,
       ).catch(() => undefined);
     }
   });
@@ -402,6 +428,8 @@ export function useNyxAgentAssistantChat({
     send,
     retry: (id: string, messageId: string) =>
       nyxAgentTransport.retry(id, messageId, onConversationAdopted),
+    checkRecovery: (id: string, messageId: string) =>
+      nyxAgentTransport.checkRecovery(id, messageId),
     /** Reload the selected thread's transcript (after a context reset). */
     refreshHistory: async () => {
       if (selectedConversationId) await nyxAgentTransport.history(selectedConversationId);

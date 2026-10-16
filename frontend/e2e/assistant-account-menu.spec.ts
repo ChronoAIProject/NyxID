@@ -715,7 +715,7 @@ test("a panel survives unresolved draft adoption and the completed chat stays mo
   await page.keyboard.press("Escape");
   await expect(page.getByRole("main", { includeHidden: true }).getByText("A delayed draft", { exact: true })).toBeVisible();
   await expect(stopButton(page)).not.toBeVisible();
-  await expect(page.locator("textarea")).toBeEnabled();
+  await expect(page.locator("[data-composer-textbox]")).toBeEnabled();
 });
 
 test("an agent deep link keeps its panel through the latest-thread redirect", async ({ page }) => {

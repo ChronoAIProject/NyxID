@@ -477,6 +477,7 @@ async fn stale_incremental_binding_update_keeps_original_refresh_usable() {
             .map(|service| service.id.clone())
             .collect::<Vec<_>>(),
         false,
+        None,
     )
     .await
     .unwrap();

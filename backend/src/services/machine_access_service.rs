@@ -43,18 +43,38 @@ pub async fn ensure_indexes(db: &Database) -> AppResult<()> {
         )
         .upsert(true)
         .await?;
+    // The former unconditional index treated absent Assistant IDs as a shared
+    // null identity. External contexts have their own typed grant identity.
+    // Build the narrower replacement first, then retire the old definition.
     db.collection::<Document>(model::CONTEXTS)
         .create_index(
             IndexModel::builder()
                 .keys(doc! {"node_id":1,"owner_id":1,"agent_id":1,"actor_id":1,"group_id":1})
                 .options(
                     mongodb::options::IndexOptions::builder()
+                        .name(Some("assistant_context_identity".to_string()))
                         .unique(true)
+                        .partial_filter_expression(doc! {"agent_id":{"$type":"string"}})
                         .build(),
                 )
                 .build(),
         )
         .await?;
+    let old_index = "node_id_1_owner_id_1_agent_id_1_actor_id_1_group_id_1";
+    let existing: Vec<mongodb::IndexModel> = db
+        .collection::<Document>(model::CONTEXTS)
+        .list_indexes()
+        .await?
+        .try_collect()
+        .await?;
+    if existing
+        .iter()
+        .any(|i| i.options.as_ref().and_then(|o| o.name.as_deref()) == Some(old_index))
+    {
+        db.collection::<Document>(model::CONTEXTS)
+            .drop_index(old_index)
+            .await?;
+    }
     for (collection, keys) in [
         (
             model::LEASES,
@@ -321,6 +341,7 @@ async fn legacy_nyxbot_assignments(
 
 pub async fn assignment(db: &Database, chat: &ChatAuthority, node: &Node) -> AppResult<Assignment> {
     super::machine_service::caller(chat)?;
+    super::remote_machine_manager::require_execution(db, node).await?;
     let agent = super::org_agent_service::chat_agent(db, chat).await?;
     if agent.destroyed_at.is_some()
         || (agent.user_id != chat.user_id && node.user_id != agent.user_id)
@@ -725,73 +746,80 @@ pub async fn configure(
 
 /// Serialize grant writes and admission by writing the same agent row. Every
 /// v2 operation has a distinct renewable lease; no request-local ACL is cached.
-pub async fn admit(
-    db: &Database,
-    chat: &ChatAuthority,
-    node: &Node,
+pub fn admit<'a>(
+    db: &'a Database,
+    chat: &'a ChatAuthority,
+    node: &'a Node,
     operation: Operation,
-    args: &serde_json::Value,
-    job_id: Option<&str>,
-) -> AppResult<Option<Box<Authority>>> {
-    let access = Box::pin(authorize(db, chat, node, operation, args)).await?;
-    let login_binding = (operation == Operation::FillLogin && access.mode == "separated")
-        .then(|| args["login"].as_str().map(str::to_owned))
-        .flatten();
-    let profile = node
-        .machine
-        .as_ref()
-        .ok_or(AppError::MachineCapabilityDisabled)?;
-    if !profile.authority_v2() {
-        return Ok(None);
-    }
-    let agent = super::org_agent_service::chat_agent(db, chat).await?;
-    let conversation =
-        super::assistant_nyxagent::get(db, &chat.user_id, &chat.conversation_id).await?;
-    let context_id = uuid::Uuid::new_v4().to_string();
-    let authority = Box::new(Authority {
-        require_v2: !access.legacy,
-        context_id: context_id.clone(),
-        generation: 1,
-        mode: access.mode.clone(),
-        agent_id: agent.id.clone(),
-        owner_id: agent.user_id.clone(),
-        actor_id: chat.user_id.clone(),
-        group_id: conversation.group_id,
-        runtime_id: profile.runtime_id.clone(),
-        conversation_id: chat.conversation_id.clone(),
-        turn_id: chat
-            .turn_id
-            .clone()
-            .filter(|_| !chat.turn_stopped)
-            .ok_or(AppError::MachineTurnStopped)?,
-        lease_id: uuid::Uuid::new_v4().to_string(),
-        revision: access.revision,
-        expires_at_ms: Utc::now().timestamp_millis() + nyxid_machine::authority::LEASE_MS,
-        capabilities: access.capabilities,
-    });
-    let lease = model::Lease {
-        id: authority.lease_id.clone(),
-        node_id: node.id.clone(),
-        api_key_id: chat.api_key_id.clone(),
-        authority: authority.clone(),
-        job_id: job_id.map(str::to_owned),
-        expires_at: Utc::now() + chrono::Duration::hours(25),
-    };
-    let context = model::Context {
-        id: context_id,
-        node_id: node.id.clone(),
-        agent_id: agent.id,
-        owner_id: agent.user_id,
-        actor_id: chat.user_id.clone(),
-        group_id: authority.group_id.clone(),
-        generation: 1,
-        mode: access.mode.clone(),
-    };
-    let db = db.clone();
-    let mut session = db.client().start_session().await?;
-    let authority = session.start_transaction().and_run2(async move |session| {
+    args: &'a serde_json::Value,
+    job_id: Option<&'a str>,
+) -> futures::future::BoxFuture<'a, AppResult<Option<Box<Authority>>>> {
+    Box::pin(async move {
+        let access = Box::pin(authorize(db, chat, node, operation, args)).await?;
+        let login_binding = (operation == Operation::FillLogin && access.mode == "separated")
+            .then(|| args["login"].as_str().map(str::to_owned))
+            .flatten();
+        let profile = node
+            .machine
+            .as_ref()
+            .ok_or(AppError::MachineCapabilityDisabled)?;
+        if !profile.authority_v2() {
+            return Ok(None);
+        }
+        let agent = super::org_agent_service::chat_agent(db, chat).await?;
+        let conversation =
+            super::assistant_nyxagent::get(db, &chat.user_id, &chat.conversation_id).await?;
+        let context_id = uuid::Uuid::new_v4().to_string();
+        let authority = Box::new(Authority {
+            require_v2: !access.legacy,
+            context_id: context_id.clone(),
+            generation: 1,
+            mode: access.mode.clone(),
+            agent_id: agent.id.clone(),
+            owner_id: agent.user_id.clone(),
+            actor_id: chat.user_id.clone(),
+            group_id: conversation.group_id,
+            runtime_id: profile.runtime_id.clone(),
+            conversation_id: chat.conversation_id.clone(),
+            turn_id: chat
+                .turn_id
+                .clone()
+                .filter(|_| !chat.turn_stopped)
+                .ok_or(AppError::MachineTurnStopped)?,
+            lease_id: uuid::Uuid::new_v4().to_string(),
+            revision: access.revision,
+            expires_at_ms: Utc::now().timestamp_millis() + nyxid_machine::authority::LEASE_MS,
+            capabilities: access.capabilities,
+        });
+        let lease = model::Lease {
+            id: authority.lease_id.clone(),
+            node_id: node.id.clone(),
+            api_key_id: chat.api_key_id.clone(),
+            authority: authority.clone(),
+            job_id: job_id.map(str::to_owned),
+            expires_at: Utc::now() + chrono::Duration::hours(25),
+        };
+        let context = model::Context {
+            id: context_id,
+            node_id: node.id.clone(),
+            agent_id: agent.id,
+            owner_id: agent.user_id,
+            actor_id: chat.user_id.clone(),
+            group_id: authority.group_id.clone(),
+            generation: 1,
+            mode: access.mode.clone(),
+        };
+        let db = db.clone();
+        let node = node.clone();
+        let mut session = db.client().start_session().await?;
+        let authority = session.start_transaction().and_run2(async move |session| {
         let result=Box::pin(async {
             let mut lease = lease.clone();
+            let runtime = super::remote_machine_runtime::fence_execution_in_session(&db, &node, session).await?;
+            if let Some(cutoff) = runtime.funding_cutoff {
+                lease.authority.expires_at_ms = lease.authority.expires_at_ms.min(cutoff.timestamp_millis());
+            }
+            if lease.authority.expires_at_ms <= Utc::now().timestamp_millis() { return Err(refused()); }
             let capacity=db.collection::<Document>(NODES).update_one(doc!{"_id":&lease.node_id,"is_active":true},doc!{"$inc":{"machine_authority_admission_fence":1}}).session(&mut *session).await?;
             if capacity.matched_count!=1 {return Err(AppError::MachineAuthorityStale);}
             // v1 returns before this transaction. Idle sockets create no leases;
@@ -827,7 +855,8 @@ pub async fn admit(
             Ok(lease.authority)
         }).await; transactions::transaction_result(result)
     }).await.map_err(transactions::map_transaction_error)?;
-    Ok(Some(authority))
+        Ok(Some(authority))
+    })
 }
 
 /// Keep renewal independent of the requesting HTTP connection for background
@@ -869,6 +898,45 @@ pub(super) async fn renew_one(state: &crate::AppState, mut lease: model::Lease) 
     }
     lease.authority.expires_at_ms =
         Utc::now().timestamp_millis() + nyxid_machine::authority::LEASE_MS;
+    // Admission of the next lease shares the managed lifecycle/Billing fence;
+    // a pause or cutoff change cannot commit around this authority extension.
+    let mut session = state.db.client().start_session().await?;
+    session
+        .start_transaction()
+        .write_concern(mongodb::options::WriteConcern::majority())
+        .await?;
+    let runtime =
+        super::remote_machine_runtime::fence_execution_in_session(&state.db, &node, &mut session)
+            .await;
+    let runtime = match runtime {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            let _ = session.abort_transaction().await;
+            return Err(error);
+        }
+    };
+    if let Some(cutoff) = runtime.funding_cutoff {
+        lease.authority.expires_at_ms =
+            lease.authority.expires_at_ms.min(cutoff.timestamp_millis());
+    }
+    if lease.authority.expires_at_ms <= Utc::now().timestamp_millis() {
+        let _ = session.abort_transaction().await;
+        return Err(refused());
+    }
+    let fenced = state
+        .db
+        .collection::<Document>(model::LEASES)
+        .update_one(
+            doc! {"_id":&lease.id,"authority.expires_at_ms":{"$gt":Utc::now().timestamp_millis()}},
+            doc! {"$inc":{"renewal_fence":1_i64}},
+        )
+        .session(&mut session)
+        .await?;
+    if fenced.matched_count != 1 {
+        let _ = session.abort_transaction().await;
+        return Err(refused());
+    }
+    session.commit_transaction().await?;
     let expires = lease.authority.expires_at_ms;
     let result = send_control(state, &node, Operation::AuthorityRenew, lease.authority).await?;
     if result["accepted"] != true {
@@ -916,6 +984,7 @@ async fn dispatch_control(
     let mut request = nyxid_machine::Request {
         version: if authority.is_some() { 2 } else { 1 },
         authority,
+        external_authority: None,
         request_id: uuid::Uuid::new_v4().to_string(),
         node_id: node.id.clone(),
         operation,
@@ -933,6 +1002,12 @@ async fn dispatch_control(
 }
 
 pub(super) async fn revoke_one(state: &crate::AppState, row: Document) -> AppResult<()> {
+    if row
+        .get_str("kind")
+        .is_ok_and(|kind| matches!(kind, "external" | "external_lease" | "owner_job"))
+    {
+        return super::machine_external_service::revoke_outbox(state, row).await;
+    }
     let id = row.get_str("_id").map_err(|_| refused())?;
     let claim = uuid::Uuid::new_v4().to_string();
     let claimed=state.db.collection::<Document>(model::OUTBOX).find_one_and_update(doc!{"_id":id,"pending":true,"claim_until":{"$lte":bson::DateTime::now()}},
@@ -1068,7 +1143,7 @@ async fn renew_leases(state: &crate::AppState) -> AppResult<()> {
         let leases = state
             .db
             .collection::<model::Lease>(model::LEASES)
-            .find(doc! {})
+            .find(doc! {"authority":{"$exists":true},"kind":{"$ne":"external"}})
             .batch_size(128)
             .await?;
         // Bounded concurrency avoids one offline node delaying every lease.
@@ -1177,6 +1252,43 @@ async fn migrate_pending(state: &crate::AppState) -> AppResult<()> {
     LeaseStore::release(&state.db, &token).await?;
     result.unwrap_or(Ok(()))
 }
+
+async fn sweep_external_sources(
+    state: &crate::AppState,
+    cursor: &mut Option<String>,
+) -> AppResult<()> {
+    use super::coordination_service::{LeaseStore, cluster_lease_runtime};
+    let runtime = cluster_lease_runtime();
+    let Some(token) = runtime
+        .acquire(&state.db, "machine-external-source-cleanup")
+        .await?
+    else {
+        return Ok(());
+    };
+    let after = cursor.clone();
+    let result = runtime
+        .run_while_renewed(
+            &state.db,
+            &token,
+            Box::pin(async {
+                let batch = super::machine_external_grant_service::sweep_invalid_sources(
+                    &state.db,
+                    after.as_deref(),
+                    100,
+                )
+                .await?;
+                super::machine_external_source_service::sweep_expired_children(&state.db, 100)
+                    .await?;
+                Ok::<_, AppError>(batch.next_after)
+            }),
+        )
+        .await;
+    LeaseStore::release(&state.db, &token).await?;
+    if let Some(result) = result {
+        *cursor = result?;
+    }
+    Ok(())
+}
 /// Change streams provide prompt delivery; the leased sweep remains authoritative
 /// when streams disconnect or a replica restarts. Per-row claims fence duplicates.
 async fn watch_revocations(state: crate::AppState) {
@@ -1218,6 +1330,12 @@ pub fn spawn(state: crate::AppState) {
             if Box::pin(renew_leases(&renewal_state)).await.is_err() {
                 tracing::warn!("Machine authority renewal deferred; offline grace remains bounded");
             }
+            if Box::pin(super::machine_external_service::maintenance(&renewal_state))
+                .await
+                .is_err()
+            {
+                tracing::warn!("External machine maintenance deferred; authority remains bounded");
+            }
         }
     });
     let migration_state = state.clone();
@@ -1226,6 +1344,23 @@ pub fn spawn(state: crate::AppState) {
         loop {
             timer.tick().await;
             let _ = Box::pin(migrate_pending(&migration_state)).await;
+        }
+    });
+    let source_state = state.clone();
+    tokio::spawn(async move {
+        let mut cursor = None;
+        let mut timer = tokio::time::interval(std::time::Duration::from_secs(10));
+        timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            timer.tick().await;
+            if Box::pin(sweep_external_sources(&source_state, &mut cursor))
+                .await
+                .is_err()
+            {
+                tracing::warn!(
+                    "External Machine source cleanup deferred; live authority remains fenced"
+                );
+            }
         }
     });
     tokio::spawn(async move {

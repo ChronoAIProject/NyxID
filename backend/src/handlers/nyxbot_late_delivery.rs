@@ -23,13 +23,7 @@ pub(super) fn answer(text: &str, failed: bool) -> String {
         if text.trim().is_empty() {
             "I could not finish that. Please try again.".into()
         } else {
-            format!(
-                "{}{INCOMPLETE}",
-                excerpt(
-                    text.trim(),
-                    MAX_CHANNEL_REPLY_CHARS - INCOMPLETE.chars().count() - 2
-                )
-            )
+            format!("{text}{INCOMPLETE}")
         }
     } else {
         bounded_reply(text)
@@ -42,7 +36,7 @@ pub(super) async fn prepare(
     event: &str,
     channel: &NyxbotChannel,
     origin: &ChannelOrigin,
-    sender: &str,
+    sender: &Sender<'_>,
     guest: bool,
     addressed: bool,
 ) -> AppResult<()> {
@@ -53,6 +47,7 @@ pub(super) async fn prepare(
         .await?
         .ok_or_else(|| AppError::Conflict("Channel event already admitted".into()))?;
     let metadata = ChannelTurnDelivery {
+        sender_kind: Some(sender.kind),
         version: 1,
         state: if channel.transport == "gateway" {
             "waiting"
@@ -61,7 +56,7 @@ pub(super) async fn prepare(
         }
         .into(),
         origin: origin.clone(),
-        sender_id: sender.into(),
+        sender_id: sender.id.into(),
         guest,
         addressed,
         transport: channel.transport.clone(),
@@ -125,8 +120,9 @@ pub(super) fn provider_stream(
                 if delivery::claim_stream(&state.db, &event_key, status).await.unwrap_or(false) {
                     guard.disarm();
                     match outcome {
-                        Ok(text) => for frame in message_frames(&response_id, Some(&bounded_reply(&text))) {
-                            yield frame;
+                        Ok(text) => {
+                            let text = stream_images(&state, &event_key, &text, deadline.into_std()).await;
+                            for frame in message_frames(&response_id, Some(&text)) { yield frame; }
                         },
                         Err(code) => yield json!({"type": "response.failed", "response": {
                             "id": &response_id, "status": "failed",
@@ -275,16 +271,46 @@ async fn process_inner(state: &AppState, event_id: &str, gateway_only: bool) -> 
     let Some(message) = state.db.collection::<AssistantMessage>(MESSAGES).find_one(doc! {
         "user_id": &event.user_id, "conversation_id": conversation_id, "turn_id": turn_id, "role": "assistant",
     }).await? else { return Ok(()); };
-    let text = answer(&message.text, message.status != "completed");
+    let text = if let Some(code) = message.error_code.as_deref() {
+        let failure = if code == "capacity_exceeded" {
+            crate::services::assistant_turn_observability::capacity_message(
+                message
+                    .error_detail
+                    .as_ref()
+                    .and_then(|detail| detail.capacity_wait_ms),
+            )
+        } else {
+            engine::TurnError::new(code).message
+        };
+        if message.text.trim().is_empty() {
+            failure
+        } else {
+            format!("{}\n\n{}", message.text.trim(), failure)
+        }
+    } else {
+        answer(&message.text, message.status != "completed")
+    };
     // Preflight above can be slow: re-resolve authority immediately before the
     // irreversible barrier. Concurrent losers never reach a provider.
-    let Some((channel, _)) = eligible(state, &event, &d, &conversation).await? else {
+    let Some((channel, thread)) = eligible(state, &event, &d, &conversation).await? else {
         return Ok(());
     };
     let claim = Uuid::new_v4().to_string();
     if !delivery::claim_send(&state.db, event_id, &claim).await? {
         return Ok(());
     }
+    let report = event_images(
+        state,
+        &event,
+        &d,
+        &channel,
+        &thread,
+        &conversation,
+        &message,
+        None,
+    )
+    .await;
+    let text = super::images::append_failure(&text, &report);
     let result = dispatch(state, &event, &d, &channel, &conversation, &text).await;
     let status = match result {
         Ok(true) => "sent",
@@ -299,10 +325,90 @@ async fn process_inner(state: &AppState, event_id: &str, gateway_only: bool) -> 
         json!({
             "event_id": event.id, "conversation_id": conversation_id, "turn_id": turn_id,
             "transport": d.transport, "outcome": status,
+            "images_attempted": report.attempted, "images_sent": report.sent, "images_failed": report.failed,
+            "images_unknown": report.unknown, "images_skipped": report.skipped,
         }),
     )
     .await;
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn event_images(
+    state: &AppState,
+    event: &NyxbotEvent,
+    delivery: &ChannelTurnDelivery,
+    channel: &NyxbotChannel,
+    thread: &NyxbotThread,
+    conversation: &AssistantConversation,
+    message: &AssistantMessage,
+    deadline: Option<std::time::Instant>,
+) -> super::images::ImageReport {
+    use super::images::*;
+    if message.status != "completed" && message.text.trim().is_empty() {
+        return ImageReport::default();
+    }
+    let anchor = event_anchor(event, delivery);
+    report_or_failure(
+        state,
+        ImageSendContext {
+            owner: &event.user_id,
+            conversation_id: &conversation.id,
+            turn_id: &message.turn_id,
+            channel,
+            thread,
+            anchor,
+            audience: ImageAudience {
+                owner_private: !delivery.guest
+                    && (conversation.channel.is_none()
+                        || (thread.kind.as_deref() == Some("private") && thread.owner_chat)),
+            },
+            deadline,
+
+            initiated: None,
+            fence: None,
+        },
+        &ImageSendPlan {
+            attachments: message.attachments.clone(),
+        },
+    )
+    .await
+}
+
+async fn stream_images(
+    state: &AppState,
+    event_id: &str,
+    text: &str,
+    deadline: std::time::Instant,
+) -> String {
+    let result: AppResult<String> = async {
+        let Some(event) = state.db.collection::<NyxbotEvent>(EVENTS).find_one(doc! {"_id":event_id}).await? else {
+            return Ok(bounded_reply(text));
+        };
+        let (Some(delivery), Some(conversation_id), Some(turn_id)) = (&event.delivery, &event.conversation_id, &event.turn_id) else {
+            return Ok(bounded_reply(text));
+        };
+        let conversation = engine::get(&state.db, &event.user_id, conversation_id).await?;
+        let Some((channel, thread)) = eligible(state, &event, delivery, &conversation).await? else {
+            return Ok(bounded_reply(text));
+        };
+        let Some(message) = state.db.collection::<AssistantMessage>(MESSAGES).find_one(doc! {
+            "user_id": &event.user_id, "conversation_id": conversation_id, "turn_id": turn_id, "role":"assistant",
+        }).await? else { return Ok(bounded_reply(text)); };
+        let report = event_images(state, &event, delivery, &channel, &thread, &conversation, &message, Some(deadline)).await;
+        Ok(super::images::append_failure(&bounded_reply(text), &report))
+    }.await;
+    match result {
+        Ok(text) => text,
+        Err(error) => {
+            tracing::warn!(
+                code = error.error_code(),
+                event_id,
+                "Stream image preparation failed"
+            );
+            bounded_reply(text)
+        }
+    }
 }
 
 async fn eligible(
@@ -359,7 +465,19 @@ async fn eligible(
     {
         return Ok(None);
     }
-    let admitted = chats::admission(&channel, &thread, &d.sender_id, Some(d.addressed));
+    let admitted = if d.sender_kind == Some(crate::models::channel_thread::ThreadSenderKind::Bot) {
+        // Followed children inherit live consent from their settings chat,
+        // checked by validate_delivery above. Their own default member fields
+        // are not that policy. Every bot answer still retains guest authority.
+        if !d.guest
+            || (d.origin.thread.is_none() && !chats::bot_guest_allowed(&thread, Some(d.addressed)))
+        {
+            return Ok(None);
+        }
+        chats::Admission::Guest
+    } else {
+        chats::admission(&channel, &thread, &d.sender_id, Some(d.addressed))
+    };
     if d.origin.thread.is_none()
         && !matches!(
             (d.guest, admitted),
@@ -452,7 +570,15 @@ async fn dispatch(
     text: &str,
 ) -> AppResult<bool> {
     if d.origin.thread.is_some() && d.transport == "direct" {
-        thread_follow::send(state, &event.user_id, &d.origin, &conversation.id, text).await?;
+        thread_follow::send(
+            state,
+            &event.user_id,
+            &d.origin,
+            &conversation.id,
+            text,
+            None,
+        )
+        .await?;
         return Ok(true);
     }
     if d.transport == "direct" {

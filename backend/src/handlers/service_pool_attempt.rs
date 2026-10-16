@@ -1,5 +1,6 @@
 use super::*;
 use crate::models::usage_meter::{PoolAttemptAccounting, PoolAttemptOutcome, PoolCompletionCause};
+use tokio_stream::wrappers::ReceiverStream;
 
 #[derive(Clone)]
 pub(super) struct AttemptContext {

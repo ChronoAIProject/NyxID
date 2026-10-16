@@ -18,6 +18,7 @@ import { ServiceIcon } from "@/components/service-icon";
 
 interface ServiceCardProps {
   readonly service: DownstreamService;
+  readonly providerIconUrl?: string | null;
   readonly onDelete?: (id: string) => void;
   readonly isDeleting: boolean;
 }
@@ -25,6 +26,7 @@ interface ServiceCardProps {
 /* ── Service Card (NyxID) ── */
 export function ServiceCard({
   service,
+  providerIconUrl,
   onDelete,
   isDeleting,
 }: ServiceCardProps) {
@@ -76,7 +78,14 @@ export function ServiceCard({
       {/* Title + Badges row */}
       <div className="flex items-start justify-between gap-3">
         <div className="flex min-w-0 items-center gap-2.5">
-          <ServiceIcon slug={service.slug} iconUrl={service.icon_url} size="md" />
+          <ServiceIcon
+            slug={service.slug}
+            iconUrl={
+              service.icon_url ||
+              (service.offering_kind !== "tool" ? providerIconUrl : null)
+            }
+            size="md"
+          />
           <h3 className="truncate text-lg font-normal text-foreground">
             {service.name}
           </h3>

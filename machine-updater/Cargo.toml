@@ -15,6 +15,8 @@ dist = false
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
 futures = { workspace = true }
 tracing = { workspace = true }
 anyhow = "1"
@@ -35,12 +37,16 @@ urlencoding = "2.1"
 libc = "0.2"
 tempfile = "3"
 hex = "0.4"
-zeroize = "1"
+zeroize = { version = "1", features = ["serde"] }
 thiserror = "2"
 nyxid-machine = { path = "../machine" }
+jsonwebtoken = { version = "10.3", default-features = false, features = ["use_pem", "aws_lc_rs"] }
 
 [dev-dependencies]
 wiremock = "0.6"
 rcgen = "0.14"
 tokio-rustls = "0.26"
 tokio-tungstenite = { version = "0.29", features = ["rustls-tls-native-roots"] }
+
+[features]
+test-support = []

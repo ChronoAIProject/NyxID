@@ -193,6 +193,9 @@ pub struct UserCapabilitiesResponse {
     /// Whether the caller may read platform-wide admin usage (Admin,
     /// Operator, or a role carrying `nyxid:admin:usage:read`).
     pub read_admin_usage: bool,
+    pub read_feature_flags: bool,
+    pub create_feature_flags: bool,
+    pub manage_all_feature_flags: bool,
     /// Feature-flag keys enabled for this user on personal (non-org)
     /// surfaces, resolved server-side with specificity precedence:
     /// default -> global -> matching org -> user. Org-scoped pages
@@ -306,6 +309,8 @@ pub async fn get_me(
         role_service::can_manage_catalog(&state.db, &user_model, platform_role).await?;
     let read_admin_usage =
         role_service::can_read_admin_usage(&state.db, &user_model, platform_role).await?;
+    let feature_flags =
+        role_service::feature_flag_access(&state.db, &user_model, platform_role).await?;
     // Personal-surface feature-flag resolution: org-aware specificity, so an
     // org override can override the global baseline for its members
     // (sidebar, /assistant guard).
@@ -348,6 +353,9 @@ pub async fn get_me(
             manage_catalog,
             manage_tools,
             read_admin_usage,
+            read_feature_flags: feature_flags.read_all || feature_flags.manage_own,
+            create_feature_flags: feature_flags.manage_own,
+            manage_all_feature_flags: feature_flags.manage_all,
             enabled_features,
         },
     }))
@@ -492,8 +500,14 @@ pub async fn delete_me(
     State(state): State<AppState>,
     auth_user: AuthUser,
     tele: TelemetryContext,
-    _headers: HeaderMap,
+    headers: HeaderMap,
 ) -> AppResult<Json<DeleteAccountResponse>> {
+    super::login_client_context::require_first_party_human(&auth_user)?;
+    let deletion_policy = headers
+        .get(admin_user_service::ACCOUNT_DELETION_POLICY_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("");
+    admin_user_service::validate_account_deletion_policy(deletion_policy)?;
     let user_id = auth_user.user_id.to_string();
 
     // GDPR erasure: when telemetry is on, enqueue the PostHog
@@ -523,7 +537,7 @@ pub async fn delete_me(
             })?;
     }
 
-    admin_user_service::delete_current_user_cascade(&state.db, &user_id).await?;
+    admin_user_service::delete_current_user_cascade(&state.db, &user_id, deletion_policy).await?;
 
     let deleted_at = chrono::Utc::now().to_rfc3339();
     audit_service::log_for_user(
@@ -1125,6 +1139,9 @@ mod tests {
                 manage_catalog: false,
                 manage_tools: false,
                 read_admin_usage: false,
+                read_feature_flags: false,
+                create_feature_flags: false,
+                manage_all_feature_flags: false,
                 enabled_features: vec![],
             },
         };
@@ -1180,6 +1197,9 @@ mod tests {
                 manage_catalog: false,
                 manage_tools: false,
                 read_admin_usage: false,
+                read_feature_flags: false,
+                create_feature_flags: false,
+                manage_all_feature_flags: false,
                 enabled_features: vec![],
             },
         };
@@ -1226,6 +1246,9 @@ mod tests {
                 manage_catalog: false,
                 manage_tools: false,
                 read_admin_usage: false,
+                read_feature_flags: false,
+                create_feature_flags: false,
+                manage_all_feature_flags: false,
                 enabled_features: vec![],
             },
         };
@@ -1412,6 +1435,9 @@ mod tests {
                 manage_catalog: false,
                 manage_tools: false,
                 read_admin_usage: false,
+                read_feature_flags: false,
+                create_feature_flags: false,
+                manage_all_feature_flags: false,
                 enabled_features: vec![],
             },
         };
@@ -1442,3 +1468,7 @@ mod tests {
         assert_eq!(obj.len(), expected_keys.len());
     }
 }
+
+#[cfg(test)]
+#[path = "account_deletion_policy_tests.rs"]
+mod account_deletion_policy_tests;

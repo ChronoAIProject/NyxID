@@ -137,6 +137,7 @@ async fn member_removal_blocks_new_funding_but_preserves_admitted_reservations()
             pending_resale_quantity: None,
             pending_platform_usage: None,
             pool_attempt: None,
+            machine_usage: None,
             status: UsageStatus::Finalized,
             forwarded: true,
             released: false,

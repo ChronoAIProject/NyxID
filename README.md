@@ -70,13 +70,27 @@ billing from either services or linked providers. See [Service configuration and
 vendor retirement](docs/SERVICE_CONFIGURATION.md). They can also give a role read-only
 access to platform-wide usage reports, for example with the seeded **Usage
 Viewer** role, without granting other admin access. See [Admin usage](docs/BILLING_UI_GLOSSARY.md#admin-usage).
+Admins and operators can open **Usage → NyxBot** for active-session counts,
+turn outcomes, and reply feedback. See [NyxBot activity](docs/chat/08-nyxagent-engine.md#admin-nyxbot-activity)
+for metric definitions and access rules.
+
+Feature flag access can be delegated to any user or group with
+`feature-flag-operator` (create flags and manage their own) or
+`feature-flag-admin` (manage all flags, including built-ins). Both roles use
+Admin → Feature Flags. See [feature flag management](docs/API.md#feature-flag-roles-and-management).
 
 ## What NyxID Does
 
+- **Speak to NyxBot and specialists** — voice calls show live captions and audio activity in the composer. Dictation offers click-to-toggle or hold-to-talk capture, microphone selection, and transcript review before insertion into a draft. Platform audio requires enabled voice features, a configured provider and tariff, and sufficient funding; microphone access is requested when capture is activated. See [voice and dictation](docs/chat/11-voice.md#19-implemented-composer-voice-and-dictation).
+
+- **Control NyxBot service use** — NyxBot enforces saved connection order, prefers suitable working personal connections, and asks before organization use in Auto and Ask every time. Choose an exact connection for the next message without changing permission modes. See [NyxBot service execution](docs/NYXBOT_SERVICE_EXECUTION.md).
+
+- **Spend NyxID credits on Telnyx tools** — the [Telnyx platform offering](docs/TELNYX_PLATFORM_BILLING.md) supports a restricted pilot of one model's nonstreaming text chat through HTTP or MCP, including NyxBot tool calls. Administrators must configure and enable the shared credential, verified model bounds, prices, billing, and pilot access before use; users do not connect Telnyx OAuth.
 - **Connect Stripe to agents** — [Stripe Apps OAuth](docs/STRIPE_OAUTH.md) supports a managed account connection and read-only customer, invoice, payment, and subscription tools.
 
 - **Connect email to agents** — [Aurinko Email](docs/AURINKO_INTEGRATION.md) provides an AI Service for mailbox API/MCP operations and an email channel bot for signed incoming notifications and replies. Connect with an account token; the channel additionally uses the application's signing secret.
 - **Create a Telegram channel bot** — [Telegram New](docs/TELEGRAM_NEW.md) uses a platform-managed creation flow so customers can create and connect a bot without copying a token. The existing Telegram option still connects bots using their current tokens. Administrators configure a dedicated manager before enabling Telegram New.
+- **Mention channel specialists** — Exact native Telegram and Lark/Feishu mentions reach the receiving bot's linked agent in an enabled group without participant OAuth. Bot-authored messages remain guests with durable handoff limits. See [channel admission and gateway rollout](docs/CHANNEL_BOT_RELAY.md#callback-contract).
 - **Reach anything** — public APIs, internal APIs, localhost services via credential nodes (`nyxid node`). SSH (Secure Shell) tunneling (`nyxid ssh`) reaches remote hosts. No VPN (Virtual Private Network), no port forwarding.
 - **Never expose keys** — the reverse proxy injects credentials automatically. Your agent talks to NyxID; NyxID talks to the API with the real key.
 - **MCP auto-wrap** — REST APIs with OpenAPI specs become [MCP](https://modelcontextprotocol.io/) (Model Context Protocol) tools. `nyxid mcp config --tool cursor` generates the config. Works with Claude Code, Cursor, VS Code, and any MCP client.
@@ -87,8 +101,9 @@ Viewer** role, without granting other admin access. See [Admin usage](docs/BILLI
 ## See It in Action
 
 The web app checks for frontend updates every ten minutes. Assistant updates
-apply on safe chat or view switches; updates still pending after two hours show
-a refresh reminder. See [deployment behavior](docs/DEPLOYMENT.md#frontend).
+apply on safe chat or view switches; every frontend build still pending after
+15 minutes shows a refresh reminder, including on Nyxbot pages.
+See [deployment behavior](docs/DEPLOYMENT.md#frontend).
 
 The end-to-end loop is short: connect a service to NyxID once, then any AI agent pointed at your NyxID MCP endpoint can use it — without ever seeing the raw API key.
 
@@ -141,7 +156,7 @@ After the CLI is installed, choose where it should log in:
 |---|---|---|
 | **What it is** | We run the NyxID backend for you in the cloud | You run the NyxID backend on your own machine |
 | **Best for** | Getting started quickly, no server setup | Full control, private networks, offline use |
-| **Status** | Early access (invite code below) | Open — anyone can run it |
+| **Status** | Open sign-up | Open — anyone can run it |
 
 > **Driving NyxID from an AI coding agent?** Hand it this single line at any point — it tells the agent to install the `nyxid` CLI plus the Nyx skill files:
 >
@@ -176,12 +191,11 @@ After the CLI is installed, choose where it should log in:
 Start using NyxID in under a minute — no Docker, no setup.
 
 1. Open **[nyx.chrono-ai.fun/register](https://nyx.chrono-ai.fun/register)** in a new tab (Cmd/Ctrl-click, or right-click → Open Link in New Tab) so you can keep this checklist open.
-2. Enter invite code: **`NYX-FGNY85AF`**
-3. Sign in with Google, GitHub, or Apple
-4. Open `AI Services`, add and connect your first external service, and run the API Usage verification curl
-5. After the service is verified, wire your AI tool to NyxID's MCP endpoint
+2. Sign up with Google, GitHub, or Apple
+3. Open `AI Services`, add and connect your first external service, and run the API Usage verification curl
+4. After the service is verified, wire your AI tool to NyxID's MCP endpoint
 
-The full click-through flow is in **[Add your first AI Service](docs/connecting-services/web-ui.md)**. Early access is limited to 20 users.
+The full click-through flow is in **[Add your first AI Service](docs/connecting-services/web-ui.md)**.
 
 #### Self-Host
 

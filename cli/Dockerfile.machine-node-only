@@ -1,0 +1,88 @@
+# NyxID node-only helper image with shell/files capabilities.
+#
+# This image intentionally contains only the NyxID Node execution runtime. It
+# has no browser, cua driver, desktop or Agent Sandbox SDK. Its protected supervisor may receive a
+# read-only, audience-bound Kubernetes workload token at runtime. The Agent Sandbox controller owns the Pod/PVC lifecycle; this
+# process connects outbound over Node WSS.
+#
+# Build locally:
+#   docker build -f cli/Dockerfile.machine-node-only \
+#     -t nyxid-node-remote-machine:local .
+
+FROM rust:1.93-bookworm AS toolchain
+
+FROM toolchain AS builder
+
+RUN sed -i 's|http://|https://|g' /etc/apt/sources.list.d/debian.sources \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends pkg-config libdbus-1-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+COPY Cargo.toml Cargo.lock ./
+COPY backend/ backend/
+COPY cli/ cli/
+COPY cloud-auth/ cloud-auth/
+COPY service-adapters/ service-adapters/
+COPY permissions/ permissions/
+COPY mcp-demo/ mcp-demo/
+COPY nyxid-crypto/ nyxid-crypto/
+COPY machine/ machine/
+COPY machine-updater/ machine-updater/
+COPY docs/AI_AGENT_PLAYBOOK.md docs/AI_AGENT_PLAYBOOK.md
+
+RUN cargo build --release -p nyxid-cli --bin nyxid \
+    && install -Dm0755 target/release/nyxid /out/nyxid
+
+# Ubuntu LTS gives the fixed profile the ordinary shell/file tooling required
+# by the MVP while keeping the process non-root for command execution.
+FROM ubuntu:24.04
+ENV DEBIAN_FRONTEND=noninteractive \
+    NYXID_MACHINE_MANAGED=1 \
+    NYXID_MACHINE_CONTAINER=1 \
+    NYXID_NODE_CONFIG_DIR=/var/lib/nyxid-machine/node \
+    HOME=/home/agent
+
+# Bootstrap HTTPS APT using the official toolchain image's public CA bundle;
+# Ubuntu's ca-certificates package replaces it during installation below.
+COPY --from=toolchain /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+
+# Ubuntu 24.04 reserves UID 1000 for its default login account. This image
+# replaces that account with the fixed command identity, as the machine image
+# does; no existing workspace or host account is involved in this build step.
+RUN userdel -r ubuntu 2>/dev/null || true
+
+RUN sed -i 's|http://|https://|g' /etc/apt/sources.list.d/ubuntu.sources \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates curl git python3 nodejs npm ripgrep build-essential \
+        pkg-config tini procps libdbus-1-3 \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --uid 1000 --create-home --shell /bin/sh agent \
+    && useradd --uid 1001 --create-home --shell /usr/sbin/nologin browser \
+    && mkdir -p /workspace /var/lib/nyxid-machine/node \
+    && chown -R agent:agent /workspace \
+    && chmod 0711 /var/lib/nyxid-machine \
+    && chmod 0700 /var/lib/nyxid-machine/node
+
+COPY --from=builder /out/nyxid /usr/local/bin/nyxid
+COPY cli/container/machine-node-only-entrypoint.sh /usr/local/bin/nyxid-machine-node-only
+
+RUN chmod 0755 /usr/local/bin/nyxid-machine-node-only \
+    && /usr/local/bin/nyxid --version
+
+VOLUME ["/workspace", "/var/lib/nyxid-machine"]
+WORKDIR /workspace
+
+# The entrypoint stays root so Node credentials remain outside the command
+# user's workspace. `nyxid node setup --container` drops command execution to
+# the fixed non-root `agent` identity.
+ENTRYPOINT ["/usr/bin/tini", "-g", "--", "/usr/local/bin/nyxid-machine-node-only"]
+
+# A healthy container has a protected identity/config and a live node process.
+# This does not claim that the Sandbox/Pod is physically fenced; that evidence
+# belongs to the platform manager and its provider-specific runtime checks.
+HEALTHCHECK --interval=10s --timeout=5s --start-period=30s --retries=3 \
+    CMD test -s "$NYXID_NODE_CONFIG_DIR/config.toml" \
+      && test -s "$NYXID_NODE_CONFIG_DIR/node.pid" \
+      && kill -0 "$(cat "$NYXID_NODE_CONFIG_DIR/node.pid")"

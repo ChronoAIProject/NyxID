@@ -90,6 +90,7 @@ frontend/src/components/service-icons/api-twilio.tsx
 frontend/src/components/service-icons/api-twitch.tsx
 frontend/src/components/service-icons/api-twitter.tsx
 frontend/src/components/service-icons/api-whatsapp-business.tsx
+frontend/src/components/service-icons/api-zoho-mail.tsx
 frontend/src/components/service-icons/api-zoom.tsx
 frontend/src/components/service-icons/aws-cost-explorer.tsx
 frontend/src/components/service-icons/chrono-llm-public.tsx

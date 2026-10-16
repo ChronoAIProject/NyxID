@@ -1,7 +1,7 @@
 //! Bounded, tool-less text inference for server-owned assistant metadata tasks.
 //! Never accepts an agent key, session, tool definitions, or arbitrary request JSON.
 //! Prefer the configured platform utility route. If absent or unavailable, use
-//! legacy platform-first selection. Preferring small advertised models is a heuristic, not
+//! personal connections in saved order, with authorized catalog platform fallback. Preferring small advertised models is a heuristic, not
 //! policy. Only model/capability metadata is cached; authority is resolved on every call.
 use std::{
     collections::HashMap,
@@ -238,21 +238,51 @@ impl Route {
 }
 
 async fn resolve(state: &AppState, actor: &str, service: &DownstreamService) -> AppResult<Route> {
-    // These are the LLM gateway's authoritative resolvers, including personal
-    // binding precedence, live platform ACL before decryption, and org role/scope.
-    let resolution = Box::pin(proxy_service::resolve_proxy_target_from_user_service(
-        &state.db,
-        &state.encryption_keys,
-        &state.node_ws_manager,
-        actor,
-        None,
-        Some(&service.id),
-        proxy_service::ProxyExecutionContext::new(
-            Some(&state.connection_expiry_notifier),
-            state.platform_user_rate_limit,
-        ),
-    ))
-    .await?;
+    // Server-owned metadata tasks never inherit organization credentials.
+    // Preserve saved order only within this catalog, then newest-first default.
+    let mut connections: Vec<crate::models::user_service::UserService> =
+        super::service_history::collection(&state.db, "user_services")
+            .find(doc! {"user_id": actor, "catalog_service_id": &service.id, "is_active": true})
+            .sort(doc! {"created_at": -1, "_id": 1})
+            .await?
+            .try_collect()
+            .await?;
+    let order = super::service_preference_service::get(&state.db, actor)
+        .await?
+        .map(|row| row.ordered)
+        .unwrap_or_default();
+    connections.sort_by_key(|row| {
+        order
+            .iter()
+            .position(|id| id == &row.id)
+            .unwrap_or(usize::MAX)
+    });
+    let mut resolution = None;
+    for connection in connections {
+        match proxy_service::resolve_proxy_target_by_user_service_id(
+            &state.db,
+            &state.encryption_keys,
+            actor,
+            &connection.id,
+            None,
+            Some(&service.id),
+            proxy_service::ProxyExecutionContext::new(
+                Some(&state.connection_expiry_notifier),
+                state.platform_user_rate_limit,
+            ),
+        )
+        .await
+        {
+            Ok(Some(candidate)) => {
+                resolution = Some(candidate);
+                break;
+            }
+            Ok(None)
+            | Err(crate::errors::AppError::CredentialUnavailable(_))
+            | Err(crate::errors::AppError::NodeOffline(_)) => continue,
+            Err(error) => return Err(error),
+        }
+    }
     if let Some(resolution) = resolution {
         let class = super::llm_gateway_service::credential_class(
             true,

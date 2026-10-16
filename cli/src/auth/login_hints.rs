@@ -188,16 +188,16 @@ fn valid_service_permission(value: &str) -> bool {
     valid_slug(slug) && !scope.is_empty() && !scope.contains("::") && text_len(value) <= 2048
 }
 
-pub fn approval_url(
-    verification: &url::Url,
-    user_code: &str,
-    pairs: &[(&str, String)],
-) -> Result<url::Url> {
+/// CLI links carry only approval preferences. The human must transfer the code
+/// from the requesting terminal, even when the server supplied a prefilled URL.
+pub fn approval_url(verification: &url::Url, pairs: &[(&str, String)]) -> Result<url::Url> {
     let mut url = verification.clone();
-    url.query_pairs_mut()
-        .clear()
-        .append_pair("user_code", user_code)
-        .extend_pairs(pairs.iter().map(|(name, value)| (*name, value.as_str())));
+    url.set_query(None);
+    url.set_fragment(None);
+    if !pairs.is_empty() {
+        url.query_pairs_mut()
+            .extend_pairs(pairs.iter().map(|(name, value)| (*name, value.as_str())));
+    }
     ensure!(
         url.query().unwrap_or_default().len() < 49152,
         "The approval link exceeds the browser query limit."
@@ -244,7 +244,7 @@ mod tests {
         args.hints.validate_mode(&args).unwrap();
         let pairs = args.hints.query_pairs(args.agent_key).unwrap();
         let base = url::Url::parse("https://nyx.example/login/device").unwrap();
-        let url = approval_url(&base, "ABCD-EFGH", &pairs).unwrap();
+        let url = approval_url(&base, &pairs).unwrap();
         let query: std::collections::HashMap<_, _> = url.query_pairs().collect();
         assert_eq!(url.path(), "/login/device");
         assert_eq!(query["login_type"], "agent");
@@ -254,7 +254,24 @@ mod tests {
             query["service_permissions"],
             "api-google-gmail::https://www.googleapis.com/auth/gmail.readonly"
         );
-        assert_eq!(query["user_code"], "ABCD-EFGH");
+        assert!(!query.contains_key("user_code"));
+        assert!(!query.contains_key("device_code"));
+    }
+
+    #[test]
+    fn code_entry_is_manual_even_when_the_server_url_contains_codes() {
+        for route in ["device", "agent-key"] {
+            let base = url::Url::parse(&format!(
+                "https://nyx.example/login/{route}?user_code=ABCD-EFGH&device_code=poll-secret#ABCD-EFGH"
+            )).unwrap();
+            let plain = approval_url(&base, &[]).unwrap();
+            assert_eq!(plain.as_str(), format!("https://nyx.example/login/{route}"));
+            let hinted = approval_url(&base, &[("login_type", "agent".into())]).unwrap();
+            assert_eq!(
+                hinted.as_str(),
+                format!("https://nyx.example/login/{route}?login_type=agent")
+            );
+        }
     }
 
     #[test]

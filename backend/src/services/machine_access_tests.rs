@@ -846,6 +846,7 @@ async fn machine_access_org_contexts_partition_people_and_recheck_membership() {
             &f.state.db,
             actor,
             &engine::TurnRequest {
+                acknowledgement_id: None,
                 retry_of: None,
                 conversation_id: Some(row.id.clone()),
                 text: "Inspect workspace".into(),
@@ -2008,8 +2009,265 @@ async fn specialist_machine_capability_card_is_denied_audited_and_routed_when_al
     .await
     .unwrap();
     assert!(pending);
-    // Capability changes are owner action cards, never NyxBot decisions.
+    // Auto preserves the owner action card.
     assert_eq!(routed["kind"], "action");
     assert_eq!(routed["decider"], "user");
     assert!(routed["acknowledgement_id"].is_string());
+    settings::update(
+        &f.state.db,
+        &f.owner,
+        settings::Update {
+            access_mode: Some(crate::models::assistant_settings::AccessMode::Autopilot),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let (routed, pending) = Box::pin(crate::handlers::machine_access::native(
+        &f.state, &f.chat, &args,
+    ))
+    .await
+    .unwrap();
+    assert!(pending);
+    assert_eq!(routed["kind"], "machine");
+    assert_eq!(routed["decider"], "orchestrator");
+    assert!(routed.get("confirm_phrase").is_none());
+    let rows = super::assistant_acknowledgement_service::history(&f.state.db, &f.owner, &f.row.id)
+        .await
+        .unwrap();
+    assert!(
+        !rows
+            .iter()
+            .any(|r| r.status == "pending" && r.decider == "user")
+    );
+    assert!(
+        rows.iter()
+            .any(|r| r.status == "pending" && r.decider == "orchestrator")
+    );
+    assert!(
+        !access::policy(&f.state.db, &f.chat.agent_id)
+            .await
+            .unwrap()
+            .assignments
+            .get(&n.id)
+            .is_some_and(|a| a.capabilities.files)
+    );
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn full_access_machine_capabilities_widens_with_receipt_while_auto_asks() {
+    use super::{
+        assistant_acknowledgement_service as acks, assistant_settings_service as settings,
+    };
+    use crate::models::assistant_settings::AccessMode;
+    for (mode, asks) in [(AccessMode::Autopilot, false), (AccessMode::Nyxmode, true)] {
+        let f = orchestrator_fixture("mode_machine_capabilities").await;
+        enable(&f).await;
+        let n = v2(&f).await;
+        settings::update(
+            &f.state.db,
+            &f.owner,
+            settings::Update {
+                access_mode: Some(mode),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let revision = access::policy(&f.state.db, &f.chat.agent_id)
+            .await
+            .unwrap()
+            .revision;
+        access::configure(
+            &f.state.db,
+            &f.owner,
+            &f.chat.agent_id,
+            &n.id,
+            selection(revision, Capabilities::default()),
+        )
+        .await
+        .unwrap();
+        let before = access::policy(&f.state.db, &f.chat.agent_id).await.unwrap();
+        let caps = Capabilities {
+            files: true,
+            ..Default::default()
+        };
+        let args = json!({"agent": f.chat.agent_id, "machine": n.id, "selection": selection(before.revision, caps)});
+        let (value, error) = crate::handlers::machine_access::native(&f.state, &f.chat, &args)
+            .await
+            .unwrap();
+        let current = access::policy(&f.state.db, &f.chat.agent_id).await.unwrap();
+        let rows = acks::history(&f.state.db, &f.owner, &f.row.id)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        if asks {
+            assert!(error);
+            assert_eq!(value["error"], "acknowledgement_required");
+            assert_eq!(current.revision, before.revision);
+            assert!(!current.assignments[&n.id].capabilities.files);
+            assert_eq!(rows[0].status, "pending");
+        } else {
+            assert!(!error, "{value}");
+            assert!(current.assignments[&n.id].capabilities.files);
+            assert_eq!(rows[0].status, "allowed");
+            assert_eq!(rows[0].decided_by.as_deref(), Some("access_mode"));
+            assert_eq!(rows[0].confirmation.as_ref().unwrap().reason, "access_mode");
+            assert_eq!(
+                rows[0].tool_name.as_deref(),
+                Some("nyxid__machine_capabilities")
+            );
+            assert!(rows[0].summary.contains(&n.name));
+        }
+        f.state.db.drop().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn full_access_machine_pairing_completes_with_receipt_while_auto_asks() {
+    use super::{
+        assistant_acknowledgement_service as acks, assistant_settings_service as settings,
+        machine_setup_service as setup,
+    };
+    use crate::models::assistant_settings::AccessMode;
+    for (mode, asks) in [(AccessMode::Autopilot, false), (AccessMode::Nyxmode, true)] {
+        let f = orchestrator_fixture("mode_machine_pairing").await;
+        settings::update(
+            &f.state.db,
+            &f.owner,
+            settings::Update {
+                access_mode: Some(mode),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let pairing = setup::initiate(
+            &f.state.db,
+            f.state.auth_device_hmac_key.as_slice(),
+            "owner-vm",
+            "linux",
+            "127.0.0.1",
+            vec!["files".into()],
+        )
+        .await
+        .unwrap();
+        let args = json!({"code": pairing.code});
+        let (result, error) = crate::handlers::machine_setup::pair_tool(&f.state, &f.chat, &args)
+            .await
+            .unwrap();
+        let machine = setup::by_code(
+            &f.state.db,
+            f.state.auth_device_hmac_key.as_slice(),
+            &pairing.code,
+        )
+        .await
+        .unwrap();
+        let rows = acks::history(&f.state.db, &f.owner, &f.row.id)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        if asks {
+            assert!(
+                !error,
+                "pairing retains its existing refusal-result transport"
+            );
+            assert_eq!(result["error"], "acknowledgement_required");
+            assert_eq!(machine.status, "pending");
+            assert_eq!(rows[0].status, "pending");
+        } else {
+            assert!(!error, "{result}");
+            assert_eq!(result["status"], "approved");
+            assert_eq!(machine.status, "approved");
+            assert_eq!(machine.user_id, f.owner);
+            assert_eq!(rows[0].status, "allowed");
+            assert_eq!(rows[0].decided_by.as_deref(), Some("access_mode"));
+            assert_eq!(rows[0].confirmation.as_ref().unwrap().reason, "access_mode");
+            assert!(rows[0].summary.contains("owner-vm"));
+            assert!(result.get("confirm_phrase").is_none());
+        }
+        f.state.db.drop().await.unwrap();
+    }
+}
+
+/// Issue #1883: a specialist the owner talks to directly (no NyxBot
+/// assignment, no shared group) gets a neutral `missing_access` answer for a
+/// capability change: no card, no NyxBot event, whatever the owner's routing
+/// setting, and the audit row records it as missing access.
+#[tokio::test]
+async fn direct_specialist_machine_capability_request_gets_missing_access_without_a_card() {
+    use crate::models::assistant_settings::SpecialistAccessRequests;
+    use crate::services::assistant_settings_service as settings;
+    let f = super::assistant_authority_tests::direct_fixture("direct_machine_capability").await;
+    assert!(!f.chat.involved());
+    enable(&f).await;
+    let n = v2(&f).await;
+    let revision = Box::pin(access::policy(&f.state.db, &f.chat.agent_id))
+        .await
+        .unwrap()
+        .revision;
+    let args = json!({"agent":f.chat.agent_id,"machine":n.id,"selection":selection(revision,Capabilities{files:true,..Default::default()})});
+    for policy in [
+        SpecialistAccessRequests::Denied,
+        SpecialistAccessRequests::RoutedToNyxbot,
+    ] {
+        settings::update(
+            &f.state.db,
+            &f.owner,
+            settings::Update {
+                specialist_access_requests: Some(policy),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let (value, pending) = Box::pin(crate::handlers::machine_access::native(
+            &f.state, &f.chat, &args,
+        ))
+        .await
+        .unwrap();
+        assert!(pending);
+        assert_eq!(value["error"], "missing_access", "{value}");
+        assert_eq!(value["scope"], "machine_capabilities");
+        assert_eq!(value["target"], n.name);
+        assert_eq!(value["request_created"], false);
+        assert!(
+            value["grants_path"]
+                .as_str()
+                .unwrap()
+                .contains(&f.chat.agent_id)
+        );
+        assert!(
+            !value.to_string().to_lowercase().contains("nyxbot"),
+            "{value}"
+        );
+    }
+    assert_eq!(
+        f.state
+            .db
+            .collection::<Document>(crate::models::assistant_acknowledgement::COLLECTION_NAME)
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        0
+    );
+    let nyxbot = super::assistant_nyxagent::get(&f.state.db, &f.owner, &f.nyxbot_thread)
+        .await
+        .unwrap();
+    assert!(nyxbot.pending_events.is_empty());
+    let audit = f
+        .state
+        .db
+        .collection::<Document>(crate::models::audit_log::COLLECTION_NAME)
+        .find_one(doc! {"event_type":"assistant_access_request_denied",
+        "event_data.scope":"machine_capabilities"})
+        .await
+        .unwrap()
+        .expect("missing-access audit");
+    let data = audit.get_document("event_data").unwrap();
+    assert_eq!(data.get_str("target").unwrap(), n.id);
+    assert_eq!(data.get_str("decision").unwrap(), "missing_access");
+    assert!(!data.get_bool("involved").unwrap());
+    f.state.db.drop().await.unwrap();
 }

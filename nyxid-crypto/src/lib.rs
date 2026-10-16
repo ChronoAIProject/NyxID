@@ -81,6 +81,9 @@ fn encrypt_with_secret_and_nonce(
     ensure_v1(&context.version)?;
     let admin_public = PublicKey::from(&admin_secret);
     let shared = admin_secret.diffie_hellman(&PublicKey::from(recipient_pubkey));
+    if !shared.was_contributory() {
+        return Err(RciCryptoError::Crypto);
+    }
     let key = derive_key(shared.as_bytes(), &context.kdf_info_bytes()?)?;
     let aad = context.aad_bytes()?;
     let cipher = XChaCha20Poly1305::new(Key::from_slice(key.as_slice()));
@@ -168,6 +171,14 @@ pub fn decrypt(
 mod tests {
     use super::*;
     use serde::Deserialize;
+
+    #[test]
+    fn non_contributory_recipient_keys_are_rejected() {
+        assert!(encrypt(b"credential", [0; 32], &context()).is_err());
+        let mut identity = [0; 32];
+        identity[0] = 1;
+        assert!(encrypt(b"credential", identity, &context()).is_err());
+    }
 
     fn context() -> RciContext {
         RciContext::new(
@@ -279,15 +290,18 @@ mod tests {
     #[cfg(feature = "decrypt")]
     #[test]
     fn decrypt_rejects_oversized_ciphertext_before_crypto() {
+        use chacha20poly1305::aead::AeadCore;
+
+        let recipient = generate_node_keypair();
+        let nonce = XChaCha20Poly1305::generate_nonce(&mut OsRng).into();
         let envelope = CiphertextEnvelope::new(
             VERSION_V1,
-            [1; 32],
-            [2; 24],
+            *recipient.public_key(),
+            nonce,
             vec![0_u8; MAX_CIPHERTEXT_SIZE + 1],
         );
-        let private_key = Zeroizing::new([3_u8; 32]);
-        let error =
-            decrypt(&envelope, &private_key, &context()).expect_err("oversized decrypt input");
+        let error = decrypt(&envelope, recipient.private_key(), &context())
+            .expect_err("oversized decrypt input");
 
         assert!(matches!(
             error,

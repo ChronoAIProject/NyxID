@@ -28,7 +28,7 @@ test("the home composer starts a NyxBot thread: durable reload, connect link, re
   await expect(homeHeading(page)).toBeVisible();
   // Model routing is server-side: no profile selector.
   await expect(page.getByRole("combobox", { name: "Profile" })).toHaveCount(0);
-  await expect(composerInput(page)).toHaveAttribute("placeholder", "Message NyxBot");
+  await expect(composerInput(page)).toHaveAttribute("data-placeholder", "Message NyxBot");
   await sendMessage(page, "List connected services");
   await expect(page).toHaveURL(/c=nyxa-[a-f0-9]{32}/);
   await expect(page.getByRole("heading", { name: "NyxBot", exact: true })).toBeVisible();
@@ -40,9 +40,10 @@ test("the home composer starts a NyxBot thread: durable reload, connect link, re
   await page.getByRole("button", { name: "Options for List connected services" }).click();
   await page.getByRole("menuitem", { name: "Rename" }).click();
   await expect(page.getByRole("menu", { includeHidden: true })).toHaveCount(0);
-  await page.getByRole("dialog").getByRole("textbox").fill("Services overview");
-  await page.getByRole("button", { name: "Save", exact: true }).click();
-  await expect(page.getByRole("dialog", { includeHidden: true })).toHaveCount(0);
+  const rename = page.getByRole("form", { name: "Rename chat", exact: true });
+  await rename.getByRole("textbox", { name: "Title", exact: true }).fill("Services overview");
+  await rename.getByRole("button", { name: "Save", exact: true }).click();
+  await expect(rename).toHaveCount(0);
   await expect(conversationRow(page, "Services overview")).toBeVisible();
   await conversationRow(page, "Services overview").hover();
   await page.getByRole("button", { name: "Options for Services overview" }).click();
@@ -184,7 +185,7 @@ test("the NyxBot home shows what happened, what NyxBot remembers, the roster and
   await agents.getByRole("button", { name: "Chat with researcher" }).click();
   await expect(page).toHaveURL(/c=nyxa-[a-f0-9]{32}/);
   await expect(page.getByRole("heading", { name: "researcher" })).toBeVisible();
-  await expect(composerInput(page)).toHaveAttribute("placeholder", "Message researcher");
+  await expect(composerInput(page)).toHaveAttribute("data-placeholder", "Message researcher");
 
   // Deep links still work: ?draft opens a fresh NyxBot thread, not the home.
   await page.goto("/assistant?mock=1&draft=true");
@@ -215,14 +216,14 @@ test("a group routes @mentions, shows who is working, and can be renamed, pruned
     "Group created with NyxBot, researcher.",
   );
   const input = composerInput(page);
-  await expect(input).toHaveAttribute("placeholder", "Message the group — @mention an agent");
+  await expect(input).toHaveAttribute("data-placeholder", "Message the group — @mention an agent");
 
   // Typing @ lists members; Tab inserts the mention.
   await input.fill("@res");
   const mentions = page.getByRole("listbox", { name: "Mention an agent" });
   await expect(mentions.getByRole("option")).toHaveText([/researcher/]);
   await input.press("Tab");
-  await expect(input).toHaveValue("@researcher ");
+  await expect(input.locator("[data-mention-handle=researcher]")).toBeVisible();
   await expect(mentions).toHaveCount(0);
   await input.pressSequentially("find something");
   await input.press("Enter");
@@ -350,7 +351,7 @@ test("a thread that came from a chat app sits in its bot's section and shows its
   const main = page.getByRole("main");
   await expect(main.getByText("via Telegram")).toHaveCount(2);
   await expect(main.getByText("What is on my calendar today?")).toBeVisible();
-  await expect(composerInput(page)).toHaveAttribute("placeholder", "Message NyxBot");
+  await expect(composerInput(page)).toHaveAttribute("data-placeholder", "Message NyxBot");
 });
 
 test("mobile drawer: a group created from the drawer's New group opens", async ({ page }) => {
@@ -380,7 +381,7 @@ test("agents get a display name and persona, shown with their @handle everywhere
   await expect(page).toHaveURL(/c=nyxa-[a-f0-9]{32}/);
   await expect(page.getByRole("heading", { name: "Luna", exact: true })).toBeVisible();
   await expect(page.getByRole("main").getByText("@writer", { exact: true })).toBeVisible();
-  await expect(composerInput(page)).toHaveAttribute("placeholder", "Message Luna");
+  await expect(composerInput(page)).toHaveAttribute("data-placeholder", "Message Luna");
   await expect(nav(page).getByRole("button", { name: "Luna (@writer), specialist, Idle" })).toBeVisible();
 
   // The drawer edits both; they persist.
@@ -418,7 +419,7 @@ test("agents get a display name and persona, shown with their @handle everywhere
   const option = page.getByRole("listbox", { name: "Mention an agent" }).getByRole("option");
   await expect(option).toHaveText([/Luna@writer/]);
   await input.press("Enter");
-  await expect(input).toHaveValue("@writer ");
+  await expect(input.locator("[data-mention-handle=writer]")).toBeVisible();
   await input.pressSequentially("hello");
   await input.press("Enter");
   await expect(page.getByRole("article", { name: "Message from Luna" })).toContainText(

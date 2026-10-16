@@ -122,7 +122,7 @@ pub enum TranscriptOutcome {
     Ignored,
 }
 
-fn validate_submit_input(input: &SubmitTaskInput) -> AppResult<()> {
+pub(crate) fn validate_submit_input(input: &SubmitTaskInput) -> AppResult<()> {
     if input.prompt.trim().is_empty() {
         return Err(AppError::ValidationError("prompt is required".to_string()));
     }
@@ -422,7 +422,7 @@ pub(crate) async fn submit_task_in_session(
     })
 }
 
-fn validate_attach_url(chatgpt_url: &str) -> AppResult<()> {
+pub(crate) fn validate_attach_url(chatgpt_url: &str) -> AppResult<()> {
     if chatgpt_url.is_empty() || chatgpt_url.len() > MAX_URL_LEN {
         return Err(AppError::ValidationError(
             "chatgpt_url must be 1-2048 chars".to_string(),
@@ -438,7 +438,7 @@ fn validate_attach_url(chatgpt_url: &str) -> AppResult<()> {
     Ok(())
 }
 
-fn validate_extract_url(url: &str) -> AppResult<()> {
+pub(crate) fn validate_extract_url(url: &str) -> AppResult<()> {
     if url.is_empty() || url.len() > MAX_URL_LEN {
         return Err(AppError::ValidationError(
             "url must be 1-2048 chars".to_string(),

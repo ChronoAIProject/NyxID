@@ -13,8 +13,10 @@ export interface ChannelBotConnectProps {
   readonly orgId: string | null;
   readonly form: UseFormReturn<CreateChannelBotFormData>;
   readonly fullPage?: boolean;
+  readonly stayInPlace?: boolean;
+  readonly returnTo?: string;
   readonly preferManual?: boolean;
-  readonly onConnected: (id: string, replace?: boolean, result?: CreateChannelBotResponse) => void;
+  readonly onConnected: (id: string, replace?: boolean, result?: CreateChannelBotResponse, botLabel?: string) => void;
   readonly renderFields: (state: {
     disabled: boolean;
     scopeDescription?: string;

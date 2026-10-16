@@ -23,6 +23,7 @@ describe("StepHeader", () => {
   it("falls back to the slug glyph without an icon", () => {
     renderHeader(null);
     expect(document.querySelector("img")).toBeNull();
-    expect(document.querySelector('[data-fallback="true"]')).toBeInTheDocument();
+    expect(document.querySelector('[data-slug="api-zoho-mail"]')).toBeInTheDocument();
+    expect(document.querySelector('[data-fallback="true"]')).toBeNull();
   });
 });

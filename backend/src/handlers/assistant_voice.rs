@@ -1,4 +1,6 @@
+mod dictation;
 mod socket;
+pub use dictation::{dictation_options, dictation_stream};
 pub use socket::stream;
 // Human-only voice control and durable request dispatch.
 use crate::{
@@ -168,8 +170,9 @@ impl From<crate::models::assistant_voice_session::VoiceSession> for SessionRespo
             final_usage_confirmed: row.final_usage_confirmed,
             end_reason: row.end_reason,
             idle_warning: (chrono::Utc::now() - row.last_user_at).num_seconds() >= 165,
-            resumable: row.protocol
-                != Some(crate::models::downstream_service::VoiceProtocol::XaiRealtime)
+            resumable: !row.dictation
+                && row.protocol
+                    != Some(crate::models::downstream_service::VoiceProtocol::XaiRealtime)
                 && row.provider_session_id.is_some()
                 && row.live_slot,
         }
@@ -222,6 +225,15 @@ pub async fn control(
 ) -> AppResult<Json<SessionResponse>> {
     super::login_client_context::require_first_party_human(&auth)?;
     require_origin(&state, &headers)?;
+    if crate::services::voice::session::get(&state.db, &auth.user_id.to_string(), &id, &sid)
+        .await?
+        .dictation
+        && body.action != "end"
+    {
+        return Err(AppError::Forbidden(
+            "Dictation only supports ending capture".into(),
+        ));
+    }
     Ok(Json(
         crate::services::voice::session::control(
             &state.db,
@@ -315,6 +327,7 @@ pub(crate) async fn sweep(state: &AppState) -> AppResult<()> {
                 "turn_id":&request.turn_id,"execution_pending":true,
             }).await?.ok_or_else(|| AppError::NotFound("Voice input unavailable".into()))?;
             let mut start = engine::TurnStart::from(&engine::TurnRequest {
+            acknowledgement_id: None,
             retry_of: None,
                 conversation_id:Some(request.task_conversation_id.clone().ok_or_else(|| AppError::Conflict("Voice task thread unavailable".into()))?),text:message.text,
                 model:None,agent_id:None,attachment_ids:Vec::new(),access_mode:None,

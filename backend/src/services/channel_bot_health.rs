@@ -6,6 +6,7 @@
 //! Diagnostics are metadata only: codes, timestamps and counts. Never store
 //! message bodies, provider error prose with user content, or credentials.
 
+use super::channel_platform::platform_name;
 use std::sync::{Arc, OnceLock};
 
 use chrono::{DateTime, Utc};
@@ -148,20 +149,6 @@ impl<'a> HealthFacts<'a> {
 
 fn is_x(platform: &str) -> bool {
     matches!(platform, "x" | "twitter")
-}
-
-pub fn platform_name(platform: &str) -> String {
-    match platform {
-        "x" | "twitter" => "X".into(),
-        "whatsapp" => "WhatsApp".into(),
-        other => {
-            let mut chars = other.chars();
-            chars
-                .next()
-                .map(|first| first.to_uppercase().chain(chars).collect())
-                .unwrap_or_default()
-        }
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
