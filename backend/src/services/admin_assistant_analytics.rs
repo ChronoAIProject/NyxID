@@ -115,6 +115,7 @@ pub async fn summary(
     ];
     // Voice delivery can mirror the same settled turn into its parent thread.
     // Group by the durable turn id before counting outcomes or tool use.
+    // A cancelled visible voice result overrides its hidden submit acknowledgement.
     let turns = vec![
         doc! {"$match": {"created_at": &range, "role": "assistant"}},
         doc! {"$project": {
@@ -132,8 +133,8 @@ pub async fn summary(
         doc! {"$facet": {
             "totals": [{"$group": {
                 "_id": null,
-                "completed": {"$sum": "$completed"},
-                "stopped": {"$sum": {"$cond": [{"$eq": ["$completed", 1]}, 0, "$stopped"]}},
+                "completed": {"$sum": {"$cond": [{"$eq": ["$stopped", 1]}, 0, "$completed"]}},
+                "stopped": {"$sum": "$stopped"},
                 "failed": {"$sum": {"$cond": [{"$and": [{"$eq": ["$completed", 0]}, {"$eq": ["$stopped", 0]}]}, 1, 0]}},
                 "with_tools": {"$sum": "$with_tools"}, "with_tool_errors": {"$sum": "$with_tool_errors"},
             }}],

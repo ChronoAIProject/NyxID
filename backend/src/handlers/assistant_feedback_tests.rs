@@ -1883,6 +1883,17 @@ async fn assistant_analytics_counts_real_activity_deduplicates_voice_and_separat
             Some("cancelled"),
             at,
         ),
+        // A successful async voice submission can later publish a cancelled result.
+        // The hidden acknowledgement must not turn a stopped task into a completion.
+        (
+            "stopped-voice-ack",
+            "hidden-voice-task",
+            "assistant",
+            "turn-c",
+            "completed",
+            None,
+            at,
+        ),
         (
             "old",
             "old-conversation",
