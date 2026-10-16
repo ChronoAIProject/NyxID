@@ -35,17 +35,13 @@
 .website-a .nyx-title-static {
   display: inline-block;
   line-height: inherit;
-  background: linear-gradient(110deg, #a672fb, #d7c7ff, #9d7af8);
+  background: var(--vivid);
   background-clip: text;
   -webkit-background-clip: text;
   color: transparent;
 }
 .website-a .nyx-title-gradient .gradient-text__content {
   font: inherit;
-}
-.website-a[data-theme="light"] .nyx-title-gradient,
-.website-a[data-theme="light"] .nyx-title-static {
-  background-image: linear-gradient(110deg, #5a2af1, #8050c9, #5a2af1);
 }
 .website-a .nyx-primary {
   position: relative;

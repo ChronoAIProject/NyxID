@@ -69,3 +69,13 @@ The local preview is retained on port4180. Production builds require only commit
 `VITE_WEBSITE_BACKGROUND_RUNTIME_URL` / `VITE_WEBSITE_BACKGROUND_PROJECT_ID` 允许配置已授权资源；`VITE_WEBSITE_VISUALS_ENABLED=false` 可重建为静态增强回退。需要撤回本次代码时，通过正常 revert Commit 回到上述 A 基线，不修改应用主题存储，不部署或强推。
 
 The background URL/project can be configured for authorized resources. A build-time visual flag provides static resilience. Use a normal revert to restore accepted A; no preference reset, force push, merge or deployment is required.
+
+## 增量配色修正 / Brand-gradient correction
+
+负责人追加：首页中英文强调词与 How-it-works 的“安全地”统一为 `#A672FB → #5E00F5`，移除浅白/灰紫色 stop。保留9秒 GradientText，静态/reduced-motion/离屏回退统一复用 `var(--vivid)`；未改参照页、文案、字号或布局。
+
+The Home emphasis now uses the reference page's two brand-purple endpoints while retaining the nine-second GradientText animation. Static fallbacks reuse the original vivid token. The reference page, content and layout are unchanged.
+
+增量验证：13项相关测试、改动 ESLint、68个输出生成复现通过；真实浏览器核对中英动画、中文参照页和离屏静态 computed gradient 一致，返回后动画恢复。见 `website-v4.1-evidence/color-audit.json` 与 `color-*.jpg/txt/json`。整体125项/完整构建记录属于前一实现 commit；本纯配色修改没有重跑全量。水印阻塞不变，独立验收按新 commit 增量复验。
+
+Incremental checks passed:13 related tests, scoped lint and68-file generation equality. Browser evidence records both animated languages, the reference and static fallback, plus animation recovery. Earlier full-build/125-test evidence belongs to the previous implementation commit; no full rerun was needed for this palette-only change. Branding remains unresolved.

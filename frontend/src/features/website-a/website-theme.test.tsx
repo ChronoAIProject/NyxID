@@ -60,7 +60,7 @@ describe("independent public website theme", () => {
         );
         expect(screen.getByTestId("gradient")).toHaveAttribute(
           "data-colors",
-          "#A672FB,#D7C7FF,#9D7AF8",
+          "#A672FB,#5E00F5",
         );
         website.unmount();
         expect(localStorage.getItem("nyxid.theme")).toBe(saved);

@@ -19,7 +19,7 @@ export function HeroTitle() {
       {active ? (
         <GradientText
           animationSpeed={9}
-          colors={["#A672FB", "#D7C7FF", "#9D7AF8"]}
+          colors={["#A672FB", "#5E00F5"]}
           scale={2}
           className="nyx-title-gradient"
         >

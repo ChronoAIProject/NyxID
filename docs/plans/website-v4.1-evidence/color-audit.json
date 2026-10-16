@@ -1,0 +1,28 @@
+[
+  {
+    "check": "home-zh-animated",
+    "gradient": "repeating-linear-gradient(90deg, rgb(166, 114, 251) -99.97%, rgb(94, 0, 245) 0.03%, rgb(166, 114, 251) 100.03%)",
+    "token": "linear-gradient(90deg,#A672FB 0%,#5E00F5 100%)",
+    "url": "http://127.0.0.1:4180/?lang=zh"
+  },
+  {
+    "check": "how-it-works-reference",
+    "gradient": "linear-gradient(90deg, rgb(166, 114, 251) 0%, rgb(94, 0, 245) 100%)",
+    "text": "安全地"
+  },
+  {
+    "check": "home-en-animated",
+    "gradient": "repeating-linear-gradient(90deg, rgb(166, 114, 251) -0.03%, rgb(94, 0, 245) 99.97%, rgb(166, 114, 251) 199.97%)",
+    "title": "AI that doesmore than chat."
+  },
+  {
+    "check": "home-static-offscreen",
+    "activeAnimation": false,
+    "gradient": "linear-gradient(90deg, rgb(166, 114, 251) 0%, rgb(94, 0, 245) 100%)",
+    "text": "more than chat."
+  },
+  {
+    "check": "animation-resumed",
+    "gradient": "repeating-linear-gradient(90deg, rgb(166, 114, 251) -0.12%, rgb(94, 0, 245) 99.88%, rgb(166, 114, 251) 199.88%)"
+  }
+]
