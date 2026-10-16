@@ -558,3 +558,56 @@ through the local proxy; actual paid-provider and physical acoustic success are
 not claimed. The dictation production route remains 404 until backend deployment.
 The live port 4615 preview is left running. The previous sample preview and the
 parent’s isolated test-only server are stopped.
+
+## Landing review after the final interaction revisions
+
+The earlier publication hold and preview status above are historical. The owner
+has now authorized updating from main, publishing, monitoring CI, squash merging,
+branch deletion and local teardown. Final source was personally reviewed after
+merging main `5aed82c5` (including #1901, #1904 and #1915); no reviewer agents were
+used. No unintended breaking changes were identified outside the voice/dictation
+and shared composer scope.
+
+- The empty composer shows Voice; a text or attachment draft replaces it with
+  Send. Pending uploads cannot be sent, and active-turn Stop remains reachable.
+- The dictation chevron occupies no desktop space until hover/focus. Only moving
+  onto the chevron opens settings; leaving the trigger/popup closes settings and
+  microphone preview after the short gap-crossing allowance.
+- Multiline drag resizing controls the visible editor height up to 90% of the
+  visible viewport, including toolbar/padding. Growth beyond the reserved band
+  overlays chat. Mobile keyboard changes, short viewports, scrolling, keyboard
+  resizing and reset are covered by browser assertions.
+- Permission acquisition precedes paid startup. Late permission responses,
+  cancellation, account/thread changes and microphone replacement remain fenced.
+  Fresh credit grants are read at admission rather than requiring a UI reload.
+- Private platform inference preserves live owner/key/agent and operation
+  restrictions. BYOK keeps exact connection grants. Additive database fields
+  default for older rows, and dictation recovery settles durable confirmed usage
+  without replaying audio or creating a conversational receipt.
+- The embedded wizard was regenerated for shared CSS. API, architecture and
+  README coverage now link to the canonical transport/accounting contract.
+
+Fresh integrated verification: 6,072 frontend tests in 569 files; frontend lint,
+TypeScript and production build; 52 selected Chromium cases; 92 backend voice
+tests, 26 operation-scope tests, 29 organization-agent tests, nine delegated-account-read tests, the
+billing-route smoke test and the formerly failing X delivery test. These backend
+filters overlap and are not a unique-test sum. Strict workspace Clippy and Rust
+format and the regenerated wizard freshness test also pass. Database tests used the explicit isolated MongoDB 8 replica
+set with transaction support. Full PR CI is tracked on the final published head.
+
+The expanded browser run found two outdated assertions, now corrected and
+passing: an empty composer expected Send, and the NyxAgent rename test expected a
+dialog instead of main's inline form. No test was disabled, no timeout/coverage
+threshold lowered, and no workflow, dependency or release configuration changed.
+Credential scanning found only the known test token, source expressions,
+documented localhost preview URLs and generated numeric patterns already present
+in main's wizard bundle.
+
+An independent upstream publication problem was reported immediately: main's
+[Publish Images run 38884258840](https://github.com/ChronoAIProject/NyxID/actions/runs/38884258840)
+failed in the Linux AMD64 backend container build with BuildKit
+`ResourceExhausted: cannot allocate memory` and a SIGKILL of `rustc`. That run
+predates the updated PR and is not a voice/composer regression. The build runner
+needs sufficient memory/swap; PR CI success alone does not certify image
+publication or a production rollout. Paid-provider acoustic verification is not
+inferred from browser fixtures.
