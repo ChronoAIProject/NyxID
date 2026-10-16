@@ -204,7 +204,6 @@ pub(crate) async fn process_inbound_messages(
                 continue;
             }
         };
-
         if bot.platform == "x" {
             tracing::info!(bot_id = %bot.id, message_id = %stored_message.id,
                 kind = activity.as_ref().map(|value| value.kind.as_str()),

@@ -2410,3 +2410,48 @@ async fn nyxbot_cancelled_image_post_releases_claims_for_automation_result() {
     );
     f.state.db.drop().await.unwrap();
 }
+
+#[tokio::test]
+async fn external_bot_delayed_images_keep_guest_authority_and_one_delivery_per_image() {
+    let (f, server) = image_fixture("telegram", "direct").await;
+    add_images(&f).await;
+    mock_sends(&server, "telegram", false, std::time::Duration::ZERO).await;
+    f.state.db.collection::<bson::Document>(THREADS).update_one(doc! {"channel_id":&f.channel.id},doc! {"$set":{"kind":"group","members":"everyone","owner_chat":false,"owner_seen":false}}).await.unwrap();
+    patch(
+        &f,
+        doc! {"delivery.guest":true,"delivery.sender_kind":"bot","delivery.state":"pending"},
+    )
+    .await;
+    f.state
+        .db
+        .collection::<bson::Document>(CONVERSATIONS)
+        .update_one(
+            doc! {"_id":&f.event.conversation_id},
+            doc! {"$set":{"guest_turn":true}},
+        )
+        .await
+        .unwrap();
+    late_delivery::process(&f.state, &f.event.id).await;
+    late_delivery::process(&f.state, &f.event.id).await;
+    assert_eq!(status(&f).await, "sent");
+    assert_eq!(
+        server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|r| r.url.path().ends_with("sendPhoto"))
+            .count(),
+        2
+    );
+    assert_eq!(
+        claim(&f)
+            .await
+            .items
+            .iter()
+            .filter(|c| c.state.as_str() == "sent")
+            .count(),
+        2
+    );
+    f.state.db.drop().await.unwrap();
+}

@@ -1,0 +1,25 @@
+{
+  "actor": {
+    "display_name": "Alice",
+    "id": "ou_sender",
+    "kind": "bot"
+  },
+  "conversation": {
+    "id": "oc_chat",
+    "kind": "group"
+  },
+  "event_id": "message-1",
+  "kind": {
+    "attachments": [],
+    "mentions_bot": true,
+    "text": "@_user_1 hello",
+    "type": "message"
+  },
+  "occurred_at": "2026-10-15T00:00:00Z",
+  "schema_version": 1,
+  "source": {
+    "platform": "lark",
+    "route_id": "route-1",
+    "type": "nyxid_relay"
+  }
+}

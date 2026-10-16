@@ -36,7 +36,7 @@ pub(super) async fn prepare(
     event: &str,
     channel: &NyxbotChannel,
     origin: &ChannelOrigin,
-    sender: &str,
+    sender: &Sender<'_>,
     guest: bool,
     addressed: bool,
 ) -> AppResult<()> {
@@ -47,6 +47,7 @@ pub(super) async fn prepare(
         .await?
         .ok_or_else(|| AppError::Conflict("Channel event already admitted".into()))?;
     let metadata = ChannelTurnDelivery {
+        sender_kind: Some(sender.kind),
         version: 1,
         state: if channel.transport == "gateway" {
             "waiting"
@@ -55,7 +56,7 @@ pub(super) async fn prepare(
         }
         .into(),
         origin: origin.clone(),
-        sender_id: sender.into(),
+        sender_id: sender.id.into(),
         guest,
         addressed,
         transport: channel.transport.clone(),
@@ -464,7 +465,19 @@ async fn eligible(
     {
         return Ok(None);
     }
-    let admitted = chats::admission(&channel, &thread, &d.sender_id, Some(d.addressed));
+    let admitted = if d.sender_kind == Some(crate::models::channel_thread::ThreadSenderKind::Bot) {
+        // Followed children inherit live consent from their settings chat,
+        // checked by validate_delivery above. Their own default member fields
+        // are not that policy. Every bot answer still retains guest authority.
+        if !d.guest
+            || (d.origin.thread.is_none() && !chats::bot_guest_allowed(&thread, Some(d.addressed)))
+        {
+            return Ok(None);
+        }
+        chats::Admission::Guest
+    } else {
+        chats::admission(&channel, &thread, &d.sender_id, Some(d.addressed))
+    };
     if d.origin.thread.is_none()
         && !matches!(
             (d.guest, admitted),

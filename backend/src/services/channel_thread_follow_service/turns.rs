@@ -131,7 +131,13 @@ pub async fn validate_in_session(
     }
     if !source.thread_context.as_ref().is_some_and(|f| {
         f.version == 1
-            && f.sender_kind == ThreadSenderKind::Human
+            && matches!(
+                f.sender_kind,
+                ThreadSenderKind::Human | ThreadSenderKind::Bot
+            )
+            && b.sender_kind.is_none_or(|kind| kind == f.sender_kind)
+            && (f.sender_kind != ThreadSenderKind::Bot
+                || (b.guest && f.address == crate::models::channel_thread::ThreadAddress::Mention))
             && Some(f.kind) == child.follow.thread_kind
             && f.root_id == child.follow.thread_root_id
             && Some(&f.chat_id) == child.platform_chat_id.as_ref()
@@ -203,7 +209,8 @@ async fn activate(
     if matches!(
         child.follow.follow_state.as_deref(),
         Some("opening" | "active")
-    ) && !b.queued
+    ) && b.sender_kind != Some(ThreadSenderKind::Bot)
+        && !b.queued
         && super::super::feature_flag_service::personal_flag_enabled(
             db,
             &child.user_id,
