@@ -35,7 +35,17 @@ pub(crate) struct HttpResponseContext {
     pub exchange_diagnostics: ProxyExchangeDiagnostics,
 }
 
-pub(crate) async fn relay_response(
+/// Construct the response relay behind a heap boundary so dispatch callers do
+/// not embed its streaming and settlement state in their own poll frames.
+pub(crate) fn relay_response<'a>(
+    state: &'a AppState,
+    context: HttpResponseContext,
+    downstream_response: reqwest::Response,
+) -> futures::future::BoxFuture<'a, AppResult<Response>> {
+    Box::pin(relay_response_inner(state, context, downstream_response))
+}
+
+async fn relay_response_inner(
     state: &AppState,
     context: HttpResponseContext,
     downstream_response: reqwest::Response,

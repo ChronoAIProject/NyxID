@@ -181,6 +181,39 @@ async fn fixture(trailing: bool) -> (Fixture, String, String) {
     choose(&f, &id).await;
     (f, id, catalog)
 }
+// Keep the resource owner distinct from the acting person and billing wallet.
+async fn org_connection(f: &Fixture, id: &str, catalog: &str) {
+    let owner = org(f).await;
+    let row = crate::services::user_service_service::find_user_service_by_id(&f.state.db, id)
+        .await
+        .unwrap()
+        .unwrap();
+    f.state
+        .db
+        .collection::<Document>("user_services")
+        .update_one(doc! {"_id":&id}, doc! {"$set":{"user_id":&owner}})
+        .await
+        .unwrap();
+    f.state
+        .db
+        .collection::<Document>("user_endpoints")
+        .update_one(
+            doc! {"_id":row.endpoint_id},
+            doc! {"$set":{"user_id":&owner}},
+        )
+        .await
+        .unwrap();
+    f.state
+        .db
+        .collection::<Document>("downstream_services")
+        .update_one(
+            doc! {"_id":&catalog},
+            doc! {"$set":{"platform_key.allowed_owner_ids":[&owner]}},
+        )
+        .await
+        .unwrap();
+}
+
 async fn call(f: &Fixture, id: &str, mcp: bool) -> crate::errors::AppResult<u16> {
     if !mcp {
         use axum::{
@@ -398,10 +431,23 @@ async fn refused(admitted: bool, drift: &str) {
 async fn actual_managed_http_and_mcp_success_settles_once_and_records_one_receipt() {
     for mcp in [false, true] {
         let (f, id, catalog) = fixture(!mcp).await;
-        // Catalog-backed HTTP resolves approval policy under the catalog ID;
-        // direct MCP execution retains the connection's service-action receipt.
-        let approval_id = if mcp { &id } else { &catalog };
-        super::receipts::require_approval(&f, approval_id).await;
+        if mcp {
+            // The direct executor's organization policy floor yields a real
+            // automatic service-action receipt for this ordinary POST.
+            org_connection(&f, &id, &catalog).await;
+            f.state
+                .db
+                .collection::<Document>(COLLECTION)
+                .delete_many(
+                    doc! {"kind":"selection","conversation_id":&f.row.id,"connection_id":&id},
+                )
+                .await
+                .unwrap();
+            choose(&f, &id).await;
+        } else {
+            // Catalog-backed HTTP resolves approval policy under the catalog ID.
+            super::receipts::require_approval(&f, &catalog).await;
+        }
         let mut provider = nyxid_service_adapters::test_support::scripted_fixture(
             "api.telnyx.com",
             vec![response(true)],
@@ -451,6 +497,15 @@ async fn actual_managed_http_and_mcp_success_settles_once_and_records_one_receip
             } else {
                 "service_approval"
             },
+            "mcp={mcp}"
+        );
+        assert_eq!(
+            receipt
+                .get_document("confirmation")
+                .unwrap()
+                .get_str("reason")
+                .unwrap(),
+            if mcp { "policy" } else { "approval" },
             "mcp={mcp}"
         );
         let sent = provider.requests.try_recv().unwrap();
@@ -569,35 +624,7 @@ async fn actual_managed_exchange_finishes_accounting_after_caller_disconnect_and
 async fn actual_managed_nonassistant_org_connection_keeps_resource_acl_and_personal_billing() {
     for mcp in [false, true] {
         let (mut f, id, catalog) = fixture(false).await;
-        let owner = org(&f).await;
-        let row = crate::services::user_service_service::find_user_service_by_id(&f.state.db, &id)
-            .await
-            .unwrap()
-            .unwrap();
-        f.state
-            .db
-            .collection::<Document>("user_services")
-            .update_one(doc! {"_id":&id}, doc! {"$set":{"user_id":&owner}})
-            .await
-            .unwrap();
-        f.state
-            .db
-            .collection::<Document>("user_endpoints")
-            .update_one(
-                doc! {"_id":row.endpoint_id},
-                doc! {"$set":{"user_id":&owner}},
-            )
-            .await
-            .unwrap();
-        f.state
-            .db
-            .collection::<Document>("downstream_services")
-            .update_one(
-                doc! {"_id":&catalog},
-                doc! {"$set":{"platform_key.allowed_owner_ids":[&owner]}},
-            )
-            .await
-            .unwrap();
+        org_connection(&f, &id, &catalog).await;
         f.auth = test_utils::test_auth_user(&f.owner);
         let mut provider = nyxid_service_adapters::test_support::scripted_fixture(
             "api.telnyx.com",
