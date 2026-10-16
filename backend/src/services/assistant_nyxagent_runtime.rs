@@ -1011,19 +1011,18 @@ pub(crate) async fn execute_owner_turn(
         });
     if !cancelled
         && (outcome.is_err() || outcome.as_ref().is_ok_and(|result| result.error.is_some()))
+        && let Some(summary) = model_refusal
     {
-        if let Some(summary) = model_refusal {
-            let text = format!(
-                "Please review the confirmation card: {summary}. I’ll continue after you allow it."
-            );
-            *partial = text.clone();
-            outcome = Ok(TurnResult {
-                text,
-                session_id: None,
-                response_id: None,
-                error: None,
-            });
-        }
+        let text = format!(
+            "Please review the confirmation card: {summary}. I’ll continue after you allow it."
+        );
+        *partial = text.clone();
+        outcome = Ok(TurnResult {
+            text,
+            session_id: None,
+            response_id: None,
+            error: None,
+        });
     }
     if outcome.as_ref().is_err() || outcome.as_ref().is_ok_and(|r| r.error.is_some()) {
         tool_images.failed(state, row).await;

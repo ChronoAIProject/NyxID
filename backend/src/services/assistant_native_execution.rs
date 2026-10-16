@@ -107,17 +107,26 @@ async fn key_binding(db: &mongodb::Database, chat: &acks::ChatAuthority) -> AppR
         "mode":acks::effective_access_mode(db, chat).await?}),
     ))
 }
+pub struct NativeResource<'a> {
+    pub collection: &'static str,
+    pub id: &'a str,
+    pub owner: &'a str,
+}
+
 pub async fn resource(
     db: &mongodb::Database,
     chat: Option<&acks::ChatAuthority>,
-    collection: &'static str,
-    id: &str,
-    owner: &str,
+    resource: NativeResource<'_>,
     tool: &str,
     arguments: &Value,
     facts: acks::ActionFacts,
     summary: &str,
 ) -> AppResult<Result<Option<ResourceAdmission>, Value>> {
+    let NativeResource {
+        collection,
+        id,
+        owner,
+    } = resource;
     let Some(chat) = chat else {
         return Ok(Ok(None));
     };
@@ -178,11 +187,10 @@ pub async fn resource(
         summary.to_owned()
     };
     let gate = acks::confirmation_needed(db, chat, facts, org).await?;
-    if let Some(need) = gate.ask() {
-        if let Some(refusal) = acks::confirm_action(db, chat, tool, &exact, &need, &summary).await?
-        {
-            return Ok(Err(refusal));
-        }
+    if let Some(need) = gate.ask()
+        && let Some(refusal) = acks::confirm_action(db, chat, tool, &exact, &need, &summary).await?
+    {
+        return Ok(Err(refusal));
     }
     Ok(Ok(Some(ResourceAdmission {
         collection,

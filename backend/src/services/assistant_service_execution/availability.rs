@@ -65,16 +65,15 @@ pub(super) async fn verified_unavailable(
             return Ok(true);
         }
     }
-    if let Some(id) = &service.api_key_id {
-        if let Some(key) = db
+    if let Some(id) = &service.api_key_id
+        && let Some(key) = db
             .collection::<UserApiKey>("user_api_keys")
             .find_one(doc! {"_id": id, "user_id": &service.user_id})
             .await?
-        {
-            // Expiry alone is not proof: refresh may recover it.
-            if matches!(key.status.as_str(), "revoked" | "failed" | "refresh_failed") {
-                return Ok(true);
-            }
+    {
+        // Expiry alone is not proof: refresh may recover it.
+        if matches!(key.status.as_str(), "revoked" | "failed" | "refresh_failed") {
+            return Ok(true);
         }
     }
     let mut filter = scope(chat)?;

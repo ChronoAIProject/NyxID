@@ -296,14 +296,14 @@ pub fn call<'a>(
                 String::new()
             }
         );
-        if let Some(plan) = &job_plan {
-            if !plan.org_labels.is_empty() {
-                summary.push_str(&format!(
-                    "; this command may use {} for job {} until it finishes or expires",
-                    plan.org_labels.join(", "),
-                    plan.id
-                ));
-            }
+        if let Some(plan) = &job_plan
+            && !plan.org_labels.is_empty()
+        {
+            summary.push_str(&format!(
+                "; this command may use {} for job {} until it finishes or expires",
+                plan.org_labels.join(", "),
+                plan.id
+            ));
         }
         if let Some(need) = gate.ask() {
             // Outside webhook automations a mismatched card id raises a fresh
@@ -546,22 +546,20 @@ pub fn call<'a>(
                 return Err(error);
             }
         };
-        if let Some(plan) = &job_plan {
-            if let Err(error) = plan.revalidate(&state.db, chat).await {
-                if let Some(job) = &job {
-                    machines::finish(&state.db, &job.id).await?;
-                }
-                if let Some(authority) = &authority {
-                    let _ = state
-                        .db
-                        .collection::<mongodb::bson::Document>(
-                            crate::models::machine_access::LEASES,
-                        )
-                        .delete_one(mongodb::bson::doc! {"_id":&authority.lease_id})
-                        .await;
-                }
-                return Err(error);
+        if let Some(plan) = &job_plan
+            && let Err(error) = plan.revalidate(&state.db, chat).await
+        {
+            if let Some(job) = &job {
+                machines::finish(&state.db, &job.id).await?;
             }
+            if let Some(authority) = &authority {
+                let _ = state
+                    .db
+                    .collection::<mongodb::bson::Document>(crate::models::machine_access::LEASES)
+                    .delete_one(mongodb::bson::doc! {"_id":&authority.lease_id})
+                    .await;
+            }
+            return Err(error);
         }
         let started = std::time::Instant::now();
         let mut result = match operation {

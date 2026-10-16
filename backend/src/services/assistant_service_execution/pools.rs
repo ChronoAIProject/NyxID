@@ -57,14 +57,12 @@ pub async fn pinned_pool_member(
                 "Pool connection use was not authorized".into(),
             ));
         }
-        if let Ok(operation) = row.get_document("operation") {
-            if let Ok(revision) = operation.get_i64("pool_revision") {
-                if db.collection::<Document>("service_pools").find_one(doc! {
+        if let Ok(operation) = row.get_document("operation")
+            && let Ok(revision) = operation.get_i64("pool_revision")
+                && db.collection::<Document>("service_pools").find_one(doc! {
                     "_id":pool,"is_active":true,"config_revision":revision,
                     "members":{"$elemMatch":{"user_service_id":row.get_str("connection_id").ok(),"enabled":true}},
                 }).await?.is_none() { return Err(AppError::Conflict("Confirmed service pool changed".into())); }
-            }
-        }
         let id = row
             .get_str("connection_id")
             .map_err(|_| AppError::Conflict("Pool confirmation lost its member".into()))?;
@@ -75,13 +73,12 @@ pub async fn pinned_pool_member(
         }
         if let Some(service) =
             crate::services::user_service_service::find_user_service_by_id(db, id).await?
+            && let Ok(operation) = row.get_document("operation")
         {
-            if let Ok(operation) = row.get_document("operation") {
-                let operation: Value = bson::from_document(operation.clone())
-                    .map_err(|_| AppError::Conflict("Invalid pool confirmation".into()))?;
-                if verified_unavailable(db, nodes, chat, &service, &operation).await? {
-                    return Ok(None);
-                }
+            let operation: Value = bson::from_document(operation.clone())
+                .map_err(|_| AppError::Conflict("Invalid pool confirmation".into()))?;
+            if verified_unavailable(db, nodes, chat, &service, &operation).await? {
+                return Ok(None);
             }
         }
         return Ok(Some(id.to_owned()));

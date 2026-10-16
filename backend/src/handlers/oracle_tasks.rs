@@ -321,7 +321,7 @@ pub async fn submit_task(
     oracle_task_service::validate_submit_input(&oracle_task_service::SubmitTaskInput {
         prompt: body.prompt.clone(),
         model_label: body.model.clone(),
-        require_model_match: body.require_model_match.clone(),
+        require_model_match: body.require_model_match,
         project_url: body.project_url.clone(),
         tag: body.tag.clone(),
         conversation_id: body.conversation_id.clone(),
@@ -334,9 +334,11 @@ pub async fn submit_task(
     let admission = match crate::services::assistant_native_execution::resource(
         &state.db,
         auth_user.assistant_chat.as_deref(),
-        "oracle_pools",
-        &pool.id,
-        &pool.user_id,
+        crate::services::assistant_native_execution::NativeResource {
+            collection: "oracle_pools",
+            id: &pool.id,
+            owner: &pool.user_id,
+        },
         "nyx__oracle_ask",
         &serde_json::to_value(&body)
             .map_err(|_| AppError::Internal("Oracle operation binding failed".into()))?,
@@ -427,9 +429,11 @@ pub async fn attach_conversation(
     let admission = match crate::services::assistant_native_execution::resource(
         &state.db,
         auth_user.assistant_chat.as_deref(),
-        "oracle_pools",
-        &pool.id,
-        &pool.user_id,
+        crate::services::assistant_native_execution::NativeResource {
+            collection: "oracle_pools",
+            id: &pool.id,
+            owner: &pool.user_id,
+        },
         "nyx__oracle_attach",
         &serde_json::to_value(&body)
             .map_err(|_| AppError::Internal("Oracle operation binding failed".into()))?,
@@ -498,9 +502,11 @@ pub async fn extract_url(
     let admission = match crate::services::assistant_native_execution::resource(
         &state.db,
         auth_user.assistant_chat.as_deref(),
-        "oracle_pools",
-        &pool.id,
-        &pool.user_id,
+        crate::services::assistant_native_execution::NativeResource {
+            collection: "oracle_pools",
+            id: &pool.id,
+            owner: &pool.user_id,
+        },
         "nyx__oracle_extract",
         &serde_json::to_value(&body)
             .map_err(|_| AppError::Internal("Oracle operation binding failed".into()))?,

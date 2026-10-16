@@ -278,12 +278,14 @@ pub(super) async fn node_service_call(f: &Fixture, id: &str, mcp: bool) -> AppRe
         .iter()
         .find(|service| service.service_id == id)
         .unwrap();
-    let endpoint = &service.endpoints[0];
-    let prepared = mcp_service::prepare_proxy_tool_call(
-        service,
-        endpoint,
-        &json!({"method":"GET","path":"/read"}),
-    )?;
+    let endpoint = service
+        .endpoints
+        .iter()
+        .find(|endpoint| {
+            endpoint.name == "read" && endpoint.method == "GET" && endpoint.path == "/read"
+        })
+        .expect("fixture publishes the exact GET /read endpoint");
+    let prepared = mcp_service::prepare_proxy_tool_call(service, endpoint, &json!({}))?;
     let context = mcp_service::McpExecContext {
         response_body_limit: None,
         actor_user_id: None,

@@ -123,19 +123,17 @@ pub async fn prepare(
         .collection::<Document>(execution::COLLECTION)
         .find_one(filter)
         .await?;
-    if !continued {
-        if let Some(plan) = existing.as_ref() {
-            let pending = state
-                .db
-                .collection::<Document>("assistant_acknowledgements")
-                .find_one(doc! {
-                "_id":plan.get_str("acknowledgement_id").unwrap_or_default(),"status":"pending",
-                "expires_at":{"$gt":bson::DateTime::now()}})
-                .await?
-                .is_some();
-            if !pending {
-                existing = None;
-            }
+    if !continued && let Some(plan) = existing.as_ref() {
+        let pending = state
+            .db
+            .collection::<Document>("assistant_acknowledgements")
+            .find_one(doc! {
+            "_id":plan.get_str("acknowledgement_id").unwrap_or_default(),"status":"pending",
+            "expires_at":{"$gt":bson::DateTime::now()}})
+            .await?
+            .is_some();
+        if !pending {
+            existing = None;
         }
     }
     let id = existing

@@ -143,9 +143,11 @@ pub(crate) fn admit<'a>(
             let admission = match super::assistant_native_execution::resource(
                 &state.db,
                 Some(chat),
-                "downstream_services",
-                catalog_id,
-                owner,
+                super::assistant_native_execution::NativeResource {
+                    collection: "downstream_services",
+                    id: catalog_id,
+                    owner,
+                },
                 kind,
                 &args,
                 acks::ActionFacts::of(acks::OwnerActionClass::Change),

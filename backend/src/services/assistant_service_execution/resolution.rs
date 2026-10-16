@@ -1,19 +1,21 @@
 use super::*;
 
+type HttpResolutionRequest<'a> = (
+    &'a str,
+    &'a str,
+    Option<&'a str>,
+    &'a [u8],
+    &'a axum::http::HeaderMap,
+    &'a HttpProjection,
+);
+
 /// Implicit provider resolution chooses before credential materialization.
 /// Exact UUID/connection-slug routes continue through their exact resolver.
 pub async fn resolve_implicit_for_request(
     state: &crate::AppState,
     auth: &crate::mw::auth::AuthUser,
     catalog: &str,
-    request: Option<(
-        &str,
-        &str,
-        Option<&str>,
-        &[u8],
-        &axum::http::HeaderMap,
-        &HttpProjection,
-    )>,
+    request: Option<HttpResolutionRequest<'_>>,
 ) -> AppResult<Option<crate::services::proxy_service::UserServiceResolution>> {
     let Some(chat) = auth.assistant_chat.as_deref() else {
         return crate::services::proxy_service::resolve_proxy_target_from_user_service(
@@ -177,42 +179,42 @@ pub async fn resolve_implicit_for_request(
         .await
         {
             Ok(Some(mut resolved)) => {
-                if selected_in_group.is_none() {
-                    if let Some((method, path, query, body, headers, projection)) = request {
-                        projection.apply(&mut resolved.target);
-                        if let Some(operation) = super::request_identity::raw_identity(
-                            &resolved.target,
-                            method,
-                            path,
-                            query,
-                            body,
-                            headers,
-                            projection,
-                        ) {
-                            if verified_unavailable(
-                                &state.db,
-                                &state.node_ws_manager,
-                                chat,
-                                &row,
-                                &operation,
-                            )
-                            .await?
-                            {
-                                continue;
-                            }
-                            let mut evidence = scope(chat)?;
-                            evidence.extend(doc! {"kind":"unavailable_bucket","entries":{"$elemMatch":{
+                if selected_in_group.is_none()
+                    && let Some((method, path, query, body, headers, projection)) = request
+                {
+                    projection.apply(&mut resolved.target);
+                    if let Some(operation) = super::request_identity::raw_identity(
+                        &resolved.target,
+                        method,
+                        path,
+                        query,
+                        body,
+                        headers,
+                        projection,
+                    ) {
+                        if verified_unavailable(
+                            &state.db,
+                            &state.node_ws_manager,
+                            chat,
+                            &row,
+                            &operation,
+                        )
+                        .await?
+                        {
+                            continue;
+                        }
+                        let mut evidence = scope(chat)?;
+                        evidence.extend(doc! {"kind":"unavailable_bucket","entries":{"$elemMatch":{
                                 "connection_id":&row.id,"binding":connection_binding(&state.db,&row.id,&chat.api_key_id).await?,
                                 "selection_operation":selection_fingerprint(&operation),"expires_at":{"$gt":bson::DateTime::now()}}}});
-                            if state
-                                .db
-                                .collection::<Document>(COLLECTION)
-                                .find_one(evidence)
-                                .await?
-                                .is_some()
-                            {
-                                continue;
-                            }
+                        if state
+                            .db
+                            .collection::<Document>(COLLECTION)
+                            .find_one(evidence)
+                            .await?
+                            .is_some()
+                        {
+                            continue;
                         }
                     }
                 }

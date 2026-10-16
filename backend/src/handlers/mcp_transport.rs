@@ -5175,9 +5175,11 @@ async fn handle_oracle_ask(
         let admission = match crate::services::assistant_native_execution::resource(
             &state.db,
             auth.chat.as_ref(),
-            "oracle_pools",
-            &pool.id,
-            &pool.user_id,
+            crate::services::assistant_native_execution::NativeResource {
+                collection: "oracle_pools",
+                id: &pool.id,
+                owner: &pool.user_id,
+            },
             "nyx__oracle_ask",
             arguments,
             crate::services::assistant_acknowledgement_service::ActionFacts {
@@ -5280,9 +5282,11 @@ async fn handle_oracle_attach(
         let admission = match crate::services::assistant_native_execution::resource(
             &state.db,
             auth.chat.as_ref(),
-            "oracle_pools",
-            &pool.id,
-            &pool.user_id,
+            crate::services::assistant_native_execution::NativeResource {
+                collection: "oracle_pools",
+                id: &pool.id,
+                owner: &pool.user_id,
+            },
             "nyx__oracle_attach",
             arguments,
             crate::services::assistant_acknowledgement_service::ActionFacts {
@@ -5349,9 +5353,11 @@ async fn handle_oracle_extract(
         let admission = match crate::services::assistant_native_execution::resource(
             &state.db,
             auth.chat.as_ref(),
-            "oracle_pools",
-            &pool.id,
-            &pool.user_id,
+            crate::services::assistant_native_execution::NativeResource {
+                collection: "oracle_pools",
+                id: &pool.id,
+                owner: &pool.user_id,
+            },
             "nyx__oracle_extract",
             arguments,
             crate::services::assistant_acknowledgement_service::ActionFacts {
@@ -5628,8 +5634,10 @@ async fn handle_mcp_ssh_exec(
         &service_id,
         &ssh_svc,
         &body,
-        &connection,
-        decision.admission.as_ref(),
+        SshCommandAdmission {
+            connection: &connection,
+            admission: decision.admission.as_ref(),
+        },
         billing_egress_permit,
     ));
     let result = match &concurrency {
@@ -5639,12 +5647,13 @@ async fn handle_mcp_ssh_exec(
 
     let response = match result {
         Ok(response) => {
-            if response.exit_code == 0 && !response.timed_out && approval_auto.is_none() {
-                if let (Some(chat), Some(admission)) =
+            if response.exit_code == 0
+                && !response.timed_out
+                && approval_auto.is_none()
+                && let (Some(chat), Some(admission)) =
                     (auth.chat.as_ref(), decision.admission.as_ref())
-                {
-                    admission.receipt(&state.db, chat, decision.automatic).await;
-                }
+            {
+                admission.receipt(&state.db, chat, decision.automatic).await;
             }
             let response_json = serde_json::json!({
                 "exit_code": response.exit_code,
@@ -5820,14 +5829,18 @@ async fn resolve_ssh_service_id(
 
 /// Internal SSH command execution (reusable by REST handler and MCP handler).
 /// Routes through the node agent for execution.
+struct SshCommandAdmission<'a> {
+    connection: &'a crate::models::user_service::UserService,
+    admission: Option<&'a crate::services::assistant_service_execution::Admission>,
+}
+
 async fn execute_ssh_command_internal(
     state: &AppState,
     auth: &McpAuthContext,
     service_id: &str,
     ssh_svc: &crate::models::downstream_service::SshServiceConfig,
     body: &super::ssh_exec::SshExecRequest,
-    connection: &crate::models::user_service::UserService,
-    admission: Option<&crate::services::assistant_service_execution::Admission>,
+    execution: SshCommandAdmission<'_>,
     billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
 ) -> Result<super::ssh_exec::SshExecResponse, crate::errors::AppError> {
     use crate::errors::AppError;
@@ -5835,6 +5848,10 @@ async fn execute_ssh_command_internal(
     use crate::models::usage_meter::CredentialClass;
     use crate::services::node_service;
 
+    let SshCommandAdmission {
+        connection,
+        admission,
+    } = execution;
     let user_id = auth.user_id.as_str();
 
     let principal = body.principal.trim();
@@ -5931,7 +5948,7 @@ async fn execute_ssh_command_internal(
                 continue;
             }
             match crate::services::assistant_native_execution::verify_ssh_node(
-                &state,
+                state,
                 chat,
                 &connection.id,
                 node_id,

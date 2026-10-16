@@ -242,11 +242,11 @@ async fn handle_web_terminal(
     }
 
     // ----- Generate ephemeral SSH credentials for cert-mode sessions -----
-    if let Some(admission) = session_admission.as_ref() {
-        if admission.revalidate(&state, None).await.is_err() {
-            send_error_and_close(&mut socket, "SSH session authority changed").await;
-            return;
-        }
+    if let Some(admission) = session_admission.as_ref()
+        && admission.revalidate(&state, None).await.is_err()
+    {
+        send_error_and_close(&mut socket, "SSH session authority changed").await;
+        return;
     }
     let ephemeral = if auth_mode == SshAuthMode::Cert {
         match generate_ephemeral_credentials(&state, &ssh_svc, &service_id, &user_id, &principal)
@@ -447,15 +447,15 @@ async fn handle_node_web_terminal(
             SshAuthMode::ProxyOnly => unreachable!("proxy-only returned before node dispatch"),
         };
 
-        if let Some(admission) = session_admission.as_ref() {
-            if admission.revalidate(&state, Some(node_id)).await.is_err() {
-                let _ = state
-                    .billing
-                    .fail(&metered, "assistant_authority_changed")
-                    .await;
-                send_error_and_close(&mut socket, "SSH session authority changed").await;
-                return;
-            }
+        if let Some(admission) = session_admission.as_ref()
+            && admission.revalidate(&state, Some(node_id)).await.is_err()
+        {
+            let _ = state
+                .billing
+                .fail(&metered, "assistant_authority_changed")
+                .await;
+            send_error_and_close(&mut socket, "SSH session authority changed").await;
+            return;
         }
         match state
             .node_dispatch

@@ -240,13 +240,12 @@ async fn check_inner(
         return Err(AppError::Forbidden("Service access revoked".into()));
     }
     let binding = connection_binding(db, connection_id, &chat.api_key_id).await?;
-    if pool {
-        if let Some(failure) =
+    if pool
+        && let Some(failure) =
             availability::pool_predispatch_failure(db, chat, connection_id, &binding, operation)
                 .await?
-        {
-            return Err(AppError::PoolAttemptTransport(failure));
-        }
+    {
+        return Err(AppError::PoolAttemptTransport(failure));
     }
     let pool_members: Vec<String> = if pool {
         if let Some(id) = operation["pool_id"].as_str() {
@@ -307,56 +306,55 @@ async fn check_inner(
         .collection::<Document>(COLLECTION)
         .find_one(selected_filter)
         .await?;
-    if let Some(selected) = selected.as_ref() {
-        if let Ok(selected_id) = selected.get_str("connection_id") {
-            let selected_service =
-                super::user_service_service::find_user_service_by_id(db, selected_id).await?;
-            let catalog = selected
-                .get_str("catalog_service_id")
-                .ok()
-                .or_else(|| {
-                    selected
-                        .get_document("operation")
-                        .ok()
-                        .and_then(|op| op.get_str("provider").ok())
-                })
-                .or_else(|| {
-                    selected_service
-                        .as_ref()
-                        .and_then(|row| row.catalog_service_id.as_deref())
-                });
-            let same_group = preferences::group_key(selected_id, catalog)
-                == preferences::group_key(connection_id, service.catalog_service_id.as_deref());
-            let applies = selected
-                .get("operation")
-                .is_none_or(|op| bson::to_bson(operation).is_ok_and(|current| current == *op));
-            let pool_fallback = pool
-                && selected.get_str("selection_source") != Ok("owner")
-                && operation["pool_id"].as_str().is_some_and(|pool| {
-                    selected
-                        .get_document("operation")
-                        .ok()
-                        .and_then(|op| op.get_str("pool_id").ok())
-                        == Some(pool)
-                })
-                && if let Some(row) = selected_service.as_ref() {
-                    verified_unavailable(db, nodes, chat, row, operation).await?
-                } else {
-                    false
-                };
-            if same_group
-                && !pool_fallback
-                && applies
-                && (selected_id != connection_id
-                    || !selection_matches(selected, &service, &binding))
-            {
-                return Ok(Decision {
-                    refusal: Some(json!({"error":"service_selection_required",
+    if let Some(selected) = selected.as_ref()
+        && let Ok(selected_id) = selected.get_str("connection_id")
+    {
+        let selected_service =
+            super::user_service_service::find_user_service_by_id(db, selected_id).await?;
+        let catalog = selected
+            .get_str("catalog_service_id")
+            .ok()
+            .or_else(|| {
+                selected
+                    .get_document("operation")
+                    .ok()
+                    .and_then(|op| op.get_str("provider").ok())
+            })
+            .or_else(|| {
+                selected_service
+                    .as_ref()
+                    .and_then(|row| row.catalog_service_id.as_deref())
+            });
+        let same_group = preferences::group_key(selected_id, catalog)
+            == preferences::group_key(connection_id, service.catalog_service_id.as_deref());
+        let applies = selected
+            .get("operation")
+            .is_none_or(|op| bson::to_bson(operation).is_ok_and(|current| current == *op));
+        let pool_fallback = pool
+            && selected.get_str("selection_source") != Ok("owner")
+            && operation["pool_id"].as_str().is_some_and(|pool| {
+                selected
+                    .get_document("operation")
+                    .ok()
+                    .and_then(|op| op.get_str("pool_id").ok())
+                    == Some(pool)
+            })
+            && if let Some(row) = selected_service.as_ref() {
+                verified_unavailable(db, nodes, chat, row, operation).await?
+            } else {
+                false
+            };
+        if same_group
+            && !pool_fallback
+            && applies
+            && (selected_id != connection_id || !selection_matches(selected, &service, &binding))
+        {
+            return Ok(Decision {
+                refusal: Some(json!({"error":"service_selection_required",
                     "selected_connection_id":selected_id,"instructions":"Use the owner's exact selected connection for this operation. If it is unavailable, ask the owner to choose a new target."})),
-                    admission: None,
-                    automatic: None,
-                });
-            }
+                admission: None,
+                automatic: None,
+            });
         }
     }
     let explicit = selected.as_ref().is_some_and(|row| {
@@ -580,28 +578,27 @@ async fn check_inner(
         summary.to_owned()
     };
     let gate = acks::confirmation_needed(db, chat, facts, org && !model_consent).await?;
-    if let Some(need) = gate.ask() {
-        if let Some(refusal) =
+    if let Some(need) = gate.ask()
+        && let Some(refusal) =
             acks::confirm_action(db, chat, "nyxid.service_execution", &args, &need, &summary)
                 .await?
+    {
+        if refusal["error"] == "acknowledgement_required"
+            && let Some(id) = refusal["acknowledgement_id"].as_str()
         {
-            if refusal["error"] == "acknowledgement_required" {
-                if let Some(id) = refusal["acknowledgement_id"].as_str() {
-                    db.collection::<Document>(COLLECTION).update_one(doc! {"_id": id}, doc! {"$setOnInsert": {
+            db.collection::<Document>(COLLECTION).update_one(doc! {"_id": id}, doc! {"$setOnInsert": {
                         "kind": "card_binding", "user_id": &chat.user_id, "conversation_id": &chat.conversation_id,
                         "api_key_id": &chat.api_key_id, "turn_id": &chat.turn_id, "connection_id": connection_id,
                         "owner_id": effective_owner, "catalog_service_id": &service.catalog_service_id,
                         "binding": &binding, "operation": bson::to_bson(operation).map_err(|_| AppError::Internal("Operation binding failed".into()))?,
                         "expires_at": bson::DateTime::from_chrono(Utc::now() + Duration::minutes(25)),
                     }}).upsert(true).await?;
-                }
-            }
-            return Ok(Decision {
-                refusal: Some(refusal),
-                admission: None,
-                automatic: None,
-            });
         }
+        return Ok(Decision {
+            refusal: Some(refusal),
+            admission: None,
+            automatic: None,
+        });
     }
     Ok(Decision {
         refusal: None,

@@ -2494,7 +2494,7 @@ pub(crate) async fn begin_owner_turn_in_session(
     }
     row.updated_at = now;
     Box::pin(super::assistant_service_execution::bind_owner_selection(
-        db, session, &row, &start, &text,
+        db, session, &row, start, &text,
     ))
     .await?;
     if voice_request.is_none() || hidden_voice {

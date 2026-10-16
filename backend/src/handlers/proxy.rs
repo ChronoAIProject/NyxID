@@ -5323,31 +5323,28 @@ async fn execute_resolved_proxy_inner(
                 return Err(error);
             }
             let start = std::time::Instant::now();
-            if resolved_user_service_id.is_none() {
-                if let Some(job) = machine_ingress.as_ref().and_then(|i| i.assistant_job_id()) {
-                    if let Err(error) =
-                        crate::services::assistant_job_service_use::validate_catalog(
-                            &state.db,
-                            job,
-                            &target.service.id,
-                        )
-                        .await
-                    {
-                        state
-                            .billing
-                            .fail(&metered, "machine_authority_changed")
-                            .await?;
-                        if let Some(reservation) = durable_reservation.as_ref() {
-                            durable_operation_grant_service::mark_pre_dispatch_rejected(
-                                &state.db,
-                                reservation,
-                                "machine authority changed before dispatch",
-                            )
-                            .await;
-                        }
-                        return Err(error);
-                    }
+            if resolved_user_service_id.is_none()
+                && let Some(job) = machine_ingress.as_ref().and_then(|i| i.assistant_job_id())
+                && let Err(error) = crate::services::assistant_job_service_use::validate_catalog(
+                    &state.db,
+                    job,
+                    &target.service.id,
+                )
+                .await
+            {
+                state
+                    .billing
+                    .fail(&metered, "machine_authority_changed")
+                    .await?;
+                if let Some(reservation) = durable_reservation.as_ref() {
+                    durable_operation_grant_service::mark_pre_dispatch_rejected(
+                        &state.db,
+                        reservation,
+                        "machine authority changed before dispatch",
+                    )
+                    .await;
                 }
+                return Err(error);
             }
             if let Some(admission) = assistant_decision.admission.as_ref() {
                 let revalidation = admission
@@ -5411,22 +5408,21 @@ async fn execute_resolved_proxy_inner(
                     path,
                 )
                 .map(|guard| guard.routed(Some(node_route)))
+                && let Err(error) = guard.revalidate().await
             {
-                if let Err(error) = guard.revalidate().await {
-                    if let Some(reservation) = durable_reservation.as_ref() {
-                        durable_operation_grant_service::mark_send_rejected(&state.db, reservation)
-                            .await;
-                    }
-                    state
-                        .billing
-                        .reject_before_send(
-                            &metered,
-                            "assistant_authority_changed",
-                            had_dispatched_failure,
-                        )
-                        .await?;
-                    return Err(error);
+                if let Some(reservation) = durable_reservation.as_ref() {
+                    durable_operation_grant_service::mark_send_rejected(&state.db, reservation)
+                        .await;
                 }
+                state
+                    .billing
+                    .reject_before_send(
+                        &metered,
+                        "assistant_authority_changed",
+                        had_dispatched_failure,
+                    )
+                    .await?;
+                return Err(error);
             }
             if let Some(accounting) = &pool_accounting {
                 accounting
@@ -6149,30 +6145,28 @@ async fn execute_resolved_proxy_inner(
             model.clone(),
         );
 
-        if resolved_user_service_id.is_none() {
-            if let Some(job) = machine_ingress.as_ref().and_then(|i| i.assistant_job_id()) {
-                if let Err(error) = crate::services::assistant_job_service_use::validate_catalog(
+        if resolved_user_service_id.is_none()
+            && let Some(job) = machine_ingress.as_ref().and_then(|i| i.assistant_job_id())
+            && let Err(error) = crate::services::assistant_job_service_use::validate_catalog(
+                &state.db,
+                job,
+                &target.service.id,
+            )
+            .await
+        {
+            state
+                .billing
+                .fail(&metered, "machine_authority_changed")
+                .await?;
+            if let Some(reservation) = durable_reservation.as_ref() {
+                durable_operation_grant_service::mark_pre_dispatch_rejected(
                     &state.db,
-                    job,
-                    &target.service.id,
+                    reservation,
+                    "machine authority changed before dispatch",
                 )
-                .await
-                {
-                    state
-                        .billing
-                        .fail(&metered, "machine_authority_changed")
-                        .await?;
-                    if let Some(reservation) = durable_reservation.as_ref() {
-                        durable_operation_grant_service::mark_pre_dispatch_rejected(
-                            &state.db,
-                            reservation,
-                            "machine authority changed before dispatch",
-                        )
-                        .await;
-                    }
-                    return Err(error);
-                }
+                .await;
             }
+            return Err(error);
         }
         if let Some(admission) = assistant_decision.admission.as_ref() {
             let revalidation = admission
@@ -6231,22 +6225,20 @@ async fn execute_resolved_proxy_inner(
                 path,
             )
             .map(|guard| guard.routed(node_route.as_ref()))
+            && let Err(error) = guard.revalidate().await
         {
-            if let Err(error) = guard.revalidate().await {
-                if let Some(reservation) = durable_reservation.as_ref() {
-                    durable_operation_grant_service::mark_send_rejected(&state.db, reservation)
-                        .await;
-                }
-                state
-                    .billing
-                    .reject_before_send(
-                        &metered,
-                        "assistant_authority_changed",
-                        had_dispatched_failure,
-                    )
-                    .await?;
-                return Err(error);
+            if let Some(reservation) = durable_reservation.as_ref() {
+                durable_operation_grant_service::mark_send_rejected(&state.db, reservation).await;
             }
+            state
+                .billing
+                .reject_before_send(
+                    &metered,
+                    "assistant_authority_changed",
+                    had_dispatched_failure,
+                )
+                .await?;
+            return Err(error);
         }
         mark_pool_attempt_dispatched(pool_dispatch_state.as_ref());
         destination_audit.dispatch();
@@ -6358,30 +6350,28 @@ async fn execute_resolved_proxy_inner(
     }
 
     // Reuse the shared reqwest::Client from AppState for connection pooling.
-    if resolved_user_service_id.is_none() {
-        if let Some(job) = machine_ingress.as_ref().and_then(|i| i.assistant_job_id()) {
-            if let Err(error) = crate::services::assistant_job_service_use::validate_catalog(
+    if resolved_user_service_id.is_none()
+        && let Some(job) = machine_ingress.as_ref().and_then(|i| i.assistant_job_id())
+        && let Err(error) = crate::services::assistant_job_service_use::validate_catalog(
+            &state.db,
+            job,
+            &target.service.id,
+        )
+        .await
+    {
+        state
+            .billing
+            .fail(&metered, "machine_authority_changed")
+            .await?;
+        if let Some(reservation) = durable_reservation.as_ref() {
+            durable_operation_grant_service::mark_pre_dispatch_rejected(
                 &state.db,
-                job,
-                &target.service.id,
+                reservation,
+                "machine authority changed before dispatch",
             )
-            .await
-            {
-                state
-                    .billing
-                    .fail(&metered, "machine_authority_changed")
-                    .await?;
-                if let Some(reservation) = durable_reservation.as_ref() {
-                    durable_operation_grant_service::mark_pre_dispatch_rejected(
-                        &state.db,
-                        reservation,
-                        "machine authority changed before dispatch",
-                    )
-                    .await;
-                }
-                return Err(error);
-            }
+            .await;
         }
+        return Err(error);
     }
     if let Some(admission) = assistant_decision.admission.as_ref() {
         let revalidation = admission
@@ -7723,14 +7713,14 @@ async fn handle_ws_passthrough(
 
     // Connect to downstream BEFORE upgrading the client connection.
     // If the downstream is unreachable, the client gets a normal HTTP error.
-    if let Some(egress) = egress_guard {
-        if let Err(error) = egress.revalidate().await {
-            state
-                .billing
-                .reject_before_send(&metered, "assistant_authority_changed", false)
-                .await?;
-            return Err(error);
-        }
+    if let Some(egress) = egress_guard
+        && let Err(error) = egress.revalidate().await
+    {
+        state
+            .billing
+            .reject_before_send(&metered, "assistant_authority_changed", false)
+            .await?;
+        return Err(error);
     }
     let downstream = connect_downstream_ws(
         &downstream_url,
@@ -7974,14 +7964,14 @@ async fn handle_ws_passthrough_via_node(
             ws_frame_injections: target.ws_frame_injections.clone(),
         };
 
-        if let Some(egress) = egress_guard {
-            if let Err(error) = egress.revalidate().await {
-                state
-                    .billing
-                    .reject_before_send(&metered, "assistant_authority_changed", false)
-                    .await?;
-                return Err(error);
-            }
+        if let Some(egress) = egress_guard
+            && let Err(error) = egress.revalidate().await
+        {
+            state
+                .billing
+                .reject_before_send(&metered, "assistant_authority_changed", false)
+                .await?;
+            return Err(error);
         }
         match state
             .node_dispatch

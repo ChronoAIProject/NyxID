@@ -133,6 +133,14 @@ async fn actual_proxy_and_mcp_delayed_exchange_revocation_prevents_operation_sen
             ));
             let owner = org(&f).await;
             let catalog = catalog(&f).await;
+            f.state
+                .db
+                .collection("service_endpoints")
+                .insert_one(test_utils::test_service_endpoint(
+                    &catalog, "read", "GET", "/read",
+                ))
+                .await
+                .unwrap();
             let id = connection(&f, &owner, "exact-exchange", Some(&catalog)).await;
             grant_service(&mut f, &id).await;
             let entered = Arc::new(tokio::sync::Notify::new());

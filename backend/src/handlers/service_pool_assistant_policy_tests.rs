@@ -139,7 +139,7 @@ async fn assistant_pool_approval_pins_member_across_requests_and_balance_ticks()
         .ok()
         .and_then(|a| a.get_str("connection_id").ok())
         .map(str::to_owned)
-        .unwrap_or_else(|| String::new());
+        .unwrap_or_else(String::new);
     let bound = f
         .state
         .db

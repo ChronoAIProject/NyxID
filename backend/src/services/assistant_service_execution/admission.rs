@@ -42,20 +42,18 @@ impl Admission {
         connection: &str,
         target: Option<&crate::services::proxy_service::ProxyTarget>,
     ) -> AppResult<()> {
-        if let Some(pool) = self.operation_identity["pool_id"].as_str() {
-            if let Some(revision) = self.operation_identity["pool_revision"].as_i64() {
-                if db
-                    .collection::<Document>("service_pools")
-                    .find_one(doc! {
-                        "_id":pool,"is_active":true,"config_revision":revision,
-                        "members":{"$elemMatch":{"user_service_id":connection,"enabled":true}},
-                    })
-                    .await?
-                    .is_none()
-                {
-                    return Err(AppError::Conflict("Confirmed service pool changed".into()));
-                }
-            }
+        if let Some(pool) = self.operation_identity["pool_id"].as_str()
+            && let Some(revision) = self.operation_identity["pool_revision"].as_i64()
+            && db
+                .collection::<Document>("service_pools")
+                .find_one(doc! {
+                    "_id":pool,"is_active":true,"config_revision":revision,
+                    "members":{"$elemMatch":{"user_service_id":connection,"enabled":true}},
+                })
+                .await?
+                .is_none()
+        {
+            return Err(AppError::Conflict("Confirmed service pool changed".into()));
         }
         if let Some(job) = &self.job_id {
             let service =

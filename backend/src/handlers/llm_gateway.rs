@@ -818,14 +818,14 @@ pub async fn llm_proxy_request(
             );
 
             state.billing.mark_forwarded(&metered).await?;
-            if let Some(guard) = egress_guard.as_ref() {
-                if let Err(error) = guard.revalidate().await {
-                    state
-                        .billing
-                        .reject_before_send(&metered, "assistant_authority_changed", false)
-                        .await?;
-                    return Err(error);
-                }
+            if let Some(guard) = egress_guard.as_ref()
+                && let Err(error) = guard.revalidate().await
+            {
+                state
+                    .billing
+                    .reject_before_send(&metered, "assistant_authority_changed", false)
+                    .await?;
+                return Err(error);
             }
             chatgpt_translator::send_to_chatgpt(
                 &translated.body,
@@ -1572,14 +1572,14 @@ async fn gateway_provider_request(
             );
 
             state.billing.mark_forwarded(&metered).await?;
-            if let Some(guard) = egress_guard.as_ref() {
-                if let Err(error) = guard.revalidate().await {
-                    state
-                        .billing
-                        .reject_before_send(&metered, "assistant_authority_changed", false)
-                        .await?;
-                    return Err(error);
-                }
+            if let Some(guard) = egress_guard.as_ref()
+                && let Err(error) = guard.revalidate().await
+            {
+                state
+                    .billing
+                    .reject_before_send(&metered, "assistant_authority_changed", false)
+                    .await?;
+                return Err(error);
             }
             chatgpt_translator::send_to_chatgpt(
                 &translated_body,

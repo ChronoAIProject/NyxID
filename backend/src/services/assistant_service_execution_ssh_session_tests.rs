@@ -324,9 +324,7 @@ async fn actual_direct_tunnel_personal_legacy_and_org_session_consent_preserve_b
         let (url, server) = websocket_server(&f, id.as_deref().unwrap_or(&c), false).await;
         let initial = connect(&url, None).await;
         let mut socket = if is_org && access != AccessMode::Autopilot {
-            let card = initial
-                .err()
-                .expect("organization Auto/Ask must require consent");
+            let card = initial.expect_err("organization Auto/Ask must require consent");
             assert!(starts.try_recv().is_err());
             let ack = allow(&f, card).await;
             connect(&url, Some(&ack)).await.unwrap()
@@ -383,9 +381,7 @@ async fn actual_terminal_org_auto_card_then_exact_node_session_and_bypass() {
         let (url, server) = websocket_server(&f, &id, true).await;
         let initial = connect(&url, None).await;
         let mut socket = if access != AccessMode::Autopilot {
-            let card = initial
-                .err()
-                .expect("organization Auto/Ask must require consent");
+            let card = initial.expect_err("organization Auto/Ask must require consent");
             assert!(observed.try_recv().is_err());
             let ack = allow(&f, card).await;
             connect(&url, Some(&ack)).await.unwrap()

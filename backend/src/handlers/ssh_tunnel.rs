@@ -483,15 +483,15 @@ async fn handle_ssh_socket(
         return;
     }
 
-    if let Some(admission) = session_admission.as_ref() {
-        if admission.revalidate(&state, None).await.is_err() {
-            let _ = state
-                .billing
-                .fail(&metered, "assistant_authority_changed")
-                .await;
-            let _ = socket.close().await;
-            return;
-        }
+    if let Some(admission) = session_admission.as_ref()
+        && admission.revalidate(&state, None).await.is_err()
+    {
+        let _ = state
+            .billing
+            .fail(&metered, "assistant_authority_changed")
+            .await;
+        let _ = socket.close().await;
+        return;
     }
     let connect_target = format!("{}:{}", ssh_service.host, ssh_service.port);
     let mut tcp_stream = match tokio::time::timeout(
@@ -849,15 +849,15 @@ async fn handle_node_ssh_socket(
         } else {
             None
         };
-        if let Some(admission) = session_admission.as_ref() {
-            if admission.revalidate(&state, Some(node_id)).await.is_err() {
-                let _ = state
-                    .billing
-                    .fail(&metered, "assistant_authority_changed")
-                    .await;
-                let _ = socket.close().await;
-                return;
-            }
+        if let Some(admission) = session_admission.as_ref()
+            && admission.revalidate(&state, Some(node_id)).await.is_err()
+        {
+            let _ = state
+                .billing
+                .fail(&metered, "assistant_authority_changed")
+                .await;
+            let _ = socket.close().await;
+            return;
         }
         match state
             .node_dispatch

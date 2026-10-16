@@ -4370,46 +4370,46 @@ fn scoped_execution(exec_ctx: &McpExecContext<'_>, service: &McpToolService) -> 
     })
 }
 
-#[allow(clippy::too_many_arguments)]
-pub fn execute_tool_response<'a>(
-    http_client: &'a reqwest::Client,
+// Resolve before polling dispatch so credential/node resolution's debug poll frame
+// is no longer on the stack while the final admission performs database reads.
+struct ToolResolutionContext<'a> {
     db: &'a mongodb::Database,
     encryption_keys: &'a EncryptionKeys,
     node_ws_manager: &'a std::sync::Arc<NodeWsManager>,
-    billing: &'a std::sync::Arc<crate::services::billing::BillingService>,
     user_id: &'a str,
     billing_principal_user_id: &'a str,
     service: &'a McpToolService,
-    endpoint: &'a McpToolEndpoint,
-    prepared: PreparedProxyCall,
-    jwt_keys: &'a crate::crypto::jwt::JwtKeys,
+    prepared: &'a PreparedProxyCall,
     config: &'a crate::config::AppConfig,
     connection_expiry_notifier:
         &'a crate::services::connection_expiry_service::ConnectionExpiryNotifier,
-    token_exchange_cache: &'a crate::services::provider_token_exchange_service::TokenExchangeCache,
-    cloud_response_cache: &'a crate::services::cloud_response_cache::CloudResponseCache,
     exec_ctx: &'a McpExecContext<'a>,
-    billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
-) -> futures::future::BoxFuture<'a, AppResult<ToolResponse>> {
+}
+
+struct ResolvedToolTarget {
+    target: proxy_service::ProxyTarget,
+    node_route: Option<node_routing_service::NodeRoute>,
+    has_server_credential: bool,
+    billing_context_builder: McpBillingRouteContextBuilder,
+    catalog_service_slug: Option<String>,
+}
+
+fn resolve_tool_target(
+    context: ToolResolutionContext<'_>,
+) -> futures::future::BoxFuture<'_, AppResult<ResolvedToolTarget>> {
     Box::pin(async move {
-        super::org_agent_service::authorize_service_with_access(
+        let ToolResolutionContext {
             db,
+            encryption_keys,
+            node_ws_manager,
             user_id,
-            exec_ctx.agent_owner,
-            Some(&service.service_id),
-            exec_ctx.org_agent_access,
-        )
-        .await?;
-        if let Some(scopes) = exec_ctx.operation_scopes {
-            prepared.authorize_agent_operations(scopes, service, endpoint)?;
-        }
-        let http_client = if scoped_execution(exec_ctx, service) {
-            proxy_service::no_redirect_http_client()
-        } else {
-            http_client
-        };
-        // Resolve the proxy target and node routing from the fresh resolver result
-        // (not cached loader flags -- credential state may have changed).
+            billing_principal_user_id,
+            service,
+            prepared,
+            config,
+            connection_expiry_notifier,
+            exec_ctx,
+        } = context;
         let resolved = match &service.source {
             McpToolSource::Internal => {
                 return Err(AppError::Forbidden(
@@ -4648,15 +4648,80 @@ pub fn execute_tool_response<'a>(
         };
 
         let (
-            target,
+            mut target,
             node_route,
             has_server_credential,
             billing_context_builder,
             catalog_service_slug,
         ) = resolved;
-
-        let mut target = target;
         prepared.resolve_destination(&mut target)?;
+        Ok(ResolvedToolTarget {
+            target,
+            node_route,
+            has_server_credential,
+            billing_context_builder,
+            catalog_service_slug,
+        })
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn execute_tool_response<'a>(
+    http_client: &'a reqwest::Client,
+    db: &'a mongodb::Database,
+    encryption_keys: &'a EncryptionKeys,
+    node_ws_manager: &'a std::sync::Arc<NodeWsManager>,
+    billing: &'a std::sync::Arc<crate::services::billing::BillingService>,
+    user_id: &'a str,
+    billing_principal_user_id: &'a str,
+    service: &'a McpToolService,
+    endpoint: &'a McpToolEndpoint,
+    prepared: PreparedProxyCall,
+    jwt_keys: &'a crate::crypto::jwt::JwtKeys,
+    config: &'a crate::config::AppConfig,
+    connection_expiry_notifier:
+        &'a crate::services::connection_expiry_service::ConnectionExpiryNotifier,
+    token_exchange_cache: &'a crate::services::provider_token_exchange_service::TokenExchangeCache,
+    cloud_response_cache: &'a crate::services::cloud_response_cache::CloudResponseCache,
+    exec_ctx: &'a McpExecContext<'a>,
+    billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
+) -> futures::future::BoxFuture<'a, AppResult<ToolResponse>> {
+    Box::pin(async move {
+        super::org_agent_service::authorize_service_with_access(
+            db,
+            user_id,
+            exec_ctx.agent_owner,
+            Some(&service.service_id),
+            exec_ctx.org_agent_access,
+        )
+        .await?;
+        if let Some(scopes) = exec_ctx.operation_scopes {
+            prepared.authorize_agent_operations(scopes, service, endpoint)?;
+        }
+        let http_client = if scoped_execution(exec_ctx, service) {
+            proxy_service::no_redirect_http_client()
+        } else {
+            http_client
+        };
+        let ResolvedToolTarget {
+            target,
+            node_route,
+            has_server_credential,
+            billing_context_builder,
+            catalog_service_slug,
+        } = resolve_tool_target(ToolResolutionContext {
+            db,
+            encryption_keys,
+            node_ws_manager,
+            user_id,
+            billing_principal_user_id,
+            service,
+            prepared: &prepared,
+            config,
+            connection_expiry_notifier,
+            exec_ctx,
+        })
+        .await?;
 
         match Box::pin(execute_tool_resolved(
             http_client,
@@ -5057,99 +5122,98 @@ async fn execute_tool_resolved_inner(
         super::assistant_acknowledgement_service::for_key(db, user_id, exec_ctx.api_key_id).await?;
     let mut assistant_admission = None;
     let mut assistant_auto = None;
-    if let Some(chat) = assistant_chat.as_ref() {
-        if let McpToolSource::UserManaged {
+    if let Some(chat) = assistant_chat.as_ref()
+        && let McpToolSource::UserManaged {
             user_service_id,
             effective_owner_id,
             ..
         } = &service.source
-        {
-            super::assistant_service_execution::verify_resolved(
-                db,
-                encryption_keys,
-                &chat,
-                user_service_id,
-                &target,
-                prepared.method.as_str(),
-                &prepared.path,
-            )
-            .await?;
-            let mut operation = super::assistant_service_execution::http_operation(
-                &target,
-                prepared.method.as_str(),
-                &prepared.path,
-                prepared.query.as_deref(),
-                prepared.body.as_deref().unwrap_or_default(),
+    {
+        super::assistant_service_execution::verify_resolved(
+            db,
+            encryption_keys,
+            chat,
+            user_service_id,
+            &target,
+            prepared.method.as_str(),
+            &prepared.path,
+        )
+        .await?;
+        let mut operation = super::assistant_service_execution::http_operation(
+            &target,
+            prepared.method.as_str(),
+            &prepared.path,
+            prepared.query.as_deref(),
+            prepared.body.as_deref().unwrap_or_default(),
+        );
+        super::assistant_service_execution::bind_headers(
+            &mut operation,
+            &prepared.parameter_headers,
+        );
+        operation["endpoint_id"] = serde_json::json!(endpoint.endpoint_id);
+        operation["endpoint_contract"] = serde_json::json!(endpoint_contract_digest(endpoint));
+        if endpoint.async_operation.is_some() {
+            operation["async_contract"] = serde_json::json!(
+                super::assistant_service_execution::async_contract_binding(service, endpoint)?
             );
-            super::assistant_service_execution::bind_headers(
-                &mut operation,
-                &prepared.parameter_headers,
-            );
-            operation["endpoint_id"] = serde_json::json!(endpoint.endpoint_id);
-            operation["endpoint_contract"] = serde_json::json!(endpoint_contract_digest(endpoint));
-            if endpoint.async_operation.is_some() {
-                operation["async_contract"] = serde_json::json!(
-                    super::assistant_service_execution::async_contract_binding(service, endpoint)?
-                );
-            }
-            let metadata = service
-                .durable_endpoint_metadata
-                .get(&endpoint.endpoint_id)
-                .copied()
-                .unwrap_or_default();
-            let effects = operation_effects(prepared.method(), metadata);
-            let read = effects.reads && !prepared.carries_method_override();
-            let destructive = effects.destructive || prepared.carries_method_override();
-            let decision = if let Some(authority) = prepared.async_continuation.as_ref() {
-                authority
-                    .admit(db, chat, user_service_id, &target, &operation)
-                    .await?
-            } else {
-                super::assistant_service_execution::check(
-                    db,
-                    node_ws_manager,
-                    &chat,
-                    user_service_id,
-                    effective_owner_id,
-                    &operation,
-                    super::assistant_acknowledgement_service::ActionFacts::of(
-                        super::assistant_acknowledgement_service::service_action_class(
-                            read,
-                            destructive,
-                        ),
-                    ),
-                    prepared.acknowledgement_id.as_deref(),
-                    &format!(
-                        "{} {} on {}",
-                        prepared.method(),
-                        endpoint.name,
-                        service.service_slug
-                    ),
-                    false,
-                    Some(&target),
-                    false,
-                    Some((
-                        prepared.body.as_deref().unwrap_or_default(),
-                        Some("application/json"),
-                    )),
-                )
+        }
+        let metadata = service
+            .durable_endpoint_metadata
+            .get(&endpoint.endpoint_id)
+            .copied()
+            .unwrap_or_default();
+        let effects = operation_effects(prepared.method(), metadata);
+        let read = effects.reads && !prepared.carries_method_override();
+        let destructive = effects.destructive || prepared.carries_method_override();
+        let decision = if let Some(authority) = prepared.async_continuation.as_ref() {
+            authority
+                .admit(db, chat, user_service_id, &target, &operation)
                 .await?
-            };
-            assistant_auto = decision.automatic;
-            if let Some(refusal) = decision.refusal {
-                return Ok(McpToolExecutionOutcome::Response(
-                    ToolResponse::policy_refusal(refusal),
-                ));
+        } else {
+            super::assistant_service_execution::check(
+                db,
+                node_ws_manager,
+                chat,
+                user_service_id,
+                effective_owner_id,
+                &operation,
+                super::assistant_acknowledgement_service::ActionFacts::of(
+                    super::assistant_acknowledgement_service::service_action_class(
+                        read,
+                        destructive,
+                    ),
+                ),
+                prepared.acknowledgement_id.as_deref(),
+                &format!(
+                    "{} {} on {}",
+                    prepared.method(),
+                    endpoint.name,
+                    service.service_slug
+                ),
+                false,
+                Some(&target),
+                false,
+                Some((
+                    prepared.body.as_deref().unwrap_or_default(),
+                    Some("application/json"),
+                )),
+            )
+            .await?
+        };
+        assistant_auto = decision.automatic;
+        if let Some(refusal) = decision.refusal {
+            return Ok(McpToolExecutionOutcome::Response(
+                ToolResponse::policy_refusal(refusal),
+            ));
+        }
+        if let Some(admission) = decision.admission {
+            if let Some(watch) = prepared.async_submission.as_deref() {
+                admission.bind_async_submission(db, watch).await?;
             }
-            if let Some(admission) = decision.admission {
-                if let Some(watch) = prepared.async_submission.as_deref() {
-                    admission.bind_async_submission(db, watch).await?;
-                }
-                admission
-                    .revalidate(db, user_service_id, Some(&target))
-                    .await?;
-                assistant_admission = Some(admission);
-            }
+            admission
+                .revalidate(db, user_service_id, Some(&target))
+                .await?;
+            assistant_admission = Some(admission);
         }
     }
 
@@ -5496,18 +5560,17 @@ async fn execute_tool_resolved_inner(
                 }
             }
             billing.mark_forwarded(&metered).await?;
-            if let Some(admission) = assistant_admission.as_ref() {
-                if let Err(error) = admission
+            if let Some(admission) = assistant_admission.as_ref()
+                && let Err(error) = admission
                     .http_egress(db, encryption_keys, &target, method.as_str(), &path)
                     .routed(node_route.as_ref())
                     .revalidate()
                     .await
-                {
-                    billing
-                        .reject_before_send(&metered, "assistant_authority_changed", false)
-                        .await?;
-                    return Err(error);
-                }
+            {
+                billing
+                    .reject_before_send(&metered, "assistant_authority_changed", false)
+                    .await?;
+                return Err(error);
             }
             match node_ws_manager
                 .send_proxy_request_classified(
@@ -5535,15 +5598,14 @@ async fn execute_tool_resolved_inner(
                         .await?;
                     destination_audit.complete(resp.status);
                     request_audit.response(resp.status);
-                    if (200..300).contains(&resp.status) {
-                        if let (Some(chat), Some(admission)) =
+                    if (200..300).contains(&resp.status)
+                        && let (Some(chat), Some(admission)) =
                             (assistant_chat.as_ref(), assistant_admission.as_ref())
-                        {
-                            if let Some(receipt) = &automatic_receipt {
-                                receipt.record(db, chat).await;
-                            } else {
-                                admission.receipt(db, chat, assistant_auto).await;
-                            }
+                    {
+                        if let Some(receipt) = &automatic_receipt {
+                            receipt.record(db, chat).await;
+                        } else {
+                            admission.receipt(db, chat, assistant_auto).await;
                         }
                     }
                     return Ok(McpToolExecutionOutcome::Response(tool_response(
@@ -5582,15 +5644,14 @@ async fn execute_tool_resolved_inner(
                         .await?;
                     destination_audit.complete(status);
                     request_audit.response(status);
-                    if (200..300).contains(&status) {
-                        if let (Some(chat), Some(admission)) =
+                    if (200..300).contains(&status)
+                        && let (Some(chat), Some(admission)) =
                             (assistant_chat.as_ref(), assistant_admission.as_ref())
-                        {
-                            if let Some(receipt) = &automatic_receipt {
-                                receipt.record(db, chat).await;
-                            } else {
-                                admission.receipt(db, chat, assistant_auto).await;
-                            }
+                    {
+                        if let Some(receipt) = &automatic_receipt {
+                            receipt.record(db, chat).await;
+                        } else {
+                            admission.receipt(db, chat, assistant_auto).await;
                         }
                     }
                     return Ok(McpToolExecutionOutcome::Response(tool_response(
@@ -5696,14 +5757,13 @@ async fn execute_tool_resolved_inner(
         Err(proxy_service::ForwardRequestError::Transport(error))
             if direct_transport_failure_is_pre_dispatch(&error) =>
         {
-            if error.is_connect() {
-                if let (Some(chat), Some(admission)) =
+            if error.is_connect()
+                && let (Some(chat), Some(admission)) =
                     (assistant_chat.as_ref(), assistant_admission.as_ref())
-                {
-                    admission
-                        .record_unavailable(db, chat, "pre_dispatch")
-                        .await?;
-                }
+            {
+                admission
+                    .record_unavailable(db, chat, "pre_dispatch")
+                    .await?;
             }
             tracing::warn!(
                 connect = error.is_connect(),
@@ -5794,15 +5854,14 @@ async fn execute_tool_resolved_inner(
 
     destination_audit.complete(status);
     request_audit.response(status);
-    if (200..300).contains(&status) {
-        if let (Some(chat), Some(admission)) =
+    if (200..300).contains(&status)
+        && let (Some(chat), Some(admission)) =
             (assistant_chat.as_ref(), assistant_admission.as_ref())
-        {
-            if let Some(receipt) = &automatic_receipt {
-                receipt.record(db, chat).await;
-            } else {
-                admission.receipt(db, chat, assistant_auto).await;
-            }
+    {
+        if let Some(receipt) = &automatic_receipt {
+            receipt.record(db, chat).await;
+        } else {
+            admission.receipt(db, chat, assistant_auto).await;
         }
     }
     Ok(McpToolExecutionOutcome::Response(ToolResponse {

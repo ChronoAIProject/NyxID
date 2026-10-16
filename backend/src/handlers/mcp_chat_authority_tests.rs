@@ -104,7 +104,7 @@ async fn execute_webhook_connection(
     _tool: &str,
     args: &Value,
     request_id: Option<Value>,
-) -> Result<(), Response> {
+) -> Result<(), Box<Response>> {
     let prepared = mcp_service::prepare_proxy_tool_call(
         service,
         endpoint,
@@ -137,7 +137,7 @@ async fn execute_webhook_connection(
     if (200..300).contains(&response.status) {
         Ok(())
     } else {
-        Err(tool_result(request_id, &response.text, true))
+        Err(Box::new(tool_result(request_id, &response.text, true)))
     }
 }
 
@@ -2126,7 +2126,7 @@ async fn webhook_calls_require_exact_action_cards_from_http_and_catalog_effects(
     )
     .await
     .unwrap_err();
-    let card = result(response, true).await;
+    let card = result(*response, true).await;
     assert_eq!(card["error"], "acknowledgement_required");
     let id = card["acknowledgement_id"].as_str().unwrap();
     let stored = acks::history(&f.state.db, &f.owner, &f.row.id)
