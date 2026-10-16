@@ -45,7 +45,13 @@ fn canonical(value: &serde_json::Value) -> Vec<u8> {
 
 fn request_mac(request: &Request, secret: &[u8]) -> Hmac<Sha256> {
     let mut mac = Hmac::<Sha256>::new_from_slice(secret).expect("HMAC accepts any key size");
-    if request.version == crate::authority::VERSION {
+    if request.version == crate::authority::EXTERNAL_VERSION {
+        mac.update(b"nyxid.machine.request.v3\0");
+        let authority =
+            serde_json::to_value(&request.external_authority).expect("external authority");
+        mac.update(&Sha256::digest(canonical(&authority)));
+        mac.update(&request.version.to_be_bytes());
+    } else if request.version == crate::authority::VERSION {
         mac.update(b"nyxid.machine.request.v2\0");
         let authority = serde_json::to_value(&request.authority).expect("authority");
         mac.update(&Sha256::digest(canonical(&authority)));
@@ -122,9 +128,12 @@ impl ReplayGuard {
         secret: &[u8],
         now: i64,
     ) -> Result<(), Rejection> {
-        if !matches!(request.version, 1 | 2)
+        if !matches!(request.version, 1..=3)
             || (request.version == 1 && request.authority.is_some())
             || (request.version == 2 && request.authority.is_none())
+            || (request.version != 3 && request.external_authority.is_some())
+            || (request.version == 3
+                && (request.external_authority.is_none() || request.authority.is_some()))
             || request.node_id != node_id
             || uuid::Uuid::parse_str(&request.request_id).is_err()
             || uuid::Uuid::parse_str(&request.nonce).is_err()
@@ -152,6 +161,7 @@ mod tests {
         let mut request = Request {
             version: 1,
             authority: None,
+            external_authority: None,
             request_id: uuid::Uuid::new_v4().to_string(),
             node_id: "node-a".into(),
             operation: Operation::Exec,
@@ -231,6 +241,94 @@ mod tests {
 mod authority_tests {
     use super::*;
     #[test]
+    fn v3_covers_external_subject_roots_services_cutoffs_and_cannot_downgrade() {
+        let authority = crate::authority::external_fixture();
+        let mut request = crate::Request {
+            version: 3,
+            authority: None,
+            external_authority: Some(Box::new(authority.clone())),
+            request_id: uuid::Uuid::new_v4().to_string(),
+            node_id: authority.node_id,
+            operation: crate::Operation::ReadFile,
+            parameters: serde_json::json!({"path":"/workspace/a"}),
+            timestamp: 1,
+            nonce: uuid::Uuid::new_v4().to_string(),
+            signature: String::new(),
+        };
+        request.signature = sign(&request, b"external-signature-test");
+        assert!(
+            ReplayGuard::default()
+                .verify(&request, &request.node_id, b"external-signature-test", 1)
+                .is_ok()
+        );
+        let original = serde_json::to_value(&request).unwrap();
+        for field in [
+            "principal",
+            "oauth_consent",
+            "node_id",
+            "runtime_id",
+            "runtime_generation",
+            "credential_epoch",
+            "context_id",
+            "generation",
+            "mode",
+            "owner_id",
+            "actor_id",
+            "grant_id",
+            "grant_revision",
+            "assignment_revision",
+            "lease_id",
+            "job_id",
+            "expires_at_ms",
+            "auth_expires_at_ms",
+            "job_expires_at_ms",
+            "funding_expires_at_ms",
+            "capabilities",
+            "file_roots",
+            "services",
+        ] {
+            let mut changed = original.clone();
+            let value = &mut changed["external_authority"][field];
+            *value = match field {
+                "principal" => {
+                    serde_json::json!({"kind":"api_key","user_id":uuid::Uuid::new_v4().to_string(),"api_key_id":uuid::Uuid::new_v4().to_string(),"api_key_credential_id":null})
+                }
+                "oauth_consent" => {
+                    serde_json::json!({"consent_id":uuid::Uuid::new_v4().to_string(),"consent_revision":uuid::Uuid::new_v4().to_string()})
+                }
+                "capabilities" => serde_json::json!({"shell":false}),
+                "file_roots" => serde_json::json!(["/"]),
+                "services" => {
+                    serde_json::json!([{"id":uuid::Uuid::new_v4().to_string(),"slug":"new-service"}])
+                }
+                "runtime_generation"
+                | "credential_epoch"
+                | "generation"
+                | "grant_revision"
+                | "assignment_revision"
+                | "expires_at_ms"
+                | "auth_expires_at_ms"
+                | "job_expires_at_ms"
+                | "funding_expires_at_ms" => serde_json::json!(2),
+                _ => serde_json::json!(uuid::Uuid::new_v4().to_string()),
+            };
+            let changed: crate::Request = serde_json::from_value(changed).unwrap();
+            assert!(
+                ReplayGuard::default()
+                    .verify(&changed, &request.node_id, b"external-signature-test", 1)
+                    .is_err(),
+                "unsigned external field {field}"
+            );
+        }
+        request.version = 1;
+        request.external_authority = None;
+        assert!(
+            ReplayGuard::default()
+                .verify(&request, &request.node_id, b"external-signature-test", 1)
+                .is_err()
+        );
+    }
+    #[test]
     fn v2_authenticates_authority_and_cannot_be_downgraded() {
         let id = || uuid::Uuid::new_v4().to_string();
         let a = crate::authority::Authority {
@@ -253,6 +351,7 @@ mod authority_tests {
         let mut r = crate::Request {
             version: 2,
             authority: Some(Box::new(a)),
+            external_authority: None,
             request_id: id(),
             node_id: id(),
             operation: crate::Operation::ReadFile,

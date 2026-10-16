@@ -52,6 +52,7 @@ pub(crate) fn route_digest(ctx: &BillingRouteContext) -> AppResult<String> {
             r.metric,
             ctx.estimated_quantity(r.metric)
         )),
+        ctx.public_probe,
         ctx.public_admission.as_ref().map(|a| (
             &a.call_id,
             &a.model_id,
@@ -113,8 +114,12 @@ pub(crate) async fn quote_operation(
         metric,
         service.billing.as_ref(),
         state.billing.resale_enabled(),
-    )
-    .with_operation(Some(&operation.operation));
+    );
+    let priced = state
+        .billing
+        .http_operation(&route, operation.method.as_str(), &operation.canonical_path)
+        .await?;
+    route = route.with_operation(priced.as_deref());
     // Reserve the complete byte upper bound; settlement still records actual
     // bytes. Preparation and callbacks therefore quote the same worst case.
     route.request_bytes = i64::from(operation.max_input_bytes);
@@ -209,15 +214,6 @@ pub(crate) async fn quote_dispatch(
         model_id: operation.model_id.clone(),
         expires_at: context.expires_at,
     });
-    if route.platform_specs().any(|(metric, _)| {
-        matches!(
-            metric,
-            crate::models::service_billing::BillingMetric::Images
-                | crate::models::service_billing::BillingMetric::VoiceSeconds
-        )
-    }) {
-        return Err(denied());
-    }
     let layers = billing::reservation::estimate_layer_reservations(
         &state.db,
         &route,
@@ -989,6 +985,7 @@ mod tests {
         .unwrap();
         let turn = row.active_turn.as_ref().unwrap();
         let ctx = PublicExecutionContext {
+            proof_record_id: "test-proof".into(),
             ingress: PublicIngress {
                 ingress: IngressClaim {
                     receipt_id: turn.receipt_id.clone(),

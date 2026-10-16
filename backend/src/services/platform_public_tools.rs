@@ -35,6 +35,13 @@ impl PublicMcpAuthority {
     pub(crate) fn context(&self) -> &PublicExecutionContext {
         &self.context
     }
+    pub(crate) fn metadata(&self) -> Value {
+        json!({"nyxid/public":{"contract":"nyxid-public-execution.v1","purpose":"public_nyxbot",
+            "profile":self.context.nyxagent_profile,"policy_digest":self.context.policy_digest,"proof_record_id":self.context.proof_record_id,
+            "public_session_id":self.context.public_session_id,"turn_id":self.context.turn.turn_id,
+            "receipt_id":self.context.ingress.ingress.receipt_id,"claim_id":self.context.ingress.ingress.claim_id,
+            "expires_at":self.context.expires_at.to_rfc3339()}})
+    }
     pub(crate) fn key_id(&self) -> &str {
         &self.key_id
     }
@@ -70,6 +77,7 @@ pub(crate) async fn fence_callback_in_session(
     context: &PublicExecutionContext,
     key: &str,
 ) -> AppResult<()> {
+    policy::verified_context_in_session(db, session, context).await?;
     if db.collection::<mongodb::bson::Document>(crate::models::platform_public_turn::COLLECTION_NAME)
         .update_one(doc! {"_id":&context.turn.turn_id,"public_session_id":&context.public_session_id,
             "receipt_id":&context.ingress.ingress.receipt_id,"claim_id":&context.ingress.ingress.claim_id,
@@ -87,14 +95,37 @@ pub(crate) async fn authenticate(
     if key.purpose != ApiKeyPurpose::PublicNyxbot || child.is_some() || !key.is_active {
         return Err(denied());
     }
-    let (_, evidence) = policy::verified_readiness()?;
     let row = db
         .collection::<PlatformPublicSession>(SESSIONS)
         .find_one(doc! {"credential_api_key_id":&key.id,"revoked_at":mongodb::bson::Bson::Null})
         .await?
         .ok_or_else(denied)?;
     let turn = row.active_turn.as_ref().ok_or_else(denied)?;
+    let retained = db
+        .collection::<crate::models::platform_public_turn::PlatformPublicTurn>(
+            crate::models::platform_public_turn::COLLECTION_NAME,
+        )
+        .find_one(
+            doc! {"_id":&turn.turn_id,"public_session_id":&row.id,"credential_api_key_id":&key.id},
+        )
+        .await?
+        .ok_or_else(denied)?;
+    let manager = ManagerAuthority {
+        profile_id: row.profile_id.clone(),
+        manager_bot_id: row.manager_bot_id.clone(),
+        telegram_bot_id: row.telegram_bot_id,
+        manager_authority_epoch: row.manager_authority_epoch,
+    };
+    let (_, evidence) = policy::verified_readiness(
+        db,
+        &manager,
+        row.public_policy_revision,
+        Some(&row.policy_digest),
+        Some(&retained.proof_record_id),
+    )
+    .await?;
     let context = PublicExecutionContext {
+        proof_record_id: evidence.proof_record_id.clone(),
         ingress: PublicIngress {
             ingress: IngressClaim {
                 receipt_id: turn.receipt_id.clone(),
@@ -122,7 +153,7 @@ pub(crate) async fn authenticate(
         limits: evidence.limits,
         expires_at: turn.expires_at.min(row.expires_at),
     };
-    let proof = policy::verified_context(&context)?;
+    let proof = policy::verified_context(db, &context).await?;
     let db_owned = db.clone();
     let mut session = db.client().start_session().await?;
     session
@@ -297,7 +328,7 @@ pub(crate) async fn execute(
     authority: &PublicMcpAuthority,
     call: PublicToolCall,
 ) -> AppResult<Zeroizing<String>> {
-    policy::verified_context(&authority.context)?;
+    policy::verified_context(&state.db, &authority.context).await?;
     let db = state.db.clone();
     let mut session = db.client().start_session().await?;
     let context = authority.context.clone();

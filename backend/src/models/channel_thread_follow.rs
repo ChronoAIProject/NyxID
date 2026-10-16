@@ -48,6 +48,8 @@ impl std::fmt::Debug for ThreadFollow {
 /// A queued event keeps its own source; newer messages cannot retarget it.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ThreadTurnBinding {
+    #[serde(default)]
+    pub sender_kind: Option<super::channel_thread::ThreadSenderKind>,
     pub child_id: String,
     pub source_message_id: String,
     pub sender_id: String,

@@ -1,3 +1,4 @@
+import { formatCapacityWait } from "./capacity-wait";
 import { ApiError } from "@/lib/api-client";
 import { assistantHttp, assistantJson } from "@/lib/assistant/assistant-http";
 import {
@@ -85,7 +86,7 @@ function path(id: string): string {
   return `${ROOT}/conversations/${id}`;
 }
 
-export function storedError(code: string | null): string {
+export function storedError(code: string | null, capacityWaitMs?: number | null): string {
   if (code === "tool_budget_exhausted" || code === "turn_timeout") return "This task reached its automatic continuation limit. Its context is saved; resume to continue, or adjust the limit in NyxBot settings.";
   if (code === "continuation_no_progress") return "Paused because the task repeated without progress. Its context is saved; give it new guidance.";
   if (code === "idle_timeout") return "The assistant stopped responding. Check what it already did before asking it to continue.";
@@ -93,13 +94,21 @@ export function storedError(code: string | null): string {
     return "The previous operation may have taken effect. Check its result before trying again.";
   }
   if (code === "credential_invalid") return "The assistant credential could not be accepted.";
-  if (code === "model_not_configured") return "This assistant profile is unavailable.";
+  if (code === "model_not_configured") return "This assistant profile is unavailable. Choose another model in the model selector.";
+  if (code === "model_unavailable") return "The selected model is unavailable. Choose another model in the model selector.";
+  if (code === "wallet_suspended") return "Your billing wallet is suspended. Contact support or check Billing & Usage.";
+  if (code === "plan_entitlement_required") return "Your plan does not include this service. Check your plan in Billing & Usage.";
+  if (code === "model_interrupted") return "The model's response was interrupted. Some actions may already have completed — check them before retrying.";
   if (code === "insufficient_credits") return "There aren't enough credits to run this turn.";
-  if (code === "session_busy" || code === "capacity_exceeded") {
-    return "The assistant is busy. Try again shortly.";
+  if (code === "session_busy") return "The assistant session is busy. Try again shortly.";
+  if (code === "capacity_exceeded") {
+    const waited = capacityWaitMs != null && capacityWaitMs > 0
+      ? ` (waited ${formatCapacityWait(capacityWaitMs)})` : "";
+    return `NyxBot is at capacity right now${waited}. Try again shortly.`;
   }
   if (code === "turn_lost") return "This turn was interrupted; check which actions completed before retrying.";
-  if (code === "assistant_unavailable") return "The assistant is temporarily unavailable. Try again shortly.";
+  if (code === "internal_error") return "NyxBot hit an internal error on this turn. Check which actions completed before retrying.";
+  if (code === "assistant_unavailable") return "The assistant could not complete this turn. Try again.";
   if (code === "first_byte_timeout") return "The assistant did not start responding in time. Try again.";
   if (code === "invalid_stream") return "The assistant stream ended unexpectedly. Try again.";
   if (code === "output_too_large") return "The assistant reached its response limit.";
@@ -162,6 +171,7 @@ export class NyxAgentTransport {
   private index = new Map<string, NyxAgentConversation>();
   private histories = new Map<string, NyxAgentHistory>();
   private consumedRetries = new Map<string, Set<string>>();
+  private acceptedTurns = new Map<string, string>();
   private reviewCards = new Map<string, string>();
   private live = new Map<string, LiveTurn>();
   private requests = new Set<AbortController>();
@@ -201,6 +211,7 @@ export class NyxAgentTransport {
     this.index.clear();
     this.histories.clear();
     this.consumedRetries.clear();
+    this.acceptedTurns.clear();
     this.reviewCards.clear();
     this.views.clear();
     this.draftModel = "nyxagent/chat";
@@ -240,6 +251,7 @@ export class NyxAgentTransport {
       this.index.delete(row.id);
       this.histories.delete(row.id);
       this.consumedRetries.delete(row.id);
+      this.acceptedTurns.delete(row.id);
       this.reviewCards.delete(row.id);
       this.views.delete(row.id);
     }
@@ -341,6 +353,9 @@ export class NyxAgentTransport {
     if (optimisticTitle !== undefined) {
       page.conversation = { ...page.conversation, title: optimisticTitle, title_source: "user" };
     }
+    if (page.conversation.active_turn && this.acceptedTurns.get(id) === page.conversation.active_turn.turn_id) {
+      page.conversation.active_turn = { ...page.conversation.active_turn, waiting_for_capacity: false, capacity_wait_note_origin: null };
+    }
     const live = this.live.get(id);
     if (live) live.conversation = { ...live.conversation, title: page.conversation.title, title_source: page.conversation.title_source,
       ...(page.conversation.active_turn?.turn_id === live.conversation.active_turn?.turn_id ? { active_turn: page.conversation.active_turn } : {}),
@@ -440,6 +455,7 @@ export class NyxAgentTransport {
     this.index.delete(id);
     this.histories.delete(id);
     this.consumedRetries.delete(id);
+    this.acceptedTurns.delete(id);
     this.reviewCards.delete(id);
     this.views.delete(id);
     this.changed();
@@ -518,8 +534,9 @@ export class NyxAgentTransport {
         timestamp: Date.parse(message.created_at),
         turnId: message.turn_id,
         status: failed ? "error" : message.error_code === "cancelled" ? "stopped" : "complete",
-        error: failed ? storedError(message.error_code) : undefined,
-        errorDetail: message.error_detail ? { stage: message.error_detail.stage, httpStatus: message.error_detail.http_status, upstreamRequestId: message.error_detail.upstream_request_id, responseId: message.error_detail.response_id, continuations: message.error_detail.continuations, turnId: message.error_detail.turn_id, occurredAt: message.error_detail.occurred_at } : undefined,
+        error: failed ? storedError(message.error_code, message.error_detail?.capacity_wait_ms) : undefined,
+        turnMetadata: message.turn_metadata ? { attempts: message.turn_metadata.attempts, capacityWaitMs: message.turn_metadata.capacity_wait_ms } : undefined,
+        errorDetail: message.error_detail ? { attempts: message.error_detail.attempts, capacityWaitMs: message.error_detail.capacity_wait_ms, upstreamCode: message.upstream_error_code, stage: message.error_detail.stage, httpStatus: message.error_detail.http_status, upstreamRequestId: message.error_detail.upstream_request_id, responseId: message.error_detail.response_id, continuations: message.error_detail.continuations, turnId: message.error_detail.turn_id, occurredAt: message.error_detail.occurred_at } : undefined,
         errorCode: message.error_code,
         ...toolCalls(message.activities, id),
         ...images(id, message.attachments),
@@ -571,14 +588,27 @@ export class NyxAgentTransport {
           id: message.id,
           role: settled?.role ?? message.role,
           feedback: settled?.feedback ?? undefined,
-          errorCode: settled?.error_code,
+          errorCode: settled?.error_code ?? (streaming ? live.state.activeTurn?.error?.code : undefined),
+          error: streaming && live.state.activeTurn?.error ? storedError(live.state.activeTurn.error.code, live.state.activeTurn.error.capacity_wait_ms) : undefined,
+          turnMetadata: streaming ? live.state.activeTurn?.turnMetadata : settled?.turn_metadata
+            ? { attempts: settled.turn_metadata.attempts, capacityWaitMs: settled.turn_metadata.capacity_wait_ms } : undefined,
+          errorDetail: streaming && live.state.activeTurn?.error?.stage ? {
+            attempts: live.state.activeTurn.error.attempts, capacityWaitMs: live.state.activeTurn.error.capacity_wait_ms,
+            stage: live.state.activeTurn.error.stage,
+            upstreamCode: live.state.activeTurn.error.upstream_error_code,
+            httpStatus: live.state.activeTurn.error.http_status,
+            upstreamRequestId: live.state.activeTurn.error.upstream_request_id,
+            responseId: live.state.activeTurn.error.response_id,
+            continuations: live.state.activeTurn.continuations ?? 0,
+            turnId: live.state.activeTurn.turnId ?? "",
+          } : undefined,
           steering: settled?.steering,
           continuation_of: settled?.continuation_of ?? message.continuation_of,
           via: settled?.via ?? (settled?.platform_origin ? "telegram" : null),
           turnId: settled?.turn_id,
           content: message.blocks.map((block) => block.text).join("\n\n"),
           timestamp: Date.parse(message.created_at),
-          status: streaming ? "streaming" : "complete",
+          status: streaming ? (live.state.activeTurn?.status === "failed" ? "error" : "streaming") : "complete",
           ...(streaming ? { turnStatus } : {}),
           ...(message.attachments?.length
             ? images(id, message.attachments)
@@ -601,7 +631,8 @@ export class NyxAgentTransport {
       }
     }
     const running = Boolean(live || conversation?.active_turn);
-    if (running && messages.at(-1)?.status !== "streaming") {
+    const liveSettled = live?.state.activeTurn && ["completed", "failed", "cancelled"].includes(live.state.activeTurn.status);
+    if (running && !liveSettled && messages.at(-1)?.status !== "streaming") {
       messages.push({
         id: `${conversation?.active_turn?.turn_id ?? "pending"}-assistant`,
         role: "assistant",
@@ -611,6 +642,9 @@ export class NyxAgentTransport {
         ...liveActivity,
         turnStatus,
       });
+    }
+    if ((conversation?.active_turn?.waiting_for_capacity || conversation?.active_turn?.capacity_wait_note_origin === "nyxid_system") && this.acceptedTurns.get(conversation.id) !== conversation.active_turn?.turn_id) {
+      messages = messages.map((message) => message.status === "streaming" ? { ...message, waitingForCapacity: conversation.active_turn?.waiting_for_capacity, systemNote: conversation.active_turn?.capacity_wait_note_origin === "nyxid_system" ? "capacity_wait" : undefined, capacityWaitStartedAt: conversation.active_turn?.engine_request_started_at ?? conversation.active_turn?.capacity_wait_started_at, capacityWaitDeadline: conversation.active_turn?.capacity_wait_deadline } : message);
     }
     const resetAt = conversation?.context_reset_at;
     if (resetAt || live?.resetBeforeMessageId) {
@@ -814,13 +848,22 @@ export class NyxAgentTransport {
                 turn.conversation = { ...turn.conversation, id: key };
                 onAdopt(key);
               }
+              if (event.engine_accepted) this.acceptedTurns.set(key, event.turn_id);
+              const accepted = this.acceptedTurns.get(key) === event.turn_id;
+              const previous = turn.conversation.active_turn?.turn_id === event.turn_id
+                ? turn.conversation.active_turn : undefined;
               turn.conversation = {
                 ...turn.conversation,
                 active_turn: {
                   turn_id: event.turn_id,
-                  started_at: now,
-                  activities: [],
-                  attachments: [],
+                  started_at: previous?.started_at ?? now,
+                  activities: previous?.activities ?? [],
+                  attachments: previous?.attachments ?? [],
+                  waiting_for_capacity: !accepted && (event.waiting_for_capacity ?? false),
+                  capacity_wait_note_origin: !accepted && event.status === "waiting" ? event.capacity_wait_note_origin ?? previous?.capacity_wait_note_origin : null,
+                  engine_request_started_at: event.engine_request_started_at ?? previous?.engine_request_started_at,
+                  capacity_wait_started_at: event.capacity_wait_started_at ?? previous?.capacity_wait_started_at,
+                  capacity_wait_deadline: event.capacity_wait_deadline ?? previous?.capacity_wait_deadline,
                 },
               };
               this.index.set(key, turn.conversation);

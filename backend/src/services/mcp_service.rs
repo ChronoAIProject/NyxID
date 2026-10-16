@@ -167,6 +167,9 @@ impl McpBillingRouteContextBuilder {
 /// node allow-list enforcement. OAuth and session callers pass `api_key_id:
 /// None` and `allow_all_nodes: true`, preserving their existing behavior.
 pub struct McpExecContext<'a> {
+    /// Original authenticated turn fence. Credential/catalog awaits must never
+    /// downgrade a live foreground request to legacy idle compatibility.
+    pub assistant_chat: Option<&'a super::assistant_acknowledgement_service::ChatAuthority>,
     /// Background result readers may stop buffering after this many bytes.
     pub response_body_limit: Option<usize>,
     /// Acting person/SA when credential resolution runs as another owner.
@@ -3530,7 +3533,36 @@ pub fn build_proxy_args(
     Ok((method, path, query, parameter_headers, body))
 }
 
+/// Server-selected receipt; never parsed from tool arguments.
+struct AutomaticReceipt {
+    choice: super::assistant_acknowledgement_service::AutoAllowed,
+    tool: String,
+    arguments: serde_json::Value,
+    summary: String,
+}
+impl AutomaticReceipt {
+    async fn record(
+        &self,
+        db: &mongodb::Database,
+        chat: &super::assistant_acknowledgement_service::ChatAuthority,
+    ) {
+        super::assistant_acknowledgement_service::record_auto_allowed(
+            db,
+            chat,
+            &self.tool,
+            &self.arguments,
+            &self.choice,
+            &self.summary,
+        )
+        .await;
+    }
+}
+
 pub struct PreparedProxyCall {
+    automatic_receipt: Option<AutomaticReceipt>,
+    async_submission: Option<String>,
+    async_continuation: Option<super::assistant_service_execution::AsyncContinuation>,
+    acknowledgement_id: Option<String>,
     endpoint_target: Option<Option<String>>,
     method: reqwest::Method,
     path: String,
@@ -3544,6 +3576,40 @@ pub struct PreparedProxyCall {
 }
 
 impl PreparedProxyCall {
+    pub(crate) fn with_automatic_receipt(
+        mut self,
+        choice: Option<super::assistant_acknowledgement_service::AutoAllowed>,
+        tool: &str,
+        arguments: &serde_json::Value,
+        summary: &str,
+    ) -> Self {
+        self.automatic_receipt = choice.map(|choice| AutomaticReceipt {
+            choice,
+            tool: tool.into(),
+            arguments: arguments.clone(),
+            summary: summary.into(),
+        });
+        self
+    }
+    pub(crate) fn with_async_submission(
+        mut self,
+        watch: Option<&crate::models::async_service_operation::AsyncServiceOperation>,
+    ) -> Self {
+        self.async_submission = watch.map(|w| w.id.clone());
+        self
+    }
+    pub(crate) fn with_async_continuation(
+        mut self,
+        authority: super::assistant_service_execution::AsyncContinuation,
+    ) -> Self {
+        self.async_continuation = Some(authority);
+        self
+    }
+    pub(crate) fn with_acknowledgement(mut self, id: Option<&str>) -> Self {
+        self.acknowledgement_id = id.map(str::to_owned);
+        self
+    }
+
     pub(crate) fn resolve_destination(
         &self,
         target: &mut proxy_service::ProxyTarget,
@@ -3768,6 +3834,10 @@ pub(crate) fn http_carries_method_override(
         return true;
     };
     PreparedProxyCall {
+        automatic_receipt: None,
+        async_submission: None,
+        async_continuation: None,
+        acknowledgement_id: None,
         endpoint_target: None,
         method,
         path: String::new(),
@@ -3855,6 +3925,10 @@ pub fn prepare_proxy_tool_call(
     };
 
     Ok(PreparedProxyCall {
+        automatic_receipt: None,
+        async_submission: None,
+        async_continuation: None,
+        acknowledgement_id: None,
         endpoint_target: (!is_generic_proxy_endpoint
             && (endpoint.target_id.is_some()
                 || producer_operation_generation(service, endpoint).is_some()))
@@ -4248,7 +4322,7 @@ fn json_body_uses_wrapper(endpoint: &McpToolEndpoint) -> bool {
 pub async fn execute_tool(
     http_client: &reqwest::Client,
     db: &mongodb::Database,
-    encryption_keys: &EncryptionKeys,
+    encryption_keys: &std::sync::Arc<EncryptionKeys>,
     node_ws_manager: &std::sync::Arc<NodeWsManager>,
     billing: &std::sync::Arc<crate::services::billing::BillingService>,
     user_id: &str,
@@ -4299,317 +4373,390 @@ fn scoped_execution(exec_ctx: &McpExecContext<'_>, service: &McpToolService) -> 
     })
 }
 
-#[allow(clippy::too_many_arguments)]
-pub async fn execute_tool_response(
-    http_client: &reqwest::Client,
-    db: &mongodb::Database,
-    encryption_keys: &EncryptionKeys,
-    node_ws_manager: &std::sync::Arc<NodeWsManager>,
-    billing: &std::sync::Arc<crate::services::billing::BillingService>,
-    user_id: &str,
-    billing_principal_user_id: &str,
-    service: &McpToolService,
-    endpoint: &McpToolEndpoint,
-    prepared: PreparedProxyCall,
-    jwt_keys: &crate::crypto::jwt::JwtKeys,
-    config: &crate::config::AppConfig,
+// Resolve before polling dispatch so credential/node resolution's debug poll frame
+// is no longer on the stack while the final admission performs database reads.
+struct ToolResolutionContext<'a> {
+    db: &'a mongodb::Database,
+    encryption_keys: &'a EncryptionKeys,
+    node_ws_manager: &'a std::sync::Arc<NodeWsManager>,
+    user_id: &'a str,
+    billing_principal_user_id: &'a str,
+    service: &'a McpToolService,
+    prepared: &'a PreparedProxyCall,
+    config: &'a crate::config::AppConfig,
     connection_expiry_notifier:
-        &crate::services::connection_expiry_service::ConnectionExpiryNotifier,
-    token_exchange_cache: &crate::services::provider_token_exchange_service::TokenExchangeCache,
-    cloud_response_cache: &crate::services::cloud_response_cache::CloudResponseCache,
-    exec_ctx: &McpExecContext<'_>,
-    billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
-) -> AppResult<ToolResponse> {
-    super::org_agent_service::authorize_service_with_access(
-        db,
-        user_id,
-        exec_ctx.agent_owner,
-        Some(&service.service_id),
-        exec_ctx.org_agent_access,
-    )
-    .await?;
-    if let Some(scopes) = exec_ctx.operation_scopes {
-        prepared.authorize_agent_operations(scopes, service, endpoint)?;
-    }
-    let http_client = if scoped_execution(exec_ctx, service) {
-        proxy_service::no_redirect_http_client()
-    } else {
-        http_client
-    };
-    // Resolve the proxy target and node routing from the fresh resolver result
-    // (not cached loader flags -- credential state may have changed).
-    let resolved = match &service.source {
-        McpToolSource::Internal => {
-            return Err(AppError::Forbidden(
-                "Native tools require chat acknowledgement dispatch".into(),
-            ));
-        }
-        McpToolSource::UserManaged {
-            user_service_id, ..
-        } => {
-            let mut resolution = proxy_service::resolve_proxy_target_by_user_service_id(
-                db,
-                encryption_keys,
-                user_id,
-                user_service_id,
-                Some(&service.service_slug),
-                None,
-                proxy_service::ProxyExecutionContext::new(
-                    Some(connection_expiry_notifier),
-                    crate::mw::rate_limit::PlatformUserRateLimitPolicy::new(
-                        config.platform_service_rate_limit_per_second,
-                        config.platform_service_rate_limit_burst,
-                    ),
-                ),
-            )
-            .await?
-            .ok_or_else(|| {
-                AppError::NotFound(format!("User service '{}' not found", service.service_slug))
-            })?;
-            prepared.resolve_destination(&mut resolution.target)?;
-            let mut override_audit = super::destination_routing::DestinationAudit::new(
-                db,
-                super::audit_service::AuditActor {
-                    user_id: user_id.into(),
-                    api_key_id: exec_ctx.api_key_id.map(str::to_string),
-                    api_key_name: None,
-                    ip_address: None,
-                    user_agent: None,
-                },
-                &resolution.target,
-            );
-            if let Some(api_key_id) = exec_ctx.api_key_id {
-                super::destination_routing::validate_selected_override(
-                    db,
-                    user_id,
-                    api_key_id,
-                    user_service_id,
-                    &resolution.target,
-                )
-                .await?;
-            }
-            let has_cred = resolution.has_server_credential;
+        &'a crate::services::connection_expiry_service::ConnectionExpiryNotifier,
+    exec_ctx: &'a McpExecContext<'a>,
+}
 
-            let mut agent_override = false;
-            // Per-agent credential override: when acting as an API key with
-            // an agent binding, swap in the override credential before execute.
-            // Matches `execute_proxy_inner` in handlers/proxy.rs.
-            if exec_ctx.agent_owner.is_none_or(|owner| owner == user_id)
-                && let Some(ak_id) = exec_ctx.api_key_id
-                && let Some(override_cred) = proxy_service::resolve_agent_credential_override(
+struct ResolvedToolTarget {
+    target: proxy_service::ProxyTarget,
+    node_route: Option<node_routing_service::NodeRoute>,
+    has_server_credential: bool,
+    billing_context_builder: McpBillingRouteContextBuilder,
+    catalog_service_slug: Option<String>,
+}
+
+fn resolve_tool_target(
+    context: ToolResolutionContext<'_>,
+) -> futures::future::BoxFuture<'_, AppResult<ResolvedToolTarget>> {
+    Box::pin(async move {
+        let ToolResolutionContext {
+            db,
+            encryption_keys,
+            node_ws_manager,
+            user_id,
+            billing_principal_user_id,
+            service,
+            prepared,
+            config,
+            connection_expiry_notifier,
+            exec_ctx,
+        } = context;
+        let resolved = match &service.source {
+            McpToolSource::Internal => {
+                return Err(AppError::Forbidden(
+                    "Native tools require chat acknowledgement dispatch".into(),
+                ));
+            }
+            McpToolSource::UserManaged {
+                user_service_id, ..
+            } => {
+                let mut resolution = proxy_service::resolve_proxy_target_by_user_service_id(
                     db,
                     encryption_keys,
                     user_id,
-                    ak_id,
                     user_service_id,
-                    &resolution.target,
-                    Some(connection_expiry_notifier),
+                    Some(&service.service_slug),
+                    None,
+                    proxy_service::ProxyExecutionContext::new(
+                        Some(connection_expiry_notifier),
+                        crate::mw::rate_limit::PlatformUserRateLimitPolicy::new(
+                            config.platform_service_rate_limit_per_second,
+                            config.platform_service_rate_limit_burst,
+                        ),
+                    ),
                 )
                 .await?
-            {
-                resolution.target.credential = override_cred;
-                agent_override = true;
-            }
-
-            // Build the full NodeRoute (primary + fallbacks) from the resolution.
-            let effective_owner = resolution
-                .org_routing
-                .as_ref()
-                .map(|r| r.org_user_id.as_str())
-                .unwrap_or(user_id);
-            // Treat legacy `resolution.node_id == Some("")` as unset:
-            // some `UserService` rows still carry the empty string
-            // instead of `None`, and building a `NodeRoute` around an
-            // empty node id would deterministically return `NodeOffline`
-            // on every call and block the direct-credential fallback.
-            // Matches the normalization applied in `classify_credential`
-            // and in the PUT /keys handler. Fifteenth-round Codex P1.
-            //
-            // This normalization runs BEFORE the scope-check below so a
-            // legacy row with `node_id: ""` is treated as "no node" by
-            // both discovery and execution. Otherwise a scoped API key
-            // would 403 on a legacy direct-routed service that
-            // `classify_credential`/`load_callable_user_services`
-            // already reported as directly executable (twenty-fifth-
-            // round Codex P2).
-            let effective_primary_node_id = resolution.node_id.as_deref().filter(|n| !n.is_empty());
-
-            // Enforce node allow-list for scoped API keys on the primary
-            // node, using the normalized value so legacy `""` rows
-            // bypass the check entirely.
-            if !exec_ctx.allow_all_nodes
-                && let Some(nid) = effective_primary_node_id
-                && !exec_ctx.allowed_node_ids.contains(&nid.to_string())
-            {
-                return Err(AppError::ApiKeyScopeForbidden(
-                    "API key does not have access to this node".to_string(),
-                ));
-            }
-            let nr = if let Some(primary_nid) = effective_primary_node_id {
-                let mut fallback_ids: Vec<String> =
-                    node_routing_service::list_dispatchable_binding_node_ids(
+                .ok_or_else(|| {
+                    AppError::NotFound(format!("User service '{}' not found", service.service_slug))
+                })?;
+                prepared.resolve_destination(&mut resolution.target)?;
+                let mut override_audit = super::destination_routing::DestinationAudit::new(
+                    db,
+                    super::audit_service::AuditActor {
+                        user_id: user_id.into(),
+                        api_key_id: exec_ctx.api_key_id.map(str::to_string),
+                        api_key_name: None,
+                        ip_address: None,
+                        user_agent: None,
+                    },
+                    &resolution.target,
+                );
+                if let Some(api_key_id) = exec_ctx.api_key_id {
+                    super::destination_routing::validate_selected_override(
                         db,
-                        effective_owner,
-                        &resolution.target.service.id,
-                        node_ws_manager.as_ref(),
+                        user_id,
+                        api_key_id,
+                        user_service_id,
+                        &resolution.target,
+                    )
+                    .await?;
+                }
+                let has_cred = resolution.has_server_credential;
+
+                let mut agent_override = false;
+                // Per-agent credential override: when acting as an API key with
+                // an agent binding, swap in the override credential before execute.
+                // Matches `execute_proxy_inner` in handlers/proxy.rs.
+                if exec_ctx.agent_owner.is_none_or(|owner| owner == user_id)
+                    && let Some(ak_id) = exec_ctx.api_key_id
+                    && let Some(override_cred) = proxy_service::resolve_agent_credential_override(
+                        db,
+                        encryption_keys,
+                        user_id,
+                        ak_id,
+                        user_service_id,
+                        &resolution.target,
+                        Some(connection_expiry_notifier),
                     )
                     .await?
-                    .into_iter()
-                    .filter(|nid| nid != primary_nid)
-                    .collect();
-                // Trim failover candidates for scoped API keys.
-                if !exec_ctx.allow_all_nodes {
-                    fallback_ids.retain(|nid| exec_ctx.allowed_node_ids.contains(nid));
+                {
+                    resolution.target.credential = override_cred;
+                    agent_override = true;
                 }
-                Some(node_routing_service::NodeRoute {
-                    node_id: primary_nid.to_string(),
-                    fallback_node_ids: fallback_ids,
-                })
-            } else {
-                None
-            };
-            // A configured node route is a hard "route via node" contract,
-            // regardless of whether the backend also happens to hold the
-            // credential bytes server-side (NyxID#418 server-held model).
-            // Forcing `has_server_credential = false` here disables the
-            // "all nodes failed → try direct" fallback below, so MCP
-            // never bypasses the node for user-managed node-routed tools.
-            // (Sixth-round Codex review P1.)
-            let has_cred_for_fallback = has_cred && nr.is_none();
-            override_audit.dismiss();
-            let mut billing_context_builder =
-                McpBillingRouteContextBuilder::from_user_service_resolution(
-                    billing_principal_user_id,
-                    &resolution,
-                );
-            if agent_override {
-                billing_context_builder.credential_class_override =
-                    Some(CredentialClass::AgentOverrideUserOwned);
-            }
-            (
-                resolution.target,
-                nr,
-                has_cred_for_fallback,
-                billing_context_builder,
-                resolution.catalog_service_slug,
-            )
-        }
-        McpToolSource::Platform {
-            downstream_service_id,
-        } => {
-            // For platform services, resolve node route first. When a node
-            // route exists, use the lenient resolver (credential may be
-            // absent if the node manages it). Otherwise, use the strict
-            // resolver which requires a credential.
-            let mut nr = node_routing_service::resolve_node_route(
-                db,
-                user_id,
-                downstream_service_id,
-                node_ws_manager.as_ref(),
-            )
-            .await?;
 
-            // Enforce node allow-list for scoped API keys: reject the primary
-            // node if it is out of scope, and prune out-of-scope failover
-            // candidates. Mirrors the UserManaged branch and the REST proxy
-            // check in `execute_proxy_inner`.
-            if !exec_ctx.allow_all_nodes
-                && let Some(route) = nr.as_mut()
-            {
-                if !exec_ctx.allowed_node_ids.contains(&route.node_id) {
+                // Build the full NodeRoute (primary + fallbacks) from the resolution.
+                let effective_owner = resolution
+                    .org_routing
+                    .as_ref()
+                    .map(|r| r.org_user_id.as_str())
+                    .unwrap_or(user_id);
+                // Treat legacy `resolution.node_id == Some("")` as unset:
+                // some `UserService` rows still carry the empty string
+                // instead of `None`, and building a `NodeRoute` around an
+                // empty node id would deterministically return `NodeOffline`
+                // on every call and block the direct-credential fallback.
+                // Matches the normalization applied in `classify_credential`
+                // and in the PUT /keys handler. Fifteenth-round Codex P1.
+                //
+                // This normalization runs BEFORE the scope-check below so a
+                // legacy row with `node_id: ""` is treated as "no node" by
+                // both discovery and execution. Otherwise a scoped API key
+                // would 403 on a legacy direct-routed service that
+                // `classify_credential`/`load_callable_user_services`
+                // already reported as directly executable (twenty-fifth-
+                // round Codex P2).
+                let effective_primary_node_id =
+                    resolution.node_id.as_deref().filter(|n| !n.is_empty());
+
+                // Enforce node allow-list for scoped API keys on the primary
+                // node, using the normalized value so legacy `""` rows
+                // bypass the check entirely.
+                if !exec_ctx.allow_all_nodes
+                    && let Some(nid) = effective_primary_node_id
+                    && !exec_ctx.allowed_node_ids.contains(&nid.to_string())
+                {
                     return Err(AppError::ApiKeyScopeForbidden(
                         "API key does not have access to this node".to_string(),
                     ));
                 }
-                route
-                    .fallback_node_ids
-                    .retain(|nid| exec_ctx.allowed_node_ids.contains(nid));
-            }
-
-            let (t, has_cred) = if nr.is_some() {
-                proxy_service::resolve_proxy_target_lenient(
-                    db,
-                    encryption_keys,
-                    user_id,
-                    downstream_service_id,
-                    crate::mw::rate_limit::PlatformUserRateLimitPolicy::new(
-                        config.platform_service_rate_limit_per_second,
-                        config.platform_service_rate_limit_burst,
-                    ),
+                let nr = if let Some(primary_nid) = effective_primary_node_id {
+                    let mut fallback_ids: Vec<String> =
+                        node_routing_service::list_dispatchable_binding_node_ids(
+                            db,
+                            effective_owner,
+                            &resolution.target.service.id,
+                            node_ws_manager.as_ref(),
+                        )
+                        .await?
+                        .into_iter()
+                        .filter(|nid| nid != primary_nid)
+                        .collect();
+                    // Trim failover candidates for scoped API keys.
+                    if !exec_ctx.allow_all_nodes {
+                        fallback_ids.retain(|nid| exec_ctx.allowed_node_ids.contains(nid));
+                    }
+                    Some(node_routing_service::NodeRoute {
+                        node_id: primary_nid.to_string(),
+                        fallback_node_ids: fallback_ids,
+                    })
+                } else {
+                    None
+                };
+                // A configured node route is a hard "route via node" contract,
+                // regardless of whether the backend also happens to hold the
+                // credential bytes server-side (NyxID#418 server-held model).
+                // Forcing `has_server_credential = false` here disables the
+                // "all nodes failed → try direct" fallback below, so MCP
+                // never bypasses the node for user-managed node-routed tools.
+                // (Sixth-round Codex review P1.)
+                let has_cred_for_fallback = has_cred && nr.is_none();
+                override_audit.dismiss();
+                let mut billing_context_builder =
+                    McpBillingRouteContextBuilder::from_user_service_resolution(
+                        billing_principal_user_id,
+                        &resolution,
+                    );
+                if agent_override {
+                    billing_context_builder.credential_class_override =
+                        Some(CredentialClass::AgentOverrideUserOwned);
+                }
+                (
+                    resolution.target,
+                    nr,
+                    has_cred_for_fallback,
+                    billing_context_builder,
+                    resolution.catalog_service_slug,
                 )
-                .await?
-            } else {
-                let t = proxy_service::resolve_proxy_target(
+            }
+            McpToolSource::Platform {
+                downstream_service_id,
+            } => {
+                // For platform services, resolve node route first. When a node
+                // route exists, use the lenient resolver (credential may be
+                // absent if the node manages it). Otherwise, use the strict
+                // resolver which requires a credential.
+                let mut nr = node_routing_service::resolve_node_route(
                     db,
-                    encryption_keys,
                     user_id,
                     downstream_service_id,
-                    crate::mw::rate_limit::PlatformUserRateLimitPolicy::new(
-                        config.platform_service_rate_limit_per_second,
-                        config.platform_service_rate_limit_burst,
-                    ),
+                    node_ws_manager.as_ref(),
                 )
                 .await?;
-                (t, true)
-            };
-            if proxy_service::uses_server_held_master(&t) {
-                nr = None;
+
+                // Enforce node allow-list for scoped API keys: reject the primary
+                // node if it is out of scope, and prune out-of-scope failover
+                // candidates. Mirrors the UserManaged branch and the REST proxy
+                // check in `execute_proxy_inner`.
+                if !exec_ctx.allow_all_nodes
+                    && let Some(route) = nr.as_mut()
+                {
+                    if !exec_ctx.allowed_node_ids.contains(&route.node_id) {
+                        return Err(AppError::ApiKeyScopeForbidden(
+                            "API key does not have access to this node".to_string(),
+                        ));
+                    }
+                    route
+                        .fallback_node_ids
+                        .retain(|nid| exec_ctx.allowed_node_ids.contains(nid));
+                }
+
+                let (t, has_cred) = if nr.is_some() {
+                    proxy_service::resolve_proxy_target_lenient(
+                        db,
+                        encryption_keys,
+                        user_id,
+                        downstream_service_id,
+                        crate::mw::rate_limit::PlatformUserRateLimitPolicy::new(
+                            config.platform_service_rate_limit_per_second,
+                            config.platform_service_rate_limit_burst,
+                        ),
+                    )
+                    .await?
+                } else {
+                    let t = proxy_service::resolve_proxy_target(
+                        db,
+                        encryption_keys,
+                        user_id,
+                        downstream_service_id,
+                        crate::mw::rate_limit::PlatformUserRateLimitPolicy::new(
+                            config.platform_service_rate_limit_per_second,
+                            config.platform_service_rate_limit_burst,
+                        ),
+                    )
+                    .await?;
+                    (t, true)
+                };
+                if proxy_service::uses_server_held_master(&t) {
+                    nr = None;
+                }
+                // Platform services resolve their node route through
+                // `NodeServiceBinding` rows, which are opt-in routing hints
+                // rather than an explicit `UserService.node_id` contract.
+                // The REST proxy mirrors this distinction via
+                // `user_service_has_explicit_node()` — it only hard-requires
+                // node routing for the UserManaged branch and allows direct
+                // fallback for binding-based routes. Keep the same semantic
+                // here: a transient node failure on a platform service can
+                // fall back to direct HTTP if a server credential exists.
+                (
+                    t,
+                    nr,
+                    has_cred,
+                    McpBillingRouteContextBuilder::for_platform_service(billing_principal_user_id),
+                    None,
+                )
             }
-            // Platform services resolve their node route through
-            // `NodeServiceBinding` rows, which are opt-in routing hints
-            // rather than an explicit `UserService.node_id` contract.
-            // The REST proxy mirrors this distinction via
-            // `user_service_has_explicit_node()` — it only hard-requires
-            // node routing for the UserManaged branch and allows direct
-            // fallback for binding-based routes. Keep the same semantic
-            // here: a transient node failure on a platform service can
-            // fall back to direct HTTP if a server credential exists.
-            (
-                t,
-                nr,
-                has_cred,
-                McpBillingRouteContextBuilder::for_platform_service(billing_principal_user_id),
-                None,
-            )
+        };
+
+        let (
+            mut target,
+            node_route,
+            has_server_credential,
+            billing_context_builder,
+            catalog_service_slug,
+        ) = resolved;
+        prepared.resolve_destination(&mut target)?;
+        Ok(ResolvedToolTarget {
+            target,
+            node_route,
+            has_server_credential,
+            billing_context_builder,
+            catalog_service_slug,
+        })
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn execute_tool_response<'a>(
+    http_client: &'a reqwest::Client,
+    db: &'a mongodb::Database,
+    encryption_keys: &'a std::sync::Arc<EncryptionKeys>,
+    node_ws_manager: &'a std::sync::Arc<NodeWsManager>,
+    billing: &'a std::sync::Arc<crate::services::billing::BillingService>,
+    user_id: &'a str,
+    billing_principal_user_id: &'a str,
+    service: &'a McpToolService,
+    endpoint: &'a McpToolEndpoint,
+    prepared: PreparedProxyCall,
+    jwt_keys: &'a crate::crypto::jwt::JwtKeys,
+    config: &'a crate::config::AppConfig,
+    connection_expiry_notifier:
+        &'a crate::services::connection_expiry_service::ConnectionExpiryNotifier,
+    token_exchange_cache: &'a crate::services::provider_token_exchange_service::TokenExchangeCache,
+    cloud_response_cache: &'a crate::services::cloud_response_cache::CloudResponseCache,
+    exec_ctx: &'a McpExecContext<'a>,
+    billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
+) -> futures::future::BoxFuture<'a, AppResult<ToolResponse>> {
+    Box::pin(async move {
+        super::org_agent_service::authorize_service_with_access(
+            db,
+            user_id,
+            exec_ctx.agent_owner,
+            Some(&service.service_id),
+            exec_ctx.org_agent_access,
+        )
+        .await?;
+        if let Some(scopes) = exec_ctx.operation_scopes {
+            prepared.authorize_agent_operations(scopes, service, endpoint)?;
         }
-    };
+        let http_client = if scoped_execution(exec_ctx, service) {
+            proxy_service::no_redirect_http_client()
+        } else {
+            http_client
+        };
+        let ResolvedToolTarget {
+            target,
+            node_route,
+            has_server_credential,
+            billing_context_builder,
+            catalog_service_slug,
+        } = resolve_tool_target(ToolResolutionContext {
+            db,
+            encryption_keys,
+            node_ws_manager,
+            user_id,
+            billing_principal_user_id,
+            service,
+            prepared: &prepared,
+            config,
+            connection_expiry_notifier,
+            exec_ctx,
+        })
+        .await?;
 
-    let (target, node_route, has_server_credential, billing_context_builder, catalog_service_slug) =
-        resolved;
-
-    let mut target = target;
-    prepared.resolve_destination(&mut target)?;
-
-    match Box::pin(execute_tool_resolved(
-        http_client,
-        db,
-        encryption_keys,
-        node_ws_manager,
-        billing,
-        user_id,
-        billing_principal_user_id,
-        service,
-        endpoint,
-        prepared,
-        jwt_keys,
-        config,
-        connection_expiry_notifier,
-        token_exchange_cache,
-        cloud_response_cache,
-        exec_ctx,
-        billing_egress_permit,
-        target,
-        node_route,
-        has_server_credential,
-        billing_context_builder,
-        catalog_service_slug.as_deref(),
-    ))
-    .await?
-    {
-        McpToolExecutionOutcome::Response(response) => Ok(response),
-        McpToolExecutionOutcome::ProviderOutcomeUnknown(error) => Err(error),
-        McpToolExecutionOutcome::ProviderUnreachable(error) => Err(error),
-    }
+        match Box::pin(execute_tool_resolved(
+            http_client,
+            db,
+            encryption_keys,
+            node_ws_manager,
+            billing,
+            user_id,
+            billing_principal_user_id,
+            service,
+            endpoint,
+            prepared,
+            jwt_keys,
+            config,
+            connection_expiry_notifier,
+            token_exchange_cache,
+            cloud_response_cache,
+            exec_ctx,
+            billing_egress_permit,
+            target,
+            node_route,
+            has_server_credential,
+            billing_context_builder,
+            catalog_service_slug.as_deref(),
+        ))
+        .await?
+        {
+            McpToolExecutionOutcome::Response(response) => Ok(response),
+            McpToolExecutionOutcome::ProviderOutcomeUnknown(error) => Err(error),
+            McpToolExecutionOutcome::ProviderUnreachable(error) => Err(error),
+        }
+    })
 }
 
 /// Outcome of an MCP provider dispatch. Exact approvals need to distinguish a
@@ -4642,6 +4789,31 @@ pub struct ToolResponse {
     pub status: u16,
     pub text: String,
     pub media: Option<ToolMedia>,
+    origin: ToolResponseOrigin,
+}
+
+#[derive(Debug)]
+enum ToolResponseOrigin {
+    Downstream,
+    AssistantPolicy,
+}
+
+impl ToolResponse {
+    /// Only the server's execution gate can construct this control response.
+    /// Provider bodies are always downstream content, even if they resemble it.
+    fn policy_refusal(refusal: serde_json::Value) -> Self {
+        Self {
+            concurrency: None,
+            status: 409,
+            text: refusal.to_string(),
+            media: None,
+            origin: ToolResponseOrigin::AssistantPolicy,
+        }
+    }
+
+    pub(crate) fn is_policy_refusal(&self) -> bool {
+        matches!(self.origin, ToolResponseOrigin::AssistantPolicy)
+    }
 }
 
 /// Only raster formats browsers render without script (never SVG).
@@ -4685,12 +4857,13 @@ fn header_value<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a s
         .map(|(_, value)| value.as_str())
 }
 
-fn tool_response(status: u16, content_type: Option<&str>, body: &[u8]) -> ToolResponse {
+pub(crate) fn tool_response(status: u16, content_type: Option<&str>, body: &[u8]) -> ToolResponse {
     ToolResponse {
         concurrency: None,
         status,
         text: String::from_utf8_lossy(body).to_string(),
         media: tool_media(status, content_type, body),
+        origin: ToolResponseOrigin::Downstream,
     }
 }
 
@@ -4760,77 +4933,10 @@ async fn collect_node_stream_response(
 /// Execute an already-resolved proxy target. Exact-service redemption uses
 /// this so the attested resolution is the one that produces the effect.
 #[allow(clippy::too_many_arguments)]
-pub async fn execute_tool_resolved(
-    http_client: &reqwest::Client,
-    db: &mongodb::Database,
-    encryption_keys: &EncryptionKeys,
-    node_ws_manager: &std::sync::Arc<NodeWsManager>,
-    billing: &std::sync::Arc<crate::services::billing::BillingService>,
-    user_id: &str,
-    billing_principal_user_id: &str,
-    service: &McpToolService,
-    endpoint: &McpToolEndpoint,
-    prepared: PreparedProxyCall,
-    jwt_keys: &crate::crypto::jwt::JwtKeys,
-    config: &crate::config::AppConfig,
-    connection_expiry_notifier: &crate::services::connection_expiry_service::ConnectionExpiryNotifier,
-    token_exchange_cache: &crate::services::provider_token_exchange_service::TokenExchangeCache,
-    cloud_response_cache: &crate::services::cloud_response_cache::CloudResponseCache,
-    exec_ctx: &McpExecContext<'_>,
-    billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
-    target: proxy_service::ProxyTarget,
-    node_route: Option<node_routing_service::NodeRoute>,
-    has_server_credential: bool,
-    billing_context_builder: McpBillingRouteContextBuilder,
-    catalog_service_slug: Option<&str>,
-) -> AppResult<McpToolExecutionOutcome> {
-    let lease = super::service_concurrency_service::acquire(
-        db,
-        &target.service,
-        exec_ctx.actor_user_id.unwrap_or(user_id),
-    )
-    .await?;
-    let execution = execute_tool_resolved_boxed(
-        http_client,
-        db,
-        encryption_keys,
-        node_ws_manager,
-        billing,
-        user_id,
-        billing_principal_user_id,
-        service,
-        endpoint,
-        prepared,
-        jwt_keys,
-        config,
-        connection_expiry_notifier,
-        token_exchange_cache,
-        cloud_response_cache,
-        exec_ctx,
-        billing_egress_permit,
-        target,
-        node_route,
-        has_server_credential,
-        billing_context_builder,
-        catalog_service_slug,
-    );
-    match lease {
-        Some(lease) => {
-            let mut outcome = lease.run(execution).await?;
-            if let McpToolExecutionOutcome::Response(response) = &mut outcome {
-                response.concurrency = Some(lease);
-            }
-            Ok(outcome)
-        }
-        None => execution.await,
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn execute_tool_resolved_boxed<'a>(
+pub fn execute_tool_resolved<'a>(
     http_client: &'a reqwest::Client,
     db: &'a mongodb::Database,
-    encryption_keys: &'a EncryptionKeys,
+    encryption_keys: &'a std::sync::Arc<EncryptionKeys>,
     node_ws_manager: &'a std::sync::Arc<NodeWsManager>,
     billing: &'a std::sync::Arc<crate::services::billing::BillingService>,
     user_id: &'a str,
@@ -4850,6 +4956,83 @@ fn execute_tool_resolved_boxed<'a>(
     has_server_credential: bool,
     billing_context_builder: McpBillingRouteContextBuilder,
     catalog_service_slug: Option<&'a str>,
+) -> futures::future::BoxFuture<'a, AppResult<McpToolExecutionOutcome>> {
+    Box::pin(async move {
+        let managed = super::telnyx_platform_service::contract(&target.service).is_some();
+        let lease = super::service_concurrency_service::acquire(
+            db,
+            &target.service,
+            exec_ctx.actor_user_id.unwrap_or(user_id),
+        )
+        .await?;
+        let execution = execute_tool_resolved_boxed(
+            http_client,
+            db,
+            encryption_keys,
+            node_ws_manager,
+            billing,
+            user_id,
+            billing_principal_user_id,
+            service,
+            endpoint,
+            prepared,
+            jwt_keys,
+            config,
+            connection_expiry_notifier,
+            token_exchange_cache,
+            cloud_response_cache,
+            exec_ctx,
+            billing_egress_permit,
+            target,
+            node_route,
+            has_server_credential,
+            billing_context_builder,
+            catalog_service_slug,
+            lease.clone(),
+        );
+        // Preserve uncertain outcomes so approval redemption cannot replay
+        // a dispatched call after capacity-lease loss.
+        if managed {
+            return execution.await;
+        }
+        match lease {
+            Some(lease) => {
+                let mut outcome = lease.run(execution).await?;
+                if let McpToolExecutionOutcome::Response(response) = &mut outcome {
+                    response.concurrency = Some(lease);
+                }
+                Ok(outcome)
+            }
+            None => execution.await,
+        }
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_tool_resolved_boxed<'a>(
+    http_client: &'a reqwest::Client,
+    db: &'a mongodb::Database,
+    encryption_keys: &'a std::sync::Arc<EncryptionKeys>,
+    node_ws_manager: &'a std::sync::Arc<NodeWsManager>,
+    billing: &'a std::sync::Arc<crate::services::billing::BillingService>,
+    user_id: &'a str,
+    billing_principal_user_id: &'a str,
+    service: &'a McpToolService,
+    endpoint: &'a McpToolEndpoint,
+    prepared: PreparedProxyCall,
+    jwt_keys: &'a crate::crypto::jwt::JwtKeys,
+    config: &'a crate::config::AppConfig,
+    connection_expiry_notifier: &'a crate::services::connection_expiry_service::ConnectionExpiryNotifier,
+    token_exchange_cache: &'a crate::services::provider_token_exchange_service::TokenExchangeCache,
+    cloud_response_cache: &'a crate::services::cloud_response_cache::CloudResponseCache,
+    exec_ctx: &'a McpExecContext<'a>,
+    billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
+    target: proxy_service::ProxyTarget,
+    node_route: Option<node_routing_service::NodeRoute>,
+    has_server_credential: bool,
+    billing_context_builder: McpBillingRouteContextBuilder,
+    catalog_service_slug: Option<&'a str>,
+    service_lease: Option<super::service_concurrency_service::Lease>,
 ) -> futures::future::BoxFuture<'a, AppResult<McpToolExecutionOutcome>> {
     Box::pin(execute_tool_resolved_inner(
         http_client,
@@ -4874,6 +5057,7 @@ fn execute_tool_resolved_boxed<'a>(
         has_server_credential,
         billing_context_builder,
         catalog_service_slug,
+        service_lease,
     ))
 }
 
@@ -4881,7 +5065,7 @@ fn execute_tool_resolved_boxed<'a>(
 async fn execute_tool_resolved_inner(
     http_client: &reqwest::Client,
     db: &mongodb::Database,
-    encryption_keys: &EncryptionKeys,
+    encryption_keys: &std::sync::Arc<EncryptionKeys>,
     node_ws_manager: &std::sync::Arc<NodeWsManager>,
     billing: &std::sync::Arc<crate::services::billing::BillingService>,
     user_id: &str,
@@ -4901,6 +5085,7 @@ async fn execute_tool_resolved_inner(
     has_server_credential: bool,
     billing_context_builder: McpBillingRouteContextBuilder,
     catalog_service_slug: Option<&str>,
+    service_lease: Option<super::service_concurrency_service::Lease>,
 ) -> AppResult<McpToolExecutionOutcome> {
     super::org_agent_service::authorize_service_with_access(
         db,
@@ -4946,7 +5131,113 @@ async fn execute_tool_resolved_inner(
         &target,
     );
     prepared.validate_destination(&target)?;
+    let assistant_chat = if let Some(chat) = exec_ctx.assistant_chat {
+        Some(chat.clone())
+    } else {
+        super::assistant_acknowledgement_service::for_key(db, user_id, exec_ctx.api_key_id).await?
+    };
+    let mut assistant_admission = None;
+    let mut assistant_auto = None;
+    if let Some(chat) = assistant_chat.as_ref()
+        && let McpToolSource::UserManaged {
+            user_service_id,
+            effective_owner_id,
+            ..
+        } = &service.source
+    {
+        super::assistant_service_execution::verify_resolved(
+            db,
+            encryption_keys,
+            chat,
+            user_service_id,
+            &target,
+            prepared.method.as_str(),
+            &prepared.path,
+        )
+        .await?;
+        let mut operation = super::assistant_service_execution::http_operation(
+            &target,
+            prepared.method.as_str(),
+            &prepared.path,
+            prepared.query.as_deref(),
+            prepared.body.as_deref().unwrap_or_default(),
+        );
+        super::assistant_service_execution::bind_headers(
+            &mut operation,
+            &prepared.parameter_headers,
+        );
+        operation["endpoint_id"] = serde_json::json!(endpoint.endpoint_id);
+        operation["endpoint_contract"] = serde_json::json!(endpoint_contract_digest(endpoint));
+        if endpoint.async_operation.is_some() {
+            operation["async_contract"] = serde_json::json!(
+                super::assistant_service_execution::async_contract_binding(service, endpoint)?
+            );
+        }
+        let metadata = service
+            .durable_endpoint_metadata
+            .get(&endpoint.endpoint_id)
+            .copied()
+            .unwrap_or_default();
+        let effects = operation_effects(prepared.method(), metadata);
+        let read = effects.reads && !prepared.carries_method_override();
+        let destructive = effects.destructive || prepared.carries_method_override();
+        let decision = if let Some(authority) = prepared.async_continuation.as_ref() {
+            authority
+                .admit(db, chat, user_service_id, &target, &operation)
+                .await?
+        } else {
+            super::assistant_service_execution::check(
+                db,
+                node_ws_manager,
+                chat,
+                user_service_id,
+                effective_owner_id,
+                &operation,
+                super::assistant_acknowledgement_service::ActionFacts::of(
+                    super::assistant_acknowledgement_service::service_action_class(
+                        read,
+                        destructive,
+                    ),
+                ),
+                prepared.acknowledgement_id.as_deref(),
+                &format!(
+                    "{} {} on {}",
+                    prepared.method(),
+                    endpoint.name,
+                    service.service_slug
+                ),
+                false,
+                Some(&target),
+                false,
+                Some((
+                    prepared.body.as_deref().unwrap_or_default(),
+                    Some("application/json"),
+                )),
+            )
+            .await?
+        };
+        assistant_auto = decision.automatic;
+        if let Some(refusal) = decision.refusal {
+            return Ok(McpToolExecutionOutcome::Response(
+                ToolResponse::policy_refusal(refusal),
+            ));
+        }
+        if let Some(admission) = decision.admission {
+            if let Some(watch) = prepared.async_submission.as_deref() {
+                admission.bind_async_submission(db, watch).await?;
+            }
+            admission
+                .revalidate(db, user_service_id, Some(&target))
+                .await?;
+            assistant_admission = Some(admission);
+        }
+    }
+
     let PreparedProxyCall {
+        automatic_receipt,
+        async_submission: _,
+        async_continuation: _,
+        acknowledgement_id: _,
         endpoint_target: _,
         method,
         path,
@@ -5185,6 +5476,65 @@ async fn execute_tool_resolved_inner(
         &billing_ctx.billing_request_id,
         billing_ctx.credential_class,
     );
+    if super::telnyx_platform_service::contract(&target.service).is_some() {
+        if node_route.is_some() || !delegated.is_empty() || !server_owned_headers.is_empty() {
+            return Err(AppError::BadRequest(
+                "This Telnyx platform operation requires direct managed execution".into(),
+            ));
+        }
+        let managed_guard = super::assistant_service_execution::OwnedHttpEgressGuard::for_managed(
+            assistant_admission.as_ref(),
+            None,
+            db,
+            encryption_keys.clone(),
+            &target,
+            (method.as_str(), &path),
+            (&billing_ctx, &resource_owner_id, assistant_chat.as_ref()),
+        );
+        destination_audit.dispatch();
+        let managed = match super::telnyx_platform_service::execute(
+            db,
+            billing.clone(),
+            billing_ctx,
+            target,
+            method.as_str(),
+            &path,
+            query.as_deref(),
+            body.as_deref().unwrap_or_default(),
+            service_lease,
+            managed_guard,
+        )
+        .await
+        {
+            Ok(response) => response,
+            Err(super::telnyx_platform_service::ManagedExecutionError::OutcomeUnknown(error)) => {
+                return Ok(McpToolExecutionOutcome::ProviderOutcomeUnknown(error));
+            }
+            Err(super::telnyx_platform_service::ManagedExecutionError::Rejected(error)) => {
+                request_audit.admission_error(&error);
+                return Err(error);
+            }
+        };
+        destination_audit.complete(managed.status);
+        request_audit.response(managed.status);
+        if let (Some(chat), Some(admission)) =
+            (assistant_chat.as_ref(), assistant_admission.as_ref())
+        {
+            if let Some(receipt) = &automatic_receipt {
+                receipt.record(db, chat).await;
+            } else {
+                admission.receipt(db, chat, assistant_auto).await;
+            }
+        }
+        return Ok(McpToolExecutionOutcome::Response(ToolResponse {
+            concurrency: None,
+            status: managed.status,
+            text: String::from_utf8(managed.body.to_vec())
+                .map_err(|_| AppError::Internal("Invalid managed response encoding".into()))?,
+            media: None,
+            origin: ToolResponseOrigin::Downstream,
+        }));
+    }
     let metered = billing
         .open(&billing_ctx)
         .await
@@ -5244,6 +5594,8 @@ async fn execute_tool_resolved_inner(
             .collect();
 
         let mut last_error: Option<AppError> = None;
+        let mut node_failure_evidence =
+            super::assistant_service_execution::NodeFailureEvidence::default();
         for nid in &all_node_ids {
             let mut attempt = node_request.clone();
             attempt.request_id = uuid::Uuid::new_v4().to_string();
@@ -5252,6 +5604,8 @@ async fn execute_tool_resolved_inner(
                 match node_service::get_node_signing_secret(db, encryption_keys, nid).await {
                     Ok(secret) => Some(secret),
                     Err(e @ AppError::NodeNotFound(_) | e @ AppError::NodeOffline(_)) => {
+                        // Signing preparation failures are not credential outages.
+                        node_failure_evidence.disqualify();
                         last_error = Some(e);
                         continue;
                     }
@@ -5267,7 +5621,32 @@ async fn execute_tool_resolved_inner(
                     .await?;
             }
             destination_audit.dispatch();
+            if let Some(admission) = assistant_admission.as_ref() {
+                let validation = admission
+                    .http_egress(db, encryption_keys, &target, method.as_str(), &path)
+                    .routed(node_route.as_ref())
+                    .revalidate()
+                    .await;
+                if let Err(error) = validation {
+                    billing
+                        .reject_before_send(&metered, "assistant_authority_changed", false)
+                        .await?;
+                    return Err(error);
+                }
+            }
             billing.mark_forwarded(&metered).await?;
+            if let Some(admission) = assistant_admission.as_ref()
+                && let Err(error) = admission
+                    .http_egress(db, encryption_keys, &target, method.as_str(), &path)
+                    .routed(node_route.as_ref())
+                    .revalidate()
+                    .await
+            {
+                billing
+                    .reject_before_send(&metered, "assistant_authority_changed", false)
+                    .await?;
+                return Err(error);
+            }
             match node_ws_manager
                 .send_proxy_request_classified(
                     nid,
@@ -5294,6 +5673,16 @@ async fn execute_tool_resolved_inner(
                         .await?;
                     destination_audit.complete(resp.status);
                     request_audit.response(resp.status);
+                    if (200..300).contains(&resp.status)
+                        && let (Some(chat), Some(admission)) =
+                            (assistant_chat.as_ref(), assistant_admission.as_ref())
+                    {
+                        if let Some(receipt) = &automatic_receipt {
+                            receipt.record(db, chat).await;
+                        } else {
+                            admission.receipt(db, chat, assistant_auto).await;
+                        }
+                    }
                     return Ok(McpToolExecutionOutcome::Response(tool_response(
                         resp.status,
                         header_value(&resp.headers, "content-type"),
@@ -5330,6 +5719,16 @@ async fn execute_tool_resolved_inner(
                         .await?;
                     destination_audit.complete(status);
                     request_audit.response(status);
+                    if (200..300).contains(&status)
+                        && let (Some(chat), Some(admission)) =
+                            (assistant_chat.as_ref(), assistant_admission.as_ref())
+                    {
+                        if let Some(receipt) = &automatic_receipt {
+                            receipt.record(db, chat).await;
+                        } else {
+                            admission.receipt(db, chat, assistant_auto).await;
+                        }
+                    }
                     return Ok(McpToolExecutionOutcome::Response(tool_response(
                         status,
                         header_value(&headers, "content-type"),
@@ -5344,6 +5743,7 @@ async fn execute_tool_resolved_inner(
                     }
                     NodeDispatchFailureDisposition::TryFallback => {
                         destination_audit.denied();
+                        node_failure_evidence.record(&failure.error, failure.dispatched);
                         last_error = Some(failure.error);
                         continue;
                     }
@@ -5361,6 +5761,13 @@ async fn execute_tool_resolved_inner(
         // holds a decrypt-able credential. node_managed keys and node-only
         // platform services have no server credential.
         if !has_server_credential {
+            if let (Some(chat), Some(admission)) =
+                (assistant_chat.as_ref(), assistant_admission.as_ref())
+            {
+                admission
+                    .exhausted_node_routes(db, chat, &node_failure_evidence)
+                    .await?;
+            }
             return Err(last_error
                 .unwrap_or_else(|| AppError::NodeOffline("All node routes failed".to_string())));
         }
@@ -5371,8 +5778,26 @@ async fn execute_tool_resolved_inner(
     // Direct proxy (no node, or node offline with server credential fallback)
     // -------------------------------------------------------------------
     destination_audit.dispatch();
+    if let Some(admission) = assistant_admission.as_ref() {
+        let validation = admission
+            .http_egress(db, encryption_keys, &target, method.as_str(), &path)
+            .routed(node_route.as_ref())
+            .revalidate()
+            .await;
+        if let Err(error) = validation {
+            billing
+                .reject_before_send(&metered, "assistant_authority_changed", false)
+                .await?;
+            return Err(error);
+        }
+    }
     billing.mark_forwarded(&metered).await?;
-    let response = match proxy_service::forward_request_with_extra_outbound_headers(
+    let egress_guard = assistant_admission.as_ref().map(|admission| {
+        admission
+            .http_egress(db, encryption_keys, &target, method.as_str(), &path)
+            .routed(node_route.as_ref())
+    });
+    let response = match proxy_service::forward_request_with_egress_guard(
         http_client,
         &target,
         method,
@@ -5387,10 +5812,17 @@ async fn execute_tool_resolved_inner(
         cloud_response_cache,
         server_owned_headers,
         billing_egress_permit,
+        egress_guard.as_ref(),
     )
     .await
     {
         Ok(response) => response,
+        Err(proxy_service::ForwardRequestError::PreDispatchRejected(error)) => {
+            billing
+                .reject_before_send(&metered, "assistant_authority_changed", false)
+                .await?;
+            return Err(error);
+        }
         Err(proxy_service::ForwardRequestError::Application(error)) => return Err(error),
         Err(error @ proxy_service::ForwardRequestError::OutcomeUnknown) => {
             return Ok(McpToolExecutionOutcome::ProviderOutcomeUnknown(
@@ -5400,6 +5832,14 @@ async fn execute_tool_resolved_inner(
         Err(proxy_service::ForwardRequestError::Transport(error))
             if direct_transport_failure_is_pre_dispatch(&error) =>
         {
+            if error.is_connect()
+                && let (Some(chat), Some(admission)) =
+                    (assistant_chat.as_ref(), assistant_admission.as_ref())
+            {
+                admission
+                    .record_unavailable(db, chat, "pre_dispatch")
+                    .await?;
+            }
             tracing::warn!(
                 connect = error.is_connect(),
                 builder = error.is_builder(),
@@ -5424,6 +5864,9 @@ async fn execute_tool_resolved_inner(
     };
 
     let status = response.status().as_u16();
+    if let (Some(chat), Some(admission)) = (assistant_chat.as_ref(), assistant_admission.as_ref()) {
+        admission.response(db, chat, status).await?;
+    }
     // Images are read as bytes; everything else keeps charset-aware decoding.
     let image_type = tool_image_type(
         response
@@ -5486,11 +5929,22 @@ async fn execute_tool_resolved_inner(
 
     destination_audit.complete(status);
     request_audit.response(status);
+    if (200..300).contains(&status)
+        && let (Some(chat), Some(admission)) =
+            (assistant_chat.as_ref(), assistant_admission.as_ref())
+    {
+        if let Some(receipt) = &automatic_receipt {
+            receipt.record(db, chat).await;
+        } else {
+            admission.receipt(db, chat, assistant_auto).await;
+        }
+    }
     Ok(McpToolExecutionOutcome::Response(ToolResponse {
         concurrency: None,
         status,
         text: body_text,
         media,
+        origin: ToolResponseOrigin::Downstream,
     }))
 }
 
@@ -6319,6 +6773,25 @@ pub async fn unpublished_tool(
 #[cfg(test)]
 mod tests {
     #[test]
+    fn structured_policy_origin_cannot_be_inferred_from_downstream_json() {
+        let refusal = serde_json::json!({"error":"acknowledgement_required","acknowledgement_id":"server-card"});
+        let downstream = super::tool_response(
+            409,
+            Some("application/json"),
+            refusal.to_string().as_bytes(),
+        );
+        assert!(!downstream.is_policy_refusal());
+        let trusted = super::ToolResponse::policy_refusal(refusal.clone());
+        assert!(trusted.is_policy_refusal());
+        assert_eq!(trusted.status, downstream.status);
+        assert_eq!(trusted.text, downstream.text);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&trusted.text).unwrap(),
+            refusal
+        );
+    }
+
+    #[test]
     fn mcp_usage_estimates_only_token_services_and_preserves_reported_usage() {
         use crate::models::downstream_service::test_helpers::dummy_service;
         use crate::models::service_billing::{BillingMetric, ServiceBilling};
@@ -6542,6 +7015,7 @@ mod tests {
                     &state.token_exchange_cache,
                     &state.cloud_response_cache,
                     &McpExecContext {
+                        assistant_chat: None,
                         response_body_limit: None,
                         actor_user_id: None,
                         caller_token: None,

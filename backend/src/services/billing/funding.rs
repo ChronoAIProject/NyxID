@@ -27,6 +27,11 @@ use super::route_context::BillingRouteContext;
 const FUNDING_CLAIM_LEASE_SECS: i64 = 60;
 const RESOURCE_LOCK_RETRIES: usize = 4;
 
+mod machine;
+pub use machine::{
+    MachineFundingCandidates, prepare_machine_window_funding, reserve_machine_window_in_session,
+};
+
 /// Pool admission has a cancellation deadline. Commit every funding hold and
 /// its recoverable meter row together, including allowance and grant funding.
 pub(super) async fn reserve_and_open_pool(
@@ -47,6 +52,23 @@ pub(super) async fn reserve_and_open_public(
     if ctx.public_admission.is_none() || ctx.pool_attempt.is_some() {
         return Err(AppError::BillingProviderUnavailable(
             "Invalid public billing admission".into(),
+        ));
+    }
+    reserve_and_open_durable(db, ctx, wallet, layers).await
+}
+
+pub(super) async fn reserve_and_open_managed(
+    db: &mongodb::Database,
+    ctx: &BillingRouteContext,
+    wallet: &crate::models::billing_wallet::BillingWallet,
+    layers: Vec<LayerReservation>,
+) -> AppResult<super::reservation::BillingReservation> {
+    if ctx.managed_admission.is_none()
+        || ctx.public_admission.is_some()
+        || ctx.pool_attempt.is_some()
+    {
+        return Err(AppError::BillingNotConfigured(
+            "Invalid managed admission".into(),
         ));
     }
     reserve_and_open_durable(db, ctx, wallet, layers).await
@@ -113,13 +135,26 @@ async fn reserve_and_open_durable(
                 if admission.expires_at <= now { return Err(AppError::BillingProviderUnavailable("Public admission expired".into())); }
                 let gross=layers.iter().map(|layer| layer.reserved_credits).try_fold(Credits::ZERO,Credits::checked_add)?;
                 let digest=crate::services::platform_public_budget_service::route_digest(&ctx)?;
-                if db.collection::<PublicCallReservation>(CALLS).update_one(doc! {
+                if ctx.public_probe {
+                    crate::services::platform_public_contract_service::fund_probe_in_session(&db, session, &ctx, &layers).await?;
+                } else if db.collection::<PublicCallReservation>(CALLS).update_one(doc! {
                     "_id":&admission.call_id,"state":"prepared","billing_request_id":&ctx.billing_request_id,
                     "sponsor_owner_user_id":&ctx.billing_owner_id,"credential_api_key_id":&ctx.api_key_id,
                     "route_digest":digest,"model_id":&admission.model_id,
                     "expires_at":{"$gt":bson::DateTime::from_chrono(now)},"maximum":{"$gte":gross.decimal()},
                 },doc! {"$set":{"state":"funded"}}).session(&mut *session).await?.matched_count != 1 {
                     return Err(AppError::Conflict("Public funding authority changed".into()));
+                }
+            } else if let Some(admission) = &ctx.managed_admission {
+                use crate::models::managed_execution::{COLLECTION_NAME,ManagedExecution};
+                let gross=layers.iter().map(|layer| layer.reserved_credits).try_fold(Credits::ZERO,Credits::checked_add)?;
+                if admission.expires_at <= now || db.collection::<ManagedExecution>(COLLECTION_NAME).update_one(doc! {
+                    "_id":&admission.execution_id,"state":"prepared","billing_request_id":&ctx.billing_request_id,
+                    "billing_owner_id":&ctx.billing_owner_id,"actor_user_id":&ctx.actor_user_id,
+                    "route_digest":&admission.route_digest,"expires_at":{"$gt":bson::DateTime::from_chrono(now)},
+                },doc! {"$set":{"state":"funded","maximum":gross.decimal(),"updated_at":bson::DateTime::from_chrono(now)}})
+                    .session(&mut *session).await?.matched_count != 1 {
+                    return Err(AppError::Conflict("Managed funding authority changed".into()));
                 }
             } else if ctx.pool_attempt.as_ref().is_none_or(|attempt| attempt.lease_until <= now) {
                 return Err(AppError::BillingProviderUnavailable("Pool admission expired".into()));
@@ -212,14 +247,40 @@ async fn reserve_and_open_durable(
                     resale.lago_metric_code.clone(), Some(&reservation), None));
             }
             if let Some(admission)=&ctx.public_admission {
-                use crate::models::platform_public_budget::{CALLS,PublicCallReservation};
+                use crate::models::platform_public_budget::CALLS;
                 let ids:Vec<_>=rows.iter().map(|row|row.id.clone()).collect();
                 if ids.is_empty() { return Err(AppError::BillingProviderUnavailable("Public meter is missing".into())); }
-                db.collection::<PublicCallReservation>(CALLS).update_one(doc! {"_id":&admission.call_id,"state":"funded"},
-                    doc! {"$set":{"meter_row_ids":ids}}).session(&mut *session).await?;
+                let collection = if ctx.public_probe { crate::models::platform_public_contract::PROBES } else { CALLS };
+                if db.collection::<Document>(collection).update_one(doc! {"_id":&admission.call_id,"state":"funded"},
+                    doc! {"$set":{"meter_row_ids":ids}}).session(&mut *session).await?.matched_count != 1 {
+                    return Err(AppError::Conflict("Public meter authority changed".into()));
+                }
+            }
+            if let Some(admission)=&ctx.managed_admission {
+                use crate::models::managed_execution::{COLLECTION_NAME,ManagedExecution};
+                let ids:Vec<_>=rows.iter().map(|row|row.id.clone()).collect();
+                if ids.is_empty() { return Err(AppError::BillingNotConfigured("Managed meter is missing".into())); }
+                if db.collection::<ManagedExecution>(COLLECTION_NAME).update_one(doc! {"_id":&admission.execution_id,"state":"funded"},
+                    doc! {"$set":{"meter_row_ids":ids}}).session(&mut *session).await?.matched_count != 1 {
+                    return Err(AppError::Conflict("Managed funding authority changed".into()));
+                }
             }
             if !rows.is_empty() {
-                db.collection::<UsageMeterRow>(USAGE_METER).insert_many(rows).session(&mut *session).await?;
+                if let Some(admission)=&ctx.managed_admission {
+                    let mut documents = Vec::with_capacity(rows.len());
+                    for mut row in rows {
+                        if let Some(funding) = row.funding.as_mut() {
+                            funding.settlement_rate = Some(Credits::from_pico(super::amounts::rate_pico(
+                                funding.credits_per_unit_pico, funding.credits_per_unit_micros))?);
+                        }
+                        let mut document = bson::to_document(&row).map_err(|_| AppError::Internal("Managed meter encoding failed".into()))?;
+                        document.insert("managed_execution_id", &admission.execution_id);
+                        documents.push(document);
+                    }
+                    db.collection::<Document>(USAGE_METER).insert_many(documents).session(&mut *session).await?;
+                } else {
+                    db.collection::<UsageMeterRow>(USAGE_METER).insert_many(rows).session(&mut *session).await?;
+                }
             }
             Ok(reservation)
         }.await;
@@ -424,6 +485,13 @@ pub async fn release_layer_reservations(
     db: &mongodb::Database,
     layers: &[LayerReservation],
 ) -> AppResult<()> {
+    if layers.iter().any(|layer| {
+        layer.metric == crate::models::service_billing::BillingMetric::MachineRunningSeconds
+    }) {
+        return Err(AppError::BillingProviderUnavailable(
+            "Machine holds require evidence-backed settlement".into(),
+        ));
+    }
     for layer in layers {
         for reservation in &layer.allowance_reservations {
             release_allowance_reservation(db, reservation).await?;
@@ -439,6 +507,11 @@ pub async fn release_usage_reservations(
     db: &mongodb::Database,
     row: &UsageMeterRow,
 ) -> AppResult<()> {
+    if machine::is_machine_runtime(row) {
+        return Err(AppError::BillingProviderUnavailable(
+            "Machine liability requires evidence-backed settlement, including zero usage".into(),
+        ));
+    }
     let Some(funding) = row.funding.as_ref() else {
         return Ok(());
     };
@@ -640,6 +713,7 @@ pub async fn settle_usage_funding(
     db: &mongodb::Database,
     row: &UsageMeterRow,
 ) -> AppResult<FundingSettlement> {
+    machine::validate_machine_settlement(row)?;
     if let Some(funding) = row.funding.as_ref()
         && funding.settled
     {
@@ -725,6 +799,9 @@ pub async fn settle_usage_funding(
         )));
     };
 
+    machine::validate_machine_settlement(&claimed)?;
+    let reserved_only = machine::is_machine_runtime(&claimed);
+
     let quantity = claimed.quantity.unwrap_or(0).max(0);
     let rate = if let Some(rate) = claimed.funding.as_ref().and_then(|f| f.settlement_rate) {
         rate.pico()
@@ -786,11 +863,19 @@ pub async fn settle_usage_funding(
         {
             allowance_covered = allowance_covered.saturating_add(consume).min(quantity);
             refresh_claimed_funding(db, &mut claimed).await?;
+        } else if reserved_only {
+            return Err(AppError::BillingProviderUnavailable(
+                "Reserved Machine allowance requires reconciliation".into(),
+            ));
         }
     }
 
     let wallet_only = claimed.funding.as_ref().is_some_and(|f| f.wallet_only);
-    if !wallet_only && claimed.layer == BillingLayer::Platform && allowance_covered < quantity {
+    if !reserved_only
+        && !wallet_only
+        && claimed.layer == BillingLayer::Platform
+        && allowance_covered < quantity
+    {
         let definitions = super::allowances::applicable_allowances(
             db,
             &claimed.billing_owner_id,
@@ -890,10 +975,14 @@ pub async fn settle_usage_funding(
                 .checked_add(consume)?
                 .min(charge_after_allowance);
             refresh_claimed_funding(db, &mut claimed).await?;
+        } else if reserved_only {
+            return Err(AppError::BillingProviderUnavailable(
+                "Reserved Machine grant requires reconciliation".into(),
+            ));
         }
     }
 
-    if !wallet_only && grant_covered < charge_after_allowance {
+    if !reserved_only && !wallet_only && grant_covered < charge_after_allowance {
         let now = Utc::now();
         let mut grants =
             super::grants::list_active_for_user(db, &claimed.billing_owner_id, now).await?;
@@ -942,6 +1031,11 @@ pub async fn settle_usage_funding(
     }
 
     let wallet = charge_after_allowance.checked_sub(grant_covered)?;
+    if reserved_only && wallet > claimed.reserved_credits {
+        return Err(AppError::BillingProviderUnavailable(
+            "Machine settlement exceeds its funded wallet window".into(),
+        ));
+    }
     let wallet_charge_credits = wallet;
     // Grant- and allowance-funded usage is deliberately absent from Lago's
     // charging stream. Only the wallet-funded fraction is emitted, so Lago's
@@ -1597,6 +1691,7 @@ mod tests {
             pending_resale_quantity: None,
             pending_platform_usage: None,
             pool_attempt: None,
+            machine_usage: None,
             status: UsageStatus::Finalized,
             forwarded: true,
             released: false,

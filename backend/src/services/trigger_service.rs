@@ -318,6 +318,8 @@ pub async fn update(
     input: UpdateInput,
 ) -> AppResult<UpdatedTrigger> {
     let mut next = current.clone();
+    next.schedule_state.terminal_failure_code = None;
+    next.schedule_state.terminal_failure_count = 0;
     next.updated_at = Utc::now().max(current.updated_at + chrono::Duration::milliseconds(1));
     let mut delivery_signing_secret = None;
     if let Some(label) = input.label {
@@ -420,6 +422,8 @@ pub async fn update(
                     "schedule": bson::to_bson(&saved.schedule).map_err(serialization_error)?,
                     "updated_at": schedules::date(saved.updated_at),
                     "schedule_state.pause_reason": &saved.schedule_state.pause_reason,
+                    "schedule_state.terminal_failure_code": null,
+                    "schedule_state.terminal_failure_count": 0,
                 };
                 let mut saved = saved.clone();
                 if schedule_changed {
@@ -512,7 +516,9 @@ pub async fn rotate_secret(
     let raw_secret = format!("{TRIGGER_SECRET_PREFIX}{}", generate_random_token());
     let mut set_doc = doc! {
         "secret_hash": hash_token(&raw_secret),
-        "updated_at": bson::DateTime::from_chrono(Utc::now()),
+        "schedule_state.terminal_failure_code": null,
+        "schedule_state.terminal_failure_count": 0,
+        "updated_at": bson::DateTime::from_chrono(Utc::now().max(current.updated_at + chrono::Duration::milliseconds(1))),
     };
     let update = match current.verification {
         TriggerVerification::HmacSha256 { .. } => {
@@ -535,12 +541,15 @@ pub async fn rotate_secret(
     let updated = db
         .collection::<Trigger>(TRIGGERS)
         .find_one_and_update(
-            doc! { "_id": &current.id, "user_id": &current.user_id },
+            doc! { "_id": &current.id, "user_id": &current.user_id, "updated_at": schedules::date(current.updated_at) },
             update,
         )
         .return_document(ReturnDocument::After)
-        .await?
-        .ok_or(AppError::TriggerNotFound)?;
+        .await?;
+    let updated = match updated {
+        Some(updated) => updated,
+        None => return Err(rotation_conflict(db, current).await?),
+    };
     Ok((updated, raw_secret))
 }
 
@@ -561,24 +570,44 @@ pub async fn rotate_delivery_secret(
     let trigger = db
         .collection::<Trigger>(TRIGGERS)
         .find_one_and_update(
-            doc! { "_id": &current.id, "user_id": &current.user_id },
+            doc! { "_id": &current.id, "user_id": &current.user_id, "updated_at": schedules::date(current.updated_at) },
             doc! { "$set": {
                 "delivery_secret_encrypted": bson::Binary {
                     subtype: bson::spec::BinarySubtype::Generic,
                     bytes: encrypted,
                 },
                 "delivery_key_id": &key_id,
-                "updated_at": bson::DateTime::from_chrono(Utc::now()),
+                "schedule_state.terminal_failure_code": null,
+                "schedule_state.terminal_failure_count": 0,
+                "updated_at": bson::DateTime::from_chrono(Utc::now().max(current.updated_at + chrono::Duration::milliseconds(1))),
             }},
         )
         .return_document(ReturnDocument::After)
-        .await?
-        .ok_or(AppError::TriggerNotFound)?;
+        .await?;
+    let trigger = match trigger {
+        Some(trigger) => trigger,
+        None => return Err(rotation_conflict(db, current).await?),
+    };
     Ok(RotatedDeliverySecret {
         trigger,
         raw_secret,
         key_id,
     })
+}
+
+async fn rotation_conflict(db: &Database, current: &Trigger) -> AppResult<AppError> {
+    if db
+        .collection::<Trigger>(TRIGGERS)
+        .find_one(doc! {"_id": &current.id, "user_id": &current.user_id})
+        .await?
+        .is_none()
+    {
+        Ok(AppError::TriggerNotFound)
+    } else {
+        Ok(AppError::Conflict(
+            "Trigger changed; reload and retry".into(),
+        ))
+    }
 }
 
 pub async fn load_active_for_ingress(db: &Database, id: &str) -> AppResult<Trigger> {
@@ -1707,8 +1736,17 @@ mod tests {
             .expect("rotate trigger secret");
         assert_ne!(created.raw_secret, second_secret);
         assert_eq!(rotated.secret_hash, hash_token(&second_secret));
+        assert!(rotated.updated_at > updated.trigger.updated_at);
+        assert!(matches!(
+            rotate_secret(&db, &keys, &updated.trigger).await,
+            Err(AppError::Conflict(_))
+        ));
 
         delete(&db, &rotated).await.expect("delete trigger");
+        assert!(matches!(
+            rotate_secret(&db, &keys, &rotated).await,
+            Err(AppError::TriggerNotFound)
+        ));
         assert!(matches!(
             get_for_actor(&db, &owner, &rotated.id).await,
             Err(AppError::TriggerNotFound)
@@ -1737,6 +1775,11 @@ mod tests {
                 .starts_with(TRIGGER_DELIVERY_SECRET_PREFIX)
         );
         assert_ne!(Some(rotated.key_id.clone()), previous_key_id);
+        assert!(rotated.trigger.updated_at > current.updated_at);
+        assert!(matches!(
+            rotate_delivery_secret(&db, &keys, &current).await,
+            Err(AppError::Conflict(_))
+        ));
         assert_eq!(
             rotated.trigger.delivery_key_id.as_deref(),
             Some(rotated.key_id.as_str())
@@ -1752,6 +1795,14 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(decrypted, rotated.raw_secret.as_bytes());
+        db.collection::<Trigger>(TRIGGERS)
+            .delete_one(doc! {"_id": &current.id})
+            .await
+            .unwrap();
+        assert!(matches!(
+            rotate_delivery_secret(&db, &keys, &rotated.trigger).await,
+            Err(AppError::TriggerNotFound)
+        ));
         current.delivery = TriggerDelivery::Notification;
         assert!(matches!(
             rotate_delivery_secret(&db, &keys, &current).await,

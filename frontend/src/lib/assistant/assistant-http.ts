@@ -29,6 +29,8 @@ export interface AssistantHttpRequest {
   readonly headers?: Readonly<Record<string, string>>;
   readonly method?: AssistantMethod;
   readonly signal?: AbortSignal;
+  /** Revalidate the account that authorized a foreground management request. */
+  readonly authorityGuard?: () => void;
   /** Foreground sends only; see `RequestOptions.creditsDenial`. */
   readonly creditsDenial?: CreditsDenialRequest;
 }
@@ -206,10 +208,29 @@ async function mockResponse(
   return globalThis.__nyxidAssistantHttpMock?.({ endpoint, init });
 }
 
+async function withNetworkError<T>(
+  request: () => Promise<T>,
+  signal?: AbortSignal,
+): Promise<T> {
+  try {
+    return await request();
+  } catch (error) {
+    if (signal?.aborted || (error instanceof Error && error.name === "AbortError")) {
+      throw error;
+    }
+    throw new ApiError(0, {
+      error: "network_error",
+      error_code: -1,
+      message: assistantRequestErrorMessage(0),
+    });
+  }
+}
+
 export async function assistantHttp(
   endpoint: string,
   options: AssistantHttpRequest = {},
 ): Promise<Response> {
+  options.authorityGuard?.();
   const method = options.method ?? "GET";
   const actorId = options.creditsDenial ? currentCreditsActor() : null;
   const init = buildFetchConfig({
@@ -220,24 +241,23 @@ export async function assistantHttp(
       ...options.headers,
     },
   });
-  let response: Response;
-  try {
-    response =
-      (await mockResponse(endpoint, init)) ??
-      (await fetch(apiUrl(endpoint, options.apiBaseUrl), init));
-  } catch (error) {
-    if (options.signal?.aborted || (error instanceof Error && error.name === "AbortError")) throw error;
-    throw new ApiError(0, {
-      error: "network_error",
-      error_code: -1,
-      message: assistantRequestErrorMessage(0),
-    });
-  }
+  const mocked = await withNetworkError(
+    () => mockResponse(endpoint, init),
+    options.signal,
+  );
+  // Account changes are authority failures, not transport failures.
+  options.authorityGuard?.();
+  const response = mocked ?? (await withNetworkError(
+    () => fetch(apiUrl(endpoint, options.apiBaseUrl), init),
+    options.signal,
+  ));
+  options.authorityGuard?.();
 
   void captureResponse(endpoint, method, response).catch(() => undefined);
   if (response.ok) return response;
 
   const { parsed: errorBody, raw } = await parseError(response);
+  options.authorityGuard?.();
   // Classify the raw envelope: the parsed shape defaults a missing symbol.
   reportCreditsDenialHttp(options.creditsDenial, response.status, raw, actorId);
   if (response.status === 401 && DEAD_SESSION_CODES.has(errorBody.error_code)) {
@@ -258,6 +278,9 @@ export async function assistantJson<T>(
   options: AssistantHttpRequest = {},
 ): Promise<T> {
   const response = await assistantHttp(endpoint, options);
+  options.authorityGuard?.();
   if (response.status === 204) return undefined as T;
-  return (await response.json()) as T;
+  const result = (await response.json()) as T;
+  options.authorityGuard?.();
+  return result;
 }

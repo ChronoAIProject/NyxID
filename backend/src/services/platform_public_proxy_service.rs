@@ -54,7 +54,7 @@ pub(crate) fn catalog_digest(service: &DownstreamService) -> AppResult<String> {
         value
     ])))
 }
-fn protocol(service: &DownstreamService) -> AppResult<PublicModelProtocol> {
+pub(crate) fn protocol(service: &DownstreamService) -> AppResult<PublicModelProtocol> {
     match service.inference.as_ref().map(|i| i.wire_protocol) {
         Some(InferenceWireProtocol::OpenaiResponses) => Ok(PublicModelProtocol::OpenAiResponses),
         Some(InferenceWireProtocol::OpenaiCompletions) => {
@@ -66,9 +66,42 @@ fn protocol(service: &DownstreamService) -> AppResult<PublicModelProtocol> {
         None => Err(denied()),
     }
 }
+/// Inference metadata declares these protocol operations independently of Tool
+/// publication. Durable endpoints, when selected, retain their generation fence.
+pub(crate) fn declared_operation(protocol: PublicModelProtocol) -> &'static str {
+    match protocol {
+        PublicModelProtocol::OpenAiResponses => "responses",
+        PublicModelProtocol::OpenAiCompletions => "chat_completions",
+        PublicModelProtocol::AnthropicMessages => "messages",
+    }
+}
+pub(crate) fn inference_path(
+    service: &DownstreamService,
+    protocol: PublicModelProtocol,
+) -> AppResult<String> {
+    // Catalog inference bases are API roots (including /v1 when required).
+    // This matches platform_inference_service; never append another /v1.
+    let base = reqwest::Url::parse(&service.base_url).map_err(|_| denied())?;
+    if base.query().is_some() || base.fragment().is_some() {
+        return Err(denied());
+    }
+    Ok(match protocol {
+        PublicModelProtocol::OpenAiResponses => "responses",
+        PublicModelProtocol::OpenAiCompletions => "chat/completions",
+        PublicModelProtocol::AnthropicMessages => "messages",
+    }
+    .into())
+}
 pub(crate) fn require_model_catalog(
     service: &DownstreamService,
     context: &PublicExecutionContext,
+    operation: &PublicModelOperation,
+) -> AppResult<()> {
+    require_model_catalog_for_sponsor(service, &context.sponsor_owner_user_id, operation)
+}
+pub(crate) fn require_model_catalog_for_sponsor(
+    service: &DownstreamService,
+    sponsor: &str,
     operation: &PublicModelOperation,
 ) -> AppResult<()> {
     if service.id != operation.service_id
@@ -81,16 +114,12 @@ pub(crate) fn require_model_catalog(
         || protocol(service)? != operation.protocol
         || catalog_digest(service)? != operation.execution_authority_digest
         || operation.method != Method::POST
-        || !matches!(
-            (operation.protocol, operation.canonical_path.as_str()),
-            (PublicModelProtocol::OpenAiResponses, "v1/responses")
-                | (
-                    PublicModelProtocol::OpenAiCompletions,
-                    "v1/chat/completions"
-                )
-                | (PublicModelProtocol::AnthropicMessages, "v1/messages")
-        )
-        || operation.endpoint_generation.is_none_or(|n| n <= 0)
+        || operation.canonical_path != inference_path(service, operation.protocol)?
+        || (operation.endpoint_generation.is_none()
+            && (service.offering_kind
+                != crate::models::downstream_service::OfferingKind::AiService
+                || operation.operation != declared_operation(operation.protocol)))
+        || operation.endpoint_generation.is_some_and(|n| n <= 0)
         || operation
             .canonical_path
             .chars()
@@ -101,9 +130,7 @@ pub(crate) fn require_model_catalog(
     if let Some(config) = &service.platform_key {
         if !config.enabled
             || (config.audience == PlatformKeyAudience::Restricted
-                && !config
-                    .allowed_owner_ids
-                    .contains(&context.sponsor_owner_user_id))
+                && !config.allowed_owner_ids.iter().any(|id| id == sponsor))
         {
             return Err(denied());
         }
@@ -132,6 +159,9 @@ async fn fence_catalog(
         )
         .session(&mut *session)
         .await?;
+    if operation.endpoint_generation.is_none() {
+        return Ok(());
+    }
     if db.collection::<ServiceEndpoint>(ENDPOINTS).update_one(doc! {"service_id":&service.id,"name":&operation.operation,
         "method":operation.method.as_str(),"path":format!("/{}",operation.canonical_path.trim_start_matches('/')),
         "operation_generation":operation.endpoint_generation.ok_or_else(denied)?,"is_active":true,"publication":"published",
@@ -362,7 +392,7 @@ impl Drop for SecretTarget {
         self.0.credential.zeroize();
     }
 }
-fn strip_identity(target: &mut proxy_service::ProxyTarget) {
+pub(crate) fn strip_identity(target: &mut proxy_service::ProxyTarget) {
     target.service.identity_propagation_mode = "none".into();
     target.service.forward_access_token = false;
     target.service.inject_delegation_token = false;
@@ -394,7 +424,7 @@ pub(crate) async fn dispatch_model(
     if uuid::Uuid::parse_str(call_id).is_err() {
         return Err(denied());
     }
-    let proof = policy::verified_context(context)?;
+    let proof = policy::verified_context(&state.db, context).await?;
     let mut matches = context.model_operations.iter().filter(|o| {
         o.service_id == service_id && o.method == Method::POST && o.canonical_path == path
     });
@@ -454,7 +484,7 @@ pub(crate) async fn dispatch_model(
             |session, (db, context, operation, call, key)| {
                 Box::pin(async move {
                     let result: AppResult<_> = async {
-                        policy::verified_context(context)?;
+                        policy::verified_context_in_session(db, session, context).await?;
                         super::platform_public_tools::fence_callback_in_session(
                             db, session, context, key,
                         )
@@ -546,6 +576,9 @@ pub(crate) async fn dispatch_model(
         .await?;
     budget::reconcile_call(&state.db, &call_id).await?;
     validate_reported_usage(&operation, &reported)?;
+    if status.is_success() {
+        validate_reported_model(&operation.model_id, &output)?;
+    }
     let mut response = Response::builder().status(status);
     if let Some(content_type) = content_type {
         response = response.header("content-type", content_type);
@@ -555,8 +588,50 @@ pub(crate) async fn dispatch_model(
         .map_err(|_| denied())
 }
 
+/// Exact models are required for JSON and streaming responses. A response with
+/// missing or alias model identity settles truthfully but cannot continue a turn.
+pub(crate) fn validate_reported_model(expected: &str, body: &[u8]) -> AppResult<()> {
+    fn models(value: &Value) -> Vec<&str> {
+        [
+            value["model"].as_str(),
+            value["response"]["model"].as_str(),
+            value["message"]["model"].as_str(),
+        ]
+        .into_iter()
+        .flatten()
+        .collect()
+    }
+    let mut observed = false;
+    if let Ok(value) = serde_json::from_slice::<Value>(body) {
+        for model in models(&value) {
+            if model != expected {
+                return Err(denied());
+            }
+            observed = true;
+        }
+    } else {
+        let text = std::str::from_utf8(body).map_err(|_| denied())?;
+        for line in text.lines().filter_map(|l| l.strip_prefix("data:")) {
+            if line.trim() == "[DONE]" {
+                continue;
+            }
+            let value: Value = serde_json::from_str(line.trim()).map_err(|_| denied())?;
+            for model in models(&value) {
+                if model != expected {
+                    return Err(denied());
+                }
+                observed = true;
+            }
+        }
+    }
+    if !observed {
+        return Err(denied());
+    }
+    Ok(())
+}
+
 // Called only after the truthful sponsor settlement and cap reconciliation.
-fn validate_reported_usage(
+pub(crate) fn validate_reported_usage(
     operation: &PublicModelOperation,
     reported: &usage::ReportedLlmUsage,
 ) -> AppResult<()> {
@@ -589,7 +664,7 @@ fn validate_reported_usage(
     Ok(())
 }
 
-fn require_outer(service: &DownstreamService) -> AppResult<()> {
+pub(crate) fn require_outer(service: &DownstreamService) -> AppResult<()> {
     if !super::assistant_nyxagent::row_contract(Some(service), None).valid()
         || service.slug != super::assistant_nyxagent::SERVICE_SLUG
         || service.service_type != "http"
@@ -649,7 +724,7 @@ pub(crate) async fn dispatch_nyxagent(
     credential: &RuntimeCredential,
     request: NyxAgentRequest,
 ) -> AppResult<Response> {
-    policy::verified_context(context)?;
+    policy::verified_context(&state.db, context).await?;
     if request.method != Method::POST
         || request.relative_path != "v1/responses"
         || request.idempotency_key != context.turn.turn_id
@@ -715,7 +790,7 @@ pub(crate) async fn dispatch_nyxagent(
             |session, (db, context, key, retained)| {
                 Box::pin(async move {
                     let result: AppResult<_> = async {
-                        policy::verified_context(context)?;
+                        policy::verified_context_in_session(db, session, context).await?;
                         budget::fence_context(db, session, context, key).await?;
                         let catalog = db
                             .collection::<DownstreamService>(SERVICES)
@@ -764,6 +839,13 @@ pub(crate) async fn dispatch_nyxagent(
         "accept",
         http::HeaderValue::from_static("text/event-stream"),
     );
+    let assertion = super::platform_public_contract_service::execution_assertion(
+        state,
+        context,
+        credential.raw_key.as_str(),
+        &body,
+    )
+    .await?;
     let downstream = proxy_service::forward_request_with_extra_outbound_headers(
         proxy_service::no_redirect_http_client(),
         &target.0,
@@ -783,6 +865,7 @@ pub(crate) async fn dispatch_nyxagent(
                 format!("Bearer {}", credential.raw_key.as_str()),
             ),
             ("idempotency-key".into(), request.idempotency_key),
+            ("x-nyxid-public-authority".into(), assertion.to_string()),
         ],
         permit,
     )
@@ -842,6 +925,25 @@ mod tests {
     }
     fn valid(op: &PublicModelOperation, body: &Value) -> bool {
         validate_body(op, &serde_json::to_vec(body).unwrap()).is_ok()
+    }
+    #[test]
+    fn model_identity_is_exact_in_json_and_streaming_responses() {
+        for body in [
+            r#"{"model":"pinned-model","output":[]}"#,
+            "event: response.created\ndata: {\"response\":{\"model\":\"pinned-model\"}}\n\ndata: [DONE]\n",
+            "data: {\"message\":{\"model\":\"pinned-model\"}}\n\ndata: {\"type\":\"content_block_delta\"}\n",
+        ] {
+            validate_reported_model("pinned-model", body.as_bytes()).unwrap();
+        }
+        for body in [
+            r#"{"model":"alias-model"}"#,
+            r#"{"output":[]}"#,
+            "data: {\"model\":\"pinned-model\"}\n\ndata: {\"response\":{\"model\":\"different\"}}\n",
+            "data: {malformed}\n",
+            "data: [DONE]\n",
+        ] {
+            assert!(validate_reported_model("pinned-model", body.as_bytes()).is_err());
+        }
     }
     #[test]
     fn all_model_protocols_require_exact_model_bounds_and_closed_tools() {

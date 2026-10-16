@@ -42,6 +42,7 @@ pub trait PublicControlReadiness: Send + Sync {
 
 #[derive(Clone)]
 pub struct RuntimeChange {
+    pub public_deployment_digest: Option<String>,
     pub initialize: bool,
     pub expected_profile_generation: Option<i64>,
     pub expected_manager_authority_epoch: i64,
@@ -263,6 +264,14 @@ fn candidate(
     current: Option<&PlatformBotRuntimeControls>,
     change: &RuntimeChange,
 ) -> AppResult<PlatformBotRuntimeControls> {
+    candidate_for_review(profile, current, change, false)
+}
+fn candidate_for_review(
+    profile: &PlatformBotConfig,
+    current: Option<&PlatformBotRuntimeControls>,
+    change: &RuntimeChange,
+    allow_unselected: bool,
+) -> AppResult<PlatformBotRuntimeControls> {
     let initializing = current.is_none();
     let mut row = if let Some(row) = current {
         if change.initialize
@@ -352,7 +361,7 @@ fn candidate(
                 "A funding organization is required".into(),
             ));
         }
-        if public.nyxagent_profile.trim().is_empty()
+        if (!allow_unselected && public.nyxagent_profile.trim().is_empty())
             || public.nyxagent_profile.len() > 128
             || public.total_daily_credits <= crate::models::credits::Credits::ZERO
             || public.sender_daily_credits <= crate::models::credits::Credits::ZERO
@@ -391,6 +400,21 @@ pub async fn update(
     change: &RuntimeChange,
     readiness: &dyn PublicControlReadiness,
 ) -> AppResult<PlatformBotRuntimeControls> {
+    if change
+        .public_deployment_digest
+        .as_ref()
+        .is_some_and(|digest| {
+            change.public_enabled != Some(true)
+                || digest.len() != 64
+                || !digest
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        })
+    {
+        return Err(AppError::ValidationError(
+            "Deployment identity requires explicit public enable and a SHA-256 digest".into(),
+        ));
+    }
     let profile = super::platform_bot_config_service::get(db, profile_id).await?;
     let previous = get(db, profile_id).await?;
     let proposed = candidate(&profile, previous.as_ref(), change)?;
@@ -398,53 +422,147 @@ pub async fn update(
         r.public_enabled != proposed.public_enabled || r.public_policy != proposed.public_policy
     });
     let needs_probe = proposed.public_enabled
-        && (previous
-            .as_ref()
-            .is_none_or(|r| !r.public_enabled || r.public_policy != proposed.public_policy));
+        && (change.public_enabled == Some(true)
+            || previous
+                .as_ref()
+                .is_none_or(|r| !r.public_enabled || r.public_policy != proposed.public_policy));
     let evidence = if needs_probe {
         authorize_public_probe(db, &actor.user_id, &policy(&proposed)).await?;
         Some(readiness.probe(db, &policy(&proposed)).await?)
     } else {
         None
     };
+    if change
+        .public_deployment_digest
+        .as_ref()
+        .is_some_and(|digest| {
+            evidence
+                .as_ref()
+                .is_none_or(|proof| &proof.policy_digest != digest)
+        })
+    {
+        return Err(AppError::Conflict(
+            "Validated deployment changed; validate again before applying".into(),
+        ));
+    }
     let db = db.clone();
     let actor = actor.clone();
     let key = zeroize::Zeroizing::new(audit_key.to_vec());
     let change = change.clone();
     let profile_id = profile_id.to_owned();
     let mut session = db.client().start_session().await?;
-    session.start_transaction().and_run(
-        (db, actor, key, change, profile_id, profile, proposed, evidence, readiness, public_changed, needs_probe),
-        |session, (db, actor, key, change, profile_id, profile, proposed, evidence, readiness, public_changed, needs_probe)| Box::pin(async move {
-        let result:AppResult<_>=async {
-            super::platform_bot_config_service::fence_admin(db,&actor.user_id,session).await?;
-            let mut filter=doc! {"_id":&*profile_id,"manager_bot_id":&profile.manager_bot_id,"deleted_at":bson::Bson::Null};
-            if change.initialize {filter.insert("generation",change.expected_profile_generation.ok_or_else(changed)?);}
-            let live=db.collection::<PlatformBotConfig>(crate::models::platform_bot_config::COLLECTION_NAME).find_one_and_update(filter,doc! {"$inc":{"runtime_configuration_revision":1_i64}}).return_document(ReturnDocument::After).session(&mut *session).await?.ok_or_else(changed)?;
-            let current=db.collection::<PlatformBotRuntimeControls>(COLLECTION_NAME).find_one(doc! {"platform_config_id":&*profile_id}).session(&mut *session).await?;
-            let rebuilt=candidate(&live,current.as_ref(),change)?;
-            if policy_digest_fields(&rebuilt)!=policy_digest_fields(proposed) {return Err(changed());}
-            proposed.effect_revision=rebuilt.effect_revision;
-            proposed.updated_at=Utc::now();
-            if (proposed.personal_enabled || proposed.public_enabled)
-                && db.collection::<Document>(crate::models::platform_credential::COLLECTION_NAME).update_one(doc! {"provider":"telegram-new","fields.manager_bot_id":&live.manager_bot_id,"fields.webhook_ready":"true"},doc! {"$inc":{"runtime_configuration_revision":1_i64}}).session(&mut *session).await?.matched_count!=1 {return Err(changed());}
-            if (proposed.personal_enabled || proposed.public_enabled)
-                && db.collection::<Document>(crate::models::channel_bot::COLLECTION_NAME).update_one(doc! {"_id":&live.channel_bot_id,"platform_profile_id":&*profile_id,"platform_bot_id":&live.manager_bot_id,"is_active":true},doc! {"$inc":{"runtime_configuration_revision":1_i64}}).session(&mut *session).await?.matched_count!=1 {return Err(changed());}
-            if proposed.public_enabled && *public_changed {
-                let sponsor=proposed.public_policy.as_ref().ok_or_else(changed)?;
-                if db.collection::<Document>(crate::models::user::COLLECTION_NAME).update_one(doc! {"_id":&sponsor.sponsor_owner_user_id,"is_active":true,"user_type":"org"},doc! {"$inc":{"runtime_funding_revision":1_i64}}).session(&mut *session).await?.matched_count!=1 {return Err(changed());}
-                if db.collection::<Document>(crate::models::org_membership::COLLECTION_NAME).update_one(doc! {"org_user_id":&sponsor.sponsor_owner_user_id,"member_user_id":&actor.user_id,"role":"admin","revoked_at":bson::Bson::Null},doc! {"$inc":{"runtime_funding_revision":1_i64}}).session(&mut *session).await?.matched_count!=1 {return Err(changed());}
-                if let Some(evidence)=evidence.as_ref() {readiness.fence(db,session,&policy(proposed),evidence).await?;} else if *needs_probe {return Err(changed());}
-            }
-            if let Some(old)=&current
-                && old.public_enabled && (!proposed.public_enabled || old.public_policy!=proposed.public_policy) {
-                readiness.revoke_public_manager(db,session,&policy(old)).await?;
-            }
-            if current.is_some() {db.collection::<PlatformBotRuntimeControls>(COLLECTION_NAME).replace_one(doc! {"platform_config_id":&*profile_id},&*proposed).session(&mut *session).await?;}else{db.collection::<PlatformBotRuntimeControls>(COLLECTION_NAME).insert_one(&*proposed).session(&mut *session).await?;}
-            super::audit_service::log_actor_event_in_session(db,session,key,actor,"platform_manager_runtime_changed",serde_json::json!({"profile_id":profile_id,"epoch":proposed.manager_authority_epoch,"personal_revision":proposed.personal_control_revision,"public_revision":proposed.public_policy_revision,"personal_enabled":proposed.personal_enabled,"public_enabled":proposed.public_enabled})).await?;
-            Ok(proposed.clone())
-        }.await;transaction_result(result)
-    })).await.map_err(map_transaction_error)
+    session
+        .start_transaction()
+        .and_run(
+            (db, actor, key, change, profile_id, profile, proposed, evidence, readiness, public_changed, needs_probe),
+            |session, (db, actor, key, change, profile_id, profile, proposed, evidence, readiness, public_changed, needs_probe)| {
+                Box::pin(async move {
+                    let result: AppResult<_> = async {
+                        use crate::models::platform_public_contract::{
+                            ACTIVATIONS, PublicDeploymentActivation,
+                        };
+                        super::platform_bot_config_service::fence_admin(db, &actor.user_id, session).await?;
+                        let mut filter = doc! {
+                            "_id": &*profile_id,
+                            "manager_bot_id": &profile.manager_bot_id,
+                            "deleted_at": bson::Bson::Null,
+                        };
+                        if change.initialize {
+                            filter.insert("generation", change.expected_profile_generation.ok_or_else(changed)?);
+                        }
+                        let live = db.collection::<PlatformBotConfig>(crate::models::platform_bot_config::COLLECTION_NAME)
+                            .find_one_and_update(filter, doc! {"$inc": {"runtime_configuration_revision": 1_i64}})
+                            .return_document(ReturnDocument::After).session(&mut *session)
+                            .await?.ok_or_else(changed)?;
+                        let current = db.collection::<PlatformBotRuntimeControls>(COLLECTION_NAME)
+                            .find_one(doc! {"platform_config_id": &*profile_id})
+                            .session(&mut *session).await?;
+                        let rebuilt = candidate(&live, current.as_ref(), change)?;
+                        if policy_digest_fields(&rebuilt) != policy_digest_fields(proposed) {
+                            return Err(changed());
+                        }
+                        proposed.effect_revision = rebuilt.effect_revision;
+                        proposed.updated_at = Utc::now();
+                        if proposed.personal_enabled || proposed.public_enabled {
+                            for (collection, filter) in [
+                                (crate::models::platform_credential::COLLECTION_NAME,
+                                    doc! {"provider": "telegram-new", "fields.manager_bot_id": &live.manager_bot_id, "fields.webhook_ready": "true"}),
+                                (crate::models::channel_bot::COLLECTION_NAME,
+                                    doc! {"_id": &live.channel_bot_id, "platform_profile_id": &*profile_id, "platform_bot_id": &live.manager_bot_id, "is_active": true}),
+                            ] {
+                                let fenced = db.collection::<Document>(collection)
+                                    .update_one(filter, doc! {"$inc": {"runtime_configuration_revision": 1_i64}})
+                                    .session(&mut *session).await?;
+                                if fenced.matched_count != 1 {
+                                    return Err(changed());
+                                }
+                            }
+                        }
+                        let old_activation = db.collection::<PublicDeploymentActivation>(ACTIVATIONS)
+                            .find_one(doc! {"_id": &*profile_id}).session(&mut *session).await?;
+                        if proposed.public_enabled && (*public_changed || *needs_probe) {
+                            let sponsor = proposed.public_policy.as_ref().ok_or_else(changed)?;
+                            for (collection, filter) in [
+                                (crate::models::user::COLLECTION_NAME,
+                                    doc! {"_id": &sponsor.sponsor_owner_user_id, "is_active": true, "user_type": "org"}),
+                                (crate::models::org_membership::COLLECTION_NAME,
+                                    doc! {"org_user_id": &sponsor.sponsor_owner_user_id, "member_user_id": &actor.user_id, "role": "admin", "revoked_at": bson::Bson::Null}),
+                            ] {
+                                let fenced = db.collection::<Document>(collection)
+                                    .update_one(filter, doc! {"$inc": {"runtime_funding_revision": 1_i64}})
+                                    .session(&mut *session).await?;
+                                if fenced.matched_count != 1 {
+                                    return Err(changed());
+                                }
+                            }
+                            let proof = evidence.as_ref().ok_or_else(changed)?;
+                            readiness.fence(db, session, &policy(proposed), proof).await?;
+                        }
+                        let deployment_changed = evidence.as_ref().is_some_and(|proof| {
+                            old_activation.as_ref().is_none_or(|old| old.policy_digest != proof.policy_digest)
+                        });
+                        if let Some(old) = &current
+                            && old.public_enabled
+                            && (!proposed.public_enabled || old.public_policy != proposed.public_policy || deployment_changed)
+                        {
+                            // Activation and revocation share the controls/manager fence.
+                            // Existing senders can then create a fresh session safely.
+                            readiness.revoke_public_manager(db, session, &policy(old)).await?;
+                        }
+                        if let Some(proof) = evidence.as_ref() {
+                            let activation = PublicDeploymentActivation {
+                                profile_id: profile_id.clone(),
+                                binding: super::platform_public_policy::binding(&policy(proposed))?,
+                                policy_digest: proof.policy_digest.clone(),
+                                activated_by: actor.user_id.clone(),
+                                activated_at: Utc::now(),
+                                effect_revision: 0,
+                            };
+                            db.collection::<PublicDeploymentActivation>(ACTIVATIONS)
+                                .replace_one(doc! {"_id": &*profile_id}, activation).upsert(true)
+                                .session(&mut *session).await?;
+                        }
+                        if current.is_some() {
+                            db.collection::<PlatformBotRuntimeControls>(COLLECTION_NAME)
+                                .replace_one(doc! {"platform_config_id": &*profile_id}, &*proposed)
+                                .session(&mut *session).await?;
+                        } else {
+                            db.collection::<PlatformBotRuntimeControls>(COLLECTION_NAME)
+                                .insert_one(&*proposed).session(&mut *session).await?;
+                        }
+                        super::audit_service::log_actor_event_in_session(
+                            db, session, key, actor, "platform_manager_runtime_changed",
+                            serde_json::json!({"profile_id": profile_id, "epoch": proposed.manager_authority_epoch,
+                                "personal_revision": proposed.personal_control_revision, "public_revision": proposed.public_policy_revision,
+                                "personal_enabled": proposed.personal_enabled, "public_enabled": proposed.public_enabled,
+                                "activated_policy_digest": evidence.as_ref().map(|proof| &proof.policy_digest)}),
+                        ).await?;
+                        Ok(proposed.clone())
+                    }.await;
+                    transaction_result(result)
+                })
+            },
+        ).await.map_err(map_transaction_error)
 }
 
 fn policy_digest_fields(
@@ -541,9 +659,7 @@ pub fn change_from_patch(
                 .nyxagent_profile
                 .clone()
                 .or_else(|| saved.map(|s| s.nyxagent_profile.clone()))
-                .ok_or_else(|| {
-                    AppError::ValidationError("Choose a public NyxAgent profile".into())
-                })?;
+                .unwrap_or_default();
             Some(Some(PublicRuntimePolicy {
                 sponsor_owner_user_id: p
                     .sponsor_owner_user_id
@@ -555,12 +671,12 @@ pub fn change_from_patch(
                     .total_daily_credits
                     .or_else(|| saved.map(|s| s.total_daily_credits))
                     .or_else(|| profile.guide.as_ref().map(|g| g.limits.daily_credits))
-                    .unwrap_or("1".parse().map_err(|_| changed())?),
+                    .unwrap_or("10".parse().map_err(|_| changed())?),
                 sender_daily_credits: p
                     .sender_daily_credits
                     .or_else(|| saved.map(|s| s.sender_daily_credits))
                     .or_else(|| profile.guide.as_ref().map(|g| g.anonymous_daily_credits))
-                    .unwrap_or("0.1".parse().map_err(|_| changed())?),
+                    .unwrap_or("0.5".parse().map_err(|_| changed())?),
             }))
         }
     };
@@ -570,6 +686,7 @@ pub fn change_from_patch(
         ));
     }
     Ok(RuntimeChange {
+        public_deployment_digest: patch.public_deployment_digest.clone(),
         initialize: patch.initialize,
         expected_profile_generation: patch.expected_profile_generation,
         expected_manager_authority_epoch: patch.expected.manager_authority_epoch,
@@ -593,8 +710,9 @@ pub async fn reviewed_policy(
         return Err(changed());
     }
     let current = get(db, profile_id).await?;
-    let change = change_from_patch(&profile, current.as_ref(), patch)?;
-    let row = candidate(&profile, current.as_ref(), &change)?;
+    let mut change = change_from_patch(&profile, current.as_ref(), patch)?;
+    change.public_enabled = Some(true);
+    let row = candidate_for_review(&profile, current.as_ref(), &change, true)?;
     if row.public_policy.is_none() {
         return Err(AppError::ValidationError(
             "Public runtime configuration is required".into(),
@@ -621,14 +739,44 @@ async fn authorize_public_probe(
         .clone();
     let db = db.clone();
     let actor = actor.to_owned();
+    let reviewed = reviewed.clone();
     let mut session = db.client().start_session().await?;
-    session.start_transaction().and_run2(async move |session| {
-        let result:AppResult<_>=async {
-            super::platform_bot_config_service::fence_admin(&db,&actor,session).await?;
-            if db.collection::<Document>(crate::models::user::COLLECTION_NAME).update_one(doc! {"_id":&sponsor,"is_active":true,"user_type":"org"},doc! {"$inc":{"runtime_probe_revision":1_i64}}).session(&mut *session).await?.matched_count!=1 || db.collection::<Document>(crate::models::org_membership::COLLECTION_NAME).update_one(doc! {"org_user_id":&sponsor,"member_user_id":&actor,"role":"admin","revoked_at":bson::Bson::Null},doc! {"$inc":{"runtime_probe_revision":1_i64}}).session(session).await?.matched_count!=1 {return Err(AppError::Forbidden("Funding consent changed".into()));}
-            Ok(())
-        }.await;transaction_result(result)
-    }).await.map_err(map_transaction_error)
+    session
+        .start_transaction()
+        .and_run2(async move |session| {
+            let result: AppResult<()> = async {
+                super::platform_bot_config_service::fence_admin(&db, &actor, session).await?;
+                for (collection, filter) in [
+                    (
+                        crate::models::user::COLLECTION_NAME,
+                        doc! {"_id": &sponsor, "is_active": true, "user_type": "org"},
+                    ),
+                    (
+                        crate::models::org_membership::COLLECTION_NAME,
+                        doc! {"org_user_id": &sponsor, "member_user_id": &actor,
+                        "role": "admin", "revoked_at": bson::Bson::Null},
+                    ),
+                ] {
+                    let fenced = db
+                        .collection::<Document>(collection)
+                        .update_one(filter, doc! {"$inc": {"runtime_probe_revision": 1_i64}})
+                        .session(&mut *session)
+                        .await?;
+                    if fenced.matched_count != 1 {
+                        return Err(AppError::Forbidden("Funding consent changed".into()));
+                    }
+                }
+                super::platform_public_contract_service::record_probe_consent(
+                    &db, session, &actor, &reviewed,
+                )
+                .await?;
+                Ok(())
+            }
+            .await;
+            transaction_result(result)
+        })
+        .await
+        .map_err(map_transaction_error)
 }
 
 pub struct ReadinessAdapter<'a>(pub &'a dyn super::platform_manager_contract::PublicTurnProducer);
@@ -639,6 +787,13 @@ impl PublicControlReadiness for ReadinessAdapter<'_> {
         db: &Database,
         candidate: &ManagerRuntimePolicy,
     ) -> AppResult<PublicReadinessEvidence> {
+        if let super::platform_manager_contract::PublicReadiness::Ready(proof) =
+            super::platform_public_policy::assess(db, candidate).await?
+            && proof.expires_at
+                > Utc::now() + Duration::seconds(i64::from(proof.limits.max_duration_secs) + 5)
+        {
+            return Ok(proof);
+        }
         match self.0.probe_public_readiness(db, candidate).await? {
             super::platform_manager_contract::PublicReadiness::Ready(evidence) => Ok(evidence),
             super::platform_manager_contract::PublicReadiness::Unavailable(_) => Err(
@@ -820,6 +975,7 @@ mod tests {
     }
     fn initialize() -> RuntimeChange {
         RuntimeChange {
+            public_deployment_digest: None,
             initialize: true,
             expected_profile_generation: Some(40),
             expected_manager_authority_epoch: 0,
@@ -924,6 +1080,7 @@ mod tests {
         .await
         .unwrap();
         let mut patch = RuntimeChange {
+            public_deployment_digest: None,
             initialize: false,
             expected_profile_generation: None,
             expected_manager_authority_epoch: row.manager_authority_epoch,

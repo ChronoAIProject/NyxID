@@ -298,6 +298,7 @@ impl Journey {
             }}).await.unwrap();
         let active = public.active_turn.as_ref().unwrap();
         let context = PublicExecutionContext {
+            proof_record_id: "test-proof".into(),
             ingress: PublicIngress {
                 ingress: IngressClaim {
                     receipt_id: active.receipt_id.clone(),
@@ -1395,7 +1396,7 @@ async fn delayed_original_route_is_not_promoted_by_new_personal_control_revision
 }
 
 #[tokio::test]
-async fn public_reply_branch_refuses_before_owner_history_lookup_without_runtime_proof() {
+async fn public_reply_branch_refuses_missing_retained_public_turn_before_owner_history_lookup() {
     let j = Journey::new().await;
     let (context, _) = j.public_signup().await;
     let destination = ReplyDestination {
@@ -1409,6 +1410,25 @@ async fn public_reply_branch_refuses_before_owner_history_lookup_without_runtime
         },
         expires_at: context.expires_at,
     };
+    assert_eq!(
+        j.state
+            .db
+            .collection::<Document>(crate::models::platform_public_session::COLLECTION_NAME)
+            .count_documents(doc! {"_id": &context.public_session_id})
+            .await
+            .unwrap(),
+        1,
+        "the session exists; the missing retained public turn must reject delivery"
+    );
+    assert_eq!(
+        j.state
+            .db
+            .collection::<Document>(crate::models::platform_public_turn::COLLECTION_NAME)
+            .count_documents(doc! {"_id": &context.turn.turn_id})
+            .await
+            .unwrap(),
+        0
+    );
     let error = deliver_saved(
         &j.state,
         &j.producers,
@@ -1421,7 +1441,7 @@ async fn public_reply_branch_refuses_before_owner_history_lookup_without_runtime
     .await
     .unwrap_err();
     assert!(
-        matches!(error,AppError::Conflict(message) if message.contains("Public runtime unavailable"))
+        matches!(error, AppError::Conflict(message) if message == "Public session authority changed")
     );
     assert_eq!(
         j.state
@@ -1433,6 +1453,259 @@ async fn public_reply_branch_refuses_before_owner_history_lookup_without_runtime
         0
     );
     assert!(j.sends().await.is_empty());
+}
+
+#[tokio::test]
+async fn asynchronous_public_failure_sends_only_fixed_notice_and_live_revocations_suppress_it() {
+    use crate::models::{
+        platform_public_contract::{ACTIVATIONS, PublicDeploymentActivation},
+        platform_public_session::{COLLECTION_NAME as SESSIONS, PlatformPublicSession},
+        platform_public_turn::{COLLECTION_NAME as TURNS, PlatformPublicTurn},
+    };
+    for change in [
+        "unchanged",
+        "execution_timeout",
+        "manager_stop",
+        "sponsor_revoke",
+        "sender_revoke",
+        "receipt_change",
+        "notice_expired",
+    ] {
+        let j = Journey::new().await;
+        // Inject local admitted state, then use real settlement, event consumption
+        // and Telegram delivery. This is not a deployed runtime readiness proof.
+        let (mut context, _) = j.public_signup().await;
+        let session = j
+            .state
+            .db
+            .collection::<PlatformPublicSession>(SESSIONS)
+            .find_one(doc! {"_id": &context.public_session_id})
+            .await
+            .unwrap()
+            .unwrap();
+        let controls =
+            super::super::platform_bot_runtime_control_service::get(&j.state.db, &j.profile.id)
+                .await
+                .unwrap()
+                .unwrap();
+        j.state
+            .db
+            .collection::<PublicDeploymentActivation>(ACTIVATIONS)
+            .insert_one(PublicDeploymentActivation {
+                profile_id: j.profile.id.clone(),
+                binding: super::super::platform_public_policy::binding(
+                    &super::super::platform_bot_runtime_control_service::policy(&controls),
+                )
+                .unwrap(),
+                policy_digest: context.policy_digest.clone(),
+                activated_by: "local-fixture-admin".into(),
+                effect_revision: 0,
+                activated_at: Utc::now(),
+            })
+            .await
+            .unwrap();
+        j.state
+            .db
+            .collection::<PlatformPublicTurn>(TURNS)
+            .insert_one(PlatformPublicTurn {
+                proof_record_id: context.proof_record_id.clone(),
+                id: context.turn.turn_id.clone(),
+                public_session_id: session.id.clone(),
+                conversation_id: context.turn.conversation_id.clone(),
+                receipt_id: context.ingress.ingress.receipt_id.clone(),
+                claim_id: context.ingress.ingress.claim_id.clone(),
+                sponsor_owner_user_id: context.sponsor_owner_user_id.clone(),
+                policy_digest: context.policy_digest.clone(),
+                credential_api_key_id: session.credential_api_key_id.clone(),
+                input_ciphertext: vec![],
+                reply_ciphertext: vec![],
+                reply_digest: String::new(),
+                reply_id: None,
+                outcome: None,
+                max_output_bytes: context.limits.max_output_bytes,
+                nyxagent_service_id: "local-fixture-outer".into(),
+                nyxagent_catalog_digest: "local-fixture-pin".into(),
+                outer_dispatch_admitted: true,
+                expires_at: session.expires_at,
+            })
+            .await
+            .unwrap();
+        j.state
+            .db
+            .collection::<PlatformPublicSession>(SESSIONS)
+            .update_one(
+                doc! {"_id": &session.id},
+                doc! {"$set": {"upstream_may_exist": true}},
+            )
+            .await
+            .unwrap();
+        if change == "execution_timeout" {
+            context.expires_at = Utc::now() - Duration::seconds(1);
+        }
+        let failure = engine::TurnResult {
+            text: "Model-authored content must never be delivered after revocation".into(),
+            session_id: None,
+            response_id: None,
+            error: Some(engine::TurnError::internal(
+                "assistant_unavailable",
+                "public_execution",
+            )),
+        };
+        let SettledExecution::Saved(reply) =
+            super::super::platform_public_credential_service::producer(j.state.clone())
+                .settle(
+                    &j.state.db,
+                    &context,
+                    &uuid::Uuid::new_v4().to_string(),
+                    &failure,
+                )
+                .await
+                .unwrap();
+        let revoked = j
+            .state
+            .db
+            .collection::<PlatformPublicSession>(SESSIONS)
+            .find_one(doc! {"_id": &session.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(revoked.revoked_at.is_some() && revoked.credential_ciphertext.is_empty());
+        assert_eq!(revoked.expires_at, session.expires_at);
+        match change {
+            "manager_stop" => {
+                let mut txn = j.state.db.client().start_session().await.unwrap();
+                txn.start_transaction().await.unwrap();
+                super::super::platform_bot_runtime_control_service::emergency_stop_in_session(
+                    &j.state.db,
+                    &mut txn,
+                    &j.profile.id,
+                    false,
+                )
+                .await
+                .unwrap();
+                txn.commit_transaction().await.unwrap();
+            }
+            "sponsor_revoke" | "sender_revoke" => {
+                let scope = if change == "sponsor_revoke" {
+                    PublicRevocationScope::Sponsor {
+                        sponsor_owner_user_id: context.sponsor_owner_user_id.clone(),
+                    }
+                } else {
+                    PublicRevocationScope::Sender {
+                        manager: context.ingress.manager.clone(),
+                        sender_id: context.ingress.sender_id,
+                        chat_id: context.ingress.chat_id,
+                    }
+                };
+                let mut txn = j.state.db.client().start_session().await.unwrap();
+                txn.start_transaction().await.unwrap();
+                super::super::platform_public_agent_service::revoke_in_session(
+                    &j.state.db,
+                    &mut txn,
+                    &scope,
+                    PublicRevocationReason::PersonalLinkConfirmed,
+                )
+                .await
+                .unwrap();
+                txn.commit_transaction().await.unwrap();
+            }
+            "receipt_change" => {
+                j.state
+                    .db
+                    .collection::<Document>(INGRESS)
+                    .update_one(
+                        doc! {"_id": &context.ingress.ingress.receipt_id},
+                        doc! {"$set": {"claim_id": "replaced-claim"}},
+                    )
+                    .await
+                    .unwrap();
+            }
+            "notice_expired" => {
+                j.state.db.collection::<Document>(INGRESS).update_one(doc! {"_id": &context.ingress.ingress.receipt_id},
+                    doc! {"$set": {"settled_at": bson::DateTime::from_chrono(Utc::now() - Duration::minutes(3))}}).await.unwrap();
+            }
+            _ => {}
+        }
+        let destination = ReplyDestination {
+            manager: context.ingress.manager.clone(),
+            sender_id: context.ingress.sender_id,
+            chat_id: context.ingress.chat_id,
+            authority: ReplyAuthority::Public {
+                ingress: context.ingress.clone(),
+                public_session_id: session.id,
+                turn: context.turn.clone(),
+            },
+            expires_at: session.expires_at,
+        };
+        let (events, receiver) = tokio::sync::mpsc::channel(2);
+        events
+            .send(ExecutionEvent::ReplyReady(reply.clone()))
+            .await
+            .unwrap();
+        events
+            .send(ExecutionEvent::Settled {
+                turn: context.turn.clone(),
+            })
+            .await
+            .unwrap();
+        drop(events);
+        consume_events(
+            j.state.clone(),
+            j.producers.clone(),
+            destination.clone(),
+            receiver,
+        )
+        .await;
+        let sends = j.sends().await;
+        if matches!(change, "unchanged" | "execution_timeout") {
+            assert_eq!(sends.len(), 1);
+            assert_eq!(
+                sends[0]["text"],
+                delivery::fixed_text(UnavailableReason::PublicTurnFailed)
+            );
+            // The saved failure reference is idempotent and cannot emit another notice.
+            let _ = deliver_saved(&j.state, &j.producers, &destination, &reply).await;
+            assert_eq!(j.sends().await.len(), 1);
+            let receipt = j
+                .state
+                .db
+                .collection::<PlatformManagerIngress>(INGRESS)
+                .find_one(doc! {"_id": &context.ingress.ingress.receipt_id})
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(
+                receipt.delivery_recovery_queued,
+                "durable fixed delivery owns recovery"
+            );
+        } else {
+            assert!(
+                sends.is_empty(),
+                "{change} must suppress the fixed failure notice"
+            );
+        }
+        assert_eq!(
+            j.state
+                .db
+                .collection::<AssistantMessage>(MESSAGES)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
+        );
+        assert!(
+            !j.state
+                .db
+                .collection::<crate::models::api_key::ApiKey>(
+                    crate::models::api_key::COLLECTION_NAME
+                )
+                .find_one(doc! {"_id": &revoked.credential_api_key_id})
+                .await
+                .unwrap()
+                .unwrap()
+                .is_active
+        );
+    }
 }
 
 #[tokio::test]

@@ -50,6 +50,10 @@ pub struct Setup {
     /// Container entrypoints start the daemon in the foreground themselves.
     #[arg(long)]
     pub no_daemon: bool,
+    /// Limited shell/files setup helper for the node-only image. Full hosted
+    /// Machines instead use managed-start with sealed owner capabilities.
+    #[arg(long, hide = true)]
+    pub node_only_machine_preset: bool,
     #[arg(long)]
     pub config: Option<String>,
     #[arg(long, env = "NYXID_PROFILE")]
@@ -97,6 +101,16 @@ fn http_base(ws: &str) -> Result<url::Url> {
 }
 
 pub async fn run(mut args: Setup) -> Result<()> {
+    if args.node_only_machine_preset {
+        args.machine = true;
+        args.shell = true;
+        args.files = true;
+        args.computer = false;
+        args.browser = Some(false);
+        args.computer_mode = super::commands::Mode::Standard;
+        args.roots = vec![PathBuf::from("/workspace")];
+        args.allow_root = false;
+    }
     let api = http_base(&args.url)?;
     let profile = args.profile.as_deref();
     if let Some(profile) = profile {
@@ -116,6 +130,7 @@ pub async fn run(mut args: Setup) -> Result<()> {
         crate::node::config::resolve_config_dir_with_profile(args.config.as_deref(), profile)?
     };
     let config_path = directory.join("config.toml");
+    crate::node::managed_runtime::require_self_hosted_mutation(&directory)?;
     let token = args.token.take().map(Zeroizing::new);
     let shell = args.machine || args.shell;
     let files = args.machine || args.files;
@@ -215,6 +230,23 @@ pub async fn run(mut args: Setup) -> Result<()> {
         None,
     )
     .await?;
+    if args.node_only_machine_preset {
+        let mut config = crate::node::config::NodeConfig::load(&config_path)?;
+        config.machine.shell = true;
+        config.machine.files = true;
+        config.machine.computer = false;
+        config.machine.browser = Some(false);
+        config.machine.computer_mode = nyxid_machine::ComputerMode::Standard;
+        config.machine.roots = vec![PathBuf::from("/workspace")];
+        config.machine.max_jobs = 2;
+        config.machine.max_timeout_secs = 3600;
+        config.machine.output_bytes = 1024 * 1024;
+        config.machine.allow_root = false;
+        config.machine.cua_driver = None;
+        config.machine.managed_browser = None;
+        config.machine.validate().map_err(anyhow::Error::msg)?;
+        config.save(&config_path)?;
+    }
     if args.browser.unwrap_or(args.computer) && !args.skip_browser_policy {
         let port = browser_port(profile.unwrap_or("default"));
         let installed = if unsafe { libc::geteuid() } == 0 {
@@ -614,6 +646,16 @@ fn systemd_quote(path: &Path) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn node_only_machine_preset_has_no_old_alias() {
+        use crate::cli::Cli;
+        use clap::Parser;
+        assert!(
+            Cli::try_parse_from(["nyxid", "node", "setup", "--node-only-machine-preset"]).is_ok()
+        );
+        assert!(Cli::try_parse_from(["nyxid", "node", "setup", "--fixed-shell-files"]).is_err());
+    }
+
     #[test]
     fn setup_urls_reject_credentials_and_clear_remote_plaintext() {
         assert!(http_base("ws://example.com/api/v1/nodes/ws").is_err());

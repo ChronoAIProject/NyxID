@@ -54,6 +54,7 @@ pub mod login_approval;
 pub mod login_client_context;
 pub mod login_code;
 pub mod login_grant;
+pub mod managed_execution;
 pub mod mcp_notification;
 pub mod mcp_session;
 pub mod mfa_factor;
@@ -174,6 +175,11 @@ pub mod assistant_voice;
 
 pub mod assistant_voice_session;
 pub mod machine_access;
+pub mod machine_free_slot;
+pub mod remote_machine;
+pub mod remote_machine_bootstrap;
+pub mod remote_machine_operation;
+pub mod remote_machine_outbox;
 pub mod service_concurrency;
 pub mod service_preference;
 
@@ -181,6 +187,17 @@ pub mod async_service_operation;
 
 pub mod catalog_icon;
 
-pub mod platform_installation;
+pub mod machine_runtime_billing;
 
+pub mod machine_oauth_consent_request;
+
+pub mod machine_external_execution;
+pub mod machine_external_grant;
+
+pub mod remote_machine_event;
+
+pub mod platform_installation;
 pub mod platform_manager_delivery;
+pub mod remote_machine_storage;
+
+pub mod platform_public_contract;

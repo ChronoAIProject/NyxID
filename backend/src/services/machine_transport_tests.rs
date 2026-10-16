@@ -572,6 +572,7 @@ struct GitUpstream {
     ca: std::path::PathBuf,
     root: tempfile::TempDir,
     task: tokio::task::JoinHandle<()>,
+    requests: Arc<std::sync::atomic::AtomicUsize>,
 }
 impl Drop for GitUpstream {
     fn drop(&mut self) {
@@ -653,7 +654,10 @@ impl GitUpstream {
         let client = client_builder().build().unwrap();
         let repo = root.path().to_owned();
         let expected = secret.to_owned();
+        let requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed = requests.clone();
         let router = Router::new().fallback(move |request: Request<Body>| {
+            observed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let repo = repo.clone();
             let expected = expected.clone();
             async move {
@@ -802,6 +806,7 @@ impl GitUpstream {
             ca,
             root,
             task,
+            requests,
         }
     }
 }
@@ -951,6 +956,181 @@ async fn machine_gateway_git_clone_fetch_pull_push_and_sdk_preserve_gzip() {
 
     peer.runtime.shutdown().await;
     f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn machine_git_final_send_rejects_live_catalog_and_credential_drift() {
+    use super::{
+        assistant_job_service_use as service_use, assistant_service_execution as execution,
+        machine_gateway_service as gateway, proxy_service as proxy,
+    };
+    use crate::services::billing::route_inventory::{
+        BillingIngress, BillingRoutePolicy, enforce_billing_egress_classification,
+    };
+    use std::sync::atomic::Ordering;
+
+    for drift in ["origin", "username", "credential"] {
+        let f = orchestrator_fixture("machine_git_live_drift").await;
+        let secret = format!("synthetic-provider-{}", Uuid::new_v4());
+        let upstream = GitUpstream::start(&secret, false, false).await;
+        let id = connect_service(&f, "api-github", "https://api.github.com", &secret).await;
+        let node = node(&f, &f.owner).await;
+        let available = gateway::services(&f.state.db, &f.owner, &f.chat.api_key_id)
+            .await
+            .unwrap();
+        let declared = gateway::declare(std::slice::from_ref(&id), available).unwrap();
+        let plan = service_use::prepare(
+            &f.state,
+            &f.chat,
+            &node.id,
+            &json!({"machine":node.id,"command":"git fetch","services":["api-github"]}),
+            &declared,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        plan.revalidate(&f.state.db, &f.chat).await.unwrap();
+        plan.claim(&f.state.db).await.unwrap();
+        let job = super::machine_service::issue_job_with_id(
+            &f.state.db,
+            &f.chat,
+            &node,
+            120,
+            gateway::declared(&declared),
+            plan.id.clone(),
+        )
+        .await
+        .unwrap();
+        plan.publish(&f.state.db, &job).await.unwrap();
+        let ingress = gateway::Ingress {
+            declared_id: id.clone(),
+            git: declared[0].git.clone(),
+            job: Some(gateway::JobAuthority::from(&job)),
+        };
+        let projection = execution::HttpProjection::for_machine(Some(&ingress));
+        let mut resolved = proxy::resolve_proxy_target_by_user_service_id(
+            &f.state.db,
+            &f.state.encryption_keys,
+            &f.owner,
+            &id,
+            None,
+            None,
+            proxy::ProxyExecutionContext::new(
+                None,
+                crate::mw::rate_limit::PlatformUserRateLimitPolicy::disabled(),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        gateway::apply_live_git_target(
+            &f.state.db,
+            &mut resolved.target,
+            resolved.master_credential,
+            ingress.git.as_ref().unwrap(),
+        )
+        .await
+        .unwrap();
+        let path = "owner/repo.git/info/refs";
+        let decision = execution::check_job_http(
+            &f.state,
+            &job.id,
+            Some(&id),
+            Some(&f.owner),
+            &resolved.target,
+            "GET",
+            path,
+            &projection,
+        )
+        .await
+        .unwrap();
+        assert!(decision.refusal.is_none(), "drift={drift}");
+        assert!(decision.admission.is_some(), "drift={drift}");
+        let guard = execution::HttpEgressGuard::for_proxy(
+            decision.admission.as_ref(),
+            Some(&ingress),
+            &f.state.db,
+            &f.state.encryption_keys,
+            &resolved.target,
+            "GET",
+            path,
+        )
+        .unwrap()
+        .projected(&projection)
+        .routed(None);
+        // First prove the translated target and real server-issued job agree.
+        guard.revalidate().await.unwrap();
+        if drift == "credential" {
+            let key = resolved.api_key_id.as_deref().unwrap();
+            let before = resolved.credential_epoch;
+            let replacement = format!("synthetic-replacement-{}", Uuid::new_v4());
+            super::user_api_key_service::update_api_key(
+                &f.state.db,
+                &f.state.encryption_keys,
+                &f.owner,
+                key,
+                None,
+                Some(&replacement),
+            )
+            .await
+            .unwrap();
+            let after = super::user_api_key_service::get_api_key(&f.state.db, &f.owner, key)
+                .await
+                .unwrap();
+            assert_eq!(after.credential_epoch, before + 1);
+        } else {
+            let (field, value) = if drift == "origin" {
+                ("git_http.origin", "https://changed.example")
+            } else {
+                ("git_http.username", "changed-user")
+            };
+            f.state
+                .db
+                .collection::<mongodb::bson::Document>("downstream_services")
+                .update_one(
+                    doc! {"_id":&resolved.target.service.id},
+                    doc! {"$set":{field:value}},
+                )
+                .await
+                .unwrap();
+        }
+        let permit = enforce_billing_egress_classification(
+            Some(BillingRoutePolicy::Metered(BillingIngress::Proxy)),
+            BillingIngress::Proxy,
+        )
+        .unwrap();
+        let result = proxy::TARGET_HTTP_CLIENT_BUILDER
+            .scope(
+                upstream.client_builder.clone(),
+                proxy::forward_request_with_egress_guard(
+                    &upstream.client,
+                    &resolved.target,
+                    reqwest::Method::GET,
+                    path,
+                    Some("service=git-upload-pack"),
+                    Default::default(),
+                    proxy::ProxyBody::Buffered(None),
+                    Vec::new(),
+                    Vec::new(),
+                    None,
+                    &f.state.token_exchange_cache,
+                    &f.state.cloud_response_cache,
+                    Vec::new(),
+                    permit,
+                    Some(&guard),
+                ),
+            )
+            .await;
+        assert!(
+            matches!(
+                result,
+                Err(proxy::ForwardRequestError::PreDispatchRejected(_))
+            ),
+            "drift={drift}: final send must preserve a proven pre-dispatch refusal"
+        );
+        assert_eq!(upstream.requests.load(Ordering::SeqCst), 0, "drift={drift}");
+        f.state.db.drop().await.unwrap();
+    }
 }
 
 #[tokio::test]

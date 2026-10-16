@@ -33,7 +33,7 @@ pub fn producer(
     execution: Arc<dyn NyxAgentExecutionProducer>,
     ingress: Arc<dyn ManagerIngressTurnStore>,
 ) -> Arc<dyn PublicTurnProducer> {
-    // No dependency can override the local absence of runtime proof.
+    // Only persisted, scoped runtime proof authorizes public execution.
     Arc::new(PublicProducer {
         state,
         execution,
@@ -63,6 +63,7 @@ pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
                 .name("public_sender_live_unique".to_owned()).build()).build(),
         IndexModel::builder().keys(doc! {"revoked_at":1,"expires_at":1}).build(),
         IndexModel::builder().keys(doc! {"sponsor_owner_user_id":1,"revoked_at":1}).build(),
+        IndexModel::builder().keys(doc! {"policy_digest":1,"cleanup_complete":1}).build(),
     ]).await?;
     db.collection::<PublicCleanupRecord>(CLEANUP_RECORDS)
         .create_index(
@@ -71,11 +72,25 @@ pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
                 .build(),
         )
         .await?;
+    // Preserve main's legacy collection and unique index. Old replicas cannot
+    // observe or constrain the independently versioned deployment proofs.
     db.collection::<Document>(READINESS_RECORDS)
         .create_index(
             IndexModel::builder()
                 .keys(doc! {"candidate_digest":1})
                 .options(IndexOptions::builder().unique(true).build())
+                .build(),
+        )
+        .await?;
+    db.collection::<Document>(crate::models::platform_public_contract::DEPLOYMENT_RECORDS)
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"candidate_digest":1,"checked_at":-1,"_id":-1})
+                .options(
+                    IndexOptions::builder()
+                        .name("public_deployment_candidate_v1".to_owned())
+                        .build(),
+                )
                 .build(),
         )
         .await?;
@@ -101,6 +116,32 @@ pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
                 .build(),
         )
         .await?;
+    for (collection, keys) in [
+        (
+            crate::models::platform_public_contract::DEPLOYMENT_RECORDS,
+            doc! {"evidence.policy_digest":1,"checked_at":-1},
+        ),
+        (
+            crate::models::platform_public_contract::DEPLOYMENT_RECORDS,
+            doc! {"evidence.probe_id":1},
+        ),
+        (
+            crate::models::platform_public_contract::DEPLOYMENT_RECORDS,
+            doc! {"checked_at":1,"retention_check_after":1},
+        ),
+        (
+            crate::models::platform_public_contract::PROBES,
+            doc! {"state":1,"expires_at":1},
+        ),
+        (
+            crate::models::platform_public_contract::PROBE_CONSENTS,
+            doc! {"binding.candidate_digest":1,"expires_at":-1},
+        ),
+    ] {
+        db.collection::<Document>(collection)
+            .create_index(IndexModel::builder().keys(keys).build())
+            .await?;
+    }
     // No TTL: expired authority is revoked before local/upstream cleanup.
     Ok(())
 }
@@ -112,34 +153,44 @@ impl PublicTurnProducer for PublicProducer {
         db: &Database,
         reviewed: &ManagerRuntimePolicy,
     ) -> AppResult<PublicProfileDiscovery> {
-        Ok(PublicProfileDiscovery {
-            profiles: Vec::new(),
-            default_profile: None,
-            readiness: policy::assess(db, reviewed).await?,
-        })
+        let _ = db;
+        Ok(
+            super::platform_public_contract_service::discover(&self.state, reviewed)
+                .await?
+                .0,
+        )
     }
     async fn probe_public_readiness(
         &self,
-        db: &Database,
+        _db: &Database,
         reviewed: &ManagerRuntimePolicy,
     ) -> AppResult<PublicReadiness> {
-        policy::assess(db, reviewed).await
+        // Explicit validation observes the current deployment, even while an
+        // older proof remains valid. Only the controls apply adapter reuses a
+        // sufficiently fresh validated proof to avoid a second paid probe.
+        super::platform_public_contract_service::probe(&self.state, reviewed, None).await
     }
     async fn fence_public_readiness(
         &self,
-        _db: &Database,
-        _session: &mut ClientSession,
-        _reviewed: &ManagerRuntimePolicy,
-        _evidence: &PublicReadinessEvidence,
+        db: &Database,
+        session: &mut ClientSession,
+        reviewed: &ManagerRuntimePolicy,
+        evidence: &PublicReadinessEvidence,
     ) -> AppResult<FenceOutcome> {
-        // Even a caller-constructed Ready snapshot cannot create deployment proof.
-        Ok(FenceOutcome::Unavailable(UnavailableReason::PublicNotReady))
+        match policy::fence_readiness(db, session, reviewed, Some(evidence)).await {
+            Ok(_) => Ok(FenceOutcome::Authorized),
+            Err(AppError::Conflict(_) | AppError::Forbidden(_)) => {
+                Ok(FenceOutcome::Unavailable(UnavailableReason::PublicNotReady))
+            }
+            Err(error) => Err(error),
+        }
     }
     async fn prepare_public_context(
         &self,
         _db: &Database,
         admitted: &PublicIngress,
     ) -> AppResult<PublicExecutionContext> {
+        super::platform_public_contract_service::refresh_for_ingress(&self.state, admitted).await?;
         super::platform_public_credential_service::issue_context(
             &self.state,
             self.ingress.clone(),
@@ -153,8 +204,12 @@ impl PublicTurnProducer for PublicProducer {
         session: &mut ClientSession,
         context: &PublicExecutionContext,
     ) -> AppResult<FenceOutcome> {
-        if policy::verified_context(context).is_err() {
-            return Ok(FenceOutcome::Unavailable(UnavailableReason::PublicNotReady));
+        match policy::verified_context_in_session(db, session, context).await {
+            Ok(_) => {}
+            Err(AppError::Conflict(_) | AppError::Forbidden(_)) => {
+                return Ok(FenceOutcome::Unavailable(UnavailableReason::PublicNotReady));
+            }
+            Err(error) => return Err(error),
         }
         let row = db
             .collection::<PlatformPublicSession>(SESSIONS)
@@ -178,7 +233,7 @@ impl PublicTurnProducer for PublicProducer {
         input: TurnInput,
         events: mpsc::Sender<ExecutionEvent>,
     ) -> AppResult<TurnRef> {
-        policy::verified_context(&context)?;
+        policy::verified_context(db, &context).await?;
         let turn = context.turn.clone();
         self.execution
             .execute_nyxagent_turn(db, NyxAgentExecutionContext::Public(context), input, events)
@@ -191,13 +246,10 @@ impl PublicTurnProducer for PublicProducer {
         session: &mut ClientSession,
         destination: &ReplyDestination,
     ) -> AppResult<FenceOutcome> {
-        let Ok((_, evidence)) = policy::verified_readiness() else {
-            return Ok(FenceOutcome::Unavailable(UnavailableReason::PublicNotReady));
-        };
         let ReplyAuthority::Public {
             ingress,
             public_session_id,
-            ..
+            turn,
         } = &destination.authority
         else {
             return Err(changed());
@@ -208,6 +260,23 @@ impl PublicTurnProducer for PublicProducer {
             .session(&mut *session)
             .await?
             .ok_or_else(changed)?;
+        let saved = db
+            .collection::<crate::models::platform_public_turn::PlatformPublicTurn>(
+                crate::models::platform_public_turn::COLLECTION_NAME,
+            )
+            .find_one(doc! {"_id": &turn.turn_id,"public_session_id":public_session_id})
+            .session(&mut *session)
+            .await?
+            .ok_or_else(changed)?;
+        let (_, evidence) = policy::verified_readiness_in_session(
+            db,
+            session,
+            &ingress.manager,
+            ingress.public_policy_revision,
+            Some(&row.policy_digest),
+            Some(&saved.proof_record_id),
+        )
+        .await?;
         if evidence.manager != ingress.manager
             || evidence.public_policy_revision != ingress.public_policy_revision
             || evidence.policy_digest != row.policy_digest
@@ -416,10 +485,14 @@ async fn revoke_page_in_session(
         if row.active_turn.is_some() {
             fields.insert("active_turn.stop_requested", true);
         }
-        if db.collection::<PlatformPublicSession>(SESSIONS).update_one(
-            doc! {"_id":&row.id,"credential_api_key_id":&row.credential_api_key_id,"revoked_at":bson::Bson::Null},
-            doc! {"$set":fields,"$inc":{"effect_revision":1_i64}},
-        ).session(&mut *session).await?.matched_count != 1 { return Err(changed()); }
+        let revoked = db.collection::<PlatformPublicSession>(SESSIONS)
+            .update_one(
+                doc! {"_id": &row.id, "credential_api_key_id": &row.credential_api_key_id, "revoked_at": bson::Bson::Null},
+                doc! {"$set": fields, "$inc": {"effect_revision": 1_i64}},
+            ).session(&mut *session).await?;
+        if revoked.matched_count != 1 {
+            return Err(changed());
+        }
         // Existing child credentials can only be corrupt/legacy data, but must
         // not survive a public revocation either. No child secret is returned.
         super::api_key_credential_service::revoke_children(
@@ -469,6 +542,30 @@ pub(crate) async fn fence_local_session_in_session(
     if row.revoked_at.is_some() || row.expires_at <= Utc::now() {
         return Ok(false);
     }
+    fence_session_scopes_in_session(db, session, row, false).await
+}
+
+/// The only allowed revoked-session effect is a fixed failure notice. Its
+/// caller separately binds the saved failed turn, receipt and live activation.
+pub(crate) async fn fence_failure_notice_scopes_in_session(
+    db: &Database,
+    session: &mut ClientSession,
+    row: &PlatformPublicSession,
+) -> AppResult<bool> {
+    if row.expires_at <= Utc::now()
+        || (row.revoked_at.is_some() && row.revocation_reason.as_deref() != Some("session_expired"))
+    {
+        return Ok(false);
+    }
+    fence_session_scopes_in_session(db, session, row, true).await
+}
+
+async fn fence_session_scopes_in_session(
+    db: &Database,
+    session: &mut ClientSession,
+    row: &PlatformPublicSession,
+    failure_notice: bool,
+) -> AppResult<bool> {
     let manager = ManagerAuthority {
         profile_id: row.profile_id.clone(),
         manager_bot_id: row.manager_bot_id.clone(),
@@ -492,10 +589,24 @@ pub(crate) async fn fence_local_session_in_session(
         },
     ] {
         let (id, filter, _) = marker_identity(&scope);
-        let marker = db.collection::<PublicRevocationMarker>(REVOCATION_SCOPES).find_one_and_update(
-            doc! {"scope_key":&id}, doc! {"$setOnInsert":{"_id":uuid::Uuid::new_v4().to_string(),"scope_key":&id,"session_filter":filter,"maximum_epoch":bson::Bson::Null,
-                "revoked_before":bson::Bson::Null,"drain_pending":false,"reason":""},"$inc":{"effect_revision":1_i64}},
-        ).upsert(true).return_document(ReturnDocument::After).session(&mut *session).await?.ok_or_else(changed)?;
+        let marker = db
+            .collection::<PublicRevocationMarker>(REVOCATION_SCOPES)
+            .find_one_and_update(
+                doc! {"scope_key": &id},
+                doc! {
+                    "$setOnInsert": {
+                        "_id": uuid::Uuid::new_v4().to_string(), "scope_key": &id,
+                        "session_filter": filter, "maximum_epoch": bson::Bson::Null,
+                        "revoked_before": bson::Bson::Null, "drain_pending": false, "reason": "",
+                    },
+                    "$inc": {"effect_revision": 1_i64},
+                },
+            )
+            .upsert(true)
+            .return_document(ReturnDocument::After)
+            .session(&mut *session)
+            .await?
+            .ok_or_else(changed)?;
         if marker
             .revoked_before
             .is_some_and(|cutoff| row.created_at <= cutoff)
@@ -503,22 +614,48 @@ pub(crate) async fn fence_local_session_in_session(
                 .maximum_epoch
                 .is_none_or(|epoch| row.manager_authority_epoch <= epoch)
         {
+            if failure_notice
+                && matches!(scope, PublicRevocationScope::Session { .. })
+                && marker.reason == "session_expired"
+                && row.revocation_reason.as_deref() == Some("session_expired")
+            {
+                continue;
+            }
             return Ok(false);
         }
     }
     Ok(true)
 }
 
-async fn process_cleanup(db: &Database, id: &str) -> AppResult<()> {
+async fn process_cleanup_state(db: &Database, state: Option<&AppState>, id: &str) -> AppResult<()> {
     let claim_id = uuid::Uuid::new_v4().to_string();
     let now = Utc::now();
-    let Some(record) = db.collection::<PublicCleanupRecord>(CLEANUP_RECORDS).find_one_and_update(
-        doc! {"_id":id,"completed":false,"retry_at":{"$lte":bson::DateTime::from_chrono(now)},
-            "$or":[{"lease_expires_at":bson::Bson::Null},{"lease_expires_at":{"$lte":bson::DateTime::from_chrono(now)}}]},
-        doc! {"$set":{"claim_id":&claim_id,"lease_expires_at":bson::DateTime::from_chrono(now+Duration::seconds(CLEANUP_LEASE_SECS))},"$inc":{"attempts":1_i64}},
-    ).return_document(ReturnDocument::After).await? else { return Ok(()); };
+    let Some(record) = db.collection::<PublicCleanupRecord>(CLEANUP_RECORDS)
+        .find_one_and_update(
+            doc! {
+                "_id": id, "completed": false, "retry_at": {"$lte": bson::DateTime::from_chrono(now)},
+                "$or": [
+                    {"lease_expires_at": bson::Bson::Null},
+                    {"lease_expires_at": {"$lte": bson::DateTime::from_chrono(now)}},
+                ],
+            },
+            doc! {
+                "$set": {
+                    "claim_id": &claim_id,
+                    "lease_expires_at": bson::DateTime::from_chrono(now + Duration::seconds(CLEANUP_LEASE_SECS)),
+                },
+                "$inc": {"attempts": 1_i64},
+            },
+        ).return_document(ReturnDocument::After).await?
+    else {
+        return Ok(());
+    };
     let mut blocked = None;
     for session_id in &record.session_ids {
+        if Utc::now() >= now + Duration::seconds(CLEANUP_LEASE_SECS - 25) {
+            blocked = Some("cleanup_batch_pending");
+            break;
+        }
         let row = db
             .collection::<PlatformPublicSession>(SESSIONS)
             .find_one(doc! {
@@ -543,28 +680,34 @@ async fn process_cleanup(db: &Database, id: &str) -> AppResult<()> {
             continue;
         }
         if row.upstream_may_exist || !row.upstream_binding_ciphertext.is_empty() {
-            // DELETE currently requires the revoked original key. Never restore
-            // execution to perform cleanup, nor report TTL as verified erasure.
-            blocked = Some("upstream_cleanup_contract_unproven");
-            continue;
+            let erased = if let Some(state) = state {
+                match super::platform_public_contract_service::cleanup(state, &row).await {
+                    Ok(erased) => erased,
+                    Err(error) => {
+                        tracing::warn!(public_session_id=%row.id,error=%error,"public session cleanup remains unconfirmed");
+                        blocked = Some("upstream_cleanup_failed");
+                        false
+                    }
+                }
+            } else {
+                false
+            };
+            if !erased {
+                if blocked.is_none() {
+                    blocked = Some("upstream_cleanup_unconfirmed");
+                }
+                continue;
+            }
         }
-        let result = db.collection::<PlatformPublicSession>(SESSIONS).update_one(doc! {
-            "_id":session_id,"cleanup_record_id":id,"revoked_at":{"$ne":bson::Bson::Null},
-            "upstream_may_exist":false,"upstream_binding_ciphertext":empty_binary(),
-        }, doc! {"$set":{"cleanup_complete":true,"active_turn":bson::Bson::Null,
-            "credential_ciphertext":empty_binary(),"upstream_binding_ciphertext":empty_binary()},
-            "$inc":{"effect_revision":1_i64}}).await?;
-        if result.matched_count != 1 {
-            blocked = Some("local_session_authority_changed");
-        }
+        complete_cleanup_session(db, id, &claim_id, &row).await?;
     }
     let result = db
         .collection::<PublicCleanupRecord>(CLEANUP_RECORDS)
         .update_one(
-            doc! {"_id":id,"claim_id":&claim_id,"completed":false},
+            doc! {"_id":id,"claim_id":&claim_id,"completed":false,"$expr":{"$gt":["$lease_expires_at","$$NOW"]}},
             doc! {"$set":{"completed":blocked.is_none(),"blocked_reason":blocked,
             "claim_id":bson::Bson::Null,"lease_expires_at":bson::Bson::Null,
-            "retry_at":bson::DateTime::from_chrono(Utc::now()+Duration::hours(1))}},
+            "retry_at":bson::DateTime::from_chrono(Utc::now()+Duration::seconds(if blocked==Some("cleanup_batch_pending") {1} else {60}))}},
         )
         .await?;
     if result.matched_count != 1 {
@@ -572,11 +715,80 @@ async fn process_cleanup(db: &Database, id: &str) -> AppResult<()> {
     }
     Ok(())
 }
-/// Bounded local-only sweep. There is no network call or erasure assertion for
+
+/// Upstream deletion is idempotent. Local erasure requires the still-live worker
+/// claim in the same transaction, so an expired worker cannot clear retained data.
+async fn complete_cleanup_session(
+    db: &Database,
+    cleanup_id: &str,
+    claim_id: &str,
+    row: &PlatformPublicSession,
+) -> AppResult<()> {
+    let mut session = db.client().start_session().await?;
+    session
+        .start_transaction()
+        .and_run(
+            (db.clone(), cleanup_id.to_owned(), claim_id.to_owned(), row.clone()),
+            |session, (db, cleanup_id, claim_id, row)| {
+                Box::pin(async move {
+                    let result: AppResult<()> = async {
+                        let claimed = db.collection::<PublicCleanupRecord>(CLEANUP_RECORDS)
+                            .update_one(
+                                doc! {
+                                    "_id": &*cleanup_id, "claim_id": &*claim_id,
+                                    "completed": false, "session_ids": &row.id,
+                                    "$expr": {"$gt": ["$lease_expires_at", "$$NOW"]},
+                                },
+                                doc! {"$inc": {"effect_revision": 1_i64}},
+                            ).session(&mut *session).await?;
+                        if claimed.matched_count != 1 {
+                            return Err(changed());
+                        }
+                        let active_keys = db.collection::<ApiKey>(KEYS)
+                            .count_documents(doc! {"_id": &row.credential_api_key_id, "is_active": true})
+                            .limit(1).session(&mut *session).await?;
+                        if active_keys != 0 {
+                            return Err(changed());
+                        }
+                        let erased = db.collection::<PlatformPublicSession>(SESSIONS)
+                            .update_one(
+                                doc! {
+                                    "_id": &row.id, "cleanup_record_id": &*cleanup_id,
+                                    "revoked_at": {"$ne": bson::Bson::Null}, "policy_digest": &row.policy_digest,
+                                    "credential_api_key_id": &row.credential_api_key_id,
+                                },
+                                doc! {
+                                    "$set": {
+                                        "cleanup_complete": true, "active_turn": bson::Bson::Null,
+                                        "credential_ciphertext": empty_binary(),
+                                        "upstream_binding_ciphertext": empty_binary(), "upstream_may_exist": false,
+                                    },
+                                    "$inc": {"effect_revision": 1_i64},
+                                },
+                            ).session(session).await?;
+                        if erased.matched_count != 1 {
+                            return Err(changed());
+                        }
+                        Ok(())
+                    }.await;
+                    transactions::transaction_result(result)
+                })
+            },
+        )
+        .await
+        .map_err(transactions::map_transaction_error)
+}
+
+#[cfg(test)]
+async fn process_cleanup(db: &Database, id: &str) -> AppResult<()> {
+    process_cleanup_state(db, None, id).await
+}
+/// Bounded lifecycle sweep. There is no network call or erasure assertion for
 /// an upstream session whose cleanup contract remains unproven.
 pub async fn sweep_public_lifecycle(state: &AppState, limit: u32) -> AppResult<RecoveryBatch> {
     let db = &state.db;
     let limit = limit.clamp(1, 100);
+    super::platform_public_contract_service::sweep_probes(state, limit).await?;
     let scopes: Vec<PublicRevocationMarker> = db
         .collection::<PublicRevocationMarker>(REVOCATION_SCOPES)
         .find(doc! {"drain_pending":true})
@@ -646,7 +858,7 @@ pub async fn sweep_public_lifecycle(state: &AppState, limit: u32) -> AppResult<R
         .try_collect()
         .await?;
     for record in records {
-        process_cleanup(db, &record.id).await?;
+        process_cleanup_state(db, Some(state), &record.id).await?;
         processed += 1;
     }
     let has_more = db
@@ -778,25 +990,10 @@ pub(crate) mod tests {
         )
         .public
         .clone();
-        for _ in 0..2 {
-            let discovery = public
-                .discover_public_profiles(&db, &reviewed)
-                .await
-                .unwrap();
-            assert!(discovery.profiles.is_empty());
-            assert!(discovery.default_profile.is_none());
-            assert!(matches!(
-                discovery.readiness,
-                PublicReadiness::Unavailable(UnavailableReason::PublicNotReady)
-            ));
-        }
-        assert_eq!(
-            db.collection::<Document>(READINESS_RECORDS)
-                .count_documents(doc! {})
-                .await
-                .unwrap(),
-            1
-        );
+        assert!(matches!(
+            policy::assess(&db, &reviewed).await.unwrap(),
+            PublicReadiness::Unavailable(UnavailableReason::PublicNotReady)
+        ));
         let evidence = PublicReadinessEvidence {
             manager: reviewed.manager.clone(),
             public_policy_revision: 1,
@@ -805,7 +1002,7 @@ pub(crate) mod tests {
             candidate_digest: policy::candidate_digest(&reviewed).unwrap(),
             evidence_digest: "forged".into(),
             sponsor_owner_user_id: "sponsor".into(),
-            nyxagent_build: policy::UPSTREAM_SOURCE_BUILD.into(),
+            nyxagent_build: "57ab8be89618a61b98e2ebc76331d121f96d731b".into(),
             nyxagent_profile: "chat".into(),
             model_operations: vec![],
             limits: PublicExecutionLimits {
@@ -906,6 +1103,47 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn local_cleanup_completion_requires_the_current_unexpired_worker_claim() {
+        let db = crate::test_utils::connect_transaction_test_database("public_cleanup_claim").await;
+        ensure_indexes(&db).await.unwrap();
+        let row = fixture(&db, 5, false).await;
+        let mut session = db.client().start_session().await.unwrap();
+        session.start_transaction().await.unwrap();
+        revoke_in_session(
+            &db,
+            &mut session,
+            &PublicRevocationScope::Session {
+                public_session_id: row.id.clone(),
+            },
+            PublicRevocationReason::SessionExpired,
+        )
+        .await
+        .unwrap();
+        session.commit_transaction().await.unwrap();
+        let row = session_row(&db, &row).await;
+        let cleanup_id = row.cleanup_record_id.as_deref().unwrap();
+        let claim = uuid::Uuid::new_v4().to_string();
+        db.collection::<Document>(CLEANUP_RECORDS).update_one(doc! {"_id":cleanup_id},doc! {"$set":{"claim_id":&claim,"lease_expires_at":bson::DateTime::from_chrono(Utc::now()+Duration::seconds(60))}}).await.unwrap();
+        assert!(
+            complete_cleanup_session(&db, cleanup_id, "stale-worker", &row)
+                .await
+                .is_err()
+        );
+        db.collection::<Document>(CLEANUP_RECORDS).update_one(doc! {"_id":cleanup_id},doc! {"$set":{"lease_expires_at":bson::DateTime::from_chrono(Utc::now()-Duration::seconds(1))}}).await.unwrap();
+        assert!(
+            complete_cleanup_session(&db, cleanup_id, &claim, &row)
+                .await
+                .is_err()
+        );
+        assert!(!session_row(&db, &row).await.cleanup_complete);
+        db.collection::<Document>(CLEANUP_RECORDS).update_one(doc! {"_id":cleanup_id},doc! {"$set":{"lease_expires_at":bson::DateTime::from_chrono(Utc::now()+Duration::seconds(60))}}).await.unwrap();
+        complete_cleanup_session(&db, cleanup_id, &claim, &row)
+            .await
+            .unwrap();
+        assert!(session_row(&db, &row).await.cleanup_complete);
+        db.drop().await.unwrap();
+    }
+    #[tokio::test]
     async fn cleanup_retains_unknown_upstream_and_completes_only_never_dispatched_sessions() {
         let db = crate::test_utils::connect_transaction_test_database("public_cleanup_proof").await;
         ensure_indexes(&db).await.unwrap();
@@ -959,7 +1197,7 @@ pub(crate) mod tests {
         assert!(!record.completed);
         assert_eq!(
             record.blocked_reason.as_deref(),
-            Some("upstream_cleanup_contract_unproven")
+            Some("upstream_cleanup_failed")
         );
         assert_eq!(record.attempts, 1);
         process_cleanup(&db, &id).await.unwrap();

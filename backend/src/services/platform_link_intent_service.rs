@@ -859,9 +859,9 @@ pub async fn confirm_original_in_session(
     effects: &dyn bindings::PersonalLifecycleEffects,
 ) -> AppResult<PersonalBindingCompletion> {
     let mut words = command.text().split_whitespace();
-    if !words
+    if words
         .next()
-        .is_some_and(|w| w.split('@').next() == Some("/confirm"))
+        .is_none_or(|w| w.split('@').next() != Some("/confirm"))
     {
         return Err(bindings::unavailable());
     }
@@ -1306,6 +1306,7 @@ mod tests {
             .unwrap();
         let turn = public.active_turn.as_ref().unwrap();
         let context = PublicExecutionContext {
+            proof_record_id: "test-proof".into(),
             ingress: PublicIngress {
                 ingress: IngressClaim {
                     receipt_id: turn.receipt_id.clone(),

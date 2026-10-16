@@ -87,12 +87,12 @@ pub(super) fn telegram(message: &InboundMessage, bot: &ChannelBot) -> Option<Cha
     });
     let mentions = telegram_mentions(native, bot);
     facts.mentions_others = mentions.mentions_others();
-    facts.address = if numeric_id(&native["reply_to_message"]["from"]["id"]).as_deref()
+    facts.address = if mentions.bot {
+        ThreadAddress::Mention
+    } else if numeric_id(&native["reply_to_message"]["from"]["id"]).as_deref()
         == Some(bot.platform_bot_id.as_str())
     {
         ThreadAddress::ReplyToBot
-    } else if mentions.bot {
-        ThreadAddress::Mention
     } else {
         ThreadAddress::NotAddressed
     };
@@ -100,63 +100,12 @@ pub(super) fn telegram(message: &InboundMessage, bot: &ChannelBot) -> Option<Cha
 }
 
 fn telegram_mentions(message: &Value, bot: &ChannelBot) -> MentionState {
-    let mut state = MentionState::default();
-    let text = message["text"]
-        .as_str()
-        .or_else(|| message["caption"].as_str())
-        .unwrap_or_default();
-    let Some(entities) = message["entities"]
-        .as_array()
-        .or_else(|| message["caption_entities"].as_array())
-    else {
-        return state;
-    };
-    for entity in entities {
-        if entity["type"] == "text_mention" {
-            match numeric_id(&entity["user"]["id"]) {
-                Some(id) if id == bot.platform_bot_id => state.bot = true,
-                Some(_) => state.other = true,
-                None => {}
-            }
-            continue;
-        }
-        if entity["type"] != "mention" || bot.platform_bot_username.is_empty() {
-            continue;
-        }
-        let Some(offset) = entity["offset"]
-            .as_u64()
-            .and_then(|n| usize::try_from(n).ok())
-        else {
-            continue;
-        };
-        let Some(length) = entity["length"]
-            .as_u64()
-            .and_then(|n| usize::try_from(n).ok())
-        else {
-            continue;
-        };
-        // Telegram entity offsets count UTF-16 code units, not UTF-8 bytes.
-        let units: Vec<_> = text
-            .encode_utf16()
-            .skip(offset)
-            .take(length.min(256))
-            .collect();
-        if length > 256 || units.len() != length {
-            continue;
-        }
-        let Ok(mention) = String::from_utf16(&units) else {
-            continue;
-        };
-        if mention.eq_ignore_ascii_case(&format!(
-            "@{}",
-            bot.platform_bot_username.trim_start_matches('@')
-        )) {
-            state.bot = true;
-        } else {
-            state.other = true;
-        }
+    let native = crate::services::channel_native_mentions::telegram(message, bot);
+    MentionState {
+        bot: native.bot && !native.invalid,
+        other: native.other,
+        everyone: native.everyone,
     }
-    state
 }
 
 pub(super) fn slack(
@@ -393,38 +342,12 @@ pub(super) fn lark(message: &InboundMessage, own_id: Option<&str>) -> Option<Cha
 }
 
 fn lark_mentions(message: &Value, own_id: Option<&str>) -> MentionState {
-    let mut state = MentionState::default();
-    let Some(mentions) = message["mentions"].as_array() else {
-        return state;
-    };
-    for mention in mentions {
-        let key = mention["key"].as_str().unwrap_or_default();
-        if matches!(key, "@_all" | "_all") {
-            state.everyone = true;
-            continue;
-        }
-        let ids: Vec<&str> = [
-            mention["id"]["open_id"].as_str(),
-            mention["id"]["user_id"].as_str(),
-            mention["id"].as_str(),
-            mention["open_id"].as_str(),
-            mention["user_id"].as_str(),
-        ]
-        .into_iter()
-        .flatten()
-        .filter(|id| !id.is_empty())
-        .collect();
-        let user_key = key.starts_with("@_user_");
-        if !user_key && ids.is_empty() {
-            continue;
-        }
-        if own_id.is_some_and(|own| ids.contains(&own)) {
-            state.bot = true;
-        } else {
-            state.other = true;
-        }
+    let native = crate::services::channel_native_mentions::lark(message, own_id);
+    MentionState {
+        bot: native.bot && !native.invalid,
+        other: native.other,
+        everyone: native.everyone,
     }
-    state
 }
 
 /// Aurinko is private-classified by the legacy router, but its provider

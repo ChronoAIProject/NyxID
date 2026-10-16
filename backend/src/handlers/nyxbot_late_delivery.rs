@@ -36,7 +36,7 @@ pub(super) async fn prepare(
     event: &str,
     channel: &NyxbotChannel,
     origin: &ChannelOrigin,
-    sender: &str,
+    sender: &Sender<'_>,
     guest: bool,
     addressed: bool,
 ) -> AppResult<()> {
@@ -47,6 +47,7 @@ pub(super) async fn prepare(
         .await?
         .ok_or_else(|| AppError::Conflict("Channel event already admitted".into()))?;
     let metadata = ChannelTurnDelivery {
+        sender_kind: Some(sender.kind),
         version: 1,
         state: if channel.transport == "gateway" {
             "waiting"
@@ -55,7 +56,7 @@ pub(super) async fn prepare(
         }
         .into(),
         origin: origin.clone(),
-        sender_id: sender.into(),
+        sender_id: sender.id.into(),
         guest,
         addressed,
         transport: channel.transport.clone(),
@@ -270,7 +271,25 @@ async fn process_inner(state: &AppState, event_id: &str, gateway_only: bool) -> 
     let Some(message) = state.db.collection::<AssistantMessage>(MESSAGES).find_one(doc! {
         "user_id": &event.user_id, "conversation_id": conversation_id, "turn_id": turn_id, "role": "assistant",
     }).await? else { return Ok(()); };
-    let text = answer(&message.text, message.status != "completed");
+    let text = if let Some(code) = message.error_code.as_deref() {
+        let failure = if code == "capacity_exceeded" {
+            crate::services::assistant_turn_observability::capacity_message(
+                message
+                    .error_detail
+                    .as_ref()
+                    .and_then(|detail| detail.capacity_wait_ms),
+            )
+        } else {
+            engine::TurnError::new(code).message
+        };
+        if message.text.trim().is_empty() {
+            failure
+        } else {
+            format!("{}\n\n{}", message.text.trim(), failure)
+        }
+    } else {
+        answer(&message.text, message.status != "completed")
+    };
     // Preflight above can be slow: re-resolve authority immediately before the
     // irreversible barrier. Concurrent losers never reach a provider.
     let Some((channel, thread)) = eligible(state, &event, &d, &conversation).await? else {
@@ -446,7 +465,19 @@ async fn eligible(
     {
         return Ok(None);
     }
-    let admitted = chats::admission(&channel, &thread, &d.sender_id, Some(d.addressed));
+    let admitted = if d.sender_kind == Some(crate::models::channel_thread::ThreadSenderKind::Bot) {
+        // Followed children inherit live consent from their settings chat,
+        // checked by validate_delivery above. Their own default member fields
+        // are not that policy. Every bot answer still retains guest authority.
+        if !d.guest
+            || (d.origin.thread.is_none() && !chats::bot_guest_allowed(&thread, Some(d.addressed)))
+        {
+            return Ok(None);
+        }
+        chats::Admission::Guest
+    } else {
+        chats::admission(&channel, &thread, &d.sender_id, Some(d.addressed))
+    };
     if d.origin.thread.is_none()
         && !matches!(
             (d.guest, admitted),

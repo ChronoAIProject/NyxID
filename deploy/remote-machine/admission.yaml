@@ -1,0 +1,72 @@
+# Kubernetes 1.30+ ValidatingAdmissionPolicy. Clusters without VAP support
+# must install an equivalent provider admission policy before enabling create;
+# the manager remains fail-closed when this contract is not present.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: nyxid-machine-sandbox-contract
+spec:
+  failurePolicy: Fail
+  paramKind:
+    apiVersion: v1
+    kind: ConfigMap
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["agents.x-k8s.io"]
+        apiVersions: ["v1beta1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["sandboxes"]
+  matchConditions:
+    - name: managed-namespace
+      expression: "request.namespace == 'nyxid-machine'"
+  validations:
+    - expression: "object.metadata.labels['nyxid.dev/managed'] == 'true' && object.metadata.labels['nyxid.dev/profile'] == 'remote-machine'"
+      message: "Sandbox must carry the NyxID managed fixed profile labels"
+    - expression: "object.spec.service == false && object.spec.shutdownPolicy == 'Retain'"
+      message: "Remote Machine Sandbox must not create an inbound Service and must retain on expiry"
+    - expression: "object.spec.podTemplate.spec.automountServiceAccountToken == false"
+      message: "Remote Machine pods must not automount a Kubernetes API token"
+    - expression: "object.spec.podTemplate.spec.containers.all(c, c.image.matches('^.+@sha256:[0-9a-f]{64}$'))"
+      message: "Remote Machine images must be immutable digest references"
+    - expression: "object.spec.podTemplate.spec.containers.size() == 1 && object.spec.podTemplate.spec.containers[0].name == 'node' && (oldObject == null ? object.spec.podTemplate.spec.containers[0].image == params.data['image'] : (oldObject.metadata.labels['nyxid.dev/managed'] == 'true' && oldObject.spec.podTemplate.spec.containers.size() == 1 && oldObject.spec.podTemplate.spec.containers[0].name == 'node' && object.spec.podTemplate.spec.containers[0].image == oldObject.spec.podTemplate.spec.containers[0].image)) && (oldObject == null ? (('runtime-class' in params.data && params.data['runtime-class'] != '') ? (has(object.spec.podTemplate.spec.runtimeClassName) && object.spec.podTemplate.spec.runtimeClassName == params.data['runtime-class']) : !has(object.spec.podTemplate.spec.runtimeClassName)) : (has(object.spec.podTemplate.spec.runtimeClassName) == has(oldObject.spec.podTemplate.spec.runtimeClassName) && (!has(object.spec.podTemplate.spec.runtimeClassName) || object.spec.podTemplate.spec.runtimeClassName == oldObject.spec.podTemplate.spec.runtimeClassName)))"
+      message: "New Remote Machines require the approved image; updates retain the exact admitted image. New RuntimeClass matches configuration; updates preserve the saved class or node default"
+    - expression: "object.spec.volumeClaimTemplates.size() == 1 && object.spec.volumeClaimTemplates[0].metadata.name == 'workspace' && object.spec.volumeClaimTemplates[0].metadata.labels == {'nyxid.dev/managed': 'true', 'nyxid.dev/owner-id': object.metadata.labels['nyxid.dev/owner-id'], 'nyxid.dev/machine-id': object.metadata.labels['nyxid.dev/machine-id'], 'nyxid.dev/profile': 'remote-machine'} && (!has(object.spec.volumeClaimTemplates[0].spec.storageClassName) || (type(object.spec.volumeClaimTemplates[0].spec.storageClassName) == string && object.spec.volumeClaimTemplates[0].spec.storageClassName != '')) && (oldObject == null ? (('storage-class' in params.data && params.data['storage-class'] != '') ? (has(object.spec.volumeClaimTemplates[0].spec.storageClassName) && object.spec.volumeClaimTemplates[0].spec.storageClassName == params.data['storage-class']) : !has(object.spec.volumeClaimTemplates[0].spec.storageClassName)) : object.spec.volumeClaimTemplates == oldObject.spec.volumeClaimTemplates) && object.spec.volumeClaimTemplates[0].spec.resources.requests.storage == '20Gi' && object.spec.volumeClaimTemplates[0].spec.accessModes == ['ReadWriteOnce']"
+      message: "New 20 GiB workspaces use the configured class or omit the field for the cluster default; updates preserve the exact original workspace template"
+    - expression: "object.spec.podTemplate.spec.containers.all(c, (!has(c.securityContext.privileged) || c.securityContext.privileged == false) && !has(c.securityContext.procMount) && !has(c.securityContext.seLinuxOptions) && !has(c.securityContext.windowsOptions) && (!has(c.securityContext.appArmorProfile) || c.securityContext.appArmorProfile.type == 'RuntimeDefault') && c.securityContext.seccompProfile.type == 'RuntimeDefault' && c.securityContext.allowPrivilegeEscalation == false && c.securityContext.readOnlyRootFilesystem == true && c.securityContext.runAsUser == 0 && c.securityContext.runAsGroup == 0 && c.securityContext.capabilities.drop == ['ALL'] && c.securityContext.capabilities.add == ['CHOWN', 'SETUID', 'SETGID', 'KILL'])"
+      message: "Remote Machine supervisor must use only the fixed UID-switching and cancellation capabilities"
+    - expression: "object.spec.podTemplate.spec.containers.all(c, c.resources.requests.cpu == '2' && c.resources.limits.cpu == '2' && c.resources.requests.memory == '2Gi' && c.resources.limits.memory == '2Gi' && (!('ephemeral-storage' in c.resources.requests) && !('ephemeral-storage' in c.resources.limits)))"
+      message: "Remote Machine resources must match the approved fixed profile"
+    - expression: "(!has(object.spec.podTemplate.spec.hostNetwork) || object.spec.podTemplate.spec.hostNetwork == false) && (!has(object.spec.podTemplate.spec.hostPID) || object.spec.podTemplate.spec.hostPID == false) && (!has(object.spec.podTemplate.spec.hostIPC) || object.spec.podTemplate.spec.hostIPC == false) && !has(object.spec.podTemplate.spec.initContainers) && !has(object.spec.podTemplate.spec.ephemeralContainers) && !has(object.spec.podTemplate.spec.securityContext) && (!has(object.spec.podTemplate.spec.shareProcessNamespace) || object.spec.podTemplate.spec.shareProcessNamespace == false)"
+      message: "Remote Machine must not expose host namespaces or alternate initializer workloads"
+    - expression: "object.spec.podTemplate.spec.containers.all(c, !has(c.command) && !has(c.args) && !has(c.envFrom) && !has(c.lifecycle) && !has(c.volumeDevices) && !has(c.readinessProbe) && c.env.size() == 6 && c.env.all(e, e.name in ['NYXID_MANAGED_KUBERNETES', 'NYXID_MANAGED_NODE_ID', 'NYXID_MANAGED_POD_UID', 'NYXID_MANAGED_WORKLOAD_TOKEN_FILE', 'NYXID_MANAGED_PREPARE_URL', 'NYXID_MANAGED_BOOTSTRAP_URL'] && c.env.filter(other, other.name == e.name).size() == 1 && (e.name == 'NYXID_MANAGED_POD_UID' ? (!has(e.value) && has(e.valueFrom) && !has(e.valueFrom.secretKeyRef) && !has(e.valueFrom.configMapKeyRef) && !has(e.valueFrom.resourceFieldRef)) : (has(e.value) && !has(e.valueFrom)))))"
+      message: "Remote Machine must use the managed image entrypoint and cannot override its execution mode"
+    - expression: "object.spec.podTemplate.spec.serviceAccountName == 'nyxid-machine-workload' && object.spec.podTemplate.spec.volumes.exists(v, v.name == 'workload-identity')"
+      message: "Only the unprivileged Pod-bound bootstrap identity is allowed"
+    - expression: "object.spec.podTemplate.spec.containers[0].env.exists(e, e.name == 'NYXID_MANAGED_KUBERNETES' && e.value == '1') && object.spec.podTemplate.spec.containers[0].env.exists(e, e.name == 'NYXID_MANAGED_NODE_ID' && e.value == object.metadata.labels['nyxid.dev/machine-id']) && object.spec.podTemplate.spec.containers[0].env.exists(e, e.name == 'NYXID_MANAGED_POD_UID' && e.valueFrom.fieldRef.fieldPath == 'metadata.uid' && (!has(e.valueFrom.fieldRef.apiVersion) || e.valueFrom.fieldRef.apiVersion == 'v1')) && object.spec.podTemplate.spec.containers[0].env.exists(e, e.name == 'NYXID_MANAGED_WORKLOAD_TOKEN_FILE' && e.value == '/var/run/nyxid-workload/token')"
+      message: "Bootstrap target identity must come from manager labels and the actual Pod UID"
+    - expression: "object.spec.podTemplate.spec.containers[0].env.exists(e, e.name == 'NYXID_MANAGED_PREPARE_URL' && e.value == params.data['bootstrap-base-url'] + '/api/v1/machines/managed/prepare') && object.spec.podTemplate.spec.containers[0].env.exists(e, e.name == 'NYXID_MANAGED_BOOTSTRAP_URL' && e.value == params.data['bootstrap-base-url'] + '/api/v1/machines/managed/bootstrap')"
+      message: "Workload credentials may only be delivered to the approved NyxID HTTPS endpoints"
+    - expression: "oldObject == null || (oldObject.metadata.labels['nyxid.dev/machine-id'] == object.metadata.labels['nyxid.dev/machine-id'] && oldObject.metadata.labels['nyxid.dev/owner-id'] == object.metadata.labels['nyxid.dev/owner-id'] && oldObject.metadata.labels['nyxid.dev/profile'] == object.metadata.labels['nyxid.dev/profile'])"
+      message: "Remote Machine allocation owner, identity and profile are immutable"
+    - expression: "object.spec.podTemplate.spec.volumes.size() == 4 && object.spec.podTemplate.spec.volumes.all(v, object.spec.podTemplate.spec.volumes.filter(other, other.name == v.name).size() == 1 && ((v.name == 'identity' && has(v.emptyDir) && v.emptyDir.medium == 'Memory' && !has(v.projected)) || (v.name in ['tmp', 'home'] && has(v.emptyDir) && (!has(v.emptyDir.medium) || v.emptyDir.medium == '') && !has(v.emptyDir.sizeLimit) && !has(v.projected)) || (v.name == 'workload-identity' && !has(v.emptyDir) && has(v.projected) && v.projected.defaultMode == 256 && v.projected.sources.size() == 1 && has(v.projected.sources[0].serviceAccountToken) && !has(v.projected.sources[0].secret) && !has(v.projected.sources[0].configMap) && !has(v.projected.sources[0].downwardAPI) && !has(v.projected.sources[0].clusterTrustBundle) && v.projected.sources[0].serviceAccountToken.audience == 'nyxid-remote-machine-v1' && v.projected.sources[0].serviceAccountToken.expirationSeconds == 600 && v.projected.sources[0].serviceAccountToken.path == 'token')))"
+      message: "Remote Machine volumes must contain the exact protected identity and disk temporary set"
+    - expression: "object.spec.podTemplate.spec.containers[0].volumeMounts.size() == 5 && object.spec.podTemplate.spec.containers[0].volumeMounts.all(v, object.spec.podTemplate.spec.containers[0].volumeMounts.filter(other, other.name == v.name).size() == 1 && !has(v.subPath) && !has(v.subPathExpr) && (!has(v.mountPropagation) || v.mountPropagation == 'None') && ((v.name == 'workspace' && v.mountPath == '/workspace' && (!has(v.readOnly) || v.readOnly == false)) || (v.name == 'identity' && v.mountPath == '/var/lib/nyxid-machine' && (!has(v.readOnly) || v.readOnly == false)) || (v.name == 'tmp' && v.mountPath == '/tmp' && (!has(v.readOnly) || v.readOnly == false)) || (v.name == 'home' && v.mountPath == '/home' && (!has(v.readOnly) || v.readOnly == false)) || (v.name == 'workload-identity' && v.mountPath == '/var/run/nyxid-workload' && v.readOnly == true)))"
+      message: "Remote Machine mounts must contain the exact workspace and protected temporary set"
+    - expression: "object.spec.podTemplate.spec.containers.all(c, c.startupProbe.exec.command == ['/bin/sh', '-ec', 'test -s /var/lib/nyxid-machine/node/config.toml && test -s /var/lib/nyxid-machine/node/node.pid && kill -0 \"$(cat /var/lib/nyxid-machine/node/node.pid)\"'] && c.startupProbe.periodSeconds == 5 && c.startupProbe.failureThreshold == 72 && c.startupProbe.timeoutSeconds == 2 && !has(c.startupProbe.httpGet) && !has(c.startupProbe.tcpSocket) && !has(c.startupProbe.grpc) && c.livenessProbe.exec.command == c.startupProbe.exec.command && c.livenessProbe.periodSeconds == 10 && c.livenessProbe.failureThreshold == 3 && c.livenessProbe.timeoutSeconds == 2 && !has(c.livenessProbe.httpGet) && !has(c.livenessProbe.tcpSocket) && !has(c.livenessProbe.grpc))"
+      message: "Supervisor probes must use only the fixed managed readiness check"
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: nyxid-machine-sandbox-contract
+spec:
+  policyName: nyxid-machine-sandbox-contract
+  validationActions: ["Deny"]
+  # Intentionally not created by these manifests. An operator must supply the
+  # approved image and bootstrap base URL, with optional storage class and
+  # RuntimeClass. An absent ConfigMap rejects admission; absent/empty storage
+  # selection requires omission so Kubernetes selects its cluster default.
+  paramRef:
+    name: nyxid-machine-approved-runtime
+    namespace: nyxid-machine
+    parameterNotFoundAction: Deny

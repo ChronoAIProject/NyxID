@@ -84,7 +84,7 @@ pub fn compose(
     assemble(state, execution, egress, settled_hook)
 }
 
-/// Every dependency is real. The public producers remain explicitly unavailable.
+/// Every dependency is real. Public execution requires persisted activated deployment proof.
 pub fn assemble(
     state: AppState,
     execution: Arc<dyn NyxAgentExecutionProducer>,
@@ -696,6 +696,38 @@ pub(crate) async fn deliver_saved(
     reply: &ReplyRef,
 ) -> AppResult<DeliveryOutcome> {
     if matches!(destination.authority, ReplyAuthority::Public { .. }) {
+        if let Some(expires_at) =
+            super::platform_public_credential_service::public_failure_notice_expiry(
+                &state.db,
+                destination,
+                reply,
+            )
+            .await?
+        {
+            let ReplyAuthority::Public { ingress, .. } = &destination.authority else {
+                unreachable!();
+            };
+            let fixed = ReplyDestination {
+                manager: destination.manager.clone(),
+                sender_id: destination.sender_id,
+                chat_id: destination.chat_id,
+                authority: ReplyAuthority::Fixed {
+                    ingress: ingress.ingress.clone(),
+                },
+                expires_at,
+            };
+            return producers
+                .transport
+                .deliver_platform_reply(
+                    &state.db,
+                    &fixed,
+                    &DeliveryRef::Fixed {
+                        ingress: ingress.ingress.clone(),
+                    },
+                    ReplyContent::Fixed(UnavailableReason::PublicTurnFailed),
+                )
+                .await;
+        }
         // Public transcripts never enter owner history or credential paths.
         return delivery::deliver_public_reply(
             state,

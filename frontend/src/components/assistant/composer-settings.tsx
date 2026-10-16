@@ -41,6 +41,7 @@ export function ComposerSettings({
   agentOverride,
   active = false,
   disabled = false,
+  connectionChoice,
 }: {
   readonly conversationId?: string;
   readonly model: string;
@@ -48,6 +49,12 @@ export function ComposerSettings({
   readonly agentOverride?: NyxAgentAccessMode | null;
   readonly active?: boolean;
   readonly disabled?: boolean;
+  readonly connectionChoice?: {
+    readonly value: string;
+    readonly options: readonly { id: string; label: string }[];
+    readonly onChange: (id: string) => void;
+    readonly disabled?: boolean;
+  };
 }) {
   const advancedControls = useFeature(FEATURE_FLAG.ASSISTANT_MODEL_CONTROLS);
   const thinking = model === "nyxagent/research";
@@ -64,6 +71,7 @@ export function ComposerSettings({
   const name = modelDisplayName(selected ?? { id: model, label: model });
   const mode = agentOverride ?? settings.data?.access_mode;
   const accessLabel = mode ? ACCESS_MODE_LABEL[mode] : "Permissions";
+  const connectionLabel = connectionChoice?.options.find((option) => option.id === connectionChoice.value)?.label;
   const triggerLabel = advancedControls
     ? name
     : `${accessLabel}${thinking ? ", Thinking" : ""}`;
@@ -95,12 +103,13 @@ export function ComposerSettings({
         <button
           type="button"
           disabled={disabled}
-          aria-label={`${menuLabel}: ${triggerLabel}${advancedControls && mode ? `, ${accessLabel}` : ""}`}
+          aria-label={`${menuLabel}: ${triggerLabel}${advancedControls && mode ? `, ${accessLabel}` : ""}${connectionLabel ? `, Connection: ${connectionLabel}` : ""}`}
+          title={connectionLabel ? `Next message connection: ${connectionLabel}` : undefined}
           className="flex h-8 min-w-0 max-w-full items-center gap-1.5 rounded-lg px-2 text-12 text-muted-foreground transition-colors hover:bg-overlay hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
         >
           <span className="flex min-w-0 items-center text-foreground">
             <span className="truncate">
-              {advancedControls ? name : accessLabel}
+              {advancedControls ? name : accessLabel}{connectionLabel ? ` · ${connectionLabel}` : ""}
             </span>
             {!advancedControls && thinking && (
               <span className="shrink-0">, Thinking</span>
@@ -193,6 +202,24 @@ export function ComposerSettings({
             <DropdownMenuSeparator className="my-0.5" />
           </>
         )}
+        {connectionChoice && <>
+          <SettingsSection label="Next message connection" value={connectionLabel ?? "Saved order"}>
+            <DropdownMenuItem role="menuitemradio" aria-checked={!connectionChoice.value}
+              disabled={active || connectionChoice.disabled}
+              onSelect={() => connectionChoice.onChange("")}>
+              Use saved service order{!connectionChoice.value && <Check aria-hidden />}
+            </DropdownMenuItem>
+            {connectionChoice.options.map((option) => <DropdownMenuItem key={option.id}
+              role="menuitemradio" aria-checked={option.id === connectionChoice.value}
+              disabled={active || connectionChoice.disabled}
+              onSelect={() => connectionChoice.onChange(option.id)}>
+              <span className="min-w-0 flex-1 break-words">{option.label}</span>
+              {option.id === connectionChoice.value && <Check aria-hidden />}
+            </DropdownMenuItem>)}
+            <p className="px-2 py-1 text-11 text-muted-foreground">Applies to the next text message. Organization connections still confirm in Auto and Ask every time.</p>
+          </SettingsSection>
+          <DropdownMenuSeparator className="my-0.5" />
+        </>}
         <SettingsSection
           label="Permissions"
           value={mode ? ACCESS_MODE_LABEL[mode] : "Loading…"}

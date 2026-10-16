@@ -467,11 +467,11 @@ sequenceDiagram
 graph TD
     MSG[Inbound Message] --> R{Routing Service}
 
-    R -->|Step 1| EC{Exact conversation<br/>match?}
-    EC -->|Yes| AGENT[Route to bound agent]
-    EC -->|No| SS{Step 2: Sender-specific<br/>match in group?}
-    SS -->|Yes| AGENT
-    SS -->|No| DA{Step 3: Default agent<br/>for this bot?}
+    R -->|Step 1| SS{Sender-specific match<br/>in this conversation?}
+    SS -->|Yes| AGENT[Route to bound agent]
+    SS -->|No| EC{Step 2: Exact conversation<br/>match without sender?}
+    EC -->|Yes| AGENT
+    EC -->|No| DA{Step 3: Default agent<br/>for this bot?}
     DA -->|Yes| AGENT
     DA -->|No| UNROUTED[Log as unrouted<br/>Optional: send 'not configured' reply]
 
@@ -1185,6 +1185,12 @@ NyxID sends a normalized message to the agent's callback URL.
 
 The payload normalizes messages into a common format so agents can handle all platforms with one code path. For agents that need platform-specific features (Telegram inline keyboards, Discord embeds/components, Lark interactive cards), the full original webhook JSON is included in `raw_platform_data`. Most agents ignore it; advanced integrations read it directly.
 
+`conversation.platform_id` and `conversation.type` describe the actual inbound event after platform webhook verification and adapter parsing. They are independent of the selected route's configured conversation ID/type: a default route configured as `"*"` / `"private"` can receive a group message, whose callback must contain the actual chat ID and `"group"`. `conversation.id` continues to identify the selected NyxID routing rule for async replies. Consumers that previously classified groups using the route's configured type may observe a corrected conversation scope; downstream history partitioning should use the actual platform context.
+
+Native mention metadata passes through unchanged in the signed `raw_platform_data`: Lark/Feishu `event.message.mentions` (including native `id.open_id` and placeholder `key`) and Telegram `message.entities` / `message.caption_entities` (including native UTF-16 offsets). NyxID does not resolve these mentions into specialist routes or infer targets from display names. Consumers can interpret native mentions within their own trusted bot/group context. The relay contract adds no normalized mention field and preserves Lark placeholders in `content.text`; NyxID's direct NyxBot consumer renders bounded, unambiguous placeholders as names for input text.
+
+A sender needs no additional NyxID OAuth/channel binding merely to address a receiving bot. The receiving bot still needs platform registration, authenticated event delivery, and an agent callback route. Mentioning a bot or specialist does not establish the sender's NyxID identity, grant protected command/tool authority, prove another bot's group membership, or authorize another owner's credentials. External runtimes retain responsibility for specialist selection and execution authorization. For NyxID-hosted agents, the receiving NyxBot channel and its live chat override select the existing linked agent; native mention labels never select another owner's agent. Provider delivery rules apply before this relay; for example, Telegram documents specific [bot-to-bot communication settings and group delivery conditions](https://core.telegram.org/bots/features#bot-to-bot-communication). Raw mention passthrough cannot cause an undelivered provider event to reach NyxID.
+
 - **`agent.api_key_id`** is the primary agent identifier. Same `ApiKey._id` from agent isolation (PR #132). A shared callback endpoint dispatches based on this value. Use for routing/authorization.
 - **`agent.name`** is the human-readable label from key creation (e.g., `"claude-support-bot"`). For logging and display only -- never use for authorization.
 - **`sender.platform_id`** is the platform-native user ID. The agent is responsible for mapping this to its own users. If the agent uses NyxID OAuth, it already has `nyxid_user_id` in its user table from login time -- it can match `sender.platform_id` against platform identities it collected during onboarding. NyxID doesn't need to do this lookup because the agent already has the data.
@@ -1200,9 +1206,9 @@ The payload normalizes messages into a common format so agents can handle all pl
 | `platform` | string | No | Which messaging platform the message came from: `telegram`, `discord`, `lark`, or `feishu`. |
 | `agent.api_key_id` | UUID | No | The `ApiKey._id` assigned to this conversation route. This is the agent's identity from agent isolation. A shared callback endpoint dispatches based on this. |
 | `agent.name` | string | No | Human-readable name of the API key (e.g., `"claude-support-bot"`). For logging and display only. |
-| `conversation.id` | UUID | No | NyxID's internal ID for the conversation route (from `channel_conversations`). Stable across all messages in the same chat. |
-| `conversation.platform_id` | string | No | The platform's native conversation identifier (Telegram `chat_id`, Discord `channel_id`, Lark `chat_id`). |
-| `conversation.type` | string | No | Conversation kind: `private` (1:1 DM), `group` (multi-user chat), or `channel` (broadcast). |
+| `conversation.id` | UUID | No | NyxID's internal ID for the selected conversation route (from `channel_conversations`). A default route can serve several platform chats. |
+| `conversation.platform_id` | string | No | The actual inbound event's native conversation identifier (Telegram `chat_id`, Discord `channel_id`, Lark `chat_id`), even when the selected route uses `"*"`. |
+| `conversation.type` | string | No | The actual inbound event's conversation kind after adapter parsing: `private` (1:1 DM), `group` (multi-user chat), or `channel` (broadcast). The route's configured type does not override it. HTTP Event Gateway callbacks use their separate `device` contract. |
 | `sender.platform_id` | string | No | The message author's ID on the platform. The agent maps this to its own users. |
 | `sender.display_name` | string | Yes | Display name from the platform (Telegram `first_name`, Discord `username`). `null` if not provided. |
 | `content.type` | string | No | Content kind: `text`, `image`, `file`, `audio`, `video`, `location`, `sticker`, or `unknown`. |
@@ -1226,6 +1232,58 @@ The payload normalizes messages into a common format so agents can handle all pl
 | `X-NyxID-Timestamp` | ISO 8601 timestamp (for replay protection) |
 | `X-NyxID-Platform` | Platform identifier (`telegram`, `discord`, `lark`, `feishu`) |
 | `X-NyxID-User-Token` | Short-lived access token for the bot owner (`JWT_RELAY_ACCESS_TTL_SECS`, default `300`s). The agent uses it as `Authorization: Bearer <token>` to call NyxID's **proxy / LLM gateway / MCP** (and approval *status* polling) on behalf of the user. It is a relay token: it is **rejected** on account, admin, key-management, session, channel-reply, and other non-proxy endpoints; it inherits the originating agent key's service/node allowlist; on MCP it is stateless (no session is minted, so it re-authenticates every call); and it stops working the moment that agent key is revoked/deactivated. To *reply* to a conversation, use the agent API key or the per-callback `reply_token`, not this token. Absent if token generation fails. |
+
+**NyxID-hosted native bot mentions.** A delivered Telegram/Lark/Feishu message
+that positively and exactly mentions the receiving native bot may start a guest
+turn for that bot's linked specialist or live chat override. The native group
+must already have owner-enabled settings: explicit `members:everyone`, or the
+ordinary default after the verified owner has talked there. Bot input never
+creates a settings row, proves owner presence, redeems owner link codes, decides
+cards or queues owner work. Private, self, unknown/system, reply-only, broadcast,
+plain-name and unaddressed bot input stays closed, including with
+`reply_mode:all`. A bot remains a guest if its ID overlaps a legacy owner ID.
+Guest service, privacy, approval and machine restrictions continue through late
+text/image delivery.
+
+Automated turns atomically spend an allowance on the existing group/topic row
+(`max_group_handoffs`, default six) and the owner's hourly
+`max_group_handoffs_per_hour` handoff window. Only an admitted authenticated
+human message resets the chat allowance; there is no timer refill. Replays and
+uncertain/busy attempts are never refunded, and exhausted bot budgets do not
+block human turns. Bots may use an existing active followed child but cannot
+open or renew following. The budget is metadata in MongoDB and is shared across
+replicas.
+
+A human message that receives a proven pre-execution busy response may retry
+after capacity returns. Its original request digest, deadline and reset claim
+are retained with encrypted event context until the existing event expiry;
+concurrent retries atomically claim one resumption and never refill bot hops
+again. Changed requests and failed, dispatched or uncertain attempts cannot
+use that retry path. Bot busy attempts remain consumed and silent.
+
+For these NyxID-hosted native group messages, the event claim uses the stored
+native message ID scoped to the receiving installation and actual chat. A
+provider redelivery with a new NyxID relay UUID therefore cannot start another
+bot turn or repeat a human turn/reset during the existing 24-hour event
+retention window. The source
+lookup checks the stored owner, receiving bot, route key, sender and chat;
+unrelated source rows cannot supply that identity. Native gateway events retain
+their existing provider event identity. The generic relay's human-message
+delivery semantics are unchanged.
+
+Gateway sources opt in through scoped `admission.bot_messages:native_mentions`
+and pinned receiving identity only after authenticated capability discovery
+advertises `native_bot_mentions_v1`. Existing connections reconcile through the
+normal management sweep without sender OAuth or manual reconnect. Old gateways
+keep their existing human-compatible source policy. Deploy CMA readers and
+upgrade every NyxID replica before enabling
+`CMAEG_NATIVE_BOT_MENTIONS_WRITES_ENABLED`; NyxID's sweep can then author
+opt-ins. This keeps execution and delayed delivery on replicas that retain bot
+guest identity and share the durable budget. Before an old-reader rollback,
+remove opt-ins with the current
+reader and clear gateway caches; disabling the write flag alone does not remove
+stored policy. No separate thread-follow gateway upgrade is required for basic
+mentions. Provider bot-to-bot delivery settings still apply before either server.
 
 #### Callback Authentication (JWT)
 

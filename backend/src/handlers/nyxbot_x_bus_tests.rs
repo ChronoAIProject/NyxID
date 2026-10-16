@@ -114,23 +114,76 @@ async fn x_requests(server: &MockServer, conversation: &str, count: usize) -> Ve
     panic!("X never received {count} replies on {conversation}");
 }
 
-async fn outbound_reason(state: &AppState, bot: &str, expected: &str) -> ChannelBot {
+// Request receipt and turn settlement precede outbound diagnostics. The exact
+// event's terminal delivery state is written after that send's diagnostics.
+async fn x_delivery(
+    state: &AppState,
+    bot: &ChannelBot,
+    channel_id: &str,
+    platform_message_id: &str,
+    expected_state: &str,
+    expected_reason: Option<&str>,
+) -> ChannelBot {
+    use crate::models::channel_message::{COLLECTION_NAME as MESSAGES, ChannelMessage};
+
+    let inbound = state
+        .db
+        .collection::<ChannelMessage>(MESSAGES)
+        .find_one(doc! {
+            "channel_bot_id": &bot.id,
+            "platform": "x",
+            "direction": "inbound",
+            "platform_message_id": platform_message_id,
+        })
+        .await
+        .unwrap_or_else(|_| {
+            panic!("X delivery {platform_message_id}/{expected_state}: inbound lookup failed")
+        })
+        .unwrap_or_else(|| {
+            panic!("X delivery {platform_message_id}/{expected_state}: inbound message missing")
+        });
+    let mut last = "event not observed".to_owned();
     for _ in 0..400 {
-        let current = crate::services::channel_bot_service::get_bot(&state.db, bot)
+        let event = state
+            .db
+            .collection::<NyxbotEvent>(EVENTS)
+            .find_one(doc! {"channel_id": channel_id, "event_id": &inbound.id})
             .await
-            .unwrap();
-        if current
-            .diagnostics
-            .last_outbound_error
+            .unwrap_or_else(|_| {
+                panic!("X delivery {platform_message_id}/{expected_state}: event lookup failed")
+            });
+        let current = crate::services::channel_bot_service::get_bot(&state.db, &bot.id)
+            .await
+            .unwrap_or_else(|_| {
+                panic!(
+                    "X delivery {platform_message_id}/{expected_state}: diagnostics lookup failed"
+                )
+            });
+        let delivery_state = event
             .as_ref()
-            .and_then(|error| error.reason.as_deref())
-            == Some(expected)
-        {
+            .and_then(|event| event.delivery.as_ref())
+            .map(|delivery| delivery.state.as_str());
+        let error = current.diagnostics.last_outbound_error.as_ref();
+        let reason = error.and_then(|error| error.reason.as_deref());
+        let diagnostics_match = match expected_reason {
+            Some(expected) => reason == Some(expected),
+            None => current.diagnostics.last_outbound_at.is_some() && error.is_none(),
+        };
+        if delivery_state == Some(expected_state) && diagnostics_match {
             return current;
         }
+        last = format!(
+            "event_status={:?}, delivery_state={delivery_state:?}, last_outbound_at={:?}, error_reason={reason:?}, error_code={:?}",
+            event.as_ref().map(|event| event.status.as_str()),
+            current.diagnostics.last_outbound_at,
+            error.map(|error| error.code.as_str()),
+        );
         tokio::time::sleep(std::time::Duration::from_millis(25)).await;
     }
-    panic!("outbound error {expected} was never recorded");
+    panic!(
+        "X delivery {platform_message_id}/{expected_state} on channel {channel_id}, relay_message_id={}: expected_reason={expected_reason:?}; last {last}",
+        inbound.id,
+    );
 }
 
 async fn idle(state: &AppState, conversation: &str) {
@@ -232,6 +285,7 @@ async fn x_dm_reaches_nyxbot_and_the_reply_reaches_x_with_diagnostics() {
         &x,
         "2-10",
         ResponseTemplate::new(201)
+            .set_delay(std::time::Duration::from_secs(1))
             .set_body_json(json!({"data": {"dm_event_id": "900", "dm_conversation_id": "2-10"}})),
     )
     .await;
@@ -257,9 +311,7 @@ async fn x_dm_reaches_nyxbot_and_the_reply_reaches_x_with_diagnostics() {
             .iter()
             .any(|message| message.role == "assistant" && message.text == "Here is your answer")
     );
-    let healthy = crate::services::channel_bot_service::get_bot(&state.db, &bot.id)
-        .await
-        .unwrap();
+    let healthy = x_delivery(&state, &bot, &row.id, "800", "sent", None).await;
     assert!(healthy.diagnostics.last_inbound_at.is_some());
     assert_eq!(
         healthy.diagnostics.last_inbound_source.as_deref(),
@@ -280,6 +332,7 @@ async fn x_dm_reaches_nyxbot_and_the_reply_reaches_x_with_diagnostics() {
         &x,
         "3-10",
         ResponseTemplate::new(201)
+            .set_delay(std::time::Duration::from_secs(1))
             .set_body_json(json!({"data": {"dm_event_id": "901", "dm_conversation_id": "3-10"}})),
     )
     .await;
@@ -298,6 +351,7 @@ async fn x_dm_reaches_nyxbot_and_the_reply_reaches_x_with_diagnostics() {
         );
     }
     idle(&state, &guests[0].id).await;
+    x_delivery(&state, &bot, &row.id, "801", "sent", None).await;
 
     // 3. X refuses the reply for a missing scope: recorded, and Health says reconnect.
     x.reset().await;
@@ -310,7 +364,15 @@ async fn x_dm_reaches_nyxbot_and_the_reply_reaches_x_with_diagnostics() {
     )
     .await;
     deliver("802", "2", "are you there?").await;
-    let refused = outbound_reason(&state, &bot.id, "scopes_missing").await;
+    let refused = x_delivery(
+        &state,
+        &bot,
+        &row.id,
+        "802",
+        "unknown",
+        Some("scopes_missing"),
+    )
+    .await;
     assert_eq!(
         refused
             .diagnostics
@@ -337,7 +399,15 @@ async fn x_dm_reaches_nyxbot_and_the_reply_reaches_x_with_diagnostics() {
     )
     .await;
     deliver("803", "2", "still there?").await;
-    let limited = outbound_reason(&state, &bot.id, "rate_limited").await;
+    let limited = x_delivery(
+        &state,
+        &bot,
+        &row.id,
+        "803",
+        "unknown",
+        Some("rate_limited"),
+    )
+    .await;
     assert_eq!(
         crate::handlers::channel_bots::health_for(&limited, false, true).recommended_action,
         "wait_rate_limit"

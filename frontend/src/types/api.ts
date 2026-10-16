@@ -200,6 +200,9 @@ export function canCreateFeatureFlags(
 }
 
 export interface ApiKey {
+  /** Approval CAS only; normal use may advance this version. */
+  readonly state_version?: number;
+  readonly purpose?: string;
   readonly assistant_conversation_id?: string | null;
   readonly id: string;
   readonly name: string;
@@ -478,6 +481,7 @@ export interface ServiceCapabilities {
 }
 
 export interface ServiceBilling {
+  readonly managed_execution?: ManagedExecutionContract | null;
   readonly byok_pricing?: LanePricingView | null;
   readonly platform_key_pricing?: LanePricingView | null;
   /** Admin opt-in: only platform_billable services charge wallet credits. */
@@ -492,6 +496,17 @@ export interface ServiceBilling {
   readonly resale_billable?: boolean;
   readonly resale_metric?: string;
   readonly lago_resale_metric_code?: string | null;
+}
+
+export interface ManagedExecutionContract {
+  readonly model: string;
+  readonly max_input_tokens: number;
+  readonly max_output_tokens: number;
+  readonly max_request_bytes: number;
+  readonly max_response_bytes: number;
+  readonly tariff_version: string;
+  readonly tariff_source: string;
+  readonly tariff_verified_at: { readonly $date: { readonly $numberLong: string } | string };
 }
 
 export interface ServicePlatformPricing {

@@ -16,7 +16,7 @@ export const publicCreditsSchema = z
 export const publicSetupSchema = z
   .object({
     source: z.literal("nyxagent"),
-    profile: z.string().min(1).max(128),
+    profile: z.string().max(128),
     total_daily_credits: publicCreditsSchema,
     sender_daily_credits: publicCreditsSchema,
     sponsor_owner_user_id: z.uuid(),
@@ -55,15 +55,19 @@ export const publicReadinessSchema = z
         "capacity_limited",
         "public_not_ready",
         "public_quota_limited",
+        "public_turn_failed",
         "runtime_uninitialized",
         "sponsor_unavailable",
         "profile_unavailable",
         "proof_expired",
+        "public_contract_unsupported",
+        "public_authority_rejected",
       ])
       .nullable(),
     checked_at: z.iso.datetime({ offset: true }).nullable(),
     expires_at: z.iso.datetime({ offset: true }).nullable(),
     evidence_digest: z.string().nullable(),
+    policy_digest: z.string().nullable().optional(),
   })
   .superRefine((value, ctx) => {
     if (
@@ -93,6 +97,7 @@ export const managerRuntimeSchema = z
     supported: z.boolean(),
     runtime: z
       .object({
+        activated_policy_digest: z.string().nullable().optional(),
         manager_authority_epoch: version,
         personal_control_revision: version,
         public_policy_revision: version,

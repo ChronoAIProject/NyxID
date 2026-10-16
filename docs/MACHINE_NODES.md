@@ -1627,3 +1627,21 @@ including pairing, capability widening, machine updates and saved-login fills,
 and records the completed action automatically. Resource confirmation settings
 apply in Auto and Ask every time. Grants, origin checks, protected fields,
 owner-control lockout, node authority and update attestation remain required.
+
+### NyxBot organization service use
+
+The existing machine-exec card identifies exact declared organization connections
+and states they may be used by this command for this job. The persisted job grant
+binds command/arguments, job ID, key generation, connections/owners and their
+credential/config authority. Every detached gateway request rechecks the live key,
+membership, policy, job expiry and machine lease. Revocation or drift ends service
+use. Dynamic HTTP payloads are authorized by this bounded command grant. Personal
+detached jobs and independently authorized catalog/platform declarations retain
+their existing authority semantics. Preferences are checked before the card; a
+model declaration is not human target selection. See
+[NyxBot execution](NYXBOT_SERVICE_EXECUTION.md).
+
+Externally authorized Remote Machine jobs use their existing source and machine
+grants instead of NyxBot chat consent. Signed gateway requests retain exact
+service declarations, streaming and billing attribution, with live source,
+grant, runtime and lease checks before dispatch.

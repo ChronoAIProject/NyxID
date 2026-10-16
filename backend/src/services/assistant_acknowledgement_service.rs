@@ -1129,6 +1129,7 @@ async fn notify_nyxbot_denied(
                     .session(&mut *session)
                     .await?;
                 let message = AssistantMessage {
+                    turn_metadata: None,
                     platform_delivery_recovery_queued: false,
                     platform_reply: None,
                     platform_origin: None,
@@ -1634,6 +1635,10 @@ pub fn decisions_note(rows: &[AssistantAcknowledgement]) -> String {
             "operations" => "operation scope".into(),
             "machine" => "machine access".into(),
             "saved_login" => "saved login access".into(),
+            "action" if row.tool_name.as_deref()==Some("nyxid.service_execution") && row.status == "allowed" => format!(
+                "exact connection use decision recorded by NyxID (acknowledgement_id {}); continue the original requested operation using that exact connection; nyxid.service_execution is internal and must never be invoked",
+                identifier(Some(&row.id))),
+            "action" if row.tool_name.as_deref()==Some("nyxid.service_execution") => "exact connection use was not authorized; the internal approval name must never be invoked".into(),
             _ => format!(
                 "action {} (acknowledgement_id {})",
                 identifier(row.tool_name.as_deref()),
@@ -1652,7 +1657,7 @@ pub fn decisions_note(rows: &[AssistantAcknowledgement]) -> String {
         .iter()
         .any(|row| row.status == "allowed" && row.kind == "action")
     {
-        note.push_str("\nRetry an allowed action with its acknowledgement_id.");
+        note.push_str("\nRetry an allowed action through its original callable tool or route with its acknowledgement_id. Internal exact-connection approvals are applied by NyxID when that original operation resumes; never invoke an internal approval name.");
     }
     note.push_str("\nDo not request denied items again unless the user asks.");
     note

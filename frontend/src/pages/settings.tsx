@@ -7,7 +7,9 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useAuthStore } from "@/stores/auth-store";
 import { useConsentStore } from "@/stores/consent-store";
 import { useUser, useMfaDisable, useRevokeSession } from "@/hooks/use-auth";
-import { api, ApiError } from "@/lib/api-client";
+import { api, apiClient, ApiError } from "@/lib/api-client";
+import { ACCOUNT_DELETION_POLICY_VERSION } from "@/lib/account-deletion-policy";
+import { AccountDeletionDisclosure } from "@/components/shared/account-deletion-disclosure";
 import { disableTelemetry } from "@/lib/telemetry";
 import type { User, Session } from "@/types/api";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -354,7 +356,10 @@ function SecurityTab() {
     }
     setIsDeletingAccount(true);
     try {
-      await api.delete<DeleteAccountResponse>("/users/me");
+      await apiClient<DeleteAccountResponse>("/users/me", {
+        method: "DELETE",
+        headers: { "X-NyxID-Account-Deletion-Policy": ACCOUNT_DELETION_POLICY_VERSION },
+      });
       toast.success("Account deleted successfully");
       try {
         await logout();
@@ -626,8 +631,8 @@ function SecurityTab() {
           <div className="space-y-1.5">
             <CardTitle className="text-destructive">Delete Account</CardTitle>
             <CardDescription className="text-destructive/70">
-              Permanently delete your account and all associated data. This action
-              cannot be undone.
+              Permanently delete your account and managed Machine workspaces.
+              Necessary security and financial records are retained.
             </CardDescription>
           </div>
           <Button
@@ -646,10 +651,12 @@ function SecurityTab() {
           <DialogHeader>
             <DialogTitle>Delete Account</DialogTitle>
             <DialogDescription>
-              Please enter your email address to confirm account deletion. This
-              action cannot be undone.
+              Enter your email address to confirm deletion of your account and
+              the Machine data described below.
             </DialogDescription>
           </DialogHeader>
+
+          <AccountDeletionDisclosure />
 
           <div className="space-y-2">
             <label

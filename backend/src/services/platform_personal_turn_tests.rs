@@ -593,10 +593,10 @@ async fn execution_factory_resumes_exact_input_once_across_competing_workers() {
 
 #[tokio::test]
 async fn execution_factory_selects_public_prepare_and_rejects_ordinary_context_before_owner_io() {
-    let db = mongodb::Client::with_uri_str("mongodb://127.0.0.1:1/?serverSelectionTimeoutMS=25")
-        .await
-        .unwrap()
-        .database("no_owner_io");
+    // Public readiness is now a scoped transactional lookup. Use a real DB to
+    // distinguish missing public authority from a failed connection, then
+    // assert neither branch creates owner history, credentials or public work.
+    let db = crate::test_utils::connect_transaction_test_database("public_execution_factory").await;
     let state = crate::test_utils::test_app_state(db.clone());
     let egress = Arc::new(CountingEgress(std::sync::atomic::AtomicUsize::new(0)));
     let execution = runtime::producer(
@@ -625,6 +625,7 @@ async fn execution_factory_selects_public_prepare_and_rejects_ordinary_context_b
         .await;
     assert!(matches!(result, Err(AppError::AssistantTurnRequired)));
     let public = contract::PublicExecutionContext {
+        proof_record_id: "test-proof".into(),
         ingress: contract::PublicIngress {
             ingress: contract::IngressClaim {
                 receipt_id: uuid::Uuid::new_v4().to_string(),
@@ -669,8 +670,27 @@ async fn execution_factory_selects_public_prepare_and_rejects_ordinary_context_b
             sender,
         )
         .await;
-    assert!(matches!(result, Err(AppError::Conflict(_))));
+    assert!(matches!(
+        result,
+        Err(AppError::Conflict(message)) if message == "Public runtime unavailable; validate the deployed public contract before enabling"
+    ));
     assert_eq!(egress.0.load(std::sync::atomic::Ordering::SeqCst), 0);
+    for collection in [
+        CONVERSATIONS,
+        CREDENTIALS,
+        crate::models::assistant_message::COLLECTION_NAME,
+        crate::models::platform_public_turn::COLLECTION_NAME,
+    ] {
+        assert_eq!(
+            db.collection::<bson::Document>(collection)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0,
+            "rejected execution must leave {collection} empty"
+        );
+    }
+    db.drop().await.unwrap();
 }
 
 async fn claimed_input(
@@ -814,6 +834,7 @@ async fn personal_event_captures_fresh_authority_and_unlinked_events_remain_web_
         let reply = finish_claim(
             &state,
             &engine::OwnerTurnClaim {
+                reclaimed: None,
                 conversation: row.clone(),
                 credential,
             },
@@ -1162,6 +1183,9 @@ async fn async_result_settlement_retains_original_destination_across_new_revisio
                 report_provenance: model::REPORT_PROVENANCE_V1,
             },
             operation_id: Some(uuid::Uuid::new_v4().to_string()),
+            execution_binding: None,
+            authority_version: 0,
+            contract_binding: None,
             state: "queued".into(),
             reason: Some("done".into()),
             attempts: 0,
@@ -1225,6 +1249,7 @@ async fn async_result_settlement_retains_original_destination_across_new_revisio
         let reply = finish_claim(
             &state,
             &engine::OwnerTurnClaim {
+                reclaimed: None,
                 conversation: continued.clone(),
                 credential,
             },
@@ -1256,5 +1281,42 @@ async fn async_result_settlement_retains_original_destination_across_new_revisio
         );
         assert_eq!(original_watch.state, "delivered");
     }
+    state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn platform_execution_claim_records_actual_worker_and_remains_single_use() {
+    let (state, admitted) = fixture("personal_execution_worker_identity").await;
+    let claim = claimed_input(&state, &admitted).await;
+    state
+        .db
+        .collection::<bson::Document>(CONVERSATIONS)
+        .update_one(
+            doc! {"_id": &claim.conversation.id},
+            doc! {"$set": {"active_turn.worker_instance": {"id": "previous-admission-worker"}}},
+        )
+        .await
+        .unwrap();
+    claim_platform_worker(&state.db, &claim.conversation, &claim.credential.api_key_id)
+        .await
+        .unwrap();
+    let current = engine::get(
+        &state.db,
+        &claim.conversation.user_id,
+        &claim.conversation.id,
+    )
+    .await
+    .unwrap();
+    let turn = current.active_turn.unwrap();
+    assert!(turn.execution_started);
+    assert_eq!(
+        turn.worker_instance.as_ref(),
+        Some(super::super::assistant_engine_worker::instance())
+    );
+    assert!(
+        claim_platform_worker(&state.db, &claim.conversation, &claim.credential.api_key_id)
+            .await
+            .is_err()
+    );
     state.db.drop().await.unwrap();
 }

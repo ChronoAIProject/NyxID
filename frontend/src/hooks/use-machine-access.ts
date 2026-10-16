@@ -8,6 +8,7 @@ import {
 } from "@/schemas/machine-access";
 import { useAuthStore } from "@/stores/auth-store";
 import { nyxBotQueryKeys } from "./use-nyxbot-agents";
+import { useAgentOwnerMutation } from "./use-agent-owner-mutation";
 const path = (id: string) => `/assistant/nyxagent/agents/${encodeURIComponent(id)}/machines`;
 export function useMachineAccess(id: string, enabled = true) {
   const userId = useAuthStore(s => s.user?.id);
@@ -19,11 +20,10 @@ export function useMachineAccess(id: string, enabled = true) {
 }
 export function useSetMachineAccess(id: string) {
   const client = useQueryClient();
-  const userId = useAuthStore(s => s.user?.id);
-  return useMutation({
-    mutationFn: ({ node, selection }: { node: string; selection: MachineSelection }) =>
-      assistantJson(`${path(id)}/${encodeURIComponent(node)}`, { method: "PUT", body: selection }),
-    onSuccess: () => client.invalidateQueries({ queryKey: nyxBotQueryKeys.agents(userId) }),
+  return useAgentOwnerMutation({
+    mutationFn: ({ node, selection }: { node: string; selection: MachineSelection }, guard) =>
+      assistantJson(`${path(id)}/${encodeURIComponent(node)}`, { method: "PUT", body: selection, authorityGuard: guard }),
+    onSettled: (owner) => client.invalidateQueries({ queryKey: nyxBotQueryKeys.agents(owner) }),
   });
 }
 

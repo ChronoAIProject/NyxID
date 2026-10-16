@@ -1242,7 +1242,7 @@ pub enum ServicePreferenceCommands {
         #[command(flatten)]
         auth: AuthArgs,
     },
-    /// Set this catalog group's discovery order with IDs or slugs
+    /// Set this catalog group's agent order; NyxBot enforces personal-first execution
     Set {
         #[arg(long)]
         group: String,
@@ -1280,7 +1280,7 @@ pub enum ServicePreferenceCommands {
 // not load-bearing — accept the lint here.
 #[allow(clippy::large_enum_variant)]
 pub enum ServiceCommands {
-    /// Set agent discovery order within a service's connections
+    /// Set per-service agent order (enforced for NyxBot, advisory for other clients)
     Preference {
         #[command(subcommand)]
         command: ServicePreferenceCommands,
@@ -2653,6 +2653,13 @@ pub enum OrgRoleScopeCommands {
 
 #[derive(Subcommand)]
 pub enum NodeCommands {
+    /// Prepare the protected recipient request for managed platform attestation.
+    #[command(hide = true)]
+    ManagedPrepare(crate::node::managed_runtime::Prepare),
+    /// Internal fixed-image bootstrap; credentials are delivered sealed to this
+    /// Pod's private key and never accepted from an ordinary registration token.
+    #[command(hide = true)]
+    ManagedStart(crate::node::managed_runtime::Start),
     /// Register, enable machine access and start its daemon in one step.
     Setup(crate::node::machine::setup::Setup),
     #[command(hide = true)]

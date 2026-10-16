@@ -99,8 +99,19 @@ export const billingTokenBreakdownSchema = z.object({
   cache_creation_tokens: z.number().int().nonnegative().optional().default(0),
 });
 
+/** Verified gateway attribution of an existing service charge, not a runtime charge. */
+export const billingMachineUsageSchema = z.object({
+  node_id: z.string().min(1),
+  job_id: z.string().min(1),
+  runtime_id: z.string().min(1),
+  runtime_generation: z.number().int().nonnegative().safe().nullable(),
+  grant_id: z.string().min(1).nullable(),
+  principal_kind: z.string().min(1),
+});
+
 export const billingUsageRowSchema = z.object({
   ...fundingBreakdownShape,
+  machine_usage: billingMachineUsageSchema.optional(),
   service_slug: z.string().nullable().optional(),
   service_id: z.string().nullable().optional(),
   metric: z.string(),
@@ -135,6 +146,8 @@ export const billingUsageTotalsSchema = z.object({
 });
 
 export const billingUsageResponseSchema = z.object({
+  machine_id: z.string().uuid().nullable().optional(),
+  job_id: z.string().uuid().nullable().optional(),
   owner_id: z.string().min(1),
   period: z.string().min(1),
   rows: z.array(billingUsageRowSchema),

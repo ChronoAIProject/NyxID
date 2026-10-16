@@ -39,7 +39,9 @@ async fn result(response: Response, error: bool) -> Value {
     let body: Value = serde_json::from_slice(&bytes).unwrap();
     assert!(body.get("error").is_none(), "{body}");
     assert_eq!(body["result"]["isError"], error, "{body}");
-    serde_json::from_str(body["result"]["content"][0]["text"].as_str().unwrap()).unwrap()
+    serde_json::from_str(body["result"]["content"][0]["text"].as_str().unwrap()).unwrap_or_else(
+        |error| panic!("Expected structured tool result: {error}; envelope: {body}"),
+    )
 }
 
 async fn direct_call(f: &Fixture, auth: &McpAuthContext, name: &str, args: Value) -> Response {
@@ -68,6 +70,75 @@ async fn call(f: &Fixture, auth: &McpAuthContext, name: &str, args: Value) -> Re
         json!({"tool_name": name, "arguments_json": args.to_string()}),
     )
     .await
+}
+
+async fn webhook_policy(f: &Fixture, policy: crate::models::trigger_schedule::ConfirmationPolicy) {
+    let now = bson::DateTime::now();
+    f.state.db.collection::<bson::Document>(crate::models::trigger_run::COLLECTION_NAME)
+        .replace_one(doc! {"_id":"webhook-run"}, doc! {
+            "_id":"webhook-run","trigger_id":uuid::Uuid::new_v4().to_string(),"user_id":&f.owner,
+            "scheduled_at":now,"deadline":now,"outcome":"started","confirmation_policy":bson::to_bson(&policy).unwrap(),
+            "thread_id":&f.row.id,"turn_id":&f.row.active_turn.as_ref().unwrap().turn_id,
+            "fence":"test","lease_until":now,"expires_at":bson::DateTime::from_chrono(chrono::Utc::now()+chrono::Duration::hours(4)),
+        }).upsert(true).await.unwrap();
+    f.state
+        .db
+        .collection::<bson::Document>(crate::models::assistant_conversation::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id":&f.row.id},
+            doc! {"$set":{"active_turn.trigger_run_id":"webhook-run"}},
+        )
+        .await
+        .unwrap();
+}
+
+/// Exercise the real resolved MCP executor; user connections are gated there,
+/// after the operation and exact destination have been resolved.
+#[allow(clippy::too_many_arguments)]
+async fn execute_webhook_connection(
+    state: &AppState,
+    auth: &McpAuthContext,
+    service: &mcp_service::McpToolService,
+    endpoint: &mcp_service::McpToolEndpoint,
+    _prepared: &mcp_service::PreparedProxyCall,
+    _tool: &str,
+    args: &Value,
+    request_id: Option<Value>,
+) -> Result<(), Box<Response>> {
+    let prepared = mcp_service::prepare_proxy_tool_call(
+        service,
+        endpoint,
+        &webhook_execution_arguments(auth, args),
+    )
+    .unwrap()
+    .with_acknowledgement(args["acknowledgement_id"].as_str());
+    let exec = mcp_exec_context(auth);
+    let response = Box::pin(mcp_service::execute_tool_response(
+        &state.http_client,
+        &state.db,
+        &state.encryption_keys,
+        &state.node_ws_manager,
+        &state.billing,
+        &auth.user_id,
+        auth.billing_principal_user_id(),
+        service,
+        endpoint,
+        prepared,
+        &state.jwt_keys,
+        &state.config,
+        &state.connection_expiry_notifier,
+        &state.token_exchange_cache,
+        &state.cloud_response_cache,
+        &exec,
+        crate::services::billing::route_inventory::internal_node_dispatch_permit(),
+    ))
+    .await
+    .expect("resolved webhook execution");
+    if (200..300).contains(&response.status) {
+        Ok(())
+    } else {
+        Err(Box::new(tool_result(request_id, &response.text, true)))
+    }
 }
 
 async fn assert_scoped_thread_attachment_access(f: &Fixture, auth: &McpAuthContext) {
@@ -2012,13 +2083,13 @@ async fn guests_never_ask_for_more_access() {
 async fn webhook_calls_require_exact_action_cards_from_http_and_catalog_effects() {
     use crate::models::trigger_schedule::ConfirmationPolicy;
     let f = orchestrator_fixture("webhook_action_cards").await;
-    let service_id = connected(
-        &f.state.db,
-        &f.owner,
-        "webhook-target",
-        "http://127.0.0.1:9",
-    )
-    .await;
+    let server = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::any())
+        .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(json!({"ok":true})))
+        .mount(&server)
+        .await;
+    let service_id = connected(&f.state.db, &f.owner, "webhook-target", &server.uri()).await;
+    webhook_policy(&f, ConfirmationPolicy::Changes).await;
     let mut auth = authenticate(&f).await;
     auth.chat.as_mut().unwrap().confirmation_policy = Some(ConfirmationPolicy::Changes);
     f.state
@@ -2043,7 +2114,7 @@ async fn webhook_calls_require_exact_action_cards_from_http_and_catalog_effects(
     let tool = "webhook-target__proxy";
     let args = json!({"method": "PATCH", "path": "/settings", "body": {"value": true}});
     let prepared = mcp_service::prepare_proxy_tool_call(service, &endpoint, &args).unwrap();
-    let response = webhook_service_gate(
+    let response = execute_webhook_connection(
         &f.state,
         &auth,
         service,
@@ -2055,7 +2126,7 @@ async fn webhook_calls_require_exact_action_cards_from_http_and_catalog_effects(
     )
     .await
     .unwrap_err();
-    let card = result(response, true).await;
+    let card = result(*response, true).await;
     assert_eq!(card["error"], "acknowledgement_required");
     let id = card["acknowledgement_id"].as_str().unwrap();
     let stored = acks::history(&f.state.db, &f.owner, &f.row.id)
@@ -2066,7 +2137,7 @@ async fn webhook_calls_require_exact_action_cards_from_http_and_catalog_effects(
     let get = json!({"method": "GET", "path": "/settings"});
     let prepared_get = mcp_service::prepare_proxy_tool_call(service, &endpoint, &get).unwrap();
     assert!(
-        webhook_service_gate(
+        execute_webhook_connection(
             &f.state,
             &auth,
             service,
@@ -2088,22 +2159,23 @@ async fn webhook_calls_require_exact_action_cards_from_http_and_catalog_effects(
     let schema = webhook_tool_schema(&auth, &json!({"type": "object", "properties": {}}));
     assert_eq!(schema["properties"]["acknowledgement_id"]["type"], "string");
     assert!(
-        webhook_service_gate(
+        execute_webhook_connection(
             &f.state, &auth, service, &endpoint, &prepared, tool, &approved, None
         )
         .await
         .is_ok()
     );
     assert!(
-        webhook_service_gate(
+        execute_webhook_connection(
             &f.state, &auth, service, &endpoint, &prepared, tool, &approved, None
         )
         .await
         .is_err()
     );
-    auth.chat.as_mut().unwrap().confirmation_policy = Some(ConfirmationPolicy::Destructive);
+    webhook_policy(&f, ConfirmationPolicy::Destructive).await;
+    auth = authenticate(&f).await;
     assert!(
-        webhook_service_gate(
+        execute_webhook_connection(
             &f.state, &auth, service, &endpoint, &prepared, tool, &args, None
         )
         .await
@@ -2115,7 +2187,7 @@ async fn webhook_calls_require_exact_action_cards_from_http_and_catalog_effects(
         .or_default()
         .destructive = true;
     assert!(
-        webhook_service_gate(
+        execute_webhook_connection(
             &f.state, &auth, service, &endpoint, &prepared, tool, &args, None
         )
         .await
@@ -2289,9 +2361,12 @@ async fn assistant_operation_scopes_block_direct_universal_raw_and_guest_bypasse
         .await["ok"],
         true
     );
-    let mut webhook = auth.clone();
-    webhook.chat.as_mut().unwrap().confirmation_policy =
-        Some(crate::models::trigger_schedule::ConfirmationPolicy::Changes);
+    webhook_policy(
+        &f,
+        crate::models::trigger_schedule::ConfirmationPolicy::Changes,
+    )
+    .await;
+    let webhook = authenticate(&f).await;
     let card = result(
         call(
             &f,
@@ -4213,29 +4288,32 @@ async fn set_access_mode(f: &Fixture, mode: crate::models::assistant_settings::A
 async fn owner_access_mode_gates_service_operations_by_effect() {
     use crate::models::assistant_settings::AccessMode;
     let f = orchestrator_fixture("owner_mode_service_gate").await;
-    let service_id = connected(&f.state.db, &f.owner, "mode-target", "http://127.0.0.1:9").await;
+    let server = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::any())
+        .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(json!({"ok":true})))
+        .mount(&server)
+        .await;
+    connected(&f.state.db, &f.owner, "mode-target", &server.uri()).await;
     let auth = authenticate(&f).await;
     assert!(auth.chat.as_ref().unwrap().confirmation_policy.is_none());
-    let mut services = load_all_services_for_meta_tools(&f.state, &auth)
-        .await
-        .unwrap();
-    let service = services
-        .iter_mut()
-        .find(|candidate| candidate.service_id == service_id)
-        .unwrap();
-    let endpoint = service.endpoints.remove(0);
-    let (service, endpoint) = (&*service, &endpoint);
-    let tool = "mode-target__proxy";
-    let gate = |method: &'static str| {
+    let tool = "mode-target__request";
+    let gate = |method: &'static str, meta: bool| {
         let args = json!({"method": method, "path": "/items/1"});
-        let prepared = mcp_service::prepare_proxy_tool_call(service, endpoint, &args).unwrap();
         let (f, auth) = (&f, &auth);
         async move {
-            webhook_service_gate(
-                &f.state, auth, service, endpoint, &prepared, tool, &args, None,
-            )
-            .await
-            .is_err()
+            let response = if meta {
+                call(f, auth, tool, args).await
+            } else {
+                direct_call(f, auth, tool, args).await
+            };
+            let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+                .await
+                .unwrap();
+            let body: Value = serde_json::from_slice(&bytes).unwrap();
+            let text = body["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap_or_default();
+            text.contains("acknowledgement_required")
         }
     };
     let matrix = [
@@ -4246,7 +4324,13 @@ async fn owner_access_mode_gates_service_operations_by_effect() {
     for (mode, expected) in matrix {
         set_access_mode(&f, mode).await;
         for (method, asks) in ["GET", "POST", "PATCH", "DELETE"].into_iter().zip(expected) {
-            assert_eq!(gate(method).await, asks, "{mode:?} {method}");
+            for meta in [false, true] {
+                assert_eq!(
+                    gate(method, meta).await,
+                    asks,
+                    "{mode:?} {method} meta={meta}"
+                );
+            }
         }
     }
     let rows = acks::history(&f.state.db, &f.owner, &f.row.id)
@@ -4283,7 +4367,35 @@ async fn owner_access_mode_gates_meta_tools_at_dispatch() {
     use crate::models::assistant_settings::AccessMode;
     let f = orchestrator_fixture("owner_mode_meta_gate").await;
     let auth = authenticate(&f).await;
-    let args = json!({"service": "no-such-host", "command": "uptime"});
+    let mut catalog = crate::test_utils::test_auto_connected_catalog_service();
+    catalog.service_type = "ssh".into();
+    catalog.ssh_config = Some(
+        crate::services::ssh_service::build_ssh_config(
+            &f.state.encryption_keys,
+            &catalog.id,
+            None,
+            crate::services::ssh_service::SshConfigInput {
+                host: "127.0.0.1",
+                port: 22,
+                certificate_auth_enabled: true,
+                ssh_auth_mode: Some(crate::models::ssh_auth_mode::SshAuthMode::Cert),
+                certificate_ttl_minutes: 30,
+                allowed_principals: &["ubuntu".into()],
+            },
+        )
+        .await
+        .unwrap(),
+    );
+    f.state
+        .db
+        .collection::<crate::models::downstream_service::DownstreamService>("downstream_services")
+        .insert_one(&catalog)
+        .await
+        .unwrap();
+    let connection = connected(&f.state.db, &f.owner, "mode-ssh", "ssh://127.0.0.1").await;
+    f.state.db.collection::<bson::Document>("user_services").update_one(doc! {"_id":&connection},
+        doc! {"$set":{"service_type":"ssh","catalog_service_id":&catalog.id,"ssh_auth_mode":"cert"}}).await.unwrap();
+    let args = json!({"service": connection, "command": "uptime"});
     let text = |response: Response| async move {
         let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
             .await
@@ -4303,7 +4415,7 @@ async fn owner_access_mode_gates_meta_tools_at_dispatch() {
         .unwrap()
         .pop()
         .unwrap();
-    assert_eq!(row.tool_name.as_deref(), Some("nyx__ssh_exec"));
+    assert_eq!(row.tool_name.as_deref(), Some("nyxid.service_execution"));
     assert_eq!(row.confirmation.as_ref().unwrap().risk, "destructive");
     assert!(
         !row.summary.contains("uptime"),

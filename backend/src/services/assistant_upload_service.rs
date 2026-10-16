@@ -2213,9 +2213,13 @@ mod integration_tests {
                 .await
                 .is_err()
         );
-        crate::services::admin_user_service::delete_current_user_cascade(db, &user)
-            .await
-            .unwrap();
+        crate::services::admin_user_service::delete_current_user_cascade(
+            db,
+            &user,
+            crate::services::admin_user_service::ACCOUNT_DELETION_POLICY_VERSION,
+        )
+        .await
+        .unwrap();
         assert_eq!(
             db.collection::<bson::Document>(COLLECTION_NAME)
                 .count_documents(doc! {"user_id":&user})

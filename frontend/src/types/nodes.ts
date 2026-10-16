@@ -1,4 +1,5 @@
 export interface NodeMetadata {
+  readonly provisioning_source?: string | null;
   readonly agent_version: string | null;
   readonly os: string | null;
   readonly arch: string | null;

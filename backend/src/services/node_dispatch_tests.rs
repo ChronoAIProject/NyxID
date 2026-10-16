@@ -946,6 +946,7 @@ async fn machine_gateway_upload_streams_across_replicas_without_buffering() {
     );
     let id = uuid::Uuid::new_v4();
     let mut request = nyxid_machine::Request {
+        external_authority: None,
         version: 1,
         authority: None,
         request_id: id.to_string(),

@@ -34,6 +34,7 @@ This document describes every HTTP endpoint exposed by the NyxID backend. All en
   - [Service Endpoints](#service-endpoints)
   - [MCP Config](#mcp-config)
   - [Service Pools](#service-pools)
+  - [Managed Execution Status](#managed-execution-status)
   - [Proxy](#proxy)
   - [Proxy Service Discovery](#proxy-service-discovery)
   - [LLM Gateway](#llm-gateway)
@@ -167,6 +168,7 @@ CLI text errors preserve the existing `Error: ...` line and append the accepted 
 | 6004 | `external_token_invalid`   | 400         | External provider token verification failed (signature, expiry, audience, or claims) |
 | 6005 | `external_provider_not_configured` | 400  | Provider hint missing or provider not configured on the server |
 | 7000 | `approval_required`        | 403         | User approval required (proxy/LLM requests block until decision; this code is used for async status polling) |
+| 12800 | `managed_execution_pending` | 409       | Provider outcome requires verification; inspect the execution UUID in the message and do not retry automatically |
 
 ---
 
@@ -1769,6 +1771,15 @@ curl -X POST http://localhost:3001/api/v1/services/d1e2f3a4-b5c6-7890-1234-56789
 ### SSH
 
 NyxID supports authenticated SSH-over-WebSocket tunnels plus short-lived SSH certificate issuance for downstream services.
+
+NyxBot callers retain these routes under the existing permission modes. Exact
+certificate/session admission binds the connection (or existing catalog-only
+authority), requested parameters and bounded lifetime. Organization use asks in
+Auto and Ask every time; Full access admits without a prompt. Retry the same
+request with `X-NyxID-Acknowledgement-Id` after allowing its action card. A tunnel
+or terminal card authorizes that one session's dynamic traffic, with live
+revocation checks; it does not represent per-frame approval. See
+[NyxBot service execution](NYXBOT_SERVICE_EXECUTION.md).
 
 SSH configuration is embedded directly in the service object under `ssh_config` when `service_type` is `"ssh"`. Create SSH services with `POST /api/v1/services` and update them with `PUT /api/v1/services/{service_id}` instead of calling separate SSH-specific CRUD endpoints.
 
@@ -3902,6 +3913,53 @@ returns `eligible: false` with `reason: "credential_unavailable"`; other
 connections remain in the response. Repair that connection before selecting it.
 Priority execution skips such members before dispatch. Database and data
 integrity errors still fail the request.
+
+### Managed Execution Status
+
+The Telnyx platform offering reserves NyxID credits before provider dispatch and
+settles validated token usage. These authenticated reads expose execution
+metadata without prompts, completions, provider credentials, or raw usage
+responses. Existing credential-type and scope checks still apply. A person can
+read their own acting executions and liabilities funded by their personal
+wallet, including their service accounts; a service account can see only its
+own acting executions. There is no caller-selected billing owner.
+
+#### GET /api/v1/billing/executions
+
+**Auth: Required.** Returns a JSON array of the latest 50 visible executions,
+ordered by descending `created_at` and then descending ID. It accepts no
+pagination or owner selection parameters.
+
+#### GET /api/v1/billing/executions/{id}
+
+**Auth: Required.** Returns one visible execution. An invalid UUID, absent row,
+or inaccessible execution returns `404`.
+
+Both endpoints use this metadata shape:
+
+```json
+{
+  "id": "0e8569b5-16ba-4205-a91f-047ace6c6588",
+  "service_slug": "telnyx-platform",
+  "model": "THE_VERIFIED_MODEL_ID",
+  "state": "pending",
+  "maximum_credits": "0.001",
+  "pending_reason": "outcome_unknown",
+  "created_at": "2026-10-16T00:00:00Z",
+  "updated_at": "2026-10-16T00:00:01Z"
+}
+```
+
+`maximum_credits` is an exact decimal string containing the reservation ceiling.
+`service_slug` and `pending_reason` may be null. States are `prepared`, `funded`,
+`dispatch_admitted`, `pending`, `evidence_ready`, `cancelling`, `released`, and
+`settled`. A pending execution retains possible liability; reading its status
+does not replay the provider call or resolve missing evidence. Successful HTTP
+execution responses include `X-NyxID-Execution-Id`; uncertain outcomes return
+`managed_execution_pending` with the UUID in the error message.
+
+See [Telnyx platform billing](TELNYX_PLATFORM_BILLING.md) for the supported
+operation, funding behavior, activation requirements, and recovery limits.
 
 ### Proxy
 
@@ -8583,3 +8641,36 @@ can send the same image once as a document under the
 A response with `"delivered_as": ["file"]` reports this actual transport kind,
 and the outbound message's `content_type` is `file`. The reply anchor, topic and
 caption are preserved. Other adapters can omit this field.
+
+## NyxBot exact service selection and consent
+
+An authenticated first-party human owner may prefix a new NyxAgent message with
+`/service <connection UUID or unambiguous connection slug>` followed by a newline
+and the request. The composer offers the same next-message choice. The selector
+lasts one admitted turn and chooses identity, not permission. API keys (including
+conversation, delegated and service-account keys), guests and webhook inputs
+cannot install human selection. Ordinary new turns clear it. An approved-card
+continuation inherits only that card's exact target and operation; expired,
+denied or consumed cards install no selection.
+
+Assistant raw proxy/LLM/SSH exec retries accept
+`X-NyxID-Acknowledgement-Id`; MCP service and native tools accept the existing
+`acknowledgement_id`. Native Oracle submit, attach and extract request bodies add
+optional `acknowledgement_id: string`. NyxID consumes this control metadata only
+for assistant execution; ordinary endpoint clients keep their payload contract.
+No acknowledgement transport metadata reaches the provider. Assistant chat keys
+use exact SSH exec and bounded certificate/tunnel/terminal session admission.
+For assistant calls, organization use asks in Auto and Ask every time and Full
+access proceeds without a prompt. Certificate cards bind the subject public key
+and principal; session cards bind the exact connection, principal/initial terminal
+geometry and maximum lifetime (at most one hour). Resume the same request with
+`X-NyxID-Acknowledgement-Id`. Session consent covers dynamic session traffic;
+revocation, config drift or elapsed authority closes the session. Ordinary client
+routing and existing personal catalog-only access are retained.
+
+Organization-use refusals persist the existing action card and return its
+`acknowledgement_id`. Full access bypasses consent while retaining preference
+and authority checks. Raw stateless org model consent admits an exact model and
+connection for the resumed turn; MCP/stateful actions retain exact semantic
+request consent. Machine exec cards explicitly admit declared exact organization
+connections for that command/job. See [execution contract](NYXBOT_SERVICE_EXECUTION.md).

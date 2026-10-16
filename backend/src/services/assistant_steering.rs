@@ -135,6 +135,7 @@ pub async fn reserve(
                 error_code: None, created_at: now, activities: vec![], activity_total: 0, attachments: vec![], origin: row.active_turn.as_ref().map(|turn| turn.origin), via: None,
                     retry_of: None,
                         upstream_error_code: None,
+                        turn_metadata: None,
                         error_detail: None,
             };
             row.message_count += 1;

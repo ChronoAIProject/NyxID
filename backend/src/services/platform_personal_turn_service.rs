@@ -199,7 +199,11 @@ pub(crate) async fn claim_platform_worker(
     mutate_platform_turn(
         db,
         row,
-        doc! {"$set":{"active_turn.execution_started":true}},
+        doc! {"$set":{
+            "active_turn.execution_started":true,
+            "active_turn.worker_instance":bson::to_bson(super::assistant_engine_worker::instance())
+                .map_err(|_|AppError::Internal("Worker identity encoding failed".into()))?,
+        }},
         Some(key_id.to_owned()),
     )
     .await
@@ -413,7 +417,7 @@ pub(crate) async fn claim_personal_turn_in_session(
         conversation_id: ids.conversation_id.clone(),
         turn_id: ids.turn_id.clone(),
     };
-    let claim = engine::begin_owner_turn_in_session(
+    let claim = Box::pin(engine::begin_owner_turn_in_session(
         db,
         session,
         keys,
@@ -424,7 +428,7 @@ pub(crate) async fn claim_personal_turn_in_session(
         None,
         Some(&model_origin(&origin)),
         None,
-    )
+    ))
     .await?
     .into_started()?;
     identity
@@ -659,6 +663,7 @@ impl contract::PersonalTurnProducer for PersonalTurns {
         let state = self.state.clone();
         let egress = self.egress.clone();
         let running = turn.clone();
+        claim.log_reclaimed();
         let settled_hook = self.settled_hook.clone();
         // The bounded receiver belongs to the caller before the worker starts.
         tokio::spawn(

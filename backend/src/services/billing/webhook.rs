@@ -777,6 +777,7 @@ mod tests {
             pending_resale_quantity: None,
             pending_platform_usage: None,
             pool_attempt: None,
+            machine_usage: None,
             status: UsageStatus::Finalized,
             forwarded: true,
             released: true,

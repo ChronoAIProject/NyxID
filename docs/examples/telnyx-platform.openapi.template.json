@@ -1,0 +1,61 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Telnyx Platform Chat",
+    "version": "REPLACE_WITH_TARIFF_VERSION",
+    "description": "A fixed-model text chat paid with NyxID credits. Supply a NyxID credential; no Telnyx OAuth connection is required."
+  },
+  "servers": [{"url": "https://api.telnyx.com/v2"}],
+  "paths": {
+    "/ai/openai/chat/completions": {
+      "post": {
+        "operationId": "chat_completions",
+        "summary": "Generate a text completion using the NyxID Telnyx platform account",
+        "x-aevatar-tool": {
+          "name": "chat_completions",
+          "description": "Spend NyxID credits on the configured Telnyx model. Unverified provider outcomes stay pending; do not retry them automatically.",
+          "readOnly": false,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["model", "messages", "max_tokens"],
+                "properties": {
+                  "model": {"type": "string", "enum": ["REPLACE_WITH_VERIFIED_MODEL_ID"]},
+                  "messages": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 128,
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": ["role", "content"],
+                      "properties": {
+                        "role": {"type": "string", "enum": ["system", "user", "assistant"]},
+                        "content": {"type": "string", "minLength": 1}
+                      }
+                    }
+                  },
+                  "max_tokens": {"type": "integer", "minimum": 1, "description": "Must not exceed the max_output_tokens in the verified managed contract."},
+                  "stream": {"type": "boolean", "enum": [false], "default": false},
+                  "temperature": {"type": "number", "minimum": 0, "maximum": 2}
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {"description": "A verified completion; usage charged through NyxID credits", "content": {"application/json": {"schema": {"type": "object", "additionalProperties": true}}}},
+          "402": {"description": "NyxID funding or billing configuration is unavailable"},
+          "409": {"description": "Provider outcome pending (managed_execution_pending); inspect its NyxID execution status and do not retry automatically"}
+        }
+      }
+    }
+  }
+}

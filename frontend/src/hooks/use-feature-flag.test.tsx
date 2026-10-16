@@ -126,6 +126,7 @@ describe("feature flag catalog", () => {
       SKILL_PIN_DISABLE: "assistant:skill-pin-disable",
       ORG_AGENTS: "assistant:org-agents",
       BILLING: "experimental:billing",
+      REMOTE_MACHINES: "experimental:remote-machines",
       AEVATAR_CHAT_WIRE_LOG: "experimental:aevatar-chat-wire-log",
       DIRECT_CHAT_ENGINE: "experimental:direct-chat-engine",
       NYXBOT_THREAD_FOLLOW: "nyxbot:thread-follow",

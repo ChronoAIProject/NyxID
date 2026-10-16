@@ -11,7 +11,7 @@ use crate::models::refresh_token::{COLLECTION_NAME as REFRESH_TOKENS, RefreshTok
 /// Upserts: if consent exists for (user_id, client_id), replaces scopes.
 ///
 /// Test-only convenience wrapper: production code uses
-/// [`grant_consent_with_services`]; the plain `grant_consent` is retained only
+/// [`grant_consent_with_machine`]; the plain `grant_consent` is retained only
 /// for existing tests, so it is scoped to test builds to avoid a bin dead-code error.
 #[cfg(test)]
 pub async fn grant_consent(
@@ -27,6 +27,7 @@ pub async fn grant_consent(
 ///
 /// `Some(ids)`, including an empty list, is an explicit per-service consent
 /// grant. `None` is an explicit unrestricted service grant.
+#[cfg(test)]
 pub async fn grant_consent_with_services(
     db: &mongodb::Database,
     user_id: &str,
@@ -47,6 +48,7 @@ pub async fn grant_consent_with_services(
     .await
 }
 
+#[cfg(test)]
 async fn grant_consent_internal(
     db: &mongodb::Database,
     user_id: &str,
@@ -55,60 +57,196 @@ async fn grant_consent_internal(
     allow_all_services: bool,
     allowed_service_ids: Option<Vec<String>>,
 ) -> AppResult<Consent> {
-    let now = Utc::now();
+    grant_consent_with_machine(
+        db,
+        user_id,
+        client_id,
+        scopes,
+        allow_all_services,
+        allowed_service_ids,
+        None,
+    )
+    .await
+}
 
-    let consent = Consent {
-        id: Uuid::new_v4().to_string(),
-        user_id: user_id.to_string(),
-        client_id: client_id.to_string(),
-        scopes: scopes.to_string(),
+#[allow(clippy::too_many_arguments)]
+pub async fn grant_consent_with_machine(
+    db: &mongodb::Database,
+    user_id: &str,
+    client_id: &str,
+    scopes: &str,
+    allow_all_services: bool,
+    allowed_service_ids: Option<Vec<String>>,
+    machine: Option<&super::machine_oauth_consent_service::MachineConsentApproval>,
+) -> AppResult<Consent> {
+    let mut session = db.client().start_session().await?;
+    let db = db.clone();
+    let user_id = user_id.to_owned();
+    let client_id = client_id.to_owned();
+    let scopes = scopes.to_owned();
+    let machine = machine.cloned();
+    session
+        .start_transaction()
+        .and_run2(async move |session| {
+            let db = &db;
+            let user_id = user_id.as_str();
+            let client_id = client_id.as_str();
+            let scopes = scopes.as_str();
+            let machine = machine.as_ref();
+            let result: AppResult<Consent> = async {
+                let existing = db
+                    .collection::<Consent>(CONSENTS)
+                    .find_one(doc! { "user_id": user_id, "client_id": client_id })
+                    .session(&mut *session)
+                    .await?;
+                write_consent_in_session(
+                    db,
+                    user_id,
+                    client_id,
+                    existing.as_ref(),
+                    scopes,
+                    allow_all_services,
+                    allowed_service_ids.clone(),
+                    None,
+                    machine,
+                    session,
+                )
+                .await
+            }
+            .await;
+            super::api_key_mutation_service::transaction_result(result)
+        })
+        .await
+        .map_err(super::api_key_mutation_service::map_transaction_error)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn write_consent_in_session(
+    db: &mongodb::Database,
+    user_id: &str,
+    client_id: &str,
+    existing: Option<&Consent>,
+    scopes: &str,
+    allow_all_services: bool,
+    allowed_service_ids: Option<Vec<String>>,
+    expires_at: Option<chrono::DateTime<Utc>>,
+    machine: Option<&super::machine_oauth_consent_service::MachineConsentApproval>,
+    session: &mut mongodb::ClientSession,
+) -> AppResult<Consent> {
+    let updated = Consent {
+        id: existing
+            .map(|c| c.id.clone())
+            .unwrap_or_else(|| Uuid::new_v4().to_string()),
+        user_id: user_id.to_owned(),
+        client_id: client_id.to_owned(),
+        scopes: scopes.to_owned(),
         revision: Some(Uuid::new_v4().to_string()),
         issuance_fence: None,
         allow_all_services,
-        allowed_service_ids: allowed_service_ids.clone(),
-        granted_at: now,
-        expires_at: None,
+        allowed_service_ids,
+        granted_at: Utc::now(),
+        expires_at,
     };
-
-    // Try to find existing consent for this user+client
-    let existing = db
-        .collection::<Consent>(CONSENTS)
-        .find_one(doc! { "user_id": user_id, "client_id": client_id })
-        .await?;
-
-    match existing {
-        Some(ex) => {
-            // Update existing consent
-            let updated = Consent {
-                id: ex.id.clone(),
-                user_id: user_id.to_string(),
-                client_id: client_id.to_string(),
-                scopes: scopes.to_string(),
-                revision: Some(Uuid::new_v4().to_string()),
-                issuance_fence: None,
-                allow_all_services,
-                allowed_service_ids,
-                granted_at: now,
-                expires_at: None,
-            };
-
-            let result = db
-                .collection::<Consent>(CONSENTS)
-                .replace_one(version_filter(&ex), &updated)
-                .await?;
-            if result.matched_count != 1 {
-                return Err(grant_changed());
-            }
-
-            Ok(updated)
+    if let Some(existing) = existing {
+        let result = db
+            .collection::<Consent>(CONSENTS)
+            .replace_one(version_filter(existing), &updated)
+            .session(&mut *session)
+            .await?;
+        if result.matched_count != 1 {
+            return Err(grant_changed());
         }
-        None => {
-            db.collection::<Consent>(CONSENTS)
-                .insert_one(&consent)
-                .await?;
-            Ok(consent)
-        }
+    } else {
+        db.collection::<Consent>(CONSENTS)
+            .insert_one(&updated)
+            .session(&mut *session)
+            .await?;
     }
+    super::machine_external_grant_service::invalidate_oauth_in_session(
+        db,
+        user_id,
+        client_id,
+        "consent_changed",
+        session,
+    )
+    .await?;
+    if let Some(machine) = machine {
+        super::machine_oauth_consent_service::approve_in_session(
+            db, user_id, client_id, existing, &updated, machine, session,
+        )
+        .await?;
+    }
+    Ok(updated)
+}
+
+/// A token reference is accepted only as the original nonempty server-issued version.
+pub fn protected_reference(
+    consent: &Consent,
+) -> AppResult<crate::models::consent::ProtectedConsentRef> {
+    let revision = consent
+        .revision
+        .as_deref()
+        .filter(|r| !r.trim().is_empty())
+        .ok_or_else(grant_changed)?;
+    if consent.id.trim().is_empty() {
+        return Err(grant_changed());
+    }
+    Ok(crate::models::consent::ProtectedConsentRef {
+        consent_id: consent.id.clone(),
+        consent_revision: revision.to_owned(),
+    })
+}
+
+/// No Machine reads on ordinary OAuth paths. Legacy/missing references cannot upgrade.
+pub async fn validate_protected_reference(
+    db: &mongodb::Database,
+    user_id: &str,
+    client_id: &str,
+    scope: &str,
+    reference: Option<&crate::models::consent::ProtectedConsentRef>,
+) -> AppResult<Option<Consent>> {
+    if !scope.split_whitespace().any(|s| s == "machine") && reference.is_none() {
+        return Ok(None);
+    }
+    let reference = reference.ok_or_else(grant_changed)?;
+    if reference.consent_id.trim().is_empty() || reference.consent_revision.trim().is_empty() {
+        return Err(grant_changed());
+    }
+    let consent = check_consent(db, user_id, client_id, "machine")
+        .await?
+        .ok_or_else(grant_changed)?;
+    if protected_reference(&consent)? != *reference {
+        return Err(grant_changed());
+    }
+    Ok(Some(consent))
+}
+
+/// Issuance writes the same source row as revocation, after refresh persistence.
+/// A revoke racing before this fence makes issuance fail; one racing after it
+/// observes the persisted refresh row. Machine admission additionally rechecks live.
+pub async fn fence_protected_reference(
+    db: &mongodb::Database,
+    user_id: &str,
+    client_id: &str,
+    scope: &str,
+    reference: Option<&crate::models::consent::ProtectedConsentRef>,
+) -> AppResult<()> {
+    let Some(consent) =
+        validate_protected_reference(db, user_id, client_id, scope, reference).await?
+    else {
+        return Ok(());
+    };
+    let result = db
+        .collection::<Consent>(CONSENTS)
+        .update_one(
+            version_filter(&consent),
+            doc! { "$set": { "issuance_fence": Uuid::new_v4().to_string() } },
+        )
+        .await?;
+    if result.matched_count != 1 {
+        return Err(grant_changed());
+    }
+    Ok(())
 }
 
 pub fn grant_changed() -> AppError {
@@ -148,36 +286,58 @@ pub fn fingerprint(consent: &Consent) -> AppResult<String> {
 
 /// Compare-and-swap only: a deleted/revoked grant must never be upserted by an
 /// old browser decision. Normal review writes use the same version fence.
+#[cfg(test)]
 pub async fn replace_incremental_consent(
     db: &mongodb::Database,
     existing: &Consent,
     scopes: &str,
     allowed_service_ids: Vec<String>,
 ) -> AppResult<Consent> {
-    let updated = Consent {
-        scopes: scopes.to_string(),
-        allowed_service_ids: Some(allowed_service_ids),
-        revision: Some(Uuid::new_v4().to_string()),
-        issuance_fence: None,
-        granted_at: Utc::now(),
-        ..existing.clone()
-    };
-    let mut filter = version_filter(existing);
-    filter.insert(
-        "$or",
-        vec![
-            doc! { "expires_at": bson::Bson::Null },
-            doc! { "expires_at": { "$gt": bson::DateTime::now() } },
-        ],
-    );
-    let result = db
-        .collection::<Consent>(CONSENTS)
-        .replace_one(filter, &updated)
-        .await?;
-    if result.matched_count != 1 {
-        return Err(grant_changed());
-    }
-    Ok(updated)
+    replace_incremental_consent_with_machine(db, existing, scopes, allowed_service_ids, None).await
+}
+
+pub async fn replace_incremental_consent_with_machine(
+    db: &mongodb::Database,
+    existing: &Consent,
+    scopes: &str,
+    allowed_service_ids: Vec<String>,
+    machine: Option<&super::machine_oauth_consent_service::MachineConsentApproval>,
+) -> AppResult<Consent> {
+    let mut session = db.client().start_session().await?;
+    let db = db.clone();
+    let existing = existing.clone();
+    let scopes = scopes.to_owned();
+    let machine = machine.cloned();
+    session
+        .start_transaction()
+        .and_run2(async move |session| {
+            let db = &db;
+            let existing = &existing;
+            let scopes = scopes.as_str();
+            let machine = machine.as_ref();
+            let result: AppResult<Consent> = async {
+                if existing.expires_at.is_some_and(|e| e <= Utc::now()) {
+                    return Err(grant_changed());
+                }
+                write_consent_in_session(
+                    db,
+                    &existing.user_id,
+                    &existing.client_id,
+                    Some(existing),
+                    scopes,
+                    existing.allow_all_services,
+                    Some(allowed_service_ids.clone()),
+                    existing.expires_at,
+                    machine,
+                    session,
+                )
+                .await
+            }
+            .await;
+            super::api_key_mutation_service::transaction_result(result)
+        })
+        .await
+        .map_err(super::api_key_mutation_service::map_transaction_error)
 }
 
 /// Check if a user has granted consent for the requested scopes to a client.
@@ -197,7 +357,7 @@ pub async fn check_consent(
         Some(c) => {
             // Check if the consent has expired
             if let Some(expires_at) = c.expires_at
-                && expires_at < Utc::now()
+                && expires_at <= Utc::now()
             {
                 return Ok(None);
             }
@@ -226,6 +386,30 @@ pub async fn revoke_consent(
         .start_transaction()
         .and_run2(async move |session| {
             let result: AppResult<ConsentRevocationResult> = async {
+                // Conflict with Machine consent preparation on the same live
+                // owner source row, then remove every unconsumed request. This
+                // prevents absent->approved->deleted consent ABA from making a
+                // formerly pending initial request authoritative again.
+                db.collection::<bson::Document>(crate::models::user::COLLECTION_NAME)
+                    .update_one(
+                        doc! {"_id":&user_id},
+                        // Keep in-flight Machine selections stale even across
+                        // absent -> approved -> revoked -> absent consent ABA.
+                        // This is not a grant security epoch: other live grants
+                        // retain their authority and ordinary fence writes do
+                        // not invalidate the preparation's consent baseline.
+                        doc! {"$inc":{"machine_external_fence":1_i64,"machine_consent_revocation_revision":1_i64}},
+                    )
+                    .session(&mut *session)
+                    .await?;
+                db.collection::<bson::Document>(
+                    crate::models::machine_oauth_consent_request::COLLECTION_NAME,
+                )
+                .delete_many(
+                    doc! {"user_id":&user_id,"client_id":&client_id,"consumed_at":bson::Bson::Null},
+                )
+                .session(&mut *session)
+                .await?;
                 let deleted = db
                     .collection::<Consent>(CONSENTS)
                     .delete_one(doc! { "user_id": &user_id, "client_id": &client_id })
@@ -234,6 +418,14 @@ pub async fn revoke_consent(
                 if deleted.deleted_count == 0 {
                     return Err(AppError::ConsentNotFound);
                 }
+                super::machine_external_grant_service::invalidate_oauth_in_session(
+                    &db,
+                    &user_id,
+                    &client_id,
+                    "consent_revoked",
+                    session,
+                )
+                .await?;
                 let revoked_refresh_tokens = if client_id == Uuid::nil().to_string() {
                     0
                 } else {
@@ -496,6 +688,7 @@ mod tests {
         db.collection::<RefreshToken>(REFRESH_TOKENS)
             .insert_many([
                 RefreshToken {
+                    protected_consent: None,
                     id: Uuid::new_v4().to_string(),
                     jti: refresh_jti.clone(),
                     client_id: client_id.clone(),
@@ -512,6 +705,7 @@ mod tests {
                     created_at: now,
                 },
                 RefreshToken {
+                    protected_consent: None,
                     id: Uuid::new_v4().to_string(),
                     jti: first_party_jti.clone(),
                     client_id: Uuid::nil().to_string(),
@@ -528,6 +722,7 @@ mod tests {
                     created_at: now,
                 },
                 RefreshToken {
+                    protected_consent: None,
                     id: Uuid::new_v4().to_string(),
                     jti: other_client_jti.clone(),
                     client_id: other_client_id,

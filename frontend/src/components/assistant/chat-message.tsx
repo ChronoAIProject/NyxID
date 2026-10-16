@@ -1,3 +1,7 @@
+import { useRouter, useRouterState } from "@tanstack/react-router";
+import { useAccountPanel } from "@/hooks/use-account-panel";
+import { isAssistantShellRoute } from "@/lib/assistant/account-panel-search";
+import { CAPACITY_ACKNOWLEDGEMENT, formatCapacityWait } from "@/lib/assistant/capacity-wait";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import {
   memo,
@@ -285,10 +289,31 @@ function ActivityBlock({ message }: { readonly message: ChatMessage }) {
 
 type ErrorDetail = NonNullable<ChatMessage["errorDetail"]>;
 
+function BillingRemedy() {
+  const router = useRouter({ warn: false });
+  return router ? <BillingRemedyWithRouter /> : null;
+}
+
+function BillingRemedyWithRouter() {
+  const pathname = useRouterState({ select: (state) => state.location.pathname });
+  const panel = useAccountPanel();
+  if (!isAssistantShellRoute(pathname)) return null;
+  return <button type="button" className="mt-2 block text-11 underline"
+    onClick={() => void panel.open("billing", { panelTab: "overview" })}>Open Billing &amp; Usage</button>;
+}
+
+function CapacityDetails({ attempts, capacityWaitMs }: { readonly attempts?: number | null; readonly capacityWaitMs?: number | null }) {
+  return <>{attempts != null ? <><dt>attempts</dt><dd>{attempts}</dd></> : null}
+    {capacityWaitMs != null && capacityWaitMs > 0 ? <><dt>capacity</dt><dd>waited {formatCapacityWait(capacityWaitMs)} for capacity</dd></> : null}</>;
+}
+
 /** Metadata-only diagnostics of a failed turn, with a copyable ID. */
 function ErrorDetails({ detail }: { readonly detail: ErrorDetail }) {
   const diagnosticId = [
     `turn ${detail.turnId}`,
+    detail.attempts != null ? `attempts ${detail.attempts}` : null,
+    detail.capacityWaitMs != null ? `capacity_wait_ms ${detail.capacityWaitMs}` : null,
+    detail.upstreamCode ? `upstream ${detail.upstreamCode}` : null,
     detail.responseId ? `response ${detail.responseId}` : null,
     detail.upstreamRequestId ? `request ${detail.upstreamRequestId}` : null,
   ]
@@ -298,6 +323,7 @@ function ErrorDetails({ detail }: { readonly detail: ErrorDetail }) {
     <details className="mt-2 text-11 text-text-tertiary">
       <summary className="cursor-pointer">Details</summary>
       <dl className="mt-1 grid grid-cols-[auto_1fr] gap-x-2 gap-y-0.5 rounded border border-hairline p-2 font-mono">
+        <CapacityDetails attempts={detail.attempts} capacityWaitMs={detail.capacityWaitMs} />
         <dt>stage</dt>
         <dd>{detail.stage}</dd>
         {detail.httpStatus != null ? (
@@ -306,6 +332,7 @@ function ErrorDetails({ detail }: { readonly detail: ErrorDetail }) {
             <dd>{detail.httpStatus}</dd>
           </>
         ) : null}
+        {detail.upstreamCode ? <><dt>upstream</dt><dd>{detail.upstreamCode}</dd></> : null}
         <dt>turn</dt>
         <dd>{detail.turnId}</dd>
         {detail.responseId ? (
@@ -347,19 +374,35 @@ function ErrorDetails({ detail }: { readonly detail: ErrorDetail }) {
  * model can think for many seconds before its first word, which must not read
  * as a frozen page. Ticks only itself, never the transcript.
  */
-function WaitingStatus({ label, interrupted }: {
+function WaitingStatus({ label, interrupted, capacity, capacityStartedAt, capacityDeadline }: {
   readonly label?: string;
   readonly interrupted?: boolean;
+  readonly capacity?: boolean;
+  readonly capacityStartedAt?: string | null;
+  readonly capacityDeadline?: string | null;
 }) {
-  const [seconds, setSeconds] = useState(0);
+  const [started] = useState(Date.now);
+  const [now, setNow] = useState(Date.now);
   useEffect(() => {
-    const started = Date.now();
-    const timer = setInterval(
-      () => setSeconds(Math.floor((Date.now() - started) / 1000)),
-      1000,
-    );
+    const timer = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(timer);
   }, []);
+  const seconds = Math.max(0, Math.floor((now - started) / 1000));
+  if (capacity) {
+    const from = Date.parse(capacityStartedAt ?? "");
+    const to = Date.parse(capacityDeadline ?? "");
+    const clock = (value: number) => `${Math.floor(value / 60)}:${String(value % 60).padStart(2, "0")}`;
+    const bound = Math.max(0, Math.ceil((to - from) / 1000));
+    const waited = Math.min(bound, Math.max(0, Math.floor((now - from) / 1000)));
+    return (
+      <span data-waiting-status>
+        <StatusLabel label="Waiting for the assistant" interrupted={interrupted} />
+        {Number.isFinite(from) && Number.isFinite(to)
+          ? <span aria-hidden> · {clock(waited)} of up to {clock(bound)}</span>
+          : seconds >= 3 ? <span aria-hidden> · {formatElapsed(seconds)}</span> : null}
+      </span>
+    );
+  }
   return (
     <span data-waiting-status={!label && seconds >= 3 ? true : undefined}>
       <StatusLabel label={label ?? "Thinking"} interrupted={interrupted} />
@@ -384,6 +427,7 @@ export function ChatMessageBubble({
   readonly feedbackEnabled?: boolean;
 }) {
   const streaming = message.status === "streaming";
+  const capacityNote = streaming && message.systemNote === "capacity_wait";
   const [retrying, setRetrying] = useState(false);
   const [retryError, setRetryError] = useState<string>();
   const [reviewOpen, setReviewOpen] = useState(false);
@@ -502,12 +546,14 @@ export function ChatMessageBubble({
     conversationId &&
     message.status === "complete" &&
     !message.errorCode &&
+    !message.systemNote &&
     message.id,
   );
   return (
     <article
       role={thinking ? "status" : undefined}
-      aria-label={thinking ? "Assistant is thinking" : undefined}
+      aria-label={capacityNote ? "Assistant is waiting for capacity" : thinking ? "Assistant is thinking" : undefined}
+      data-system-note={capacityNote ? "capacity_wait" : undefined}
       className="group/message flex items-start gap-2.5"
     >
       <span
@@ -537,7 +583,19 @@ export function ChatMessageBubble({
             ))}
           </div>
         ) : null}
-        {content ? <TextBlock text={content} streaming={streaming} /> : null}
+        {capacityNote ? (
+          <p role="note" className="text-12 leading-relaxed text-foreground">{CAPACITY_ACKNOWLEDGEMENT}</p>
+        ) : content ? <TextBlock text={content} streaming={streaming} /> : null}
+        {message.status === "error" && ["wallet_suspended", "plan_entitlement_required"].includes(message.errorCode ?? "") ? (
+          <BillingRemedy />
+        ) : null}
+        {message.status === "complete" && message.turnMetadata && ((message.turnMetadata.capacityWaitMs ?? 0) > 0 || (message.turnMetadata.attempts ?? 0) > 1) ? (
+          <details className="mt-2 text-11 text-text-tertiary"><summary className="cursor-pointer">Details</summary>
+            <dl className="mt-1 grid grid-cols-[auto_1fr] gap-x-2 gap-y-0.5 rounded border border-hairline p-2 font-mono">
+              <CapacityDetails {...message.turnMetadata} />
+            </dl>
+          </details>
+        ) : null}
         {message.status === "error" && message.errorDetail ? (
           <ErrorDetails detail={message.errorDetail} />
         ) : null}
@@ -639,7 +697,7 @@ export function ChatMessageBubble({
               {...(!content && runningTool ? { "data-running-tool": runningTool.name } : {})}
               {...(!runningTool && lastTool ? { "data-last-tool": true } : {})}
             >
-              {toolStartedAt ? (
+              {toolStartedAt && !(capacityNote || message.waitingForCapacity) ? (
                 <>
                   <StatusLabel
                     label={statusLabel ?? "Thinking"}
@@ -648,7 +706,13 @@ export function ChatMessageBubble({
                   <ToolElapsed startedAt={toolStartedAt} />
                 </>
               ) : (
-                <WaitingStatus label={statusLabel} interrupted={message.turnStatus?.interrupted} />
+                <WaitingStatus
+                  label={statusLabel}
+                  interrupted={message.turnStatus?.interrupted}
+                  capacity={capacityNote || message.waitingForCapacity}
+                  capacityStartedAt={message.capacityWaitStartedAt}
+                  capacityDeadline={message.capacityWaitDeadline}
+                />
               )}
             </span>
           </div>

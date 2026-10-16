@@ -421,6 +421,13 @@ async fn service_tool_content(
     bool,
     Option<crate::models::assistant_conversation::ToolFailure>,
 ) {
+    if response.is_policy_refusal() {
+        return (
+            vec![serde_json::json!({ "type": "text", "text": response.text })],
+            true,
+            None,
+        );
+    }
     let status = response.status;
     let is_error = !(200..300).contains(&status);
     let Some(media) = response.media.filter(|_| !is_error) else {
@@ -633,6 +640,9 @@ fn untracked_discovery_allowed(name: Option<&str>) -> bool {
 /// limits, and audit attribution.
 #[derive(Debug, Clone)]
 struct McpAuthContext {
+    /// Derived only from verified OAuth claims or a live authenticated key.
+    /// No source lookup occurs for unrelated tools; Machine admission is live.
+    machine_source: Option<crate::services::machine_external_grant_service::VerifiedExternalSource>,
     caller_token: Option<proxy_service::CallerToken>,
     chat: Option<crate::services::assistant_acknowledgement_service::ChatAuthority>,
     account_acknowledged: bool,
@@ -672,6 +682,7 @@ struct McpAuthContext {
 impl McpAuthContext {
     fn user(user_id: String, auth_method: AuthMethod) -> Self {
         Self {
+            machine_source: None,
             caller_token: None,
             chat: None,
             account_acknowledged: false,
@@ -816,21 +827,31 @@ fn mcp_extract_user_agent(headers: &HeaderMap) -> Option<String> {
 /// without the flag, return 401 so the client re-presents its token.
 ///
 /// On failure returns an MCP-formatted 401 response with `WWW-Authenticate`.
-#[allow(clippy::result_large_err)]
 enum McpAuthentication {
     Ordinary(Box<McpAuthContext>),
     Public(Box<crate::services::platform_public_tools::PublicMcpAuthority>),
 }
 
-#[allow(clippy::result_large_err)]
 async fn authenticate_mcp(
     state: &AppState,
     headers: &HeaderMap,
     session_fallback: bool,
-) -> Result<McpAuthContext, Response> {
-    match authenticate_mcp_or_public(state, headers, session_fallback, false).await? {
+) -> Result<McpAuthContext, Box<Response>> {
+    authenticate_mcp_for_method(state, headers, session_fallback, axum::http::Method::POST).await
+}
+
+async fn authenticate_mcp_for_method(
+    state: &AppState,
+    headers: &HeaderMap,
+    session_fallback: bool,
+    method: axum::http::Method,
+) -> Result<McpAuthContext, Box<Response>> {
+    match authenticate_mcp_or_public(state, headers, session_fallback, false, method)
+        .await
+        .map_err(Box::new)?
+    {
         McpAuthentication::Ordinary(auth) => Ok(*auth),
-        McpAuthentication::Public(_) => Err(mcp_403_api_key_insufficient_scope()),
+        McpAuthentication::Public(_) => Err(Box::new(mcp_403_api_key_insufficient_scope())),
     }
 }
 
@@ -840,6 +861,7 @@ async fn authenticate_mcp_or_public(
     headers: &HeaderMap,
     session_fallback: bool,
     allow_public: bool,
+    method: axum::http::Method,
 ) -> Result<McpAuthentication, Response> {
     let request_ip = mcp_extract_ip(headers);
     let request_ua = mcp_extract_user_agent(headers);
@@ -916,6 +938,14 @@ async fn authenticate_mcp_or_public(
                     .await
                     .map_err(axum::response::IntoResponse::into_response)?;
                 return Ok(McpAuthentication::Ordinary(Box::new(McpAuthContext {
+                    machine_source: if chat.is_none()
+                        && !auth::is_assistant_conversation_key_candidate(&api_key)
+                    {
+                        crate::services::machine_external_grant_service::VerifiedExternalSource::from_verified_api_key(
+                            &api_key, credential_id.as_deref()).ok()
+                    } else {
+                        None
+                    },
                     caller_token: proxy_service::caller_bearer_token_for_downstream(headers, false),
                     scope: api_key.scopes.clone(),
                     resource_uris: None,
@@ -962,7 +992,10 @@ async fn authenticate_mcp_or_public(
     let token = headers
         .get("authorization")
         .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.strip_prefix("Bearer "));
+        .and_then(|s| {
+            s.strip_prefix("Bearer ")
+                .or_else(|| s.strip_prefix("DPoP "))
+        });
 
     // A raw API key must never acquire an unrelated stored MCP session via
     // bearer/JWT fallback. Public-purpose keys have no session authority.
@@ -991,6 +1024,27 @@ async fn authenticate_mcp_or_public(
     if let Some(token) = token {
         match jwt::verify_token(&state.jwt_keys, &state.config, token) {
             Ok(claims) if claims.token_type == "access" => {
+                // Manual MCP authentication preserves the same sender-bound
+                // proof checks as the REST extractor. It never turns a bound
+                // token into an ordinary bearer for Machine execution.
+                if let Some(cnf) = claims.cnf.as_ref() {
+                    let request = axum::http::Request::builder()
+                        .method(method.clone())
+                        .uri("/mcp")
+                        .body(())
+                        .map_err(|_| mcp_401(&state.config.base_url))?;
+                    let (mut parts, _) = request.into_parts();
+                    parts.headers = headers.clone();
+                    if let Some(jkt) = cnf.jkt.as_deref() {
+                        auth::validate_dpop_bound_access(&parts, state, jkt)
+                            .await
+                            .map_err(|_| mcp_401(&state.config.base_url))?;
+                    }
+                    if let Some(x5t) = cnf.x5t_s256.as_deref() {
+                        auth::validate_mtls_bound_access(&parts, state, x5t)
+                            .map_err(|_| mcp_401(&state.config.base_url))?;
+                    }
+                }
                 if !auth::scope_allows_rest_proxy(&claims.scope) {
                     return Err(mcp_403_insufficient_scope());
                 }
@@ -1050,6 +1104,20 @@ async fn authenticate_mcp_or_public(
                 };
 
                 let mut ctx = McpAuthContext::user(user_id, auth_method);
+                if claims.resources.as_ref().is_none_or(|resources| {
+                    // Existing OAuth issuance serializes an omitted RFC 8707
+                    // resource as Some([]). Only a nonempty list narrows the
+                    // audience; Machine scope and protected consent still apply.
+                    resources.is_empty()
+                        || resources.iter().any(|resource| {
+                            crate::services::oauth_resource_service::is_mcp_resource(
+                                &state.config,
+                                resource,
+                            )
+                        })
+                }) {
+                    ctx.machine_source = crate::services::machine_external_grant_service::VerifiedExternalSource::from_verified_oauth(&claims).ok();
+                }
                 ctx.caller_token =
                     proxy_service::caller_bearer_token_for_downstream(headers, false);
                 if matches!(
@@ -1266,6 +1334,44 @@ fn mcp_service_scope(auth: &McpAuthContext) -> mcp_service::ServiceScope<'_> {
 }
 
 #[cfg(test)]
+pub(crate) async fn external_machine_source_for_test(
+    state: &AppState,
+    raw_key: &str,
+) -> crate::errors::AppResult<crate::services::machine_external_grant_service::VerifiedExternalSource>
+{
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "x-api-key",
+        axum::http::HeaderValue::from_str(raw_key)
+            .map_err(|_| crate::errors::AppError::MachineNotAllowed)?,
+    );
+    authenticate_mcp(state, &headers, false)
+        .await
+        .map_err(|_| crate::errors::AppError::MachineNotAllowed)?
+        .machine_source
+        .ok_or(crate::errors::AppError::MachineNotAllowed)
+}
+
+#[cfg(test)]
+pub(crate) async fn external_machine_oauth_source_for_test(
+    state: &AppState,
+    bearer: &str,
+) -> crate::errors::AppResult<crate::services::machine_external_grant_service::VerifiedExternalSource>
+{
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        axum::http::header::AUTHORIZATION,
+        axum::http::HeaderValue::from_str(&format!("Bearer {bearer}"))
+            .map_err(|_| crate::errors::AppError::MachineNotAllowed)?,
+    );
+    authenticate_mcp(state, &headers, false)
+        .await
+        .map_err(|_| crate::errors::AppError::MachineNotAllowed)?
+        .machine_source
+        .ok_or(crate::errors::AppError::MachineNotAllowed)
+}
+
+#[cfg(test)]
 pub(super) async fn assert_oauth_service_scope(
     state: &AppState,
     access_token: &str,
@@ -1400,7 +1506,15 @@ pub async fn mcp_post(
     // `initialize` requires a valid JWT or API key (no session exists yet).
     // All other methods allow session-based auth fallback.
     let is_initialize = request.method == "initialize";
-    let auth = match authenticate_mcp_or_public(&state, &headers, !is_initialize, true).await {
+    let auth = match authenticate_mcp_or_public(
+        &state,
+        &headers,
+        !is_initialize,
+        true,
+        axum::http::Method::POST,
+    )
+    .await
+    {
         Ok(McpAuthentication::Ordinary(a)) => *a,
         Ok(McpAuthentication::Public(a)) => {
             return handle_public_rpc(&state, &headers, &body, &request, &a).await;
@@ -1541,6 +1655,7 @@ async fn handle_public_rpc(
                 "protocolVersion":negotiated_protocol_version(request.params.as_ref()),
                 "capabilities":{"tools":{"listChanged":false}},
                 "serverInfo":{"name":"nyxid-public","version":env!("CARGO_PKG_VERSION")},
+                "_meta":authority.metadata(),
                 "instructions":public::INSTRUCTIONS,
             }),
         ),
@@ -1642,10 +1757,11 @@ async fn resolve_session(
 // ---------------------------------------------------------------------------
 
 pub async fn mcp_get(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    let auth = match authenticate_mcp(&state, &headers, true).await {
-        Ok(a) => a,
-        Err(resp) => return resp,
-    };
+    let auth =
+        match authenticate_mcp_for_method(&state, &headers, true, axum::http::Method::GET).await {
+            Ok(a) => a,
+            Err(resp) => return *resp,
+        };
 
     if let Err(e) = crate::mw::rate_limit::check_agent_rate_limit_raw(
         &state.per_agent_limiter,
@@ -1730,9 +1846,11 @@ pub async fn mcp_get(State(state): State<AppState>, headers: HeaderMap) -> Respo
 // ---------------------------------------------------------------------------
 
 pub async fn mcp_delete(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    let auth = match authenticate_mcp(&state, &headers, true).await {
+    let auth = match authenticate_mcp_for_method(&state, &headers, true, axum::http::Method::DELETE)
+        .await
+    {
         Ok(a) => a,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
 
     if let Err(e) = crate::mw::rate_limit::check_agent_rate_limit_raw(
@@ -1999,6 +2117,14 @@ async fn handle_tools_list(
         tool_defs.push(crate::services::assistant_upload_service::definition());
         tool_defs.push(crate::services::assistant_upload_service::list_definition());
         tool_defs.push(crate::services::assistant_nyxagent::conversation_history_definition());
+    } else if auth.chat.is_none()
+        && let Some(source) = auth.machine_source.as_ref()
+        && let Ok(tools) = Box::pin(crate::services::machine_external_service::definitions(
+            state, source,
+        ))
+        .await
+    {
+        tool_defs.extend(tools);
     }
 
     let tools_json: Vec<serde_json::Value> = tool_defs
@@ -2433,6 +2559,7 @@ async fn dispatch_tools_call(
                 | "nyx__oracle_pools"
                 | "nyx__oracle_result"
                 | "nyx__oracle_session"
+                | "nyx__ssh_exec" | "nyx__oracle_ask" | "nyx__oracle_attach" | "nyx__oracle_extract"
                 | "nyx__attachment_read" | "nyx__attachment_list" | "nyx__conversation_history"
                 | "nyx__machine_list"
                 | "nyx__saved_logins"
@@ -2796,7 +2923,11 @@ async fn dispatch_service_tool(
     let execution_arguments = webhook_execution_arguments(auth, &arguments);
     let prepared =
         match mcp_service::prepare_proxy_tool_call(service, endpoint, &execution_arguments) {
-            Ok(prepared) => prepared,
+            Ok(prepared) => prepared.with_acknowledgement(
+                auth.chat
+                    .as_ref()
+                    .and_then(|_| arguments["acknowledgement_id"].as_str()),
+            ),
             Err(e) => {
                 return tool_result(
                     request.id.clone(),
@@ -2868,6 +2999,24 @@ async fn dispatch_service_tool(
         }
     } else {
         None
+    };
+    let prepared = if matches!(
+        service.source,
+        mcp_service::McpToolSource::UserManaged { .. }
+    ) {
+        prepared
+            .with_automatic_receipt(
+                auto_allowed.as_ref().map(|(choice, _)| *choice),
+                tool_name,
+                &arguments,
+                auto_allowed
+                    .as_ref()
+                    .map(|(_, summary)| summary.as_str())
+                    .unwrap_or_default(),
+            )
+            .with_async_submission(async_watch.as_ref())
+    } else {
+        prepared
     };
     let exec_ctx = mcp_exec_context(auth);
     update_activity_label(
@@ -2950,7 +3099,13 @@ async fn dispatch_service_tool(
 
     let concurrency = response.concurrency.take();
     let (content, is_error, failure) = service_tool_content(state, auth, tool_name, response).await;
-    if !is_error && let (Some((auto, summary)), Some(chat)) = (auto_allowed, auth.chat.as_ref()) {
+    if !is_error
+        && !matches!(
+            service.source,
+            mcp_service::McpToolSource::UserManaged { .. }
+        )
+        && let (Some((auto, summary)), Some(chat)) = (auto_allowed, auth.chat.as_ref())
+    {
         crate::services::assistant_acknowledgement_service::record_auto_allowed(
             &state.db, chat, tool_name, &arguments, &auto, &summary,
         )
@@ -2970,6 +3125,7 @@ async fn dispatch_service_tool(
 /// the authenticated MCP caller -- API key identity + node scope.
 fn mcp_exec_context<'a>(auth: &'a McpAuthContext) -> mcp_service::McpExecContext<'a> {
     mcp_service::McpExecContext {
+        assistant_chat: auth.chat.as_ref(),
         response_body_limit: None,
         actor_user_id: Some(&auth.user_id),
         caller_token: auth.caller_token.as_deref(),
@@ -3441,6 +3597,9 @@ async fn webhook_service_gate(
     let Some(chat) = auth.chat.as_ref().filter(|chat| !chat.guest) else {
         return Ok(None);
     };
+    if service.source.is_user_service() {
+        return Ok(None);
+    }
     let metadata = service
         .durable_endpoint_metadata
         .get(&endpoint.endpoint_id)
@@ -3699,48 +3858,72 @@ async fn handle_attachment_read(
     }
 }
 
-async fn handle_machine_tool(
-    state: &AppState,
-    auth: &McpAuthContext,
-    tool_name: &str,
+fn handle_machine_tool<'a>(
+    state: &'a AppState,
+    auth: &'a McpAuthContext,
+    tool_name: &'a str,
     arguments: serde_json::Value,
     request_id: Option<serde_json::Value>,
-) -> Response {
-    let Some(chat) = auth.chat.as_ref().filter(|chat| !chat.guest) else {
-        return tool_result(
-            request_id,
-            "Machines require an assistant chat key on an owner turn",
-            true,
-        );
-    };
-    // Keep the machine adapter's dispatch/confirmation future off the common
-    // MCP router stack. Unrelated callers do not allocate or enter this branch.
-    match Box::pin(super::machine_tools::call(
-        state, chat, tool_name, arguments,
-    ))
-    .await
-    {
-        Ok(value) => tool_result(
-            request_id,
-            &crate::services::assistant_access_policy::with_frontend(
-                value.clone(),
-                &state.config.frontend_url,
-            )
-            .to_string(),
-            value.get("error").is_some() || value["isError"] == true,
-        ),
-        Err(error) => tool_result(
-            request_id,
-            &crate::services::assistant_account_tools::error_result_for(
-                error,
-                Some(chat),
-                &state.config.frontend_url,
-            )
-            .value
-            .to_string(),
-            true,
-        ),
-    }
+) -> futures::future::BoxFuture<'a, Response> {
+    Box::pin(async move {
+        if auth.chat.is_none()
+            && let Some(source) = auth.machine_source.as_ref()
+        {
+            return match Box::pin(crate::services::machine_external_service::dispatch(
+                state, source, tool_name, arguments,
+            ))
+            .await
+            {
+                Ok(value) => tool_result(
+                    request_id,
+                    &value.to_string(),
+                    value.get("error").is_some() || value["isError"] == true,
+                ),
+                Err(error) => tool_result(
+                    request_id,
+                    &crate::services::assistant_account_tools::error_result(error)
+                        .value
+                        .to_string(),
+                    true,
+                ),
+            };
+        }
+        let Some(chat) = auth.chat.as_ref().filter(|chat| !chat.guest) else {
+            return tool_result(
+                request_id,
+                "Machines require an assistant chat key on an owner turn",
+                true,
+            );
+        };
+        // Keep the machine adapter's dispatch/confirmation future off the common
+        // MCP router stack. Unrelated callers do not allocate or enter this branch.
+        match Box::pin(super::machine_tools::call(
+            state, chat, tool_name, arguments,
+        ))
+        .await
+        {
+            Ok(value) => tool_result(
+                request_id,
+                &crate::services::assistant_access_policy::with_frontend(
+                    value.clone(),
+                    &state.config.frontend_url,
+                )
+                .to_string(),
+                value.get("error").is_some() || value["isError"] == true,
+            ),
+            Err(error) => tool_result(
+                request_id,
+                &crate::services::assistant_account_tools::error_result_for(
+                    error,
+                    Some(chat),
+                    &state.config.frontend_url,
+                )
+                .value
+                .to_string(),
+                true,
+            ),
+        }
+    })
 }
 
 /// `nyx__call_tool` -- universal proxy that lets clients invoke any connected
@@ -3893,7 +4076,11 @@ async fn handle_meta_call_tool(
     let execution_arguments = webhook_execution_arguments(auth, &inner_args);
     let prepared =
         match mcp_service::prepare_proxy_tool_call(service, endpoint, &execution_arguments) {
-            Ok(prepared) => prepared,
+            Ok(prepared) => prepared.with_acknowledgement(
+                auth.chat
+                    .as_ref()
+                    .and_then(|_| inner_args["acknowledgement_id"].as_str()),
+            ),
             Err(e) => {
                 return tool_result(request_id, &format!("Invalid tool arguments: {e}"), true);
             }
@@ -3985,6 +4172,24 @@ async fn handle_meta_call_tool(
     } else {
         None
     };
+    let prepared = if matches!(
+        service.source,
+        mcp_service::McpToolSource::UserManaged { .. }
+    ) {
+        prepared
+            .with_automatic_receipt(
+                auto_allowed.as_ref().map(|(choice, _)| *choice),
+                tool_name,
+                &inner_args,
+                auto_allowed
+                    .as_ref()
+                    .map(|(_, summary)| summary.as_str())
+                    .unwrap_or_default(),
+            )
+            .with_async_submission(async_watch.as_ref())
+    } else {
+        prepared
+    };
     let exec_ctx = mcp_exec_context(auth);
     update_activity_label(
         state,
@@ -4063,7 +4268,13 @@ async fn handle_meta_call_tool(
 
     let concurrency = response.concurrency.take();
     let (content, is_error, failure) = service_tool_content(state, auth, tool_name, response).await;
-    if !is_error && let (Some((auto, summary)), Some(chat)) = (auto_allowed, auth.chat.as_ref()) {
+    if !is_error
+        && !matches!(
+            service.source,
+            mcp_service::McpToolSource::UserManaged { .. }
+        )
+        && let (Some((auto, summary)), Some(chat)) = (auto_allowed, auth.chat.as_ref())
+    {
         crate::services::assistant_acknowledgement_service::record_auto_allowed(
             &state.db,
             chat,
@@ -4204,6 +4415,14 @@ async fn handle_meta_search(
     if let Some(chat) = auth.chat.as_ref().filter(|chat| !chat.guest) {
         candidates.extend(Box::pin(machine_discovery_definitions(state, chat)).await);
         candidates.push(crate::services::assistant_upload_service::definition());
+    } else if auth.chat.is_none()
+        && let Some(source) = auth.machine_source.as_ref()
+        && let Ok(tools) = Box::pin(crate::services::machine_external_service::definitions(
+            state, source,
+        ))
+        .await
+    {
+        candidates.extend(tools);
     }
     let results: Vec<_> = mcp_service::rank_search_candidates(candidates, query)
         .into_iter()
@@ -4955,6 +5174,31 @@ async fn handle_oracle_ask(
     let result = async {
         let pool = oracle_pool_service::get_pool(&state.db, pool_ref).await?;
         oracle_pool_service::ensure_can_submit(&state.db, &auth.user_id, &pool).await?;
+        let admission = match crate::services::assistant_native_execution::resource(
+            &state.db,
+            auth.chat.as_ref(),
+            crate::services::assistant_native_execution::NativeResource {
+                collection: "oracle_pools",
+                id: &pool.id,
+                owner: &pool.user_id,
+            },
+            "nyx__oracle_ask",
+            arguments,
+            crate::services::assistant_acknowledgement_service::ActionFacts {
+                class: crate::services::assistant_acknowledgement_service::OwnerActionClass::Change,
+                read_only: false,
+                destructive: true,
+            },
+            "Use the exact approved Oracle operation",
+        )
+        .await?
+        {
+            Ok(value) => value,
+            Err(refusal) => return Err(crate::errors::AppError::Conflict(refusal.to_string())),
+        };
+        if let Some(admission) = &admission {
+            admission.revalidate(&state.db).await?;
+        }
         let outcome = oracle_task_service::submit_task(
             &state.db,
             &pool,
@@ -4968,6 +5212,9 @@ async fn handle_oracle_ask(
             },
         )
         .await?;
+        if let Some(admission) = &admission {
+            admission.receipt(&state.db).await;
+        }
         poll_oracle_task(&state.db, &auth.user_id, &outcome.task.id, wait_secs).await
     }
     .await;
@@ -5034,14 +5281,43 @@ async fn handle_oracle_attach(
     let result = async {
         let pool = oracle_pool_service::get_pool(&state.db, pool_ref).await?;
         oracle_pool_service::ensure_can_submit(&state.db, &auth.user_id, &pool).await?;
-        oracle_task_service::attach_conversation(
+        let admission = match crate::services::assistant_native_execution::resource(
+            &state.db,
+            auth.chat.as_ref(),
+            crate::services::assistant_native_execution::NativeResource {
+                collection: "oracle_pools",
+                id: &pool.id,
+                owner: &pool.user_id,
+            },
+            "nyx__oracle_attach",
+            arguments,
+            crate::services::assistant_acknowledgement_service::ActionFacts {
+                class: crate::services::assistant_acknowledgement_service::OwnerActionClass::Change,
+                read_only: false,
+                destructive: true,
+            },
+            "Use the exact approved Oracle operation",
+        )
+        .await?
+        {
+            Ok(value) => value,
+            Err(refusal) => return Err(crate::errors::AppError::Conflict(refusal.to_string())),
+        };
+        if let Some(admission) = &admission {
+            admission.revalidate(&state.db).await?;
+        }
+        let outcome = oracle_task_service::attach_conversation(
             &state.db,
             &pool,
             &oracle_submitter(auth),
             chatgpt_url,
             None,
         )
-        .await
+        .await?;
+        if let Some(admission) = &admission {
+            admission.receipt(&state.db).await;
+        }
+        Ok(outcome)
     }
     .await;
 
@@ -5076,6 +5352,31 @@ async fn handle_oracle_extract(
     let result = async {
         let pool = oracle_pool_service::get_pool(&state.db, pool_ref).await?;
         oracle_pool_service::ensure_can_submit(&state.db, &auth.user_id, &pool).await?;
+        let admission = match crate::services::assistant_native_execution::resource(
+            &state.db,
+            auth.chat.as_ref(),
+            crate::services::assistant_native_execution::NativeResource {
+                collection: "oracle_pools",
+                id: &pool.id,
+                owner: &pool.user_id,
+            },
+            "nyx__oracle_extract",
+            arguments,
+            crate::services::assistant_acknowledgement_service::ActionFacts {
+                class: crate::services::assistant_acknowledgement_service::OwnerActionClass::Change,
+                read_only: false,
+                destructive: true,
+            },
+            "Use the exact approved Oracle operation",
+        )
+        .await?
+        {
+            Ok(value) => value,
+            Err(refusal) => return Err(crate::errors::AppError::Conflict(refusal.to_string())),
+        };
+        if let Some(admission) = &admission {
+            admission.revalidate(&state.db).await?;
+        }
         let task = oracle_task_service::extract_url(
             &state.db,
             &pool,
@@ -5084,6 +5385,9 @@ async fn handle_oracle_extract(
             optional_string_arg(arguments, "model"),
         )
         .await?;
+        if let Some(admission) = &admission {
+            admission.receipt(&state.db).await;
+        }
         poll_oracle_task(&state.db, &auth.user_id, &task.id, wait_secs).await
     }
     .await;
@@ -5174,18 +5478,46 @@ async fn handle_mcp_ssh_exec(
         .unwrap_or(30)
         .min(300) as u32;
 
-    // Resolve service by slug or ID
-    let service_id =
-        match resolve_ssh_service_id(&state.db, auth.user_id.as_str(), service_ref).await {
+    let connection = if auth.chat.is_some() {
+        match crate::services::assistant_native_execution::ssh_connection(
+            state,
+            &auth.user_id,
+            service_ref,
+        )
+        .await
+        {
+            Ok(row) => row,
+            Err(error) => return tool_result(request_id, &error.to_string(), true),
+        }
+    } else {
+        let id = match resolve_ssh_service_id(&state.db, &auth.user_id, service_ref).await {
             Ok(id) => id,
-            Err(msg) => return tool_result(request_id, &msg, true),
+            Err(error) => return tool_result(request_id, &error, true),
         };
-
+        match user_service_service::find_by_catalog_service_id(&state.db, &auth.user_id, &id).await
+        {
+            Ok(Some(row)) => row,
+            _ => return tool_result(request_id, "SSH service unavailable", true),
+        }
+    };
+    let Some(service_id) = connection.catalog_service_id.clone() else {
+        return tool_result(request_id, "SSH catalog configuration required", true);
+    };
     // Get SSH config
     let ssh_svc = match ssh_service::get_ssh_service(&state.db, &service_id).await {
         Ok(svc) => svc,
         Err(e) => return tool_result(request_id, &format!("SSH service error: {e}"), true),
     };
+
+    if auth.chat.is_some()
+        && connection.ssh_auth_mode != crate::models::ssh_auth_mode::SshAuthMode::Cert
+    {
+        return tool_result(
+            request_id,
+            "This MCP SSH adapter requires an exact certificate-mode connection; use the SSH exec API for node-key mode",
+            true,
+        );
+    }
 
     if !ssh_svc.certificate_auth_enabled {
         return tool_result(
@@ -5275,6 +5607,17 @@ async fn handle_mcp_ssh_exec(
         timeout_secs,
     };
 
+    if let Err(error) = super::ssh_exec::check_dangerous_command(command) {
+        return tool_result(request_id, &error.to_string(), true);
+    }
+    let decision=match crate::services::assistant_native_execution::ssh_gate(state,auth.chat.as_ref(),&connection,&ssh_svc,
+        &serde_json::json!({"command":command,"principal":resolved_principal,"timeout_secs":timeout_secs,
+            "acknowledgement_id":arguments.get("acknowledgement_id")})).await {
+        Ok(value)=>value,Err(error)=>return tool_result(request_id,&error.to_string(),true),
+    };
+    if let Some(refusal) = decision.refusal {
+        return tool_result(request_id, &refusal.to_string(), true);
+    }
     let concurrency = match crate::services::service_concurrency_service::acquire_policy(
         &state.db,
         service.concurrency_policy.as_ref(),
@@ -5293,6 +5636,10 @@ async fn handle_mcp_ssh_exec(
         &service_id,
         &ssh_svc,
         &body,
+        SshCommandAdmission {
+            connection: &connection,
+            admission: decision.admission.as_ref(),
+        },
         billing_egress_permit,
     ));
     let result = match &concurrency {
@@ -5302,6 +5649,14 @@ async fn handle_mcp_ssh_exec(
 
     let response = match result {
         Ok(response) => {
+            if response.exit_code == 0
+                && !response.timed_out
+                && approval_auto.is_none()
+                && let (Some(chat), Some(admission)) =
+                    (auth.chat.as_ref(), decision.admission.as_ref())
+            {
+                admission.receipt(&state.db, chat, decision.automatic).await;
+            }
             let response_json = serde_json::json!({
                 "exit_code": response.exit_code,
                 "stdout": response.stdout,
@@ -5476,19 +5831,29 @@ async fn resolve_ssh_service_id(
 
 /// Internal SSH command execution (reusable by REST handler and MCP handler).
 /// Routes through the node agent for execution.
+struct SshCommandAdmission<'a> {
+    connection: &'a crate::models::user_service::UserService,
+    admission: Option<&'a crate::services::assistant_service_execution::Admission>,
+}
+
 async fn execute_ssh_command_internal(
     state: &AppState,
     auth: &McpAuthContext,
     service_id: &str,
     ssh_svc: &crate::models::downstream_service::SshServiceConfig,
     body: &super::ssh_exec::SshExecRequest,
+    execution: SshCommandAdmission<'_>,
     billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
 ) -> Result<super::ssh_exec::SshExecResponse, crate::errors::AppError> {
     use crate::errors::AppError;
     use crate::models::service_billing::{BillingMetric, PlatformUsage};
     use crate::models::usage_meter::CredentialClass;
-    use crate::services::{node_routing_service, node_service};
+    use crate::services::node_service;
 
+    let SshCommandAdmission {
+        connection,
+        admission,
+    } = execution;
     let user_id = auth.user_id.as_str();
 
     let principal = body.principal.trim();
@@ -5509,27 +5874,19 @@ async fn execute_ssh_command_internal(
     super::ssh_exec::check_dangerous_command(command)?;
 
     // Require a node agent for SSH execution
-    let node_route = node_routing_service::resolve_node_route(
-        &state.db,
-        user_id,
-        service_id,
-        &state.node_ws_manager,
-    )
-    .await
-    .ok()
-    .flatten()
-    .ok_or_else(|| {
-        AppError::BadRequest(
-            "No node agent is bound to this SSH service. \
-             Deploy a NyxID node agent and bind it to this service to execute commands."
-                .to_string(),
+    let node_route = if auth.chat.is_some() {
+        crate::services::assistant_native_execution::ssh_route(state, connection).await?
+    } else {
+        crate::services::node_routing_service::resolve_node_route(
+            &state.db,
+            user_id,
+            service_id,
+            &state.node_ws_manager,
         )
-    })?;
-
-    let user_service =
-        user_service_service::find_by_catalog_service_id(&state.db, user_id, service_id)
-            .await?
-            .ok_or_else(|| AppError::NotFound("SSH service not found".to_string()))?;
+        .await?
+        .ok_or_else(|| AppError::NodeOffline("SSH has no credential node".into()))?
+    };
+    let user_service = connection.clone();
     let credential_class = CredentialClass::NodeManaged;
     let billing_owner = state
         .billing
@@ -5582,6 +5939,35 @@ async fn execute_ssh_command_internal(
     let mut last_error = None;
 
     for node_id in &all_node_ids {
+        if let Some(chat) = auth.chat.as_ref() {
+            if !crate::services::node_routing_service::is_node_id_dispatchable(
+                &state.db,
+                node_id,
+                &state.node_ws_manager,
+            )
+            .await?
+            {
+                continue;
+            }
+            match crate::services::assistant_native_execution::verify_ssh_node(
+                state,
+                chat,
+                &connection.id,
+                node_id,
+            )
+            .await
+            {
+                Ok(()) => {}
+                Err(AppError::ApiKeyScopeForbidden(_)) => continue,
+                Err(error) => {
+                    state
+                        .billing
+                        .fail(&metered, "assistant_authority_changed")
+                        .await?;
+                    return Err(error);
+                }
+            }
+        }
         let signing_secret = if state.config.node_hmac_signing_enabled {
             match node_service::get_node_signing_secret(
                 &state.db,
@@ -5607,6 +5993,28 @@ async fn execute_ssh_command_internal(
         };
 
         state.billing.mark_forwarded(&metered).await?;
+        if let Some(admission) = admission {
+            let validation = async {
+                admission
+                    .revalidate(&state.db, &connection.id, None)
+                    .await?;
+                crate::services::assistant_native_execution::verify_ssh_node(
+                    state,
+                    auth.chat.as_ref().ok_or(AppError::AssistantTurnRequired)?,
+                    &connection.id,
+                    node_id,
+                )
+                .await
+            }
+            .await;
+            if let Err(error) = validation {
+                state
+                    .billing
+                    .reject_before_send(&metered, "assistant_authority_changed", false)
+                    .await?;
+                return Err(error);
+            }
+        }
         match session_guard
             .run_until_lost(state.node_dispatch.exec_ssh_command(
                 node_id,
@@ -5674,6 +6082,10 @@ async fn execute_ssh_command_internal(
             }
             Err(error @ AppError::RateLimited) => return Err(error),
             Err(error) => {
+                if auth.chat.is_some() {
+                    state.billing.fail(&metered, "ssh_outcome_unknown").await?;
+                    return Err(error);
+                }
                 tracing::warn!(
                     service_id = %service_id,
                     node_id = %node_id,
@@ -5700,8 +6112,20 @@ mod tests {
 
     #[tokio::test]
     async fn public_credentials_never_resolve_ordinary_inventory_or_session_fallback() {
-        let db =
-            crate::test_utils::connect_transaction_test_database("public_mcp_closed_auth").await;
+        use mongodb::event::{EventHandler, command::CommandEvent};
+        let commands =
+            std::sync::Arc::new(std::sync::Mutex::new(Vec::<mongodb::bson::Document>::new()));
+        let recorded = commands.clone();
+        let handler = EventHandler::callback(move |event| {
+            if let CommandEvent::Started(event) = event {
+                recorded.lock().unwrap().push(event.command);
+            }
+        });
+        let db = crate::test_utils::connect_transaction_test_database_with_command_handler(
+            "public_mcp_closed_auth",
+            handler,
+        )
+        .await;
         let owner = uuid::Uuid::new_v4().to_string();
         db.collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
             .insert_one(crate::test_utils::test_user(
@@ -5736,9 +6160,10 @@ mod tests {
             )
             .await
             .unwrap();
-        // No connected service or conversation is present. A public key must
-        // fail at the deployment-proof boundary before ordinary resolution.
-        let state = crate::test_utils::test_app_state(db);
+        // A purpose marker alone has no trusted session/turn binding. Reject it
+        // at that exact public authority gate, before any ordinary resolution.
+        let state = crate::test_utils::test_app_state(db.clone());
+        commands.lock().unwrap().clear();
         for (name, value) in [
             ("x-api-key", key.full_key.clone()),
             ("authorization", format!("Bearer {}", key.full_key)),
@@ -5746,13 +6171,40 @@ mod tests {
             let mut headers = HeaderMap::new();
             headers.insert(name, value.parse().unwrap());
             headers.insert("mcp-session-id", "unrelated-owner-session".parse().unwrap());
-            let failure = authenticate_mcp_or_public(&state, &headers, true, true)
+            let failure =
+                authenticate_mcp_or_public(&state, &headers, true, true, axum::http::Method::POST)
+                    .await
+                    .err()
+                    .expect("unproven public runtime denied");
+            assert_eq!(failure.status(), StatusCode::FORBIDDEN);
+            let body = axum::body::to_bytes(failure.into_body(), 4096)
                 .await
-                .err()
-                .expect("unproven public runtime denied");
-            assert_eq!(failure.status(), StatusCode::CONFLICT);
+                .unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(body["error"], "forbidden");
+            assert_eq!(
+                body["message"],
+                "Forbidden: Public tool or arguments are not allowed"
+            );
             assert!(authenticate_mcp(&state, &headers, true).await.is_err());
         }
+        let observed = commands.lock().unwrap().clone();
+        for command in observed {
+            if let Ok(collection) = command.get_str("find") {
+                assert!(
+                    ![
+                        USER_SERVICES,
+                        USER_ENDPOINTS,
+                        crate::models::assistant_conversation::COLLECTION_NAME,
+                        crate::models::assistant_agent_credential::COLLECTION_NAME,
+                        MCP_SESSION_COLLECTION,
+                    ]
+                    .contains(&collection),
+                    "unbound public credentials must not query ordinary authority: {collection}"
+                );
+            }
+        }
+        db.drop().await.unwrap();
     }
     use crate::models::approval_grant::{ApprovalGrant, COLLECTION_NAME as APPROVAL_GRANTS};
     use crate::models::approval_request::{ApprovalRequest, COLLECTION_NAME as APPROVAL_REQUESTS};
@@ -5828,6 +6280,7 @@ mod tests {
 
     fn api_key_auth(allowed_service_ids: Vec<String>) -> McpAuthContext {
         McpAuthContext {
+            machine_source: None,
             caller_token: None,
             chat: None,
             account_acknowledged: false,
@@ -6067,20 +6520,24 @@ mod tests {
                 .await;
         let state = test_app_state(db.clone());
         let auth = api_key_auth(Vec::new());
-        for status in [404, 429, 500] {
+        for status in [404, 409, 429, 500] {
+            let downstream = if status == 409 {
+                r#"{"error":"acknowledgement_required","acknowledgement_id":"provider-text"}"#
+            } else {
+                "Downstream error"
+            };
             let (content, is_error, failure) = service_tool_content(
                 &state,
                 &auth,
                 "catalog__operation",
-                mcp_service::ToolResponse {
-                    concurrency: None,
-                    status,
-                    text: "Downstream error".into(),
-                    media: None,
-                },
+                mcp_service::tool_response(status, Some("application/json"), downstream.as_bytes()),
             )
             .await;
             assert!(is_error);
+            assert_eq!(
+                content[0]["text"],
+                format!("Error ({status}): {downstream}")
+            );
             let mut response = content_result(None, content, is_error);
             response.extensions_mut().insert(failure.unwrap());
             assert_eq!(response.status(), StatusCode::OK);

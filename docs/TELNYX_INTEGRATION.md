@@ -165,6 +165,11 @@ messaging registration.
 
 ## Retired vendor credentials
 
+For shared-account execution paid with NyxID credits, see
+[Telnyx platform billing](TELNYX_PLATFORM_BILLING.md). It uses a dedicated
+restricted offering and a managed billing contract; enabling the existing broad
+Telnyx API catalog alone does not provide verified vendor-cost settlement.
+
 The former `platform-telnyx` internal vendor store is retired. Startup disables
 legacy vendor rows and their bindings; runtime guards also reject rows written by
 older replicas after startup. Historical credentials, audit, and usage remain

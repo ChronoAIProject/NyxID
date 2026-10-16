@@ -10,7 +10,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use chrono::{Duration, Utc};
 use serde::Deserialize;
 
-use crate::api::{CLI_USER_AGENT, build_cli_http_client};
+use crate::api::{CLI_USER_AGENT, build_cli_http_client, build_credential_http_client_for_url};
 use crate::cli::{AuthArgs, LoginArgs};
 
 pub mod agent_key;
@@ -770,7 +770,7 @@ async fn refresh_saved_session(auth: &AuthArgs) -> SessionRefresh {
         ));
     }
 
-    let client = match build_cli_http_client(profile) {
+    let client = match build_credential_http_client_for_url(profile, &base_url) {
         Ok(c) => c,
         Err(e) => return SessionRefresh::Network(e),
     };
@@ -822,7 +822,7 @@ pub async fn force_refresh_session(auth: &AuthArgs) -> Result<RefreshReport> {
     }
     let base_url = auth.resolved_base_url()?;
     validate_profile_destination(profile, &base_url)?;
-    let client = build_cli_http_client(profile)?;
+    let client = build_credential_http_client_for_url(profile, &base_url)?;
     match exchange_refresh_token(&client, &base_url, &refresh_token).await {
         RefreshExchange::Renewed {
             access_token,
@@ -920,15 +920,21 @@ async fn handle_dead_session(auth: &AuthArgs, reason: DeadSessionReason) -> Resu
     let base_url = auth
         .resolved_base_url()
         .unwrap_or_else(|_| DEFAULT_LOGIN_BASE_URL.to_string());
-    run_login(LoginArgs {
-        base_url: Some(base_url),
-        password: false,
-        device: false,
-        agent_key: false,
-        email: None,
-        profile: auth.profile.clone(),
-        ..Default::default()
-    })
+    // Session recovery only offers browser/device login. Keep it separate from
+    // the explicit password mode used by `nyxid login --password`.
+    let strategies = RealLoginStrategies;
+    run_interactive_login_with_strategies(
+        LoginArgs {
+            base_url: Some(base_url),
+            password: false,
+            device: false,
+            agent_key: false,
+            email: None,
+            profile: auth.profile.clone(),
+            ..Default::default()
+        },
+        &strategies,
+    )
     .await?;
 
     // Deliberately do NOT resume the original command: the user re-runs it with
@@ -1014,16 +1020,26 @@ impl LoginStrategies for RealLoginStrategies {
 }
 
 async fn run_login_with_strategies(
+    args: LoginArgs,
+    strategies: &impl LoginStrategies,
+) -> Result<()> {
+    if args.password {
+        let profile = args.profile.as_deref();
+        let base_url = args.base_url.as_deref().unwrap_or(DEFAULT_LOGIN_BASE_URL);
+        return strategies
+            .run_password_login(base_url, args.email.as_deref(), profile)
+            .await;
+    }
+    run_interactive_login_with_strategies(args, strategies).await
+}
+
+/// Browser/device login shared by explicit login and dead-session recovery.
+async fn run_interactive_login_with_strategies(
     mut args: LoginArgs,
     strategies: &impl LoginStrategies,
 ) -> Result<()> {
     let profile = args.profile.as_deref();
     let base_url = args.base_url.as_deref().unwrap_or(DEFAULT_LOGIN_BASE_URL);
-    if args.password {
-        return strategies
-            .run_password_login(base_url, args.email.as_deref(), profile)
-            .await;
-    }
     if args.device {
         return strategies.run_device_code_login(args).await;
     }
@@ -1070,8 +1086,11 @@ pub async fn run_logout(base_url: &str, profile: Option<&str>) -> Result<()> {
         )
     };
     let base_url = base_url.trim_end_matches('/');
-    let revoked = if let Some(token) = &token {
-        let client = crate::api::build_credential_http_client(profile)?;
+    // Remote revocation is best effort. An unsafe destination or client setup
+    // failure must never send the credential or prevent guarded local cleanup.
+    let revoked = if let Some(token) = &token
+        && let Ok(client) = build_credential_http_client_for_url(profile, base_url)
+    {
         let request = if restricted {
             client.delete(format!("{base_url}/api/v1/auth/agent-key/self"))
         } else {
@@ -1425,6 +1444,7 @@ async fn run_password_login(
     email: Option<&str>,
     profile: Option<&str>,
 ) -> Result<()> {
+    let client = build_credential_http_client_for_url(profile, base_url)?;
     let email = match email {
         Some(email) => email.to_string(),
         None => {
@@ -1449,8 +1469,6 @@ async fn run_password_login(
 
     let base_url = base_url.trim_end_matches('/');
     let login_url = format!("{base_url}/api/v1/auth/login");
-
-    let client = build_cli_http_client(profile)?;
 
     let response = client
         .post(&login_url)
@@ -1979,6 +1997,80 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn password_login_rejects_remote_cleartext_before_prompting() {
+        let error = super::run_password_login(
+            "http://cleartext-fixture.invalid",
+            Some("fixture@example.test"),
+            None,
+        )
+        .await
+        .expect_err("remote HTTP must fail before reading a password");
+        assert!(error.to_string().contains("requires HTTPS"));
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // serializes temporary credential storage
+    async fn session_refresh_rejects_remote_cleartext_before_sending() {
+        let _home = PreflightHome::set();
+        let mut auth = preflight_auth_args();
+        auth.base_url = Some("http://cleartext-fixture.invalid".to_string());
+        let expired = build_jwt(&serde_json::json!({"exp": 1_000_000_000i64}));
+        let refresh = uuid::Uuid::new_v4().to_string();
+        super::save_tokens_for(auth.profile.as_deref(), &expired, Some(&refresh)).unwrap();
+        let error = super::ensure_session(&auth)
+            .await
+            .expect_err("preflight must reject HTTP");
+        assert!(error.to_string().contains("requires HTTPS"));
+        let error = super::force_refresh_session(&auth)
+            .await
+            .expect_err("explicit refresh must reject HTTP");
+        assert!(error.to_string().contains("requires HTTPS"));
+        assert!(
+            super::read_saved_refresh_token_for(auth.profile.as_deref()).as_deref()
+                == Some(refresh.as_str())
+        );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // serializes temporary credential storage
+    async fn session_refresh_does_not_follow_body_preserving_redirects() {
+        use wiremock::{
+            Mock, MockServer, ResponseTemplate,
+            matchers::{method, path},
+        };
+        let _home = PreflightHome::set();
+        let origin = MockServer::start().await;
+        let target = MockServer::start().await;
+        let mut auth = preflight_auth_args();
+        auth.base_url = Some(origin.uri());
+        let expired = build_jwt(&serde_json::json!({"exp": 1_000_000_000i64}));
+        let refresh = uuid::Uuid::new_v4().to_string();
+        super::save_tokens_for(auth.profile.as_deref(), &expired, Some(&refresh)).unwrap();
+        Mock::given(method("POST"))
+            .and(path("/api/v1/auth/refresh"))
+            .respond_with(ResponseTemplate::new(307).insert_header("Location", target.uri()))
+            .expect(2)
+            .mount(&origin)
+            .await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "access_token": uuid::Uuid::new_v4().to_string(),
+                "refresh_token": uuid::Uuid::new_v4().to_string(),
+            })))
+            .expect(0)
+            .mount(&target)
+            .await;
+        assert!(super::ensure_session(&auth).await.is_err());
+        assert!(super::force_refresh_session(&auth).await.is_err());
+        assert!(
+            super::read_saved_refresh_token_for(auth.profile.as_deref()).as_deref()
+                == Some(refresh.as_str())
+        );
+        origin.verify().await;
+        target.verify().await;
+    }
+
+    #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn ensure_session_errors_when_no_token_and_headless() {
         // Test stdin is not a TTY, so handle_dead_session takes the
@@ -2243,6 +2335,42 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    #[tokio::test]
+    async fn session_recovery_login_uses_only_browser_or_device_flow() {
+        for environment_alias in [false, true] {
+            let _env = LoginEnvironment::set(environment_alias, false);
+            let strategies = MockLoginStrategies::default();
+            super::run_interactive_login_with_strategies(login_args(), &strategies)
+                .await
+                .expect("session recovery login");
+            assert!(strategies.password_calls.load(Ordering::SeqCst) == 0);
+            assert_eq!(
+                strategies.browser_calls.load(Ordering::SeqCst),
+                usize::from(environment_alias)
+            );
+            assert_eq!(
+                strategies.device_calls.load(Ordering::SeqCst),
+                usize::from(!environment_alias)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn explicit_password_login_skips_browser_and_device_flow() {
+        for environment_alias in [false, true] {
+            let _env = LoginEnvironment::set(environment_alias, true);
+            let strategies = MockLoginStrategies::default();
+            let mut args = login_args();
+            args.password = true;
+            run_login_with_strategies(args, &strategies)
+                .await
+                .expect("explicit password login");
+            assert!(strategies.password_calls.load(Ordering::SeqCst) == 1);
+            assert_eq!(strategies.browser_calls.load(Ordering::SeqCst), 0);
+            assert_eq!(strategies.device_calls.load(Ordering::SeqCst), 0);
         }
     }
 

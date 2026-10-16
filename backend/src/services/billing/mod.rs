@@ -5,6 +5,8 @@ pub mod funding;
 pub mod grants;
 pub mod lago_client;
 pub mod ledger;
+pub mod machine_runtime;
+mod machine_runtime_math;
 pub mod meter;
 pub mod metric_resolution;
 pub mod owner_resolver;
@@ -168,6 +170,34 @@ pub struct BillingService {
     config: Arc<AppConfig>,
     owner_resolver: BillingOwnerResolver,
     lago: Option<Arc<dyn LagoApi>>,
+    #[cfg(test)]
+    pub(crate) settlement_gate: Option<Arc<SettlementGate>>,
+    #[cfg(test)]
+    pub(crate) before_send_gate: Option<Arc<SettlementGate>>,
+}
+
+#[cfg(test)]
+pub(crate) struct SettlementGate {
+    pub entered: tokio::sync::Notify,
+    pub release: tokio::sync::Semaphore,
+    pub fail: bool,
+    pub used: std::sync::atomic::AtomicBool,
+}
+
+#[cfg(test)]
+impl SettlementGate {
+    async fn wait(&self) -> AppResult<()> {
+        if !self.used.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            self.entered.notify_one();
+            self.release.acquire().await.unwrap().forget();
+            if self.fail {
+                return Err(crate::errors::AppError::Internal(
+                    "Settlement fixture failure".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 impl BillingService {
@@ -190,6 +220,10 @@ impl BillingService {
             config,
             owner_resolver: BillingOwnerResolver::new(db),
             lago,
+            #[cfg(test)]
+            settlement_gate: None,
+            #[cfg(test)]
+            before_send_gate: None,
         }
     }
 
@@ -204,6 +238,8 @@ impl BillingService {
             config,
             owner_resolver: BillingOwnerResolver::new(db),
             lago: Some(lago),
+            settlement_gate: None,
+            before_send_gate: None,
         }
     }
 
@@ -397,12 +433,35 @@ impl BillingService {
     }
 
     pub async fn open(&self, ctx: &BillingRouteContext) -> AppResult<MeteredProxyContext> {
+        if ctx.managed_billing.is_some() || ctx.managed_admission.is_some() {
+            return Err(crate::errors::AppError::BillingNotConfigured(
+                "Managed execution requires its validated admission".into(),
+            ));
+        }
         self.open_with_requirement(ctx, false).await
     }
 
     /// Paid push channels cannot fall back to uncharged provider activity when
     /// billing is enabled but its catalog price, wallet, or provider is missing.
     pub async fn open_required(&self, ctx: &BillingRouteContext) -> AppResult<MeteredProxyContext> {
+        if ctx.managed_billing.is_some() || ctx.managed_admission.is_some() {
+            return Err(crate::errors::AppError::BillingNotConfigured(
+                "Managed execution requires its validated admission".into(),
+            ));
+        }
+        self.open_with_requirement(ctx, true).await
+    }
+
+    pub(crate) async fn open_managed(
+        &self,
+        ctx: &BillingRouteContext,
+    ) -> AppResult<MeteredProxyContext> {
+        crate::services::managed_execution_service::validate_route(ctx)?;
+        if ctx.managed_admission.is_none() || !self.config.billing_enabled {
+            return Err(crate::errors::AppError::BillingNotConfigured(
+                "Managed execution requires enabled billing and durable admission".into(),
+            ));
+        }
         self.open_with_requirement(ctx, true).await
     }
 
@@ -435,6 +494,7 @@ impl BillingService {
         required: bool,
     ) -> AppResult<MeteredProxyContext> {
         let public = ctx.public_admission.is_some();
+        let managed = ctx.managed_admission.is_some();
         if public && (!required || !self.config.billing_enabled || ctx.pool_attempt.is_some()) {
             return Err(crate::errors::AppError::BillingProviderUnavailable(
                 "Public funding requires enabled billing".into(),
@@ -444,7 +504,9 @@ impl BillingService {
             ctx.require_platform_price()?;
             if self.lago.is_none() {
                 return Err(crate::errors::AppError::BillingNotConfigured(
-                    "The billing provider (Lago) is not configured; configure Lago before enabling paid channels".into(),
+                    if managed { "Managed execution requires a configured billing provider" } else {
+                        "The billing provider (Lago) is not configured; configure Lago before enabling paid channels"
+                    }.into(),
                 ));
             }
         }
@@ -452,7 +514,7 @@ impl BillingService {
             // Staged rollout: charging applies only to owners covered by the
             // billing feature flag. Everyone else is metered for
             // observability but never charged on either layer.
-            let rollout_enabled = if required {
+            let rollout_enabled = if required && !managed {
                 // Autonomous channels have a persisted owner but no acting
                 // organization member. Use the owner's rollout baseline.
                 let owner = self
@@ -488,16 +550,18 @@ impl BillingService {
                     .await?;
                 if required && !chargeable {
                     return Err(crate::errors::AppError::BillingNotConfigured(
-                        "A provisioned Lago billing wallet and subscription are required for paid channels, including grant or allowance funding".into(),
+                        if managed { "Managed execution requires a provisioned billing wallet and subscription" } else {
+                            "A provisioned Lago billing wallet and subscription are required for paid channels, including grant or allowance funding"
+                        }.into(),
                     ));
                 }
                 chargeable
             } else {
                 false
             };
-            if public && (!rollout_enabled || !platform_billable) {
+            if (public || managed) && (!rollout_enabled || !platform_billable) {
                 return Err(crate::errors::AppError::BillingProviderUnavailable(
-                    "Public sponsor funding is unavailable".into(),
+                    "Required execution funding is unavailable".into(),
                 ));
             }
             let mut ctx = ctx.clone();
@@ -535,10 +599,17 @@ impl BillingService {
             && reservation.is_none()
         {
             return Err(crate::errors::AppError::BillingNotConfigured(
-                "Channel billing could not reserve funding".into(),
+                if managed {
+                    "Managed execution could not reserve funding"
+                } else {
+                    "Channel billing could not reserve funding"
+                }
+                .into(),
             ));
         }
-        if (ctx.pool_attempt.is_some() || ctx.public_admission.is_some()) && reservation.is_some() {
+        if (ctx.pool_attempt.is_some() || ctx.public_admission.is_some() || managed)
+            && reservation.is_some()
+        {
             // Pool funding and meter rows committed together; cancellation at
             // any later await can recover from the durable attempt lease.
             return Ok(MeteredProxyContext::from_route(&ctx));
@@ -591,7 +662,12 @@ impl BillingService {
     }
 
     pub async fn mark_forwarded(&self, metered: &MeteredProxyContext) -> AppResult<()> {
-        meter::mark_forwarded(&self.db, metered).await
+        meter::mark_forwarded(&self.db, metered).await?;
+        #[cfg(test)]
+        if let Some(gate) = &self.before_send_gate {
+            gate.wait().await?;
+        }
+        Ok(())
     }
 
     pub async fn settle(
@@ -601,6 +677,10 @@ impl BillingService {
         resale: Option<crate::models::service_billing::ResaleUsage>,
         model: Option<String>,
     ) -> AppResult<()> {
+        #[cfg(test)]
+        if let Some(gate) = &self.settlement_gate {
+            gate.wait().await?;
+        }
         meter::settle(&self.db, metered, platform, resale, model).await
     }
 
@@ -619,7 +699,15 @@ impl BillingService {
         let persisted =
             meter::persist_settlement_intent(&self.db, metered, platform, resale, model).await?;
         let db = self.db.clone();
+        #[cfg(test)]
+        let gate = self.settlement_gate.clone();
         tokio::spawn(async move {
+            #[cfg(test)]
+            if let Some(gate) = gate
+                && gate.wait().await.is_err()
+            {
+                return;
+            }
             if meter::settle_persisted(&db, persisted).await.is_err() {
                 tracing::warn!(
                     billing_request_id,
@@ -632,6 +720,23 @@ impl BillingService {
 
     pub async fn fail(&self, metered: &MeteredProxyContext, reason: &str) -> AppResult<()> {
         meter::fail(&self.db, metered, reason).await
+    }
+
+    /// A private sender fence proved that the operation was never sent. Undo
+    /// pre-send bookkeeping before releasing its reservation; transport errors
+    /// and cancellation after dispatch must use the ordinary settlement path.
+    pub(crate) fn reject_before_send<'a>(
+        &'a self,
+        metered: &'a MeteredProxyContext,
+        reason: &'a str,
+        previously_dispatched: bool,
+    ) -> futures::future::BoxFuture<'a, AppResult<()>> {
+        Box::pin(async move {
+            if previously_dispatched {
+                return self.fail(metered, reason).await;
+            }
+            meter::reject_before_send(&self.db, metered, reason).await
+        })
     }
 }
 
@@ -667,6 +772,7 @@ mod tests {
         insert_wallet(&db, owner_id).await;
         let service = BillingService::new(db.clone(), std::sync::Arc::new(test_app_config()));
         let billing = ServiceBilling {
+            managed_execution: None,
             platform_billable: true,
             platform_charge_nyxid_credentials_only: false,
             platform_metric: None,
@@ -2176,7 +2282,7 @@ mod tests {
         let first = crate::services::auth_service::register_user(
             &db,
             "cap-global@example.com",
-            "password123",
+            &uuid::Uuid::new_v4().to_string(),
             Some("Cap Global"),
             None,
             true,
@@ -2208,7 +2314,7 @@ mod tests {
         let second = crate::services::auth_service::register_user(
             &db,
             "cap-env@example.com",
-            "password123",
+            &uuid::Uuid::new_v4().to_string(),
             Some("Cap Env"),
             None,
             true,

@@ -6,6 +6,15 @@ requires a live, non-stopped turn; dedicated channel-agent credentials remain
 separate and idle-capable. Deploy all replicas before enabling the flag, and
 disable it before rollback.
 
+NyxBot service ordering does not enable this rollout flag. While it is off,
+personal service calls and existing personal/platform model inference remain
+available to keys first authenticated without a live turn, subject to their
+current grants, ACLs, operation scopes and permission mode. Actions that need
+confirmation and organization connection use require a real live turn. Turn
+selection and organization model consent cannot be borrowed by an idle request.
+An admission captured in a live turn always retains its same-turn and Stop
+fence through final dispatch, independently of the rollout flag.
+
 ## Login Credentials Bound to a Key
 
 `nyxid login --agent-key` enrolls a CLI profile through explicit human approval in the web console or the mobile app's QR flow. The operator chooses an existing eligible personal/org key or creates a limited key. Each login receives its own `api_key_credentials` child secret; the parent key's primary secret is never recovered, displayed, or silently rotated. New keys also use child credentials, with their undisclosed primary secret discarded.

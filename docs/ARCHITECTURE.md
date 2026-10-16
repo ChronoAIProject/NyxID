@@ -10,6 +10,21 @@ services. Provider linking and requirement mutations are serialized through the
 service record. A small retirement guard keeps historical vendor credential
 stores inaccessible. See [Service configuration and vendor retirement](SERVICE_CONFIGURATION.md).
 
+NyxBot's assistant-only concrete execution gate is shared by MCP, raw proxy,
+LLM gateway, native SSH/Oracle, and machine service requests. It preserves the
+existing authority and billing boundaries while enforcing per-catalog personal
+priority and organization consent. `assistant_service_execution` stores private
+turn input admissions, owner selections, exact card bindings, bounded model-use
+grants, model callback attempt correlation, job plans and outage evidence.
+Its compound index covers owner/conversation/key/turn/kind; `expires_at` has an
+absolute TTL index. Every read checks expiry (TTL deletion is asynchronous).
+Turn/key fences make old rows unusable immediately; conversation deletion,
+agent destruction and owner purge remove associated rows. Outages use one atomic
+bounded 32-entry array per turn with 60-second entry expiry and credential/config
+binding. Machine jobs persist their command-use grant on `machine_jobs` for their
+existing bounded lifetime. No secret or payload is stored in these digests or
+forwarded to providers. See [NyxBot service execution](NYXBOT_SERVICE_EXECUTION.md).
+
 ## Table of Contents
 
 - [System Overview](#system-overview)
@@ -175,6 +190,7 @@ Handlers are thin HTTP boundary functions. They:
 | `api_keys.rs` | list_keys, create_key, delete_key, rotate_key                   |
 | `services.rs` | list_services, create_service, delete_service                   |
 | `proxy.rs`    | proxy_request (UUID-based), proxy_request_by_slug (slug-based), list_proxy_services (discovery) |
+| `managed_executions.rs` | Authenticated metadata reads for managed provider executions and personal wallet liabilities |
 | `oauth.rs`    | authorize, token, userinfo                                      |
 | `admin.rs`    | list_users, get_user, update_user, set_user_role, set_user_status, force_password_reset, delete_user, verify_user_email, list_user_sessions, revoke_user_sessions, list_audit_log, oauth client CRUD |
 | `admin_roles.rs` | list_roles, create_role, get_role, update_role, delete_role, get_user_roles, assign_role, revoke_role |
@@ -205,6 +221,8 @@ The service layer contains all business logic. Services receive database connect
 | `oauth_service.rs`  | OAuth client validation, redirect URI verification, scope validation, authorization code creation/exchange, PKCE S256 verification, ID token generation |
 | `key_service.rs`    | API key creation (prefix + SHA-256 hash), listing, deletion (soft deactivation), rotation (atomic deactivate + recreate) |
 | `proxy_service.rs`  | Downstream service resolution (by UUID and slug), credential decryption, request forwarding with credential injection (header/bearer/query/basic), header allowlist enforcement |
+| `telnyx_platform_service.rs` | Shared HTTP/MCP runner for bounded text chat, validated provider usage, and dispatch authority tied to the funded request |
+| `managed_execution_service.rs` | Durable admission, dispatch fencing, evidence persistence, settlement, cancellation, recovery, and execution visibility |
 | `mfa_service.rs`    | TOTP secret generation with QR provisioning, code verification against encrypted secrets, recovery code management |
 | `admin_user_service.rs` | Admin user CRUD (update profile, set role, set status), cascade user deletion across 8 collections, force password reset, manual email verification, session listing and bulk revocation |
 | `role_service.rs`   | Role CRUD (slug uniqueness, system role protection), user role assignment/revocation, system role seeding at startup |
@@ -654,6 +672,28 @@ Client                     NyxID Backend                     Downstream
 ```
 
 ### Collection Details
+
+#### managed_executions
+
+Stores the durable lifecycle of an admitted platform provider request: the actor
+and personal payer, service and API-key identifiers, request/configuration
+digests, billing snapshot, exact reservation ceiling, three meter-row links,
+validated token usage, provider request ID, state, bounded pending reason, and
+BSON timestamps. It stores no prompts, completions, or credential material.
+The billing request ID is unique; additional indexes bound recovery walks and
+actor/payer status reads. Pending liabilities have no TTL that could release
+funding without evidence.
+
+The initial Telnyx runner supports a restricted fixed-model text-chat pilot.
+Funding and the input/output/cache meter rows commit together through existing
+allowance, grant, wallet, and ledger machinery. Dispatch atomically marks the
+execution and all three meter rows as forwarded. The worker retains its
+credential and concurrency lease after caller disconnection; validated usage is
+persisted before idempotent settlement. Reconciliation releases expired work
+that was never dispatched and settles persisted evidence, while unknown
+dispatched outcomes retain their holds. Ordinary forwarding requires a managed
+proof for these services and cannot bypass admission. See
+[Telnyx platform billing](TELNYX_PLATFORM_BILLING.md) for the contract and rollout.
 
 #### Aurinko email coordination
 
@@ -2105,3 +2145,20 @@ provider call, then accepted only after validation and outbound persistence.
 There is no persisted message queue or automatic replay. See
 [Complete IM replies](CHANNEL_COMPLETE_REPLIES.md) for the API and rollout
 contract.
+
+## Native channel mention admission
+
+`channel_native_mentions` interprets bounded, authenticated Telegram and
+Lark/Feishu addressing facts. The receiving `NyxbotChannel` and live chat settings
+select the linked agent; display labels never resolve an agent or grant identity.
+Bot actors require an exact native mention in an existing enabled group and
+retain guest authority through execution, thread following and delayed delivery.
+
+`channel_bot_turn_service` atomically spends the existing `nyxbot_threads`
+chat/topic allowance and the owner's `assistant_group_handoffs` hourly window.
+The `nyxbot_events` claim fences duplicate execution and human budget resets;
+only admitted human messages refill the chat allowance. These are metadata-only
+additions to existing collections. The gateway policy is capability negotiated
+at management time, and existing connections reconcile without participant
+OAuth. See [the relay contract](CHANNEL_BOT_RELAY.md) for admission, compatibility
+and the required reader-before-writer rollout.

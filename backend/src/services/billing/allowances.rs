@@ -77,7 +77,7 @@ async fn prepare_allowance(
     )
     .await?;
     let service = resolve_service(db, &input.service_ref).await?;
-    let metric = super::metric_resolution::allowance_metric(&service, input.metric)?;
+    let metric = service.metric(input.metric)?;
     let now = Utc::now();
     let allowance = UsageAllowance {
         bundle_id: None,
@@ -184,7 +184,7 @@ async fn prepare_update(
             // without a metric. Preserve the allowance's existing unit.
             current.metric
         } else {
-            super::metric_resolution::allowance_metric(&service, input.metric)?
+            service.metric(input.metric)?
         };
         set.insert("service_id", service.id);
         set.insert("service_slug", service.slug.clone());
@@ -219,7 +219,7 @@ pub struct AllowanceBundleInput {
 async fn validate_bundle(
     db: &mongodb::Database,
     input: &AllowanceBundleInput,
-) -> AppResult<DownstreamService> {
+) -> AppResult<AllowanceTarget> {
     if !(1..=16).contains(&input.units.len()) {
         return Err(AppError::ValidationError(
             "Select 1 to 16 allowance units".into(),
@@ -234,7 +234,7 @@ async fn validate_bundle(
             ));
         }
         validate_quantity(unit.quantity)?;
-        super::metric_resolution::allowance_metric(&service, Some(unit.metric))?;
+        service.metric(Some(unit.metric))?;
     }
     super::targets::validate(
         db,
@@ -606,17 +606,52 @@ fn validate_quantity(quantity: i64) -> AppResult<()> {
     Ok(())
 }
 
-async fn resolve_service(db: &mongodb::Database, reference: &str) -> AppResult<DownstreamService> {
+async fn resolve_service(db: &mongodb::Database, reference: &str) -> AppResult<AllowanceTarget> {
     let reference = reference.trim();
     if reference.is_empty() {
         return Err(AppError::ValidationError(
             "service_ref is required".to_string(),
         ));
     }
-    db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+    if reference == super::machine_runtime::SKU {
+        return Ok(AllowanceTarget {
+            id: reference.into(),
+            slug: reference.into(),
+            catalog: None,
+        });
+    }
+    let service = db
+        .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
         .find_one(doc! { "$or": [{ "_id": reference }, { "slug": reference }] })
         .await?
-        .ok_or_else(|| AppError::ValidationError("allowance service was not found".to_string()))
+        .ok_or_else(|| AppError::ValidationError("allowance service was not found".to_string()))?;
+    Ok(AllowanceTarget {
+        id: service.id.clone(),
+        slug: service.slug.clone(),
+        catalog: Some(service),
+    })
+}
+
+/// Runtime is a logical Billing SKU, never a credential-bearing catalog row.
+struct AllowanceTarget {
+    id: String,
+    slug: String,
+    catalog: Option<DownstreamService>,
+}
+impl AllowanceTarget {
+    fn metric(&self, requested: Option<BillingMetric>) -> AppResult<BillingMetric> {
+        match self.catalog.as_ref() {
+            Some(service) => super::metric_resolution::allowance_metric(service, requested),
+            None if requested
+                .is_none_or(|metric| metric == BillingMetric::MachineRunningSeconds) =>
+            {
+                Ok(BillingMetric::MachineRunningSeconds)
+            }
+            None => Err(AppError::ValidationError(
+                "Remote Machine runtime allowances require machine_running_seconds".into(),
+            )),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -628,6 +663,71 @@ mod tests {
     use crate::test_utils::connect_test_database;
 
     use super::*;
+
+    #[tokio::test]
+    async fn machine_runtime_allowance_is_a_logical_sku_without_catalog_credentials() {
+        let db =
+            crate::test_utils::connect_transaction_test_database("runtime_allowance_authoring")
+                .await;
+        let target = resolve_service(&db, super::super::machine_runtime::SKU)
+            .await
+            .unwrap();
+        assert!(target.catalog.is_none());
+        assert_eq!(
+            target.metric(None).unwrap(),
+            BillingMetric::MachineRunningSeconds
+        );
+        assert!(target.metric(Some(BillingMetric::VoiceSeconds)).is_err());
+        let row = create_allowance(
+            &db,
+            CreateAllowanceInput {
+                service_ref: super::super::machine_runtime::SKU.into(),
+                metric: Some(BillingMetric::MachineRunningSeconds),
+                quantity: 3600,
+                recurrence: AllowanceRecurrence::Daily,
+                target_kind: BillingTargetKind::AllUsers,
+                target_user_ids: vec![],
+                target_org_ids: vec![],
+                target_group_ids: vec![],
+                created_by: Uuid::new_v4().to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(row.service_slug, super::super::machine_runtime::SKU);
+        assert_eq!(
+            db.collection::<bson::Document>(DOWNSTREAM_SERVICES)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
+        );
+        assert!(
+            update_allowance(
+                &db,
+                &row.id,
+                UpdateAllowanceInput {
+                    metric: Some(BillingMetric::VoiceSeconds),
+                    ..Default::default()
+                }
+            )
+            .await
+            .is_err()
+        );
+        let updated = update_allowance(
+            &db,
+            &row.id,
+            UpdateAllowanceInput {
+                quantity: Some(7200),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(updated.metric, BillingMetric::MachineRunningSeconds);
+        assert_eq!(updated.quantity, 7200);
+        db.drop().await.unwrap();
+    }
 
     #[test]
     fn utc_windows_cover_daily_weekly_monthly_and_one_time() {

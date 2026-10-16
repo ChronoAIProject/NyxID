@@ -17,6 +17,41 @@ it("validates workspace queries without propagating unrelated fields", () => {
     parseMachineDesktopSearch({ conversation_id: "x".repeat(129) })
       .conversation_id,
   ).toBeUndefined();
-  expect(parseMachineDesktopSearch({ context_id: "12345678-1234-4234-8234-123456789abc" }).context_id).toBe("12345678-1234-4234-8234-123456789abc");
-  expect(parseMachineDesktopSearch({ context_id: "ctx_secret!" }).context_id).toBeUndefined();
+  expect(
+    parseMachineDesktopSearch({
+      context_id: "12345678-1234-4234-8234-123456789abc",
+    }).context_id,
+  ).toBe("12345678-1234-4234-8234-123456789abc");
+  expect(
+    parseMachineDesktopSearch({ context_id: "ctx_secret!" }).context_id,
+  ).toBeUndefined();
+  expect(
+    parseMachinesSearch({
+      machine: "machine-1",
+      operation: "operation-1",
+      confirmation: "confirmation-1",
+      token: "not-allowed",
+    }),
+  ).toEqual({
+    tab: undefined,
+    machine: "machine-1",
+    operation: "operation-1",
+    confirmation: "confirmation-1",
+  });
+  expect(
+    parseMachinesSearch({
+      operation: "x".repeat(129),
+      confirmation: "../secret?token=x",
+    }),
+  ).toEqual({ tab: undefined });
+});
+
+it("allows the hosted setup shortcut without propagating an arbitrary mode", () => {
+  expect(parseMachineSetupSearch({ where: "hosted" })).toMatchObject({
+    where: "hosted",
+  });
+  expect(parseMachineSetupSearch({ where: "unknown" })).not.toHaveProperty(
+    "where",
+    "unknown",
+  );
 });

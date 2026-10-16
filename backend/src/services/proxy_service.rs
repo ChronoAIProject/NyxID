@@ -102,7 +102,7 @@ pub struct EffectiveActor {
 }
 
 impl EffectiveActor {
-    fn from_user_id(user_id: impl Into<String>) -> Self {
+    pub(crate) fn from_user_id(user_id: impl Into<String>) -> Self {
         Self {
             user_id: user_id.into(),
         }
@@ -3267,6 +3267,7 @@ async fn load_catalog_service_for_user_service(
 #[derive(Clone, Default)]
 struct CatalogProxyAuthorization {
     auth_scheme: Option<String>,
+    platform_key: Option<crate::models::downstream_service::PlatformKeyConfig>,
     platform_key_configured: bool,
     no_auth_platform_service: bool,
     offering_kind: crate::models::downstream_service::OfferingKind,
@@ -3300,6 +3301,7 @@ async fn load_catalog_proxy_authorization_for_user_service(
     super::retired_service_service::require_available(&service)?;
     Ok(CatalogProxyAuthorization {
         auth_scheme: service.auth_scheme.clone(),
+        platform_key: service.platform_key.clone(),
         platform_key_configured: service.platform_key.is_some(),
         no_auth_platform_service: super::platform_key_service::no_auth_platform_service(&service),
         offering_kind: service.offering_kind,
@@ -3321,6 +3323,7 @@ fn apply_catalog_proxy_authorization(
 ) {
     service.offering_kind = authorization.offering_kind;
     service.auth_scheme = authorization.auth_scheme.clone();
+    service.platform_key = authorization.platform_key.clone();
     service.concurrency_policy = authorization.concurrency_policy.clone();
     service.inference = authorization.inference.clone();
     service.proxy_operation_policy = authorization.policy.clone();
@@ -4044,6 +4047,7 @@ pub async fn forward_request(
 #[derive(Debug)]
 pub(crate) enum ForwardRequestError {
     Application(AppError),
+    PreDispatchRejected(AppError),
     Transport(reqwest::Error),
     OutcomeUnknown,
 }
@@ -4051,7 +4055,7 @@ pub(crate) enum ForwardRequestError {
 impl ForwardRequestError {
     pub(crate) fn into_app_error(self) -> AppError {
         match self {
-            Self::Application(error) => error,
+            Self::Application(error) | Self::PreDispatchRejected(error) => error,
             Self::OutcomeUnknown => AppError::Conflict(
                 "Provider outcome is unknown; check the provider before retrying".into(),
             ),
@@ -4126,7 +4130,80 @@ fn build_target_http_client(builder: reqwest::ClientBuilder) -> Client {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn forward_request_with_extra_outbound_headers(
+pub(crate) fn forward_request_with_extra_outbound_headers<'a>(
+    client: &'a Client,
+    target: &'a ProxyTarget,
+    method: reqwest::Method,
+    path: &'a str,
+    query: Option<&'a str>,
+    headers: reqwest::header::HeaderMap,
+    body: ProxyBody,
+    identity_headers: Vec<(String, String)>,
+    delegated_credentials: Vec<DelegatedCredential>,
+    caller_token: Option<&'a str>,
+    token_exchange_cache: &'a TokenExchangeCache,
+    cloud_response_cache: &'a CloudResponseCache,
+    extra_outbound_headers: Vec<(String, String)>,
+    _billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
+) -> futures::future::BoxFuture<'a, Result<reqwest::Response, ForwardRequestError>> {
+    forward_request_with_egress_guard(
+        client,
+        target,
+        method,
+        path,
+        query,
+        headers,
+        body,
+        identity_headers,
+        delegated_credentials,
+        caller_token,
+        token_exchange_cache,
+        cloud_response_cache,
+        extra_outbound_headers,
+        _billing_egress_permit,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn forward_request_with_egress_guard<'a>(
+    client: &'a Client,
+    target: &'a ProxyTarget,
+    method: reqwest::Method,
+    path: &'a str,
+    query: Option<&'a str>,
+    headers: reqwest::header::HeaderMap,
+    body: ProxyBody,
+    identity_headers: Vec<(String, String)>,
+    delegated_credentials: Vec<DelegatedCredential>,
+    caller_token: Option<&'a str>,
+    token_exchange_cache: &'a TokenExchangeCache,
+    cloud_response_cache: &'a CloudResponseCache,
+    extra_outbound_headers: Vec<(String, String)>,
+    billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
+    egress_guard: Option<&'a super::assistant_service_execution::HttpEgressGuard<'a>>,
+) -> futures::future::BoxFuture<'a, Result<reqwest::Response, ForwardRequestError>> {
+    Box::pin(forward_request_with_egress_guard_inner(
+        client,
+        target,
+        method,
+        path,
+        query,
+        headers,
+        body,
+        identity_headers,
+        delegated_credentials,
+        caller_token,
+        token_exchange_cache,
+        cloud_response_cache,
+        extra_outbound_headers,
+        billing_egress_permit,
+        egress_guard,
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn forward_request_with_egress_guard_inner(
     client: &Client,
     target: &ProxyTarget,
     method: reqwest::Method,
@@ -4140,8 +4217,17 @@ pub(crate) async fn forward_request_with_extra_outbound_headers(
     token_exchange_cache: &TokenExchangeCache,
     cloud_response_cache: &CloudResponseCache,
     extra_outbound_headers: Vec<(String, String)>,
-    _billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
+    billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
+    egress_guard: Option<&super::assistant_service_execution::HttpEgressGuard<'_>>,
 ) -> Result<reqwest::Response, ForwardRequestError> {
+    if super::telnyx_platform_service::contract(&target.service).is_some() {
+        let proof = billing_egress_permit.managed_proof().ok_or_else(|| {
+            AppError::BillingProviderUnavailable(
+                "Managed services require funded execution admission".into(),
+            )
+        })?;
+        proof.validate(target, method.as_str(), path, query, &body)?;
+    }
     super::destination_routing::validate_outbound_destination(
         target,
         method.as_str(),
@@ -4224,6 +4310,11 @@ pub(crate) async fn forward_request_with_extra_outbound_headers(
 
     if target.auth_method == nyxid_service_adapters::ifttt::AUTH_METHOD {
         let body = body.buffered()?;
+        if let Some(guard) = egress_guard {
+            Box::pin(guard.revalidate())
+                .await
+                .map_err(ForwardRequestError::PreDispatchRejected)?;
+        }
         return nyxid_service_adapters::ifttt::client()
             .forward(
                 &target.base_url,
@@ -4244,17 +4335,38 @@ pub(crate) async fn forward_request_with_extra_outbound_headers(
     }
     if target.auth_method == nyxid_service_adapters::ifttt_mcp::AUTH_METHOD {
         let body = body.buffered()?;
+        if let Some(guard) = egress_guard {
+            Box::pin(guard.revalidate())
+                .await
+                .map_err(ForwardRequestError::PreDispatchRejected)?;
+        }
+        let validate =
+            || -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + '_>> {
+                Box::pin(async {
+                    match egress_guard {
+                        Some(guard) => guard.revalidate().await.is_ok(),
+                        None => true,
+                    }
+                })
+            };
         return nyxid_service_adapters::ifttt_mcp::client()
-            .forward(
+            .forward_with_guard(
                 &target.base_url,
                 &method,
                 path,
                 query,
                 &target.credential,
                 body.as_deref(),
+                egress_guard
+                    .map(|_| &validate as &nyxid_service_adapters::ifttt_mcp::DispatchGuard<'_>),
             )
             .await
             .map_err(|error| match error {
+                nyxid_service_adapters::ifttt_mcp::Error::PreDispatchRejected => {
+                    ForwardRequestError::PreDispatchRejected(AppError::Conflict(
+                        "Assistant authority changed before operation dispatch".into(),
+                    ))
+                }
                 nyxid_service_adapters::ifttt_mcp::Error::Transport(error) => {
                     ForwardRequestError::Transport(error)
                 }
@@ -4344,6 +4456,11 @@ pub(crate) async fn forward_request_with_extra_outbound_headers(
                     base_url = %target.base_url,
                     "cloud_response_cache hit"
                 );
+                if let Some(guard) = egress_guard {
+                    Box::pin(guard.revalidate())
+                        .await
+                        .map_err(ForwardRequestError::PreDispatchRejected)?;
+                }
                 return Ok(cached);
             }
             Some(key)
@@ -4501,6 +4618,11 @@ pub(crate) async fn forward_request_with_extra_outbound_headers(
         }
     }
 
+    if let Some(guard) = egress_guard {
+        Box::pin(guard.revalidate())
+            .await
+            .map_err(ForwardRequestError::PreDispatchRejected)?;
+    }
     let response = request.send().await?;
 
     // Cache successful billing-API responses so a follow-up request
@@ -5892,6 +6014,7 @@ mod tests {
                 is_active: true,
                 created_at: Utc::now(),
                 rotation_predecessor_id: None,
+                machine_external_grants_present: false,
                 state_version: 1,
                 updated_at: Some(Utc::now()),
                 description: None,
@@ -7836,6 +7959,50 @@ mod tests {
 
         assert!(svc.token_exchange_config.is_none());
         assert_eq!(svc.auth_method, "bearer");
+    }
+
+    #[test]
+    fn managed_contract_and_restricted_audience_survive_user_service_projection() {
+        let mut user_service = make_user_service_token_exchange();
+        user_service.auth_method = "bearer".into();
+        user_service.credential_binding = Some("platform".into());
+        let contract = crate::models::service_billing::ManagedExecutionContract {
+            model: "verified/model".into(),
+            max_input_tokens: 8192,
+            max_output_tokens: 512,
+            max_request_bytes: 4096,
+            max_response_bytes: 65536,
+            tariff_version: "v1".into(),
+            tariff_source: "https://api.telnyx.com/v2/pricing/products/inference".into(),
+            tariff_verified_at: Utc::now(),
+        };
+        let mut service = build_minimal_downstream_service(
+            &user_service,
+            &make_endpoint(),
+            Utc::now(),
+            None,
+            Some(crate::models::service_billing::ServiceBilling {
+                managed_execution: Some(contract.clone()),
+                ..Default::default()
+            }),
+        );
+        let config = crate::models::downstream_service::PlatformKeyConfig {
+            enabled: true,
+            audience: crate::models::downstream_service::PlatformKeyAudience::Restricted,
+            allowed_owner_ids: vec!["pilot".into()],
+        };
+        apply_catalog_proxy_authorization(
+            &mut service,
+            &CatalogProxyAuthorization {
+                platform_key: Some(config.clone()),
+                service_category: Some("internal".into()),
+                requires_user_credential: Some(false),
+                ..Default::default()
+            },
+        );
+        assert_eq!(service.platform_key, Some(config));
+        assert_eq!(service.billing.unwrap().managed_execution, Some(contract));
+        assert!(!service.requires_user_credential);
     }
 
     // ─── body auth method guard regression tests ─────────────────────

@@ -25,7 +25,7 @@ use crate::services::node_ws_manager::NodeWebTerminalAuthMode;
 use crate::services::{audit_service, node_routing_service, node_service, ssh_service};
 use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
 
-use super::ssh_tunnel::authorize_ssh_access;
+use super::ssh_tunnel::{authorize_ssh_access_for_connection, session_connection};
 
 #[derive(Debug, Deserialize)]
 pub struct WebTerminalQuery {
@@ -78,7 +78,23 @@ pub async fn ssh_web_terminal(
             Some(billing_route_policy),
             crate::services::billing::BillingIngress::SshWebTerminal,
         )?;
-    let auth_context = authorize_ssh_access(&state, &auth_user, &service_id).await?;
+    let connection = session_connection(&state, &auth_user, &service_id).await?;
+    let service_id = connection
+        .as_ref()
+        .and_then(|row| row.catalog_service_id.clone())
+        .unwrap_or(service_id);
+    let operation = crate::services::operation_descriptor::build_ssh_descriptor(
+        crate::services::operation_descriptor::SshOperationKind::Tunnel,
+        None,
+    );
+    let auth_context = authorize_ssh_access_for_connection(
+        &state,
+        &auth_user,
+        &service_id,
+        &operation,
+        connection.as_ref(),
+    )
+    .await?;
     let ssh_svc = ssh_service::get_ssh_service(&state.db, &service_id).await?;
     if auth_context.mode == SshAuthMode::ProxyOnly {
         return Err(AppError::SshAuthModeUnsupportedForOperation(
@@ -104,6 +120,28 @@ pub async fn ssh_web_terminal(
         ));
     }
 
+    let cols = query.cols.clamp(10, 500);
+    let rows = query.rows.clamp(2, 200);
+    let session_admission = match crate::services::assistant_ssh_session::admit(
+        &state,
+        auth_user.assistant_chat.as_deref(),
+        connection.as_ref(),
+        &ssh_svc,
+        &service_id,
+        "SSH terminal session",
+        serde_json::json!({"principal":principal,"cols":cols,"rows":rows}),
+        headers
+            .get(crate::services::assistant_service_execution::ACK_HEADER)
+            .and_then(|v| v.to_str().ok()),
+        state.config.ssh_max_tunnel_duration_secs,
+    )
+    .await?
+    {
+        Ok(admission) => admission,
+        Err(refusal) => {
+            return Ok((axum::http::StatusCode::CONFLICT, axum::Json(refusal)).into_response());
+        }
+    };
     let session_guard = state
         .ssh_session_manager
         .try_acquire(&auth_user.user_id.to_string())
@@ -116,9 +154,6 @@ pub async fn ssh_web_terminal(
             .and_then(|v| v.to_str().ok())
             .map(str::to_string),
     );
-
-    let cols = query.cols.clamp(10, 500);
-    let rows = query.rows.clamp(2, 200);
 
     // Snapshot telemetry context BEFORE the WS upgrade so the spawned
     // socket task keeps the original `X-NyxID-Client` surface on
@@ -157,6 +192,7 @@ pub async fn ssh_web_terminal(
                     tele,
                     auth_context.owner_user_id,
                     billing_egress_permit,
+                    session_admission,
                 )
                 .await;
                 Ok(())
@@ -187,6 +223,7 @@ async fn handle_web_terminal(
     tele: TelemetryContext,
     resource_owner_id: String,
     billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
+    session_admission: Option<crate::services::assistant_ssh_session::SessionAdmission>,
 ) {
     let _ = &session_guard;
     let slot_cancel = session_guard.cancellation_token();
@@ -205,6 +242,12 @@ async fn handle_web_terminal(
     }
 
     // ----- Generate ephemeral SSH credentials for cert-mode sessions -----
+    if let Some(admission) = session_admission.as_ref()
+        && admission.revalidate(&state, None).await.is_err()
+    {
+        send_error_and_close(&mut socket, "SSH session authority changed").await;
+        return;
+    }
     let ephemeral = if auth_mode == SshAuthMode::Cert {
         match generate_ephemeral_credentials(&state, &ssh_svc, &service_id, &user_id, &principal)
             .await
@@ -221,11 +264,11 @@ async fn handle_web_terminal(
     };
 
     // ----- Check for node route -----
-    let node_route = node_routing_service::resolve_node_route(
-        &state.db,
+    let node_route = crate::services::assistant_ssh_session::route(
+        &state,
+        session_admission.as_ref(),
         &user_id,
         &service_id,
-        &state.node_ws_manager,
     )
     .await
     .ok()
@@ -255,6 +298,7 @@ async fn handle_web_terminal(
             billing_resolution_user_id,
             billing_egress_permit,
             slot_cancel,
+            session_admission,
         )
         .await;
     } else {
@@ -304,6 +348,7 @@ async fn handle_node_web_terminal(
     billing_resolution_user_id: String,
     billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
     slot_cancel: tokio_util::sync::CancellationToken,
+    session_admission: Option<crate::services::assistant_ssh_session::SessionAdmission>,
 ) {
     let all_node_ids: Vec<&str> = std::iter::once(node_route.node_id.as_str())
         .chain(node_route.fallback_node_ids.iter().map(|id| id.as_str()))
@@ -402,6 +447,16 @@ async fn handle_node_web_terminal(
             SshAuthMode::ProxyOnly => unreachable!("proxy-only returned before node dispatch"),
         };
 
+        if let Some(admission) = session_admission.as_ref()
+            && admission.revalidate(&state, Some(node_id)).await.is_err()
+        {
+            let _ = state
+                .billing
+                .fail(&metered, "assistant_authority_changed")
+                .await;
+            send_error_and_close(&mut socket, "SSH session authority changed").await;
+            return;
+        }
         match state
             .node_dispatch
             .open_web_terminal(
@@ -423,6 +478,9 @@ async fn handle_node_web_terminal(
             .await
         {
             Ok(rx) => {
+                if let Some(admission) = session_admission.as_ref() {
+                    admission.receipt(&state).await;
+                }
                 terminal_rx = Some(rx);
                 selected_node_id = Some(node_id.to_string());
                 break;
@@ -552,8 +610,15 @@ async fn handle_node_web_terminal(
     let idle_timer = tokio::time::sleep(idle_timeout);
     tokio::pin!(idle_timer);
 
+    let authority_lost = crate::services::assistant_ssh_session::monitor(
+        &state,
+        session_admission.as_ref(),
+        Some(node_id.as_str()),
+    );
+    tokio::pin!(authority_lost);
     let disconnect_reason = loop {
         tokio::select! {
+            () = &mut authority_lost => { break "assistant_authority_changed"; }
             () = slot_cancel.cancelled() => {
                 break "capacity_slot_lost";
             }
