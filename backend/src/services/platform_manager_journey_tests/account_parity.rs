@@ -210,20 +210,27 @@ impl InspectOwnerEgress {
             .find_one(doc! {"user_id":&user,"label":{"$regex":"^account-owned-bot-"}})
             .await?
             .unwrap();
-        let shared = self
+        let shared_snapshot = self
             .state
             .db
-            .collection::<crate::models::channel_bot::ChannelBot>(
-                crate::models::channel_bot::COLLECTION_NAME,
-            )
+            .collection::<Document>(crate::models::channel_bot::COLLECTION_NAME)
             .find_one(doc! {"user_id":&user,"label":"same-owner-platform-manager"})
             .await?
             .unwrap();
+        let shared: crate::models::channel_bot::ChannelBot =
+            bson::from_document(shared_snapshot.clone()).map_err(|_| {
+                AppError::Internal("Unable to decode shared manager fixture".into())
+            })?;
         *self.stage.lock().await = "shared_manager_refusal";
         let mut shared_args = json!({"bot_id":shared.id,"label":"Forbidden shared mutation"});
         let mut shared_result = tools
             .execute(&auth, "nyxid__update_channel_bot", &shared_args)
             .await;
+        let mut shared_confirmation = None;
+        if *mode == AccessMode::AskEveryTime {
+            assert!(shared_result.is_error);
+            assert_eq!(shared_result.value["error"], "acknowledgement_required");
+        }
         if shared_result.value["error"] == "acknowledgement_required" {
             let card = shared_result.value["acknowledgement_id"]
                 .as_str()
@@ -234,26 +241,42 @@ impl InspectOwnerEgress {
             shared_result = tools
                 .execute(&auth, "nyxid__update_channel_bot", &shared_args)
                 .await;
+            shared_confirmation = Some(card);
         }
         assert!(
             shared_result.is_error,
             "same-owner platform manager stays confined after normal confirmation"
         );
-        assert!(
-            shared_result.value.to_string().contains("platform manager"),
-            "{}",
-            shared_result.value
-        );
+        let forbidden = AppError::Forbidden(String::new()).response_body();
+        assert_eq!(shared_result.value["error"], forbidden.error);
+        assert_eq!(shared_result.value["error_code"], forbidden.error_code);
+        if let Some(card) = shared_confirmation {
+            assert!(
+                self.state
+                    .db
+                    .collection::<Document>(
+                        crate::models::assistant_acknowledgement::COLLECTION_NAME,
+                    )
+                    .find_one(doc! {"_id":card,"user_id":&user,
+                    "conversation_id":&turn.conversation_id,"status":"used"})
+                    .projection(doc! {"_id":1})
+                    .await?
+                    .is_some(),
+                "shared manager mutation is refused after consuming the exact owner confirmation"
+            );
+        }
         let shared_unchanged = self
             .state
             .db
-            .collection::<crate::models::channel_bot::ChannelBot>(
-                crate::models::channel_bot::COLLECTION_NAME,
-            )
+            .collection::<Document>(crate::models::channel_bot::COLLECTION_NAME)
             .find_one(doc! {"_id":&shared.id})
             .await?
             .unwrap();
-        assert_eq!(shared_unchanged.label, shared.label);
+        assert_eq!(shared_unchanged.get_str("label").unwrap(), shared.label);
+        assert!(
+            shared_unchanged == shared_snapshot,
+            "shared manager stored row stays unchanged"
+        );
         *self.stage.lock().await = "foreign_bot_refusal";
         for target in self
             .state
