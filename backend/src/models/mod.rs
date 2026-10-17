@@ -200,4 +200,5 @@ pub mod platform_installation;
 pub mod platform_manager_delivery;
 pub mod remote_machine_storage;
 
+pub mod channel_adapter;
 pub mod platform_public_contract;

@@ -40,6 +40,7 @@ alternate send, stream, recovery, or control path.
 This set does not specify:
 
 - Channel bots, inbound channel events, or asynchronous channel replies. Those are separate webhook and relay surfaces under `/api/v1/channel-*`; see `docs/CHANNEL_BOT_RELAY.md` and `docs/CHANNEL_EVENT_GATEWAY.md`.
+- Phone, SMS and external speech connections to NyxBot specialists. See [NyxBot service adapters](../NYXBOT_SERVICE_ADAPTERS.md) for Telnyx, Twilio and ElevenLabs setup, capabilities, guest authority and billing.
 - The general downstream proxy at `/api/v1/proxy/**`, including node-routed and WebSocket proxy streaming. See `docs/PROXY_STREAMING_ARCHITECTURE.md` and `docs/NODE_PROXY_ARCHITECTURE.md`.
 - The older standalone chatbot products described by `docs/NYXID_CHATBOT_SPEC.md` and `docs/CHATBOT_3RD_PARTY_INTEGRATION_SPEC.md`.
 - Oracle browser-worker pools. See `docs/ORACLE_RELAY.md`.

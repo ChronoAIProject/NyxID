@@ -2114,6 +2114,7 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
     // Routes that ALLOW delegated tokens (proxy, LLM gateway, delegation refresh)
     // Also accessible by service accounts.
     let api_v1_delegated = Router::new()
+        .route("/channel-adapters", get(handlers::call_adapters::catalog))
         .route(
             "/channel-platforms",
             get(handlers::channel_platforms::list_platforms),
@@ -2591,6 +2592,50 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
 
     // Routes that BLOCK service account tokens (human-only endpoints)
     let api_v1_human_only = Router::new()
+        .route(
+            "/channel-adapter-bindings",
+            get(handlers::call_adapters::list).post(handlers::call_adapters::create),
+        )
+        .route(
+            "/channel-adapter-bindings/{id}",
+            axum::routing::delete(handlers::call_adapters::remove),
+        )
+        .route(
+            "/channel-adapter-bindings/{id}/disable",
+            post(handlers::call_adapters::disable),
+        )
+        .route(
+            "/channel-adapter-bindings/{id}/verify",
+            post(handlers::call_adapters::reverify),
+        )
+        .route(
+            "/channel-adapter-bindings/{id}/custom-llm-setup",
+            post(handlers::call_adapters::custom_setup),
+        )
+        .route(
+            "/channel-adapter-bindings/{id}/sessions",
+            post(handlers::call_adapters::custom_session),
+        )
+        .route(
+            "/admin/channel-adapter-accounts",
+            get(handlers::call_adapters::accounts).post(handlers::call_adapters::account),
+        )
+        .route(
+            "/admin/channel-adapter-allocations",
+            get(handlers::call_adapters::allocations).post(handlers::call_adapters::allocate),
+        )
+        .route(
+            "/admin/channel-adapter-accounts/{id}",
+            axum::routing::delete(handlers::call_adapters::remove_account),
+        )
+        .route(
+            "/channel-adapter-bindings/{id}/sessions/{sid}/end",
+            post(handlers::call_adapters::end_custom_session),
+        )
+        .route(
+            "/admin/channel-adapter-allocations/{id}",
+            axum::routing::delete(handlers::call_adapters::revoke_allocation),
+        )
         .route(
             "/remote-machine-entitlement",
             get(handlers::remote_machine::entitlement),
@@ -3140,6 +3185,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .nest("/api/v1/webhooks", webhook_routes)
         .nest("/api/v1/webhooks/triggers", trigger_webhook_routes)
         // Channel bot webhook routes -- unauthenticated (per-bot signature verified)
+        .route("/api/v1/webhooks/call-adapters/{id}", post(handlers::call_adapters::webhook))
+        .route("/api/v1/webhooks/call-adapters/{id}/sms-receipts/{send}", post(handlers::call_adapters::sms_receipt))
+        .route("/api/v1/webhooks/call-adapters/{id}/socket/{sid}", get(handlers::call_adapters::socket))
+        .route("/api/v1/webhooks/call-adapters/{id}/v1/chat/completions", post(handlers::call_adapters::completions))
         .route(
             "/api/v1/webhooks/channel/telegram-new/manager",
             post(handlers::telegram_new::webhook)

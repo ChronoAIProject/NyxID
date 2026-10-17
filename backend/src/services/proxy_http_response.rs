@@ -563,9 +563,11 @@ async fn relay_response_inner(
             proven_nyxagent_refusal(nyxagent_admission, status.as_u16(), &response_body);
         if rejected_admission {
             // Returning the refusal admits a retry. Its funding must be free first.
-            if let Err(error) = state
-                .billing
-                .settle(
+            // Poll funding separately from the deep proxy stack, and await its
+            // durable release before allowing the provider retry.
+            let billing = state.billing.clone();
+            let settlement = tokio::spawn(async move {
+                Box::pin(billing.settle(
                     &metered,
                     PlatformUsage::default(),
                     resale.map(|mut usage| {
@@ -573,9 +575,17 @@ async fn relay_response_inner(
                         usage
                     }),
                     model,
-                )
+                ))
                 .await
-            {
+            })
+            .await;
+            let settlement = match settlement {
+                Ok(result) => result,
+                Err(_) => Err(AppError::Internal(
+                    "Assistant admission funding release failed".into(),
+                )),
+            };
+            if let Err(error) = settlement {
                 tracing::error!(
                     code = error.error_code(),
                     "Assistant admission funding release failed"

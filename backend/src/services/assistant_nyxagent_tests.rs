@@ -952,6 +952,7 @@ fn stale_test_row(now: DateTime<Utc>) -> AssistantConversation {
         credential_api_key_id: "key".into(),
         message_count: 0,
         active_turn: Some(ActiveTurn {
+            channel_adapter_origin: None,
             platform_reply: None,
             execution_started: false,
             machine_scopes: Vec::new(),
@@ -5098,6 +5099,7 @@ async fn platform_thread_requires_live_turn_with_ordinary_rollout_disabled() {
     let db = connect_transaction_test_database("nyxa_platform_gate_off").await;
     let owner = Uuid::new_v4().to_string();
     let mut fence = AssistantTurnFence {
+        channel_adapter_origin: None,
         conversation_id: Uuid::new_v4().to_string(),
         turn_id: None,
         turn_live: false,

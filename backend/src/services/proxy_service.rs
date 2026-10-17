@@ -1869,7 +1869,7 @@ pub async fn resolve_proxy_target_from_user_service(
             return Ok(Some(
                 finish_resolution(
                     db,
-                    encryption_keys,
+                    Some(encryption_keys),
                     user_id,
                     us,
                     None,
@@ -1894,7 +1894,7 @@ pub async fn resolve_proxy_target_from_user_service(
             return Ok(Some(
                 finish_resolution(
                     db,
-                    encryption_keys,
+                    Some(encryption_keys),
                     user_id,
                     us,
                     None,
@@ -2002,7 +2002,7 @@ pub async fn resolve_proxy_target_from_user_service(
             return Ok(Some(
                 finish_resolution(
                     db,
-                    encryption_keys,
+                    Some(encryption_keys),
                     &membership.org_user_id,
                     org_us,
                     Some(routing),
@@ -2306,7 +2306,7 @@ pub async fn resolve_proxy_target_by_user_service_id(
 ) -> AppResult<Option<UserServiceResolution>> {
     resolve_proxy_target_by_user_service_id_with_mode(
         db,
-        encryption_keys,
+        Some(encryption_keys),
         actor_user_id,
         user_service_id,
         expected_slug,
@@ -2328,7 +2328,7 @@ pub async fn read_proxy_authority_snapshot_by_user_service_id(
 ) -> AppResult<Option<UserServiceResolution>> {
     resolve_proxy_target_by_user_service_id_with_mode(
         db,
-        encryption_keys,
+        Some(encryption_keys),
         actor_user_id,
         user_service_id,
         expected_slug,
@@ -2340,7 +2340,7 @@ pub async fn read_proxy_authority_snapshot_by_user_service_id(
 
 async fn resolve_proxy_target_by_user_service_id_with_mode(
     db: &mongodb::Database,
-    encryption_keys: &EncryptionKeys,
+    encryption_keys: Option<&EncryptionKeys>,
     actor_user_id: &str,
     user_service_id: &str,
     expected_slug: Option<&str>,
@@ -2868,7 +2868,7 @@ pub(crate) async fn verify_auto_provision_eligibility(
 
 async fn finish_resolution(
     db: &mongodb::Database,
-    encryption_keys: &EncryptionKeys,
+    encryption_keys: Option<&EncryptionKeys>,
     effective_owner_id: &str,
     user_service: crate::models::user_service::UserService,
     org_routing: Option<OrgRouting>,
@@ -2961,7 +2961,7 @@ async fn finish_resolution(
             )
             .await?;
             let decrypted_bytes = Zeroizing::new(
-                decrypt_authorized_master_credential(encryption_keys, &authorized).await?,
+                decrypt_authorized_master_credential(encryption_keys.ok_or_else(||AppError::Internal("Credential materialization requires encryption keys".into()))?, &authorized).await?,
             );
             String::from_utf8((*decrypted_bytes).clone()).map_err(|e| {
                 tracing::error!("Credential UTF-8 decode failed: {e}");
@@ -3096,7 +3096,7 @@ async fn finish_resolution(
     let api_key = if materialize_credentials {
         maybe_refresh_provider_backed_api_key(
             db,
-            encryption_keys,
+            encryption_keys.ok_or_else(||AppError::Internal("Credential materialization requires encryption keys".into()))?,
             effective_owner_id,
             api_key,
             connection_expiry_notifier,
@@ -3110,7 +3110,7 @@ async fn finish_resolution(
     // since the node agent handles credential injection locally.
     if user_service.node_id.is_some() {
         let credential = if materialize_credentials {
-            match resolve_user_api_key_credential(&api_key, encryption_keys).await {
+            match resolve_user_api_key_credential(&api_key, encryption_keys.ok_or_else(||AppError::Internal("Credential materialization requires encryption keys".into()))?).await {
                 Ok(cred) => cred,
                 Err(e) => {
                     tracing::debug!(
@@ -3178,7 +3178,7 @@ async fn finish_resolution(
     }
 
     let credential = if materialize_credentials {
-        let credential = resolve_user_api_key_credential(&api_key, encryption_keys).await?;
+        let credential = resolve_user_api_key_credential(&api_key, encryption_keys.ok_or_else(||AppError::Internal("Credential materialization requires encryption keys".into()))?).await?;
         let credential =
             credential.ok_or_else(|| missing_user_api_key_credential_error(&api_key))?;
 
@@ -4692,6 +4692,25 @@ fn inject_credential_into_json_body(
     })?;
 
     Ok(bytes::Bytes::from(bytes))
+}
+
+/// Reuse the exact execution resolver's live ACL, destination and credential
+/// identity checks without requiring access to encryption keys or refreshing.
+pub(crate) async fn read_connection_authority(
+    db: &mongodb::Database,
+    actor: &str,
+    id: &str,
+) -> AppResult<Option<UserServiceResolution>> {
+    resolve_proxy_target_by_user_service_id_with_mode(
+        db,
+        None,
+        actor,
+        id,
+        None,
+        None,
+        ProxyCredentialResolution::read_only_snapshot(),
+    )
+    .await
 }
 
 #[cfg(test)]

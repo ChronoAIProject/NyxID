@@ -303,6 +303,8 @@ pub struct ActiveTurn {
     pub machine_scopes: Vec<MachineTurnScope>,
     #[serde(default)]
     pub platform_origin: Option<PlatformTurnOrigin>,
+    #[serde(default)]
+    pub channel_adapter_origin: Option<super::channel_adapter::TurnAuthority>,
     /// The failed turn this turn retries (owner Retry only).
     #[serde(default)]
     pub retry_of: Option<String>,

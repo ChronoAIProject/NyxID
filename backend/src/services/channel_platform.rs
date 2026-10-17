@@ -484,6 +484,13 @@ pub fn insert_reply_context(metadata: &mut Option<serde_json::Value>, key: &str,
 /// to normalize webhook verification, message parsing, and reply sending.
 #[async_trait::async_trait]
 pub trait PlatformAdapter: Send + Sync {
+    fn supports_text_reply(&self) -> bool {
+        true
+    }
+    fn supports_text_ingress(&self) -> bool {
+        self.registration().webhook_ingestion || matches!(self.ingestion(), Ingestion::Poll { .. })
+    }
+
     fn activity_descriptors(
         &self,
     ) -> &'static [super::channel_activity_service::ActivityDescriptor] {

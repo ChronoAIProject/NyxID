@@ -38,6 +38,7 @@ pub fn metadata(turn: &ActiveTurn, now: DateTime<Utc>) -> TurnMetadata {
             (now - started).num_milliseconds().max(0) as u64
         });
     TurnMetadata {
+        channel_delivery: None,
         attempts: Some(turn.engine_attempts),
         capacity_wait_ms: Some(turn.capacity_wait_ms.saturating_add(active_wait_ms)),
     }

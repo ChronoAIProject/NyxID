@@ -30,6 +30,7 @@ use crate::{
 /// never contains key material.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AssistantTurnFence {
+    pub channel_adapter_origin: Option<crate::models::channel_adapter::TurnAuthority>,
     pub platform_thread: bool,
     pub platform_origin: Option<crate::models::assistant_conversation::PlatformTurnOrigin>,
     pub conversation_id: String,
@@ -71,6 +72,20 @@ pub async fn enforce_turn_gate(
     user_agent: Option<&str>,
     route: &str,
 ) -> AppResult<()> {
+    if let Some(origin) = &fence.channel_adapter_origin {
+        fence.require_live()?;
+        super::call_channels::session::fence_tool(
+            db,
+            user_id,
+            &fence.conversation_id,
+            fence
+                .turn_id
+                .as_deref()
+                .ok_or(AppError::AssistantTurnRequired)?,
+            origin,
+        )
+        .await?;
+    }
     // Platform execution is mandatory independently of the ordinary rollout.
     // A later app turn on this thread remains usable without old consent.
     if fence.platform_thread || fence.platform_origin.is_some() {
@@ -847,6 +862,7 @@ mod access_mode_tests {
     #[test]
     fn webhook_policy_floor_remains_independent_of_owner_mode() {
         let mut chat = ChatAuthority {
+            channel_adapter_origin: None,
             platform_thread: false,
             platform_origin: None,
             org_agent_access: None,
@@ -876,6 +892,7 @@ mod access_mode_tests {
 
 #[derive(Clone)]
 pub struct ChatAuthority {
+    pub channel_adapter_origin: Option<crate::models::channel_adapter::TurnAuthority>,
     pub platform_thread: bool,
     pub platform_origin: Option<crate::models::assistant_conversation::PlatformTurnOrigin>,
     pub org_agent_access: Option<std::sync::Arc<super::org_agent_service::RequestAccess>>,
@@ -945,6 +962,7 @@ impl ChatAuthority {
 
     pub fn turn_fence(&self) -> AssistantTurnFence {
         AssistantTurnFence {
+            channel_adapter_origin: self.channel_adapter_origin.clone(),
             platform_thread: self.platform_thread,
             platform_origin: self.platform_origin.clone(),
             conversation_id: self.conversation_id.clone(),
@@ -1360,6 +1378,10 @@ pub async fn for_key_with_access(
         .map(|turn| (turn.report_to.clone(), turn.with_nyxbot))
         .unwrap_or((None, false));
     Ok(Some(ChatAuthority {
+        channel_adapter_origin: conversation
+            .active_turn
+            .as_ref()
+            .and_then(|t| t.channel_adapter_origin.clone()),
         platform_thread: conversation.platform_thread.is_some(),
         platform_origin: conversation
             .active_turn
@@ -2716,6 +2738,7 @@ pub(crate) async fn decide_in_session(
             .await?;
     }
     let chat = ChatAuthority {
+        channel_adapter_origin: None,
         platform_thread: target.platform_thread.is_some(),
         platform_origin: target
             .active_turn
