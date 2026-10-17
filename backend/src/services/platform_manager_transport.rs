@@ -239,7 +239,21 @@ async fn dispatch_native_admission_impl(
     Ok(())
 }
 
-async fn dispatch_verified(
+fn dispatch_verified<'a>(
+    state: &'a AppState,
+    producers: Arc<PlatformManagerProducers>,
+    runtime: crate::models::platform_bot_runtime_controls::PlatformBotRuntimeControls,
+    verified: VerifiedManagerUpdate,
+    text: &'a str,
+    username: &'a str,
+    api: &'a super::telegram_new_api::TelegramApi<'_>,
+) -> futures::future::BoxFuture<'a, AppResult<ManagerDispatch>> {
+    Box::pin(dispatch_verified_impl(
+        state, producers, runtime, verified, text, username, api,
+    ))
+}
+
+async fn dispatch_verified_impl(
     state: &AppState,
     producers: Arc<PlatformManagerProducers>,
     runtime: crate::models::platform_bot_runtime_controls::PlatformBotRuntimeControls,
@@ -1118,6 +1132,29 @@ mod future_size_tests {
         ) -> F,
     ) -> usize {
         std::mem::size_of::<F>()
+    }
+
+    fn verified_future_size<F: std::future::Future>(
+        _: impl FnOnce(
+            &'static AppState,
+            Arc<PlatformManagerProducers>,
+            crate::models::platform_bot_runtime_controls::PlatformBotRuntimeControls,
+            VerifiedManagerUpdate,
+            &'static str,
+            &'static str,
+            &'static super::super::telegram_new_api::TelegramApi<'static>,
+        ) -> F,
+    ) -> usize {
+        std::mem::size_of::<F>()
+    }
+
+    #[test]
+    fn verified_dispatch_keeps_legacy_transport_caller_future_small() {
+        let size = verified_future_size(dispatch_verified);
+        assert!(
+            size < 1024,
+            "verified dispatch caller future grew to {size} bytes"
+        );
     }
 
     #[test]

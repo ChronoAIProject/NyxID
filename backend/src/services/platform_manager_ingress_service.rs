@@ -489,7 +489,7 @@ mod tests {
         ensure_indexes(&db).await.unwrap();
         let update = VerifiedManagerUpdate {
             profile_id: Uuid::new_v4().to_string(),
-            manager_bot_id: Uuid::new_v4().to_string(),
+            manager_bot_id: "100".into(),
             entry: EntryIdentity::TelegramV1 {
                 telegram_bot_id: 100,
             },

@@ -551,11 +551,10 @@ fn discord_browser_consent_saved_personal_reply_history_continuation_and_logout_
             let completed = json!({"type":"response.completed","sequence_number":0,"response":{"id":format!("resp_{session}_abcdef1234567890abcdef1234567890"),"conversation":{"id":format!("conv_{session}")},"status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Continued from the browser"}]}]}});
             Mock::given(method("POST"))
                 .and(path("/v1/responses"))
-                .respond_with(
-                    ResponseTemplate::new(200)
-                        .insert_header("content-type", "text/event-stream")
-                        .set_body_string(format!("data: {completed}\n\n")),
-                )
+                .respond_with(ResponseTemplate::new(200).set_body_raw(
+                    format!("data: {completed}\n\n").into_bytes(),
+                    "text/event-stream",
+                ))
                 .expect(1)
                 .mount(&j.server)
                 .await;

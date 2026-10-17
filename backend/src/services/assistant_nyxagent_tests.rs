@@ -1045,7 +1045,7 @@ fn platform_test_origin(
         personal_control_revision: 11,
         sender: crate::models::platform_entry_projection::StoredSenderIdentity::TelegramV1 {
             telegram_sender_id: 456,
-            telegram_chat_id: 789,
+            telegram_chat_id: 456,
         },
         source: PlatformOriginSource::Ingress {
             receipt_id: "receipt".into(),

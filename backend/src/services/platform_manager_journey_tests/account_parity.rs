@@ -95,6 +95,8 @@ struct InspectOwnerEgress {
     inner: Arc<dyn NyxAgentEgress>,
     accounts: Vec<(String, String, AccessMode)>,
     observed: Mutex<Vec<(String, String, String, String)>>,
+    stage: Mutex<&'static str>,
+    failure: Mutex<Option<(&'static str, u32)>>,
 }
 
 #[async_trait]
@@ -105,6 +107,22 @@ impl NyxAgentEgress for InspectOwnerEgress {
         credential: &RuntimeCredential,
         request: NyxAgentRequest,
     ) -> AppResult<axum::response::Response> {
+        let result = self.inspect_request(context, credential, request).await;
+        if let Err(error) = &result {
+            *self.failure.lock().await = Some((*self.stage.lock().await, error.error_code()));
+        }
+        result
+    }
+}
+
+impl InspectOwnerEgress {
+    async fn inspect_request(
+        &self,
+        context: &NyxAgentExecutionContext,
+        credential: &RuntimeCredential,
+        request: NyxAgentRequest,
+    ) -> AppResult<axum::response::Response> {
+        *self.stage.lock().await = "credential_validation";
         let (user, key, child) =
             key_service::validate_api_key(&self.state.db, &credential.raw_key).await?;
         assert!(child.is_none());
@@ -128,16 +146,19 @@ impl NyxAgentEgress for InspectOwnerEgress {
         if let Some(origin) = platform_origin {
             assert_eq!(origin.authority.user_id, user);
         }
+        *self.stage.lock().await = "live_chat";
         let chat = acks::for_key(&self.state.db, &user, Some(&key.id))
             .await?
             .unwrap();
         assert!(chat.turn_live && !chat.guest && chat.is_orchestrator());
         assert_eq!(chat.conversation_id, turn.conversation_id);
+        *self.stage.lock().await = "access_mode";
         let (_, service, mode) = self.accounts.iter().find(|a| a.0 == user).unwrap();
         assert_eq!(
             acks::effective_access_mode(&self.state.db, &chat).await?,
             *mode
         );
+        *self.stage.lock().await = "account_authentication";
         let auth =
             crate::mw::auth::api_key_auth_user(&self.state.db, &key, None, None, None).await?;
         let tools = AccountTools {
@@ -148,6 +169,7 @@ impl NyxAgentEgress for InspectOwnerEgress {
             token_exchange_cache: &self.state.token_exchange_cache,
             node_manager: &self.state.node_ws_manager,
         };
+        *self.stage.lock().await = "account_service_tools";
         let list = tools
             .execute(&auth, "nyxid__list_my_services", &json!({}))
             .await;
@@ -178,6 +200,7 @@ impl NyxAgentEgress for InspectOwnerEgress {
         } else {
             assert!(!change.is_error);
         }
+        *self.stage.lock().await = "owned_bot_lookup";
         let owned_bot = self
             .state
             .db
@@ -196,6 +219,7 @@ impl NyxAgentEgress for InspectOwnerEgress {
             .find_one(doc! {"user_id":&user,"label":"same-owner-platform-manager"})
             .await?
             .unwrap();
+        *self.stage.lock().await = "shared_manager_refusal";
         let mut shared_args = json!({"bot_id":shared.id,"label":"Forbidden shared mutation"});
         let mut shared_result = tools
             .execute(&auth, "nyxid__update_channel_bot", &shared_args)
@@ -230,6 +254,7 @@ impl NyxAgentEgress for InspectOwnerEgress {
             .await?
             .unwrap();
         assert_eq!(shared_unchanged.label, shared.label);
+        *self.stage.lock().await = "foreign_bot_refusal";
         for target in self
             .state
             .db
@@ -263,6 +288,7 @@ impl NyxAgentEgress for InspectOwnerEgress {
                 "foreign/shared-manager mutation refused"
             );
         }
+        *self.stage.lock().await = "owned_bot_confirmation";
         let mut args =
             json!({"bot_id":owned_bot.id,"label":format!("account-owned-bot-{}-managed",user)});
         let mut managed = tools
@@ -311,6 +337,7 @@ impl NyxAgentEgress for InspectOwnerEgress {
                 managed.value
             );
         }
+        *self.stage.lock().await = "owned_bot_verification";
         let changed = self
             .state
             .db
@@ -322,6 +349,7 @@ impl NyxAgentEgress for InspectOwnerEgress {
             .unwrap();
         assert_eq!(changed.label, args["label"].as_str().unwrap());
         assert_eq!(changed.user_id, user);
+        *self.stage.lock().await = "observed";
         self.observed.lock().await.push((
             user,
             turn.conversation_id.clone(),
@@ -330,6 +358,7 @@ impl NyxAgentEgress for InspectOwnerEgress {
         ));
         // The production implementation validates the credential/origin again,
         // resolves the live catalog, chooses the payer and performs the HTTP hop.
+        *self.stage.lock().await = "owner_http_egress";
         self.inner.request(context, credential, request).await
     }
 }
@@ -373,19 +402,68 @@ pub(super) async fn confirm_account(j: &Journey, sender: i64, account: &str, seq
 
 async fn wait_observed(
     inspected: &InspectOwnerEgress,
+    account: &str,
     count: usize,
 ) -> Vec<(String, String, String, String)> {
-    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+    let mut worker_state = (false, false, false);
+    let result = tokio::time::timeout(std::time::Duration::from_secs(30), async {
         loop {
+            let failure = *inspected.failure.lock().await;
+            assert!(failure.is_none(), "owner inspection failed: {failure:?}");
             let observed = inspected.observed.lock().await.clone();
             if observed.len() >= count {
                 return observed;
             }
+            if let Some(saved) = inspected
+                .state
+                .db
+                .collection::<AssistantMessage>(MESSAGES)
+                .find_one(doc! {"user_id":account,"role":"assistant","status":"failed"})
+                .sort(doc! {"created_at":-1,"_id":-1})
+                .await
+                .unwrap()
+            {
+                panic!(
+                    "personal turn failed before observation: code={:?}, stage={:?}, inspection={}",
+                    saved.error_code,
+                    saved
+                        .error_detail
+                        .as_ref()
+                        .map(|detail| detail.stage.as_str()),
+                    *inspected.stage.lock().await
+                );
+            }
+            let row = inspected
+                .state
+                .db
+                .collection::<crate::models::assistant_conversation::AssistantConversation>(
+                    crate::models::assistant_conversation::COLLECTION_NAME,
+                )
+                .find_one(doc! {"user_id":account})
+                .sort(doc! {"created_at":-1,"_id":-1})
+                .await
+                .unwrap();
+            worker_state = (
+                row.is_some(),
+                row.as_ref().is_some_and(|row| row.active_turn.is_some()),
+                row.as_ref()
+                    .and_then(|row| row.active_turn.as_ref())
+                    .is_some_and(|turn| turn.execution_started),
+            );
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
     })
-    .await
-    .unwrap()
+    .await;
+    match result {
+        Ok(observed) => observed,
+        Err(_) => panic!(
+            "owner observation timed out: inspection={}, conversation_exists={}, active_turn={}, execution_started={}",
+            *inspected.stage.lock().await,
+            worker_state.0,
+            worker_state.1,
+            worker_state.2
+        ),
+    }
 }
 
 async fn wait_reply(
@@ -643,6 +721,8 @@ async fn two_accounts_keep_real_credentials_memory_tools_payers_and_web_continui
         inner: crate::services::assistant_nyxagent_egress::producer(j.state.clone(), identity),
         accounts: specs,
         observed: Mutex::new(vec![]),
+        stage: Mutex::new("not_entered"),
+        failure: Mutex::new(None),
     });
     let public = crate::services::platform_public_credential_service::producer(j.state.clone());
     let execution = crate::services::assistant_nyxagent_runtime::producer(
@@ -671,7 +751,7 @@ async fn two_accounts_keep_real_credentials_memory_tools_payers_and_web_continui
         payload["message"]["from"]["id"] = json!(sender);
         payload["message"]["chat"]["id"] = json!(sender);
         j.webhook(&payload).await;
-        let observed = wait_observed(&inspected, index + 1).await;
+        let observed = wait_observed(&inspected, account, index + 1).await;
         let captured = &observed[index];
         assert_eq!(captured.0, *account);
         let saved = wait_reply(&j, account, &captured.1, &captured.3).await;

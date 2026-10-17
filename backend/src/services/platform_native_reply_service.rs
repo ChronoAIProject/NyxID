@@ -318,7 +318,16 @@ pub(crate) fn send_adapter(
     ))
 }
 
-pub(crate) async fn send_claimed(
+pub(crate) fn send_claimed<'a>(
+    state: &'a AppState,
+    authority: NativeSendAuthority,
+    body: Zeroizing<String>,
+    adapter: &'a dyn PlatformAdapter,
+) -> futures::future::BoxFuture<'a, AppResult<NativeSendOutcome>> {
+    Box::pin(send_claimed_impl(state, authority, body, adapter))
+}
+
+async fn send_claimed_impl(
     state: &AppState,
     authority: NativeSendAuthority,
     body: Zeroizing<String>,

@@ -1008,17 +1008,33 @@ mod tests {
         }
     }
     #[test]
-    fn actual_codex_normalized_faq_signup_callbacks_obey_pinned_reasoning_grammar() {
+    fn schema_adapted_codex_callbacks_obey_pinned_reasoning_grammar() {
         let fixture: Value = serde_json::from_str(include_str!(
+            "../../../docs/fixtures/codex-public-responses-0.160.1-native-schema-derived.json"
+        ))
+        .unwrap();
+        let historical: Value = serde_json::from_str(include_str!(
             "../../../docs/fixtures/codex-public-responses-0.160.1.json"
         ))
         .unwrap();
+        assert_eq!(
+            fixture["schema_adaptation"]["kind"],
+            "derived-schema-adapted-historical-input-not-new-capture"
+        );
+        assert_eq!(fixture["calls"].as_array().unwrap().len(), 4);
+        assert_eq!(historical["calls"].as_array().unwrap().len(), 4);
         let mut op = operation(PublicModelProtocol::OpenAiResponses);
         op.model_id = "public-wire-review".into();
         op.max_input_bytes = 8192;
         op.max_input_tokens = 8192;
         op.max_output_tokens = 512;
         op.reasoning_effort = Some("low".into());
+        for call in historical["calls"].as_array().unwrap() {
+            assert!(
+                !valid(&op, &call["callback"]),
+                "historical callbacks retain the old exact tool description"
+            );
+        }
         for call in fixture["calls"].as_array().unwrap() {
             let body = &call["callback"];
             assert!(valid(&op, body));

@@ -394,7 +394,18 @@ pub(crate) async fn saved_personal_reply(
     .await
 }
 
-pub(crate) async fn saved_personal_reply_with_api(
+pub(crate) fn saved_personal_reply_with_api<'a>(
+    state: &'a AppState,
+    row: &'a AssistantConversation,
+    reply: &'a ReplyRef,
+    api: &'a super::telegram_new_api::TelegramApi<'_>,
+) -> futures::future::BoxFuture<'a, AppResult<Option<DeliveryOutcome>>> {
+    // Owner turn settlement also calls this for replies without a platform route.
+    // Keep the transport-specific delivery future outside those caller frames.
+    Box::pin(saved_personal_reply_with_api_impl(state, row, reply, api))
+}
+
+async fn saved_personal_reply_with_api_impl(
     state: &AppState,
     row: &AssistantConversation,
     reply: &ReplyRef,
@@ -1041,6 +1052,29 @@ async fn prepare_native_send(
     let EntryIdentity::NativeV2 { platform_entry } = &row.entry else {
         return Ok(None);
     };
+    prepare_selected_native_send(state, row, platform_entry, deadline).await
+}
+
+fn prepare_selected_native_send<'a>(
+    state: &'a AppState,
+    row: &'a Delivery,
+    platform_entry: &'a crate::models::platform_entry_identity::NativeEntryIdentity,
+    deadline: Option<chrono::DateTime<Utc>>,
+) -> futures::future::BoxFuture<'a, AppResult<Option<NativeSendPreparation>>> {
+    Box::pin(prepare_selected_native_send_impl(
+        state,
+        row,
+        platform_entry,
+        deadline,
+    ))
+}
+
+async fn prepare_selected_native_send_impl(
+    state: &AppState,
+    row: &Delivery,
+    platform_entry: &crate::models::platform_entry_identity::NativeEntryIdentity,
+    deadline: Option<chrono::DateTime<Utc>>,
+) -> AppResult<Option<NativeSendPreparation>> {
     let deadline = deadline.ok_or_else(refused)?;
     let remaining = (deadline - Utc::now()).to_std().map_err(|_| refused())?;
     tokio::time::timeout(remaining, async {
@@ -1226,7 +1260,18 @@ tokio::task_local! {
     pub(crate) static TEST_BEFORE_COMMAND_CLAIM: Arc<tokio::sync::Barrier>;
 }
 
-async fn send(
+fn send<'a>(
+    state: &'a AppState,
+    identity: Arc<dyn ManagerIdentityProducer>,
+    public: Option<Arc<dyn PublicTurnProducer>>,
+    row: Delivery,
+    body: Zeroizing<String>,
+    api: &'a super::telegram_new_api::TelegramApi<'_>,
+) -> futures::future::BoxFuture<'a, AppResult<DeliveryOutcome>> {
+    Box::pin(send_impl(state, identity, public, row, body, api))
+}
+
+async fn send_impl(
     state: &AppState,
     identity: Arc<dyn ManagerIdentityProducer>,
     public: Option<Arc<dyn PublicTurnProducer>>,
@@ -2354,5 +2399,70 @@ mod native_render_tests {
         assert!(rendered.contains("/assistant?c=nyxa-0123456789abcdef0123456789abcdef"));
         assert!(rendered.contains("Action:"));
         assert!(!rendered.contains("Reply yes"));
+    }
+}
+
+#[cfg(test)]
+mod future_size_tests {
+    use super::*;
+
+    fn future_size<Args, F: std::future::Future>(_: impl FnOnce(Args) -> F) -> usize {
+        std::mem::size_of::<F>()
+    }
+
+    #[test]
+    fn native_delivery_keeps_shared_settlement_and_send_futures_small() {
+        let saved = future_size(
+            |(state, row, reply): (
+                &'static AppState,
+                &'static AssistantConversation,
+                &'static ReplyRef,
+            )| { saved_personal_reply(state, row, reply) },
+        );
+        let prepare = future_size(
+            |(state, row, deadline): (
+                &'static AppState,
+                &'static Delivery,
+                Option<chrono::DateTime<Utc>>,
+            )| { prepare_native_send(state, row, deadline) },
+        );
+        let send = future_size(
+            |(state, identity, public, row, body, api): (
+                &'static AppState,
+                Arc<dyn ManagerIdentityProducer>,
+                Option<Arc<dyn PublicTurnProducer>>,
+                Delivery,
+                Zeroizing<String>,
+                &'static super::super::telegram_new_api::TelegramApi<'static>,
+            )| send(state, identity, public, row, body, api),
+        );
+        let native = future_size(
+            |(state, authority, body, adapter): (
+                &'static AppState,
+                super::super::platform_native_reply_service::NativeSendAuthority,
+                Zeroizing<String>,
+                &'static dyn super::super::channel_platform::PlatformAdapter,
+            )| {
+                super::super::platform_native_reply_service::send_claimed(
+                    state, authority, body, adapter,
+                )
+            },
+        );
+        assert!(
+            saved < 16 * 1024,
+            "saved reply caller future grew to {saved} bytes"
+        );
+        assert!(
+            prepare < 16 * 1024,
+            "native selection future grew to {prepare} bytes"
+        );
+        assert!(
+            send < 1024,
+            "shared send caller future grew to {send} bytes"
+        );
+        assert!(
+            native < 1024,
+            "native send caller future grew to {native} bytes"
+        );
     }
 }

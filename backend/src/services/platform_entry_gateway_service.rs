@@ -434,7 +434,18 @@ pub(crate) enum GatewayResponsesOutcome {
     Dispatched,
 }
 
-pub(crate) async fn responses(
+pub(crate) fn responses<'a>(
+    state: &'a AppState,
+    authority: GatewayAuthority,
+    request: &'a Value,
+    producers: Option<Arc<PlatformManagerProducers>>,
+) -> futures::future::BoxFuture<'a, AppResult<GatewayResponsesOutcome>> {
+    // Ordinary gateway handlers construct native work only after authentication
+    // has selected this transport, and retain just its boxed future.
+    Box::pin(responses_impl(state, authority, request, producers))
+}
+
+async fn responses_impl(
     state: &AppState,
     authority: GatewayAuthority,
     request: &Value,
@@ -1485,4 +1496,29 @@ pub(super) async fn inspect_pending(
         remote_version: response.body["version"].as_i64(),
         remote_ready: ready,
     })
+}
+
+#[cfg(test)]
+mod future_size_tests {
+    use super::*;
+
+    fn responses_future_size<F: std::future::Future>(
+        _: impl FnOnce(
+            &'static AppState,
+            GatewayAuthority,
+            &'static Value,
+            Option<Arc<PlatformManagerProducers>>,
+        ) -> F,
+    ) -> usize {
+        std::mem::size_of::<F>()
+    }
+
+    #[test]
+    fn native_gateway_keeps_responses_caller_future_small() {
+        let size = responses_future_size(responses);
+        assert!(
+            size < 1024,
+            "native gateway caller future grew to {size} bytes"
+        );
+    }
 }
