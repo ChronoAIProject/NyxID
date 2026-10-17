@@ -36,6 +36,8 @@ use wiremock::{
 };
 use zeroize::Zeroizing;
 
+const CANONICAL_ANSWER: &str = "NyxID manages sign-in and connected services. Review the private account link sent separately.";
+
 struct NoOwner;
 #[async_trait::async_trait]
 impl crate::services::assistant_nyxagent_runtime::OwnerTurnSettledHook for NoOwner {
@@ -284,8 +286,8 @@ fn real_codex_native_v2_discovery_readiness_faq_search_read_signup_answer_use_ac
         let item=if n<3 {
             let (name,args)=match n { 0=>("public_faq_search",json!({"query":"NyxID"})),1=>("public_faq_read",json!({"article_id":article})),_=>("public_signup_link",json!({})) };
             json!({"type":"function_call","id":format!("fc_native_{n}"),"call_id":format!("call_native_{n}"),"name":name,"arguments":args.to_string(),"status":"completed"})
-        } else { json!({"id":"msg_native_pair","type":"message","role":"assistant","status":"completed","phase":"final_answer","content":[{"type":"output_text","text":"NyxID manages sign-in and connected services. Review the private account link sent separately.","annotations":[]}]}) };
-        ResponseTemplate::new(200).insert_header("content-type","text/event-stream").set_body_string(scripted_events(&response_model,n,item))
+        } else { json!({"id":"msg_native_pair","type":"message","role":"assistant","status":"completed","phase":"final_answer","content":[{"type":"output_text","text":CANONICAL_ANSWER,"annotations":[]}]}) };
+        ResponseTemplate::new(200).set_body_raw(scripted_events(&response_model,n,item).into_bytes(),"text/event-stream")
     }).mount(&provider).await;
             let isolated = tempfile::tempdir().unwrap();
             let log_path = std::env::temp_dir().join(format!(
@@ -577,6 +579,31 @@ fn real_codex_native_v2_discovery_readiness_faq_search_read_signup_answer_use_ac
                 ExecutionEvent::ReplyReady(ready) => {
                     assert!(reply.is_none(), "duplicate final reply event");
                     assert_eq!(ready.turn, context.turn);
+                    let saved_turn = db
+                        .collection::<PlatformPublicTurn>(TURNS)
+                        .find_one(doc! {"_id":&ready.turn.turn_id})
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    assert_eq!(saved_turn.conversation_id, ready.turn.conversation_id);
+                    assert_eq!(saved_turn.public_session_id, context.public_session_id);
+                    assert_eq!(saved_turn.reply_id.as_deref(), Some(ready.reply_id.as_str()));
+                    assert_eq!(
+                        saved_turn.outcome.as_deref(),
+                        Some("settled"),
+                        "public turn must succeed before final delivery; model_callbacks={}",
+                        count.load(Ordering::SeqCst),
+                    );
+                    let saved_answer = crate::services::assistant_agent_credential_service::decrypt_runtime_key(
+                        &state.encryption_keys,
+                        &saved_turn.reply_ciphertext,
+                    )
+                    .await
+                    .unwrap();
+                    assert!(
+                        saved_answer.as_str() == CANONICAL_ANSWER,
+                        "settled public answer differs from the scripted canonical answer",
+                    );
                     let mut retained_delivery = None;
                     loop {
                         let outcome = with_transport_for_test(
@@ -665,10 +692,8 @@ fn real_codex_native_v2_discovery_readiness_faq_search_read_signup_answer_use_ac
             }
             let final_posted: Value = serde_json::from_slice(&sends[1].body).unwrap();
             assert!(
-                final_posted["content"]
-                    .as_str()
-                    .unwrap()
-                    .contains("NyxID manages sign-in")
+                final_posted["content"] == CANONICAL_ANSWER,
+                "delivered public answer differs from the scripted canonical answer",
             );
             assert!(
                 !final_posted.to_string().contains("nyx_pli_")
@@ -718,7 +743,10 @@ fn real_codex_native_v2_discovery_readiness_faq_search_read_signup_answer_use_ac
             )
             .await
             .unwrap();
-            assert!(answer.contains("NyxID manages sign-in"));
+            assert!(
+                answer.as_str() == CANONICAL_ANSWER,
+                "retained public answer differs from the scripted canonical answer",
+            );
             assert!(!answer.contains("nyx_pli_") && !answer.contains("intent_token"));
             let budget = db
                 .collection::<PublicBudgetLoop>(LOOPS)

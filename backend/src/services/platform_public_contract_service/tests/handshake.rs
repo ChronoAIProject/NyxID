@@ -504,9 +504,9 @@ impl Handshake {
             axum::serve(runtime_listener, runtime_app).await.unwrap();
         });
         Mock::given(method("POST")).and(path("/v1/responses"))
-            .respond_with(ResponseTemplate::new(provider_status).set_body_json(json!({"model":provider_model,
-                "output":[{"type":"message","content":[{"type":"output_text","text":"OK"}]}],
-                "usage":{"input_tokens":20,"output_tokens":3,"input_tokens_details":{"cached_tokens":4}}})))
+            .respond_with(ResponseTemplate::new(provider_status).set_body_json(json!({"id":"resp_handshake_probe","object":"response","status":"completed","model":provider_model,
+                "output":[{"id":"msg_handshake_probe","type":"message","role":"assistant","content":[{"type":"output_text","text":"OK"}]}],
+                "usage":{"input_tokens":20,"output_tokens":3,"total_tokens":23,"input_tokens_details":{"cached_tokens":4}}})))
             .mount(&provider).await;
         let producers = crate::services::platform_manager_transport::compose(
             state.clone(),
@@ -1972,14 +1972,33 @@ async fn actual_upstream_discovery_readiness_and_four_call_default_budget_settle
     let final_item = json!({"id":"msg_paired","type":"message","role":"assistant","status":"completed",
         "content":[{"type":"output_text","text":"NyxID manages sign-in and connected services."}]});
     let final_response = json!({"id":"resp_paired","object":"response","status":"completed","model":op.model_id,
-        "output":[final_item],"usage":{"input_tokens":100,"output_tokens":12,"output_tokens_details":{"reasoning_tokens":4}}});
-    let event = json!({"type":"response.completed","sequence_number":0,"response":final_response});
+        "output":[final_item],"usage":{"input_tokens":100,"output_tokens":12,"total_tokens":112,"output_tokens_details":{"reasoning_tokens":4}}});
+    let mut added_item = final_item.clone();
+    added_item["status"] = "in_progress".into();
+    added_item["content"] = json!([]);
+    let events = [
+        json!({"type":"response.created","response":{"id":"resp_paired","model":op.model_id,"status":"in_progress","output":[]}}),
+        json!({"type":"response.output_item.added","output_index":0,"item":added_item}),
+        json!({"type":"response.content_part.added","output_index":0,"item_id":final_item["id"],"content_index":0,"part":{"type":"output_text","text":""}}),
+        json!({"type":"response.output_text.delta","output_index":0,"item_id":final_item["id"],"content_index":0,"delta":final_item["content"][0]["text"]}),
+        json!({"type":"response.output_text.done","output_index":0,"item_id":final_item["id"],"content_index":0,"text":final_item["content"][0]["text"]}),
+        json!({"type":"response.content_part.done","output_index":0,"item_id":final_item["id"],"content_index":0,"part":final_item["content"][0]}),
+        json!({"type":"response.output_item.done","output_index":0,"item":final_item}),
+        json!({"type":"response.completed","response":final_response}),
+    ];
+    let stream: String = events
+        .into_iter()
+        .map(|event| {
+            format!(
+                "event: {}\ndata: {event}\n\n",
+                event["type"].as_str().unwrap()
+            )
+        })
+        .collect();
     Mock::given(method("POST"))
         .and(path("/v1/responses"))
         .respond_with(
-            ResponseTemplate::new(200)
-                .insert_header("content-type", "text/event-stream")
-                .set_body_string(format!("data: {event}\n\n")),
+            ResponseTemplate::new(200).set_body_raw(stream.into_bytes(), "text/event-stream"),
         )
         .mount(&fixture.provider)
         .await;
