@@ -10755,7 +10755,7 @@ mod tests {
             assert_eq!(
                 created.is_ok(),
                 valid,
-                "{provider_type} {required} {endpoint} {param:?}: {created:?}"
+                "{provider_type} {required} {endpoint} {param:?}"
             );
             assert_eq!(
                 db.collection::<ProviderConfig>(COLLECTION_NAME)
