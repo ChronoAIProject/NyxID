@@ -1376,7 +1376,7 @@ pub(super) async fn admit_stop_source_in_session(
     source: &VerifiedExternalSource,
     session: &mut ClientSession,
 ) -> AppResult<()> {
-    if source.expires_at <= Utc::now() {
+    if source.authentication_expires_at() <= Utc::now() {
         return Err(AppError::MachinePermissionRevoked);
     }
     owner_in_session(db, &source.user_id, session).await?;
