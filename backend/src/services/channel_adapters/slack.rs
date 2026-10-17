@@ -709,6 +709,7 @@ impl PlatformAdapter for SlackAdapter {
         let body = build_post_message_body(reply, conversation_id);
 
         let url = format!("{}/chat.postMessage", self.base_url);
+        crate::services::channel_platform::mark_provider_attempt();
         let response = http
             .post(&url)
             .header("Authorization", format!("Bearer {bot_token}"))

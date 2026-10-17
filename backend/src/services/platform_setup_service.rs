@@ -263,12 +263,7 @@ pub async fn get_owned(db: &Database, owner: &str, id: &str) -> AppResult<Platfo
         .find_one(doc! {"_id": id, "owner_user_id": owner})
         .await?
         .ok_or_else(|| AppError::NotFound("Setup not found".into()))?;
-    if row.expires_at.is_some_and(|t| t <= Utc::now())
-        && !matches!(
-            row.state,
-            SetupState::Active | SetupState::Cancelled | SetupState::Expired
-        )
-    {
+    if is_expired(&row, Utc::now()) {
         let updated = db.collection::<PlatformSetup>(COLLECTION_NAME).find_one_and_update(
             doc! {"_id": id, "owner_user_id": owner, "revision": row.revision},
             doc! {"$set": {"state": "expired", "approved_digest": bson::Bson::Null, "approved_revision": bson::Bson::Null, "purge_after": bson::DateTime::from_chrono(Utc::now() + Duration::days(30))}, "$inc": {"revision": 1_i64, "authority_generation": 1_i64}}
@@ -280,6 +275,40 @@ pub async fn get_owned(db: &Database, owner: &str, id: &str) -> AppResult<Platfo
         }
     }
     Ok(row)
+}
+
+fn is_expired(row: &PlatformSetup, now: chrono::DateTime<Utc>) -> bool {
+    row.expires_at.is_some_and(|t| t <= now)
+        && !matches!(
+            row.state,
+            SetupState::Active | SetupState::Cancelled | SetupState::Expired
+        )
+}
+
+/// The same live expiry projection as get_owned, inside manager receipt/send
+/// transactions so a delayed acknowledgement cannot advertise an expired setup.
+pub(crate) async fn get_owned_in_session(
+    db: &Database,
+    session: &mut mongodb::ClientSession,
+    owner: &str,
+    id: &str,
+) -> AppResult<PlatformSetup> {
+    let row = db
+        .collection::<PlatformSetup>(COLLECTION_NAME)
+        .find_one(doc! {"_id":id,"owner_user_id":owner})
+        .session(&mut *session)
+        .await?
+        .ok_or_else(|| AppError::NotFound("Setup not found".into()))?;
+    if !is_expired(&row, Utc::now()) {
+        return Ok(row);
+    }
+    db.collection::<PlatformSetup>(COLLECTION_NAME).find_one_and_update(
+        doc! {"_id":id,"owner_user_id":owner,"revision":row.revision},
+        doc! {"$set":{"state":"expired","approved_digest":bson::Bson::Null,"approved_revision":bson::Bson::Null,
+            "purge_after":bson::DateTime::from_chrono(Utc::now()+Duration::days(30))},
+            "$inc":{"revision":1_i64,"authority_generation":1_i64}})
+        .return_document(ReturnDocument::After).session(session).await?
+        .ok_or_else(|| AppError::Conflict("Setup changed; refresh".into()))
 }
 
 pub async fn list_owned(db: &Database, owner: &str) -> AppResult<Vec<PlatformSetup>> {
@@ -1661,7 +1690,14 @@ mod signup_journey_tests {
     use tower::ServiceExt;
 
     #[tokio::test]
-    async fn platform_onboarding_real_registration_policy_login_and_owned_resume() {
+    async fn platform_onboarding_default_registration_login_and_owned_resume() {
+        registration_login_and_owned_resume(false).await;
+    }
+    #[tokio::test]
+    async fn platform_onboarding_configured_registration_login_and_owned_resume() {
+        registration_login_and_owned_resume(true).await;
+    }
+    async fn registration_login_and_owned_resume(auto_verify_email: bool) {
         use crate::handlers::auth::{self, LoginRequest, RegisterRequest};
         let mut f = super::super::platform_onboarding_test_support::distinct_fixture().await;
         let peer = ConnectInfo("127.0.0.1:45678".parse().unwrap());
@@ -1684,7 +1720,7 @@ mod signup_journey_tests {
             Err(AppError::EmailSignupDisabled)
         ));
         f.state.config.email_auth_enabled = true;
-        f.state.config.auto_verify_email = true;
+        f.state.config.auto_verify_email = auto_verify_email;
         assert!(
             super::super::feature_flag_service::invitation_code_required(&f.state.db)
                 .await
@@ -1735,6 +1771,19 @@ mod signup_journey_tests {
         )
         .await
         .unwrap();
+        assert_eq!(
+            registered.message,
+            "Registration processed. You can now sign in."
+        );
+        let stored = f
+            .state
+            .db
+            .collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+            .find_one(doc! {"_id":&registered.user_id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.email_verified, auto_verify_email);
         let (_, Json(login)) = auth::login(
             State(f.state.clone()),
             peer,

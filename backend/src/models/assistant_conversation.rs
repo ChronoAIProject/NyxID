@@ -1,3 +1,6 @@
+use super::platform_entry_projection::{
+    StoredEntryIdentity, StoredSenderIdentity, checked_identity_record, same_version,
+};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -110,18 +113,24 @@ pub struct ChannelOrigin {
     pub platform: String,
 }
 
+checked_identity_record! {
 /// Stable ownership of a personal manager thread. Retained after transport
 /// unlink so the owner can continue the thread in NyxID.
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PlatformThread {
+
+#[derive(Clone, PartialEq, Eq, Serialize)]
+pub struct PlatformThread, RawPlatformThread {
     pub platform: String,
     pub profile_id: String,
     pub manager_bot_id: String,
-    pub telegram_bot_id: i64,
+    #[serde(flatten)]
+    pub entry: StoredEntryIdentity,
     pub binding_id: String,
     pub binding_generation: i64,
     pub user_id: String,
     pub nyxbot_agent_id: String,
+}
+|record| record.platform == super::platform_entry_projection::entry_platform(&record.entry)
+    && super::platform_entry_projection::entry_matches(&record.entry, &record.manager_bot_id)
 }
 
 /// An event receives fresh admission; it never reuses an ingress receipt.
@@ -137,16 +146,20 @@ pub enum PlatformOriginSource {
     },
 }
 
+checked_identity_record! {
 /// Exact server-authored execution and delivery proof. Never accepted from an
 /// owner request or projected wholesale into an HTTP response.
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PlatformTurnOrigin {
+
+#[derive(Clone, PartialEq, Eq, Serialize)]
+pub struct PlatformTurnOrigin, RawPlatformTurnOrigin {
     pub thread: PlatformThread,
     pub manager_authority_epoch: i64,
     pub personal_control_revision: i64,
-    pub sender_id: i64,
-    pub chat_id: i64,
+    #[serde(flatten, with = "super::platform_entry_projection::ingress_sender")]
+    pub sender: StoredSenderIdentity,
     pub source: PlatformOriginSource,
+}
+|record| same_version(&record.thread.entry, &record.sender, None)
 }
 
 /// Delivery authority is independent of a later continuation's execution.

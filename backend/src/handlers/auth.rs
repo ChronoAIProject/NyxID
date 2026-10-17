@@ -339,8 +339,8 @@ pub(crate) fn resolve_auth_client_mode(
 
 /// POST /api/v1/auth/register
 ///
-/// Create a new user account. Returns the user ID and sends an email
-/// verification link (when SMTP is configured).
+/// Process registration and return sign-in guidance. Email verification status
+/// follows AUTO_VERIFY_EMAIL; password login currently accepts active accounts.
 pub async fn register(
     State(state): State<AppState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
@@ -377,11 +377,7 @@ pub async fn register(
             // still recorded for audit/monitoring.
             Err(AppError::InviteCodeAlreadyRedeemed) => {
                 tracing::warn!("Registration attempt with an already-redeemed invite code");
-                let message = if state.config.auto_verify_email {
-                    "Registration processed. You can now sign in.".to_string()
-                } else {
-                    "Check your email for a verification link to complete registration.".to_string()
-                };
+                let message = "Registration processed. You can now sign in.".to_string();
                 let fake_user_id = uuid::Uuid::new_v4().to_string();
                 audit_service::log_async(
                     state.db.clone(),
@@ -461,17 +457,7 @@ pub async fn register(
         ensure_billing_wallet_after_user_create(&state, &result.user_id).await;
     }
 
-    #[cfg(debug_assertions)]
-    tracing::debug!(
-        token = %result.email_verification_token,
-        "Email verification token (dev only)"
-    );
-
-    let message = if state.config.auto_verify_email {
-        "Registration processed. You can now sign in.".to_string()
-    } else {
-        "Check your email for a verification link to complete registration.".to_string()
-    };
+    let message = "Registration processed. You can now sign in.".to_string();
 
     // Telemetry: user.signed_up. Pre-auth path, so surface comes from
     // the `X-NyxID-Client` header rather than from `AuthUser`.

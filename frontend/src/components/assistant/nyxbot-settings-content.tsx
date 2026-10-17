@@ -73,7 +73,7 @@ export function NyxBotSettingsContent() {
           <ChannelBotsSection />
         </div>
       </DetailSection>
-      <DetailSection title="Personal Telegram links"><div className="p-5"><PlatformPersonalBindings /></div></DetailSection>
+      <DetailSection title="Personal chat links"><div className="p-5"><PlatformPersonalBindings /></div></DetailSection>
     </section>
   );
 }

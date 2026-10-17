@@ -1,4 +1,5 @@
 //! Public routing fails closed; local revocation and cleanup remain operational.
+use super::platform_entry_scope as scope;
 use super::{
     api_key_mutation_service as transactions, platform_manager_contract::*,
     platform_public_policy as policy,
@@ -47,6 +48,7 @@ struct PublicProducer {
 }
 
 pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
+    super::platform_entry_migration::ensure_indexes(db).await?;
     // Draft versions used the deterministic scope identity as _id. Preserve
     // revocation cutoffs and pending drains before building the unique index.
     db.collection::<Document>(REVOCATION_SCOPES)
@@ -55,16 +57,28 @@ pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
             vec![doc! {"$set":{"scope_key":"$_id"}}],
         )
         .await?;
-    db.collection::<PlatformPublicSession>(SESSIONS).create_indexes([
-        IndexModel::builder().keys(doc! {"credential_api_key_id":1})
-            .options(IndexOptions::builder().unique(true).name("public_key_binding_unique".to_owned()).build()).build(),
-        IndexModel::builder().keys(doc! {"profile_id":1,"manager_bot_id":1,"telegram_bot_id":1,"sender_id":1,"chat_id":1})
-            .options(IndexOptions::builder().unique(true).partial_filter_expression(doc! {"revoked_at":bson::Bson::Null})
-                .name("public_sender_live_unique".to_owned()).build()).build(),
-        IndexModel::builder().keys(doc! {"revoked_at":1,"expires_at":1}).build(),
-        IndexModel::builder().keys(doc! {"sponsor_owner_user_id":1,"revoked_at":1}).build(),
-        IndexModel::builder().keys(doc! {"policy_digest":1,"cleanup_complete":1}).build(),
-    ]).await?;
+    db.collection::<PlatformPublicSession>(SESSIONS)
+        .create_indexes([
+            IndexModel::builder()
+                .keys(doc! {"credential_api_key_id":1})
+                .options(
+                    IndexOptions::builder()
+                        .unique(true)
+                        .name("public_key_binding_unique".to_owned())
+                        .build(),
+                )
+                .build(),
+            IndexModel::builder()
+                .keys(doc! {"revoked_at":1,"expires_at":1})
+                .build(),
+            IndexModel::builder()
+                .keys(doc! {"sponsor_owner_user_id":1,"revoked_at":1})
+                .build(),
+            IndexModel::builder()
+                .keys(doc! {"policy_digest":1,"cleanup_complete":1})
+                .build(),
+        ])
+        .await?;
     db.collection::<PublicCleanupRecord>(CLEANUP_RECORDS)
         .create_index(
             IndexModel::builder()
@@ -294,16 +308,14 @@ impl PublicTurnProducer for PublicProducer {
         db: &Database,
         session: &mut ClientSession,
         manager: &ManagerAuthority,
-        sender_id: i64,
-        chat_id: i64,
+        sender: &SenderIdentity,
     ) -> AppResult<()> {
         revoke_in_session(
             db,
             session,
             &PublicRevocationScope::Sender {
                 manager: manager.clone(),
-                sender_id,
-                chat_id,
+                sender: sender.clone(),
             },
             PublicRevocationReason::PersonalLinkConfirmed,
         )
@@ -333,14 +345,9 @@ fn reason_label(reason: PublicRevocationReason) -> &'static str {
 fn scope_filter(scope: &PublicRevocationScope) -> Document {
     let mut filter = doc! {"revoked_at":bson::Bson::Null};
     match scope {
-        PublicRevocationScope::Sender {
-            manager,
-            sender_id,
-            chat_id,
-        } => {
+        PublicRevocationScope::Sender { manager, sender } => {
             filter.extend(manager_filter(manager));
-            filter.insert("sender_id", *sender_id);
-            filter.insert("chat_id", *chat_id);
+            filter.extend(scope::sender_fields(sender, true));
         }
         PublicRevocationScope::Manager { manager } => filter.extend(manager_filter(manager)),
         PublicRevocationScope::Sponsor {
@@ -355,8 +362,15 @@ fn scope_filter(scope: &PublicRevocationScope) -> Document {
     filter
 }
 fn manager_filter(manager: &ManagerAuthority) -> Document {
-    doc! {"profile_id":&manager.profile_id,"manager_bot_id":&manager.manager_bot_id,
-    "telegram_bot_id":manager.telegram_bot_id,"manager_authority_epoch":{"$lte":manager.manager_authority_epoch}}
+    let mut filter =
+        doc! {"profile_id":&manager.profile_id,"manager_bot_id":&manager.manager_bot_id};
+    // Preserve v1 BSON ordering: these bytes identify existing revocation markers.
+    filter.extend(scope::entry_fields(&manager.entry));
+    filter.insert(
+        "manager_authority_epoch",
+        doc! {"$lte":manager.manager_authority_epoch},
+    );
+    filter
 }
 fn changed() -> AppError {
     AppError::Conflict("Public session authority changed".into())
@@ -569,7 +583,7 @@ async fn fence_session_scopes_in_session(
     let manager = ManagerAuthority {
         profile_id: row.profile_id.clone(),
         manager_bot_id: row.manager_bot_id.clone(),
-        telegram_bot_id: row.telegram_bot_id,
+        entry: row.entry.clone(),
         manager_authority_epoch: row.manager_authority_epoch,
     };
     for scope in [
@@ -584,8 +598,7 @@ async fn fence_session_scopes_in_session(
         },
         PublicRevocationScope::Sender {
             manager,
-            sender_id: row.sender_id,
-            chat_id: row.chat_id,
+            sender: row.sender.clone(),
         },
     ] {
         let (id, filter, _) = marker_identity(&scope);
@@ -902,10 +915,14 @@ pub(crate) mod tests {
             id: uuid::Uuid::new_v4().to_string(),
             profile_id: "profile".into(),
             manager_bot_id: "99".into(),
-            telegram_bot_id: 99,
+            entry: EntryIdentity::TelegramV1 {
+                telegram_bot_id: 99,
+            },
             manager_authority_epoch: 3,
-            sender_id,
-            chat_id: sender_id,
+            sender: SenderIdentity::TelegramV1 {
+                telegram_sender_id: sender_id,
+                telegram_chat_id: sender_id,
+            },
             sponsor_owner_user_id: uuid::Uuid::new_v4().to_string(),
             public_policy_revision: 1,
             policy_digest: "candidate-only".into(),
@@ -968,7 +985,9 @@ pub(crate) mod tests {
             manager: ManagerAuthority {
                 profile_id: "profile".into(),
                 manager_bot_id: "99".into(),
-                telegram_bot_id: 99,
+                entry: EntryIdentity::TelegramV1 {
+                    telegram_bot_id: 99,
+                },
                 manager_authority_epoch: 1,
             },
             personal_enabled: true,
@@ -1158,7 +1177,9 @@ pub(crate) mod tests {
                 manager: ManagerAuthority {
                     profile_id: "profile".into(),
                     manager_bot_id: "99".into(),
-                    telegram_bot_id: 99,
+                    entry: EntryIdentity::TelegramV1 {
+                        telegram_bot_id: 99,
+                    },
                     manager_authority_epoch: 3,
                 },
             },
@@ -1223,8 +1244,10 @@ pub(crate) mod tests {
             let mut next = row.clone();
             next.id = uuid::Uuid::new_v4().to_string();
             next.credential_api_key_id = uuid::Uuid::new_v4().to_string();
-            next.sender_id = 100 + n as i64;
-            next.chat_id = next.sender_id;
+            next.sender = SenderIdentity::TelegramV1 {
+                telegram_sender_id: 100 + n as i64,
+                telegram_chat_id: 100 + n as i64,
+            };
             extra.push(next);
         }
         db.collection::<PlatformPublicSession>(SESSIONS)
@@ -1234,7 +1257,9 @@ pub(crate) mod tests {
         let manager = ManagerAuthority {
             profile_id: "profile".into(),
             manager_bot_id: "99".into(),
-            telegram_bot_id: 99,
+            entry: EntryIdentity::TelegramV1 {
+                telegram_bot_id: 99,
+            },
             manager_authority_epoch: 3,
         };
         let mut session = db.client().start_session().await.unwrap();
@@ -1308,7 +1333,7 @@ pub(crate) mod tests {
         let manager = ManagerAuthority {
             profile_id: row.profile_id.clone(),
             manager_bot_id: row.manager_bot_id.clone(),
-            telegram_bot_id: row.telegram_bot_id,
+            entry: row.entry.clone(),
             manager_authority_epoch: row.manager_authority_epoch,
         };
         let mut ids = Vec::new();
@@ -1349,13 +1374,17 @@ pub(crate) mod tests {
         let manager = ManagerAuthority {
             profile_id: "profile".into(),
             manager_bot_id: "99".into(),
-            telegram_bot_id: 99,
+            entry: EntryIdentity::TelegramV1 {
+                telegram_bot_id: 99,
+            },
             manager_authority_epoch: 3,
         };
         let filter = scope_filter(&PublicRevocationScope::Sender {
             manager,
-            sender_id: 5,
-            chat_id: 5,
+            sender: SenderIdentity::TelegramV1 {
+                telegram_sender_id: 5,
+                telegram_chat_id: 5,
+            },
         });
         assert_eq!(filter.get_str("profile_id").unwrap(), "profile");
         assert_eq!(filter.get_i64("sender_id").unwrap(), 5);

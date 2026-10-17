@@ -129,13 +129,14 @@ async fn record_next(
     let update = contract::VerifiedManagerUpdate {
         profile_id: profile.id,
         manager_bot_id: admitted.authority.manager.manager_bot_id.clone(),
-        telegram_bot_id: admitted.authority.manager.telegram_bot_id,
+        entry: admitted.authority.manager.entry.clone(),
         observation_id: profile.observation_id,
-        sender_id: admitted.authority.sender_id,
-        chat_id: admitted.authority.chat_id,
+        sender: admitted.authority.sender.clone(),
         chat_kind: contract::ManagerChatKind::Private,
-        update_id: sequence,
-        message_id: sequence,
+        event: crate::models::platform_entry_projection::StoredEventIdentity::TelegramV1 {
+            update_id: sequence,
+            message_id: sequence,
+        },
         command_eligibility: contract::ManagerCommandEligibility::OriginalPrivateMessage,
     };
     let mut session = state.db.client().start_session().await.unwrap();
@@ -354,8 +355,16 @@ async fn eight_owners(delay: Duration) {
             .unwrap();
         binding.id = uuid::Uuid::new_v4().to_string();
         binding.user_id = owner;
-        binding.telegram_sender_id += index;
-        binding.telegram_chat_id = binding.telegram_sender_id;
+        if let crate::models::platform_entry_projection::StoredSenderIdentity::TelegramV1 {
+            telegram_sender_id,
+            telegram_chat_id,
+        } = &mut binding.sender
+        {
+            *telegram_sender_id += index;
+            *telegram_chat_id = *telegram_sender_id;
+        } else {
+            panic!("legacy fixture");
+        }
         state
             .db
             .collection::<PlatformPersonalBinding>(

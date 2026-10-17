@@ -245,6 +245,10 @@ pub(crate) fn validate_manifest(m: &RuntimeManifest) -> AppResult<()> {
                 || op.max_input_tokens > 8192
                 || op.max_output_tokens == 0
                 || op.max_output_tokens > 512
+                || op.reasoning_effort.as_deref().is_some_and(|effort| {
+                    op.protocol != "openai_responses"
+                        || !matches!(effort, "low" | "medium" | "high" | "xhigh")
+                })
                 || op.max_response_bytes == 0
                 || op.max_response_bytes > 65536
                 || u64::from(op.max_input_tokens) * u64::from(l.max_model_calls)
@@ -561,7 +565,11 @@ pub(crate) async fn discover(
 fn probe_body(op: &ModelOperation) -> Value {
     match op.protocol.as_str() {
         "openai_responses" => {
-            json!({"model":op.model_id,"input":"Reply OK.","max_output_tokens":op.max_output_tokens})
+            let mut value = json!({"model":op.model_id,"input":"Reply OK.","max_output_tokens":op.max_output_tokens});
+            if let Some(effort) = &op.reasoning_effort {
+                value["reasoning"] = json!({"effort":effort,"summary":"none"});
+            }
+            value
         }
         "openai_completions" => {
             json!({"model":op.model_id,"messages":[{"role":"user","content":"Reply OK."}],"max_completion_tokens":op.max_output_tokens})
@@ -1826,6 +1834,7 @@ async fn model_bindings(db: &Database, sponsor: &str) -> AppResult<Vec<Value>> {
             _ => continue,
         };
         let op = PublicModelOperation {
+            reasoning_effort: None,
             service_id: service.id.clone(),
             operation: operation.clone(),
             method: http::Method::POST,
@@ -1836,7 +1845,7 @@ async fn model_bindings(db: &Database, sponsor: &str) -> AppResult<Vec<Value>> {
             model_id: "discovery-only".into(),
             max_input_bytes: 8192,
             max_input_tokens: 8192,
-            max_output_tokens: 256,
+            max_output_tokens: 512,
             max_response_bytes: 65536,
         };
         if proxy::require_model_catalog_for_sponsor(&service, sponsor, &op).is_err() {
@@ -1852,7 +1861,8 @@ async fn model_bindings(db: &Database, sponsor: &str) -> AppResult<Vec<Value>> {
             "operation": operation, "method": "POST", "canonical_path": path, "protocol": protocol,
             "execution_authority_digest": op.execution_authority_digest,
             "endpoint_generation": generation.unwrap_or(0), "endpoint_set_digest": endpoint_set_digest(&endpoints)?,
-            "max_input_bytes": 8192, "max_input_tokens": 8192, "max_output_tokens": 256, "max_response_bytes": 65536,
+            "max_input_bytes": op.max_input_bytes, "max_input_tokens": op.max_input_tokens,
+            "max_output_tokens": op.max_output_tokens, "max_response_bytes": op.max_response_bytes,
         }));
     }
     Ok(bindings)
@@ -1913,7 +1923,7 @@ async fn fence_probe_authority(
         session,
         &binding.profile_id,
         &binding.manager_bot_id,
-        binding.telegram_bot_id,
+        &binding.entry,
         None,
     )
     .await?;
@@ -1973,30 +1983,45 @@ async fn fence_probe_authority(
         .session(&mut *session)
         .await?
         .ok_or_else(denied)?;
-    if binding.telegram_bot_id <= 0
-        || binding.manager_bot_id.parse::<i64>().ok() != Some(binding.telegram_bot_id)
-    {
+    if super::platform_bot_runtime_control_service::profile_identity(&profile)? != binding.entry {
         return Err(denied());
     }
-    for (collection, filter) in [
-        (
-            crate::models::platform_credential::COLLECTION_NAME,
-            doc! {"provider":"telegram-new","fields.manager_bot_id":&binding.manager_bot_id,"fields.webhook_ready":"true"},
-        ),
-        (
-            crate::models::channel_bot::COLLECTION_NAME,
-            doc! {"_id":&profile.channel_bot_id,"platform_profile_id":&binding.profile_id,"platform_bot_id":&binding.manager_bot_id,"is_active":true},
-        ),
-    ] {
-        if db
-            .collection::<Document>(collection)
-            .update_one(filter, doc! {"$inc":{"public_probe_fence":1_i64}})
-            .session(&mut *session)
+    match &binding.entry {
+        super::platform_manager_contract::EntryIdentity::TelegramV1 { .. } => {
+            for (collection, filter) in [
+                (
+                    crate::models::platform_credential::COLLECTION_NAME,
+                    doc! {"provider":"telegram-new","fields.manager_bot_id":&binding.manager_bot_id,"fields.webhook_ready":"true"},
+                ),
+                (
+                    crate::models::channel_bot::COLLECTION_NAME,
+                    doc! {"_id":&profile.channel_bot_id,"platform_profile_id":&binding.profile_id,"platform_bot_id":&binding.manager_bot_id,"is_active":true},
+                ),
+            ] {
+                if db
+                    .collection::<Document>(collection)
+                    .update_one(filter, doc! {"$inc":{"public_probe_fence":1_i64}})
+                    .session(&mut *session)
+                    .await?
+                    .matched_count
+                    != 1
+                {
+                    return Err(denied());
+                }
+            }
+        }
+        super::platform_manager_contract::EntryIdentity::NativeV2 { .. } => {
+            if !super::platform_bot_runtime_control_service::native_transport_ready(
+                db, session, &profile, true,
+            )
             .await?
-            .matched_count
-            != 1
-        {
-            return Err(denied());
+            {
+                return Err(denied());
+            }
+            if db.collection::<Document>(crate::models::channel_bot::COLLECTION_NAME)
+                .update_one(doc! {"_id":&profile.channel_bot_id,"platform_profile_id":&profile.id,"platform_entry_version":2,
+                    "platform":super::platform_entry_scope::platform(&binding.entry),"platform_bot_id":&binding.manager_bot_id,"is_active":true,"status":"active","platform_entry_pending":{"$exists":false}},
+                    doc! {"$inc":{"public_probe_fence":1_i64}}).session(&mut *session).await?.matched_count!=1 {return Err(denied());}
         }
     }
     match (live, consent.controls_id) {

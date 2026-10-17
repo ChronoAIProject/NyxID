@@ -86,6 +86,7 @@ pub mod platform_bot_runtime_controls;
 pub mod platform_credential;
 pub mod platform_link_intent;
 pub mod platform_manager_ingress;
+pub mod platform_manager_management;
 pub mod platform_personal_binding;
 pub mod platform_public_budget;
 pub mod platform_public_session;
@@ -201,3 +202,13 @@ pub mod platform_manager_delivery;
 pub mod remote_machine_storage;
 
 pub mod platform_public_contract;
+
+pub(crate) mod platform_entry_discord_installation;
+
+pub(crate) mod platform_entry_gateway;
+
+pub(crate) mod platform_entry_identity;
+
+pub(crate) mod platform_entry_projection;
+
+pub(crate) mod platform_native_reply_handle;
