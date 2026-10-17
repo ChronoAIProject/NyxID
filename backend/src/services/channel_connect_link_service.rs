@@ -144,6 +144,25 @@ pub async fn create(
     } else {
         None
     };
+    let requested_by = app.map(|a| a.client_name).or(input.requested_by.clone());
+    let label = label.to_owned();
+    let (link, token) = build_link(input, label, callback_url, receiver, requested_by);
+    db.collection::<Link>(LINKS).insert_one(&link).await?;
+    Ok(Created {
+        link,
+        token,
+        signing_secret,
+        signing_key_id,
+    })
+}
+
+fn build_link(
+    input: CreateInput,
+    label: String,
+    callback_url: Option<String>,
+    receiver: Option<Receiver>,
+    requested_by: Option<String>,
+) -> (Link, Zeroizing<String>) {
     let token = Zeroizing::new(format!("{TOKEN_PREFIX}{}", generate_random_token()));
     let now = Utc::now();
     let link = Link {
@@ -151,8 +170,8 @@ pub async fn create(
         user_id: input.owner,
         created_by_user_id: input.actor,
         platform: input.platform,
-        label: label.into(),
-        requested_by: app.map(|a| a.client_name).or(input.requested_by),
+        label,
+        requested_by,
         token_hash: hash(&token),
         callback_url,
         receiver,
@@ -173,13 +192,82 @@ pub async fn create(
         delivery_attempts: 0,
         delivery_after: None,
     };
-    db.collection::<Link>(LINKS).insert_one(&link).await?;
+    (link, token)
+}
+
+/// A manager control can mint only a personal, actor-owned Telegram request.
+/// Insertion shares the receipt transaction; no token survives in queued state.
+pub(crate) async fn create_personal_telegram_in_session(
+    db: &Database,
+    session: &mut ClientSession,
+    actor: &str,
+) -> AppResult<Created> {
+    if db
+        .collection::<Document>(crate::models::user::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id":actor,"is_active":true,"$or":[{"user_type":"person"},{"user_type":{"$exists":false}}]},
+            doc! {"$inc":{"channel_connect_fence":1_i64}},
+        )
+        .session(&mut *session)
+        .await?
+        .matched_count
+        != 1
+    {
+        return Err(missing());
+    }
+    let input = CreateInput {
+        owner: actor.into(),
+        actor: actor.into(),
+        platform: "telegram-new".into(),
+        label: "New Telegram bot".into(),
+        requested_by: Some("Your NyxBot chat".into()),
+        app_id: None,
+        callback_url: None,
+        webhook_url: None,
+        expires_in: Some(900),
+    };
+    let (link, token) = build_link(
+        input,
+        "New Telegram bot".into(),
+        None,
+        None,
+        Some("Your NyxBot chat".into()),
+    );
+    db.collection::<Link>(LINKS)
+        .insert_one(&link)
+        .session(session)
+        .await?;
     Ok(Created {
         link,
         token,
-        signing_secret,
-        signing_key_id,
+        signing_secret: None,
+        signing_key_id: None,
     })
+}
+
+pub(crate) async fn token_matches_in_session(
+    db: &Database,
+    session: &mut ClientSession,
+    id: &str,
+    owner: &str,
+    token: &str,
+) -> AppResult<bool> {
+    if !token.starts_with(TOKEN_PREFIX) || token.len() > 160 {
+        return Ok(false);
+    }
+    Ok(db
+        .collection::<Document>(LINKS)
+        .update_one(
+            doc! {
+                "_id":id,"user_id":owner,"created_by_user_id":owner,"platform":"telegram-new",
+                "token_hash":hash(token),"status":"pending","$expr":{"$gt":["$expires_at","$$NOW"]},
+            },
+            doc! {"$inc":{"manager_delivery_fence":1_i64}},
+        )
+        .session(session)
+        .await?
+        .matched_count
+        == 1)
 }
 
 pub async fn get(db: &Database, id: &str) -> AppResult<Link> {

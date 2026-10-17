@@ -40,7 +40,7 @@ async function request<T>(
       (error.status === 404 || error.status === 410)
     )
       throw new Error(
-        "This request is unavailable or expired. Send /link again in the bot's private chat.",
+        "This request is unavailable or expired. Open the bot's private chat help and start a new login request.",
       );
     if (error instanceof ApiError && error.status === 403)
       throw new Error(

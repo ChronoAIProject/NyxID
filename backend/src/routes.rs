@@ -1122,6 +1122,22 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             get(handlers::platform_bots::list).post(handlers::platform_bots::convert),
         )
         .route(
+            "/platform-bots/native/transports",
+            get(handlers::platform_bots::native_transports),
+        )
+        .route(
+            "/platform-bots/native",
+            post(handlers::platform_bots::convert_native),
+        )
+        .route(
+            "/platform-bots/native/{bot}/review",
+            post(handlers::platform_bots::review_native_lifecycle),
+        )
+        .route(
+            "/platform-bots/native/{bot}/inspect",
+            post(handlers::platform_bots::inspect_native_gateway),
+        )
+        .route(
             "/platform-bots/{id}",
             get(handlers::platform_bots::get).delete(handlers::platform_bots::delete),
         )
@@ -3197,7 +3213,7 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .route(
             "/api/v1/webhooks/channel/{platform}/{bot_id}",
             get(handlers::channel_webhooks::channel_subscription)
-                .post(handlers::channel_webhooks::channel_webhook),
+                .post(handlers::channel_webhooks::channel_webhook_with_runtime),
         )
         .route(
             "/api/v1/webhooks/channel/{platform}/platform",
@@ -3268,7 +3284,7 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
                     "/bindings/{binding_id}/conversations/{conversation_id}/events/{event_id}",
                     get(handlers::nyxbot::get_event_context),
                 )
-                .route("/responses", post(handlers::nyxbot::responses))
+                .route("/responses", post(handlers::nyxbot::responses_with_runtime))
                 .route("/relay/{channel_id}", post(handlers::nyxbot::relay_callback))
                 .layer(DefaultBodyLimit::max(2 * 1024 * 1024)),
         )

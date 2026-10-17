@@ -14,6 +14,15 @@ pub(crate) fn installation_filter(bot_id: &str, platform: &str, platform_bot_id:
     }
 }
 
+/// Remote-ID fallback applies only to the original Telegram namespace.
+fn profile_filter(bot_id: &str, platform: &str, remote_id: &str) -> Document {
+    if matches!(platform, "telegram" | "telegram-new") {
+        doc! {"$or":[{"channel_bot_id":bot_id},{"manager_bot_id":remote_id,"native_entry":bson::Bson::Null}]}
+    } else {
+        doc! {"channel_bot_id":bot_id}
+    }
+}
+
 /// Read persisted authority rather than trusting a cached channel/link snapshot.
 /// This checks profile authority; callers retain their normal bot-liveness checks.
 pub(crate) async fn permits_personal_routes(
@@ -27,14 +36,12 @@ pub(crate) async fn permits_personal_routes(
     let Some(bot) = bot else {
         return Ok(false);
     };
-    if bot.contains_key("platform_profile_id") || bot.contains_key("platform_installation_id") {
+    if bot.contains_key("platform_profile_id")
+        || bot.contains_key("platform_installation_id")
+        || bot.contains_key("platform_entry_version")
+        || bot.contains_key("platform_entry_pending")
+    {
         return Ok(false);
-    }
-    if !matches!(
-        bot.get_str("platform").ok(),
-        Some("telegram" | "telegram-new")
-    ) {
-        return Ok(true);
     }
     if db
         .collection::<Document>(crate::models::platform_installation::COLLECTION_NAME)
@@ -51,10 +58,11 @@ pub(crate) async fn permits_personal_routes(
     // A paused or tombstoned profile must never restore personal routing.
     let profile = db
         .collection::<Document>(crate::models::platform_bot_config::COLLECTION_NAME)
-        .find_one(doc! {"$or": [
-            {"channel_bot_id": bot_id},
-            {"manager_bot_id": bot.get_str("platform_bot_id").unwrap_or("")}
-        ]})
+        .find_one(profile_filter(
+            bot_id,
+            bot.get_str("platform").unwrap_or(""),
+            bot.get_str("platform_bot_id").unwrap_or(""),
+        ))
         .await?;
     Ok(profile.is_none())
 }
@@ -92,7 +100,7 @@ pub(crate) async fn fence_personal_routes(
     let bot = db
         .collection::<Document>(crate::models::channel_bot::COLLECTION_NAME)
         .find_one_and_update(
-            doc! {"_id": bot_id, "user_id": owner, "platform_profile_id": {"$exists": false}, "platform_installation_id": {"$exists": false}},
+            doc! {"_id": bot_id, "user_id": owner, "platform_profile_id": {"$exists": false}, "platform_installation_id": {"$exists": false}, "platform_entry_version": {"$exists": false}, "platform_entry_pending": {"$exists": false}},
             doc! {"$inc": {"route_revision": 1_i64}},
         )
         .session(&mut *session)
@@ -113,12 +121,20 @@ pub(crate) async fn fence_personal_routes(
             "This installation requires its reviewed setup authority".into(),
         ));
     }
-    if matches!(bot.get_str("platform").ok(), Some("telegram" | "telegram-new"))
-        && db.collection::<Document>(crate::models::platform_bot_config::COLLECTION_NAME)
-            .find_one(doc! {"$or": [{"channel_bot_id": bot_id}, {"manager_bot_id": bot.get_str("platform_bot_id").unwrap_or("")}]})
-            .session(&mut *session).await?.is_some()
+    if db
+        .collection::<Document>(crate::models::platform_bot_config::COLLECTION_NAME)
+        .find_one(profile_filter(
+            bot_id,
+            bot.get_str("platform").unwrap_or(""),
+            bot.get_str("platform_bot_id").unwrap_or(""),
+        ))
+        .session(&mut *session)
+        .await?
+        .is_some()
     {
-        return Err(AppError::Forbidden("The platform manager cannot use personal channel routes".into()));
+        return Err(AppError::Forbidden(
+            "The platform manager cannot use personal channel routes".into(),
+        ));
     }
     Ok(())
 }
@@ -126,6 +142,55 @@ pub(crate) async fn fence_personal_routes(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn same_remote_native_entry_does_not_confer_telegram_platform_authority() {
+        let db = crate::test_utils::connect_transaction_test_database(
+            "native_remote_authority_namespace",
+        )
+        .await;
+        let bots = db.collection::<Document>(crate::models::channel_bot::COLLECTION_NAME);
+        let profiles =
+            db.collection::<Document>(crate::models::platform_bot_config::COLLECTION_NAME);
+        bots.insert_one(
+            doc! {"_id":"ordinary-telegram","user_id":"owner","platform":"telegram",
+            "platform_bot_id":"123","credential_source":"user","is_active":true},
+        )
+        .await
+        .unwrap();
+        profiles.insert_one(doc! {"_id":"native-profile","channel_bot_id":"native-channel","manager_bot_id":"123",
+            "identity_version":2,"enabled":true,"native_entry":{"identity":{"version":2,"platform":"x",
+                "channel_bot_id":"native-channel","platform_bot_id":"123"}}}).await.unwrap();
+        assert!(
+            permits_personal_routes(&db, "ordinary-telegram")
+                .await
+                .unwrap()
+        );
+        let mut session = db.client().start_session().await.unwrap();
+        session.start_transaction().await.unwrap();
+        fence_personal_routes(&db, "ordinary-telegram", "owner", &mut session)
+            .await
+            .unwrap();
+        session.commit_transaction().await.unwrap();
+        // An own-channel profile remains a refusal even if its marker is missing.
+        bots.insert_one(
+            doc! {"_id":"native-channel","user_id":"owner","platform":"x","platform_bot_id":"123"},
+        )
+        .await
+        .unwrap();
+        assert!(
+            !permits_personal_routes(&db, "native-channel")
+                .await
+                .unwrap()
+        );
+        profiles.insert_one(doc! {"_id":"legacy-profile","channel_bot_id":"legacy-channel","manager_bot_id":"123",
+            "identity_version":1,"enabled":false}).await.unwrap();
+        assert!(
+            !permits_personal_routes(&db, "ordinary-telegram")
+                .await
+                .unwrap()
+        );
+    }
 
     #[tokio::test]
     async fn platform_onboarding_legacy_manager_is_opt_in_and_tombstone_is_closed() {

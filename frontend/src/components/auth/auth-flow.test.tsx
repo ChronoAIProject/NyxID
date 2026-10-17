@@ -317,7 +317,7 @@ describe("AuthFlow — register", () => {
       screen.queryByPlaceholderText("NYX-XXXXXXXX"),
     ).not.toBeInTheDocument();
 
-    registerFn.mockResolvedValue({ message: "Check your email." });
+    registerFn.mockResolvedValue({ message: "Registration processed. You can now sign in." });
     const nameInput = screen.getByPlaceholderText("John Doe");
     // Wait for the panel transition's delayed autofocus before typing fields.
     await waitFor(() => expect(nameInput).toHaveFocus());
@@ -366,7 +366,7 @@ describe("AuthFlow — register", () => {
   });
 
   it("submits the registration with the normalized invite code on the happy path", async () => {
-    registerFn.mockResolvedValue({ message: "Check your email." });
+    registerFn.mockResolvedValue({ message: "Registration processed. You can now sign in." });
     const user = userEvent.setup();
     render(<AuthFlow initialPanel={1} initialInviteCode="nyx-abcd1234" />);
 
@@ -393,7 +393,7 @@ describe("AuthFlow — register", () => {
         invite_code: "NYX-ABCD1234",
       });
     });
-    expect(toastFns.info).toHaveBeenCalledWith("Check your email.");
+    expect(toastFns.info).toHaveBeenCalledWith("Registration processed. You can now sign in.");
     // The success path slides back to the login view via a timed fade —
     // flush those pending timers inside act() so they don't leak.
     await act(async () => {

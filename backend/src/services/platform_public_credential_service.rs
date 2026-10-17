@@ -1,4 +1,5 @@
 //! Public keys and disposable encrypted transcripts, separate from owner state.
+use super::platform_entry_scope as scope;
 use super::{
     api_key_mutation_service as tx, assistant_agent_credential_service as crypto,
     platform_manager_contract::*, platform_public_budget_service as budget,
@@ -140,25 +141,31 @@ pub(crate) async fn issue_context(
     .await?;
     if evidence.manager != admitted.manager
         || evidence.public_policy_revision != admitted.public_policy_revision
-        || admitted.sender_id <= 0
-        || admitted.sender_id != admitted.chat_id
     {
         return Err(denied());
     }
+    scope::validate(
+        &admitted.manager.entry,
+        &admitted.manager.manager_bot_id,
+        Some(&admitted.sender),
+    )?;
     let hello = state.db.run_command(doc! {"hello":1}).await?;
     let now = hello
         .get_datetime("localTime")
         .map_err(|_| denied())?
         .to_chrono();
     let manager = &admitted.manager;
+    let mut subject = doc! {
+        "profile_id":&manager.profile_id,"manager_bot_id":&manager.manager_bot_id,
+        "revoked_at":bson::Bson::Null,
+    };
+    subject.extend(scope::entry_fields(&manager.entry));
+    subject.extend(scope::sender_fields(&admitted.sender, true));
+    scope::exclude_other_version(&mut subject, &manager.entry);
     let existing = state
         .db
         .collection::<PlatformPublicSession>(SESSIONS)
-        .find_one(doc! {
-            "profile_id":&manager.profile_id,"manager_bot_id":&manager.manager_bot_id,
-            "telegram_bot_id":manager.telegram_bot_id,"sender_id":admitted.sender_id,
-            "chat_id":admitted.chat_id,"revoked_at":bson::Bson::Null,
-        })
+        .find_one(subject)
         .await?;
     let (row, key) = if let Some(row) = existing {
         // Expired, busy and changed-policy sessions must be retired by the
@@ -184,10 +191,9 @@ pub(crate) async fn issue_context(
                 id: uuid::Uuid::new_v4().to_string(),
                 profile_id: manager.profile_id.clone(),
                 manager_bot_id: manager.manager_bot_id.clone(),
-                telegram_bot_id: manager.telegram_bot_id,
+                entry: manager.entry.clone(),
                 manager_authority_epoch: manager.manager_authority_epoch,
-                sender_id: admitted.sender_id,
-                chat_id: admitted.chat_id,
+                sender: admitted.sender.clone(),
                 sponsor_owner_user_id: evidence.sponsor_owner_user_id.clone(),
                 public_policy_revision: admitted.public_policy_revision,
                 policy_digest: evidence.policy_digest.clone(),
@@ -245,13 +251,18 @@ pub(crate) async fn issue_context(
                             .session(&mut *session)
                             .await?
                             .ok_or_else(denied)?;
+                        if receipt.entry != manager.entry
+                            || receipt.sender != context.ingress.sender
+                        {
+                            return Err(denied());
+                        }
                         let controls =
                             super::platform_bot_runtime_control_service::fence_manager_in_session(
                                 db,
                                 session,
                                 &manager.profile_id,
                                 &manager.manager_bot_id,
-                                manager.telegram_bot_id,
+                                &manager.entry,
                                 Some(&receipt.observation_id),
                             )
                             .await?
@@ -268,15 +279,19 @@ pub(crate) async fn issue_context(
                         {
                             return Err(denied());
                         }
+                        let mut binding_subject = doc! {
+                            "platform_config_id": &manager.profile_id,
+                            "manager_bot_id": &manager.manager_bot_id, "state": "active",
+                        };
+                        binding_subject.extend(scope::entry_fields(&manager.entry));
+                        binding_subject
+                            .extend(scope::sender_key_fields(&context.ingress.sender, false));
+                        scope::exclude_other_version(&mut binding_subject, &manager.entry);
                         let personal_links = db
                             .collection::<Document>(
                                 crate::models::platform_personal_binding::COLLECTION_NAME,
                             )
-                            .count_documents(doc! {
-                                "platform_config_id": &manager.profile_id,
-                                "manager_bot_id": &manager.manager_bot_id,
-                                "telegram_sender_id": context.ingress.sender_id, "state": "active",
-                            })
+                            .count_documents(binding_subject)
                             .session(&mut *session)
                             .await?;
                         if personal_links > 0 {
@@ -286,7 +301,11 @@ pub(crate) async fn issue_context(
                             super::coordination_service::RateWindowStore::admit_in_session(
                                 db,
                                 "public_turn_starts",
-                                &format!("{}:{}", manager.profile_id, context.ingress.sender_id),
+                                &format!(
+                                    "{}:{}",
+                                    manager.profile_id,
+                                    scope::budget_actor(&manager.entry, &context.ingress.sender)?
+                                ),
                                 10,
                                 std::time::Duration::from_secs(3600),
                                 session,
@@ -325,10 +344,9 @@ async fn install_turn_in_session(
         || row.id != context.turn.conversation_id
         || row.profile_id != manager.profile_id
         || row.manager_bot_id != manager.manager_bot_id
-        || row.telegram_bot_id != manager.telegram_bot_id
+        || row.entry != manager.entry
         || row.manager_authority_epoch != manager.manager_authority_epoch
-        || row.sender_id != context.ingress.sender_id
-        || row.chat_id != context.ingress.chat_id
+        || row.sender != context.ingress.sender
         || row.sponsor_owner_user_id != context.sponsor_owner_user_id
         || row.policy_digest != context.policy_digest
         || row.public_policy_revision != context.ingress.public_policy_revision
@@ -847,8 +865,7 @@ fn reply_filter(destination: &ReplyDestination, reply: &ReplyRef) -> AppResult<D
     };
     if *turn != reply.turn
         || destination.manager != ingress.manager
-        || destination.sender_id != ingress.sender_id
-        || destination.chat_id != ingress.chat_id
+        || destination.sender != ingress.sender
         || destination.expires_at <= Utc::now()
     {
         return Err(denied());
@@ -1108,42 +1125,62 @@ pub(crate) async fn fence_reply_in_session(
         return Err(denied());
     };
     if destination.manager != ingress.manager
-        || destination.sender_id != ingress.sender_id
-        || destination.chat_id != ingress.chat_id
+        || destination.sender != ingress.sender
         || destination.expires_at <= Utc::now()
-        || ingress.sender_id <= 0
-        || ingress.sender_id != ingress.chat_id
     {
         return Err(denied());
     }
+    scope::validate(
+        &ingress.manager.entry,
+        &ingress.manager.manager_bot_id,
+        Some(&ingress.sender),
+    )?;
     let manager = &ingress.manager;
     let retained=db.collection::<PlatformPublicTurn>(TURNS).find_one(doc! {
         "_id":&turn.turn_id,"conversation_id":&turn.conversation_id,"public_session_id":public_session_id,
         "receipt_id":&ingress.ingress.receipt_id,"claim_id":&ingress.ingress.claim_id,
         "reply_id":{"$type":"string"},"outcome":"settled","$expr":{"$gt":["$expires_at","$$NOW"]},
     }).session(&mut *session).await?.ok_or_else(denied)?;
-    let row=db.collection::<PlatformPublicSession>(SESSIONS).find_one_and_update(doc! {
+    let mut session_subject = doc! {
         "_id":public_session_id,"profile_id":&manager.profile_id,"manager_bot_id":&manager.manager_bot_id,
-        "telegram_bot_id":manager.telegram_bot_id,"manager_authority_epoch":manager.manager_authority_epoch,
-        "sender_id":ingress.sender_id,"chat_id":ingress.chat_id,"public_policy_revision":ingress.public_policy_revision,
+        "manager_authority_epoch":manager.manager_authority_epoch,
+        "public_policy_revision":ingress.public_policy_revision,
         "sponsor_owner_user_id":&retained.sponsor_owner_user_id,"policy_digest":&retained.policy_digest,
         "revoked_at":bson::Bson::Null,"$expr":{"$gt":["$expires_at","$$NOW"]},
-    },doc! {"$inc":{"effect_revision":1_i64}}).return_document(ReturnDocument::After).session(&mut *session).await?.ok_or_else(denied)?;
+    };
+    session_subject.extend(scope::entry_fields(&manager.entry));
+    session_subject.extend(scope::sender_fields(&ingress.sender, true));
+    scope::exclude_other_version(&mut session_subject, &manager.entry);
+    let row = db
+        .collection::<PlatformPublicSession>(SESSIONS)
+        .find_one_and_update(session_subject, doc! {"$inc":{"effect_revision":1_i64}})
+        .return_document(ReturnDocument::After)
+        .session(&mut *session)
+        .await?
+        .ok_or_else(denied)?;
     if !super::platform_public_agent_service::fence_local_session_in_session(db, session, &row)
         .await?
     {
         return Err(denied());
     }
-    db.collection::<PlatformManagerIngress>(RECEIPTS).find_one_and_update(doc! {
+    let mut ingress_subject = doc! {
         "_id":&ingress.ingress.receipt_id,"claim_id":&ingress.ingress.claim_id,"phase":"settled",
         "profile_id":&manager.profile_id,"manager_bot_id":&manager.manager_bot_id,
-        "telegram_bot_id":manager.telegram_bot_id,"manager_authority_epoch":manager.manager_authority_epoch,
-        "sender_id":ingress.sender_id,"chat_id":ingress.chat_id,"audience.kind":"public",
+        "manager_authority_epoch":manager.manager_authority_epoch,"audience.kind":"public",
         "audience.public_policy_revision":ingress.public_policy_revision,
         "execution.public_session_id":public_session_id,"execution.conversation_id":&turn.conversation_id,
         "execution.turn_id":&turn.turn_id,"execution.payer_user_id":&row.sponsor_owner_user_id,
         "execution.public_policy_digest":&row.policy_digest,"reply_id":retained.reply_id.as_deref().ok_or_else(denied)?,
-    },doc! {"$inc":{"effect_revision":1_i64}}).session(&mut *session).await?.ok_or_else(denied)?;
+    };
+    ingress_subject.extend(scope::entry_fields(&manager.entry));
+    ingress_subject.extend(scope::sender_fields(&ingress.sender, true));
+    scope::exclude_other_version(&mut ingress_subject, &manager.entry);
+    let retained_ingress = db
+        .collection::<PlatformManagerIngress>(RECEIPTS)
+        .find_one_and_update(ingress_subject, doc! {"$inc":{"effect_revision":1_i64}})
+        .session(&mut *session)
+        .await?
+        .ok_or_else(denied)?;
     // Token rotation for the same numeric bot does not change authority epoch.
     // Bind the current profile observation, not the historical receipt token.
     let profile = db
@@ -1162,8 +1199,11 @@ pub(crate) async fn fence_reply_in_session(
         session,
         &manager.profile_id,
         &manager.manager_bot_id,
-        manager.telegram_bot_id,
-        Some(&profile.observation_id),
+        &manager.entry,
+        Some(match &manager.entry {
+            EntryIdentity::TelegramV1 { .. } => &profile.observation_id,
+            EntryIdentity::NativeV2 { .. } => &retained_ingress.observation_id,
+        }),
     )
     .await?
     .ok_or_else(denied)?;
@@ -1377,10 +1417,14 @@ pub(crate) mod tests {
             id: uuid::Uuid::new_v4().to_string(),
             profile_id: "profile".into(),
             manager_bot_id: "99".into(),
-            telegram_bot_id: 99,
+            entry: EntryIdentity::TelegramV1 {
+                telegram_bot_id: 99,
+            },
             manager_authority_epoch: 1,
-            sender_id: 5,
-            chat_id: 5,
+            sender: SenderIdentity::TelegramV1 {
+                telegram_sender_id: 5,
+                telegram_chat_id: 5,
+            },
             sponsor_owner_user_id: "sponsor".into(),
             public_policy_revision: 1,
             policy_digest: "policy".into(),
@@ -1408,11 +1452,15 @@ pub(crate) mod tests {
                 manager: ManagerAuthority {
                     profile_id: row.profile_id.clone(),
                     manager_bot_id: row.manager_bot_id.clone(),
-                    telegram_bot_id: 99,
+                    entry: EntryIdentity::TelegramV1 {
+                        telegram_bot_id: 99,
+                    },
                     manager_authority_epoch: 1,
                 },
-                sender_id: 5,
-                chat_id: 5,
+                sender: SenderIdentity::TelegramV1 {
+                    telegram_sender_id: 5,
+                    telegram_chat_id: 5,
+                },
                 public_policy_revision: 1,
             },
             public_session_id: row.id.clone(),
@@ -1596,8 +1644,7 @@ pub(crate) mod tests {
         assert_eq!(settled.matched_count, 1, "prepared turn must be settled");
         let destination = ReplyDestination {
             manager: context.ingress.manager.clone(),
-            sender_id: context.ingress.sender_id,
-            chat_id: context.ingress.chat_id,
+            sender: context.ingress.sender.clone(),
             authority: ReplyAuthority::Public {
                 ingress: context.ingress.clone(),
                 public_session_id: row.id,
@@ -1676,13 +1723,19 @@ pub(crate) mod tests {
             claim_id: retained.claim_id.clone(),
             profile_id: row.profile_id.clone(),
             manager_bot_id: row.manager_bot_id.clone(),
-            telegram_bot_id: 99,
+            entry: EntryIdentity::TelegramV1 {
+                telegram_bot_id: 99,
+            },
             manager_authority_epoch: 1,
             observation_id: "observation".into(),
-            sender_id: 5,
-            chat_id: 5,
-            update_id: 1,
-            message_id: 1,
+            sender: SenderIdentity::TelegramV1 {
+                telegram_sender_id: 5,
+                telegram_chat_id: 5,
+            },
+            event: EventIdentity::TelegramV1 {
+                update_id: 1,
+                message_id: 1,
+            },
             original_private_command: false,
             audience: IngressAudience::Public {
                 public_policy_revision: 1,
@@ -1697,6 +1750,7 @@ pub(crate) mod tests {
             }),
             decision: None,
             reply_id: None,
+            control_effect: None,
             delivery_recovery_queued: false,
             interrupted_reason: None,
             effect_revision: 0,
@@ -1886,6 +1940,8 @@ pub(crate) mod tests {
         let held = Credits::from_pico(10).unwrap();
         let allocated = Credits::from_pico(6).unwrap();
         let loop_row = PublicBudgetLoop {
+            continuations: 0,
+            max_continuations: 1,
             id: uuid::Uuid::new_v4().to_string(),
             public_session_id: row.id.clone(),
             conversation_id: context.turn.conversation_id.clone(),
@@ -1893,7 +1949,7 @@ pub(crate) mod tests {
             receipt_id: context.ingress.ingress.receipt_id.clone(),
             claim_id: context.ingress.ingress.claim_id.clone(),
             profile_id: row.profile_id.clone(),
-            sender_id: row.sender_id,
+            actor: scope::budget_identity(&row.entry, &row.sender).unwrap(),
             sponsor_owner_user_id: row.sponsor_owner_user_id.clone(),
             credential_api_key_id: row.credential_api_key_id.clone(),
             policy_digest: row.policy_digest.clone(),
@@ -1915,6 +1971,7 @@ pub(crate) mod tests {
             closed: false,
         };
         let call = PublicCallReservation {
+            continuation: false,
             id: uuid::Uuid::new_v4().to_string(),
             loop_id: loop_row.id.clone(),
             sponsor_owner_user_id: row.sponsor_owner_user_id.clone(),
@@ -2079,7 +2136,7 @@ pub(crate) mod tests {
             bson::to_document(&call).unwrap()
         );
         let (next_row, next_key, next_context) = fixture();
-        assert_eq!(next_row.sender_id, row.sender_id);
+        assert_eq!(next_row.sender, row.sender);
         session.start_transaction().await.unwrap();
         install_turn_in_session(&db, &mut session, &next_context, &next_row, Some(&next_key))
             .await
@@ -2087,7 +2144,11 @@ pub(crate) mod tests {
         session.commit_transaction().await.unwrap();
         assert_eq!(
             db.collection::<PlatformPublicSession>(SESSIONS)
-                .count_documents(doc! {"sender_id":row.sender_id,"revoked_at":bson::Bson::Null})
+                .count_documents({
+                    let mut filter = scope::sender_fields(&row.sender, true);
+                    filter.insert("revoked_at", bson::Bson::Null);
+                    filter
+                })
                 .await
                 .unwrap(),
             1

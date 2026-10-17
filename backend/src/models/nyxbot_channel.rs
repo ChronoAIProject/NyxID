@@ -358,7 +358,8 @@ pub struct NyxbotWatch {
     /// channel_bot: the bot that was linked.
     #[serde(default)]
     pub channel_bot_id: Option<String>,
-    /// connect_link: the hosted link being completed.
+    /// connect_link: a ConnectLink; channel_bot: the exact ChannelConnectLink.
+    /// Legacy channel_bot watches without this field retain the old creation-window lookup.
     #[serde(default)]
     pub connect_link_id: Option<String>,
     /// Stable code only, never upstream prose.

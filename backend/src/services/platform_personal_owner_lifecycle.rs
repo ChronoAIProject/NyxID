@@ -77,11 +77,10 @@ impl PersonalLifecycleEffects for LocalEffects {
                 manager: ManagerAuthority {
                     profile_id: binding.platform_config_id.clone(),
                     manager_bot_id: binding.manager_bot_id.clone(),
-                    telegram_bot_id: binding.telegram_bot_id,
+                    entry: binding.entry.clone(),
                     manager_authority_epoch: binding.manager_authority_epoch,
                 },
-                sender_id: binding.telegram_sender_id,
-                chat_id: binding.telegram_chat_id,
+                sender: binding.sender.clone(),
             },
             PublicRevocationReason::SenderUnlinked,
         )
@@ -416,10 +415,9 @@ mod tests {
         let proof = PersonalTurnProof {
             platform_config_id: update.profile_id.clone(),
             manager_bot_id: update.manager_bot_id.clone(),
-            telegram_bot_id: update.telegram_bot_id,
+            entry: update.entry.clone(),
             manager_authority_epoch: 1,
-            telegram_sender_id: update.sender_id,
-            telegram_chat_id: update.chat_id,
+            sender: update.sender.clone(),
             binding_id: binding.id.clone(),
             binding_generation: 1,
             personal_control_revision: 1,
@@ -474,8 +472,11 @@ mod tests {
         let mut batch = Vec::new();
         for sender in 1000..1051 {
             let mut sender_update = update.clone();
-            sender_update.sender_id = sender;
-            sender_update.chat_id = sender;
+            sender_update.sender =
+                crate::models::platform_entry_projection::StoredSenderIdentity::TelegramV1 {
+                    telegram_sender_id: sender,
+                    telegram_chat_id: sender,
+                };
             batch.push(bindings::tests::binding(&sender_update, &owner));
         }
         rows.insert_many(batch).await.unwrap();

@@ -1,6 +1,7 @@
 use chrono::Utc;
 use mongodb::bson::{self, doc};
 use uuid::Uuid;
+use zeroize::Zeroizing;
 
 use crate::crypto::password;
 use crate::crypto::token::{generate_random_token, hash_token};
@@ -27,9 +28,9 @@ pub fn ensure_person_user(user: &User) -> AppResult<()> {
 /// Result of a successful registration.
 pub struct RegisterResult {
     pub user_id: String,
-    /// Used in debug builds to log the verification token.
-    #[cfg_attr(not(debug_assertions), allow(dead_code))]
-    pub email_verification_token: String,
+    /// Raw material is exposed only to verification regressions, never handlers.
+    #[cfg(test)]
+    pub email_verification_token: Zeroizing<String>,
     /// `true` when a new user was actually inserted; `false` when the email
     /// already existed and a fake success was returned for email-enumeration
     /// protection. Callers that hold a reserved invite code must use this to
@@ -85,13 +86,14 @@ pub async fn register_user(
         tracing::warn!(email = %email, "Registration attempt for existing email");
         return Ok(RegisterResult {
             user_id: Uuid::new_v4().to_string(), // Fake ID, not stored
-            email_verification_token: generate_random_token(), // Fake token
+            #[cfg(test)]
+            email_verification_token: Zeroizing::new(generate_random_token()),
             actually_created: false,
         });
     }
 
     let password_hash = password::hash_password(password_raw)?;
-    let verification_token = generate_random_token();
+    let verification_token = Zeroizing::new(generate_random_token());
     // Store the hash of the verification token, not the raw token
     let verification_token_hash = hash_token(&verification_token);
     let now = Utc::now();
@@ -138,6 +140,7 @@ pub async fn register_user(
 
     Ok(RegisterResult {
         user_id,
+        #[cfg(test)]
         email_verification_token: verification_token,
         actually_created: true,
     })

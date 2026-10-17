@@ -43,13 +43,17 @@ pub(crate) fn verified_message(
     Some(VerifiedManagerUpdate {
         profile_id: profile_id.into(),
         manager_bot_id: manager_bot_id.into(),
-        telegram_bot_id,
+        entry: EntryIdentity::TelegramV1 { telegram_bot_id },
         observation_id: observation_id.into(),
-        sender_id,
-        chat_id,
+        sender: SenderIdentity::TelegramV1 {
+            telegram_sender_id: sender_id,
+            telegram_chat_id: chat_id,
+        },
         chat_kind,
-        update_id: update["update_id"].as_i64().filter(|id| *id >= 0)?,
-        message_id: message["message_id"].as_i64().filter(|id| *id > 0)?,
+        event: EventIdentity::TelegramV1 {
+            update_id: update["update_id"].as_i64().filter(|id| *id >= 0)?,
+            message_id: message["message_id"].as_i64().filter(|id| *id > 0)?,
+        },
         command_eligibility: if original {
             ManagerCommandEligibility::OriginalPrivateMessage
         } else {
@@ -76,7 +80,7 @@ pub(crate) async fn admit_in_session(
         session,
         &update.profile_id,
         &update.manager_bot_id,
-        update.telegram_bot_id,
+        &update.entry,
         Some(&update.observation_id),
     )
     .await?
@@ -96,15 +100,14 @@ pub(crate) async fn admit_in_session(
                 }
                 ManagerAudience::Personal(AdmittedPersonalUpdate {
                     ingress: claim.clone(),
-                    authority,
+                    authority: *authority,
                 })
             }
             SenderResolution::Unlinked if policy.public_enabled => {
                 ManagerAudience::Public(PublicIngress {
                     ingress: claim.clone(),
                     manager: policy.manager.clone(),
-                    sender_id: update.sender_id,
-                    chat_id: update.chat_id,
+                    sender: update.sender.clone(),
                     public_policy_revision: policy.public_policy_revision,
                 })
             }
@@ -170,7 +173,13 @@ mod tests {
         for field in ["forward_origin", "forward_date", "via_bot"] {
             update["message"][field] = serde_json::json!({"id":999});
             let forwarded = verified_message("profile", "99", 99, "obs", &update).unwrap();
-            assert_eq!(forwarded.sender_id, 123);
+            assert_eq!(
+                forwarded.sender,
+                SenderIdentity::TelegramV1 {
+                    telegram_sender_id: 123,
+                    telegram_chat_id: 123
+                }
+            );
             assert_eq!(
                 forwarded.command_eligibility,
                 ManagerCommandEligibility::Ineligible
@@ -236,7 +245,9 @@ mod tests {
             matches!(admit_manager_update(&db,&IdentityProducer,&update).await.unwrap(),IngressAdmission::Duplicate {receipt_id} if receipt_id==original.receipt_id)
         );
         let mut next = update.clone();
-        next.update_id += 1;
+        if let EventIdentity::TelegramV1 { update_id, .. } = &mut next.event {
+            *update_id += 1;
+        }
         assert!(matches!(
             admit_manager_update(&db, &IdentityProducer, &next)
                 .await

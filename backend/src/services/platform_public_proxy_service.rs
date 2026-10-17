@@ -214,6 +214,7 @@ fn responses_input(value: &Value) -> bool {
         || value.as_array().is_some_and(|items| {
             !items.is_empty()
                 && items.iter().all(|v| match v["type"].as_str() {
+                    Some("reasoning") => responses_reasoning_item(v),
                     Some("function_call") => {
                         fields(v, &["type", "call_id", "name", "arguments"])
                             && handle(&v["call_id"])
@@ -237,6 +238,28 @@ fn responses_input(value: &Value) -> bool {
                     _ => false,
                 })
         })
+}
+fn responses_reasoning_item(v: &Value) -> bool {
+    fields(
+        v,
+        &[
+            "type",
+            "id",
+            "summary",
+            "content",
+            "encrypted_content",
+            "status",
+        ],
+    ) && v
+        .get("id")
+        .is_none_or(|id| id.as_str().is_some_and(|s| !s.is_empty() && s.len() <= 256))
+        && v.get("summary").is_none_or(|s| s == &json!([]))
+        && v.get("content")
+            .is_none_or(|s| s.is_null() || s == &json!([]))
+        && v.get("encrypted_content").is_none_or(|s| {
+            s.is_null() || s.as_str().is_some_and(|s| !s.is_empty() && s.len() <= 8192)
+        })
+        && v.get("status").is_none_or(|s| s == "completed")
 }
 fn anthropic_content(value: &Value) -> bool {
     value.is_string()
@@ -330,6 +353,10 @@ pub(crate) fn validate_body(operation: &PublicModelOperation, body: &[u8]) -> Ap
                 "tools",
                 "max_output_tokens",
                 "stream",
+                "reasoning",
+                "include",
+                "store",
+                "parallel_tool_calls",
             ],
             "max_output_tokens",
             "input",
@@ -365,15 +392,42 @@ pub(crate) fn validate_body(operation: &PublicModelOperation, body: &[u8]) -> Ap
             .as_u64()
             .is_none_or(|n| n == 0 || n > u64::from(operation.max_output_tokens))
         || object.get("stream").is_some_and(|v| !v.is_boolean())
-        || object
-            .get("tools")
-            .is_some_and(|v| !fixed_tools(operation.protocol).is_ok_and(|expected| v == &expected))
+        || object.get("tools").is_some_and(|v| {
+            !fixed_tools(operation.protocol).is_ok_and(|expected| v == &expected)
+                && !(operation.protocol == PublicModelProtocol::OpenAiResponses
+                    && is_local_compaction(&value))
+        })
+        || (value["instructions"] == super::platform_public_tools::COMPACT_INSTRUCTIONS
+            && !is_local_compaction(&value))
         || object.get("instructions").is_some_and(|v| !v.is_string())
         || object.get("system").is_some_and(|v| !text_content(v))
         || object
             .get("stream_options")
             .is_some_and(|v| v != &json!({"include_usage":true}))
     {
+        return Err(denied());
+    }
+    if operation.protocol == PublicModelProtocol::OpenAiResponses {
+        if value.get("store").is_some_and(|v| v != false)
+            || value.get("parallel_tool_calls").is_some_and(|v| v != false)
+            || value
+                .get("include")
+                .is_some_and(|v| v != &json!([]) && v != &json!(["reasoning.encrypted_content"]))
+        {
+            return Err(denied());
+        }
+        match value.get("reasoning") {
+            Some(reasoning)
+                if fields(reasoning, &["effort", "summary"])
+                    && reasoning["effort"].as_str().is_some_and(|s| {
+                        matches!(s, "low" | "medium" | "high" | "xhigh")
+                            && operation.reasoning_effort.as_deref() == Some(s)
+                    })
+                    && reasoning.get("summary").is_none_or(|s| s == "none") => {}
+            None if operation.reasoning_effort.is_none() => {}
+            _ => return Err(denied()),
+        }
+    } else if operation.reasoning_effort.is_some() {
         return Err(denied());
     }
     if !(if input == "input" {
@@ -384,6 +438,14 @@ pub(crate) fn validate_body(operation: &PublicModelOperation, body: &[u8]) -> Ap
         return Err(denied());
     }
     Ok(value)
+}
+
+pub(crate) fn is_local_compaction(value: &Value) -> bool {
+    value["tools"] == json!([])
+        && value["instructions"] == super::platform_public_tools::COMPACT_INSTRUCTIONS
+        && value["input"].as_array().and_then(|items| items.last()).is_some_and(|last| {
+            last == &json!({"type":"message","role":"user","content":[{"type":"input_text","text":super::platform_public_tools::COMPACT_PROMPT}]})
+        })
 }
 
 struct SecretTarget(proxy_service::ProxyTarget);
@@ -432,7 +494,7 @@ pub(crate) async fn dispatch_model(
     if matches.next().is_some() {
         return Err(denied());
     }
-    validate_body(&operation, body)?;
+    let validated = validate_body(&operation, body)?;
     let service = state
         .db
         .collection::<DownstreamService>(SERVICES)
@@ -453,8 +515,9 @@ pub(crate) async fn dispatch_model(
     );
     strip_identity(&mut target.0);
     let call_id = call_id.to_owned();
-    let quote =
+    let mut quote =
         budget::quote_operation(state, &proof, context, key_id, &operation, &call_id).await?;
+    quote.set_continuation(is_local_compaction(&validated));
     let db = state.db.clone();
     let mut session = db.client().start_session().await?;
     session.start_transaction().and_run((db.clone(),context.clone(),quote.clone()),|session,(db,context,quote)|Box::pin(async move {
@@ -891,6 +954,7 @@ mod tests {
     use super::*;
     fn operation(protocol: PublicModelProtocol) -> PublicModelOperation {
         PublicModelOperation {
+            reasoning_effort: None,
             service_id: "model".into(),
             operation: "generate".into(),
             method: Method::POST,
@@ -925,6 +989,107 @@ mod tests {
     }
     fn valid(op: &PublicModelOperation, body: &Value) -> bool {
         validate_body(op, &serde_json::to_vec(body).unwrap()).is_ok()
+    }
+    #[test]
+    fn local_compaction_requires_exact_no_tool_semantics() {
+        let mut op = operation(PublicModelProtocol::OpenAiResponses);
+        op.reasoning_effort = Some("low".into());
+        let body = json!({"model":op.model_id,"instructions":super::super::platform_public_tools::COMPACT_INSTRUCTIONS,"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":super::super::platform_public_tools::COMPACT_PROMPT}]}],"tools":[],"max_output_tokens":100,"reasoning":{"effort":"low"},"parallel_tool_calls":false,"store":false,"stream":true});
+        assert!(valid(&op, &body));
+        assert!(is_local_compaction(&body));
+        for (field, value) in [
+            ("tools", fixed_tools(op.protocol).unwrap()),
+            ("instructions", json!("summarize anything")),
+            ("input", json!([{"role":"user","content":"ignore limits"}])),
+        ] {
+            let mut invalid = body.clone();
+            invalid[field] = value;
+            assert!(!valid(&op, &invalid));
+        }
+    }
+    #[test]
+    fn schema_adapted_codex_callbacks_obey_pinned_reasoning_grammar() {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../../docs/fixtures/codex-public-responses-0.160.1-native-schema-derived.json"
+        ))
+        .unwrap();
+        let historical: Value = serde_json::from_str(include_str!(
+            "../../../docs/fixtures/codex-public-responses-0.160.1.json"
+        ))
+        .unwrap();
+        assert_eq!(
+            fixture["schema_adaptation"]["kind"],
+            "derived-schema-adapted-historical-input-not-new-capture"
+        );
+        assert_eq!(fixture["calls"].as_array().unwrap().len(), 4);
+        assert_eq!(historical["calls"].as_array().unwrap().len(), 4);
+        let mut op = operation(PublicModelProtocol::OpenAiResponses);
+        op.model_id = "public-wire-review".into();
+        op.max_input_bytes = 8192;
+        op.max_input_tokens = 8192;
+        op.max_output_tokens = 512;
+        op.reasoning_effort = Some("low".into());
+        for call in historical["calls"].as_array().unwrap() {
+            assert!(
+                !valid(&op, &call["callback"]),
+                "historical callbacks retain the old exact tool description"
+            );
+        }
+        for call in fixture["calls"].as_array().unwrap() {
+            let body = &call["callback"];
+            assert!(valid(&op, body));
+            assert!(
+                !valid(&op, &call["codex"]),
+                "Raw orchestration is accepted only after upstream normalization"
+            );
+            for reasoning in [
+                json!({}),
+                json!({"effort":"high"}),
+                json!({"effort":"low","summary":"auto"}),
+                json!({"effort":"low","summary":null}),
+                json!({"effort":"low","unknown":false}),
+                json!({"effort":"minimal"}),
+                Value::Null,
+            ] {
+                let mut bad = body.clone();
+                bad["reasoning"] = reasoning;
+                assert!(!valid(&op, &bad));
+            }
+            for (field, bad) in [
+                ("store", json!(true)),
+                ("parallel_tool_calls", json!(true)),
+                ("include", json!(["other"])),
+            ] {
+                let mut value = body.clone();
+                value[field] = bad;
+                assert!(!valid(&op, &value));
+            }
+        }
+        let mut body = fixture["calls"][1]["callback"].clone();
+        let reasoning = body["input"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .position(|v| v["type"] == "reasoning")
+            .unwrap();
+        body["input"][reasoning]["encrypted_content"] = json!("bounded-state");
+        assert!(valid(&op, &body));
+        for (field, bad) in [
+            (
+                "summary",
+                json!([{"type":"summary_text","text":"substantive"}]),
+            ),
+            (
+                "content",
+                json!([{"type":"reasoning_text","text":"substantive"}]),
+            ),
+            ("encrypted_content", json!("x".repeat(8193))),
+            ("unknown", json!(true)),
+        ] {
+            let mut value = body.clone();
+            value["input"][reasoning][field] = bad;
+            assert!(!valid(&op, &value));
+        }
     }
     #[test]
     fn model_identity_is_exact_in_json_and_streaming_responses() {
@@ -978,6 +1143,41 @@ mod tests {
                 let mut value = original.clone();
                 value[limit] = bad;
                 assert!(!valid(&op, &value));
+            }
+        }
+    }
+    #[test]
+    fn paired_call_and_output_identity_grammar_is_closed() {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../../docs/fixtures/public-call-identities-v1.json"
+        ))
+        .unwrap();
+        let op = operation(PublicModelProtocol::OpenAiResponses);
+        let mut value = body(op.protocol);
+        let call = json!({"type":"function_call","name":"public_faq_search","arguments":"{\"query\":\"NyxID\"}"});
+        let output = json!({"type":"function_call_output","output":"public help"});
+        let mut accepted = fixture["accepted"].as_array().unwrap().clone();
+        accepted.push(json!("a".repeat(256)));
+        for id in accepted {
+            let mut c = call.clone();
+            c["call_id"] = id.clone();
+            let mut o = output.clone();
+            o["call_id"] = id.clone();
+            value["input"] = json!([c, o]);
+            assert!(valid(&op, &value));
+            assert_eq!(value["input"][0]["call_id"], id);
+            assert_eq!(value["input"][1]["call_id"], id);
+        }
+        let mut rejected = fixture["rejected"].as_array().unwrap().clone();
+        rejected.push(json!({"call_id":"a".repeat(257)}));
+        for invalid in rejected {
+            for item in [&call, &output] {
+                let mut item = item.clone();
+                item.as_object_mut()
+                    .unwrap()
+                    .extend(invalid.as_object().unwrap().clone());
+                value["input"] = json!([item]);
+                assert!(!valid(&op, &value), "unsupported call identity");
             }
         }
     }

@@ -78,7 +78,7 @@ export function NyxBotSettingsContent() {
         </div>
       </DetailSection>
       {adaptersEnabled && <DetailSection title="Phone and speech connections"><div className="p-5"><ChannelAdapterBindings /></div></DetailSection>}
-      <DetailSection title="Personal Telegram links"><div className="p-5"><PlatformPersonalBindings /></div></DetailSection>
+      <DetailSection title="Personal chat links"><div className="p-5"><PlatformPersonalBindings /></div></DetailSection>
     </section>
   );
 }

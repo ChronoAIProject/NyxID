@@ -370,8 +370,21 @@ pub(crate) async fn webhook_with_producers(
         )
         .await
         {
-            Ok(true) => return Ok(StatusCode::OK),
-            Ok(false) => {}
+            Ok(crate::services::platform_manager_transport::ManagerDispatch::Handled) => {
+                return Ok(StatusCode::OK);
+            }
+            Ok(
+                crate::services::platform_manager_transport::ManagerDispatch::LegacyConfirmation,
+            ) => {
+                // This explicit compatibility handoff never falls through to guide/owner routing.
+                return match super::platform_binding::handle_command(state, &bot, &update, service)
+                    .await
+                {
+                    Ok(_) => Ok(StatusCode::OK),
+                    Err(error) => Ok(native_dispatch_status(&error)),
+                };
+            }
+            Ok(crate::services::platform_manager_transport::ManagerDispatch::NotOptedIn) => {}
             Err(error) => {
                 tracing::warn!(bot_id=%bot.id, error_code=error.error_code(), "Personal manager dispatch refused");
                 return Ok(native_dispatch_status(&error));

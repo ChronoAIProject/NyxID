@@ -85,7 +85,7 @@ impl CredentialSnapshot {
         })
     }
 
-    fn fingerprint(&self) -> AppResult<String> {
+    pub(crate) fn fingerprint(&self) -> AppResult<String> {
         let mut fields = credential_filter(&self.bot)?;
         // A matching webhook can activate a bot while verification is in flight.
         fields.remove("status");
@@ -104,6 +104,15 @@ impl CredentialSnapshot {
         let bytes = bson::to_vec(&fields)
             .map_err(|_| AppError::Internal("Unable to encode credential check".into()))?;
         Ok(hex::encode(Sha256::digest(bytes)))
+    }
+
+    pub(crate) async fn send_token(
+        &self,
+        keys: &crate::crypto::aes::EncryptionKeys,
+    ) -> AppResult<zeroize::Zeroizing<String>> {
+        super::channel_bot_service::decrypt_bot_token(keys, &self.bot)
+            .await
+            .map(zeroize::Zeroizing::new)
     }
 
     pub(crate) async fn secrets(
@@ -126,6 +135,39 @@ impl CredentialSnapshot {
             }
         }
         Ok(secrets)
+    }
+
+    /// Join the existing sender-authority transaction. Both bot-specific and
+    /// shared platform key changes conflict with admission under this snapshot.
+    pub(crate) async fn fence_in_session(
+        &self,
+        db: &mongodb::Database,
+        session: &mut mongodb::ClientSession,
+    ) -> AppResult<bool> {
+        if let Some(platform) = &self.platform {
+            let guard = doc! {"_id":&platform.id,"secrets":bson::to_bson(&platform.secrets)
+            .map_err(|_|AppError::Internal("Unable to encode platform credentials".into()))?};
+            if db
+                .collection::<Document>(crate::models::platform_credential::COLLECTION_NAME)
+                .update_one(guard, doc! {"$inc":{"channel_observation_version":1_i64}})
+                .session(&mut *session)
+                .await?
+                .matched_count
+                != 1
+            {
+                return Ok(false);
+            }
+        }
+        Ok(db
+            .collection::<ChannelBot>(COLLECTION_NAME)
+            .update_one(
+                credential_filter(&self.bot)?,
+                doc! {"$inc":{"platform_entry_effect_revision":1_i64}},
+            )
+            .session(session)
+            .await?
+            .matched_count
+            == 1)
     }
 
     async fn update(

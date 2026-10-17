@@ -612,11 +612,11 @@ it("shows General's load error with retry without hiding the other sections", as
     await screen.findByRole("list", { name: "Connected channel bots" }),
   ).toHaveTextContent("Home bot");
   const personalLinks = screen.getByRole("region", {
-    name: "Personal Telegram links",
+    name: "Personal chat links",
   });
   expect(
     await within(personalLinks).findByText(
-      "Personal Telegram links are unavailable.",
+      "Personal chat links are unavailable.",
     ),
   ).toBeVisible();
   expect(

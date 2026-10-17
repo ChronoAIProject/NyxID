@@ -1,0 +1,533 @@
+{
+  "contract": "nyxid-manager-binding-identities.v1",
+  "cases": [
+    {
+      "name": "canonical_telegram_v1",
+      "valid": true,
+      "binding": {
+        "profile_id": "bf6320a0-c246-4f13-9932-31c3296842a7",
+        "manager_bot_id": "123",
+        "telegram_bot_id": 123,
+        "manager_authority_epoch": 1,
+        "public_policy_revision": 1,
+        "sponsor_owner_user_id": "f3ef7926-ed8d-437a-a335-4b62e920d026",
+        "candidate_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+    },
+    {
+      "name": "opaque_slack_v2",
+      "valid": true,
+      "binding": {
+        "profile_id": "bf6320a0-c246-4f13-9932-31c3296842a7",
+        "manager_bot_id": "opaque:bot/identity",
+        "manager_authority_epoch": 1,
+        "public_policy_revision": 1,
+        "sponsor_owner_user_id": "f3ef7926-ed8d-437a-a335-4b62e920d026",
+        "candidate_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "platform_entry": {
+          "version": 2,
+          "platform": "slack",
+          "channel_bot_id": "e79ef8c6-8fe7-454d-a8d3-5fc0710779c5",
+          "platform_bot_id": "opaque:bot/identity"
+        }
+      }
+    },
+    {
+      "name": "opaque_discord_v2",
+      "valid": true,
+      "binding": {
+        "profile_id": "bf6320a0-c246-4f13-9932-31c3296842a7",
+        "manager_bot_id": "opaque:bot/identity",
+        "manager_authority_epoch": 1,
+        "public_policy_revision": 1,
+        "sponsor_owner_user_id": "f3ef7926-ed8d-437a-a335-4b62e920d026",
+        "candidate_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "platform_entry": {
+          "version": 2,
+          "platform": "discord",
+          "channel_bot_id": "e79ef8c6-8fe7-454d-a8d3-5fc0710779c5",
+          "platform_bot_id": "opaque:bot/identity"
+        }
+      }
+    },
+    {
+      "name": "opaque_whatsapp_v2",
+      "valid": true,
+      "binding": {
+        "profile_id": "bf6320a0-c246-4f13-9932-31c3296842a7",
+        "manager_bot_id": "opaque:bot/identity",
+        "manager_authority_epoch": 1,
+        "public_policy_revision": 1,
+        "sponsor_owner_user_id": "f3ef7926-ed8d-437a-a335-4b62e920d026",
+        "candidate_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "platform_entry": {
+          "version": 2,
+          "platform": "whatsapp",
+          "channel_bot_id": "e79ef8c6-8fe7-454d-a8d3-5fc0710779c5",
+          "platform_bot_id": "opaque:bot/identity"
+        }
+      }
+    },
+    {
+      "name": "opaque_lark_v2",
+      "valid": true,
+      "binding": {
+        "profile_id": "bf6320a0-c246-4f13-9932-31c3296842a7",
+        "manager_bot_id": "opaque:bot/identity",
+        "manager_authority_epoch": 1,
+        "public_policy_revision": 1,
+        "sponsor_owner_user_id": "f3ef7926-ed8d-437a-a335-4b62e920d026",
+        "candidate_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "platform_entry": {
+          "version": 2,
+          "platform": "lark",
+          "channel_bot_id": "e79ef8c6-8fe7-454d-a8d3-5fc0710779c5",
+          "platform_bot_id": "opaque:bot/identity"
+        }
+      }
+    },
+    {
+      "name": "opaque_feishu_v2",
+      "valid": true,
+      "binding": {
+        "profile_id": "bf6320a0-c246-4f13-9932-31c3296842a7",
+        "manager_bot_id": "opaque:bot/identity",
+        "manager_authority_epoch": 1,
+        "public_policy_revision": 1,
+        "sponsor_owner_user_id": "f3ef7926-ed8d-437a-a335-4b62e920d026",
+        "candidate_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "platform_entry": {
+          "version": 2,
+          "platform": "feishu",
+          "channel_bot_id": "e79ef8c6-8fe7-454d-a8d3-5fc0710779c5",
+          "platform_bot_id": "opaque:bot/identity"
+        }
+      }
+    },
+    {
+      "name": "opaque_x_v2",
+      "valid": true,
+      "binding": {
+        "profile_id": "bf6320a0-c246-4f13-9932-31c3296842a7",
+        "manager_bot_id": "opaque:bot/identity",
+        "manager_authority_epoch": 1,
+        "public_policy_revision": 1,
+        "sponsor_owner_user_id": "f3ef7926-ed8d-437a-a335-4b62e920d026",
+        "candidate_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "platform_entry": {
+          "version": 2,
+          "platform": "x",
+          "channel_bot_id": "e79ef8c6-8fe7-454d-a8d3-5fc0710779c5",
+          "platform_bot_id": "opaque:bot/identity"
+        }
+      }
+    },
+    {
+      "name": "legacy_null_alternative",
+      "valid": false,
+      "binding": {
+        "profile_id": "bf6320a0-c246-4f13-9932-31c3296842a7",
+        "manager_bot_id": "123",
+        "telegram_bot_id": 123,
+        "manager_authority_epoch": 1,
+        "public_policy_revision": 1,
+        "sponsor_owner_user_id": "f3ef7926-ed8d-437a-a335-4b62e920d026",
+        "candidate_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "platform_entry": null
+      }
+    },
+    {
+      "name": "native_null_alternative",
+      "valid": false,
+      "binding": {
+        "profile_id": "bf6320a0-c246-4f13-9932-31c3296842a7",
+        "manager_bot_id": "opaque:bot/identity",
+        "manager_authority_epoch": 1,
+        "public_policy_revision": 1,
+        "sponsor_owner_user_id": "f3ef7926-ed8d-437a-a335-4b62e920d026",
+        "candidate_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "platform_entry": {
+          "version": 2,
+          "platform": "slack",
+          "channel_bot_id": "e79ef8c6-8fe7-454d-a8d3-5fc0710779c5",
+          "platform_bot_id": "opaque:bot/identity"
+        },
+        "telegram_bot_id": null
+      }
+    },
+    {
+      "name": "null_legacy",
+      "valid": false,
+      "binding": {
+        "profile_id": "bf6320a0-c246-4f13-9932-31c3296842a7",
+        "manager_bot_id": "123",
+        "telegram_bot_id": null,
+        "manager_authority_epoch": 1,
+        "public_policy_revision": 1,
+        "sponsor_owner_user_id": "f3ef7926-ed8d-437a-a335-4b62e920d026",
+        "candidate_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+    },
+    {
+      "name": "null_native",
+      "valid": false,
+      "binding": {
+        "profile_id": "bf6320a0-c246-4f13-9932-31c3296842a7",
+        "manager_bot_id": "opaque:bot/identity",
+        "manager_authority_epoch": 1,
+        "public_policy_revision": 1,
+        "sponsor_owner_user_id": "f3ef7926-ed8d-437a-a335-4b62e920d026",
+        "candidate_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "platform_entry": null
+      }
+    },
+    {
+      "name": "mixed_versions",
+      "valid": false,
+      "binding": {
+        "profile_id": "bf6320a0-c246-4f13-9932-31c3296842a7",
+        "manager_bot_id": "123",
+        "telegram_bot_id": 123,
+        "manager_authority_epoch": 1,
+        "public_policy_revision": 1,
+        "sponsor_owner_user_id": "f3ef7926-ed8d-437a-a335-4b62e920d026",
+        "candidate_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "platform_entry": {
+          "version": 2,
+          "platform": "slack",
+          "channel_bot_id": "e79ef8c6-8fe7-454d-a8d3-5fc0710779c5",
+          "platform_bot_id": "opaque:bot/identity"
+        }
+      }
+    },
+    {
+      "name": "noncanonical_legacy_'+123'",
+      "valid": false,
+      "binding": {
+        "profile_id": "bf6320a0-c246-4f13-9932-31c3296842a7",
+        "manager_bot_id": "+123",
+        "telegram_bot_id": 123,
+        "manager_authority_epoch": 1,
+        "public_policy_revision": 1,
+        "sponsor_owner_user_id": "f3ef7926-ed8d-437a-a335-4b62e920d026",
+        "candidate_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+    },
+    {
+      "name": "noncanonical_legacy_'0123'",
+      "valid": false,
+      "binding": {
+        "profile_id": "bf6320a0-c246-4f13-9932-31c3296842a7",
+        "manager_bot_id": "0123",
+        "telegram_bot_id": 123,
+        "manager_authority_epoch": 1,
+        "public_policy_revision": 1,
+        "sponsor_owner_user_id": "f3ef7926-ed8d-437a-a335-4b62e920d026",
+        "candidate_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+    },
+    {
+      "name": "noncanonical_legacy_' 123'",
+      "valid": false,
+      "binding": {
+        "profile_id": "bf6320a0-c246-4f13-9932-31c3296842a7",
+        "manager_bot_id": " 123",
+        "telegram_bot_id": 123,
+        "manager_authority_epoch": 1,
+        "public_policy_revision": 1,
+        "sponsor_owner_user_id": "f3ef7926-ed8d-437a-a335-4b62e920d026",
+        "candidate_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+    },
+    {
+      "name": "noncanonical_legacy_'123 '",
+      "valid": false,
+      "binding": {
+        "profile_id": "bf6320a0-c246-4f13-9932-31c3296842a7",
+        "manager_bot_id": "123 ",
+        "telegram_bot_id": 123,
+        "manager_authority_epoch": 1,
+        "public_policy_revision": 1,
+        "sponsor_owner_user_id": "f3ef7926-ed8d-437a-a335-4b62e920d026",
+        "candidate_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+    },
+    {
+      "name": "noncanonical_legacy_'-123'",
+      "valid": false,
+      "binding": {
+        "profile_id": "bf6320a0-c246-4f13-9932-31c3296842a7",
+        "manager_bot_id": "-123",
+        "telegram_bot_id": 123,
+        "manager_authority_epoch": 1,
+        "public_policy_revision": 1,
+        "sponsor_owner_user_id": "f3ef7926-ed8d-437a-a335-4b62e920d026",
+        "candidate_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+    },
+    {
+      "name": "invalid_native_' opaque:bot/identity'",
+      "valid": false,
+      "binding": {
+        "profile_id": "bf6320a0-c246-4f13-9932-31c3296842a7",
+        "manager_bot_id": " opaque:bot/identity",
+        "manager_authority_epoch": 1,
+        "public_policy_revision": 1,
+        "sponsor_owner_user_id": "f3ef7926-ed8d-437a-a335-4b62e920d026",
+        "candidate_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "platform_entry": {
+          "version": 2,
+          "platform": "slack",
+          "channel_bot_id": "e79ef8c6-8fe7-454d-a8d3-5fc0710779c5",
+          "platform_bot_id": " opaque:bot/identity"
+        }
+      }
+    },
+    {
+      "name": "invalid_native_'opaque:bot/identity '",
+      "valid": false,
+      "binding": {
+        "profile_id": "bf6320a0-c246-4f13-9932-31c3296842a7",
+        "manager_bot_id": "opaque:bot/identity ",
+        "manager_authority_epoch": 1,
+        "public_policy_revision": 1,
+        "sponsor_owner_user_id": "f3ef7926-ed8d-437a-a335-4b62e920d026",
+        "candidate_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "platform_entry": {
+          "version": 2,
+          "platform": "slack",
+          "channel_bot_id": "e79ef8c6-8fe7-454d-a8d3-5fc0710779c5",
+          "platform_bot_id": "opaque:bot/identity "
+        }
+      }
+    },
+    {
+      "name": "invalid_native_'bot\\nidentity'",
+      "valid": false,
+      "binding": {
+        "profile_id": "bf6320a0-c246-4f13-9932-31c3296842a7",
+        "manager_bot_id": "bot\nidentity",
+        "manager_authority_epoch": 1,
+        "public_policy_revision": 1,
+        "sponsor_owner_user_id": "f3ef7926-ed8d-437a-a335-4b62e920d026",
+        "candidate_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "platform_entry": {
+          "version": 2,
+          "platform": "slack",
+          "channel_bot_id": "e79ef8c6-8fe7-454d-a8d3-5fc0710779c5",
+          "platform_bot_id": "bot\nidentity"
+        }
+      }
+    },
+    {
+      "name": "invalid_native_''",
+      "valid": false,
+      "binding": {
+        "profile_id": "bf6320a0-c246-4f13-9932-31c3296842a7",
+        "manager_bot_id": "",
+        "manager_authority_epoch": 1,
+        "public_policy_revision": 1,
+        "sponsor_owner_user_id": "f3ef7926-ed8d-437a-a335-4b62e920d026",
+        "candidate_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "platform_entry": {
+          "version": 2,
+          "platform": "slack",
+          "channel_bot_id": "e79ef8c6-8fe7-454d-a8d3-5fc0710779c5",
+          "platform_bot_id": ""
+        }
+      }
+    },
+    {
+      "name": "invalid_native_'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'",
+      "valid": false,
+      "binding": {
+        "profile_id": "bf6320a0-c246-4f13-9932-31c3296842a7",
+        "manager_bot_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "manager_authority_epoch": 1,
+        "public_policy_revision": 1,
+        "sponsor_owner_user_id": "f3ef7926-ed8d-437a-a335-4b62e920d026",
+        "candidate_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "platform_entry": {
+          "version": 2,
+          "platform": "slack",
+          "channel_bot_id": "e79ef8c6-8fe7-454d-a8d3-5fc0710779c5",
+          "platform_bot_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        }
+      }
+    },
+    {
+      "name": "unsupported_version_0",
+      "valid": false,
+      "binding": {
+        "profile_id": "bf6320a0-c246-4f13-9932-31c3296842a7",
+        "manager_bot_id": "opaque:bot/identity",
+        "manager_authority_epoch": 1,
+        "public_policy_revision": 1,
+        "sponsor_owner_user_id": "f3ef7926-ed8d-437a-a335-4b62e920d026",
+        "candidate_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "platform_entry": {
+          "version": 0,
+          "platform": "slack",
+          "channel_bot_id": "e79ef8c6-8fe7-454d-a8d3-5fc0710779c5",
+          "platform_bot_id": "opaque:bot/identity"
+        }
+      }
+    },
+    {
+      "name": "unsupported_version_1",
+      "valid": false,
+      "binding": {
+        "profile_id": "bf6320a0-c246-4f13-9932-31c3296842a7",
+        "manager_bot_id": "opaque:bot/identity",
+        "manager_authority_epoch": 1,
+        "public_policy_revision": 1,
+        "sponsor_owner_user_id": "f3ef7926-ed8d-437a-a335-4b62e920d026",
+        "candidate_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "platform_entry": {
+          "version": 1,
+          "platform": "slack",
+          "channel_bot_id": "e79ef8c6-8fe7-454d-a8d3-5fc0710779c5",
+          "platform_bot_id": "opaque:bot/identity"
+        }
+      }
+    },
+    {
+      "name": "unsupported_version_3",
+      "valid": false,
+      "binding": {
+        "profile_id": "bf6320a0-c246-4f13-9932-31c3296842a7",
+        "manager_bot_id": "opaque:bot/identity",
+        "manager_authority_epoch": 1,
+        "public_policy_revision": 1,
+        "sponsor_owner_user_id": "f3ef7926-ed8d-437a-a335-4b62e920d026",
+        "candidate_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "platform_entry": {
+          "version": 3,
+          "platform": "slack",
+          "channel_bot_id": "e79ef8c6-8fe7-454d-a8d3-5fc0710779c5",
+          "platform_bot_id": "opaque:bot/identity"
+        }
+      }
+    },
+    {
+      "name": "unsupported_version_99",
+      "valid": false,
+      "binding": {
+        "profile_id": "bf6320a0-c246-4f13-9932-31c3296842a7",
+        "manager_bot_id": "opaque:bot/identity",
+        "manager_authority_epoch": 1,
+        "public_policy_revision": 1,
+        "sponsor_owner_user_id": "f3ef7926-ed8d-437a-a335-4b62e920d026",
+        "candidate_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "platform_entry": {
+          "version": 99,
+          "platform": "slack",
+          "channel_bot_id": "e79ef8c6-8fe7-454d-a8d3-5fc0710779c5",
+          "platform_bot_id": "opaque:bot/identity"
+        }
+      }
+    },
+    {
+      "name": "unsupported_platform_aurinko",
+      "valid": false,
+      "binding": {
+        "profile_id": "bf6320a0-c246-4f13-9932-31c3296842a7",
+        "manager_bot_id": "opaque:bot/identity",
+        "manager_authority_epoch": 1,
+        "public_policy_revision": 1,
+        "sponsor_owner_user_id": "f3ef7926-ed8d-437a-a335-4b62e920d026",
+        "candidate_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "platform_entry": {
+          "version": 2,
+          "platform": "aurinko",
+          "channel_bot_id": "e79ef8c6-8fe7-454d-a8d3-5fc0710779c5",
+          "platform_bot_id": "opaque:bot/identity"
+        }
+      }
+    },
+    {
+      "name": "unsupported_platform_openclaw",
+      "valid": false,
+      "binding": {
+        "profile_id": "bf6320a0-c246-4f13-9932-31c3296842a7",
+        "manager_bot_id": "opaque:bot/identity",
+        "manager_authority_epoch": 1,
+        "public_policy_revision": 1,
+        "sponsor_owner_user_id": "f3ef7926-ed8d-437a-a335-4b62e920d026",
+        "candidate_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "platform_entry": {
+          "version": 2,
+          "platform": "openclaw",
+          "channel_bot_id": "e79ef8c6-8fe7-454d-a8d3-5fc0710779c5",
+          "platform_bot_id": "opaque:bot/identity"
+        }
+      }
+    },
+    {
+      "name": "unsupported_platform_telegram",
+      "valid": false,
+      "binding": {
+        "profile_id": "bf6320a0-c246-4f13-9932-31c3296842a7",
+        "manager_bot_id": "opaque:bot/identity",
+        "manager_authority_epoch": 1,
+        "public_policy_revision": 1,
+        "sponsor_owner_user_id": "f3ef7926-ed8d-437a-a335-4b62e920d026",
+        "candidate_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "platform_entry": {
+          "version": 2,
+          "platform": "telegram",
+          "channel_bot_id": "e79ef8c6-8fe7-454d-a8d3-5fc0710779c5",
+          "platform_bot_id": "opaque:bot/identity"
+        }
+      }
+    },
+    {
+      "name": "channel_uuid_v1",
+      "valid": false,
+      "binding": {
+        "profile_id": "bf6320a0-c246-4f13-9932-31c3296842a7",
+        "manager_bot_id": "opaque:bot/identity",
+        "manager_authority_epoch": 1,
+        "public_policy_revision": 1,
+        "sponsor_owner_user_id": "f3ef7926-ed8d-437a-a335-4b62e920d026",
+        "candidate_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "platform_entry": {
+          "version": 2,
+          "platform": "slack",
+          "channel_bot_id": "00000000-0000-1000-8000-000000000000",
+          "platform_bot_id": "opaque:bot/identity"
+        }
+      }
+    },
+    {
+      "name": "manager_mismatch",
+      "valid": false,
+      "binding": {
+        "profile_id": "bf6320a0-c246-4f13-9932-31c3296842a7",
+        "manager_bot_id": "other",
+        "manager_authority_epoch": 1,
+        "public_policy_revision": 1,
+        "sponsor_owner_user_id": "f3ef7926-ed8d-437a-a335-4b62e920d026",
+        "candidate_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "platform_entry": {
+          "version": 2,
+          "platform": "slack",
+          "channel_bot_id": "e79ef8c6-8fe7-454d-a8d3-5fc0710779c5",
+          "platform_bot_id": "opaque:bot/identity"
+        }
+      }
+    },
+    {
+      "name": "missing_identity",
+      "valid": false,
+      "binding": {
+        "profile_id": "bf6320a0-c246-4f13-9932-31c3296842a7",
+        "manager_bot_id": "123",
+        "manager_authority_epoch": 1,
+        "public_policy_revision": 1,
+        "sponsor_owner_user_id": "f3ef7926-ed8d-437a-a335-4b62e920d026",
+        "candidate_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+    }
+  ]
+}

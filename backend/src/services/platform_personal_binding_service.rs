@@ -1,4 +1,6 @@
 //! Durable consent and write fences. Session-taking operations never own commit.
+use super::platform_entry_scope as scope;
+use super::platform_manager_contract::SenderIdentity;
 use crate::{
     errors::{AppError, AppResult},
     models::{
@@ -51,14 +53,40 @@ pub struct CapturedPersonalStop {
 }
 
 pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> {
+    super::platform_entry_migration::ensure_indexes(db).await?;
     let rows = db.collection::<PlatformPersonalBinding>(COLLECTION_NAME);
     for index in [
-        IndexModel::builder().keys(doc! {"platform_config_id":1,"manager_authority_epoch":1,"telegram_sender_id":1}).options(IndexOptions::builder().unique(true).partial_filter_expression(doc! {"state":"active"}).name("personal_sender_active".to_owned()).build()).build(),
-        IndexModel::builder().keys(doc! {"platform_config_id":1,"manager_authority_epoch":1,"telegram_sender_id":1,"generation":-1}).options(IndexOptions::builder().unique(true).name("personal_sender_generation".to_owned()).build()).build(),
-        IndexModel::builder().keys(doc! {"user_id":1,"_id":-1}).build(),
-        IndexModel::builder().keys(doc! {"platform_config_id":1,"state":1,"_id":1}).build(),
-        IndexModel::builder().keys(doc! {"conversation_id":1}).options(IndexOptions::builder().unique(true).partial_filter_expression(doc! {"conversation_id":{"$type":"string"}}).name("personal_thread_owner".to_owned()).build()).build(),
-    ] { rows.create_index(index).await?; }
+        IndexModel::builder()
+            .keys(doc! {"user_id":1,"_id":-1})
+            .build(),
+        IndexModel::builder()
+            .keys(doc! {"platform_config_id":1,"state":1,"_id":1})
+            .build(),
+        IndexModel::builder()
+            .keys(doc! {"conversation_id":1})
+            .options(
+                IndexOptions::builder()
+                    .unique(true)
+                    .partial_filter_expression(doc! {"conversation_id":{"$type":"string"}})
+                    .name("personal_thread_owner".to_owned())
+                    .build(),
+            )
+            .build(),
+    ] {
+        rows.create_index(index).await?;
+    }
+    db.collection::<Document>(crate::models::platform_manager_management::SELECTIONS)
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"purge_after":1})
+                .options(
+                    IndexOptions::builder()
+                        .expire_after(std::time::Duration::ZERO)
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
     Ok(())
 }
 
@@ -105,9 +133,16 @@ pub async fn latest_for_sender(
     session: &mut ClientSession,
     profile_id: &str,
     epoch: i64,
-    sender_id: i64,
+    sender: &SenderIdentity,
 ) -> AppResult<Option<PlatformPersonalBinding>> {
-    Ok(db.collection::<PlatformPersonalBinding>(COLLECTION_NAME).find_one(doc! {"platform_config_id":profile_id,"manager_authority_epoch":epoch,"telegram_sender_id":sender_id}).sort(doc! {"generation":-1}).session(session).await?)
+    let mut filter = doc! {"platform_config_id":profile_id,"manager_authority_epoch":epoch};
+    filter.extend(scope::sender_key_fields(sender, false));
+    Ok(db
+        .collection::<PlatformPersonalBinding>(COLLECTION_NAME)
+        .find_one(filter)
+        .sort(doc! {"generation":-1})
+        .session(session)
+        .await?)
 }
 
 pub async fn resolve_sender_in_session(
@@ -117,8 +152,7 @@ pub async fn resolve_sender_in_session(
 ) -> AppResult<ResolvedPersonalSender> {
     use super::platform_manager_contract::{ManagerChatKind, UnavailableReason as Reason};
     if update.chat_kind != ManagerChatKind::Private
-        || update.sender_id <= 0
-        || update.sender_id != update.chat_id
+        || scope::validate(&update.entry, &update.manager_bot_id, Some(&update.sender)).is_err()
     {
         return Ok(ResolvedPersonalSender::Unavailable(
             Reason::ManagerUnavailable,
@@ -129,7 +163,7 @@ pub async fn resolve_sender_in_session(
         session,
         &update.profile_id,
         &update.manager_bot_id,
-        update.telegram_bot_id,
+        &update.entry,
         Some(&update.observation_id),
     )
     .await?
@@ -153,14 +187,14 @@ pub async fn resolve_sender_in_session(
         session,
         &update.profile_id,
         controls.manager_authority_epoch,
-        update.sender_id,
+        &update.sender,
     )
     .await?
     else {
         return Ok(ResolvedPersonalSender::Unlinked);
     };
-    if binding.telegram_bot_id != update.telegram_bot_id
-        || binding.telegram_chat_id != update.chat_id
+    if binding.entry != update.entry
+        || binding.sender != update.sender
         || binding.manager_bot_id != update.manager_bot_id
     {
         return Err(AppError::Internal(
@@ -168,6 +202,9 @@ pub async fn resolve_sender_in_session(
         ));
     }
     if binding.state == PersonalBindingState::Revoked {
+        if binding.logged_out_at.is_some() {
+            return Ok(ResolvedPersonalSender::Unlinked);
+        }
         return Ok(match binding.revocation_reason {
             Some(PersonalRevocationReason::Unlinked) => ResolvedPersonalSender::Unlinked,
             Some(
@@ -228,7 +265,7 @@ async fn check_binding_in_session(
             session,
             &binding.platform_config_id,
             &binding.manager_bot_id,
-            binding.telegram_bot_id,
+            &binding.entry,
             None,
         )
         .await?
@@ -238,7 +275,7 @@ async fn check_binding_in_session(
             session,
             &binding.platform_config_id,
             &binding.manager_bot_id,
-            binding.telegram_bot_id,
+            &binding.entry,
             None,
         )
         .await?
@@ -258,7 +295,10 @@ async fn check_binding_in_session(
         return Ok(false);
     }
     let rows = db.collection::<PlatformPersonalBinding>(COLLECTION_NAME);
-    let filter = doc! {"_id":&binding.id,"generation":binding.generation,"user_id":&binding.user_id,"state":"active","platform_config_id":&binding.platform_config_id,"manager_authority_epoch":binding.manager_authority_epoch,"telegram_sender_id":binding.telegram_sender_id,"telegram_chat_id":binding.telegram_chat_id};
+    let mut filter = doc! {"_id":&binding.id,"generation":binding.generation,"user_id":&binding.user_id,"state":"active","platform_config_id":&binding.platform_config_id,"manager_authority_epoch":binding.manager_authority_epoch};
+    filter.extend(scope::entry_fields(&binding.entry));
+    filter.extend(scope::sender_fields(&binding.sender, false));
+    scope::exclude_other_version(&mut filter, &binding.entry);
     Ok(if write_fence {
         rows.update_one(filter, doc! {"$inc":{"effect_revision":1_i64}})
             .session(session)
@@ -319,7 +359,10 @@ pub(crate) async fn resolve_thread_in_session(
         )
         .await?
         {
-            ThreadAuthorityResolution::Personal(authority(&row, controls.personal_control_revision))
+            ThreadAuthorityResolution::Personal(Box::new(authority(
+                &row,
+                controls.personal_control_revision,
+            )))
         } else {
             ThreadAuthorityResolution::WebOnly
         },
@@ -378,9 +421,8 @@ pub async fn claim_turn_in_session(
         || origin.platform_config_id != binding.platform_config_id
         || origin.manager_bot_id != binding.manager_bot_id
         || origin.manager_authority_epoch != binding.manager_authority_epoch
-        || origin.telegram_bot_id != binding.telegram_bot_id
-        || origin.telegram_sender_id != binding.telegram_sender_id
-        || origin.telegram_chat_id != binding.telegram_chat_id
+        || origin.entry != binding.entry
+        || origin.sender != binding.sender
         || !fence_binding_in_session(db, session, binding, origin.personal_control_revision).await?
     {
         return Err(conflict());
@@ -471,6 +513,15 @@ pub async fn revoke_binding_in_session(
         return Err(unavailable());
     };
     if current.state == PersonalBindingState::Revoked {
+        if reason == PersonalRevocationReason::Unlinked {
+            // Preserve the retirement audit reason. Logout changes only the
+            // sender's routing state and cancels every pending proof.
+            db.collection::<Document>(COLLECTION_NAME).update_one(
+                doc! {"_id":&current.id,"generation":current.generation,"state":"revoked"},
+                doc! {"$set":{"logged_out_at":bson::DateTime::now(),"updated_at":bson::DateTime::now()},"$inc":{"effect_revision":1_i64}},
+            ).session(&mut *session).await?;
+            cancel_sender_proofs_in_session(db, session, &current, except_intent).await?;
+        }
         return Ok(false);
     }
     if let Some(active) = &current.active_turn
@@ -492,7 +543,7 @@ pub(crate) async fn cancel_sender_proofs_in_session(
     binding: &PlatformPersonalBinding,
     except_intent: Option<&str>,
 ) -> AppResult<()> {
-    let mut filter = doc! {"platform_config_id":&binding.platform_config_id,"manager_authority_epoch":binding.manager_authority_epoch,"telegram_sender_id":binding.telegram_sender_id,"state":"pending"};
+    let mut filter = doc! {"platform_config_id":&binding.platform_config_id,"manager_authority_epoch":binding.manager_authority_epoch,scope::actor_key(&binding.sender,false):scope::actor_value(&binding.sender),"state":"pending"};
     if let Some(id) = except_intent {
         filter.insert("_id", doc! {"$ne":id});
     }
@@ -500,7 +551,7 @@ pub(crate) async fn cancel_sender_proofs_in_session(
         .update_many(filter, doc! {"$set":{"state":"cancelled"}})
         .session(&mut *session)
         .await?;
-    let mut filter = doc! {"platform_config_id":&binding.platform_config_id,"manager_authority_epoch":binding.manager_authority_epoch,"telegram_sender_id":binding.telegram_sender_id,"state":{"$in":["review","awaiting_chat_confirmation"]}};
+    let mut filter = doc! {"platform_config_id":&binding.platform_config_id,"manager_authority_epoch":binding.manager_authority_epoch,scope::actor_key(&binding.sender,false):scope::actor_value(&binding.sender),"state":{"$in":["review","awaiting_chat_confirmation"]}};
     if let Some(id) = except_intent {
         filter.insert("intent_id", doc! {"$ne":id});
     }
@@ -743,7 +794,9 @@ pub(crate) mod tests {
         platform_bot_config::{PlatformBotConfig, PlatformExecutionProfile},
         platform_bot_runtime_controls::PlatformBotRuntimeControls,
     };
-    use crate::services::platform_manager_contract::{ManagerChatKind, VerifiedManagerUpdate};
+    use crate::services::platform_manager_contract::{
+        EntryIdentity, EventIdentity, ManagerChatKind, VerifiedManagerUpdate,
+    };
 
     pub(crate) async fn fixture(name: &str) -> (Database, VerifiedManagerUpdate, String) {
         let db = crate::test_utils::connect_transaction_test_database(name).await;
@@ -767,6 +820,8 @@ pub(crate) mod tests {
             .await
             .unwrap();
         let profile = PlatformBotConfig {
+            identity_version: None,
+            native_entry: None,
             id: profile_id.clone(),
             channel_bot_id: bot_id.clone(),
             manager_bot_id: "991100".into(),
@@ -795,7 +850,9 @@ pub(crate) mod tests {
             contract_version: 1,
             platform_config_id: profile_id.clone(),
             manager_bot_id: "991100".into(),
-            telegram_bot_id: 991100,
+            entry: EntryIdentity::TelegramV1 {
+                telegram_bot_id: 991100,
+            },
             manager_authority_epoch: 1,
             personal_control_revision: 1,
             public_policy_revision: 1,
@@ -816,13 +873,11 @@ pub(crate) mod tests {
             VerifiedManagerUpdate {
                 profile_id,
                 manager_bot_id: "991100".into(),
-                telegram_bot_id: 991100,
+                entry: EntryIdentity::TelegramV1 { telegram_bot_id:991100 },
                 observation_id: observation,
-                sender_id: 123,
-                chat_id: 123,
+                sender: SenderIdentity::TelegramV1 { telegram_sender_id:123,telegram_chat_id:123 },
                 chat_kind: ManagerChatKind::Private,
-                update_id: 1,
-                message_id: 1,
+                event: EventIdentity::TelegramV1 { update_id:1,message_id:1 },
             command_eligibility: super::super::platform_manager_contract::ManagerCommandEligibility::OriginalPrivateMessage,
             },
             owner,
@@ -835,10 +890,9 @@ pub(crate) mod tests {
             id: uuid::Uuid::new_v4().to_string(),
             platform_config_id: update.profile_id.clone(),
             manager_bot_id: update.manager_bot_id.clone(),
-            telegram_bot_id: update.telegram_bot_id,
+            entry: update.entry.clone(),
             manager_authority_epoch: 1,
-            telegram_sender_id: update.sender_id,
-            telegram_chat_id: update.chat_id,
+            sender: update.sender.clone(),
             user_id: owner.into(),
             generation: 1,
             state: PersonalBindingState::Active,
@@ -854,6 +908,7 @@ pub(crate) mod tests {
             consented_at: now,
             updated_at: now,
             revoked_at: None,
+            logged_out_at: None,
         }
     }
 
@@ -991,11 +1046,10 @@ pub(crate) fn authority(
         manager: ManagerAuthority {
             profile_id: row.platform_config_id.clone(),
             manager_bot_id: row.manager_bot_id.clone(),
-            telegram_bot_id: row.telegram_bot_id,
+            entry: row.entry.clone(),
             manager_authority_epoch: row.manager_authority_epoch,
         },
-        sender_id: row.telegram_sender_id,
-        chat_id: row.telegram_chat_id,
+        sender: row.sender.clone(),
         binding_id: row.id.clone(),
         binding_generation: row.generation,
         personal_control_revision: revision,
@@ -1011,10 +1065,9 @@ pub(crate) fn stored_origin(
     PersonalTurnProof {
         platform_config_id: a.manager.profile_id.clone(),
         manager_bot_id: a.manager.manager_bot_id.clone(),
-        telegram_bot_id: a.manager.telegram_bot_id,
+        entry: a.manager.entry.clone(),
         manager_authority_epoch: a.manager.manager_authority_epoch,
-        telegram_sender_id: a.sender_id,
-        telegram_chat_id: a.chat_id,
+        sender: a.sender.clone(),
         binding_id: a.binding_id.clone(),
         binding_generation: a.binding_generation,
         personal_control_revision: a.personal_control_revision,
@@ -1043,11 +1096,10 @@ pub(crate) fn service_origin(
             manager: ManagerAuthority {
                 profile_id: proof.platform_config_id.clone(),
                 manager_bot_id: proof.manager_bot_id.clone(),
-                telegram_bot_id: proof.telegram_bot_id,
+                entry: proof.entry.clone(),
                 manager_authority_epoch: proof.manager_authority_epoch,
             },
-            sender_id: proof.telegram_sender_id,
-            chat_id: proof.telegram_chat_id,
+            sender: proof.sender.clone(),
             binding_id: proof.binding_id.clone(),
             binding_generation: proof.binding_generation,
             personal_control_revision: proof.personal_control_revision,
@@ -1090,7 +1142,10 @@ impl super::platform_manager_contract::ManagerIdentityProducer for IdentityProdu
         Ok(
             super::platform_bot_runtime_control_service::get(db, profile_id)
                 .await?
-                .filter(|r| r.contract_version == 1)
+                .filter(|r| {
+                    matches!(r.contract_version, 1 | 2)
+                        && r.contract_version == scope::version(&r.entry)
+                })
                 .as_ref()
                 .map(super::platform_bot_runtime_control_service::policy),
         )
@@ -1110,7 +1165,10 @@ impl super::platform_manager_contract::ManagerIdentityProducer for IdentityProdu
                 }
                 ResolvedPersonalSender::Personal { binding, controls } => {
                     SenderResolution::Personal {
-                        authority: authority(&binding, controls.personal_control_revision),
+                        authority: Box::new(authority(
+                            &binding,
+                            controls.personal_control_revision,
+                        )),
                         nyxbot_agent_id: binding.nyxbot_agent_id,
                         conversation_id: binding.conversation_id,
                     }
@@ -1291,13 +1349,7 @@ impl PersonalLifecycleEffects for LifecycleProducer {
         binding: &PlatformPersonalBinding,
     ) -> AppResult<()> {
         self.public
-            .revoke_public_sender(
-                db,
-                session,
-                &authority(binding, 0).manager,
-                binding.telegram_sender_id,
-                binding.telegram_chat_id,
-            )
+            .revoke_public_sender(db, session, &authority(binding, 0).manager, &binding.sender)
             .await
     }
 }
@@ -1316,8 +1368,7 @@ impl super::platform_manager_contract::ManagerLifecycleProducer for LifecyclePro
         };
         let update = command.update();
         if update.chat_kind != ManagerChatKind::Private
-            || update.sender_id <= 0
-            || update.sender_id != update.chat_id
+            || scope::validate(&update.entry, &update.manager_bot_id, Some(&update.sender)).is_err()
             || update.command_eligibility != ManagerCommandEligibility::OriginalPrivateMessage
         {
             return Err(unavailable());
@@ -1326,7 +1377,7 @@ impl super::platform_manager_contract::ManagerLifecycleProducer for LifecyclePro
             .text()
             .split_whitespace()
             .next()
-            .is_none_or(|word| word.split('@').next() != Some("/unlink"))
+            .is_none_or(|word| !matches!(word.split('@').next(), Some("/unlink" | "/logout")))
         {
             return Err(unavailable());
         }
@@ -1336,7 +1387,7 @@ impl super::platform_manager_contract::ManagerLifecycleProducer for LifecyclePro
             session,
             &update.profile_id,
             &update.manager_bot_id,
-            update.telegram_bot_id,
+            &update.entry,
             Some(&update.observation_id),
         )
         .await?
@@ -1347,11 +1398,11 @@ impl super::platform_manager_contract::ManagerLifecycleProducer for LifecyclePro
             session,
             &update.profile_id,
             controls.manager_authority_epoch,
-            update.sender_id,
+            &update.sender,
         )
         .await?
         {
-            if row.telegram_chat_id != update.chat_id {
+            if row.entry != update.entry || row.sender != update.sender {
                 return Err(unavailable());
             }
             revoked = revoke_binding_in_session(
@@ -1364,30 +1415,49 @@ impl super::platform_manager_contract::ManagerLifecycleProducer for LifecyclePro
             )
             .await?;
         }
-        db.collection::<Document>(crate::models::platform_link_intent::COLLECTION_NAME).update_many(doc! {"platform_config_id":&update.profile_id,"manager_authority_epoch":controls.manager_authority_epoch,"telegram_sender_id":update.sender_id,"telegram_chat_id":update.chat_id,"state":"pending"},doc! {"$set":{"state":"cancelled"}}).session(&mut *session).await?;
-        db.collection::<Document>(crate::models::platform_link_intent::CHALLENGES).update_many(doc! {"platform_config_id":&update.profile_id,"manager_authority_epoch":controls.manager_authority_epoch,"telegram_sender_id":update.sender_id,"telegram_chat_id":update.chat_id,"state":{"$in":["review","awaiting_chat_confirmation"]}},doc! {"$set":{"state":"cancelled"}}).session(&mut *session).await?;
-        super::platform_binding_service::unlink_sender_in_session(
-            db,
-            session,
-            &update.profile_id,
-            &update.manager_bot_id,
-            &update.sender_id.to_string(),
-            &update.chat_id.to_string(),
-        )
-        .await?;
+        db.collection::<Document>(crate::models::platform_link_intent::COLLECTION_NAME).update_many(doc! {"platform_config_id":&update.profile_id,"manager_authority_epoch":controls.manager_authority_epoch,scope::actor_key(&update.sender,false):scope::actor_value(&update.sender),scope::destination_key(&update.sender,false):scope::destination_value(&update.sender),"state":"pending"},doc! {"$set":{"state":"cancelled"}}).session(&mut *session).await?;
+        db.collection::<Document>(crate::models::platform_link_intent::CHALLENGES).update_many(doc! {"platform_config_id":&update.profile_id,"manager_authority_epoch":controls.manager_authority_epoch,scope::actor_key(&update.sender,false):scope::actor_value(&update.sender),scope::destination_key(&update.sender,false):scope::destination_value(&update.sender),"state":{"$in":["review","awaiting_chat_confirmation"]}},doc! {"$set":{"state":"cancelled"}}).session(&mut *session).await?;
+        // Native logout never touches the separate legacy Telegram onboarding namespace.
+        if let SenderIdentity::TelegramV1 {
+            telegram_sender_id,
+            telegram_chat_id,
+        } = &update.sender
+        {
+            super::platform_binding_service::unlink_sender_in_session(
+                db,
+                session,
+                &update.profile_id,
+                &update.manager_bot_id,
+                &telegram_sender_id.to_string(),
+                &telegram_chat_id.to_string(),
+            )
+            .await?;
+        }
         self.public
             .revoke_public_sessions_in_session(
                 db,
                 session,
                 &PublicRevocationScope::Sender {
                     manager: super::platform_bot_runtime_control_service::policy(&controls).manager,
-                    sender_id: update.sender_id,
-                    chat_id: update.chat_id,
+                    sender: update.sender.clone(),
                 },
                 PublicRevocationReason::SenderUnlinked,
             )
             .await?;
-        let mut cursor=db.collection::<PlatformPersonalStopEffect>(crate::models::platform_bot_runtime_controls::STOP_EFFECTS).find(doc! {"active_turn.origin.platform_config_id":&update.profile_id,"active_turn.origin.telegram_sender_id":update.sender_id,"completed":false}).limit(50).session(&mut *session).await?;
+        let mut stop_filter =
+            doc! {"active_turn.origin.platform_config_id":&update.profile_id,"completed":false};
+        stop_filter.extend(scope::prefix(
+            scope::sender_key_fields(&update.sender, false),
+            "active_turn.origin.",
+        ));
+        let mut cursor = db
+            .collection::<PlatformPersonalStopEffect>(
+                crate::models::platform_bot_runtime_controls::STOP_EFFECTS,
+            )
+            .find(stop_filter)
+            .limit(50)
+            .session(&mut *session)
+            .await?;
         let mut ids = Vec::new();
         while let Some(row) = cursor.next(&mut *session).await.transpose()? {
             ids.push(row.id);
@@ -1613,11 +1683,15 @@ mod stop_completion_tests {
                     manager: ManagerAuthority {
                         profile_id: "profile".into(),
                         manager_bot_id: "991100".into(),
-                        telegram_bot_id: 991100,
+                        entry: EntryIdentity::TelegramV1 {
+                            telegram_bot_id: 991100,
+                        },
                         manager_authority_epoch: 1,
                     },
-                    sender_id: 123,
-                    chat_id: 123,
+                    sender: SenderIdentity::TelegramV1 {
+                        telegram_sender_id: 123,
+                        telegram_chat_id: 123,
+                    },
                     binding_id: "binding".into(),
                     binding_generation: 1,
                     personal_control_revision: 1,
@@ -1669,6 +1743,50 @@ pub struct ManagerDisplay {
     pub username: String,
 }
 
+pub(crate) async fn native_manager_display(
+    db: &Database,
+    profile_id: &str,
+    manager_bot_id: &str,
+    entry: &crate::models::platform_entry_identity::NativeEntryIdentity,
+) -> AppResult<Option<(Option<String>, String)>> {
+    let identity = crate::models::platform_entry_projection::StoredEntryIdentity::NativeV2 {
+        platform_entry: entry.clone(),
+    };
+    super::platform_entry_scope::validate(&identity, manager_bot_id, None)?;
+    if db.collection::<Document>(crate::models::platform_bot_config::COLLECTION_NAME)
+        .find_one(doc! {"_id":profile_id,"identity_version":2,"channel_bot_id":&entry.channel_bot_id,
+            "manager_bot_id":manager_bot_id,"native_entry.identity":bson::to_bson(entry).map_err(|_|unavailable())?,"deleted_at":bson::Bson::Null})
+        .projection(doc! {"_id":1}).await?.is_none() {return Ok(None);}
+    let Some(bot)=db.collection::<Document>(crate::models::channel_bot::COLLECTION_NAME)
+        .find_one(doc! {"_id":&entry.channel_bot_id,"platform_profile_id":profile_id,"platform_entry_version":2,
+            "platform_bot_id":manager_bot_id,"platform":super::platform_entry_native::platform_name(entry.platform),"is_active":true,"status":"active"})
+        .projection(doc! {"_id":0,"platform_bot_username":1,"label":1}).await? else {return Ok(None);};
+    let bounded = |value: &str| {
+        !value.trim().is_empty() && value.len() <= 256 && !value.chars().any(char::is_control)
+    };
+    let username = bot
+        .get_str("platform_bot_username")
+        .ok()
+        .filter(|value| bounded(value))
+        .map(str::to_owned);
+    let display_name = bot
+        .get_str("label")
+        .ok()
+        .filter(|value| bounded(value))
+        .map(str::to_owned)
+        .or_else(|| username.clone())
+        .unwrap_or_else(|| {
+            format!(
+                "{} bot {}",
+                super::platform_chat_presentation::ChatPresentation::for_entry(&identity)
+                    .expect("checked identity")
+                    .name(),
+                manager_bot_id
+            )
+        });
+    Ok(Some((username, display_name)))
+}
+
 /// Safe current manager metadata only. The projections never load credentials
 /// or bot secrets, and both metadata sources must match the profile identity and
 /// the current verified credential observation.
@@ -1682,7 +1800,7 @@ pub async fn manager_display(
             crate::models::platform_bot_config::COLLECTION_NAME,
         )
         .find_one(
-            doc! {"_id":profile_id,"manager_bot_id":manager_bot_id,"deleted_at":bson::Bson::Null},
+            doc! {"_id":profile_id,"manager_bot_id":manager_bot_id,"native_entry":bson::Bson::Null,"deleted_at":bson::Bson::Null},
         )
         .await?
     else {

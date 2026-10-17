@@ -173,6 +173,7 @@ pub mod platform_manager_command_service;
 pub(crate) mod platform_manager_contract;
 pub mod platform_manager_dispatch_service;
 pub mod platform_manager_ingress_service;
+pub mod platform_manager_management;
 pub mod platform_personal_binding_service;
 pub mod platform_personal_owner_lifecycle;
 pub mod platform_personal_turn_service;
@@ -213,7 +214,7 @@ pub mod telegram_new_claims;
 pub mod telegram_new_connect;
 pub mod telegram_new_service;
 #[cfg(test)]
-mod telegram_new_tests;
+pub(crate) mod telegram_new_tests;
 pub mod telegram_new_worker;
 pub mod telegram_poller;
 pub mod telegram_service;
@@ -422,3 +423,29 @@ pub mod platform_manager_delivery;
 pub mod platform_manager_transport;
 
 pub mod platform_public_contract_service;
+
+pub(crate) mod platform_chat_presentation;
+
+pub(crate) mod platform_entry_admin_service;
+
+pub(crate) mod platform_entry_credentials;
+
+pub(crate) mod platform_entry_discord_controls;
+
+pub(crate) mod platform_entry_discord_installation;
+
+pub(crate) mod platform_entry_gateway_service;
+
+pub(crate) mod platform_entry_identity;
+
+pub(crate) mod platform_entry_ingress_service;
+
+pub(crate) mod platform_entry_migration;
+
+pub(crate) mod platform_entry_native;
+
+pub(crate) mod platform_entry_receipts;
+
+pub(crate) mod platform_entry_scope;
+
+pub(crate) mod platform_native_reply_service;
