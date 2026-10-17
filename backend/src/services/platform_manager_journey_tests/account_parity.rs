@@ -8,6 +8,7 @@ use crate::models::{
     usage_meter::{CredentialClass, UsageMeterRow, UsageStatus},
 };
 use crate::models::{billing_wallet::BillingWallet, credits::Credits};
+use crate::models::{service_billing::BillingMetric, usage_meter::BillingLayer};
 use crate::services::{
     assistant_account_tools::AccountTools, assistant_acknowledgement_service as acks,
     assistant_agent_credential_service as credentials, assistant_authority_tests::connected,
@@ -534,7 +535,15 @@ async fn two_accounts_keep_real_credentials_memory_tools_payers_and_web_continui
     Mock::given(method("POST")).and(path("/v1/responses"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({"model":"account-model",
             "output":[{"type":"message","content":[{"type":"output_text","text":"Paid by this account"}]}],
-            "usage":{"input_tokens":20,"output_tokens":3}}))).mount(&provider).await;
+            "usage":{"input_tokens":20,"output_tokens":3}}))).expect(3).mount(&provider).await;
+    // Each first owner exchange may start a best-effort title task. Unavailable
+    // model discovery refuses before generation and settles its funding at zero.
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .respond_with(ResponseTemplate::new(404))
+        .expect(0..=2)
+        .mount(&provider)
+        .await;
     let requests = Arc::new(Mutex::new(vec![]));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let upstream_url = format!("http://{}", listener.local_addr().unwrap());
@@ -853,7 +862,6 @@ async fn two_accounts_keep_real_credentials_memory_tools_payers_and_web_continui
     );
     let captured_requests = requests.lock().await.clone();
     assert_eq!(captured_requests.len(), 3);
-    assert_eq!(provider.received_requests().await.unwrap().len(), 3);
     for (index, (user, key, body)) in captured_requests.iter().enumerate() {
         let owner_index = if index == 1 { 1 } else { 0 };
         assert_eq!(user, &accounts[owner_index]);
@@ -874,32 +882,95 @@ async fn two_accounts_keep_real_credentials_memory_tools_payers_and_web_continui
             );
         }
     }
-    let inner_meters = tokio::time::timeout(std::time::Duration::from_secs(30), async {
-        loop {
-            let rows = j
-                .state
-                .db
-                .collection::<UsageMeterRow>(crate::models::usage_meter::COLLECTION_NAME)
-                .find(doc! {"service_id":&model.id})
-                .await
-                .unwrap()
-                .try_collect::<Vec<_>>()
-                .await
-                .unwrap();
-            if rows.len() == 3
-                && rows.iter().all(|m| {
-                    m.status == UsageStatus::Finalized
-                        && m.funding.as_ref().is_some_and(|f| f.settled)
-                })
-            {
-                break rows;
+    let (inner_meters, metadata_meters) =
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            loop {
+                let provider_requests = provider.received_requests().await.unwrap();
+                let mut model_requests = 0;
+                let mut model_list_requests = 0;
+                for request in &provider_requests {
+                    assert!(request.url.query().is_none());
+                    match (request.method.as_str(), request.url.path()) {
+                        ("POST", "/v1/responses") => {
+                            model_requests += 1;
+                            assert_eq!(
+                                request.body_json::<Value>().unwrap(),
+                                json!({
+                                    "model":"account-model", "input":"Use my account context",
+                                    "max_output_tokens":16, "stream":false, "store":false,
+                                })
+                            );
+                        }
+                        ("GET", "/v1/models") => {
+                            model_list_requests += 1;
+                            assert!(request.body.is_empty());
+                        }
+                        _ => panic!("unexpected provider request method or path"),
+                    }
+                }
+                assert_eq!(model_requests, 3);
+                assert!(model_list_requests <= accounts.len());
+                let rows = j
+                    .state
+                    .db
+                    .collection::<UsageMeterRow>(crate::models::usage_meter::COLLECTION_NAME)
+                    .find(doc! {"service_id":&model.id})
+                    .await
+                    .unwrap()
+                    .try_collect::<Vec<_>>()
+                    .await
+                    .unwrap();
+                let (paid, metadata): (Vec<_>, Vec<_>) =
+                    rows.iter().partition(|m| m.api_key_id.is_some());
+                assert!(paid.len() <= 3);
+                assert!(metadata.len() <= accounts.len());
+                if paid.len() == 3
+                    && metadata.len() == model_list_requests
+                    && rows.iter().all(|m| {
+                        m.status == UsageStatus::Finalized
+                            && m.funding.as_ref().is_some_and(|f| f.settled)
+                    })
+                {
+                    break rows
+                        .into_iter()
+                        .partition::<Vec<_>, _>(|m| m.api_key_id.is_some());
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
             }
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .unwrap();
+        })
+        .await
+        .unwrap();
+    let mut metadata_owners = std::collections::BTreeSet::new();
+    for meter in &metadata_meters {
+        assert!(accounts.contains(&meter.billing_owner_id));
+        assert_eq!(meter.actor_user_id, meter.billing_owner_id);
+        assert_ne!(meter.billing_owner_id, j.owner);
+        assert!(metadata_owners.insert(&meter.billing_owner_id));
+        assert!(meter.api_key_id.is_none());
+        assert!(meter.model.is_none());
+        assert_eq!(meter.layer, BillingLayer::Platform);
+        assert_eq!(meter.metric, BillingMetric::Requests);
+        assert_eq!(meter.credential_class, CredentialClass::NyxidManagedMaster);
+        assert!(meter.forwarded);
+        assert_eq!(meter.quantity, Some(0));
+        let funding = meter.funding.as_ref().unwrap();
+        assert!(funding.settled);
+        assert_eq!(funding.total_charge, Some(Credits::ZERO));
+        assert_eq!(funding.grant_funded, Some(Credits::ZERO));
+        assert_eq!(funding.wallet_funded, Some(Credits::ZERO));
+        assert_eq!(funding.allowance_funded, Some(Credits::ZERO));
+        assert!(funding.grant_consumptions.iter().all(|c| {
+            c.amount == Credits::ZERO
+                && c.grant_id == grants[0].id
+                && meter.billing_owner_id == accounts[0]
+        }));
+        assert!(funding.allowance_consumptions.is_empty());
+    }
+    assert_eq!(inner_meters.len(), 3);
     for meter in &inner_meters {
+        assert_eq!(meter.layer, BillingLayer::Platform);
+        assert_eq!(meter.metric, BillingMetric::Requests);
+        assert_eq!(meter.quantity, Some(1));
         let index = accounts
             .iter()
             .position(|a| a == &meter.billing_owner_id)
