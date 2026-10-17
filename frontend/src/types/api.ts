@@ -792,6 +792,7 @@ export interface ProviderConfig {
   readonly default_scopes: readonly string[] | null;
   readonly supports_oauth_scopes?: boolean;
   readonly supports_pkce: boolean;
+  readonly authorization_nonce_required?: boolean;
   readonly device_code_url: string | null;
   readonly device_token_url: string | null;
   readonly device_verification_url: string | null;

@@ -2531,6 +2531,7 @@ async fn insert_llm_route_service(
         extra_auth_params: None,
         device_code_format: "rfc8628".to_string(),
         client_id_param_name: None,
+        authorization_nonce_required: false,
         requires_gateway_url: false,
         created_by: "billing-route-test".to_string(),
         revocation_seed_version: 0,

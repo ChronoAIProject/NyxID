@@ -730,6 +730,12 @@ pub async fn initiate_oauth_connect(
         ));
     }
 
+    oauth_flow::validate_authorization_nonce_config(
+        provider.authorization_nonce_required,
+        provider.authorization_url.as_deref(),
+        provider.client_id_param_name.as_deref(),
+    )?;
+
     let provider =
         super::ifttt_oauth_service::ensure_registered(db, encryption_keys, base_url, provider)
             .await?;
@@ -898,6 +904,14 @@ pub async fn initiate_oauth_connect(
         None => None,
     };
 
+    let authorization_nonce = provider.authorization_nonce_required.then(|| {
+        use base64::Engine;
+        use rand::RngCore;
+        let mut bytes = [0u8; 32];
+        rand::rngs::OsRng.fill_bytes(&mut bytes);
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
+    });
+
     let oauth_state = OAuthState {
         history_context: crate::services::service_history::context::current(),
         id: state_id.clone(),
@@ -915,6 +929,7 @@ pub async fn initiate_oauth_connect(
         attempt_nonce: attempt_nonce.clone(),
         connection_id: connection_id.map(String::from),
         connect_link_id: connect_link_id.map(String::from),
+        authorization_nonce: authorization_nonce.clone(),
         consumed: false,
         expires_at,
         created_at: now,
@@ -945,9 +960,21 @@ pub async fn initiate_oauth_connect(
     );
 
     let cid_param = oauth_flow::client_id_param_name(&provider);
+    // Keep the historic unconditional '?' byte construction when disabled.
+    // Enabled URLs have already been checked for nonce conflicts and fragments.
+    let separator = if provider.authorization_nonce_required && authorization_url.contains('?') {
+        if authorization_url.ends_with(['?', '&']) {
+            ""
+        } else {
+            "&"
+        }
+    } else {
+        "?"
+    };
     let mut auth_url = format!(
-        "{}?{}={}&redirect_uri={}&response_type=code&state={}",
+        "{}{}{}={}&redirect_uri={}&response_type=code&state={}",
         authorization_url,
+        separator,
         urlencoding::encode(cid_param),
         urlencoding::encode(&client_id),
         urlencoding::encode(&callback_url),
@@ -1008,6 +1035,10 @@ pub async fn initiate_oauth_connect(
             "&resource={}",
             urlencoding::encode(nyxid_service_adapters::ifttt_mcp::BASE_URL)
         ));
+    }
+
+    if let Some(nonce) = authorization_nonce {
+        auth_url.push_str(&format!("&nonce={nonce}"));
     }
 
     tracing::info!(
@@ -1239,6 +1270,7 @@ pub async fn request_device_code(
         attempt_nonce: None,
         connection_id: connection_id.map(String::from),
         connect_link_id: None,
+        authorization_nonce: None,
         consumed: false,
         expires_at,
         created_at: now,
@@ -3331,6 +3363,7 @@ mod tests {
                 redirect_path: None,
                 flow_kind: None,
                 attempt_nonce: None,
+                authorization_nonce: None,
                 consumed: false,
                 expires_at: now + Duration::minutes(5),
                 created_at: now,
@@ -3409,6 +3442,7 @@ mod tests {
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: Some("NyxIdBot".to_string()),
+            authorization_nonce_required: false,
             requires_gateway_url: false,
             created_by: "system".to_string(),
             revocation_seed_version: 0,
@@ -4413,6 +4447,7 @@ mod tests {
                 Some(enc.encrypt(b"client-secret").await.unwrap()),
             );
             provider.slug = slug.into();
+            provider.authorization_nonce_required = true;
             if slug == "stripe" {
                 provider.authorization_url =
                     Some("https://marketplace.stripe.com/oauth/v2/authorize".into());
@@ -4884,6 +4919,465 @@ mod tests {
         )
     }
 
+    #[tokio::test]
+    async fn authorization_nonce_is_unique_persisted_and_independent_for_hosted_attempts() {
+        use base64::Engine;
+        let db = connect_test_database("auth_nonce_attempts")
+            .await
+            .expect("MongoDB required");
+        let enc = test_encryption_keys();
+        let mut provider = make_test_provider(
+            &Uuid::new_v4().to_string(),
+            "https://example.com/token",
+            Some(enc.encrypt(b"client-id").await.unwrap()),
+            Some(enc.encrypt(b"client-secret").await.unwrap()),
+        );
+        provider.authorization_nonce_required = true;
+        provider.authorization_url = Some("https://example.com/authorize?audience=api".into());
+        provider.default_scopes = Some(vec!["hubstaff:read".into()]);
+        provider.extra_auth_params = Some(HashMap::from([
+            ("nonce".into(), "static-override".into()),
+            ("state".into(), "state-override".into()),
+            ("code_challenge".into(), "pkce-override".into()),
+            ("client_id".into(), "client-override".into()),
+        ]));
+        db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
+            .insert_one(&provider)
+            .await
+            .unwrap();
+        let key = insert_pending_user_api_key(&db, &enc, &provider.id, None, None).await;
+        let link = Uuid::new_v4().to_string();
+        let mut nonces = std::collections::HashSet::new();
+        for chat in [false, true, true] {
+            let result = super::initiate_oauth_connect(
+                &db,
+                &enc,
+                "https://nyxid.example",
+                &key.user_id,
+                &provider.id,
+                None,
+                None,
+                &[],
+                None,
+                key.connection_id.as_deref(),
+                Some(&link),
+                chat.then_some(crate::models::oauth_flow_kind::OAuthFlowKind::ChatConnect),
+            )
+            .await
+            .unwrap();
+            let url = url::Url::parse(&result.authorization_url).unwrap();
+            let pairs: Vec<_> = url.query_pairs().into_owned().collect();
+            let query: HashMap<_, _> = pairs.iter().cloned().collect();
+            assert_eq!(pairs.iter().filter(|(key, _)| key == "nonce").count(), 1);
+            let nonce = &query["nonce"];
+            assert_eq!(nonce.len(), 43);
+            assert_eq!(
+                base64::engine::general_purpose::URL_SAFE_NO_PAD
+                    .decode(nonce)
+                    .unwrap()
+                    .len(),
+                32
+            );
+            assert!(
+                nonces.insert(nonce.clone()),
+                "each attempt must have a fresh nonce"
+            );
+            let saved = db
+                .collection::<OAuthState>(OAUTH_STATES)
+                .find_one(doc! { "_id": &query["state"] })
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(saved.authorization_nonce.as_ref(), Some(nonce));
+            assert_eq!(saved.connection_id, key.connection_id);
+            assert_eq!(saved.connect_link_id.as_deref(), Some(link.as_str()));
+            assert_eq!(saved.attempt_nonce, result.attempt_nonce);
+            assert_ne!(nonce, &saved.id);
+            assert_ne!(Some(nonce), saved.attempt_nonce.as_ref());
+            let verifier = String::from_utf8(
+                enc.decrypt(&hex::decode(saved.code_verifier.unwrap()).unwrap())
+                    .await
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_ne!(nonce, &verifier);
+            assert_eq!(
+                query["code_challenge"],
+                oauth_flow::generate_code_challenge(&verifier)
+            );
+            assert_eq!(query["client_id"], "client-id");
+            assert_eq!(query["scope"], "hubstaff:read");
+            assert_eq!(query["audience"], "api");
+            if chat {
+                let current = db
+                    .collection::<UserApiKey>(USER_API_KEYS)
+                    .find_one(doc! { "_id": &key.id })
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(current.oauth_attempt_nonce, saved.attempt_nonce);
+                assert_eq!(saved.id, format!("1cc_{}", saved.attempt_nonce.unwrap()));
+                assert_eq!(current.status, "active");
+            } else {
+                assert!(result.attempt_nonce.is_none());
+                assert!(Uuid::parse_str(&saved.id).is_ok());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn authorization_nonce_disabled_preserves_legacy_url_bytes_and_provider_parameters() {
+        let db = connect_test_database("auth_nonce_disabled")
+            .await
+            .expect("MongoDB required");
+        let enc = test_encryption_keys();
+        for slug in ["google", "lark", "feishu", "stripe", "ifttt-mcp"] {
+            for missing in [false, true] {
+                let mut provider = make_test_provider(
+                    &Uuid::new_v4().to_string(),
+                    "https://example.com/token",
+                    Some(enc.encrypt(b"client-id").await.unwrap()),
+                    Some(enc.encrypt(b"client-secret").await.unwrap()),
+                );
+                provider.slug = slug.into();
+                provider.supports_pkce = slug != "stripe";
+                provider.supports_oauth_scopes = slug != "stripe";
+                provider.default_scopes = Some(vec![
+                    if slug == "ifttt-mcp" { "mcp" } else { "email" }.into(),
+                ]);
+                if slug == "stripe" {
+                    provider.authorization_url =
+                        Some("https://marketplace.stripe.com/oauth/v2/authorize".into());
+                }
+                if matches!(slug, "lark" | "feishu") {
+                    provider.client_id_param_name = Some("app_id".into());
+                }
+                let extra = if slug == "google" {
+                    ("access_type", "offline")
+                } else {
+                    ("prompt", "consent")
+                };
+                provider.extra_auth_params = Some(HashMap::from([
+                    (extra.0.into(), extra.1.into()),
+                    ("nonce".into(), "blocked".into()),
+                ]));
+                if slug == "ifttt-mcp" {
+                    provider
+                        .extra_auth_params
+                        .as_mut()
+                        .unwrap()
+                        .insert("resource".into(), "https://attacker.example".into());
+                }
+                let mut document = bson::to_document(&provider).unwrap();
+                if missing {
+                    document.remove("authorization_nonce_required");
+                }
+                db.collection::<bson::Document>(PROVIDER_CONFIGS)
+                    .insert_one(document)
+                    .await
+                    .unwrap();
+                let result = super::initiate_oauth_connect(
+                    &db,
+                    &enc,
+                    "https://nyxid.example",
+                    "actor",
+                    &provider.id,
+                    None,
+                    None,
+                    &[],
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .await
+                .unwrap();
+                let url = url::Url::parse(&result.authorization_url).unwrap();
+                let query: HashMap<_, _> = url.query_pairs().into_owned().collect();
+                assert!(!query.contains_key("nonce"));
+                let saved = db
+                    .collection::<OAuthState>(OAUTH_STATES)
+                    .find_one(doc! { "_id": &query["state"] })
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert!(saved.authorization_nonce.is_none());
+                let mut expected = format!(
+                    "{}?{}=client-id&redirect_uri=https%3A%2F%2Fnyxid.example%2Fapi%2Fv1%2Fproviders%2Fcallback{}&state={}",
+                    provider.authorization_url.as_deref().unwrap(),
+                    oauth_flow::client_id_param_name(&provider),
+                    if slug == "stripe" {
+                        ""
+                    } else {
+                        "&response_type=code"
+                    },
+                    saved.id
+                );
+                if slug != "stripe" {
+                    expected.push_str(if slug == "ifttt-mcp" {
+                        "&scope=mcp"
+                    } else {
+                        "&scope=email"
+                    });
+                }
+                if let Some(encrypted) = saved.code_verifier {
+                    let verifier = String::from_utf8(
+                        enc.decrypt(&hex::decode(encrypted).unwrap()).await.unwrap(),
+                    )
+                    .unwrap();
+                    expected.push_str(&format!(
+                        "&code_challenge={}&code_challenge_method=S256",
+                        oauth_flow::generate_code_challenge(&verifier)
+                    ));
+                }
+                for (key, value) in provider.extra_auth_params.as_ref().unwrap() {
+                    if key == "nonce" || (slug == "ifttt-mcp" && key == "resource") {
+                        continue;
+                    }
+                    expected.push_str(&format!(
+                        "&{}={}",
+                        urlencoding::encode(key),
+                        urlencoding::encode(value)
+                    ));
+                }
+                if slug == "ifttt-mcp" {
+                    expected.push_str(&format!(
+                        "&resource={}",
+                        urlencoding::encode(nyxid_service_adapters::ifttt_mcp::BASE_URL)
+                    ));
+                }
+                assert_eq!(
+                    result.authorization_url, expected,
+                    "{slug}: missing={missing}"
+                );
+            }
+        }
+        // Keep the legacy builder's unconditional '?' even for pre-existing queries/fragments.
+        for endpoint in [
+            "https://example.com/authorize?nonce=legacy",
+            "https://example.com/authorize#legacy",
+        ] {
+            let mut provider = make_test_provider(
+                &Uuid::new_v4().to_string(),
+                "https://example.com/token",
+                Some(enc.encrypt(b"client-id").await.unwrap()),
+                Some(enc.encrypt(b"client-secret").await.unwrap()),
+            );
+            provider.authorization_url = Some(endpoint.into());
+            provider.client_id_param_name = Some("nonce".into());
+            db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
+                .insert_one(&provider)
+                .await
+                .unwrap();
+            let result = super::initiate_oauth_connect(
+                &db,
+                &enc,
+                "https://nyxid.example",
+                "actor",
+                &provider.id,
+                None,
+                None,
+                &[],
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+            assert!(
+                result
+                    .authorization_url
+                    .starts_with(&format!("{endpoint}?nonce=client-id&redirect_uri="))
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn authorization_nonce_conflicts_fail_before_state_or_chat_mutation() {
+        let db = connect_test_database("auth_nonce_conflict")
+            .await
+            .expect("MongoDB required");
+        let enc = test_encryption_keys();
+        for (endpoint, param) in [
+            ("https://example.com/authorize?nonce=static", None),
+            ("https://example.com/authorize?%6e%6fnce=static", None),
+            ("https://example.com/authorize#fragment", None),
+            ("https://example.com/authorize", Some(" nonce ")),
+        ] {
+            let mut provider = make_test_provider(
+                &Uuid::new_v4().to_string(),
+                "https://example.com/token",
+                Some(enc.encrypt(b"client-id").await.unwrap()),
+                Some(enc.encrypt(b"client-secret").await.unwrap()),
+            );
+            provider.authorization_nonce_required = true;
+            provider.authorization_url = Some(endpoint.into());
+            provider.client_id_param_name = param.map(str::to_string);
+            db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
+                .insert_one(&provider)
+                .await
+                .unwrap();
+            let key = insert_pending_user_api_key(&db, &enc, &provider.id, None, None).await;
+            let before = db
+                .collection::<bson::Document>(USER_API_KEYS)
+                .find_one(doc! { "_id": &key.id })
+                .await
+                .unwrap()
+                .unwrap();
+            let result = super::initiate_oauth_connect(
+                &db,
+                &enc,
+                "https://nyxid.example",
+                &key.user_id,
+                &provider.id,
+                None,
+                None,
+                &[],
+                None,
+                key.connection_id.as_deref(),
+                None,
+                Some(crate::models::oauth_flow_kind::OAuthFlowKind::ChatConnect),
+            )
+            .await;
+            assert!(matches!(result, Err(AppError::ValidationError(_))));
+            assert_eq!(
+                db.collection::<OAuthState>(OAUTH_STATES)
+                    .count_documents(doc! {})
+                    .await
+                    .unwrap(),
+                0
+            );
+            assert_eq!(
+                db.collection::<bson::Document>(USER_API_KEYS)
+                    .find_one(doc! { "_id": &key.id })
+                    .await
+                    .unwrap()
+                    .unwrap(),
+                before
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn authorization_nonce_legacy_callback_after_toggle_and_token_contract() {
+        use wiremock::matchers::{body_string, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let db = connect_test_database("auth_nonce_callback")
+            .await
+            .expect("MongoDB required");
+        let enc = test_encryption_keys();
+        let server = MockServer::start().await;
+        for legacy in [true, false] {
+            let mut provider = make_test_provider(
+                &Uuid::new_v4().to_string(),
+                &format!("{}/token", server.uri()),
+                Some(enc.encrypt(b"client-id").await.unwrap()),
+                Some(enc.encrypt(b"client-secret").await.unwrap()),
+            );
+            provider.authorization_nonce_required = !legacy;
+            db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
+                .insert_one(&provider)
+                .await
+                .unwrap();
+            let result = super::initiate_oauth_connect(
+                &db,
+                &enc,
+                "https://nyxid.example",
+                "actor",
+                &provider.id,
+                None,
+                None,
+                &[],
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+            let url = url::Url::parse(&result.authorization_url).unwrap();
+            let query: HashMap<_, _> = url.query_pairs().into_owned().collect();
+            if legacy {
+                db.collection::<bson::Document>(OAUTH_STATES)
+                    .update_one(
+                        doc! { "_id": &query["state"] },
+                        doc! { "$unset": { "authorization_nonce": "" } },
+                    )
+                    .await
+                    .unwrap();
+                crate::services::provider_service::update_provider(
+                    &db,
+                    &enc,
+                    &provider.id,
+                    crate::services::provider_service::ProviderUpdateInput {
+                        authorization_nonce_required: Some(true),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+            }
+            let saved = db
+                .collection::<OAuthState>(OAUTH_STATES)
+                .find_one(doc! { "_id": &query["state"] })
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(saved.authorization_nonce.is_none(), legacy);
+            let verifier = String::from_utf8(
+                enc.decrypt(&hex::decode(saved.code_verifier.unwrap()).unwrap())
+                    .await
+                    .unwrap(),
+            )
+            .unwrap();
+            let expected = url::form_urlencoded::Serializer::new(String::new())
+                .extend_pairs([
+                    ("grant_type", "authorization_code"),
+                    ("code", "code"),
+                    (
+                        "redirect_uri",
+                        "https://nyxid.example/api/v1/providers/callback",
+                    ),
+                    ("client_id", "client-id"),
+                    ("client_secret", "client-secret"),
+                    ("code_verifier", &verifier),
+                ])
+                .finish();
+            Mock::given(method("POST"))
+                .and(path("/token"))
+                .and(body_string(expected))
+                .respond_with(ResponseTemplate::new(200).set_body_json(
+                    serde_json::json!({"access_token":"access", "refresh_token":"refresh"}),
+                ))
+                .expect(1)
+                .mount(&server)
+                .await;
+            super::handle_oauth_callback(
+                &db,
+                &enc,
+                "https://nyxid.example",
+                &provider.id,
+                "code",
+                &query["state"],
+            )
+            .await
+            .unwrap();
+            let replay = super::handle_oauth_callback(
+                &db,
+                &enc,
+                "https://nyxid.example",
+                &provider.id,
+                "code",
+                &query["state"],
+            )
+            .await;
+            assert!(replay.is_err());
+            server.verify().await;
+            server.reset().await;
+        }
+    }
+
     fn make_test_provider(
         id: &str,
         token_url: &str,
@@ -4921,6 +5415,7 @@ mod tests {
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
+            authorization_nonce_required: false,
             requires_gateway_url: false,
             created_by: "system".to_string(),
             revocation_seed_version: 0,
