@@ -1487,8 +1487,9 @@ unavailable saved source never silently selects another paid provider. The
 secondary Voice settings action in the microphone popup opens configuration
 without microphone permission or a provider start. End retains that panel's
 next-call settings; a later waveform start preserves them on the same binding.
-Before a provider start, the typed settings save updates the original actor's
-settings cache only after server confirmation. Close/reopen therefore retains
+Before a provider start, changed preferences are saved and update the original actor's
+settings cache only after server confirmation. Unchanged saved preferences skip
+that write; session creation still revalidates access and funding. Close/reopen therefore retains
 the confirmed source and input mode; a save completing after an account change
 cannot update either account's cache or authorize that start. Settings controls
 wait for initial saved-preference loading, and subsequent hydration does not
@@ -1514,6 +1515,12 @@ share one ephemeral capture owner. Account/thread navigation, disabled features,
 destroyed conversations, track revocation and component teardown fence late
 callbacks and close media. Audio contexts for capture/encoding are created and
 resumed during activation; autoplay rejection offers an explicit resume path.
+Dictation loads its encoder during this setup without connecting a microphone
+node. For an existing thread, read-only source/price discovery overlaps the
+permission/device wait and is reused only by that attempt and thread. New draft
+creation and price disclosure still follow permission; the metered connection
+waits for both. Audio encoding starts only after the provider acknowledges
+readiness. Denial, cancellation and account changes cannot start a late session.
 
 ### Dictation review and draft integrity
 

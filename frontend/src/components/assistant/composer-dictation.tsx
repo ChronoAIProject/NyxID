@@ -333,17 +333,22 @@ export function useComposerDictation({
       },
     });
     client.current = next;
+    const discover = (id: string) =>
+      api.get(
+        `/assistant/nyxagent/dictation/options?conversation_id=${encodeURIComponent(id)}`,
+      );
+    let discovery: Promise<unknown> | undefined;
     // start constructs capture and encoding context synchronously in this gesture;
     // source preparation happens after permission, without forwarding any audio.
     void next.start(
       async () => {
         setLoading(true);
         try {
+          if (generation.current !== ticket)
+            throw new DOMException("Cancelled", "AbortError");
           const id = await getThread();
           const data = voiceOptionsSchema.parse(
-            await api.get(
-              `/assistant/nyxagent/dictation/options?conversation_id=${encodeURIComponent(id)}`,
-            ),
+            await (id === threadId && discovery ? discovery : discover(id)),
           );
           if (generation.current !== ticket)
             throw new DOMException("Cancelled", "AbortError");
@@ -387,6 +392,14 @@ export function useComposerDictation({
       undefined,
       device,
     );
+    // Capture above requests permission synchronously. For an existing thread,
+    // overlap read-only discovery with browser/device startup. Draft creation,
+    // disclosure and the metered socket still wait for microphone permission.
+    if (threadId) {
+      discovery = discover(threadId);
+      // Denial/cancellation may prevent the preparation callback from awaiting it.
+      void discovery.catch(() => {});
+    }
   }
   function stop() {
     held.current = false;
