@@ -3808,7 +3808,22 @@ pub async fn responses_with_runtime(
     responses_with_producers(state, runtime.map(|extension| extension.0), headers, body).await
 }
 
-async fn responses_with_producers(
+fn responses_with_producers(
+    state: AppState,
+    producers: Option<
+        std::sync::Arc<crate::services::platform_manager_contract::PlatformManagerProducers>,
+    >,
+    headers: HeaderMap,
+    body: Bytes,
+) -> futures::future::BoxFuture<'static, Response> {
+    // Native authentication precedes ordinary routing. Keep that composition's
+    // state outside both HTTP caller futures, including ordinary group events.
+    Box::pin(responses_with_producers_impl(
+        state, producers, headers, body,
+    ))
+}
+
+async fn responses_with_producers_impl(
     state: AppState,
     producers: Option<
         std::sync::Arc<crate::services::platform_manager_contract::PlatformManagerProducers>,
@@ -5218,3 +5233,45 @@ pub(crate) mod thread_controls;
 
 #[path = "nyxbot_late_delivery.rs"]
 pub(crate) mod late_delivery;
+
+#[cfg(test)]
+mod future_size_tests {
+    use super::*;
+
+    type Runtime = Option<
+        axum::Extension<
+            std::sync::Arc<crate::services::platform_manager_contract::PlatformManagerProducers>,
+        >,
+    >;
+    type ResponseArgs = (AppState, HeaderMap, Bytes);
+    type RuntimeResponseArgs = (AppState, Runtime, HeaderMap, Bytes);
+
+    fn future_size<Args, F: std::future::Future>(_: impl FnOnce(Args) -> F) -> usize {
+        std::mem::size_of::<F>()
+    }
+
+    #[test]
+    fn native_selection_keeps_ordinary_and_runtime_responses_futures_small() {
+        let ordinary = future_size(|(state, headers, body): ResponseArgs| {
+            responses(State(state), headers, body)
+        });
+        let runtime = future_size(|(state, runtime, headers, body): RuntimeResponseArgs| {
+            responses_with_runtime(State(state), runtime, headers, body)
+        });
+        let composition = future_size(|(state, headers, body): ResponseArgs| {
+            responses_with_producers(state, None, headers, body)
+        });
+        assert!(
+            ordinary < 16 * 1024,
+            "ordinary Responses future grew to {ordinary} bytes"
+        );
+        assert!(
+            runtime < 16 * 1024,
+            "runtime Responses future grew to {runtime} bytes"
+        );
+        assert!(
+            composition < 1024,
+            "Responses composition future grew to {composition} bytes"
+        );
+    }
+}
