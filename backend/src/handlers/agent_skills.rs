@@ -203,7 +203,7 @@ async fn fetch_ornn_classified(request: OrnnFetch<'_>) -> OrnnOutcome {
         auth.api_key_id = Some(key);
     }
     auth.assistant_operation_scopes = scopes;
-    auth.assistant_turn_fence = chat.as_ref().map(|chat| chat.turn_fence());
+    auth.assistant_turn_fence = chat.as_ref().map(|chat| Box::new(chat.turn_fence()));
     auth.assistant_chat = chat;
     let Ok(mut request) = Request::builder()
         .method(method)

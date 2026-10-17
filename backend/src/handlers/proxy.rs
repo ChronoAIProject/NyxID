@@ -15249,7 +15249,7 @@ mod nyxagent_admission_tests {
                         .unwrap();
                     let mut auth = test_auth_user(&owner);
                     auth.api_key_id = Some(row.credential_api_key_id.clone());
-                    auth.assistant_turn_fence = Some(AssistantTurnFence {
+                    auth.assistant_turn_fence = Some(Box::new(AssistantTurnFence {
                         channel_adapter_origin: None,
                         platform_origin: None,
                         platform_thread: false,
@@ -15257,7 +15257,7 @@ mod nyxagent_admission_tests {
                         turn_id: Some(turn.turn_id.clone()),
                         turn_live: true,
                         turn_stopped: false,
-                    });
+                    }));
                     let mut request = Request::builder()
                         .method("POST")
                         .header("content-type", "application/json")

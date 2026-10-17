@@ -80,8 +80,9 @@ pub struct AuthUser {
     /// credential. Ordinary API keys never perform this lookup.
     pub assistant_chat:
         Option<std::sync::Arc<crate::services::assistant_acknowledgement_service::ChatAuthority>>,
+    /// Keep optional turn authority out of every ordinary request's inline storage.
     pub assistant_turn_fence:
-        Option<crate::services::assistant_acknowledgement_service::AssistantTurnFence>,
+        Option<Box<crate::services::assistant_acknowledgement_service::AssistantTurnFence>>,
     /// RFC 8707 resource URI restrictions carried by OAuth bearer tokens.
     pub resource_uris: Option<Vec<String>>,
     /// List of Node IDs this key can route through (only checked when allow_all_nodes is false).
@@ -892,7 +893,9 @@ pub(crate) async fn api_key_auth_user(
         assistant_group_id: key.assistant_group_id.clone(),
         assistant_agent_owner_id: key.assistant_agent_owner_id.clone(),
         assistant_operation_scopes: key.assistant_operation_scopes.clone(),
-        assistant_turn_fence: assistant_chat.as_ref().map(|chat| chat.turn_fence()),
+        assistant_turn_fence: assistant_chat
+            .as_ref()
+            .map(|chat| Box::new(chat.turn_fence())),
         assistant_chat,
         resource_uris: None,
         allowed_node_ids,
@@ -1359,7 +1362,7 @@ impl FromRequestParts<AppState> for AuthUser {
                         assistant_group_id: None,
                         assistant_agent_owner_id,
                         assistant_operation_scopes,
-                        assistant_turn_fence: assistant_chat.as_ref().map(|chat| chat.turn_fence()),
+                        assistant_turn_fence: assistant_chat.as_ref().map(|chat| Box::new(chat.turn_fence())),
                         assistant_chat,
                         user_id,
                         session_id,
@@ -3564,7 +3567,7 @@ mod tests {
         };
         let user_id = Uuid::new_v4().to_string();
         let auth = AuthUser {
-            assistant_turn_fence: Some(
+            assistant_turn_fence: Some(Box::new(
                 crate::services::assistant_acknowledgement_service::AssistantTurnFence {
                     channel_adapter_origin: None,
                     platform_thread: false,
@@ -3574,7 +3577,7 @@ mod tests {
                     turn_live: true,
                     turn_stopped: false,
                 },
-            ),
+            )),
             user_id: Uuid::parse_str(&user_id).unwrap(),
             ..test_auth_user(AuthMethod::ApiKey, "proxy")
         };
@@ -3636,7 +3639,7 @@ mod tests {
             .await
             .unwrap();
         let mut auth = AuthUser {
-            assistant_turn_fence: Some(
+            assistant_turn_fence: Some(Box::new(
                 crate::services::assistant_acknowledgement_service::AssistantTurnFence {
                     channel_adapter_origin: None,
                     platform_thread: false,
@@ -3646,7 +3649,7 @@ mod tests {
                     turn_live: false,
                     turn_stopped: false,
                 },
-            ),
+            )),
             user_id: Uuid::parse_str(&user_id).unwrap(),
             ..test_auth_user(AuthMethod::ApiKey, "proxy")
         };
@@ -3801,7 +3804,7 @@ mod tests {
     #[test]
     fn conversation_keys_are_restricted_to_execution_routes() {
         let mut user = test_auth_user(AuthMethod::ApiKey, "proxy");
-        user.assistant_turn_fence = Some(
+        user.assistant_turn_fence = Some(Box::new(
             crate::services::assistant_acknowledgement_service::AssistantTurnFence {
                 channel_adapter_origin: None,
                 platform_thread: false,
@@ -3811,7 +3814,7 @@ mod tests {
                 turn_live: true,
                 turn_stopped: false,
             },
-        );
+        ));
 
         for path in [
             "/api/v1/proxy/service/path",
@@ -4645,6 +4648,73 @@ mod tests {
             &Method::GET,
             "/api/v1/api-keys"
         ));
+    }
+    mod storage_size_tests {
+        use super::*;
+
+        fn field_size<T>(_: impl FnOnce(&AuthUser) -> &T) -> usize {
+            std::mem::size_of::<T>()
+        }
+
+        fn future_size<Args, F: std::future::Future>(_: impl FnOnce(Args) -> F) -> usize {
+            std::mem::size_of::<F>()
+        }
+
+        #[test]
+        fn optional_turn_fence_keeps_auth_user_storage_bounded() {
+            use crate::handlers::providers::{UpdateProviderRequest, update_provider};
+
+            type UpdateProviderArgs = (AppState, AuthUser, String, UpdateProviderRequest);
+
+            let auth_bytes = std::mem::size_of::<AuthUser>();
+            let fence_slot_bytes = field_size(|auth| &auth.assistant_turn_fence);
+            let provider_future_bytes =
+                future_size(|(state, auth, provider_id, body): UpdateProviderArgs| {
+                    update_provider(
+                        axum::extract::State(state),
+                        auth,
+                        axum::extract::Path(provider_id),
+                        axum::Json(body),
+                    )
+                });
+            eprintln!(
+                "AuthUser={auth_bytes} bytes, optional turn fence={fence_slot_bytes} bytes, \
+                 ordinary update_provider future={provider_future_bytes} bytes"
+            );
+            assert!(auth_bytes <= 1024, "AuthUser grew to {auth_bytes} bytes");
+            assert_eq!(
+                fence_slot_bytes,
+                std::mem::size_of::<usize>(),
+                "optional turn fence must occupy one pointer in AuthUser"
+            );
+        }
+
+        #[test]
+        fn cloned_auth_user_keeps_independent_mutable_turn_fence() {
+            let mut original = test_auth_user(AuthMethod::ApiKey, "proxy");
+            original.assistant_turn_fence = Some(Box::new(
+                crate::services::assistant_acknowledgement_service::AssistantTurnFence {
+                    channel_adapter_origin: None,
+                    platform_thread: false,
+                    platform_origin: None,
+                    conversation_id: "conversation".into(),
+                    turn_id: Some("turn".into()),
+                    turn_live: true,
+                    turn_stopped: false,
+                },
+            ));
+            let mut cloned = original.clone();
+            let cloned_fence = cloned.assistant_turn_fence.as_mut().unwrap();
+            cloned_fence.turn_live = false;
+            cloned_fence.turn_id = Some("other-turn".into());
+
+            let original_fence = original.assistant_turn_fence.as_ref().unwrap();
+            assert!(original_fence.turn_live);
+            assert_eq!(original_fence.turn_id.as_deref(), Some("turn"));
+            let cloned_fence = cloned.assistant_turn_fence.as_ref().unwrap();
+            assert!(!cloned_fence.turn_live);
+            assert_eq!(cloned_fence.turn_id.as_deref(), Some("other-turn"));
+        }
     }
 }
 
