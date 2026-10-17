@@ -257,6 +257,8 @@ successful strict check; this final plan update records the completed evidence.
 - `backend/src/models/oracle_pool.rs`
 - `backend/src/models/oracle_worker.rs`
 - `backend/src/routes.rs`
+- `backend/src/services/assistant_native_execution.rs`
+- `backend/src/services/assistant_service_execution_authority_tests.rs`
 - `backend/src/services/mod.rs`
 - `backend/src/services/oracle_login_profile_service.rs`
 - `backend/src/services/oracle_login_snapshot_service.rs`
@@ -287,8 +289,18 @@ removal and local build/service teardown. The branch is now
 It incorporates `origin/main` at `0aceacb0`. The only merge conflict was in
 `docs/API.md`; both independent documentation additions were retained. Upstream
 Oracle input-validation visibility changes and assistant admission gates remain
-intact. The final compatibility review found no unintended breaking changes
-outside the lifecycle contract. README and architecture documentation now link
+intact. The final compatibility review identified a main-integration regression:
+normal worker heartbeats advanced `worker_enrollment_epoch`, which main's native
+Oracle consent identity hashed as execution state. The correction excludes only
+that Oracle coordination counter from both consent issuance and held-admission
+revalidation. Ownership, lifecycle/installation epochs and execution settings
+remain bound; non-Oracle identity projections are unchanged. Regression coverage
+uses the authenticated heartbeat and task-submit handlers, verifies successful
+card redemption and held admission after a heartbeat, and verifies configuration
+updates and ownership transfer still reject old approvals. Formatting and
+whitespace checks passed; fresh full CI must execute these new regressions before
+merge. No other actionable compatibility finding remains in the personal source
+review. README and architecture documentation now link
 and explain that contract as required by the contribution guide. No package
 version or release tag is changed; releases use the repository's tag workflow.
 

@@ -17,7 +17,7 @@ pub struct ResourceAdmission {
     tool: String,
     summary: String,
 }
-fn binding(row: &Document) -> String {
+fn binding(collection: &str, row: &Document) -> String {
     let mut row = row.clone();
     for field in [
         "created_at",
@@ -27,6 +27,12 @@ fn binding(row: &Document) -> String {
         "worker_token_hash",
     ] {
         row.remove(field);
+    }
+    if collection == crate::models::oracle_pool::COLLECTION_NAME {
+        // Every fenced Oracle writer advances this operational counter, including
+        // heartbeats. It serializes writes; it does not change execution consent.
+        // Keep owner, lifecycle/installation epochs and configuration in the hash.
+        row.remove("worker_enrollment_epoch");
     }
     super::mcp_service::canonical_sha256(json!(row))
 }
@@ -45,7 +51,7 @@ impl ResourceAdmission {
             .find_one(doc! {"_id":&self.id,"is_active":true})
             .await?
             .ok_or_else(|| AppError::Forbidden("Native service unavailable".into()))?;
-        if binding(&row) != self.binding {
+        if binding(self.collection, &row) != self.binding {
             return Err(AppError::Conflict(
                 "Native service changed; confirm again".into(),
             ));
@@ -155,7 +161,7 @@ pub async fn resource(
     if actual_owner != owner {
         return Err(AppError::Forbidden("Native resource owner changed".into()));
     }
-    let binding = binding(&row);
+    let binding = binding(collection, &row);
     let key_binding = key_binding(db, chat).await?;
     let mut semantic = arguments.clone();
     let ack = semantic
@@ -401,4 +407,57 @@ pub(super) fn ssh_projection(
         row.as_object_mut().expect("connection").remove(field);
     }
     json!({"connection":row,"config":config})
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::oracle_pool::COLLECTION_NAME as POOLS;
+
+    #[test]
+    fn oracle_binding_ignores_absent_and_advancing_write_fence() {
+        let mut row = doc! {"_id":"pool","user_id":"owner"};
+        let expected = binding(POOLS, &row);
+        for epoch in [0_i64, 1, 42] {
+            row.insert("worker_enrollment_epoch", epoch);
+            assert_eq!(binding(POOLS, &row), expected);
+        }
+    }
+
+    #[test]
+    fn oracle_binding_retains_execution_authority_and_configuration() {
+        let row = doc! {"_id":"pool","user_id":"owner","lifecycle_version":0_i64,
+        "installation_epoch":0_i64,"visibility":"platform","is_active":true,
+        "max_workers":2,"max_queue_length":10,"per_user_max_inflight":10,
+        "task_timeout_secs":300_i64,"require_model_match":true,"allow_extract":false};
+        let expected = binding(POOLS, &row);
+        for (field, value) in doc! {"user_id":"new-owner","lifecycle_version":1_i64,
+        "installation_epoch":1_i64,"visibility":"private","is_active":false,
+        "deleted_at":bson::DateTime::now(),"max_workers":3,"max_queue_length":11,
+        "per_user_max_inflight":11,"task_timeout_secs":600_i64,
+        "require_model_match":false,"allow_extract":true,
+        "chatgpt_project_url":"https://chatgpt.com/g/project","default_model_label":"new-model"}
+        {
+            let mut changed = row.clone();
+            changed.insert(&field, value);
+            assert_ne!(binding(POOLS, &changed), expected, "{field}");
+        }
+    }
+
+    #[test]
+    fn non_oracle_binding_preserves_existing_projection() {
+        let semantic = doc! {"_id":"service","user_id":"owner","worker_enrollment_epoch":1_i64};
+        let expected = super::super::mcp_service::canonical_sha256(json!(semantic));
+        let mut row = semantic;
+        row.extend(
+            doc! {"created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now(),
+            "name":"Service","description":"Metadata","worker_token_hash":"hash"},
+        );
+        for collection in ["downstream_services", "user_services"] {
+            assert_eq!(binding(collection, &row), expected);
+            let mut changed = row.clone();
+            changed.insert("worker_enrollment_epoch", 2_i64);
+            assert_ne!(binding(collection, &changed), expected);
+        }
+    }
 }

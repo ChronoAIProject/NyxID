@@ -197,13 +197,19 @@ async fn scope_ineligible_preferred_candidate_does_not_block_exact_allowed_opera
     );
 }
 
-async fn pool(f: &Fixture, owner: &str, slug: &str) -> String {
+async fn pool(f: &Fixture, owner: &str, slug: &str) -> (String, zeroize::Zeroizing<String>) {
     let id = Uuid::new_v4().to_string();
+    let token = zeroize::Zeroizing::new(format!(
+        "nyx_owk_{}{}",
+        Uuid::new_v4().simple(),
+        Uuid::new_v4().simple()
+    ));
     f.state
         .db
         .collection::<Document>("oracle_pools")
         .insert_one(doc! {"_id":&id,"user_id":owner,"slug":slug,"name":slug,
-        "visibility":"platform","worker_token_hash":"test","max_workers":2,"max_queue_length":10,
+        "visibility":"platform","worker_token_hash":crate::crypto::token::hash_token(&token),
+        "max_workers":2,"max_queue_length":10,
         "per_user_max_inflight":10,"task_timeout_secs":300_i64,"is_active":true,
         "created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now()})
         .await
@@ -216,7 +222,63 @@ async fn pool(f: &Fixture, owner: &str, slug: &str) -> String {
         .await
         .unwrap()
         .unwrap();
-    id
+    (id, token)
+}
+
+async fn oracle_heartbeat(f: &Fixture, pool_id: &str, token: &str) {
+    let pools = f.state.db.collection::<Document>("oracle_pools");
+    let before = pools.find_one(doc! {"_id":pool_id}).await.unwrap().unwrap();
+    let mut headers = HeaderMap::new();
+    headers.insert("authorization", format!("Bearer {token}").parse().unwrap());
+    let response = crate::handlers::oracle_worker::heartbeat(
+        State(f.state.clone()),
+        headers,
+        Json(
+            serde_json::from_value(json!({
+                "worker":"consent-regression","instance_id":"consent-regression-instance"
+            }))
+            .unwrap(),
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(response.0.status, "ok");
+    let after = pools.find_one(doc! {"_id":pool_id}).await.unwrap().unwrap();
+    assert!(
+        after.get_i64("worker_enrollment_epoch").unwrap()
+            > before.get_i64("worker_enrollment_epoch").unwrap_or(0)
+    );
+    assert_eq!(
+        after.get("lifecycle_version"),
+        before.get("lifecycle_version")
+    );
+    assert_eq!(
+        after.get("installation_epoch"),
+        before.get("installation_epoch")
+    );
+}
+
+async fn oracle_native_admission(
+    f: &Fixture,
+    pool_id: &str,
+    owner: &str,
+    arguments: &Value,
+) -> Result<Option<crate::services::assistant_native_execution::ResourceAdmission>, Value> {
+    crate::services::assistant_native_execution::resource(
+        &f.state.db,
+        Some(&f.chat),
+        crate::services::assistant_native_execution::NativeResource {
+            collection: "oracle_pools",
+            id: pool_id,
+            owner,
+        },
+        "nyx__oracle_ask",
+        arguments,
+        acks::ActionFacts::of(acks::OwnerActionClass::Change),
+        "Submit the approved Oracle prompt",
+    )
+    .await
+    .unwrap()
 }
 
 #[tokio::test]
@@ -231,8 +293,8 @@ async fn oracle_http_person_platform_auto_proceeds_org_auto_asks_and_full_access
         .await
         .unwrap();
     let org = org(&f).await;
-    let personal_pool = pool(&f, &person, "person-public").await;
-    let org_pool = pool(&f, &org, "org-public").await;
+    let (personal_pool, _) = pool(&f, &person, "person-public").await;
+    let (org_pool, token) = pool(&f, &org, "org-public").await;
     let mut auth = f.auth.clone();
     auth.assistant_chat = Some(std::sync::Arc::new(f.chat.clone()));
     let body = || serde_json::from_value(json!({"prompt":"question"})).unwrap();
@@ -264,6 +326,42 @@ async fn oracle_http_person_platform_auto_proceeds_org_auto_asks_and_full_access
         .await
         .unwrap();
     assert_eq!(cards, 1);
+    let card = f
+        .state
+        .db
+        .collection::<AssistantAcknowledgement>("assistant_acknowledgements")
+        .find_one(doc! {"conversation_id":&f.row.id,"status":"pending"})
+        .await
+        .unwrap()
+        .unwrap();
+    // A real authenticated heartbeat advances the pool's transaction fence
+    // between card issuance and approval/redemption, without changing consent.
+    oracle_heartbeat(&f, &org_pool, &token).await;
+    acks::decide(&f.state.db, &f.owner, &f.row.id, &card.id, true)
+        .await
+        .unwrap();
+    let response = crate::handlers::oracle_tasks::submit_task(
+        State(f.state.clone()),
+        auth.clone(),
+        Path(org_pool.clone()),
+        Json(
+            serde_json::from_value(json!({"prompt":"question","acknowledgement_id":&card.id}))
+                .unwrap(),
+        ),
+    )
+    .await
+    .unwrap()
+    .into_response();
+    assert!(response.status().is_success());
+    let used = f
+        .state
+        .db
+        .collection::<Document>("assistant_acknowledgements")
+        .find_one(doc! {"_id":&card.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(used.get_str("status").unwrap(), "used");
     mode(&f, AccessMode::Autopilot).await;
     let response = crate::handlers::oracle_tasks::submit_task(
         State(f.state.clone()),
@@ -275,6 +373,102 @@ async fn oracle_http_person_platform_auto_proceeds_org_auto_asks_and_full_access
     .unwrap()
     .into_response();
     assert!(response.status().is_success());
+}
+
+#[tokio::test]
+async fn oracle_native_admission_survives_heartbeat_but_rejects_execution_drift() {
+    use crate::services::{audit_service::AuditActor, oracle_pool_service as pools};
+
+    test_utils::init_test_audit_chain_hmac_key();
+    for transfer in [false, true] {
+        let f = orchestrator_fixture("oracle_native_semantic_drift").await;
+        mode(&f, AccessMode::Nyxmode).await;
+        let owner = org(&f).await;
+        let destination = org(&f).await;
+        let (id, token) = pool(&f, &owner, "org-semantic-drift").await;
+        let mut pending_args = json!({"prompt":"pending operation"});
+        let pending_card = allow(
+            &f,
+            oracle_native_admission(&f, &id, &owner, &pending_args)
+                .await
+                .map(|_| ())
+                .unwrap_err(),
+        )
+        .await;
+        pending_args["acknowledgement_id"] = json!(&pending_card);
+
+        let mut held_args = json!({"prompt":"held operation"});
+        let held_card = allow(
+            &f,
+            oracle_native_admission(&f, &id, &owner, &held_args)
+                .await
+                .map(|_| ())
+                .unwrap_err(),
+        )
+        .await;
+        held_args["acknowledgement_id"] = json!(held_card);
+        let held = oracle_native_admission(&f, &id, &owner, &held_args)
+            .await
+            .unwrap_or_else(|refusal| panic!("approved operation refused: {refusal}"))
+            .unwrap();
+        oracle_heartbeat(&f, &id, &token).await;
+        held.revalidate(&f.state.db).await.unwrap();
+
+        let current_owner = if transfer {
+            pools::transfer_pool(
+                &f.state.db,
+                &AuditActor::from_auth_user(&f.auth),
+                &id,
+                pools::TransferPoolInput {
+                    owner_user_id: destination.clone(),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+            &destination
+        } else {
+            pools::update_pool(
+                &f.state.db,
+                &f.owner,
+                &id,
+                pools::UpdatePoolInput {
+                    default_model_label: Some("changed-model".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+            &owner
+        };
+        assert!(matches!(
+            held.revalidate(&f.state.db).await,
+            Err(AppError::Conflict(_))
+        ));
+        let refusal = oracle_native_admission(&f, &id, current_owner, &pending_args)
+            .await
+            .map(|_| ())
+            .expect_err("old approval must not authorize changed execution");
+        assert_eq!(refusal["error"], "acknowledgement_invalid");
+        let card = f
+            .state
+            .db
+            .collection::<Document>("assistant_acknowledgements")
+            .find_one(doc! {"_id":&pending_card})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(card.get_str("status").unwrap(), "allowed");
+        assert_eq!(
+            f.state
+                .db
+                .collection::<Document>("oracle_tasks")
+                .count_documents(doc! {"pool_id":&id})
+                .await
+                .unwrap(),
+            0
+        );
+    }
 }
 
 #[tokio::test]
