@@ -241,6 +241,15 @@ export function VoicePanel({
           useAuthStore.getState().user?.id !== startingActor
         )
           throw new Error("Your account changed. Start voice again.");
+        // The session request carries these preferences and revalidates access
+        // and funding. An unchanged saved selection needs no settings round trip.
+        if (
+          savedPreferences &&
+          (Object.keys(preferences) as (keyof VoicePreferences)[]).every(
+            (key) => preferences[key] === savedPreferences[key],
+          )
+        )
+          return;
         try {
           const settings = await nyxBotApi.updateSettings({
             voice: preferences,

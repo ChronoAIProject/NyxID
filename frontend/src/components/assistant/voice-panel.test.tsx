@@ -501,6 +501,63 @@ it("configuration does not capture/start; End retains next-call input choice in 
   );
 });
 
+it("starts with unchanged saved preferences without waiting for a redundant settings write", async () => {
+  useAuthStore.setState({
+    user: { id: "same-settings-owner" } as NonNullable<
+      ReturnType<typeof useAuthStore.getState>["user"]
+    >,
+  });
+  mock.connected = false;
+  mock.options = [voiceOption];
+  const saved = { ...voicePreferences, voice: "marin" };
+  const provider = vi.fn();
+  mock.start.mockImplementationOnce(
+    async (_prefs, _protocol, before: () => Promise<void>) => {
+      await before();
+      provider();
+    },
+  );
+  render(
+    <VoicePanel threadId="thread" savedPreferences={saved} onClose={vi.fn()} />,
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Start voice" }));
+  await waitFor(() => expect(provider).toHaveBeenCalledOnce());
+  expect(mock.save).not.toHaveBeenCalled();
+});
+
+it("the unchanged-preferences path still refuses a switched account", async () => {
+  useAuthStore.setState({
+    user: { id: "original-owner" } as NonNullable<
+      ReturnType<typeof useAuthStore.getState>["user"]
+    >,
+  });
+  mock.connected = false;
+  mock.options = [voiceOption];
+  let authorize!: () => Promise<void>;
+  mock.start.mockImplementationOnce(
+    async (_prefs, _protocol, before: () => Promise<void>) => {
+      authorize = before;
+    },
+  );
+  render(
+    <VoicePanel
+      threadId="thread"
+      savedPreferences={{ ...voicePreferences, voice: "marin" }}
+      onClose={vi.fn()}
+    />,
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Start voice" }));
+  act(() =>
+    useAuthStore.setState({
+      user: { id: "other-owner" } as NonNullable<
+        ReturnType<typeof useAuthStore.getState>["user"]
+      >,
+    }),
+  );
+  await expect(authorize()).rejects.toThrow("Your account changed");
+  expect(mock.save).not.toHaveBeenCalled();
+});
+
 it("confirmed preference save updates the actor cache so Close/reopen retains source and input mode", async () => {
   const actor = { id: "preference-owner" } as NonNullable<
     ReturnType<typeof useAuthStore.getState>["user"]

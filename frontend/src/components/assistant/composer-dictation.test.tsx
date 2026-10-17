@@ -11,6 +11,7 @@ import { useComposerDictation } from "./composer-dictation";
 import { ApiError } from "@/lib/api-client";
 const f = vi.hoisted(() => ({
   get: vi.fn(),
+  permission: Promise.resolve() as Promise<void>,
   clients: [] as {
     callbacks: {
       state: (value: string) => void;
@@ -32,6 +33,7 @@ vi.mock("@/lib/assistant-dictation-client", () => ({
     start = vi.fn(async (prepare: () => Promise<unknown>) => {
       this.callbacks.state("requesting");
       try {
+        await f.permission;
         await prepare();
       } catch {
         this.callbacks.error("Preparation failed");
@@ -86,6 +88,7 @@ beforeEach(() => {
   localStorage.clear();
   vi.clearAllMocks();
   f.clients = [];
+  f.permission = Promise.resolve();
   f.get.mockResolvedValue({ options: [voiceOption] });
   getThread.mockResolvedValue("thread-A");
   devices = [
@@ -117,6 +120,52 @@ afterEach(() => {
 function configure() {
   fireEvent.click(screen.getByRole("button", { name: "Configure dictation" }));
 }
+it("overlaps existing-thread option discovery with permission without preparing a draft early", async () => {
+  let grant!: () => void;
+  f.permission = new Promise<void>((resolve) => {
+    grant = resolve;
+  });
+  render(<Harness threadId="thread-A" />);
+  fireEvent.click(screen.getByRole("button", { name: "Dictate a message" }));
+  try {
+    expect(f.get).toHaveBeenCalledWith(
+      "/assistant/nyxagent/dictation/options?conversation_id=thread-A",
+    );
+    expect(getThread).not.toHaveBeenCalled();
+  } finally {
+    await act(async () => grant());
+  }
+  await waitFor(() => expect(getThread).toHaveBeenCalledOnce());
+  expect(f.get).toHaveBeenCalledOnce();
+});
+it("a denied permission consumes no draft and safely ignores failed early discovery", async () => {
+  let deny!: (error: Error) => void;
+  f.permission = new Promise<void>((_resolve, reject) => {
+    deny = reject;
+  });
+  f.get.mockRejectedValueOnce(new Error("Offline"));
+  render(<Harness threadId="thread-A" />);
+  fireEvent.click(screen.getByRole("button", { name: "Dictate a message" }));
+  await act(async () => {});
+  expect(f.get).toHaveBeenCalledOnce();
+  await act(async () => deny(new Error("Denied")));
+  expect(getThread).not.toHaveBeenCalled();
+  expect(
+    screen.getByRole("button", { name: "Dictate a message" }),
+  ).toBeInTheDocument();
+});
+it("cancel while permission is pending fences early discovery and late preparation", async () => {
+  let grant!: () => void;
+  f.permission = new Promise<void>((resolve) => {
+    grant = resolve;
+  });
+  render(<Harness threadId="thread-A" />);
+  fireEvent.click(screen.getByRole("button", { name: "Dictate a message" }));
+  fireEvent.click(screen.getByRole("button", { name: "Cancel dictation" }));
+  await act(async () => grant());
+  expect(getThread).not.toHaveBeenCalled();
+  expect(screen.queryByText("Preparation failed")).not.toBeInTheDocument();
+});
 it("crossing between trigger and popup keeps settings open; leaving closes and stops the microphone test", async () => {
   render(<Harness />);
   configure();
