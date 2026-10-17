@@ -588,6 +588,31 @@ fn real_codex_native_v2_discovery_readiness_faq_search_read_signup_answer_use_ac
                     assert_eq!(saved_turn.conversation_id, ready.turn.conversation_id);
                     assert_eq!(saved_turn.public_session_id, context.public_session_id);
                     assert_eq!(saved_turn.reply_id.as_deref(), Some(ready.reply_id.as_str()));
+                    if saved_turn.outcome.as_deref() != Some("settled") {
+                        let budget = db
+                            .collection::<PublicBudgetLoop>(LOOPS)
+                            .find_one(doc! {"turn_id":&ready.turn.turn_id})
+                            .await
+                            .unwrap();
+                        let budget = budget.map(|row|json!({
+                            "calls":row.calls,"tool_calls":row.tool_calls,
+                            "input_tokens":row.input_tokens,"output_tokens":row.output_tokens,
+                            "closed":row.closed,
+                        }));
+                        let provider_paths: Vec<_> = provider
+                            .received_requests()
+                            .await
+                            .unwrap()
+                            .iter()
+                            .map(|request|format!("{} {}",request.method,request.url.path()))
+                            .collect();
+                        eprintln!(
+                            "native public turn failed; callbacks={:?} mcp_calls={:?} budget={budget:?} provider_paths={provider_paths:?} runtime_log={}",
+                            callback_outcomes.lock().await,
+                            mcp_calls.lock().await,
+                            log_path.display(),
+                        );
+                    }
                     assert_eq!(
                         saved_turn.outcome.as_deref(),
                         Some("settled"),

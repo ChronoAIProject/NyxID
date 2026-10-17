@@ -1814,9 +1814,19 @@ async fn actual_upstream_discovery_readiness_and_four_call_default_budget_settle
         );
         assert!(meter.funding.as_ref().is_some_and(|f| f.settled));
     }
-    // Gross cap accounting retains each forwarded call's maximum even when
-    // settled wallet cost is lower. One call already leaves less than the
-    // next full-loop reserve at these selected rates and the approved 0.50 cap.
+    // The manual callback segment has no observed upstream session handle.
+    // Check its cap independently of the runtime's earlier ambiguity fence.
+    // Settled spend plus a new full-loop maximum exceeds the approved 0.50 cap.
+    assert!(settled.spent.checked_add(initial.maximum).unwrap() > "0.5".parse().unwrap());
+    let retained = fixture
+        .state
+        .db
+        .collection::<PlatformPublicSession>(SESSIONS)
+        .find_one(doc! {"_id":&context.public_session_id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(retained.upstream_may_exist && retained.upstream_binding_ciphertext.is_empty());
     let retry_ingress = fixture.ingress(1001).await;
     let retry_context = fixture
         .producers
@@ -1824,7 +1834,61 @@ async fn actual_upstream_discovery_readiness_and_four_call_default_budget_settle
         .prepare_public_context(&fixture.state.db, &retry_ingress)
         .await
         .unwrap();
-    let retry = runtime
+    assert_eq!(retry_context.public_session_id, context.public_session_id);
+    let buckets: Vec<Document> = fixture
+        .state
+        .db
+        .collection::<Document>(crate::models::platform_public_budget::BUCKETS)
+        .find(doc! {"_id":{"$in":&initial.bucket_ids}})
+        .sort(doc! {"_id":1})
+        .await
+        .unwrap()
+        .try_collect()
+        .await
+        .unwrap();
+    assert_eq!(buckets.len(), 2);
+    let mut cap_session = fixture.state.db.client().start_session().await.unwrap();
+    let retry = cap_session
+        .start_transaction()
+        .and_run2(async |session| {
+            let result: crate::errors::AppResult<_> = async {
+                let proof = crate::services::platform_public_policy::verified_context_in_session(
+                    &fixture.state.db,
+                    session,
+                    &retry_context,
+                )
+                .await?;
+                crate::services::platform_public_budget_service::reserve_loop_in_session(
+                    &fixture.state.db,
+                    session,
+                    &proof,
+                    &retry_context,
+                    &prepared.credential.api_key_id,
+                    initial.maximum,
+                    retry_context.limits.max_model_calls,
+                )
+                .await
+                .map(|_| ())
+            }
+            .await;
+            tx::transaction_result(result)
+        })
+        .await
+        .map_err(tx::map_transaction_error);
+    assert!(matches!(retry, Err(crate::errors::AppError::RateLimited)));
+    let after_buckets: Vec<Document> = fixture
+        .state
+        .db
+        .collection::<Document>(crate::models::platform_public_budget::BUCKETS)
+        .find(doc! {"_id":{"$in":&initial.bucket_ids}})
+        .sort(doc! {"_id":1})
+        .await
+        .unwrap()
+        .try_collect()
+        .await
+        .unwrap();
+    assert_eq!(after_buckets, buckets);
+    let ambiguous_retry = runtime
         .prepare(
             &fixture.state.db,
             &retry_context,
@@ -1833,7 +1897,27 @@ async fn actual_upstream_discovery_readiness_and_four_call_default_budget_settle
             },
         )
         .await;
-    assert!(matches!(retry, Err(crate::errors::AppError::RateLimited)));
+    assert!(
+        matches!(
+            ambiguous_retry,
+            Err(crate::errors::AppError::Conflict(ref reason))
+                if reason == "Public runtime unavailable; validate the deployed public contract before enabling"
+        ),
+        "a dispatched session without an observed handle must refuse reuse",
+    );
+    assert!(
+        fixture
+            .state
+            .db
+            .collection::<PlatformPublicSession>(SESSIONS)
+            .find_one(doc! {"_id":&retry_context.public_session_id})
+            .await
+            .unwrap()
+            .unwrap()
+            .active_turn
+            .is_none(),
+        "refused runtime preparation must release its exact turn lease",
+    );
     assert_eq!(fixture.provider.received_requests().await.unwrap().len(), 4);
     assert_eq!(fixture.wallet().await.reserved_credits, Credits::ZERO);
     assert!(
@@ -1857,6 +1941,7 @@ async fn actual_upstream_discovery_readiness_and_four_call_default_budget_settle
         .prepare_public_context(&fixture.state.db, &compact_ingress)
         .await
         .unwrap();
+    assert_ne!(compact_context.public_session_id, context.public_session_id);
     let compact_prepared = runtime
         .prepare(
             &fixture.state.db,
@@ -1867,6 +1952,7 @@ async fn actual_upstream_discovery_readiness_and_four_call_default_budget_settle
         )
         .await
         .unwrap();
+    assert!(compact_prepared.upstream_session_id.is_none());
     let compact_turn = fixture
         .state
         .db
@@ -2009,6 +2095,11 @@ async fn actual_upstream_discovery_readiness_and_four_call_default_budget_settle
         .prepare_public_context(&fixture.state.db, &live_ingress)
         .await
         .unwrap();
+    assert_ne!(live_context.public_session_id, context.public_session_id);
+    assert_ne!(
+        live_context.public_session_id,
+        compact_context.public_session_id
+    );
     let (events, mut received) = tokio::sync::mpsc::channel(8);
     fixture
         .producers
