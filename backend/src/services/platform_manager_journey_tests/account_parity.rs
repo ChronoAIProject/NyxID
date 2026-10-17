@@ -1054,21 +1054,27 @@ async fn two_accounts_keep_real_credentials_memory_tools_payers_and_web_continui
         .await
         .unwrap();
     assert_eq!(meters.len(), 3);
-    for meter in meters {
+    for meter in &meters {
         assert!(accounts.contains(&meter.billing_owner_id));
         assert_eq!(meter.actor_user_id, meter.billing_owner_id);
         assert_ne!(meter.billing_owner_id, j.owner);
         assert_eq!(meter.credential_class, CredentialClass::NoAuth);
         assert_eq!(meter.status, UsageStatus::Finalized);
-        let index = accounts
-            .iter()
-            .position(|a| a == &meter.billing_owner_id)
-            .unwrap();
-        assert_eq!(
-            meter.api_key_id.as_deref(),
-            Some(observed[index].2.as_str())
-        );
     }
+    // Native owner egress bills with its conversation key. The browser proxy
+    // retains human authentication even while forwarding that key to NyxAgent.
+    let mut identities = meters
+        .iter()
+        .map(|meter| (meter.billing_owner_id.as_str(), meter.api_key_id.as_deref()))
+        .collect::<Vec<_>>();
+    identities.sort_unstable();
+    let mut expected = [
+        (accounts[0].as_str(), Some(observed[0].2.as_str())),
+        (accounts[1].as_str(), Some(observed[1].2.as_str())),
+        (accounts[0].as_str(), None),
+    ];
+    expected.sort_unstable();
+    assert_eq!(identities, expected);
     upstream_task.abort();
     j.state.db.drop().await.unwrap();
 }
