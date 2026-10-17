@@ -24,6 +24,44 @@ pub fn token_exchange_client() -> &'static reqwest::Client {
     &TOKEN_EXCHANGE_CLIENT
 }
 
+/// Validate only the opt-in hosted authorization nonce contract. Legacy URLs
+/// and parameter names keep their existing behavior while the flag is off.
+pub fn validate_authorization_nonce_config(
+    required: bool,
+    authorization_url: Option<&str>,
+    client_id_param_name: Option<&str>,
+) -> AppResult<()> {
+    if !required {
+        return Ok(());
+    }
+    if client_id_param_name.is_some_and(|name| name.trim() == "nonce") {
+        return Err(AppError::ValidationError(
+            "client_id_param_name cannot be nonce when authorization_nonce_required is enabled"
+                .to_string(),
+        ));
+    }
+    let url = authorization_url
+        .and_then(|value| url::Url::parse(value).ok())
+        .ok_or_else(|| {
+            AppError::ValidationError(
+                "A valid authorization URL is required for authorization_nonce_required"
+                    .to_string(),
+            )
+        })?;
+    if url.fragment().is_some() {
+        return Err(AppError::ValidationError(
+            "authorization_url cannot contain a fragment when authorization_nonce_required is enabled".to_string(),
+        ));
+    }
+    if url.query_pairs().any(|(key, _)| key == "nonce") {
+        return Err(AppError::ValidationError(
+            "authorization_url cannot contain nonce when authorization_nonce_required is enabled"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
 pub fn expect_json_response(request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
     request.header(reqwest::header::ACCEPT, "application/json")
 }
@@ -421,6 +459,7 @@ mod tests {
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
+            authorization_nonce_required: false,
             requires_gateway_url: false,
             created_by: "test".to_string(),
             revocation_seed_version: 0,

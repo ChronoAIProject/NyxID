@@ -2570,6 +2570,7 @@ List all active provider configurations.
       "has_oauth_config": false,
       "default_scopes": null,
       "supports_pkce": false,
+      "authorization_nonce_required": false,
       "token_endpoint_auth_method": "client_secret_post",
       "extra_auth_params": null,
       "device_code_format": "rfc8628",
@@ -2618,6 +2619,7 @@ Register a new provider configuration. OAuth2 providers require additional field
 | `client_id`         | string   | OAuth2   | OAuth2 client ID (required for `oauth2` type, encrypted at rest)     |
 | `client_secret`     | string   | OAuth2   | OAuth2 client secret (required for `oauth2` type, encrypted at rest) |
 | `supports_pkce`     | boolean  | No       | Whether the provider supports PKCE (default: `false`)                |
+| `authorization_nonce_required` | boolean | No | Default `false`; generate a fresh nonce for each hosted OAuth2 authorization-code attempt. See the hosted nonce contract below. |
 | `token_endpoint_auth_method` | string | No | `client_secret_post` (default) or `client_secret_basic`             |
 | `extra_auth_params` | object   | No       | Extra authorization URL parameters (e.g., `{"access_type": "offline"}`) |
 | `device_code_url`   | string   | device_code | Device authorization endpoint (required for `device_code` type)   |
@@ -2629,6 +2631,14 @@ Register a new provider configuration. OAuth2 providers require additional field
 | `api_key_url`       | string   | No       | URL where users can create API keys                                  |
 | `icon_url`          | string   | No       | Provider icon/logo URL                                               |
 | `documentation_url` | string   | No       | Provider documentation URL                                           |
+
+**Hosted authorization nonce contract:** `authorization_nonce_required` is additive and default-off. Omitted create values become `false`; omitted updates preserve the stored value. Responses include the setting; consumers of older servers should treat a missing response field as `false`. Explicit `true` is rejected for provider types other than `oauth2`; missing/false remain valid. It is a client-bound OAuth setting under the existing Admin/Catalog Manager permission rules.
+
+When explicitly enabled, NyxID generates 32 cryptographically random bytes, encodes them as URL-safe base64 without padding, stores the value separately as `OAuthState.authorization_nonce`, and sends exactly that value once as `nonce` on the hosted OAuth2 authorization request. It is independent of OAuth state, PKCE and ChatConnect popup correlation. Enabled configurations reject authorization URLs containing a `nonce` query parameter (including a percent-encoded key) or a fragment, and reject `client_id_param_name` equal to `nonce` after trimming. Validation applies to the effective configuration on later URL/parameter edits too. `extra_auth_params` cannot override nonce, state or PKCE.
+
+This capability applies only to hosted OAuth2 authorization-code initiation, including ChatConnect and hosted connect links; node-owned OAuth and public login/OIDC have separate flows. Callback handling does not require a nonce or consume external ID tokens. Attempts started before activation remain valid, including legacy states without this field. Code exchange, refresh and revocation requests are unchanged; existing tokens need no migration or reconnection solely for this setting.
+
+Upgrade **all backend replicas before activation**: older initiators ignore the capability. Configure Hubstaff explicitly after upgrade while retaining `hubstaff:read`, PKCE S256 and the existing client authentication. No `openid` scope or provider-slug inference is needed. This contract does not establish live Hubstaff validation.
 
 **Slug Validation:** Must contain only lowercase letters, digits, and hyphens. No leading, trailing, or consecutive hyphens.
 
@@ -2757,6 +2767,7 @@ Update a provider configuration. Only the provided fields are updated (partial u
 | `client_id`         | string   | No       | OAuth2 client ID (encrypted at rest)                 |
 | `client_secret`     | string   | No       | OAuth2 client secret (encrypted at rest)             |
 | `supports_pkce`     | boolean  | No       | PKCE support flag                                    |
+| `authorization_nonce_required` | boolean | No | Set or clear the hosted OAuth2 authorization nonce capability. Omission preserves the stored setting. |
 | `token_endpoint_auth_method` | string | No | `client_secret_post` or `client_secret_basic`       |
 | `extra_auth_params` | object   | No       | Extra authorization URL parameters                   |
 | `device_code_url`   | string   | No       | Device authorization endpoint                        |

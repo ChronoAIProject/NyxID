@@ -512,6 +512,7 @@ pub async fn seed_default_providers(
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
+            authorization_nonce_required: false,
             requires_gateway_url: false,
             created_by: "system".to_string(),
             revocation_seed_version: 0,
@@ -567,6 +568,7 @@ pub async fn seed_default_providers(
             )])),
             device_code_format: "rfc8628".into(),
             client_id_param_name: None,
+            authorization_nonce_required: false,
             requires_gateway_url: false,
             created_by: "system".into(),
             revocation_seed_version: 0,
@@ -613,6 +615,7 @@ pub async fn seed_default_providers(
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
+            authorization_nonce_required: false,
             requires_gateway_url: false,
             created_by: "system".to_string(),
             revocation_seed_version: 0,
@@ -717,6 +720,7 @@ pub async fn seed_default_providers(
             extra_auth_params: None,
             device_code_format: "openai".to_string(),
             client_id_param_name: None,
+            authorization_nonce_required: false,
             requires_gateway_url: false,
             created_by: "system".to_string(),
             revocation_seed_version: 0,
@@ -765,6 +769,7 @@ pub async fn seed_default_providers(
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
+            authorization_nonce_required: false,
             requires_gateway_url: false,
             created_by: "system".to_string(),
             revocation_seed_version: 0,
@@ -812,6 +817,7 @@ pub async fn seed_default_providers(
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
+            authorization_nonce_required: false,
             requires_gateway_url: false,
             created_by: "system".to_string(),
             revocation_seed_version: 0,
@@ -859,6 +865,7 @@ pub async fn seed_default_providers(
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
+            authorization_nonce_required: false,
             requires_gateway_url: false,
             created_by: "system".to_string(),
             revocation_seed_version: 0,
@@ -909,6 +916,7 @@ pub async fn seed_default_providers(
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
+            authorization_nonce_required: false,
             requires_gateway_url: false,
             created_by: "system".to_string(),
             revocation_seed_version: 0,
@@ -956,6 +964,7 @@ pub async fn seed_default_providers(
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
+            authorization_nonce_required: false,
             requires_gateway_url: false,
             created_by: "system".to_string(),
             revocation_seed_version: 0,
@@ -1003,6 +1012,7 @@ pub async fn seed_default_providers(
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
+            authorization_nonce_required: false,
             requires_gateway_url: false,
             created_by: "system".to_string(),
             revocation_seed_version: 0,
@@ -1054,6 +1064,7 @@ pub async fn seed_default_providers(
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
+            authorization_nonce_required: false,
             requires_gateway_url: false,
             created_by: "system".to_string(),
             revocation_seed_version: 0,
@@ -1111,6 +1122,7 @@ pub async fn seed_default_providers(
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
+            authorization_nonce_required: false,
             requires_gateway_url: true,
             created_by: "system".to_string(),
             revocation_seed_version: 0,
@@ -1208,6 +1220,7 @@ pub async fn seed_default_providers(
                 .then(|| HashMap::from([("prompt".to_string(), "consent".to_string())])),
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
+            authorization_nonce_required: false,
             requires_gateway_url: false,
             created_by: "system".to_string(),
             revocation_seed_version: i32::from(slug == "cloudflare"),
@@ -1259,6 +1272,7 @@ pub async fn seed_default_providers(
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
+            authorization_nonce_required: false,
             requires_gateway_url: false,
             created_by: "system".to_string(),
             revocation_seed_version: 0,
@@ -1312,6 +1326,7 @@ pub async fn seed_default_providers(
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
+            authorization_nonce_required: false,
             requires_gateway_url: false,
             created_by: "system".to_string(),
             revocation_seed_version: 0,
@@ -1363,6 +1378,7 @@ pub async fn seed_default_providers(
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
+            authorization_nonce_required: false,
             requires_gateway_url: false,
             created_by: "system".to_string(),
             revocation_seed_version: 0,
@@ -1414,6 +1430,7 @@ pub async fn seed_default_providers(
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
+            authorization_nonce_required: false,
             requires_gateway_url: false,
             created_by: "system".to_string(),
             revocation_seed_version: 0,
@@ -1476,6 +1493,7 @@ pub async fn seed_default_providers(
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
+            authorization_nonce_required: false,
             requires_gateway_url: false,
             created_by: "system".to_string(),
             revocation_seed_version: 1,
@@ -1643,6 +1661,7 @@ pub async fn seed_default_providers(
             ])),
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
+            authorization_nonce_required: false,
             requires_gateway_url: false,
             created_by: "system".to_string(),
             revocation_seed_version: 1,
@@ -1697,6 +1716,7 @@ pub async fn seed_default_providers(
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
+            authorization_nonce_required: false,
             requires_gateway_url: false,
             created_by: "system".to_string(),
             revocation_seed_version: 1,
@@ -1755,6 +1775,7 @@ pub async fn seed_default_providers(
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
+            authorization_nonce_required: false,
             requires_gateway_url: false,
             created_by: "system".to_string(),
             revocation_seed_version: 0,
@@ -1808,6 +1829,7 @@ pub async fn seed_default_providers(
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
+            authorization_nonce_required: false,
             requires_gateway_url: false,
             created_by: "system".to_string(),
             revocation_seed_version: 1,
@@ -1861,6 +1883,7 @@ pub async fn seed_default_providers(
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
+            authorization_nonce_required: false,
             requires_gateway_url: false,
             created_by: "system".to_string(),
             revocation_seed_version: 1,
@@ -1911,6 +1934,7 @@ pub async fn seed_default_providers(
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
+            authorization_nonce_required: false,
             requires_gateway_url: false,
             created_by: "system".to_string(),
             revocation_seed_version: 0,
@@ -1973,6 +1997,7 @@ pub async fn seed_default_providers(
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
+            authorization_nonce_required: false,
             requires_gateway_url: false,
             created_by: "system".to_string(),
             revocation_seed_version: 1,
@@ -2027,6 +2052,7 @@ pub async fn seed_default_providers(
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
+            authorization_nonce_required: false,
             requires_gateway_url: false,
             created_by: "system".to_string(),
             revocation_seed_version: 1,
@@ -2084,6 +2110,7 @@ pub async fn seed_default_providers(
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
+            authorization_nonce_required: false,
             requires_gateway_url: false,
             created_by: "system".to_string(),
             revocation_seed_version: 0,
@@ -2154,6 +2181,7 @@ pub async fn seed_default_providers(
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: Some("client_key".to_string()),
+            authorization_nonce_required: false,
             requires_gateway_url: false,
             created_by: "system".to_string(),
             revocation_seed_version: 1,
@@ -2205,6 +2233,7 @@ pub async fn seed_default_providers(
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
+            authorization_nonce_required: false,
             requires_gateway_url: false,
             created_by: "system".to_string(),
             revocation_seed_version: 1,
@@ -2259,6 +2288,7 @@ pub async fn seed_default_providers(
             )])),
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
+            authorization_nonce_required: false,
             requires_gateway_url: false,
             created_by: "system".to_string(),
             revocation_seed_version: 1,
@@ -2354,6 +2384,7 @@ pub async fn seed_default_providers(
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
+            authorization_nonce_required: false,
             requires_gateway_url: false,
             created_by: "system".to_string(),
             revocation_seed_version: 0,
@@ -2407,6 +2438,7 @@ pub async fn seed_default_providers(
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
+            authorization_nonce_required: false,
             requires_gateway_url: false,
             created_by: "system".to_string(),
             revocation_seed_version: 0,
@@ -2455,6 +2487,7 @@ pub async fn seed_default_providers(
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
+            authorization_nonce_required: false,
             requires_gateway_url: false,
             created_by: "system".to_string(),
             revocation_seed_version: 0,
@@ -2505,6 +2538,7 @@ pub async fn seed_default_providers(
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
+            authorization_nonce_required: false,
             requires_gateway_url: false,
             created_by: "system".to_string(),
             revocation_seed_version: 0,
@@ -2566,6 +2600,7 @@ pub async fn seed_default_providers(
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
+            authorization_nonce_required: false,
             requires_gateway_url: false,
             created_by: "system".to_string(),
             revocation_seed_version: 0,
@@ -2624,6 +2659,7 @@ pub async fn seed_default_providers(
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
+            authorization_nonce_required: false,
             requires_gateway_url: false,
             created_by: "system".to_string(),
             revocation_seed_version: 0,
@@ -2684,6 +2720,7 @@ pub async fn seed_default_providers(
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
+            authorization_nonce_required: false,
             requires_gateway_url: false,
             created_by: "system".to_string(),
             revocation_seed_version: 0,
@@ -2745,6 +2782,7 @@ pub async fn seed_default_providers(
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
+            authorization_nonce_required: false,
             requires_gateway_url: false,
             created_by: "system".to_string(),
             revocation_seed_version: 0,
@@ -2792,6 +2830,7 @@ pub async fn seed_default_providers(
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
+            authorization_nonce_required: false,
             requires_gateway_url: false,
             created_by: "system".to_string(),
             revocation_seed_version: 0,
@@ -2847,6 +2886,7 @@ pub async fn seed_default_providers(
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
+            authorization_nonce_required: false,
             requires_gateway_url: true,
             created_by: "system".to_string(),
             revocation_seed_version: 0,
@@ -2898,6 +2938,7 @@ pub async fn seed_default_providers(
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
+            authorization_nonce_required: false,
             requires_gateway_url: false,
             created_by: "system".to_string(),
             revocation_seed_version: 0,
@@ -2960,6 +3001,7 @@ pub async fn seed_default_providers(
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
+            authorization_nonce_required: false,
             requires_gateway_url: false,
             created_by: "system".to_string(),
             revocation_seed_version: 1,
@@ -3031,6 +3073,7 @@ pub async fn seed_default_providers(
             extra_auth_params: Some(HashMap::from([("owner".to_string(), "user".to_string())])),
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
+            authorization_nonce_required: false,
             requires_gateway_url: false,
             created_by: "system".to_string(),
             revocation_seed_version: 1,
@@ -3125,6 +3168,7 @@ pub async fn seed_default_providers(
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
+            authorization_nonce_required: false,
             requires_gateway_url: false,
             created_by: "system".to_string(),
             revocation_seed_version: 0,
@@ -3196,6 +3240,7 @@ pub async fn seed_default_providers(
             ])),
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
+            authorization_nonce_required: false,
             requires_gateway_url: false,
             created_by: "system".to_string(),
             revocation_seed_version: 1,
@@ -3280,6 +3325,7 @@ pub async fn seed_default_providers(
             }),
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: seed.client_id_param_name.map(str::to_string),
+            authorization_nonce_required: false,
             requires_gateway_url: false,
             created_by: "system".to_string(),
             revocation_seed_version: 0,
@@ -7030,6 +7076,7 @@ pub struct ProviderUpdateInput {
     pub client_id: Option<String>,
     pub client_secret: Option<String>,
     pub supports_pkce: Option<bool>,
+    pub authorization_nonce_required: Option<bool>,
     pub device_code_url: Option<String>,
     pub device_token_url: Option<String>,
     pub device_verification_url: Option<String>,
@@ -7049,6 +7096,41 @@ pub struct ProviderUpdateInput {
     /// are rejected. Incident-response path for a compromised connector
     /// secret (docs/ONE_CLICK_OAUTH_CONNECTORS_SPEC.md B5).
     pub clear_client_credentials: Option<bool>,
+}
+
+/// Only fence values whose concurrent change could invalidate nonce validation.
+/// Disabled URL edits may race with each other; explicit disabling needs no guard.
+fn authorization_nonce_update_guard(
+    existing: &ProviderConfig,
+    updates: &ProviderUpdateInput,
+) -> Option<bson::Document> {
+    if existing.provider_type != "oauth2"
+        || updates.authorization_nonce_required == Some(false)
+        || (updates.authorization_nonce_required.is_none()
+            && updates.authorization_url.is_none()
+            && updates.client_id_param_name.is_none())
+    {
+        return None;
+    }
+    let mut guard = doc! {
+        "authorization_nonce_required": if existing.authorization_nonce_required {
+            bson::Bson::Boolean(true)
+        } else {
+            bson::Bson::Document(doc! { "$ne": true })
+        },
+    };
+    if updates
+        .authorization_nonce_required
+        .unwrap_or(existing.authorization_nonce_required)
+    {
+        // Compare actual fields as well as updated_at: BSON clocks have ms precision.
+        guard.insert("authorization_url", existing.authorization_url.as_deref());
+        guard.insert(
+            "client_id_param_name",
+            existing.client_id_param_name.as_deref(),
+        );
+    }
+    Some(guard)
 }
 
 /// Create a new provider configuration. Admin only.
@@ -7097,6 +7179,7 @@ pub async fn create_provider(
         None,
         HashMap::new(),
         true,
+        false,
     )
     .await
 }
@@ -7125,7 +7208,23 @@ pub async fn create_provider_with_revocation(
     token_request_encoding: Option<String>,
     oauth_request_headers: HashMap<String, String>,
     supports_oauth_scopes: bool,
+    authorization_nonce_required: bool,
 ) -> AppResult<ProviderConfig> {
+    if authorization_nonce_required && provider_type != "oauth2" {
+        return Err(AppError::ValidationError(
+            "authorization_nonce_required is only supported for hosted oauth2 providers"
+                .to_string(),
+        ));
+    }
+    if provider_type == "oauth2" {
+        super::oauth_flow::validate_authorization_nonce_config(
+            authorization_nonce_required,
+            oauth_config
+                .as_ref()
+                .map(|config| config.authorization_url.as_str()),
+            client_id_param_name,
+        )?;
+    }
     validate_oauth_request_options(
         token_request_encoding.as_deref(),
         Some(&oauth_request_headers),
@@ -7293,6 +7392,7 @@ pub async fn create_provider_with_revocation(
         extra_auth_params,
         device_code_format: device_code_format.unwrap_or("rfc8628").to_string(),
         client_id_param_name: normalized_client_id_param_name,
+        authorization_nonce_required,
         requires_gateway_url: false,
         created_by: created_by.to_string(),
         revocation_seed_version: i32::from(has_admin_revocation),
@@ -7393,6 +7493,27 @@ pub async fn update_provider_if_unchanged(
         return Err(AppError::ValidationError(
             "credential_mode only applies to oauth2/device_code providers; omit it or set \"admin\" for api_key providers".to_string(),
         ));
+    }
+    if updates.authorization_nonce_required == Some(true) && existing.provider_type != "oauth2" {
+        return Err(AppError::ValidationError(
+            "authorization_nonce_required is only supported for hosted oauth2 providers"
+                .to_string(),
+        ));
+    }
+    if existing.provider_type == "oauth2" {
+        super::oauth_flow::validate_authorization_nonce_config(
+            updates
+                .authorization_nonce_required
+                .unwrap_or(existing.authorization_nonce_required),
+            updates
+                .authorization_url
+                .as_deref()
+                .or(existing.authorization_url.as_deref()),
+            updates
+                .client_id_param_name
+                .as_deref()
+                .or(existing.client_id_param_name.as_deref()),
+        )?;
     }
     let revocation_update = match updates.revocation.clone() {
         Some(explicit) => Some(explicit),
@@ -7539,6 +7660,9 @@ pub async fn update_provider_if_unchanged(
             },
         );
     }
+    if let Some(required) = updates.authorization_nonce_required {
+        set_doc.insert("authorization_nonce_required", required);
+    }
     if let Some(pkce) = updates.supports_pkce {
         set_doc.insert("supports_pkce", pkce);
     }
@@ -7682,6 +7806,12 @@ pub async fn update_provider_if_unchanged(
         filter.insert("updated_at", bson::DateTime::from_chrono(observed));
     }
 
+    let nonce_guard = authorization_nonce_update_guard(&existing, &updates);
+    let nonce_config_update = nonce_guard.is_some();
+    if let Some(guard) = nonce_guard {
+        filter.extend(guard);
+    }
+
     let updated = db
         .collection::<ProviderConfig>(COLLECTION_NAME)
         .find_one_and_update(filter, update_doc)
@@ -7690,18 +7820,42 @@ pub async fn update_provider_if_unchanged(
                 .return_document(ReturnDocument::After)
                 .build(),
         )
-        .await?
-        .ok_or_else(|| match observed_updated_at {
-            Some(_) => AppError::Conflict(
-                "The provider changed while this update was being checked; reload and try again"
-                    .to_string(),
-            ),
-            None => AppError::NotFound("Provider not found".to_string()),
-        })?;
+        .await?;
+    let Some(updated) = updated else {
+        return Err(provider_update_miss_error(
+            db,
+            provider_id,
+            observed_updated_at.is_some(),
+            nonce_config_update,
+        )
+        .await?);
+    };
 
     tracing::info!(provider_id = %provider_id, "Provider config updated");
 
     Ok(updated)
+}
+
+async fn provider_update_miss_error(
+    db: &mongodb::Database,
+    provider_id: &str,
+    version_fenced: bool,
+    nonce_config_update: bool,
+) -> AppResult<AppError> {
+    if !version_fenced
+        && (!nonce_config_update
+            || db
+                .collection::<ProviderConfig>(COLLECTION_NAME)
+                .find_one(doc! { "_id": provider_id })
+                .await?
+                .is_none())
+    {
+        return Ok(AppError::NotFound("Provider not found".to_string()));
+    }
+    Ok(AppError::Conflict(
+        "The provider changed while this update was being checked; reload and try again"
+            .to_string(),
+    ))
 }
 
 pub(crate) fn normalize_telegram_bot_username(raw: &str) -> AppResult<String> {
@@ -8571,6 +8725,7 @@ mod tests {
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
+            authorization_nonce_required: false,
             requires_gateway_url: false,
             created_by: "system".to_string(),
             revocation_seed_version: 0,
@@ -9701,6 +9856,7 @@ mod tests {
                 client_id: None,
                 client_secret: None,
                 supports_pkce: None,
+                authorization_nonce_required: None,
                 device_code_url: None,
                 device_token_url: None,
                 device_verification_url: None,
@@ -9777,6 +9933,7 @@ mod tests {
                 client_id: None,
                 client_secret: None,
                 supports_pkce: None,
+                authorization_nonce_required: None,
                 device_code_url: None,
                 device_token_url: None,
                 device_verification_url: None,
@@ -9824,6 +9981,7 @@ mod tests {
                 client_id: None,
                 client_secret: None,
                 supports_pkce: None,
+                authorization_nonce_required: None,
                 device_code_url: None,
                 device_token_url: None,
                 device_verification_url: None,
@@ -9903,6 +10061,7 @@ mod tests {
                 client_id: None,
                 client_secret: None,
                 supports_pkce: None,
+                authorization_nonce_required: None,
                 device_code_url: None,
                 device_token_url: None,
                 device_verification_url: None,
@@ -9974,6 +10133,7 @@ mod tests {
                 client_id: None,
                 client_secret: None,
                 supports_pkce: None,
+                authorization_nonce_required: None,
                 device_code_url: None,
                 device_token_url: None,
                 device_verification_url: None,
@@ -10030,6 +10190,7 @@ mod tests {
                 client_id: None,
                 client_secret: None,
                 supports_pkce: None,
+                authorization_nonce_required: None,
                 device_code_url: None,
                 device_token_url: None,
                 device_verification_url: None,
@@ -10101,6 +10262,7 @@ mod tests {
                 client_id: None,
                 client_secret: None,
                 supports_pkce: None,
+                authorization_nonce_required: None,
                 device_code_url: None,
                 device_token_url: None,
                 device_verification_url: None,
@@ -10172,6 +10334,7 @@ mod tests {
                 client_id: None,
                 client_secret: None,
                 supports_pkce: None,
+                authorization_nonce_required: None,
                 device_code_url: None,
                 device_token_url: None,
                 device_verification_url: None,
@@ -10252,6 +10415,7 @@ mod tests {
                 client_id: Some("my-client-id".to_string()),
                 client_secret: Some("my-secret".to_string()),
                 supports_pkce: None,
+                authorization_nonce_required: None,
                 device_code_url: None,
                 device_token_url: None,
                 device_verification_url: None,
@@ -10338,6 +10502,7 @@ mod tests {
                 client_id: None,
                 client_secret: None,
                 supports_pkce: Some(true),
+                authorization_nonce_required: None,
                 device_code_url: Some("https://new.example.com/device".to_string()),
                 device_token_url: Some("https://new.example.com/devtoken".to_string()),
                 device_verification_url: Some("https://new.example.com/verify".to_string()),
@@ -10414,6 +10579,341 @@ mod tests {
         assert!(updated.extra_auth_params.is_some());
     }
 
+    #[tokio::test]
+    async fn authorization_nonce_provider_crud_preserves_omissions_and_validates_effective_config()
+    {
+        let db = connect_test_database("auth_nonce_crud")
+            .await
+            .expect("MongoDB required");
+        let enc = test_encryption_keys();
+        let provider = create_oauth_provider_with_revocation(&db, None, None).await;
+        assert!(!provider.authorization_nonce_required);
+        let update =
+            |required, url: Option<&str>, param: Option<&str>| super::ProviderUpdateInput {
+                authorization_nonce_required: required,
+                authorization_url: url.map(str::to_string),
+                client_id_param_name: param.map(str::to_string),
+                ..Default::default()
+            };
+        for (url, param) in [
+            (Some("https://example.com/auth?nonce=static"), None),
+            (Some("https://example.com/auth?%6eonce="), None),
+            (Some("https://example.com/auth#fragment"), None),
+            (None, Some(" nonce ")),
+        ] {
+            assert!(matches!(
+                super::update_provider(&db, &enc, &provider.id, update(Some(true), url, param))
+                    .await,
+                Err(AppError::ValidationError(_))
+            ));
+            assert!(
+                !super::get_provider(&db, &provider.id)
+                    .await
+                    .unwrap()
+                    .authorization_nonce_required
+            );
+        }
+        super::update_provider(&db, &enc, &provider.id, update(Some(true), None, None))
+            .await
+            .unwrap();
+        let renamed = super::update_provider(
+            &db,
+            &enc,
+            &provider.id,
+            super::ProviderUpdateInput {
+                name: Some("Older client changed name".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert!(renamed.authorization_nonce_required);
+        for changes in [
+            update(None, Some("https://example.com/auth?nonce=static"), None),
+            update(None, Some("https://example.com/auth?%6eonce="), None),
+            update(None, Some("https://example.com/auth#fragment"), None),
+            update(None, None, Some(" nonce ")),
+        ] {
+            assert!(matches!(
+                super::update_provider(&db, &enc, &provider.id, changes).await,
+                Err(AppError::ValidationError(_))
+            ));
+        }
+        let cleared =
+            super::update_provider(&db, &enc, &provider.id, update(None, None, Some("  ")))
+                .await
+                .unwrap();
+        assert_eq!(cleared.client_id_param_name, None);
+        let disabled = super::update_provider(
+            &db,
+            &enc,
+            &provider.id,
+            update(
+                Some(false),
+                Some("https://example.com/auth?nonce=legacy#legacy"),
+                Some(" nonce "),
+            ),
+        )
+        .await
+        .unwrap();
+        assert!(!disabled.authorization_nonce_required);
+        assert_eq!(disabled.client_id_param_name.as_deref(), Some("nonce"));
+        assert!(
+            super::update_provider(&db, &enc, &provider.id, update(Some(true), None, None))
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn authorization_nonce_create_rejects_conflicts_before_persistence_and_non_oauth2() {
+        let db = connect_test_database("auth_nonce_create")
+            .await
+            .expect("MongoDB required");
+        let enc = test_encryption_keys();
+        for (provider_type, required, endpoint, param, valid) in [
+            ("oauth2", true, "https://example.com/auth", None, true),
+            (
+                "oauth2",
+                true,
+                "https://example.com/auth?nonce=x",
+                None,
+                false,
+            ),
+            (
+                "oauth2",
+                true,
+                "https://example.com/auth?%6eonce=x",
+                None,
+                false,
+            ),
+            ("oauth2", true, "https://example.com/auth#x", None, false),
+            (
+                "oauth2",
+                true,
+                "https://example.com/auth",
+                Some(" nonce "),
+                false,
+            ),
+            (
+                "oauth2",
+                false,
+                "https://example.com/auth?nonce=x#x",
+                Some("nonce"),
+                true,
+            ),
+            ("api_key", true, "https://example.com/auth", None, false),
+            ("api_key", false, "https://example.com/auth", None, true),
+            ("device_code", true, "https://example.com/auth", None, false),
+            (
+                "telegram_widget",
+                true,
+                "https://example.com/auth",
+                None,
+                false,
+            ),
+        ] {
+            let slug = Uuid::new_v4().to_string();
+            let created = super::create_provider_with_revocation(
+                &db,
+                &enc,
+                "Nonce test",
+                &slug,
+                provider_type,
+                if provider_type == "oauth2" {
+                    "user"
+                } else {
+                    "admin"
+                },
+                "client_secret_post",
+                (provider_type == "oauth2").then(|| super::OAuthProviderInput {
+                    authorization_url: endpoint.into(),
+                    token_url: "https://example.com/token".into(),
+                    revocation_url: None,
+                    default_scopes: Some(vec!["hubstaff:read".into()]),
+                    client_id: None,
+                    client_secret: None,
+                    supports_pkce: true,
+                }),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                "admin",
+                None,
+                None,
+                param,
+                None,
+                None,
+                Default::default(),
+                true,
+                required,
+            )
+            .await;
+            assert_eq!(
+                created.is_ok(),
+                valid,
+                "{provider_type} {required} {endpoint} {param:?}"
+            );
+            assert_eq!(
+                db.collection::<ProviderConfig>(COLLECTION_NAME)
+                    .count_documents(doc! {"slug":&slug})
+                    .await
+                    .unwrap(),
+                u64::from(valid)
+            );
+            if let Ok(provider) = created {
+                assert_eq!(provider.authorization_nonce_required, required);
+                if provider_type == "api_key" {
+                    assert!(matches!(
+                        super::update_provider(
+                            &db,
+                            &enc,
+                            &provider.id,
+                            super::ProviderUpdateInput {
+                                authorization_nonce_required: Some(true),
+                                ..Default::default()
+                            }
+                        )
+                        .await,
+                        Err(AppError::ValidationError(_))
+                    ));
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn authorization_nonce_update_guards_detect_concurrent_enable_and_config_edits() {
+        let db = connect_test_database("auth_nonce_guards")
+            .await
+            .expect("MongoDB required");
+        let provider = create_oauth_provider_with_revocation(&db, None, None).await;
+        let url_edit = super::ProviderUpdateInput {
+            authorization_url: Some("https://example.com/new".into()),
+            ..Default::default()
+        };
+        let enable = super::ProviderUpdateInput {
+            authorization_nonce_required: Some(true),
+            ..Default::default()
+        };
+        let mut disabled_guard =
+            super::authorization_nonce_update_guard(&provider, &url_edit).unwrap();
+        assert_eq!(
+            disabled_guard,
+            doc! {"authorization_nonce_required":{"$ne":true}}
+        );
+        let mut enabled_guard =
+            super::authorization_nonce_update_guard(&provider, &enable).unwrap();
+        assert!(enabled_guard.contains_key("authorization_url"));
+        assert!(enabled_guard.contains_key("client_id_param_name"));
+        assert!(
+            super::authorization_nonce_update_guard(
+                &provider,
+                &super::ProviderUpdateInput::default()
+            )
+            .is_none()
+        );
+        assert!(
+            super::authorization_nonce_update_guard(
+                &provider,
+                &super::ProviderUpdateInput {
+                    authorization_nonce_required: Some(false),
+                    authorization_url: Some("https://example.com/auth?nonce=legacy".into()),
+                    ..Default::default()
+                }
+            )
+            .is_none()
+        );
+        disabled_guard.insert("_id", &provider.id);
+        enabled_guard.insert("_id", &provider.id);
+        let rows = db.collection::<bson::Document>(COLLECTION_NAME);
+        // Keep updated_at identical: actual field comparisons must detect drift.
+        rows.update_one(
+            doc! {"_id":&provider.id},
+            doc! {"$set":{"authorization_url":"https://example.com/concurrent?nonce=static"}},
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            rows.update_one(
+                enabled_guard,
+                doc! {"$set":{"authorization_nonce_required":true}}
+            )
+            .await
+            .unwrap()
+            .matched_count,
+            0
+        );
+        // Ordinary disabled edits retain their previous concurrency behavior.
+        assert_eq!(
+            rows.update_one(
+                disabled_guard.clone(),
+                doc! {"$set":{"authorization_url":"https://example.com/other"}}
+            )
+            .await
+            .unwrap()
+            .matched_count,
+            1
+        );
+        rows.update_one(
+            doc! {"_id":&provider.id},
+            doc! {"$set":{"authorization_nonce_required":true}},
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            rows.update_one(
+                disabled_guard,
+                doc! {"$set":{"authorization_url":"https://example.com/auth?nonce=static"}}
+            )
+            .await
+            .unwrap()
+            .matched_count,
+            0
+        );
+        let enabled = super::get_provider(&db, &provider.id).await.unwrap();
+        let mut edit_guard = super::authorization_nonce_update_guard(&enabled, &url_edit).unwrap();
+        edit_guard.insert("_id", &provider.id);
+        rows.update_one(
+            doc! {"_id":&provider.id},
+            doc! {"$set":{"client_id_param_name":"app_id"}},
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            rows.update_one(
+                edit_guard,
+                doc! {"$set":{"authorization_url":"https://example.com/new"}}
+            )
+            .await
+            .unwrap()
+            .matched_count,
+            0
+        );
+        assert!(matches!(
+            super::provider_update_miss_error(&db, &provider.id, false, true)
+                .await
+                .unwrap(),
+            AppError::Conflict(_)
+        ));
+        rows.delete_one(doc! {"_id":&provider.id}).await.unwrap();
+        assert!(matches!(
+            super::provider_update_miss_error(&db, &provider.id, false, true)
+                .await
+                .unwrap(),
+            AppError::NotFound(_)
+        ));
+        assert!(matches!(
+            super::provider_update_miss_error(&db, &provider.id, true, true)
+                .await
+                .unwrap(),
+            AppError::Conflict(_)
+        ));
+    }
+
     async fn create_oauth_provider_with_revocation(
         db: &mongodb::Database,
         legacy_revocation_url: Option<&str>,
@@ -10452,6 +10952,7 @@ mod tests {
             None,
             Default::default(),
             true,
+            false,
         )
         .await
         .expect("provider should be created")
@@ -12491,6 +12992,7 @@ mod tests {
                 client_id: None,
                 client_secret: None,
                 supports_pkce: None,
+                authorization_nonce_required: None,
                 device_code_url: None,
                 device_token_url: None,
                 device_verification_url: None,
@@ -12574,6 +13076,7 @@ mod tests {
                 client_id: None,
                 client_secret: None,
                 supports_pkce: None,
+                authorization_nonce_required: None,
                 device_code_url: None,
                 device_token_url: None,
                 device_verification_url: None,
@@ -12614,6 +13117,7 @@ mod tests {
                 client_id: None,
                 client_secret: None,
                 supports_pkce: None,
+                authorization_nonce_required: None,
                 device_code_url: None,
                 device_token_url: None,
                 device_verification_url: None,
@@ -12689,6 +13193,7 @@ mod tests {
                     client_id: None,
                     client_secret: None,
                     supports_pkce: None,
+                    authorization_nonce_required: None,
                     device_code_url: None,
                     device_token_url: None,
                     device_verification_url: None,
@@ -12872,6 +13377,7 @@ mod tests {
                 client_id: None,
                 client_secret: None,
                 supports_pkce: None,
+                authorization_nonce_required: None,
                 device_code_url: None,
                 device_token_url: None,
                 device_verification_url: None,
