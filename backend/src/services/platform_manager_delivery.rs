@@ -2406,6 +2406,15 @@ mod native_render_tests {
 mod future_size_tests {
     use super::*;
 
+    type SendArgs = (
+        &'static AppState,
+        Arc<dyn ManagerIdentityProducer>,
+        Option<Arc<dyn PublicTurnProducer>>,
+        Delivery,
+        Zeroizing<String>,
+        &'static super::super::telegram_new_api::TelegramApi<'static>,
+    );
+
     fn future_size<Args, F: std::future::Future>(_: impl FnOnce(Args) -> F) -> usize {
         std::mem::size_of::<F>()
     }
@@ -2426,16 +2435,9 @@ mod future_size_tests {
                 Option<chrono::DateTime<Utc>>,
             )| { prepare_native_send(state, row, deadline) },
         );
-        let send = future_size(
-            |(state, identity, public, row, body, api): (
-                &'static AppState,
-                Arc<dyn ManagerIdentityProducer>,
-                Option<Arc<dyn PublicTurnProducer>>,
-                Delivery,
-                Zeroizing<String>,
-                &'static super::super::telegram_new_api::TelegramApi<'static>,
-            )| send(state, identity, public, row, body, api),
-        );
+        let send = future_size(|(state, identity, public, row, body, api): SendArgs| {
+            send(state, identity, public, row, body, api)
+        });
         let native = future_size(
             |(state, authority, body, adapter): (
                 &'static AppState,
