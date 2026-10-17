@@ -81,6 +81,8 @@ Admin → Feature Flags. See [feature flag management](docs/API.md#feature-flag-
 
 ## What NyxID Does
 
+- **Connect phone and speech services to NyxBot** — [service adapters](docs/NYXBOT_SERVICE_ADAPTERS.md) add Telnyx/Twilio inbound calls and SMS plus ElevenLabs Custom LLM, with declared capabilities, verified connections and specialist tools. The feature is disabled by default; shared-platform Telnyx voice is unavailable.
+
 - **Manage Oracle pool ownership and retirement** — transfer a pool between your account and organizations you manage while preserving its identity, or delete an idle pool through the API and CLI. See [Oracle pool lifecycle](docs/ORACLE_RELAY.md#pool-ownership-and-deletion-unreleased-1527-1542) for credential renewal and coordinated rollout requirements. Available in the first tagged release containing these changes.
 
 - **Speak to NyxBot and specialists** — voice calls show live captions and audio activity in the composer. Dictation offers click-to-toggle or hold-to-talk capture, microphone selection, and transcript review before insertion into a draft. Platform audio requires enabled voice features, a configured provider and tariff, and sufficient funding; microphone access is requested when capture is activated. See [voice and dictation](docs/chat/11-voice.md#19-implemented-composer-voice-and-dictation).

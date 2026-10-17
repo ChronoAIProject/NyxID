@@ -647,6 +647,7 @@ fn delegated_read_denied_path(path: &str) -> bool {
                 | "integrations"
                 | "billing"
                 | "oracle"
+                | "channel-adapter-bindings"
                 | "channel-bots"
                 | "channel-conversations"
                 | "connect-links"
@@ -3565,6 +3566,7 @@ mod tests {
         let auth = AuthUser {
             assistant_turn_fence: Some(
                 crate::services::assistant_acknowledgement_service::AssistantTurnFence {
+                    channel_adapter_origin: None,
                     platform_thread: false,
                     platform_origin: None,
                     conversation_id: "conversation".into(),
@@ -3636,6 +3638,7 @@ mod tests {
         let mut auth = AuthUser {
             assistant_turn_fence: Some(
                 crate::services::assistant_acknowledgement_service::AssistantTurnFence {
+                    channel_adapter_origin: None,
                     platform_thread: false,
                     platform_origin: None,
                     conversation_id: "conversation".into(),
@@ -3800,6 +3803,7 @@ mod tests {
         let mut user = test_auth_user(AuthMethod::ApiKey, "proxy");
         user.assistant_turn_fence = Some(
             crate::services::assistant_acknowledgement_service::AssistantTurnFence {
+                channel_adapter_origin: None,
                 platform_thread: false,
                 platform_origin: None,
                 conversation_id: "conversation".into(),
@@ -3851,6 +3855,7 @@ mod tests {
     #[test]
     fn conversation_fence_requires_a_live_non_stopped_turn() {
         let base = crate::services::assistant_acknowledgement_service::AssistantTurnFence {
+            channel_adapter_origin: None,
             platform_thread: false,
             platform_origin: None,
             conversation_id: "conversation".into(),

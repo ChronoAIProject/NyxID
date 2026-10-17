@@ -129,6 +129,12 @@ const ASSISTANT_VOICE_FLAG: FeatureFlagDef = FeatureFlagDef {
 };
 
 pub const NYXBOT_THREAD_FOLLOW_FLAG_KEY: &str = "nyxbot:thread-follow";
+pub const NYXBOT_ADAPTERS_FLAG_KEY: &str = "nyxbot:service-adapters";
+const NYXBOT_ADAPTERS_FLAG: FeatureFlagDef = FeatureFlagDef {
+    key: NYXBOT_ADAPTERS_FLAG_KEY,
+    description: "Phone/SMS/Custom LLM bindings. Enable only after every API replica enforces channel_adapter_origin at tool dispatch.",
+    default_enabled: false,
+};
 const NYXBOT_THREAD_FOLLOW_FLAG: FeatureFlagDef = FeatureFlagDef {
     key: NYXBOT_THREAD_FOLLOW_FLAG_KEY,
     description: "Staged direct-relay channel thread follow. Gateway follow remains unavailable until a compatible gateway is negotiated.",
@@ -266,6 +272,7 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     ASSISTANT_MODEL_CONTROLS_FLAG,
     SKILL_PIN_DISABLE_FLAG,
     NYXBOT_THREAD_FOLLOW_FLAG,
+    NYXBOT_ADAPTERS_FLAG,
     AGENT_OPERATION_SCOPES_FLAG,
     ASSISTANT_LIVE_TURN_GATE_FLAG,
     MACHINE_CAPABILITIES_FLAG,
@@ -299,6 +306,7 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     ASSISTANT_MODEL_CONTROLS_FLAG,
     SKILL_PIN_DISABLE_FLAG,
     NYXBOT_THREAD_FOLLOW_FLAG,
+    NYXBOT_ADAPTERS_FLAG,
     AGENT_OPERATION_SCOPES_FLAG,
     ASSISTANT_LIVE_TURN_GATE_FLAG,
     MACHINE_CAPABILITIES_FLAG,
@@ -2472,6 +2480,7 @@ mod tests {
                 "assistant:model-controls",
                 "assistant:skill-pin-disable",
                 "nyxbot:thread-follow",
+                "nyxbot:service-adapters",
                 "assistant:operation-scopes",
                 "assistant:live-turn-gate",
                 "assistant:machine-capabilities",

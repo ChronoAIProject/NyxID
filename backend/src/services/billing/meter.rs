@@ -876,6 +876,40 @@ fn is_duplicate_key_error(error: &mongodb::error::Error) -> bool {
         .contains("duplicate key")
 }
 
+/// Settle admitted carrier usage from persisted rates/funding after credentials,
+/// ACLs or catalog prices change. This never opens another reservation.
+pub(crate) async fn settle_channel_admission(
+    db: &mongodb::Database,
+    request_id: &str,
+    actor: &str,
+    usage: PlatformUsage,
+) -> AppResult<()> {
+    let rows:Vec<UsageMeterRow>=db.collection::<UsageMeterRow>(USAGE_METER).find(doc!{"billing_request_id":request_id,"actor_user_id":actor,"layer":"platform","forwarded":true}).await?.try_collect().await?;
+    let mut finalized = Vec::new();
+    for row in rows {
+        if let Some(saved) = finalize_matching(
+            db,
+            doc! {"_id":&row.id,"status":"forwarded"},
+            platform_quantity(row.metric, &usage),
+            None,
+            Some(&usage),
+            None,
+            Utc::now(),
+        )
+        .await?
+        {
+            finalized.push(saved);
+        } else if let Some(saved) = db
+            .collection::<UsageMeterRow>(USAGE_METER)
+            .find_one(doc! {"_id":&row.id,"quantity":{"$ne":bson::Bson::Null}})
+            .await?
+        {
+            finalized.push(saved);
+        }
+    }
+    settle_persisted(db, finalized).await
+}
+
 #[cfg(test)]
 mod tests {
     use chrono::Utc;

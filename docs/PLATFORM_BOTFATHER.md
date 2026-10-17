@@ -220,6 +220,16 @@ but a v1-only binary cannot safely recover a native v2 entry. Preserve the selec
 transport, installation ownership and retirement markers throughout rollback or
 recovery.
 
+Startup also upgrades the shared `platform_public_turns` index so legacy
+deduplication and multiple runtime transcripts can coexist. Before starting an
+upgraded replica, prevent older binaries from entering startup, including through
+automatic restarts; keep them out of restart paths throughout the rolling upgrade
+and afterward. An older startup can recreate the unrestricted index or fail once
+multiple runtime transcripts exist. This requirement also applies to deployments
+using only the legacy Telegram public runtime, before any native conversion.
+Use compatible binaries for rollback or recovery and retain both legacy rows and
+runtime transcripts.
+
 Required external validation remains explicit: signed native manager creation and
 stale-form delivery, manager token rotation and shared webhook preservation,
 two distinct client accounts, a distinct independent Telegram customer, observed

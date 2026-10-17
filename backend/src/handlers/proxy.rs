@@ -15250,6 +15250,7 @@ mod nyxagent_admission_tests {
                     let mut auth = test_auth_user(&owner);
                     auth.api_key_id = Some(row.credential_api_key_id.clone());
                     auth.assistant_turn_fence = Some(AssistantTurnFence {
+                        channel_adapter_origin: None,
                         platform_origin: None,
                         platform_thread: false,
                         conversation_id: row.id.clone(),

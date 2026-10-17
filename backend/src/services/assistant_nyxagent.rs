@@ -2372,6 +2372,7 @@ pub(crate) async fn begin_owner_turn_in_session(
         (None, None) => None,
     };
     row.active_turn = Some(ActiveTurn {
+        channel_adapter_origin: None,
         worker_instance: Some(super::assistant_engine_worker::instance().clone()),
         model_attempt_id: None,
         model_requests_active: 0,
@@ -3058,6 +3059,7 @@ async fn finish_turn_inner(
                             .and_then(|code| TurnError::new(code).upstream_code);
                         if let Some(detail) = saved.error_detail.as_ref() {
                             error.metadata = Some(Box::new(crate::models::assistant_message::TurnMetadata {
+                                channel_delivery:None,
                                 attempts: detail.attempts, capacity_wait_ms: detail.capacity_wait_ms,
                             }));
                         }
@@ -4505,6 +4507,7 @@ pub async fn delete(
                         "End the voice call before deleting this conversation".into(),
                     ));
                 }
+                if db.collection::<bson::Document>(crate::models::channel_adapter::SESSIONS).find_one(doc!{"user_id":user_id,"conversation_id":id,"$or":[{"state":{"$ne":"closed"}},{"billing_finalized":false}]}).session(&mut *session).await?.is_some(){return Err(AppError::Conflict("End this external session and settle its usage before deleting the conversation".into()));}
                 let mut rows = vec![row];
                 let mut child_cursor = collection
                     .find(doc! {
@@ -5138,6 +5141,17 @@ fn recap_line(
     guest: bool,
     remaining: usize,
 ) -> Option<RenderedRecapLine> {
+    let delivery = message
+        .turn_metadata
+        .as_ref()
+        .and_then(|m| m.channel_delivery.as_ref());
+    let projected=delivery.map(|e| {
+        if e.status=="interrupted_prefix" && e.heard_prefix_matches_sent {
+            let heard:String=message.text.chars().take(e.heard_prefix_chars.unwrap_or(0).max(0) as usize).collect();
+            format!("{heard} [Interrupted here. Remaining generated text was not confirmed heard. Completed tool effects remain completed; do not replay them because speech was interrupted.]")
+        } else {format!("{} [Generated response; delivery/hearing is {}. Do not assume the caller heard it. Completed tool effects must not be replayed automatically.]",message.text,e.status)}
+    });
+    let text = projected.as_deref().unwrap_or(&message.text);
     let role = if message.author == Some(crate::models::assistant_message::MessageAuthor::Guest)
         && message.role == "user"
     {
@@ -5165,19 +5179,19 @@ fn recap_line(
     let budget = (remaining - prefix.len()).min(2048);
     let head = budget / 2;
     let tail = budget - head;
-    let mut end = message.text.len().min(head);
-    while !message.text.is_char_boundary(end) {
+    let mut end = text.len().min(head);
+    while !text.is_char_boundary(end) {
         end -= 1;
     }
-    let mut start = message.text.len().saturating_sub(tail);
-    while start < message.text.len() && !message.text.is_char_boundary(start) {
+    let mut start = text.len().saturating_sub(tail);
+    while start < text.len() && !text.is_char_boundary(start) {
         start += 1;
     }
     let mut truncated = start > end;
     let body = if truncated {
-        format!("{} … {}", &message.text[..end], &message.text[start..])
+        format!("{} … {}", &text[..end], &text[start..])
     } else {
-        message.text.clone()
+        text.to_owned()
     };
     let activities = if guest || message.activities.is_empty() {
         String::new()

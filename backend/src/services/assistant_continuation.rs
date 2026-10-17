@@ -70,7 +70,14 @@ pub async fn started(
         .return_document(mongodb::options::ReturnDocument::After)
         .projection(doc! {"active_turn": 1, "_id": 0})
         .await?;
-    decode_active(row)
+    let turn = decode_active(row)?;
+    if let Some(turn) = turn.as_ref()
+        && let Some(origin) = &turn.channel_adapter_origin
+    {
+        super::call_channels::session::fence_tool(db, owner, conversation, &turn.turn_id, origin)
+            .await?;
+    }
+    Ok(turn)
 }
 
 fn decode_active(row: Option<bson::Document>) -> AppResult<Option<ActiveTurn>> {
@@ -95,7 +102,14 @@ pub async fn active_window(
         .find_one(doc! {"_id": conversation, "user_id": owner})
         .projection(doc! {"active_turn":1, "_id":0})
         .await?;
-    decode_active(row)
+    let turn = decode_active(row)?;
+    if let Some(turn) = turn.as_ref()
+        && let Some(origin) = &turn.channel_adapter_origin
+    {
+        super::call_channels::session::fence_tool(db, owner, conversation, &turn.turn_id, origin)
+            .await?;
+    }
+    Ok(turn)
 }
 
 pub async fn completed(

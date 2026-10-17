@@ -4535,6 +4535,7 @@ async fn proxy_model_billing_refusals_settle_with_specific_code_and_original_ups
         let mut auth = test_auth_user(OWNER);
         auth.api_key_id = Some(row.credential_api_key_id.clone());
         auth.assistant_turn_fence = Some(AssistantTurnFence {
+            channel_adapter_origin: None,
             platform_origin: None,
             platform_thread: false,
             conversation_id: row.id.clone(),

@@ -152,6 +152,15 @@ pub struct Steering {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct TurnMetadata {
+    #[serde(default)]
+    pub channel_delivery: Option<ChannelDelivery>,
     pub attempts: Option<u32>,
     pub capacity_wait_ms: Option<u64>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ChannelDelivery {
+    pub status: String,
+    pub heard_prefix_chars: Option<i64>,
+    pub heard_prefix_matches_sent: bool,
 }

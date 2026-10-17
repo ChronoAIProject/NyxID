@@ -1078,6 +1078,7 @@ async fn server_main() {
 
     // NyxBot: destroy idle subagents and retry deferred team wake-ups.
     handlers::assistant_team::spawn_sweeps(state.clone());
+    services::call_channels::coordinator::spawn_sweep(state.clone());
     services::platform_manager_transport::spawn_sweeps(
         state.clone(),
         services::platform_manager_transport::compose(
@@ -1579,7 +1580,7 @@ async fn server_main() {
     .layer(Extension(global_rate_limiter))
     .layer(Extension(trusted_proxy_ranges))
     .layer(Extension(rate_limit_exempt_ips))
-    .layer(TraceLayer::new_for_http())
+    .layer(TraceLayer::new_for_http().make_span_with(mw::request_trace::span::<axum::body::Body>))
     .layer(axum_mw::from_fn(mw::assistant_trace::assistant_trace));
 
     // Bind both listeners before serving. Internal routes never enter the

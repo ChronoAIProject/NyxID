@@ -56,6 +56,7 @@ This document describes every HTTP endpoint exposed by the NyxID backend. All en
   - [Device Token Management](#device-token-management)
   - [Approval Management](#approval-management)
   - [Telegram New Channel Creation](#telegram-new-channel-creation)
+  - [NyxBot service adapters](#nyxbot-service-adapters)
   - [Webhooks](#webhooks)
 - [Assistant voice and dictation](#assistant-voice-and-dictation)
 
@@ -8749,3 +8750,57 @@ and authority checks. Raw stateless org model consent admits an exact model and
 connection for the resumed turn; MCP/stateful actions retain exact semantic
 request consent. Machine exec cards explicitly admit declared exact organization
 connections for that command/job. See [execution contract](NYXBOT_SERVICE_EXECUTION.md).
+
+## NyxBot service adapters
+
+The default-off `nyxbot:service-adapters` flag gates adapter setup and execution.
+Upgrade every API replica before enabling it. The existing
+`GET /api/v1/channel-platforms` contract is unchanged. See the
+[operator guide](NYXBOT_SERVICE_ADAPTERS.md) for provider setup, supported
+credential modes, dynamic instructions, FAQ grants and billing requirements.
+
+Prefix every path below with `/api/v1`. Binding management and secret/session
+issuance require a first-party human account and verify ownership. Administrator
+account/allocation routes additionally require the administrator role. Capability
+metadata allows delegated `account:read`. List routes accept `after` and return
+`next_after_id`; an absent cursor marks the final page.
+
+| Method | Path | Result |
+| --- | --- | --- |
+| GET | `/channel-adapters` | Versioned executable descriptors in `adapters`, including legacy/disabled profiles. |
+| GET | `/channel-adapter-bindings` | Owner's bindings, readiness and next cursor. |
+| POST | `/channel-adapter-bindings` | Verify provider resources and create a binding; returns its descriptor and readiness. |
+| POST | `/channel-adapter-bindings/{id}/disable` | Disable admission and start cleanup; 204. |
+| POST | `/channel-adapter-bindings/{id}/verify` | Reverify and enable; returns the updated binding. |
+| DELETE | `/channel-adapter-bindings/{id}` | Remove a disabled, settled binding; 204. |
+| POST | `/channel-adapter-bindings/{id}/custom-llm-setup` | ElevenLabs Custom LLM URL, API key and model; secret-bearing response. |
+| POST | `/channel-adapter-bindings/{id}/sessions` | Issue a distinct ElevenLabs guest session and `extra_body` authentication. |
+| POST | `/channel-adapter-bindings/{id}/sessions/{sid}/end` | End an owned ElevenLabs guest session; 204. |
+| GET, POST | `/admin/channel-adapter-accounts` | List or configure trusted provider accounts; POST returns 204. |
+| DELETE | `/admin/channel-adapter-accounts/{id}` | Remove trust after allocations are removed; 204. |
+| GET, POST | `/admin/channel-adapter-allocations` | List or allocate platform number/application resources with tariff evidence. |
+| DELETE | `/admin/channel-adapter-allocations/{id}` | Revoke allocation; pending cleanup prevents premature removal. |
+
+Binding creation accepts `adapter_id`, `contract_version: 1`, `label`, `agent_id`,
+`credential` and provider-specific resource settings. `credential` is either
+`{"kind":"connection","user_service_id":"..."}` or
+`{"kind":"platform","catalog_service_id":"..."}`. Carrier settings include
+`account_id`, `resource_id`, `phone_number`, `application_id`, `voice` and
+`language`; user-owned Telnyx additionally supplies `webhook_public_key`.
+ElevenLabs uses its agent ID as `application_id`. Creation verifies ownership
+without placing a call or sending SMS. A binding response contains identifiers,
+configuration, `enabled`, `revision`, `verified_at`, `webhook_url` and per-operation
+`availability`; it never returns stored credentials.
+
+Provider-facing routes authenticate their own protocol instead of a human login:
+
+| Method | Path | Authentication and transport |
+| --- | --- | --- |
+| POST | `/webhooks/call-adapters/{id}` | Telnyx Ed25519 or Twilio signature plus bound resource proof; bounded body, XML response. |
+| POST | `/webhooks/call-adapters/{id}/sms-receipts/{send}` | Signed, correlated delivery receipt; bounded body, XML response. |
+| GET | `/webhooks/call-adapters/{id}/socket/{sid}` | Admitted session ticket, plus Twilio signature when applicable; WebSocket upgrade. |
+| POST | `/webhooks/call-adapters/{id}/v1/chat/completions` | Custom LLM bearer and separately issued guest-session credentials; bounded JSON input and SSE output. |
+
+Caller messages never grant owner authority. Specialist guest grants, live
+binding/session authority and catalog operation policy remain mandatory at
+execution. Provider retries do not automatically repeat uncertain effects.

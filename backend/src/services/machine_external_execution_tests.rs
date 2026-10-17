@@ -1131,6 +1131,57 @@ async fn external_narrow_cancel_survives_grant_revoke_but_never_revoked_source()
 }
 
 #[tokio::test]
+async fn external_sibling_cancel_after_grant_revoke_keeps_original_job_principal() {
+    let f = fixture("external_sibling_narrow_stop").await;
+    let (_, original_secret) = child(&f).await;
+    let (_, sibling_secret) = child(&f).await;
+    let original_secret = zeroize::Zeroizing::new(original_secret);
+    let sibling_secret = zeroize::Zeroizing::new(sibling_secret);
+    let original_source = source(&f, &original_secret).await;
+    let sibling_source = source(&f, &sibling_secret).await;
+    let (peer, mut requests) = peer(&f).await;
+    let id = execute(&f, &original_source).await;
+    assert_eq!(requests.recv().await.unwrap().operation, Operation::Exec);
+    let original = job(&f, &id).await;
+    let grant = grants::get_active_for_key(&f.state.db, &f.owner, &f.key.id)
+        .await
+        .unwrap()
+        .unwrap();
+    grants::revoke(&f.state.db, &f.owner, &grant.id, grant.revision)
+        .await
+        .unwrap();
+    let result = dispatch(
+        &f.state,
+        &sibling_source,
+        "nyx__machine_job_cancel",
+        json!({"machine":f.node.id,"job_id":id}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(result["cancellation_acknowledged"], true);
+    assert_eq!(result["stop_acknowledged"], false);
+    assert!(result.get("stdout").is_none());
+    let stopped = requests.recv().await.unwrap();
+    assert_eq!(stopped.operation, Operation::AuthorityRevoke);
+    let authority = stopped.external_authority.unwrap();
+    assert!(authority.principal == wire_principal(&original_source.principal()));
+    assert!(authority.principal != wire_principal(&sibling_source.principal()));
+    assert_eq!(authority.lease_id, external_binding(&original).unwrap().6);
+    let cancelled = job(&f, &id).await;
+    assert_eq!(cancelled.state, "cancelled");
+    assert_eq!(cancelled.binding, original.binding);
+    assert_eq!(
+        cancelled.cancellation_requested_by,
+        Some(MachineCancellationRequester::External {
+            principal: sibling_source.principal()
+        })
+    );
+    assert!(requests.try_recv().is_err());
+    peer.abort();
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
 async fn external_confirmation_checks_original_child_expiry_before_sweep() {
     let mut f = fixture("external_confirm_live_child").await;
     f.node.machine_confirm = nyxid_machine::Confirmation::All;
@@ -1374,12 +1425,12 @@ async fn external_discovery_hint_is_loaded_with_key_and_does_not_grant_authority
     f.state.db.drop().await.unwrap();
 }
 
-// A scoped gateway caller stops only after its transaction has established a
+// A scoped authorization caller pauses only after its transaction establishes a
 // read snapshot. The competing real caller then commits its fence writes before
-// that gateway attempts its own writes. MongoDB must reject the stale snapshot;
+// the first caller attempts its own writes. MongoDB must reject the stale snapshot;
 // this is not a synthetic database error, timing delay, or authorization bypass.
 // Task-local installation plus the exact database/job pair prevents parallel
-// tests and unrelated gateway calls from observing this hook.
+// tests and unrelated calls from observing this hook.
 #[derive(Clone)]
 struct GatewaySnapshotHook {
     database: String,
@@ -1391,6 +1442,7 @@ struct GatewaySnapshotHook {
 
 tokio::task_local! {
     static GATEWAY_SNAPSHOT_HOOK: GatewaySnapshotHook;
+    static CANCEL_SNAPSHOT_HOOK: GatewaySnapshotHook;
 }
 
 impl GatewaySnapshotHook {
@@ -1418,7 +1470,24 @@ impl GatewaySnapshotHook {
 }
 
 pub(super) async fn gateway_snapshot_loaded(db: &Database, job_id: &str) {
-    let Some(hook) = GATEWAY_SNAPSHOT_HOOK.try_with(Clone::clone).ok() else {
+    transaction_snapshot_loaded(
+        GATEWAY_SNAPSHOT_HOOK.try_with(Clone::clone).ok(),
+        db,
+        job_id,
+    )
+    .await;
+}
+
+pub(super) async fn cancel_snapshot_loaded(db: &Database, job_id: &str) {
+    transaction_snapshot_loaded(CANCEL_SNAPSHOT_HOOK.try_with(Clone::clone).ok(), db, job_id).await;
+}
+
+async fn transaction_snapshot_loaded(
+    hook: Option<GatewaySnapshotHook>,
+    db: &Database,
+    job_id: &str,
+) {
+    let Some(hook) = hook else {
         return;
     };
     if hook.database != db.name() || hook.job_id != job_id {
@@ -1520,6 +1589,223 @@ async fn gateway_oauth_source(f: &Fixture) -> VerifiedExternalSource {
     crate::handlers::mcp_transport::external_machine_oauth_source_for_test(&f.state, &token)
         .await
         .unwrap()
+}
+
+#[tokio::test]
+async fn external_cancel_retries_renewal_and_reloads_current_transport_authority() {
+    let f = fixture("external_cancel_renewal_contention").await;
+    let source = gateway_oauth_source(&f).await;
+    let (peer, mut requests) = peer(&f).await;
+    let id = execute(&f, &source).await;
+    assert_eq!(requests.recv().await.unwrap().operation, Operation::Exec);
+    let original = job(&f, &id).await;
+    let ExternalPrincipalRef::OAuth {
+        oauth_client_id, ..
+    } = source.principal()
+    else {
+        panic!("OAuth source required");
+    };
+    let token = zeroize::Zeroizing::new(
+        crate::crypto::jwt::generate_oauth_access_token_with_consent(
+            &f.state.jwt_keys,
+            &f.state.config,
+            &Uuid::parse_str(&f.owner).unwrap(),
+            "openid proxy machine offline_access",
+            None,
+            Some(1200),
+            None,
+            None,
+            Some(crate::crypto::jwt::AccessTokenRestrictions {
+                resources: &[],
+                allowed_service_ids: &[],
+                allowed_node_ids: std::slice::from_ref(&f.node.id),
+                allow_all_nodes: false,
+            }),
+            &oauth_client_id,
+            source.protected_consent(),
+        )
+        .unwrap(),
+    );
+    let refreshed =
+        crate::handlers::mcp_transport::external_machine_oauth_source_for_test(&f.state, &token)
+            .await
+            .unwrap();
+    let hook = GatewaySnapshotHook::new(&f.state.db, &original);
+    let cancelling = CANCEL_SNAPSHOT_HOOK.scope(
+        hook.clone(),
+        dispatch(
+            &f.state,
+            &source,
+            "nyx__machine_job_cancel",
+            json!({"machine":f.node.id,"job_id":id}),
+        ),
+    );
+    let renewing = async {
+        hook.wait_for_snapshot().await;
+        renew_job_with_source(&f.state, &refreshed, &original)
+            .await
+            .unwrap();
+        hook.release();
+    };
+    let (result, ()) = tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        tokio::join!(cancelling, renewing)
+    })
+    .await
+    .expect("cancellation and renewal must finish without timing sleeps");
+    let result = result.expect("current source cancellation must retry the real snapshot conflict");
+    assert!(hook.attempts() >= 2, "a real stale snapshot must retry");
+    assert_eq!(result["status"], "cancelled");
+    assert_eq!(result["cancellation_acknowledged"], true);
+    assert_eq!(result["stop_acknowledged"], false);
+    assert!(result.get("stdout").is_none());
+    let renewed = requests.recv().await.unwrap();
+    assert_eq!(renewed.operation, Operation::AuthorityRenew);
+    let renewed = renewed.external_authority.unwrap();
+    assert!(renewed.auth_expires_at_ms > source.authentication_expires_at().timestamp_millis());
+    let stopped = requests.recv().await.unwrap();
+    assert_eq!(stopped.operation, Operation::AuthorityRevoke);
+    let stopped = stopped.external_authority.unwrap();
+    assert_eq!(stopped.auth_expires_at_ms, renewed.auth_expires_at_ms);
+    assert_eq!(stopped.principal, renewed.principal);
+    assert_eq!(stopped.oauth_consent, renewed.oauth_consent);
+    assert_eq!(stopped.lease_id, renewed.lease_id);
+    assert_eq!(stopped.job_id.as_deref(), Some(id.as_str()));
+    assert_eq!(stopped.node_id, original.node_id);
+    assert_eq!(stopped.runtime_id, original.runtime_id);
+    assert!(
+        requests.try_recv().is_err(),
+        "retries must not send Node effects"
+    );
+    let cancelled = job(&f, &id).await;
+    assert_eq!(cancelled.state, "cancelled");
+    assert_eq!(
+        cancelled.cancellation_requested_by,
+        Some(MachineCancellationRequester::External {
+            principal: source.principal()
+        })
+    );
+    assert!(cancelled.cancellation_requested_at.is_some());
+    assert_eq!(cancelled.finished_at, cancelled.cancellation_requested_at);
+    assert_eq!(
+        f.state
+            .db
+            .collection::<Document>(access::LEASES)
+            .count_documents(doc! {"_id":&stopped.lease_id})
+            .await
+            .unwrap(),
+        0
+    );
+    let rows: Vec<Document> = f
+        .state
+        .db
+        .collection(access::OUTBOX)
+        .find(doc! {"kind":"external_lease","lease_id":&stopped.lease_id})
+        .await
+        .unwrap()
+        .try_collect()
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1, "one committed cancellation outbox row");
+    assert_eq!(rows[0].get_str("reason").unwrap(), "job_cancelled");
+    let queued: ExternalAuthority =
+        bson::from_bson(rows[0].get("external_authority").unwrap().clone()).unwrap();
+    assert_eq!(queued.auth_expires_at_ms, renewed.auth_expires_at_ms);
+    assert_eq!(queued.lease_id, renewed.lease_id);
+    assert_eq!(
+        f.state
+            .db
+            .collection::<Document>(machine_job::COLLECTION_NAME)
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        1,
+        "cancellation retries never create or replay execution"
+    );
+    peer.abort();
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn external_cancel_retry_rechecks_revoked_child_before_any_stop_effect() {
+    let f = fixture("external_cancel_child_revocation_contention").await;
+    let (child_id, secret) = child(&f).await;
+    let secret = zeroize::Zeroizing::new(secret);
+    let source = source(&f, &secret).await;
+    let (peer, mut requests) = peer(&f).await;
+    let id = execute(&f, &source).await;
+    assert_eq!(requests.recv().await.unwrap().operation, Operation::Exec);
+    let original = job(&f, &id).await;
+    let hook = GatewaySnapshotHook::new(&f.state.db, &original);
+    let cancelling = CANCEL_SNAPSHOT_HOOK.scope(
+        hook.clone(),
+        dispatch(
+            &f.state,
+            &source,
+            "nyx__machine_job_cancel",
+            json!({"machine":f.node.id,"job_id":id}),
+        ),
+    );
+    let revoking = async {
+        hook.wait_for_snapshot().await;
+        renew_job_with_source(&f.state, &source, &original)
+            .await
+            .unwrap();
+        let mut session = f.state.db.client().start_session().await.unwrap();
+        session.start_transaction().await.unwrap();
+        crate::services::api_key_credential_service::revoke_in_session(
+            &f.state.db,
+            &child_id,
+            crate::models::api_key_credential::CredentialRevokedReason::WebRevoke,
+            &mut session,
+        )
+        .await
+        .unwrap();
+        session.commit_transaction().await.unwrap();
+        hook.release();
+    };
+    let (result, ()) = tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        tokio::join!(cancelling, revoking)
+    })
+    .await
+    .expect("revocation and cancellation must finish without timing sleeps");
+    assert!(hook.attempts() >= 2, "a real stale snapshot must retry");
+    assert!(
+        matches!(result, Err(AppError::MachinePermissionRevoked)),
+        "retry must reject the now-revoked child"
+    );
+    assert_eq!(
+        requests.recv().await.unwrap().operation,
+        Operation::AuthorityRenew
+    );
+    assert!(
+        requests.try_recv().is_err(),
+        "denied cancellation sends no Node effect"
+    );
+    let unchanged = job(&f, &id).await;
+    assert_eq!(unchanged.state, "running");
+    assert!(unchanged.cancellation_requested_at.is_none());
+    let lease = external_binding(&original).unwrap().6;
+    assert_eq!(
+        f.state
+            .db
+            .collection::<Document>(access::LEASES)
+            .count_documents(doc! {"_id":lease})
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        f.state
+            .db
+            .collection::<Document>(access::OUTBOX)
+            .count_documents(doc! {"kind":"external_lease","lease_id":lease})
+            .await
+            .unwrap(),
+        0,
+        "failed attempts leave no cancellation outbox"
+    );
+    peer.abort();
+    f.state.db.drop().await.unwrap();
 }
 
 #[tokio::test]

@@ -933,6 +933,7 @@ mod tests {
         guest: bool,
     ) -> ChatAuthority {
         ChatAuthority {
+            channel_adapter_origin: None,
             platform_thread: false,
             platform_origin: None,
             report_to: None,
