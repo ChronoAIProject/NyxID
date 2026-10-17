@@ -63,6 +63,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       backend: ${{ steps.filter.outputs.backend }}
+      backend_image: ${{ steps.filter.outputs.backend_image }}
       cli: ${{ steps.filter.outputs.cli }}
       machine: ${{ steps.filter.outputs.machine }}
       permissions: ${{ steps.filter.outputs.permissions }}
@@ -90,6 +91,12 @@ jobs:
           # YAML anchors aren't used here -- aliased sequences expand to
           # nested lists in js-yaml, which paths-filter does not flatten.
           filters: |
+            backend_image:
+              - 'backend/Dockerfile'
+              - '.dockerignore'
+              - '.github/scripts/prepare-backend-runner.sh'
+              - '.github/workflows/ci.yml'
+              - '.github/workflows/publish-images.yml'
             permissions:
               - 'permissions/**'
               - 'scripts/test-drive-permissions-poc.py'
@@ -519,6 +526,36 @@ jobs:
         run: cargo build --release -p nyxid --bin nyxid-server --features gcp-kms
       - name: Check backend Docker embedded assets
         run: python3 scripts/check-backend-docker-embeds.py
+
+  # Exercise the image's compiler and release build when its infrastructure changes.
+  backend-image-smoke:
+    name: Backend Release Image
+    needs: changes
+    if: github.event_name == 'pull_request' && needs.changes.outputs.backend_image == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v6
+      - name: Prepare backend image memory reserve
+        timeout-minutes: 5
+        run: bash .github/scripts/prepare-backend-runner.sh
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+      - name: Build backend release image without publishing
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: backend/Dockerfile
+          platforms: linux/amd64
+          build-args: |
+            NYXID_GIT_HASH=${{ github.sha }}
+          outputs: type=cacheonly
+          push: false
+          cache-from: |
+            type=gha,scope=backend-pr-linux-amd64
+            type=gha,scope=backend-linux-amd64
+          cache-to: type=gha,mode=max,scope=backend-pr-linux-amd64
+          provenance: false
 
   # ---------------------------------------------------------------------------
   # Rust: CLI / node-agent build + test (no DB required)
@@ -1272,6 +1309,7 @@ jobs:
       - permissions-test
       - backend-billing-smoke
       - backend-image-inputs
+      - backend-image-smoke
       - cli-test
       - machine-container
       - rust-features
@@ -1303,6 +1341,7 @@ jobs:
             permissions-test=${{ needs.permissions-test.result }}
             backend-billing-smoke=${{ needs.backend-billing-smoke.result }}
             backend-image-inputs=${{ needs.backend-image-inputs.result }}
+            backend-image-smoke=${{ needs.backend-image-smoke.result }}
             cli-test=${{ needs.cli-test.result }}
             machine-container=${{ needs.machine-container.result }}
             rust-features=${{ needs.rust-features.result }}
