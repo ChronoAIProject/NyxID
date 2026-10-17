@@ -191,7 +191,17 @@ pub(crate) async fn dispatch_update(
 
 /// Both entry transports provide an admission constructed from authenticated
 /// native content. Its canonical text is fixed before any control or model work.
-pub(crate) async fn dispatch_native_admission(
+pub(crate) fn dispatch_native_admission(
+    state: &AppState,
+    producers: Option<Arc<PlatformManagerProducers>>,
+    admission: super::platform_entry_receipts::NativeAdmission,
+) -> futures::future::BoxFuture<'_, AppResult<()>> {
+    // Direct webhooks and gateway Responses share this native-only boundary.
+    // Construct the large dispatch future outside their caller poll frames.
+    Box::pin(dispatch_native_admission_impl(state, producers, admission))
+}
+
+async fn dispatch_native_admission_impl(
     state: &AppState,
     producers: Option<Arc<PlatformManagerProducers>>,
     admission: super::platform_entry_receipts::NativeAdmission,
@@ -1095,3 +1105,24 @@ async fn recover_ingress(
 #[cfg(test)]
 #[path = "platform_manager_journey_tests.rs"]
 mod journey_tests;
+
+#[cfg(test)]
+mod future_size_tests {
+    use super::*;
+
+    fn admission_future_size<F: std::future::Future>(
+        _: impl FnOnce(
+            &'static AppState,
+            Option<Arc<PlatformManagerProducers>>,
+            super::super::platform_entry_receipts::NativeAdmission,
+        ) -> F,
+    ) -> usize {
+        std::mem::size_of::<F>()
+    }
+
+    #[test]
+    fn native_admission_keeps_transport_caller_futures_small() {
+        let size = admission_future_size(dispatch_native_admission);
+        assert!(size < 1024, "native admission future grew to {size} bytes");
+    }
+}

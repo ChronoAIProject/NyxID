@@ -54,6 +54,49 @@ pub(crate) async fn intercept(
     if version != Some(2) {
         return Err(refused());
     }
+    intercept_native(
+        state,
+        bot_id,
+        expected_platform,
+        headers,
+        body,
+        producers,
+        raw,
+    )
+    .await
+}
+
+fn intercept_native<'a>(
+    state: &'a AppState,
+    bot_id: &'a str,
+    expected_platform: &'a str,
+    headers: &'a HeaderMap,
+    body: &'a [u8],
+    producers: Option<Arc<PlatformManagerProducers>>,
+    raw: Document,
+) -> futures::future::BoxFuture<'a, AppResult<NativeWebhook>> {
+    // Allocate native preparation and dispatch only after sticky v2 selection.
+    // The ordinary webhook future retains just the marker lookup and this pointer.
+    Box::pin(intercept_native_impl(
+        state,
+        bot_id,
+        expected_platform,
+        headers,
+        body,
+        producers,
+        raw,
+    ))
+}
+
+async fn intercept_native_impl(
+    state: &AppState,
+    bot_id: &str,
+    expected_platform: &str,
+    headers: &HeaderMap,
+    body: &[u8],
+    producers: Option<Arc<PlatformManagerProducers>>,
+    raw: Document,
+) -> AppResult<NativeWebhook> {
     let bot: ChannelBot = bson::from_document(raw.clone()).map_err(|_| refused())?;
     if bot.platform != expected_platform || !bot.is_active || bot.status != "active" {
         return Err(refused());
@@ -234,4 +277,39 @@ pub(crate) async fn intercept(
         }
     }
     Ok(NativeWebhook::Consumed(None))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn webhook_future_size<F: std::future::Future>(
+        _: impl FnOnce(
+            &'static AppState,
+            &'static str,
+            &'static str,
+            &'static HeaderMap,
+            &'static [u8],
+            Option<Arc<PlatformManagerProducers>>,
+        ) -> F,
+    ) -> usize {
+        // Inspect the future type without constructing state or polling a webhook.
+        std::mem::size_of::<F>()
+    }
+
+    #[test]
+    fn native_selection_keeps_ordinary_webhook_futures_small() {
+        let interceptor = webhook_future_size(intercept);
+        assert!(
+            interceptor < 16 * 1024,
+            "native interceptor future grew to {interceptor} bytes"
+        );
+        let handler = webhook_future_size(
+            crate::handlers::channel_webhooks::handle_webhook_inner_with_producers,
+        );
+        assert!(
+            handler < 16 * 1024,
+            "ordinary webhook future grew to {handler} bytes"
+        );
+    }
 }
