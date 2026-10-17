@@ -377,7 +377,7 @@ mod tests {
         for verb in ["/bot", "/setup"] {
             assert!(parse(&format!("{verb} {id}"), "manager_bot").is_some());
             for bad in [
-                format!("{verb}"),
+                verb.to_string(),
                 format!("{verb} arbitrary"),
                 format!("{verb} {id} extra"),
                 format!("{verb}@other_bot {id}"),

@@ -100,7 +100,7 @@ pub(crate) async fn admit_in_session(
                 }
                 ManagerAudience::Personal(AdmittedPersonalUpdate {
                     ingress: claim.clone(),
-                    authority,
+                    authority: *authority,
                 })
             }
             SenderResolution::Unlinked if policy.public_enabled => {

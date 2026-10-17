@@ -82,12 +82,14 @@ async fn x_admission(
         &mut session,
         &fixture.state.encryption_keys,
         fixture.state.auth_device_hmac_key.as_slice(),
-        &profile.id,
-        epoch,
-        configuration,
-        &batch,
-        0,
-        &uuid::Uuid::new_v4().to_string(),
+        super::super::platform_entry_receipts::NativeReceiptInput {
+            profile_id: &profile.id,
+            epoch,
+            configuration,
+            batch: &batch,
+            index: 0,
+            relay_message_id: &uuid::Uuid::new_v4().to_string(),
+        },
     )
     .await
     .unwrap();

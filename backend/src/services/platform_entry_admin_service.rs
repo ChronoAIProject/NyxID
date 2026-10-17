@@ -32,7 +32,7 @@ pub(crate) enum NativeTransportChoice {
 }
 
 pub(crate) enum NativeConversionOutcome {
-    Converted(PlatformBotConfig),
+    Converted(Box<PlatformBotConfig>),
     DiscordRecovery(discord::RecoveryReview),
     GatewayRecovery(super::platform_entry_gateway_service::GatewayRecoveryReview),
 }
@@ -87,10 +87,12 @@ impl NativeConversionAuthority {
             return Err(refused());
         }
         validate_configuration(&self.configuration)?;
-        if let Some(profile) = &self.previous_profile {
-            if db.collection::<Document>(crate::models::platform_bot_config::COLLECTION_NAME).update_one(
+        if let Some(profile) = &self.previous_profile
+            && db.collection::<Document>(crate::models::platform_bot_config::COLLECTION_NAME).update_one(
                 doc! {"_id":&profile.id,"generation":profile.generation,"native_entry":bson::to_bson(&profile.native_entry).map_err(|_|refused())?,"enabled":false,"deleted_at":bson::Bson::Null},
-                doc! {"$inc":{"native_admin_effect_revision":1_i64}}).session(&mut *session).await?.matched_count!=1 { return Err(refused()); }
+                doc! {"$inc":{"native_admin_effect_revision":1_i64}}).session(&mut *session).await?.matched_count!=1
+        {
+            return Err(refused());
         }
         if db
             .collection::<Document>(BOTS)
@@ -442,7 +444,7 @@ pub(crate) async fn convert(
         {
             super::platform_entry_gateway_service::GatewayPreparation::Ready(prepared) => {
                 authority.configuration = prepared.configuration().clone();
-                authority.gateway = Some(prepared);
+                authority.gateway = Some(*prepared);
             }
             super::platform_entry_gateway_service::GatewayPreparation::Recovery(review) => {
                 return Ok(NativeConversionOutcome::GatewayRecovery(review));
@@ -450,7 +452,7 @@ pub(crate) async fn convert(
         }
     }
     let profile = super::platform_bot_config_service::convert_native(state, &authority).await?;
-    Ok(NativeConversionOutcome::Converted(profile))
+    Ok(NativeConversionOutcome::Converted(Box::new(profile)))
 }
 
 /// Inspection issues no provider mutation, token refresh or paid verification.

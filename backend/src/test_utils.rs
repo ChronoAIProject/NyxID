@@ -2913,6 +2913,30 @@ pub(crate) struct LocalMachinePlatform {
     pub readiness: crate::services::remote_machine_manager::PlatformReadiness,
 }
 
+/// Construct and poll the large native lifecycle journey futures on a scoped
+/// thread. The ordinary libtest/nextest thread only joins and propagates panic.
+pub(crate) fn run_native_journey_test<F, Fut>(name: &'static str, test: F)
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()>,
+{
+    let thread = std::thread::Builder::new()
+        .name(name.into())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(move || {
+            let future: std::pin::Pin<Box<dyn std::future::Future<Output = ()>>> = Box::pin(test());
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("native journey runtime")
+                .block_on(future);
+        })
+        .expect("native journey thread");
+    if let Err(panic) = thread.join() {
+        std::panic::resume_unwind(panic);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3823,29 +3847,5 @@ mod tests {
             local_test_connection(&mut options);
             assert_eq!(options.direct_connection, expected);
         }
-    }
-}
-
-/// Construct and poll the large native lifecycle journey futures on a scoped
-/// thread. The ordinary libtest/nextest thread only joins and propagates panic.
-pub(crate) fn run_native_journey_test<F, Fut>(name: &'static str, test: F)
-where
-    F: FnOnce() -> Fut + Send + 'static,
-    Fut: std::future::Future<Output = ()>,
-{
-    let thread = std::thread::Builder::new()
-        .name(name.into())
-        .stack_size(16 * 1024 * 1024)
-        .spawn(move || {
-            let future: std::pin::Pin<Box<dyn std::future::Future<Output = ()>>> = Box::pin(test());
-            tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("native journey runtime")
-                .block_on(future);
-        })
-        .expect("native journey thread");
-    if let Err(panic) = thread.join() {
-        std::panic::resume_unwind(panic);
     }
 }

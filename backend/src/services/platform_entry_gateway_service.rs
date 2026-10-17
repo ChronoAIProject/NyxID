@@ -491,12 +491,14 @@ pub(crate) async fn responses(
                                     &state.db,
                                     session,
                                     state.auth_device_hmac_key.as_slice(),
-                                    &authority.row.profile_id,
-                                    &authority.row.configuration,
-                                    &authority.row.id,
                                     &state.token_exchange_cache,
-                                    activity,
-                                    text,
+                                    super::platform_entry_receipts::GatewayReceiptInput {
+                                        profile_id: &authority.row.profile_id,
+                                        configuration: &authority.row.configuration,
+                                        transport_channel_id: &authority.row.id,
+                                        activity,
+                                        text,
+                                    },
                                 )
                                 .await?;
                             if state
@@ -961,7 +963,7 @@ impl std::fmt::Debug for GatewayRecoveryReview {
     }
 }
 pub(crate) enum GatewayPreparation {
-    Ready(PreparedGateway),
+    Ready(Box<PreparedGateway>),
     Recovery(GatewayRecoveryReview),
 }
 
@@ -1167,7 +1169,7 @@ async fn dispatch_setup(
     let remaining = (deadline - chrono::Utc::now())
         .to_std()
         .map_err(|_| refused())?;
-    let result = tokio::time::timeout(remaining, async {
+    tokio::time::timeout(remaining, async {
         let bytes = Zeroizing::new(
             state
                 .encryption_keys
@@ -1206,8 +1208,7 @@ async fn dispatch_setup(
         .await
     })
     .await
-    .map_err(|_| refused())?;
-    result
+    .map_err(|_| refused())?
 }
 
 pub(crate) async fn prepare(
@@ -1245,9 +1246,9 @@ pub(crate) async fn prepare(
             false
         };
         if ready {
-            return Ok(GatewayPreparation::Ready(
+            return Ok(GatewayPreparation::Ready(Box::new(
                 observe_ready(state, authority, row, &observed.body, &provider, &route).await?,
-            ));
+            )));
         }
         // A disappeared previously-observed record is never silently recreated.
         if row.setup_state == "observed" {
@@ -1403,9 +1404,9 @@ pub(crate) async fn prepare(
         (row, provider, route)
     };
     let observed = dispatch_setup(state, authority, &mut row, &provider, &route).await?;
-    Ok(GatewayPreparation::Ready(
+    Ok(GatewayPreparation::Ready(Box::new(
         observe_ready(state, authority, row, &observed, &provider, &route).await?,
-    ))
+    )))
 }
 
 pub(super) async fn inspect_pending(

@@ -720,12 +720,14 @@ async fn stored_connection_signing_rotation_and_epoch_replacement_refuse_native_
             &mut session,
             &state.encryption_keys,
             state.auth_device_hmac_key.as_slice(),
-            &profile_id,
-            1,
-            &config,
-            &batch,
-            0,
-            &uuid::Uuid::new_v4().to_string(),
+            super::super::platform_entry_receipts::NativeReceiptInput {
+                profile_id: &profile_id,
+                epoch: 1,
+                configuration: &config,
+                batch: &batch,
+                index: 0,
+                relay_message_id: &uuid::Uuid::new_v4().to_string(),
+            },
         )
         .await;
         assert!(
@@ -872,12 +874,14 @@ async fn real_oauth_refresh_before_admission_preserves_scope_set_identity_and_li
         &mut session,
         &state.encryption_keys,
         state.auth_device_hmac_key.as_slice(),
-        &profile_id,
-        1,
-        &config,
-        &batch,
-        0,
-        &uuid::Uuid::new_v4().to_string(),
+        super::super::platform_entry_receipts::NativeReceiptInput {
+            profile_id: &profile_id,
+            epoch: 1,
+            configuration: &config,
+            batch: &batch,
+            index: 0,
+            relay_message_id: &uuid::Uuid::new_v4().to_string(),
+        },
     )
     .await
     .unwrap();
@@ -945,12 +949,14 @@ async fn equivalent_scope_reordering_retains_identity_but_fences_an_already_capt
             &mut session,
             &state.encryption_keys,
             state.auth_device_hmac_key.as_slice(),
-            &profile_id,
-            1,
-            &config,
-            &batch,
-            0,
-            &uuid::Uuid::new_v4().to_string()
+            super::super::platform_entry_receipts::NativeReceiptInput {
+                profile_id: &profile_id,
+                epoch: 1,
+                configuration: &config,
+                batch: &batch,
+                index: 0,
+                relay_message_id: &uuid::Uuid::new_v4().to_string(),
+            },
         )
         .await
         .is_err()
@@ -973,12 +979,14 @@ async fn equivalent_scope_reordering_retains_identity_but_fences_an_already_capt
         &mut session,
         &state.encryption_keys,
         state.auth_device_hmac_key.as_slice(),
-        &profile_id,
-        1,
-        &config,
-        &retry,
-        0,
-        &uuid::Uuid::new_v4().to_string(),
+        super::super::platform_entry_receipts::NativeReceiptInput {
+            profile_id: &profile_id,
+            epoch: 1,
+            configuration: &config,
+            batch: &retry,
+            index: 0,
+            relay_message_id: &uuid::Uuid::new_v4().to_string(),
+        },
     )
     .await
     .unwrap();
@@ -1101,12 +1109,14 @@ async fn authenticated_batch_cannot_be_relabelled_to_a_live_entry_or_transport()
                 &mut session,
                 &state.encryption_keys,
                 state.auth_device_hmac_key.as_slice(),
-                &target_profile,
-                1,
-                &replacement,
-                &batch,
-                0,
-                &uuid::Uuid::new_v4().to_string()
+                super::super::platform_entry_receipts::NativeReceiptInput {
+                    profile_id: &target_profile,
+                    epoch: 1,
+                    configuration: &replacement,
+                    batch: &batch,
+                    index: 0,
+                    relay_message_id: &uuid::Uuid::new_v4().to_string(),
+                },
             )
             .await
             .is_err(),

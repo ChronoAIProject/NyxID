@@ -166,12 +166,14 @@ pub(crate) async fn intercept(
                                     session,
                                     &state.encryption_keys,
                                     state.auth_device_hmac_key.as_slice(),
-                                    &profile.id,
-                                    controls.manager_authority_epoch,
-                                    configuration,
-                                    batch,
-                                    *index,
-                                    relay_message_id,
+                                    super::platform_entry_receipts::NativeReceiptInput {
+                                        profile_id: &profile.id,
+                                        epoch: controls.manager_authority_epoch,
+                                        configuration,
+                                        batch,
+                                        index: *index,
+                                        relay_message_id,
+                                    },
                                 )
                                 .await?;
                                 let id = &admission.receipt().id;

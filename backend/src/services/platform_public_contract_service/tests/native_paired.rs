@@ -512,12 +512,14 @@ fn real_codex_native_v2_discovery_readiness_faq_search_read_signup_answer_use_ac
                 &mut session,
                 &state.encryption_keys,
                 state.auth_device_hmac_key.as_slice(),
-                &profile.id,
-                controls.manager_authority_epoch,
-                profile.native_entry.as_ref().unwrap(),
-                &batch,
-                0,
-                &uuid::Uuid::new_v4().to_string(),
+                crate::services::platform_entry_receipts::NativeReceiptInput {
+                    profile_id: &profile.id,
+                    epoch: controls.manager_authority_epoch,
+                    configuration: profile.native_entry.as_ref().unwrap(),
+                    batch: &batch,
+                    index: 0,
+                    relay_message_id: &uuid::Uuid::new_v4().to_string(),
+                },
             )
             .await
             .unwrap();

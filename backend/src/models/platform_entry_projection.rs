@@ -204,14 +204,11 @@ pub(crate) use checked_identity_record;
 
 // Option<T> would collapse an explicit null into absence and accept a mixed
 // projection. Only an absent field uses Missing; a present field must decode T.
+#[derive(Default)]
 pub(crate) enum Field<T> {
+    #[default]
     Missing,
     Present(T),
-}
-impl<T> Default for Field<T> {
-    fn default() -> Self {
-        Self::Missing
-    }
 }
 impl<'de, T: Deserialize<'de>> Deserialize<'de> for Field<T> {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {

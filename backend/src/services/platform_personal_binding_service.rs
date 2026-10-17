@@ -1,6 +1,6 @@
 //! Durable consent and write fences. Session-taking operations never own commit.
 use super::platform_entry_scope as scope;
-use super::platform_manager_contract::{EntryIdentity, EventIdentity, SenderIdentity};
+use super::platform_manager_contract::SenderIdentity;
 use crate::{
     errors::{AppError, AppResult},
     models::{
@@ -359,7 +359,10 @@ pub(crate) async fn resolve_thread_in_session(
         )
         .await?
         {
-            ThreadAuthorityResolution::Personal(authority(&row, controls.personal_control_revision))
+            ThreadAuthorityResolution::Personal(Box::new(authority(
+                &row,
+                controls.personal_control_revision,
+            )))
         } else {
             ThreadAuthorityResolution::WebOnly
         },
@@ -791,7 +794,9 @@ pub(crate) mod tests {
         platform_bot_config::{PlatformBotConfig, PlatformExecutionProfile},
         platform_bot_runtime_controls::PlatformBotRuntimeControls,
     };
-    use crate::services::platform_manager_contract::{ManagerChatKind, VerifiedManagerUpdate};
+    use crate::services::platform_manager_contract::{
+        EntryIdentity, EventIdentity, ManagerChatKind, VerifiedManagerUpdate,
+    };
 
     pub(crate) async fn fixture(name: &str) -> (Database, VerifiedManagerUpdate, String) {
         let db = crate::test_utils::connect_transaction_test_database(name).await;
@@ -1160,7 +1165,10 @@ impl super::platform_manager_contract::ManagerIdentityProducer for IdentityProdu
                 }
                 ResolvedPersonalSender::Personal { binding, controls } => {
                     SenderResolution::Personal {
-                        authority: authority(&binding, controls.personal_control_revision),
+                        authority: Box::new(authority(
+                            &binding,
+                            controls.personal_control_revision,
+                        )),
                         nyxbot_agent_id: binding.nyxbot_agent_id,
                         conversation_id: binding.conversation_id,
                     }

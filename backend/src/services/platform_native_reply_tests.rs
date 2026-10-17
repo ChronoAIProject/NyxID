@@ -40,12 +40,14 @@ async fn retain_admission(
         &mut session,
         &state.encryption_keys,
         state.auth_device_hmac_key.as_slice(),
-        profile,
-        1,
-        configuration,
-        &batch,
-        0,
-        &uuid::Uuid::new_v4().to_string(),
+        crate::services::platform_entry_receipts::NativeReceiptInput {
+            profile_id: profile,
+            epoch: 1,
+            configuration,
+            batch: &batch,
+            index: 0,
+            relay_message_id: &uuid::Uuid::new_v4().to_string(),
+        },
     )
     .await
     .unwrap();

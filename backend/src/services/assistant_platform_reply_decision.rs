@@ -107,7 +107,7 @@ pub(crate) async fn decide_personal_reply_in_session(
                 conversation_id,
             )
             .await?,
-        contract::ThreadAuthorityResolution::Personal(resolved) if resolved == *authority
+        contract::ThreadAuthorityResolution::Personal(resolved) if *resolved == *authority
     ) {
         return Ok(contract::PlatformDecisionOutcome::Unavailable(
             contract::UnavailableReason::OriginRevoked,

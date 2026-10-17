@@ -265,7 +265,7 @@ async fn repair_with_service(
     body: GenerationRequest,
     service: &crate::services::telegram_new_service::TelegramNewService<'_>,
 ) -> AppResult<(HeaderMap, Json<ConfigResponse>)> {
-    admin(&state, &auth).await?;
+    admin(state, auth).await?;
     let row = configs::get(&state.db, &id.to_string()).await?;
     configs::require_telegram_manager(&row)?;
     if row.generation != body.generation || row.deleted_at.is_some() {
@@ -285,7 +285,7 @@ async fn repair_with_service(
         .await?;
     audit_service::log_for_user(
         state.db.clone(),
-        &auth,
+        auth,
         "platform_bot_repaired",
         Some(serde_json::json!({"platform_config_id": row.id, "generation": row.generation})),
     );
@@ -1687,7 +1687,7 @@ pub async fn convert_native(
                 Some(serde_json::json!({"platform_config_id":row.id,"generation":row.generation})),
             );
             NativeConversionResponse::Converted {
-                profile: row.into(),
+                profile: (*row).into(),
             }
         }
         NativeConversionOutcome::DiscordRecovery(review) => NativeConversionResponse::Recovery {

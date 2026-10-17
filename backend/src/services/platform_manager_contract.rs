@@ -167,7 +167,7 @@ pub struct PersonalThreadClaim {
 
 #[derive(Clone, Debug)]
 pub enum ThreadAuthorityResolution {
-    Personal(PersonalBindingAuthority),
+    Personal(Box<PersonalBindingAuthority>),
     WebOnly,
 }
 
@@ -175,7 +175,7 @@ pub enum ThreadAuthorityResolution {
 pub enum SenderResolution {
     Unlinked,
     Personal {
-        authority: PersonalBindingAuthority,
+        authority: Box<PersonalBindingAuthority>,
         nyxbot_agent_id: Option<String>,
         conversation_id: Option<String>,
     },

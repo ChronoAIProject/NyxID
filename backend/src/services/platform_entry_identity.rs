@@ -4,22 +4,10 @@ use crate::{
     errors::{AppError, AppResult},
     models::platform_entry_identity::{
         EntryPlatform, NativeControlSurface, NativeEntryConfiguration, NativeEntryIdentity,
-        NativeEntryReceipt, NativeSenderIdentity,
+        NativeEntryReceipt,
     },
 };
 use zeroize::Zeroizing;
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum EntryIdentity {
-    TelegramV1 { bot_id: i64 },
-    NativeV2(NativeEntryIdentity),
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum SenderIdentity {
-    TelegramV1 { sender_id: i64, chat_id: i64 },
-    NativeV2(NativeSenderIdentity),
-}
 
 pub(crate) fn refused() -> AppError {
     AppError::Forbidden("Original private platform identity is unavailable".into())
@@ -142,46 +130,6 @@ pub(crate) fn validate_configuration(configuration: &NativeEntryConfiguration) -
     Ok(())
 }
 
-/// Exactly one stored projection is accepted. A native projection never decodes
-/// by ignoring legacy numeric fields, nor does legacy decoding ignore native IDs.
-pub(crate) fn decode_entry(
-    telegram_bot_id: Option<i64>,
-    native: Option<&NativeEntryIdentity>,
-    manager_bot_id: &str,
-) -> AppResult<EntryIdentity> {
-    match (telegram_bot_id, native) {
-        (Some(id), None) if id > 0 && manager_bot_id == id.to_string() => {
-            Ok(EntryIdentity::TelegramV1 { bot_id: id })
-        }
-        (None, Some(entry)) if manager_bot_id == entry.platform_bot_id => {
-            validate_entry(entry)?;
-            Ok(EntryIdentity::NativeV2(entry.clone()))
-        }
-        _ => Err(refused()),
-    }
-}
-
-pub(crate) fn decode_sender(
-    entry: &EntryIdentity,
-    telegram_sender_id: Option<i64>,
-    telegram_chat_id: Option<i64>,
-    native: Option<&NativeSenderIdentity>,
-) -> AppResult<SenderIdentity> {
-    match (entry, telegram_sender_id, telegram_chat_id, native) {
-        (EntryIdentity::TelegramV1 { .. }, Some(sender_id), Some(chat_id), None)
-            if sender_id > 0 && sender_id == chat_id =>
-        {
-            Ok(SenderIdentity::TelegramV1 { sender_id, chat_id })
-        }
-        (EntryIdentity::NativeV2(_), None, None, Some(sender)) => {
-            opaque(&sender.sender_id)?;
-            opaque(&sender.private_conversation_id)?;
-            Ok(SenderIdentity::NativeV2(sender.clone()))
-        }
-        _ => Err(refused()),
-    }
-}
-
 pub(crate) const MAX_NATIVE_TEXT_BYTES: usize = 4096;
 
 pub(crate) fn canonical_text(text: &str) -> AppResult<&str> {
@@ -246,7 +194,13 @@ pub(crate) fn verify_content(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::platform_entry_identity::EntryTransport;
+    use crate::models::{
+        platform_entry_identity::{EntryTransport, NativeSenderIdentity},
+        platform_entry_projection::{
+            StoredEntryIdentity as EntryIdentity, StoredSenderIdentity as SenderIdentity,
+        },
+    };
+    use crate::services::platform_entry_scope::validate;
 
     fn receipt() -> NativeEntryReceipt {
         NativeEntryReceipt {
@@ -285,23 +239,43 @@ mod tests {
     #[test]
     fn opaque_subject_is_distinct_from_telegram_and_mixed_projections_refuse() {
         let native = receipt().configuration.identity;
-        let entry = decode_entry(None, Some(&native), "B-manager").unwrap();
-        assert!(decode_entry(Some(99), Some(&native), "99").is_err());
-        assert!(decode_sender(&entry, Some(4), Some(4), None).is_err());
+        let entry: EntryIdentity =
+            serde_json::from_value(serde_json::json!({"platform_entry":&native})).unwrap();
+        validate(&entry, "B-manager", None).unwrap();
+        assert!(
+            serde_json::from_value::<EntryIdentity>(serde_json::json!({
+                "telegram_bot_id":99,"platform_entry":&native
+            }))
+            .is_err()
+        );
+        let legacy_sender = SenderIdentity::TelegramV1 {
+            telegram_sender_id: 4,
+            telegram_chat_id: 4,
+        };
+        assert!(validate(&entry, "B-manager", Some(&legacy_sender)).is_err());
         let subject = NativeSenderIdentity {
             sender_id: "opaque:user".into(),
             private_conversation_id: "different/conversation".into(),
         };
+        let sender: SenderIdentity =
+            serde_json::from_value(serde_json::json!({"platform_sender":&subject})).unwrap();
         assert_eq!(
-            decode_sender(&entry, None, None, Some(&subject)).unwrap(),
-            SenderIdentity::NativeV2(subject)
+            sender,
+            SenderIdentity::NativeV2 {
+                platform_sender: subject
+            }
         );
+        validate(&entry, "B-manager", Some(&sender)).unwrap();
         assert!(
-            decode_sender(
-                &EntryIdentity::TelegramV1 { bot_id: 99 },
-                Some(4),
-                Some(5),
-                None
+            validate(
+                &EntryIdentity::TelegramV1 {
+                    telegram_bot_id: 99
+                },
+                "99",
+                Some(&SenderIdentity::TelegramV1 {
+                    telegram_sender_id: 4,
+                    telegram_chat_id: 5,
+                }),
             )
             .is_err()
         );

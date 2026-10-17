@@ -409,7 +409,7 @@ async fn dispatch_verified(
                         .session(&mut session)
                         .await?
                         .is_some();
-                    if authority != admitted.authority || !thread_matches {
+                    if *authority != admitted.authority || !thread_matches {
                         send_fixed(
                             state,
                             &producers,

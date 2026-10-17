@@ -246,12 +246,14 @@ impl NativeJourney {
             &mut session,
             &self.state.encryption_keys,
             self.state.auth_device_hmac_key.as_slice(),
-            &self.profile.id,
-            controls.manager_authority_epoch,
-            configuration,
-            &batch,
-            0,
-            &uuid::Uuid::new_v4().to_string(),
+            crate::services::platform_entry_receipts::NativeReceiptInput {
+                profile_id: &self.profile.id,
+                epoch: controls.manager_authority_epoch,
+                configuration,
+                batch: &batch,
+                index: 0,
+                relay_message_id: &uuid::Uuid::new_v4().to_string(),
+            },
         )
         .await
         .unwrap();

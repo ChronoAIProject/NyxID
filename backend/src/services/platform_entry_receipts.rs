@@ -102,18 +102,30 @@ pub(super) async fn fence_configuration(
     Ok(())
 }
 
+pub(crate) struct NativeReceiptInput<'a> {
+    pub(crate) profile_id: &'a str,
+    pub(crate) epoch: i64,
+    pub(crate) configuration: &'a NativeEntryConfiguration,
+    pub(crate) batch: &'a AuthenticatedNativeBatch,
+    pub(crate) index: usize,
+    pub(crate) relay_message_id: &'a str,
+}
+
 pub(crate) async fn record_in_session(
     db: &Database,
     session: &mut ClientSession,
     encryption_keys: &crate::crypto::aes::EncryptionKeys,
     key: &[u8],
-    profile_id: &str,
-    epoch: i64,
-    configuration: &NativeEntryConfiguration,
-    batch: &AuthenticatedNativeBatch,
-    index: usize,
-    relay_message_id: &str,
+    input: NativeReceiptInput<'_>,
 ) -> AppResult<NativeAdmission> {
+    let NativeReceiptInput {
+        profile_id,
+        epoch,
+        configuration,
+        batch,
+        index,
+        relay_message_id,
+    } = input;
     // The authenticated parser fixes both entry and transport. A caller cannot
     // relabel its facts using another independently live configuration.
     if batch.configuration() != configuration {
@@ -178,17 +190,28 @@ pub(crate) async fn record_in_session(
     })
 }
 
+pub(crate) struct GatewayReceiptInput<'a> {
+    pub(crate) profile_id: &'a str,
+    pub(crate) configuration: &'a NativeEntryConfiguration,
+    pub(crate) transport_channel_id: &'a str,
+    pub(crate) activity: &'a serde_json::Value,
+    pub(crate) text: &'a str,
+}
+
 pub(crate) async fn verify_gateway_in_session(
     db: &Database,
     session: &mut ClientSession,
     key: &[u8],
-    profile_id: &str,
-    configuration: &NativeEntryConfiguration,
-    transport_channel_id: &str,
     cache: &std::sync::Arc<super::provider_token_exchange_service::TokenExchangeCache>,
-    activity: &serde_json::Value,
-    text: &str,
+    input: GatewayReceiptInput<'_>,
 ) -> AppResult<NativeAdmission> {
+    let GatewayReceiptInput {
+        profile_id,
+        configuration,
+        transport_channel_id,
+        activity,
+        text,
+    } = input;
     let EntryTransport::NyxagentGateway { channel_id, .. } = &configuration.transport else {
         return Err(refused());
     };

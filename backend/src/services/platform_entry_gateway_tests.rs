@@ -161,12 +161,14 @@ impl Fixture {
             &mut session,
             &state.encryption_keys,
             state.auth_device_hmac_key.as_slice(),
-            &row.profile_id,
-            1,
-            &configuration,
-            &batch,
-            0,
-            exported["activity"]["event_id"].as_str().unwrap(),
+            crate::services::platform_entry_receipts::NativeReceiptInput {
+                profile_id: &row.profile_id,
+                epoch: 1,
+                configuration: &configuration,
+                batch: &batch,
+                index: 0,
+                relay_message_id: exported["activity"]["event_id"].as_str().unwrap(),
+            },
         )
         .await
         .unwrap();

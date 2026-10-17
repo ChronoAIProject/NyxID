@@ -127,7 +127,7 @@ pub(crate) async fn fresh_thread_event_origin_in_session(
         return Ok(None);
     };
     let origin = model_origin(&contract::PlatformTurnOrigin {
-        authority,
+        authority: *authority,
         nyxbot_agent_id: thread.nyxbot_agent_id.clone(),
         source: contract::PlatformOriginSource::ThreadEvent {
             admission_id: turn_id.to_owned(),
