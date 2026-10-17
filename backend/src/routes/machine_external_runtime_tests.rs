@@ -41,6 +41,24 @@ use tower::ServiceExt;
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
+struct DatabaseCommandFailure {
+    command: String,
+    server_code: Option<i32>,
+    transient_transaction: bool,
+    unknown_commit: bool,
+}
+
+impl std::fmt::Debug for DatabaseCommandFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DatabaseCommandFailure")
+            .field("command", &self.command)
+            .field("server_code", &self.server_code)
+            .field("transient_transaction", &self.transient_transaction)
+            .field("unknown_commit", &self.unknown_commit)
+            .finish()
+    }
+}
+
 struct Fixture {
     state: AppState,
     app: Router,
@@ -52,6 +70,8 @@ struct Fixture {
     peer: Peer,
     grant: Value,
     sessions: Mutex<HashMap<String, String>>,
+    database_failures: Arc<Mutex<Vec<DatabaseCommandFailure>>>,
+    call_ordinal: AtomicUsize,
 }
 
 async fn http(
@@ -135,6 +155,16 @@ async fn rpc(f: &Fixture, token: &str, method: &str, params: Value) -> (StatusCo
     )
 }
 async fn call(f: &Fixture, token: &str, name: &str, args: Value) -> Value {
+    let ordinal = f.call_ordinal.fetch_add(1, Ordering::Relaxed) + 1;
+    let source_class = if token == f.key_secret.as_str() {
+        "fixture_parent_key"
+    } else if token.starts_with(crate::crypto::token::AGENT_KEY_PREFIX) || token.starts_with("nyx_")
+    {
+        "other_key"
+    } else {
+        "bearer"
+    };
+    f.database_failures.lock().unwrap().clear();
     let (status, response) = rpc(
         f,
         token,
@@ -142,14 +172,21 @@ async fn call(f: &Fixture, token: &str, name: &str, args: Value) -> Value {
         json!({"name":name,"arguments":args}),
     )
     .await;
-    assert_eq!(status, StatusCode::OK, "public MCP HTTP status for {name}");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "public MCP HTTP status for call #{ordinal} {name} ({source_class})"
+    );
     assert!(
         response.get("error").is_none(),
-        "public MCP protocol error: {response}"
+        "public MCP protocol error for call #{ordinal} {name} ({source_class}): {response}; observed database command failures during request: {:?}",
+        f.database_failures.lock().unwrap()
     );
     assert_ne!(
-        response["result"]["isError"], true,
-        "public MCP tool error: {response}"
+        response["result"]["isError"],
+        true,
+        "public MCP tool error for call #{ordinal} {name} ({source_class}): {response}; observed database command failures during request: {:?}",
+        f.database_failures.lock().unwrap()
     );
     serde_json::from_str(
         response["result"]["content"][0]["text"]
@@ -174,7 +211,66 @@ async fn denied(f: &Fixture, token: &str, name: &str, args: Value) {
     );
 }
 async fn fixture(label: &str) -> Fixture {
-    let db = test_utils::connect_transaction_test_database(label).await;
+    use mongodb::event::{EventHandler, command::CommandEvent};
+
+    let database_failures = Arc::new(Mutex::new(Vec::new()));
+    let observed_failures = database_failures.clone();
+    let db = test_utils::connect_transaction_test_database_with_command_handler(
+        label,
+        EventHandler::callback(move |event| {
+            let failures: Vec<_> = match event {
+                CommandEvent::Failed(event) => vec![DatabaseCommandFailure {
+                    command: event.command_name,
+                    server_code: match event.failure.kind.as_ref() {
+                        mongodb::error::ErrorKind::Command(error) => Some(error.code),
+                        _ => None,
+                    },
+                    transient_transaction: event
+                        .failure
+                        .contains_label("TransientTransactionError"),
+                    unknown_commit: event
+                        .failure
+                        .contains_label("UnknownTransactionCommitResult"),
+                }],
+                // Mongo can return write errors inside an otherwise successful
+                // command response. Retain their codes through the same filter.
+                CommandEvent::Succeeded(event) => event
+                    .reply
+                    .get_array("writeErrors")
+                    .ok()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(bson::Bson::as_document)
+                    .chain(event.reply.get_document("writeConcernError").ok())
+                    .map(|error| {
+                        let has_label = |label: &str| {
+                            event.reply.get_array("errorLabels").is_ok_and(|labels| {
+                                labels.iter().any(|value| value.as_str() == Some(label))
+                            })
+                        };
+                        DatabaseCommandFailure {
+                            command: event.command_name.clone(),
+                            server_code: error.get_i32("code").ok(),
+                            transient_transaction: has_label("TransientTransactionError"),
+                            unknown_commit: has_label("UnknownTransactionCommitResult"),
+                        }
+                    })
+                    .collect(),
+                _ => return,
+            };
+            // Maintenance shares this client. These are bounded command
+            // diagnostics, not proof that a failure belongs to the MCP call.
+            // Never retain command/reply bodies, messages or source IDs.
+            let mut observed = observed_failures.lock().unwrap();
+            for failure in failures {
+                if observed.len() == 16 {
+                    observed.remove(0);
+                }
+                observed.push(failure);
+            }
+        }),
+    )
+    .await;
     crate::db::ensure_indexes(&db).await.unwrap();
     let owner = Uuid::new_v4().to_string();
     db.collection(crate::models::user::COLLECTION_NAME)
@@ -241,6 +337,8 @@ async fn fixture(label: &str) -> Fixture {
         peer,
         grant,
         sessions: Mutex::new(HashMap::new()),
+        database_failures,
+        call_ordinal: AtomicUsize::new(0),
     }
 }
 async fn child(f: &Fixture) -> (String, Zeroizing<String>) {

@@ -1207,104 +1207,74 @@ async fn renew_job_with_source(
     Ok(())
 }
 
-/// Narrow cancellation checks actual live source identity without requiring a
-/// grant that may already have been revoked. It cannot read output or renew.
-async fn valid_stop_source(db: &Database, source: &VerifiedExternalSource) -> AppResult<()> {
-    if source.authentication_expires_at() <= Utc::now() {
-        return Err(refused());
-    }
-    let principal = source.principal();
-    let user = db
-        .collection::<Document>(crate::models::user::COLLECTION_NAME)
-        .find_one(
-            doc! {"_id":principal_user(&principal),"is_active":true,"user_type":{"$ne":"org"}},
-        )
-        .await?;
-    if user.is_none() {
-        return Err(refused());
-    }
-    match principal {
-        ExternalPrincipalRef::ApiKey {
-            user_id,
-            api_key_id,
-            api_key_credential_id,
-        } => {
-            let key = super::key_service::get_api_key(db, &user_id, &api_key_id).await?;
-            VerifiedExternalSource::from_verified_api_key(&key, api_key_credential_id.as_deref())?;
-            if let Some(child) = api_key_credential_id {
-                let mut session = db.client().start_session().await?;
-                session.start_transaction().await?;
-                let valid = super::machine_external_source_service::fence_child_in_session(
-                    db,
-                    &user_id,
-                    &api_key_id,
-                    &child,
-                    &mut session,
-                )
-                .await;
-                match valid {
-                    Ok(_) => session.commit_transaction().await?,
-                    Err(error) => {
-                        let _ = session.abort_transaction().await;
-                        return Err(error);
-                    }
-                }
-            }
-        }
-        ExternalPrincipalRef::OAuth {
-            user_id,
-            oauth_client_id,
-        } => {
-            let consent = source.protected_consent().ok_or_else(refused)?;
-            if db
-                .collection::<Document>(crate::models::oauth_client::COLLECTION_NAME)
-                .find_one(doc! {"_id":&oauth_client_id,"is_active":true})
-                .await?
-                .is_none()
-            {
-                return Err(refused());
-            }
-            if db.collection::<Document>(crate::models::consent::COLLECTION_NAME).find_one(doc!{"_id":&consent.consent_id,"user_id":&user_id,"client_id":&oauth_client_id,"revision":&consent.consent_revision,"$or":[{"expires_at":Bson::Null},{"expires_at":{"$gt":bson::DateTime::now()}}]}).await?.is_none(){return Err(refused());}
-        }
-    }
-    Ok(())
-}
 async fn cancel(
     state: &AppState,
     source: &VerifiedExternalSource,
     node: &Node,
     job: &MachineJob,
 ) -> AppResult<Value> {
-    valid_stop_source(&state.db, source).await?;
     if !same_principal(external_binding(job)?.0, &source.principal()) {
         return Err(AppError::MachineJobNotFound);
     }
-    let row = state
-        .db
-        .collection::<Document>(machine_job::COLLECTION_NAME)
-        .find_one(doc! {"_id":&job.id})
-        .await?
-        .ok_or(AppError::MachineJobNotFound)?;
-    let mut authority: Box<ExternalAuthority> =
-        bson::from_bson(row.get("external_authority").cloned().ok_or_else(refused)?)
-            .map_err(|_| refused())?;
-    authority.expires_at_ms = Utc::now().timestamp_millis() + nyxid_machine::authority::LEASE_MS;
-    let lease_id = authority.lease_id.clone();
-    let mut session = state.db.client().start_session().await?;
-    session.start_transaction().await?;
-    enqueue_lease_in_session(&state.db, &authority, "job_cancelled", &mut session).await?;
-    let requested_at = Utc::now();
-    let requester = MachineCancellationRequester::External {
-        principal: source.principal(),
-    };
-    state.db.collection::<Document>(machine_job::COLLECTION_NAME).update_one(doc!{"_id":&job.id,"node_id":&node.id,"runtime_id":&job.runtime_id,"state":"running"},doc!{"$set":{"state":"cancelled","finished_at":bson::DateTime::from_chrono(requested_at),"retain_until":bson::DateTime::from_chrono(requested_at+Duration::days(HISTORY_DAYS)),"cancellation_requested_by":encode(&requester)?,"cancellation_requested_at":bson::DateTime::from_chrono(requested_at)}}).session(&mut session).await?;
-    state
-        .db
-        .collection::<Document>(access::LEASES)
-        .delete_one(doc! {"_id":&lease_id})
-        .session(&mut session)
-        .await?;
-    session.commit_transaction().await?;
+    let mut filter = doc! {"_id":&job.id,"user_id":&job.user_id,"node_id":&node.id,"runtime_id":&job.runtime_id,"runtime_generation":encode(&job.runtime_generation)?};
+    let mut binding =
+        bson::to_document(job.binding.as_ref().ok_or_else(refused)?).map_err(|_| refused())?;
+    // Renewal can advance this one field, but cannot rebind the admitted job.
+    binding.remove("authentication_expires_at");
+    for (field, value) in binding {
+        filter.insert(format!("binding.{field}"), value);
+    }
+    let db = state.db.clone();
+    let source = source.clone();
+    let original_job = job.clone();
+    let authority = db.client().start_session().await?.start_transaction()
+        .write_concern(mongodb::options::WriteConcern::majority())
+        .and_run2(async move |session| {
+            let result: AppResult<Box<ExternalAuthority>> = async {
+                // Reload renewal's mutable transport authority on every attempt.
+                let row = db.collection::<Document>(machine_job::COLLECTION_NAME)
+                    .find_one(filter.clone()).session(&mut *session).await?
+                    .ok_or(AppError::MachineJobNotFound)?;
+                let mut authority: Box<ExternalAuthority> = bson::from_bson(
+                    row.get("external_authority").cloned().ok_or_else(refused)?
+                ).map_err(|_| refused())?;
+                let (principal, grant, revision, assignment, _, _, lease) = external_binding(&original_job)?;
+                if authority.principal != wire_principal(principal)
+                    || authority.node_id != original_job.node_id
+                    || authority.runtime_id != original_job.runtime_id
+                    || authority.runtime_generation != original_job.runtime_generation
+                    || authority.job_id.as_deref() != Some(original_job.id.as_str())
+                    || authority.grant_id != grant
+                    || authority.grant_revision != revision
+                    || authority.assignment_revision != assignment
+                    || authority.lease_id != lease
+                {
+                    return Err(refused());
+                }
+                #[cfg(test)]
+                tests::cancel_snapshot_loaded(&db, &original_job.id).await;
+                grants::admit_stop_source_in_session(&db, &source, session).await?;
+                // Also fence terminal jobs: a repeated stop cannot commit
+                // against a concurrently replaced persisted identity.
+                let touched = db.collection::<Document>(machine_job::COLLECTION_NAME)
+                    .update_one(filter.clone(), doc! {"$inc":{"machine_execution_fence":1_i64}})
+                    .session(&mut *session).await?;
+                if touched.matched_count != 1 {
+                    return Err(AppError::MachineJobNotFound);
+                }
+                authority.expires_at_ms = Utc::now().timestamp_millis() + nyxid_machine::authority::LEASE_MS;
+                enqueue_lease_in_session(&db, &authority, "job_cancelled", session).await?;
+                let requested_at = Utc::now();
+                let requester = MachineCancellationRequester::External { principal: source.principal() };
+                let mut running = filter.clone();
+                running.insert("state", "running");
+                db.collection::<Document>(machine_job::COLLECTION_NAME).update_one(running,doc!{"$set":{"state":"cancelled","finished_at":bson::DateTime::from_chrono(requested_at),"retain_until":bson::DateTime::from_chrono(requested_at+Duration::days(HISTORY_DAYS)),"cancellation_requested_by":encode(&requester)?,"cancellation_requested_at":bson::DateTime::from_chrono(requested_at)}}).session(&mut *session).await?;
+                db.collection::<Document>(access::LEASES).delete_one(doc! {"_id":lease})
+                    .session(&mut *session).await?;
+                Ok(authority)
+            }.await;
+            transactions::transaction_result(result)
+        }).await.map_err(transactions::map_transaction_error)?;
     // Durable outbox owns retries; this request only attempts the immediate
     // low-latency stop. The result contains no output under any circumstance.
     let accepted = if node
