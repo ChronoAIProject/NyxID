@@ -2681,13 +2681,21 @@ async fn custom_llm_disconnected_body_stops_slow_tool_and_full_queue_is_bounded(
         );
         if disconnect {
             f.gate.add_permits(1);
-            tokio::time::timeout(std::time::Duration::from_secs(10), async {
-                while f.callback_codes.lock().await.is_empty() {
-                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-                }
-            })
+            // Cancellation can finish or drop the accepted upstream handler
+            // before it returns a callback status. Observe completion first.
+            tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                f.upstream_finished.cancelled(),
+            )
             .await
             .unwrap();
+            assert_eq!(f.requests.lock().await.len(), 1);
+            let codes = f.callback_codes.lock().await;
+            match codes.as_slice() {
+                [] => {} // The accepted handler was cancelled before a response.
+                [code] => assert!(*code >= 400, "the stopped turn must reject its callback"),
+                _ => panic!("expected at most one callback from the accepted turn"),
+            }
             assert_eq!(f.reads.load(Ordering::SeqCst), 0);
         }
         drop(held);
