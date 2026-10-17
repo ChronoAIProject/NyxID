@@ -1146,8 +1146,8 @@ async fn cleanup_before_deadline(
     deadline: Option<chrono::DateTime<Utc>>,
     future: impl std::future::Future<Output = AppResult<()>>,
 ) -> AppResult<bool> {
-    let result = before_native_deadline(deadline, async {
-        #[cfg(test)]
+    #[cfg(test)]
+    let future = async {
         if deadline.is_some()
             && let Ok(stall) = TEST_NATIVE_CLEANUP_STALL.try_with(Arc::clone)
         {
@@ -1157,8 +1157,8 @@ async fn cleanup_before_deadline(
             tokio::time::sleep(stall.duration).await;
         }
         future.await
-    })
-    .await;
+    };
+    let result = before_native_deadline(deadline, future).await;
     match result {
         Some(result) => result.map(|()| true),
         None => Ok(false),
