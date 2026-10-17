@@ -66,6 +66,74 @@ fn binding(profile: Profile, owner: &str) -> Binding {
         updated_at: now,
     }
 }
+#[test]
+fn twilio_public_sid_cannot_carry_auth_token_or_path_data() {
+    let digits = format!("{:032x}", 0x0123456789abcdef0123456789abcdef_u128);
+    let public_sid = format!("AC{digits}");
+    let sid = protocol::TwilioAccountSid::parse(&public_sid).unwrap();
+    assert_eq!(sid.to_string(), public_sid);
+    let raw = zeroize::Zeroizing::new(format!("{public_sid}:fixture-auth-token"));
+    let (routing, token) = protocol::twilio_key(&raw, &public_sid).unwrap();
+    assert!(routing == sid);
+    assert!(token == "fixture-auth-token");
+    for invalid in [
+        "ACshort".to_owned(),
+        digits.clone(),
+        format!("SK{digits}"),
+        format!("AC{}g", &digits[..31]),
+        format!("AC{}", digits.to_ascii_uppercase()),
+        format!("AC{}F{}", &digits[..15], &digits[16..]),
+        format!("{public_sid}:fixture-auth-token"),
+        format!("{public_sid}/Calls"),
+        format!("{public_sid}?token=fixture"),
+    ] {
+        assert!(protocol::TwilioAccountSid::parse(&invalid).is_err());
+    }
+    assert!(
+        protocol::twilio_key(
+            &format!("AC{:032x}:fixture-auth-token", 1_u128),
+            &public_sid,
+        )
+        .is_err()
+    );
+    assert!(protocol::twilio_key(&format!("{public_sid}:"), &public_sid).is_err());
+}
+#[test]
+fn provider_request_urls_allow_only_compiled_https_or_test_loopback() {
+    for (profile, base) in [
+        (Profile::TelnyxSms, "https://api.telnyx.com"),
+        (Profile::TwilioRelay, "https://api.twilio.com"),
+        (Profile::ElevenlabsCustomLlm, "https://api.elevenlabs.io"),
+    ] {
+        let url = profiles::provider_url(profile, base, "/resource?cursor=123").unwrap();
+        assert_eq!(url.scheme(), "https");
+        assert_eq!(url.path(), "/resource");
+        assert_eq!(url.query(), Some("cursor=123"));
+        for path in [
+            "https://elsewhere.invalid/resource",
+            "//elsewhere.invalid/resource",
+            "/\\elsewhere.invalid/resource",
+            "/resource#fragment",
+            "resource",
+        ] {
+            assert!(profiles::provider_url(profile, base, path).is_err());
+        }
+        for invalid in [
+            "http://api.twilio.com",
+            "https://elsewhere.invalid",
+            "http://localhost:12345",
+            "http://127.0.0.1:12345@elsewhere.invalid",
+            "http://user@127.0.0.1:12345",
+            "http://127.0.0.1:12345/path",
+            "http://127.0.0.1:12345?query=1",
+        ] {
+            assert!(profiles::provider_url(profile, invalid, "/resource").is_err());
+        }
+        for fixture in ["http://127.0.0.1:12345", "http://[::1]:12345"] {
+            assert!(profiles::provider_url(profile, fixture, "/resource").is_ok());
+        }
+    }
+}
 async fn serve(router: Router) -> (String, tokio::task::JoinHandle<()>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let origin = format!("http://{}", listener.local_addr().unwrap());
@@ -150,6 +218,7 @@ struct Fixture {
     reads: Arc<AtomicUsize>,
     requests: Arc<Mutex<Vec<Value>>>,
     callback_codes: Arc<Mutex<Vec<u16>>>,
+    upstream_finished: tokio_util::sync::CancellationToken,
     gate: Arc<Semaphore>,
     chunks: Arc<AtomicUsize>,
     chunk_delay_ms: Arc<AtomicUsize>,
@@ -284,7 +353,10 @@ async fn fixture(profile: Profile, gated: bool) -> Fixture {
     let stream_chunks = chunks.clone();
     let stream_delay = chunk_delay_ms.clone();
     let stream_fail = fail_turn.clone();
-    let upstream=Router::new().route("/v1/capabilities",get(||async{StatusCode::NOT_FOUND})).route("/v1/models",get(||async{Json(json!({"data":[{"id":engine::DEFAULT_MODEL}]}))})).route("/v1/responses",post(move|headers:HeaderMap,Json(body):Json<Value>|{let proxy=proxy.clone();let notion=notion.clone();let captures=captures.clone();let codes=codes.clone();let g=g.clone();let chunks=stream_chunks.clone();let delay=stream_delay.clone();let failed=stream_fail.clone();async move{
+    let upstream_finished = tokio_util::sync::CancellationToken::new();
+    let finished = upstream_finished.clone();
+    let upstream=Router::new().route("/v1/capabilities",get(||async{StatusCode::NOT_FOUND})).route("/v1/models",get(||async{Json(json!({"data":[{"id":engine::DEFAULT_MODEL}]}))})).route("/v1/responses",post(move|headers:HeaderMap,Json(body):Json<Value>|{let proxy=proxy.clone();let notion=notion.clone();let captures=captures.clone();let codes=codes.clone();let g=g.clone();let chunks=stream_chunks.clone();let delay=stream_delay.clone();let failed=stream_fail.clone();let finished=finished.clone();async move{
+        let _finished = finished.drop_guard();
         captures.lock().await.push(body);g.acquire().await.unwrap().forget();
         let authorization=headers.get("authorization").unwrap().clone();
         let response=proxy.oneshot(Request::builder().uri(format!("/proxy/s/api-notion/faq?_nyxid_via={notion}")).header("authorization",authorization).body(Body::empty()).unwrap()).await.unwrap();
@@ -321,6 +393,7 @@ async fn fixture(profile: Profile, gated: bool) -> Fixture {
         reads,
         requests,
         callback_codes,
+        upstream_finished,
         gate,
         chunks,
         chunk_delay_ms,
@@ -352,7 +425,10 @@ async fn run_turn(f: &Fixture, s: &CallSession, event: &str, text: &str) -> Stri
     assert!(
         !output_failed && settlement.error.is_none(),
         "turn error: {:?}; upstream requests: {}; callback statuses: {:?}",
-        settlement.error,
+        settlement
+            .error
+            .as_ref()
+            .map(|error| (error.code, error.stage)),
         f.requests.lock().await.len(),
         f.callback_codes.lock().await
     );
@@ -2512,16 +2588,22 @@ async fn websocket_disconnect_stops_accepted_turn_before_tool_callback() {
     let _ = ws.next().await;
     wait_closed(&f, call).await;
     f.gate.add_permits(1);
-    tokio::time::timeout(std::time::Duration::from_secs(10), async {
-        while f.callback_codes.lock().await.is_empty() {
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-    })
+    // Disconnect may cancel NyxAgent's HTTP handler before it can issue a
+    // callback. Wait for that handler to finish or be dropped, so an empty
+    // status list proves cancellation rather than a callback still pending.
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        f.upstream_finished.cancelled(),
+    )
     .await
     .unwrap();
+    assert_eq!(f.requests.lock().await.len(), 1);
     let codes = f.callback_codes.lock().await;
-    assert_eq!(codes.len(), 1);
-    assert!(!(200..300).contains(&codes[0]));
+    match codes.as_slice() {
+        [] => {} // The accepted handler was cancelled before a response.
+        [code] => assert!(!(200..300).contains(code)),
+        _ => panic!("expected at most one callback from the accepted turn"),
+    }
     assert_eq!(f.reads.load(Ordering::SeqCst), 0);
     drop(codes);
     f.state.db.drop().await.unwrap();

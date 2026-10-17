@@ -56,11 +56,11 @@ pub async fn request(
     let method = reqwest::Method::from_bytes(method.as_bytes())
         .map_err(|_| AppError::BadRequest("Invalid method".into()))?;
     let mut request = crate::services::proxy_service::no_redirect_http_client()
-        .request(method, format!("{}{path}", profiles::binding_origin(b)?))
+        .request(method, profiles::binding_url(b, path)?)
         .timeout(std::time::Duration::from_secs(15));
     request = if profiles::provider(b.profile) == "twilio" {
         let (a, k) = protocol::twilio_key(&r.key, &b.account_id)?;
-        request.basic_auth(a, Some(k))
+        request.basic_auth(a.to_string(), Some(k))
     } else {
         request.bearer_auth(r.key.as_str())
     };
@@ -220,9 +220,10 @@ pub async fn twilio_update(
     if fields.iter().any(|(name, _)| *name == "TimeLimit") && !active {
         return Err(AppError::VoiceProviderUnavailable);
     }
+    let sid = protocol::TwilioAccountSid::parse(&b.account_id)?;
     let path = format!(
         "/2010-04-01/Accounts/{}/Calls/{}.json",
-        b.account_id, s.provider_call_id
+        sid, s.provider_call_id
     );
     let encoded: String = url::form_urlencoded::Serializer::new(String::new())
         .extend_pairs(fields.iter().copied())
@@ -237,8 +238,8 @@ pub async fn twilio_update(
     binding::authorize(state, b, r, "POST", &path, Some(encoded.as_bytes())).await?;
     let (a, key) = protocol::twilio_key(&r.key, &b.account_id)?;
     let response = crate::services::proxy_service::no_redirect_http_client()
-        .post(format!("{}{path}", profiles::binding_origin(b)?))
-        .basic_auth(a, Some(key))
+        .post(profiles::binding_url(b, &path)?)
+        .basic_auth(a.to_string(), Some(key))
         .form(fields)
         .timeout(std::time::Duration::from_secs(10))
         .send()

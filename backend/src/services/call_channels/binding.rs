@@ -375,12 +375,12 @@ pub(crate) async fn verify_resources(
     let paths = resource_paths(b);
     for (index, path) in paths.iter().enumerate() {
         let mut request = http
-            .get(format!("{origin}{path}"))
+            .get(profiles::provider_url(b.profile, &origin, path)?)
             .timeout(std::time::Duration::from_secs(15));
         request = match profiles::provider(b.profile) {
             "twilio" => {
                 let (a, k) = protocol::twilio_key(key, &b.account_id)?;
-                request.basic_auth(a, Some(k))
+                request.basic_auth(a.to_string(), Some(k))
             }
             "telnyx" => request.bearer_auth(key),
             _ => request.header("xi-api-key", key),

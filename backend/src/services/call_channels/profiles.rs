@@ -354,19 +354,18 @@ pub(crate) async fn send_sms_at(
     }
     .map_err(SmsFailure::Rejected)?;
     let request = if b.profile == Profile::TelnyxSms {
-        http.post(format!("{origin}/v2/messages"))
+        http.post(provider_url(b.profile, &origin, "/v2/messages").map_err(SmsFailure::Rejected)?)
             .bearer_auth(key)
             .header("content-type", "application/json")
             .body(payload)
     } else {
-        let (account, secret) =
+        let (sid, secret) =
             protocol::twilio_key(key, &b.account_id).map_err(SmsFailure::Rejected)?;
-        http.post(format!(
-            "{origin}/2010-04-01/Accounts/{account}/Messages.json"
-        ))
-        .basic_auth(account, Some(secret))
-        .header("content-type", "application/x-www-form-urlencoded")
-        .body(payload)
+        let path = format!("/2010-04-01/Accounts/{sid}/Messages.json");
+        http.post(provider_url(b.profile, &origin, &path).map_err(SmsFailure::Rejected)?)
+            .basic_auth(sid.to_string(), Some(secret))
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(payload)
     };
     let response = request
         .timeout(std::time::Duration::from_secs(15))
@@ -422,6 +421,19 @@ pub(crate) async fn send_sms_at(
 pub(crate) fn origin(p: Profile, fixture: Option<&str>) -> AppResult<String> {
     #[cfg(test)]
     if let Some(origin) = fixture {
+        let url = url::Url::parse(origin)
+            .map_err(|_| AppError::Forbidden("Unsupported provider origin".into()))?;
+        if url.scheme() != "http"
+            || !matches!(url.host(), Some(url::Host::Ipv4(ip)) if ip.is_loopback())
+                && !matches!(url.host(), Some(url::Host::Ipv6(ip)) if ip.is_loopback())
+            || !url.username().is_empty()
+            || url.password().is_some()
+            || url.path() != "/"
+            || url.query().is_some()
+            || url.fragment().is_some()
+        {
+            return Err(AppError::Forbidden("Unsupported provider origin".into()));
+        }
         return Ok(origin.into());
     }
     #[cfg(not(test))]
@@ -434,6 +446,38 @@ pub(crate) fn origin(p: Profile, fixture: Option<&str>) -> AppResult<String> {
         _ => "https://api.elevenlabs.io",
     }
     .into())
+}
+/// Credentials go only to the compiled HTTPS provider, or an explicit test-only
+/// loopback HTTP fixture. A path cannot select another origin or userinfo.
+pub(crate) fn provider_url(p: Profile, base: &str, path: &str) -> AppResult<url::Url> {
+    let compiled = origin(p, None)?;
+    if base != compiled {
+        #[cfg(not(test))]
+        return Err(AppError::Forbidden("Unsupported provider origin".into()));
+        #[cfg(test)]
+        origin(p, Some(base))?;
+    }
+    let base = url::Url::parse(base)
+        .map_err(|_| AppError::Forbidden("Unsupported provider origin".into()))?;
+    let result = base
+        .join(path)
+        .map_err(|_| AppError::Forbidden("Unsupported provider path".into()))?;
+    if !path.starts_with('/')
+        || path.starts_with("//")
+        || result.origin() != base.origin()
+        || !result.username().is_empty()
+        || result.password().is_some()
+        || result.fragment().is_some()
+    {
+        return Err(AppError::Forbidden("Unsupported provider path".into()));
+    }
+    Ok(result)
+}
+pub(crate) fn binding_url(
+    b: &crate::models::channel_adapter::Binding,
+    path: &str,
+) -> AppResult<url::Url> {
+    provider_url(b.profile, &binding_origin(b)?, path)
 }
 pub(crate) async fn bounded_response(response: reqwest::Response) -> AppResult<Vec<u8>> {
     use futures::StreamExt;
@@ -477,7 +521,7 @@ pub(crate) fn binding_origin(b: &crate::models::channel_adapter::Binding) -> App
         .get(&b.account_id)
         .cloned()
     {
-        return Ok(origin);
+        return self::origin(b.profile, Some(&origin));
     }
     #[cfg(test)]
     {

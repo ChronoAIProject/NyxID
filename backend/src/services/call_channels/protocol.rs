@@ -45,12 +45,38 @@ pub fn call_segment(profile: Profile, s: &str) -> AppResult<String> {
     }
     Ok(s.replace('=', "%3D").replace(':', "%3A"))
 }
-pub fn twilio_key<'a>(raw: &'a str, account: &str) -> AppResult<(&'a str, &'a str)> {
+/// Public Twilio routing identity, distinct from the credential's auth token.
+/// Only a canonical AC-prefixed 128-bit SID can become an account path segment;
+/// rendering preserves the exact path used by operation authorization.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct TwilioAccountSid(u128);
+impl TwilioAccountSid {
+    pub fn parse(value: &str) -> AppResult<Self> {
+        let digits = value.strip_prefix("AC").ok_or_else(invalid)?;
+        if digits.len() != 32
+            || !digits
+                .bytes()
+                .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
+        {
+            return Err(invalid());
+        }
+        u128::from_str_radix(digits, 16)
+            .map(Self)
+            .map_err(|_| invalid())
+    }
+}
+impl std::fmt::Display for TwilioAccountSid {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "AC{:032x}", self.0)
+    }
+}
+pub fn twilio_key<'a>(raw: &'a str, account: &str) -> AppResult<(TwilioAccountSid, &'a str)> {
+    let sid = TwilioAccountSid::parse(account)?;
     let (id, secret) = raw.split_once(':').ok_or_else(invalid)?;
-    if id != account || secret.is_empty() || secret.contains(':') {
+    if TwilioAccountSid::parse(id)? != sid || secret.is_empty() || secret.contains(':') {
         return Err(invalid());
     }
-    Ok((id, secret))
+    Ok((sid, secret))
 }
 pub fn form(body: &[u8]) -> AppResult<BTreeMap<String, String>> {
     if body.len() > MAX_INGRESS || std::str::from_utf8(body).is_err() {

@@ -18,7 +18,7 @@ use axum::{
     http::HeaderMap,
 };
 use chrono::{Duration, Utc};
-use futures::SinkExt;
+use futures::{SinkExt, future::BoxFuture};
 use mongodb::bson::{self, doc};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -73,15 +73,26 @@ async fn ticket(state: &AppState, s: &CallSession) -> AppResult<Zeroizing<String
     }
     Ok(raw)
 }
-pub async fn ingress(
+pub fn ingress<'a>(
     state: AppState,
-    id: &str,
-    headers: &HeaderMap,
-    body: &[u8],
-) -> AppResult<String> {
-    ingress_correlated(state, id, headers, body, None).await
+    id: &'a str,
+    headers: &'a HeaderMap,
+    body: &'a [u8],
+) -> BoxFuture<'a, AppResult<String>> {
+    ingress_correlated(state, id, headers, body, None)
 }
-pub async fn ingress_correlated(
+// Construct admission on the heap before a handler polls it. Boxing only at
+// an await site still embeds the unboxed construction temporary in that frame.
+pub fn ingress_correlated<'a>(
+    state: AppState,
+    id: &'a str,
+    headers: &'a HeaderMap,
+    body: &'a [u8],
+    send: Option<&'a str>,
+) -> BoxFuture<'a, AppResult<String>> {
+    Box::pin(ingress_correlated_inner(state, id, headers, body, send))
+}
+async fn ingress_correlated_inner(
     state: AppState,
     id: &str,
     headers: &HeaderMap,
@@ -958,7 +969,17 @@ pub async fn finalize_call(state: &AppState, s: &CallSession) -> AppResult<()> {
         .await?;
     Ok(())
 }
-pub async fn close(
+// Socket tasks and ingress share cleanup. Keep its billing and credential
+// state machine out of both callers' poll frames, including future creation.
+pub fn close<'a>(
+    state: &'a AppState,
+    b: &'a Binding,
+    s: &'a CallSession,
+    authoritative: bool,
+) -> BoxFuture<'a, AppResult<()>> {
+    Box::pin(close_inner(state, b, s, authoritative))
+}
+async fn close_inner(
     state: &AppState,
     b: &Binding,
     s: &CallSession,

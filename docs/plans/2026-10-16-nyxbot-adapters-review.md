@@ -2,6 +2,7 @@
 
 Opened: 2026-10-16. Final review: 2026-10-17. Status: implementation and local
 acceptance complete for the documented supported profiles. R1–R23 are resolved.
+PR integration validation is in progress; the CI findings below remain open.
 The separate credential-exposure incident below remains open pending rotation.
 
 The primary agent reviews the implementation personally. There is one Heca
@@ -697,3 +698,80 @@ included. The wizard source-closure hash matches its committed bundle and none
 of this PR's files are in that closure. Main's GitHub ruleset requires one
 approving review; no bypass is planned. Live provider validation and the separate
 credential-rotation incident remain outside these local/CI results.
+
+### First PR CI run
+
+[CI run 39013759876](https://github.com/ChronoAIProject/NyxID/actions/runs/39013759876)
+validated rebased head `fb97669f1e64c8c0a96ab516ff5472a9b3d5e216`. The full
+backend nextest run completed: **9,224 passed, four failed, eight skipped**. All
+four failures were new adapter tests; no existing backend test failed.
+
+- **CI1 — open:** Linux stack overflows in
+  `concurrent_duplicate_websocket_loser_cannot_cleanup_winner`,
+  `signed_carrier_ingress_websocket_finals_and_fifo_reach_real_faq_tools`, and
+  `twilio_rejected_or_uncertain_cap_never_releases_relay_and_never_replays_cap`.
+  Coverage independently aborted on the first of these, before producing a
+  coverage percentage. No lowered threshold or increased stack is accepted as
+  a resolution.
+- **CI2 — open:** `websocket_disconnect_stops_accepted_turn_before_tool_callback`
+  timed out waiting for fixture callback completion after disconnect. Preserve
+  the actual cancellation/zero-tool-effect contract and remove timing ambiguity.
+- **CI3 — open:** CodeQL alerts 517 and 518 trace Twilio account identifiers into
+  required REST URL paths. Verify the public routing identity separately from
+  credential material and preserve fixed HTTPS production destinations. The
+  scanner finding is under investigation, not dismissed as a passed check.
+- **CI4 — open:** CodeQL alert 516 flags the test's formatted settlement error.
+  Diagnostics must expose only a safe error classification.
+
+The full frontend suite passed locally after rebase: **6,106 tests in 575 files**;
+lint and the production build also passed. Remote Rust format/Clippy, all three
+KMS feature builds, production image inputs, billing smoke, CLI, Machine Container
+E2E, frontend, wizard freshness and CLI/frontend coverage passed. Individual
+CodeQL analysis jobs succeeded, but the aggregate correctly remains red for the
+three findings. These passing jobs do not override the failing gates.
+
+The machine restarted during this phase; previous `/tmp` logs and local processes
+were lost. GitHub job logs and the uploaded JUnit/resource artifacts are retained
+as durable evidence. Before the restart, the task's stopped MongoDB data and
+frontend dependencies/build output were removed and MongoDB logs compressed.
+Remaining generated frontend documentation was removed afterward. No unrelated
+server or shared source workspace was stopped or deleted.
+
+### CI correction review in progress
+
+The primary personally reviewed the proposed public Twilio routing identity,
+fixed-provider URL validation and cancellation-completion assertions. One review
+correction requires canonical lowercase SID digits so the path authorized by
+catalog policy is byte-identical to the dispatched path; uppercase and mixed-case
+SIDs now have rejection cases. The public SID is parsed independently of the
+auth token, which never becomes part of a provider URL. Test diagnostics retain
+only the fixed error code and stage rather than formatting a full settlement
+error.
+
+The disconnect fixture now signals when the accepted upstream handler finishes
+or is dropped. The assertion waits for that signal, requires exactly one accepted
+request, permits only cancellation or a rejected callback, and still requires
+zero FAQ reads. This establishes completion before asserting absence of effects.
+CI1–CI4 remain open until the final correction and renewed validation complete.
+
+The additional scope review checked shared turn fencing, credential-resolution
+callers, funding release, additive message fields and frontend parsing against
+main `64116aace`. No unrelated API/data-contract removal or dependency version
+upgrade was found. Compilation resource pressure is being contained to this
+worktree; other worktrees' compilers and shared target artifacts are not cleanup
+targets.
+
+The proposed CI1 correction moves `ingress_correlated` and `close` behind
+functions returning `BoxFuture`, leaving their existing async bodies and await
+ordering intact. Callers now retain the boxed handle instead of embedding those
+large admission/cleanup state machines and their construction temporaries. The
+primary reviewed the exact diff: no new task, detached operation, retry, billing
+decision, authority check or cancellation branch is introduced. Workspace
+formatting and whitespace checks pass; runtime validation is still pending.
+
+Two full local diagnostic compilation attempts were interrupted while protecting
+disk headroom under concurrent worktree memory pressure. They are not passing
+builds or source-regression evidence. A temporary copy excludes unrelated test
+functions for focused diagnosis only; repository tests, CI configuration, thread
+stack limits and coverage thresholds remain unchanged. The next published
+revision must still pass the complete Linux test and coverage jobs.
