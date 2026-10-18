@@ -2835,7 +2835,7 @@ async fn partially_created_sandbox_needs_no_fabricated_pod_node_or_csi_fact() {
 }
 
 #[tokio::test]
-async fn current_persisted_control_plane_stop_has_no_retry_or_lifetime_cap() {
+async fn current_persisted_control_plane_stop_survives_manual_retry_after_lifetime_limit() {
     let f = recovery_fixture("delete_aged_control_plane_stop", true).await;
     assert!(f.step().await.is_err());
     let original = f.current().await;
@@ -2852,8 +2852,19 @@ async fn current_persisted_control_plane_stop_has_no_retry_or_lifetime_cap() {
         .unwrap();
     f.db.collection::<Document>(crate::models::remote_machine_operation::COLLECTION_NAME).update_one(
         doc! {"_id": &original.active_operation_id},
-        doc! {"$set": {"retry_count": 100_000_i64, "deadline_at": bson::DateTime::from_chrono(first_stop), "created_at": bson::DateTime::from_chrono(first_stop)}},
+        doc! {"$set": {"retry_count": 100_000_i64, "delete_retry":bson::Bson::Null, "deadline_at": bson::DateTime::from_chrono(first_stop), "created_at": bson::DateTime::from_chrono(first_stop)}},
     ).await.unwrap();
+    let exhausted = f.current().await;
+    super::super::remote_machine_delete_retry::retry(
+        &f.db,
+        &exhausted.owner_id,
+        exhausted.active_operation_id.as_deref().unwrap(),
+        exhausted.revision,
+        100_000,
+        "renew-aged-delete",
+    )
+    .await
+    .unwrap();
     {
         let mut c = f.cluster.lock().unwrap();
         c.sandbox = None;
@@ -2870,6 +2881,301 @@ async fn current_persisted_control_plane_stop_has_no_retry_or_lifetime_cap() {
         final_progress.stop.as_ref().unwrap().evidence_ref,
         retained.stop.as_ref().unwrap().evidence_ref
     );
+    f.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn delete_retry_limit_stops_both_entry_points_and_retains_cleanup() {
+    let f = recovery_fixture("delete_retry_limit", true).await;
+    f.set_pv("Retain");
+    for _ in 0..10 {
+        assert!(f.step().await.is_err());
+    }
+    let before = f.cluster.lock().unwrap().requests.len();
+    f.due().await;
+    let machine = f.current().await;
+    assert!(advance(&f.manager, &machine).await.is_ok());
+    assert!(f.manager.observe(&machine).await.is_ok());
+    assert_eq!(f.cluster.lock().unwrap().requests.len(), before);
+    f.slot_retained().await;
+    let op = operations::get_operation(
+        &f.db,
+        &machine.owner_id,
+        machine.active_operation_id.as_deref().unwrap(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(op.retry_count, 10);
+    assert!(op.terminal_at.is_none());
+    assert_eq!(
+        op.cleanup_state,
+        crate::models::remote_machine_operation::CleanupState::Pending
+    );
+    let view = serde_json::to_value(lifecycle::safe_operation_view(&op)).unwrap();
+    assert_eq!(view["delete_retry_stopped"], true);
+    assert_eq!(view["next_attempt_at"], Value::Null);
+    assert!(!f.current().await.writer_admitted);
+    f.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn delete_retry_limit_reserves_one_minute_without_progress_double_counting() {
+    let f = recovery_fixture("delete_retry_spacing", true).await;
+    f.set_pv("Retain");
+    assert!(f.step().await.is_err());
+    let machine = f.current().await;
+    let op_id = machine.active_operation_id.as_deref().unwrap();
+    let op = operations::get_operation(&f.db, &machine.owner_id, op_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(op.next_attempt_at.unwrap() >= Utc::now() + chrono::Duration::seconds(55));
+    let before = f.cluster.lock().unwrap().requests.len();
+    assert!(f.manager.observe(&machine).await.is_ok());
+    f.manager
+        .progress(op_id, "runtime_evidence_pending")
+        .await
+        .unwrap();
+    let after = operations::get_operation(&f.db, &machine.owner_id, op_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(after.retry_count, 1);
+    assert_eq!(after.next_attempt_at, op.next_attempt_at);
+    assert_eq!(f.cluster.lock().unwrap().requests.len(), before);
+    f.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn delete_retry_limit_stops_legacy_exhausted_operations_before_kubernetes_io() {
+    let f = recovery_fixture("delete_legacy_retry_limit", true).await;
+    let machine = f.current().await;
+    f.db.collection::<Document>(crate::models::remote_machine_operation::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": &machine.active_operation_id},
+            doc! {"$set": {"retry_count": 15_639_i64}},
+        )
+        .await
+        .unwrap();
+    assert!(f.step().await.is_ok());
+    assert!(f.cluster.lock().unwrap().requests.is_empty());
+    let op = operations::get_operation(
+        &f.db,
+        &machine.owner_id,
+        machine.active_operation_id.as_deref().unwrap(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(op.retry_count, 15_639);
+    assert_eq!(
+        serde_json::to_value(lifecycle::safe_operation_view(&op)).unwrap()["delete_retry_stopped"],
+        true
+    );
+    f.slot_retained().await;
+    f.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn delete_retry_limit_manual_reset_is_owner_bound_idempotent_and_reuses_original_delete() {
+    use super::super::remote_machine_delete_retry as retry;
+    let f = recovery_fixture("delete_manual_retry", true).await;
+    f.set_pv("Retain");
+    assert!(f.step().await.is_err());
+    let machine = f.current().await;
+    let op_id = machine.active_operation_id.as_deref().unwrap();
+    let collection =
+        f.db.collection::<Document>(crate::models::remote_machine_operation::COLLECTION_NAME);
+    collection
+        .update_one(
+            doc! {"_id":op_id},
+            doc! {"$set":{"retry_count":15_639_i64,"delete_retry":bson::Bson::Null}},
+        )
+        .await
+        .unwrap();
+    let before = operations::get_operation(&f.db, &machine.owner_id, op_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let count = collection.count_documents(doc! {}).await.unwrap();
+    for (owner, revision, total) in [
+        (Uuid::new_v4().to_string(), machine.revision, 15_639),
+        (machine.owner_id.clone(), machine.revision - 1, 15_639),
+        (machine.owner_id.clone(), machine.revision, 15_638),
+    ] {
+        assert!(
+            retry::retry(&f.db, &owner, op_id, revision, total, "manual-delete")
+                .await
+                .is_err()
+        );
+    }
+    let resumed = retry::retry(
+        &f.db,
+        &machine.owner_id,
+        op_id,
+        machine.revision,
+        15_639,
+        "manual-delete",
+    )
+    .await
+    .unwrap();
+    assert_eq!(resumed.id, before.id);
+    assert_eq!(resumed.retry_count, 15_639);
+    assert_eq!(retry::attempts(&resumed), 0);
+    assert_eq!(resumed.error_code, before.error_code);
+    assert_eq!(resumed.evidence_digest, before.evidence_digest);
+    assert_eq!(resumed.cleanup_state, before.cleanup_state);
+    assert!(resumed.next_attempt_at.unwrap() <= Utc::now());
+    let mut expected = serde_json::to_value(&machine).unwrap();
+    let mut actual = serde_json::to_value(f.current().await).unwrap();
+    for key in ["revision", "updated_at"] {
+        expected.as_object_mut().unwrap().remove(key);
+        actual.as_object_mut().unwrap().remove(key);
+    }
+    assert_eq!(
+        actual, expected,
+        "manual retry only changes scheduling and the revision fence"
+    );
+    assert_eq!(f.current().await.revision, machine.revision + 1);
+    f.slot_retained().await;
+    assert!(f.step().await.is_err());
+    let replay = retry::retry(
+        &f.db,
+        &machine.owner_id,
+        op_id,
+        machine.revision,
+        15_639,
+        "manual-delete",
+    )
+    .await
+    .unwrap();
+    assert_eq!(replay.retry_count, 15_640);
+    assert_eq!(
+        retry::attempts(&replay),
+        1,
+        "lost response replay cannot renew the budget again"
+    );
+    assert!(
+        retry::retry(
+            &f.db,
+            &machine.owner_id,
+            op_id,
+            machine.revision + 1,
+            15_639,
+            "manual-delete"
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(collection.count_documents(doc! {}).await.unwrap(), count);
+    assert_eq!(
+        f.db.collection::<Document>(crate::models::audit_log::COLLECTION_NAME)
+            .count_documents(doc! {"event_type":"remote_machine_delete_retried"})
+            .await
+            .unwrap(),
+        1
+    );
+    f.slot_retained().await;
+    f.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn delete_retry_limit_concurrent_entries_reserve_one_attempt_and_expired_claim_recovers() {
+    use super::super::remote_machine_delete_retry as retry;
+    let f = recovery_fixture("delete_retry_claim", true).await;
+    let machine = f.current().await;
+    let (a, b) = tokio::join!(retry::claim(&f.db, &machine), retry::claim(&f.db, &machine));
+    let claims = [a.unwrap(), b.unwrap()];
+    assert_eq!(claims.iter().filter(|c| c.is_some()).count(), 1);
+    let op_id = machine.active_operation_id.as_deref().unwrap();
+    let op = operations::get_operation(&f.db, &machine.owner_id, op_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(op.retry_count, 1);
+    f.due().await;
+    assert!(advance(&f.manager, &machine).await.is_ok());
+    assert!(f.cluster.lock().unwrap().requests.is_empty());
+    let collection =
+        f.db.collection::<Document>(crate::models::remote_machine_operation::COLLECTION_NAME);
+    collection.update_one(doc! {"_id":op_id}, doc! {"$set":{
+        "delete_retry.claim_until":bson::DateTime::from_chrono(Utc::now()-chrono::Duration::seconds(1))
+    }}).await.unwrap();
+    let successor = retry::claim(&f.db, &machine).await.unwrap().unwrap();
+    let old_claim = claims.iter().flatten().next().unwrap();
+    retry::finish(&f.db, op_id, old_claim).await.unwrap();
+    let claimed = operations::get_operation(&f.db, &machine.owner_id, op_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(claimed.retry_count, 2);
+    assert_eq!(
+        claimed.delete_retry.unwrap().claim_id.as_deref(),
+        Some(successor.as_str())
+    );
+    retry::finish(&f.db, op_id, &successor).await.unwrap();
+    f.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn delete_retry_limit_manual_reset_rejects_active_claim_and_wrong_lifecycle() {
+    use super::super::remote_machine_delete_retry as retry;
+    let f = recovery_fixture("delete_retry_authority", true).await;
+    let machine = f.current().await;
+    let op_id = machine.active_operation_id.as_deref().unwrap();
+    let collection =
+        f.db.collection::<Document>(crate::models::remote_machine_operation::COLLECTION_NAME);
+    for change in [
+        doc! {"retry_count":10_i64,"delete_retry":{"attempts":10_i64,"claim_id":"active",
+        "claim_until":bson::DateTime::from_chrono(Utc::now()+chrono::Duration::minutes(1))}},
+        doc! {"delete_retry":bson::Bson::Null,"action":"pause"},
+        doc! {"action":"delete","state":"succeeded","terminal_at":bson::DateTime::now()},
+    ] {
+        collection
+            .update_one(doc! {"_id":op_id}, doc! {"$set":change})
+            .await
+            .unwrap();
+        assert!(
+            retry::retry(
+                &f.db,
+                &machine.owner_id,
+                op_id,
+                machine.revision,
+                10,
+                "no-reset"
+            )
+            .await
+            .is_err()
+        );
+    }
+    collection
+        .update_one(
+            doc! {"_id":op_id},
+            doc! {"$set":{"state":"reconciling","terminal_at":bson::Bson::Null}},
+        )
+        .await
+        .unwrap();
+    f.db.collection::<Document>(MACHINE_COLLECTION)
+        .update_one(
+            doc! {"_id":&machine.node_id},
+            doc! {"$set":{"writer_admitted":true}},
+        )
+        .await
+        .unwrap();
+    assert!(
+        retry::retry(
+            &f.db,
+            &machine.owner_id,
+            op_id,
+            machine.revision,
+            10,
+            "no-reset"
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(f.current().await.revision, machine.revision);
     f.db.drop().await.unwrap();
 }
 

@@ -288,6 +288,31 @@ async fn delete_recovery_scan_selects_only_due_live_original_operations() {
             Some(operation)
         );
     }
+    for change in [
+        doc! {"retry_count":10_i64},
+        doc! {"retry_count":15_639_i64},
+        doc! {"retry_count":1_i64,"delete_retry":{"attempts":1_i64,
+        "claim_until":mongodb::bson::DateTime::from_chrono(Utc::now()+chrono::Duration::seconds(60))}},
+    ] {
+        operations
+            .update_one(doc! {"_id":operation}, doc! {"$set":change})
+            .await
+            .unwrap();
+        assert!(f.manager.observation_candidates().await.unwrap().is_empty());
+    }
+    operations
+        .update_one(
+            doc! {"_id":operation},
+            doc! {"$set":{"retry_count":15_639_i64,
+            "delete_retry":{"attempts":0_i64}}},
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        f.manager.observation_candidates().await.unwrap().len(),
+        1,
+        "a manually renewed round is due regardless of its lifetime count"
+    );
     operations.update_one(doc! {"_id":operation}, doc! {"$set":{
         "next_attempt_at":mongodb::bson::DateTime::from_chrono(Utc::now()+chrono::Duration::hours(1))}})
         .await.unwrap();

@@ -265,7 +265,9 @@ impl Manager {
             doc! {"$lookup":{"from":OPERATIONS,"let":{"operation":"$active_operation_id","machine":"$_id","owner":"$owner_id"},
                 "pipeline":[{"$match":{"action":"delete","state":{"$in":["accepted","applying","reconciling"]},
                     "$or":[{"next_attempt_at":bson::Bson::Null},{"next_attempt_at":{"$lte":bson::DateTime::now()}}],
-                    "$expr":{"$and":[{"$eq":["$_id","$$operation"]},{"$eq":["$machine_id","$$machine"]},{"$eq":["$owner_id","$$owner"]}]}}},
+                    "terminal_at":bson::Bson::Null,
+                    "$expr":{"$and":[{"$eq":["$_id","$$operation"]},{"$eq":["$machine_id","$$machine"]},{"$eq":["$owner_id","$$owner"]},
+                        super::remote_machine_delete_retry::eligible_expression(Utc::now())]}}},
                     {"$project":{"_id":1}}],"as":"due_delete"}},
             doc! {"$match":{"due_delete.0":{"$exists":true}}},
             doc! {"$sort":{"manager_observed_at":1,"_id":1}},
@@ -1554,7 +1556,7 @@ impl Manager {
             LifecycleAction::Reconcile => machine.resource_state == ResourceState::Ready,
         };
         if final_state {
-            self.db.collection::<Document>(OPERATIONS).update_one(doc! {"_id":op_id,"state":{"$in":["accepted","applying","reconciling"]}}, doc! {"$set":{"state":"succeeded","cleanup_state":&machine.cleanup_state,"terminal_at":bson::DateTime::now(),"updated_at":bson::DateTime::now(),"error_code":bson::Bson::Null,"error_message":bson::Bson::Null}}).await?;
+            self.db.collection::<Document>(OPERATIONS).update_one(doc! {"_id":op_id,"state":{"$in":["accepted","applying","reconciling"]}}, doc! {"$set":{"state":"succeeded","cleanup_state":&machine.cleanup_state,"terminal_at":bson::DateTime::now(),"updated_at":bson::DateTime::now(),"error_code":bson::Bson::Null,"error_message":bson::Bson::Null,"next_attempt_at":bson::Bson::Null}}).await?;
             super::remote_machine_events::record(
                 &self.db,
                 &op,
@@ -1568,20 +1570,19 @@ impl Manager {
     }
 
     pub(crate) async fn progress(&self, operation: &str, code: &str) -> AppResult<()> {
-        let mut filter =
-            doc! {"_id":operation,"state":{"$in":["accepted","applying","reconciling"]}};
+        let mut filter = doc! {"_id":operation,"action":"delete","state":{"$in":["accepted","applying","reconciling"]}};
         if matches!(code, "sandbox_effect_pending" | "runtime_evidence_pending") {
-            // A wrapper failure must not erase the recovery stage or undo a
-            // later original-operation retry deadline established elsewhere.
-            filter.insert("$or", vec![
-                doc! {"action":{"$ne":"delete"}},
-                doc! {"$and":[
-                    {"error_code":{"$in":[bson::Bson::Null,bson::Bson::from("sandbox_effect_pending"),bson::Bson::from("runtime_evidence_pending")]}},
-                    {"$or":[{"next_attempt_at":bson::Bson::Null},{"next_attempt_at":{"$lte":bson::DateTime::now()}}]},
-                ]},
-            ]);
+            filter.insert("error_code", doc! {"$in":[bson::Bson::Null,bson::Bson::from("sandbox_effect_pending"),bson::Bson::from("runtime_evidence_pending")]});
         }
+        // Only shared admission consumes/schedules a delete attempt. Internal
+        // milestones and wrapper errors preserve its budget and last blocker.
         self.db.collection::<Document>(OPERATIONS).update_one(filter, doc! {
+            "$set":{"state":"reconciling","error_code":code,
+                "error_message":"Awaiting verified lifecycle responsibilities; work data remains retained",
+                "updated_at":bson::DateTime::now()},
+        }).await?;
+        self.db.collection::<Document>(OPERATIONS).update_one(
+            doc! {"_id":operation,"action":{"$ne":"delete"},"state":{"$in":["accepted","applying","reconciling"]}}, doc! {
             "$set":{"state":"reconciling","error_code":code,
                 "error_message":"Awaiting verified lifecycle responsibilities; work data remains retained",
                 "updated_at":bson::DateTime::now()},

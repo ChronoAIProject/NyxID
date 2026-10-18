@@ -206,7 +206,7 @@ pub(crate) fn advance<'a>(
 }
 
 async fn advance_inner(manager: &Manager, snapshot: &ManagedMachine) -> AppResult<()> {
-    let mut machine = lifecycle::managed_machine_for_node(&manager.db, &snapshot.node_id)
+    let machine = lifecycle::managed_machine_for_node(&manager.db, &snapshot.node_id)
         .await?
         .ok_or_else(|| pending("delete_machine_missing"))?;
     if machine.resource_state == ResourceState::Deleted {
@@ -255,6 +255,22 @@ async fn advance_inner(manager: &Manager, snapshot: &ManagedMachine) -> AppResul
     if op.next_attempt_at.is_some_and(|at| at > Utc::now()) {
         return Ok(());
     }
+    let Some(claim_id) = super::remote_machine_delete_retry::claim(&manager.db, &machine).await?
+    else {
+        return Ok(());
+    };
+    let op_id = op.id;
+    let result = tokio::time::timeout(
+        super::remote_machine_delete_retry::ATTEMPT_TIMEOUT,
+        pending_attempt(manager, machine),
+    )
+    .await
+    .unwrap_or_else(|_| Err(pending("delete_attempt_timed_out")));
+    super::remote_machine_delete_retry::finish(&manager.db, &op_id, &claim_id).await?;
+    result
+}
+
+async fn pending_attempt(manager: &Manager, mut machine: ManagedMachine) -> AppResult<()> {
     // This path proves local non-submission, never remote absence. Paid zero
     // runtime settlement remains its existing restricted implementation.
     let _ = super::remote_machine_runtime::finalize_never_submitted(

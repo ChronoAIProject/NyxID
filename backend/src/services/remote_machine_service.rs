@@ -569,6 +569,7 @@ pub fn safe_view(machine: &ManagedMachine) -> SafeManagedMachineView {
 }
 
 pub fn safe_operation_view(operation: &MachineOperation) -> SafeMachineOperationView {
+    let retry_stopped = super::remote_machine_delete_retry::stopped(operation, Utc::now());
     let safe_code = operation.error_code.as_deref().map(|code| match code {
         "sandbox_effect_pending"
         | "runtime_evidence_pending"
@@ -591,6 +592,11 @@ pub fn safe_operation_view(operation: &MachineOperation) -> SafeMachineOperation
         state: operation.state,
         cleanup_state: operation.cleanup_state,
         retry_count: operation.retry_count,
+        delete_retry_attempts: (operation.action == LifecycleAction::Delete)
+            .then(|| super::remote_machine_delete_retry::attempts(operation).min(super::remote_machine_delete_retry::LIMIT)),
+        delete_retry_limit: (operation.action == LifecycleAction::Delete)
+            .then_some(super::remote_machine_delete_retry::LIMIT),
+        delete_retry_stopped: retry_stopped,
         error_code: safe_code.map(str::to_string),
         error_message: safe_code.map(|code| match code {
             "runtime_funding_unavailable" | "runtime_funding_expired" => "Runtime funding could not be renewed. Your workspace is retained; restore available funds or billing availability, then review a new quote and resume manually.",
@@ -599,7 +605,7 @@ pub fn safe_operation_view(operation: &MachineOperation) -> SafeMachineOperation
             _ => "The operation requires reconciliation. Check its cleanup and resource state before retrying.",
         }.into()),
         evidence_digest: operation.evidence_digest.as_ref().map(|reference| hex::encode(Sha256::digest(reference.as_bytes()))),
-        next_attempt_at: operation.next_attempt_at,
+        next_attempt_at: if retry_stopped { None } else { operation.next_attempt_at },
         deadline_at: operation.deadline_at,
         created_at: operation.created_at,
         updated_at: operation.updated_at,
@@ -738,6 +744,7 @@ async fn create_machine_inner(
         error_message: None,
         evidence_digest: None,
         retry_count: 0,
+        delete_retry: None,
         next_attempt_at: Some(now),
         deadline_at: Some(now + chrono::Duration::minutes(15)),
         created_at: now,
@@ -1163,7 +1170,7 @@ async fn request_action_inner(
                     error_code: None,
                     error_message: None,
                     evidence_digest: None,
-                    retry_count: 0,
+                    retry_count: 0, delete_retry: None,
                     next_attempt_at: Some(now),
                     deadline_at: Some(now + if input_owned.action == LifecycleAction::Delete { chrono::Duration::hours(24) } else { chrono::Duration::minutes(15) }),
                     created_at: now,
@@ -1859,7 +1866,7 @@ pub async fn suspend_ineligible_with_billing(
                     request_digest: request_digest(&json!({"source":"account_safety","generation":current.runtime_generation})),
                     expected_revision: Some(current.revision), desired_runtime_generation: Some(current.runtime_generation),
                     state: OperationState::Accepted, cleanup_state: CleanupState::Pending, effect_id: Some(effect_id.clone()),
-                    error_code: Some(reason.into()), error_message: None, evidence_digest: None, retry_count: 0,
+                    error_code: Some(reason.into()), error_message: None, evidence_digest: None, retry_count: 0, delete_retry: None,
                     next_attempt_at: Some(now), deadline_at: Some(now+chrono::Duration::hours(24)), created_at: now, updated_at: now, terminal_at: None,
                 };
                 let outbox = MachineEffectOutbox {

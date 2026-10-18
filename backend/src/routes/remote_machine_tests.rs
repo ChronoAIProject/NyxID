@@ -247,6 +247,73 @@ async fn remote_machine_full_router_indexes_unconfigured_admission_replay_and_ow
     )
     .await;
     assert_eq!(status, StatusCode::FORBIDDEN, "{value}");
+    // An exhausted delete remains operable by its human owner even after new
+    // Machine admission is disabled. Delegated/API keys never renew it.
+    use mongodb::bson::{Document, doc};
+    let deleted = crate::services::remote_machine_service::request_action(
+        &db,
+        crate::services::remote_machine_service::LifecycleRequest {
+            owner_id: user.to_string(),
+            machine_id: node.clone(),
+            action: crate::models::remote_machine_operation::LifecycleAction::Delete,
+            expected_revision: Some(created.machine.revision),
+            idempotency_key: "router-delete".into(),
+            request_body: json!({"action":"delete","revision":created.machine.revision,
+                "policy_version":"remote-machine-mvp","data_policy_version":"remote-machine-data",
+                "acknowledge_shared_environment":true,"acknowledge_data_loss":true}),
+            now: None,
+        },
+    )
+    .await
+    .unwrap();
+    db.collection::<Document>(crate::models::remote_machine_operation::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id":&deleted.operation.id},
+            doc! {"$set":{"retry_count":15_639_i64}},
+        )
+        .await
+        .unwrap();
+    super::remote_machine_flag_tests::set_enabled(&db, &user.to_string(), false).await;
+    let retry_path = format!(
+        "/api/v1/remote-machine-operations/{}/retry-delete",
+        deleted.operation.id
+    );
+    let retry_body =
+        json!({"expected_revision":deleted.machine.revision,"expected_retry_count":15_639});
+    for credential in [&delegated, &key.full_key] {
+        let (status, _) = request(
+            &app,
+            "POST",
+            &retry_path,
+            credential,
+            retry_body.clone(),
+            Some("manual-round"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+    let (status, _) = request(&app, "POST", &retry_path, &token, retry_body.clone(), None).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    for _ in 0..2 {
+        let (status, response) = request(
+            &app,
+            "POST",
+            &retry_path,
+            &token,
+            retry_body.clone(),
+            Some("manual-round"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{response}");
+        assert_eq!(response["operation"]["id"], deleted.operation.id);
+        assert_eq!(response["operation"]["retry_count"], 15_639);
+        assert_eq!(response["operation"]["delete_retry_attempts"], 0);
+        assert_eq!(response["operation"]["delete_retry_stopped"], false);
+        assert!(
+            response["operation"].get("delete_retry").is_none(),
+            "private retry records are never serialized"
+        );
+    }
     db.drop().await.unwrap();
 }
 
