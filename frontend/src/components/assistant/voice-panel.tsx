@@ -74,7 +74,10 @@ function VoiceCreditUsage({ option }: { option: VoiceOption }) {
       </p>
       <p className="mt-1">
         Assistant tasks are billed separately. Muting keeps the call running
-        and billed. View recorded charges in your account menu under Usage.
+        and billed.{" "}
+        {option.billing_owner === "organization"
+          ? "Charges are recorded against the organization's credits."
+          : "View recorded charges in your account menu under Usage."}
       </p>
     </details>
   );

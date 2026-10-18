@@ -226,6 +226,12 @@ it("starts with a catalog-added model and voice and keeps payer and tariff in Cr
   expect(screen.getByText(/Paid by the organization/)).toHaveTextContent(
     "0.00002",
   );
+  expect(screen.getByText(/Charges are recorded/)).toHaveTextContent(
+    "the organization's credits",
+  );
+  expect(
+    screen.queryByText(/your account menu under Usage/),
+  ).not.toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: "Start voice" }));
   await waitFor(() =>
     expect(mock.start).toHaveBeenCalledWith(

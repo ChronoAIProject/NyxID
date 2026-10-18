@@ -1168,7 +1168,7 @@ the authority; no browser-only lock or automatic takeover.
 
 On closure, append exactly one compact **Call receipt** through the existing
 thread message/sequence path with `via: "voice"`. Its deterministic server
-snapshot shows duration without cost or pending-cost lines. Recorded charges
+snapshot shows duration without cost or pending-cost lines. Personal charges
 remain in **Billing & Usage → Usage**; creating the receipt does not query usage
 meters. It then lists
 each handed-off request using a bounded title from the user's source message,
