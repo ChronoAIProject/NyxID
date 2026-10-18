@@ -233,6 +233,24 @@ acceptance is running. Its independent build comparison found preload ordering
 divergence and an extra stock50x.html; those are open W7/W5 corrections, never a
 reproducibility pass.
 
+## W5 fixture event lifecycle correction
+
+PM's actual nginx1.27.5 matrices passed22 responses each. Its unchanged-image
+browser run passed21 tests and failed the unlisted-runtime test's required CSP
+event collection; the functional denial passed, and Chromium trace recorded the
+real connect-src rejection. Focused Linux reruns reproduced3/3 collector losses.
+The auto-fixture depended only on context, allowing the test page to tear down
+before queued DOM violation/exposeBinding delivery.
+
+The fixture now depends on page to retain it through fixture teardown, drains
+one browser task turn, then polls up to5 seconds for each exact annotated event.
+Unexpected-event checking still covers every test; no assertion or exception
+was removed. Host focused unlisted-runtime and injection cases, repeated10 each,
+passed20/0 in23.6s against the unchanged W5 product dist
+(`w5-csp-sync.log`, `w5-csp-sync-results.json`). ESLint passed. This is a test-only
+correction; PM will apply the committed fixture onto its immutable product
+snapshot and rerun, without rebuilding product.
+
 ## Remaining authorized batches
 
 W5 final container review/integration; W7 pinned,
