@@ -9,6 +9,31 @@ function fixture(name: string): Buffer {
   return fs.readFileSync(path.join(directory, name));
 }
 
+test("destructive dropdown icon retains its color when keyboard focused", async ({ page }) => {
+  await mockDashboard(page);
+  await page.route("**/api/v1/triggers", (route) => route.fulfill({ json: { triggers: [{
+    id: "11111111-1111-4111-8111-111111111111", user_id: "test-user", label: "Style fixture",
+    user_service_id: null, status: "active", verification: { mode: "token", location: "bearer" },
+    delivery: { type: "notification" }, inbound_url: null,
+    created_at: "2026-10-19T00:00:00Z", updated_at: "2026-10-19T00:00:00Z",
+  }] } }));
+  await page.goto("/triggers");
+  await page.getByRole("button", { name: "More actions for Style fixture" }).first().click();
+  const item = page.getByRole("menuitem", { name: "Delete", exact: true });
+  await item.focus();
+  await expect(item).toBeFocused();
+  const expected = await page.evaluate(() => {
+    const reference = document.createElement("span");
+    reference.className = "text-destructive";
+    document.body.append(reference);
+    const color = getComputedStyle(reference).color;
+    reference.remove();
+    return color;
+  });
+  await expect.poll(() => item.locator("svg").evaluate(node => getComputedStyle(node).color)).toBe(expected);
+  await expect.poll(() => item.evaluate(node => getComputedStyle(node).color)).toBe(expected);
+});
+
 test("managed WhatsApp rejects an unlisted runtime API origin", async ({ page }, testInfo) => {
   const origin = "https://unlisted-api.example";
   testInfo.annotations.push({ type: "expected-csp", description: JSON.stringify({ directive: "connect-src", blocked: `${origin}/api/v1/channel-bots/managed-onboarding/whatsapp/complete` }) });

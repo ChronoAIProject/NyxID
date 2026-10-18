@@ -1,0 +1,1 @@
+try{const mode=JSON.parse(localStorage.getItem("nyxid.theme")||"null")?.state?.mode;if(mode==="light"||(mode!=="dark"&&matchMedia("(prefers-color-scheme: light)").matches))document.documentElement.classList.add("theme-light")}catch{}

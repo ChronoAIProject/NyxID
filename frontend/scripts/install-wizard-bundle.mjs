@@ -32,6 +32,7 @@ const OUT_BUNDLE = path.join(OUT_ASSETS_DIR, "index.html")
 const OUT_META_DIR = path.join(REPO, "cli", "src", "wizard", "bundle-meta")
 const OUT_MANIFEST = path.join(OUT_META_DIR, "index.manifest")
 const OUT_HASH = path.join(OUT_META_DIR, "index.hash")
+const OUT_GRAPH = path.join(OUT_META_DIR, "rendered-graph.json")
 
 const STATIC_ASSETS = [
   ["frontend/public/nyxid-wordmark.svg", "nyxid-wordmark.svg"],
@@ -53,6 +54,12 @@ const EXTRAS = [
   "frontend/vite.wizard.config.ts",
   "frontend/wizard.html",
   "frontend/vite-plugins/wizard-manifest.ts",
+  "frontend/vite-plugins/shipped-composition.ts",
+  "frontend/scripts/install-wizard-bundle.mjs",
+  "frontend/scripts/seal-shipped-composition.mjs",
+  "frontend/scripts/html-composition.mjs",
+  "frontend/html-resource-policy.json",
+  "frontend/static-asset-provenance.json",
   ".node-version",
 ]
 
@@ -97,6 +104,7 @@ for (const [source, target] of STATIC_ASSETS) {
 }
 fs.writeFileSync(OUT_MANIFEST, manifestText)
 fs.writeFileSync(OUT_HASH, digest + "\n")
+fs.copyFileSync(path.join(FRONTEND, "dist-wizard/composition-graph.json"), OUT_GRAPH)
 
 const relBundle = path.relative(REPO, OUT_BUNDLE)
 const relManifest = path.relative(REPO, OUT_MANIFEST)

@@ -1,4 +1,4 @@
-import { serviceViewSchema } from "../src/schemas/service-view";
+import { serviceViewSchema } from "../src/schemas/service-view.ts";
 import { randomBytes } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { Plugin } from "vite";

@@ -10,7 +10,7 @@ import {
   RELEASE_INTEGRITY_SCHEMA_VERSION,
   type ReleaseIntegrityArtifact,
   type ReleaseIntegrityManifest,
-} from "../src/lib/release-integrity/manifest";
+} from "../src/lib/release-integrity/manifest.ts";
 
 interface ScriptArtifactBytes {
   readonly path: string;

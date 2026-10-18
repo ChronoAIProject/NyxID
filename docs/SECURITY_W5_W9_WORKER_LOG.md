@@ -373,6 +373,55 @@ reviewed npm11 bootstrap, and updater test compilation adds the missing
 `--locked`. This corrects the executable gap; the earlier install result alone
 must not be treated as actual schema-validation acceptance.
 
+## W7 shipped frontend composition and R1-08
+
+The SPA, standalone backend credential page and CLI singlefile wizard now have
+separate retained-module/CSS graphs and final-byte seals. Exact installed lock
+name/version/integrity/purl identities describe retained package modules rather
+than the whole dependency lock. Source identifiers are normalized; unknown
+virtual/package mappings fail. Retained xterm/Tailwind/tw-animate CSS is tracked
+separately from JS. Exact-byte worklets/theme assets and font/license provenance
+cover unbundled outputs. Font versions come from the embedded name tables and
+are not claimed as independently authenticated upstream releases.
+
+Final HTML inline scripts/styles/style attributes and local/exact remote
+references are accounted after Vite, prerender and singlefile transforms.
+Vite-minified template CSS is bound to its original template block; captured
+singlefile code must appear in final HTML. The parser rejects base elements and
+active unaccounted attributes and recognizes case-insensitive rel tokens.
+Sealing checks canonical lock names/purls as well as version/integrity. The
+wizard source closure includes the parser, sealer and provenance policies.
+`docs/SHIPPED_ARTIFACT_COMPOSITION.md` documents the acyclic ordering and keeps
+future detached SBOM/signature bundles outside the sealed application tree.
+These seals are inclusion/hash evidence, not yet artifact SBOMs or signatures.
+
+Final focused composition tests pass11/11, including actual singlefile JS/CSS,
+tree-shaken dependency absence, unknown/mislabeled package mapping, stale/missing
+outputs, exact fonts/licenses, unmapped benign inline code, base and mixed-case
+rel cases. Both final SPA/credential builds match402files under thread pools1/8
+with Node22.23.2/npm11.21.1, full commit and commit epoch inputs. All three seal
+verification modes pass. The Rust wizard freshness test passes1/0/0ignored.
+Frontend lint exits0 with34 existing warnings. No invalid-selector or native
+config warning remains in the final build; the large-chunk advisory remains.
+
+R1-08 replaces the invalid escaped focus-class selector with the destructive
+class plus focus state. All current destructive callers provide that class.
+The committed production browser test focuses a real trigger menu item and
+checks both its text and SVG against the actual built destructive color. Its
+focused native-nginx run passes1/1 with the CSP collector enabled.
+The complete corrected native-nginx production run passes23/23. Its first
+run passed22 cases but failed the log/referrer case before assertions because
+the command omitted `NYXID_NGINX_ACCESS_LOG`; that failed log is retained.
+
+Evidence under the validation root: `w7-composition-{tests-final,build-final,
+wizard-final,wizard-freshness,lint-final}.log`,
+`w7-composition-repeatability/{comparison.json,build-*-sha256.json,build-*.log}`,
+`w7-dropdown-browser.{log,json}` and `w7-composition-browser-final.{log,json}`.
+Early seal failures exposed missing
+template-CSS attribution and capture before aggregate CSS emission; both are
+fixed and covered by the final tests. No blocked mobile probe was retried.
+Final exact-source image extraction/scan/browser checks remain PM-owned.
+
 ## Remaining authorized batches
 
 W5 final container review/integration; W7 pinned,

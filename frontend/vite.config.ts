@@ -5,10 +5,13 @@ import tailwindcss from "@tailwindcss/vite"
 import path from "path"
 import fs from "node:fs"
 import https from "node:https"
-import { allDocPages } from "./src/features/docs/manifest"
-import { routingPreview } from "./dev/routing-preview"
-import { machineSeccomp } from "./scripts/machine-seccomp"
-import { buildVersion } from "./scripts/build-version"
+import { allDocPages } from "./src/features/docs/manifest.ts"
+import { routingPreview } from "./dev/routing-preview.ts"
+import { machineSeccomp } from "./scripts/machine-seccomp.ts"
+import { buildVersion } from "./scripts/build-version.ts"
+import { shippedComposition } from "./vite-plugins/shipped-composition.ts"
+
+const frontendRoot = import.meta.dirname
 
 const backendUrl = process.env.BACKEND_URL || "http://localhost:3001"
 
@@ -108,9 +111,9 @@ const SITEMAP_BASE = "https://nyx.chrono-ai.fun"
 const STATIC_SITEMAP_ROUTES = ["/", "/docs", "/blog", "/privacy", "/terms"]
 
 function docsSync(): Plugin {
-  const srcDir = path.resolve(__dirname, "../docs/site")
-  const outDir = path.resolve(__dirname, "public/docs")
-  const sitemapPath = path.resolve(__dirname, "public/sitemap.xml")
+  const srcDir = path.resolve(frontendRoot, "../docs/site")
+  const outDir = path.resolve(frontendRoot, "public/docs")
+  const sitemapPath = path.resolve(frontendRoot, "public/sitemap.xml")
   let isBuild = false
 
   const parseMeta = (raw: string) => {
@@ -247,8 +250,9 @@ const BUILD_ID = SOURCE_COMMIT || Date.now().toString(36)
 export default defineConfig({
   plugins: [
     ...(process.env.NYXID_ROUTING_PREVIEW === "1" ? [routingPreview(backendUrl, expectedOrigin)] : []),
-    telegramClaimReferrer(), react(), tailwindcss(), docsSync(), machineSeccomp(__dirname),
+    telegramClaimReferrer(), react(), tailwindcss(), docsSync(), machineSeccomp(frontendRoot),
     buildVersion(BUILD_ID, SOURCE_COMMIT),
+    shippedComposition("spa"),
   ],
   define: {
     __BUILD_ID__: JSON.stringify(BUILD_ID),
@@ -256,8 +260,8 @@ export default defineConfig({
   },
   resolve: {
     alias: [
-      { find: /^zod$/, replacement: path.resolve(__dirname, "./src/lib/zod-csp.ts") },
-      { find: "@", replacement: path.resolve(__dirname, "./src") },
+      { find: /^zod$/, replacement: path.resolve(frontendRoot, "./src/lib/zod-csp.ts") },
+      { find: "@", replacement: path.resolve(frontendRoot, "./src") },
     ],
   },
   build: {

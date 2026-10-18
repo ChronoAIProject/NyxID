@@ -12,7 +12,7 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const dist = path.join(root, "dist");
 const css = await fs.readFile(path.join(root, "scripts", "legal-page.css"), "utf8");
 const etags = {};
-const themeScript = `try{const mode=JSON.parse(localStorage.getItem("nyxid.theme")||"null")?.state?.mode;if(mode==="light"||(mode!=="dark"&&matchMedia("(prefers-color-scheme: light)").matches))document.documentElement.classList.add("theme-light")}catch{}`;
+const themeScript = await fs.readFile(path.join(root, "scripts", "legal-theme.js"), "utf8");
 const themePath = `/assets/legal-theme-${createHash("sha256").update(themeScript).digest("hex").slice(0, 16)}.js`;
 await fs.writeFile(path.join(dist, themePath.slice(1)), themeScript);
 

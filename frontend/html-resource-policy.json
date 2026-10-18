@@ -1,0 +1,8 @@
+{
+  "schema": "nyxid.html-resource-policy.v1",
+  "script": [],
+  "style": [
+    "https://fonts.googleapis.com/css2?family=Mona+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
+  ],
+  "note": "These remote stylesheet bytes are fetched at runtime and are not claimed as shipped components. Supported dynamic vendor integrations are inventoried in BROWSER_SECURITY_POLICY.md and constrained by CSP."
+}

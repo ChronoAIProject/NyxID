@@ -1,0 +1,29 @@
+{
+  "schema": "nyxid.static-provenance.v1",
+  "assets": [
+    {
+      "source": "frontend/public/nyxbot-inter-latin.woff2",
+      "sha256": "3100e775e8616cd2611beecfa23a4263d7037586789b43f035236a2e6fbd4c62",
+      "name": "Inter",
+      "origin": "vendored-font",
+      "license": "OFL-1.1",
+      "license_source": "frontend/public/nyxbot-inter-LICENSE.txt",
+      "license_sha256": "262481e844521b326f5ecd053e59b98c8b2da78c8ee1bdbb6e8174305e54935a",
+      "upstream": "https://github.com/rsms/inter",
+      "version": "4.001",
+      "version_evidence": "Embedded nameID5: Version 4.001;git-66647c0bb; uniqueID 4.001;RSMS;Inter-Regular. This identifies the exact committed bytes, not independent upstream release authentication."
+    },
+    {
+      "source": "cli/src/wizard/assets/fonts/dm-serif-display-400.woff2",
+      "sha256": "f273cf2c9ce9bc7d6b0f4fcb8aee72f8cf5a249991308b6a144217e0760c5d3f",
+      "name": "DM Serif Display",
+      "origin": "vendored-font",
+      "license": "OFL-1.1",
+      "license_source": "cli/src/wizard/assets/fonts/OFL.txt",
+      "license_sha256": "a3e5cdd67d4571dd0a24fcc968de0efde7ae97ef752daf0906e4767619dd7231",
+      "upstream": "https://github.com/google/fonts/tree/main/ofl/dmserifdisplay",
+      "version": "5.200",
+      "version_evidence": "Embedded nameID5: Version 5.200; ttfautohint (v1.8.3); uniqueID 5.200;GOOG;DMSerifDisplay-Regular. This identifies the exact committed bytes, not independent upstream release authentication."
+    }
+  ]
+}

@@ -2,7 +2,7 @@ import type { Plugin } from "vite";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { parseBuildVersion } from "../src/lib/build-version";
+import { parseBuildVersion } from "../src/lib/build-version.ts";
 
 interface ModuleDependencies {
   readonly importedIds: readonly string[];
