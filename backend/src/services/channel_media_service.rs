@@ -75,7 +75,6 @@ pub async fn media_client(
                 .map_err(|_| fetch_failed());
         }
         if parsed.scheme() != "https"
-            || parsed.fragment().is_some()
             || (hosts.is_some() && parsed.port_or_known_default() != Some(443))
             || hosts.is_some_and(|hosts| !allowed_host(&parsed, hosts))
         {
@@ -373,6 +372,33 @@ mod tests {
         Mock, MockServer, ResponseTemplate,
         matchers::{method, path},
     };
+
+    #[tokio::test]
+    async fn media_client_preserves_fragments_without_relaxing_the_public_host_boundary() {
+        // Literal addresses exercise production validation without DNS or a request.
+        assert!(
+            media_client("https://1.1.1.1/image.png#preview", None, None)
+                .await
+                .is_ok()
+        );
+        assert!(
+            media_client("https://127.0.0.1/image.png#preview", None, None)
+                .await
+                .is_err()
+        );
+        assert!(
+            media_client(
+                &format!(
+                    "https://1.1.1.1/image.png?signature={}",
+                    "a".repeat(MAX_MEDIA_URL_BYTES)
+                ),
+                None,
+                None,
+            )
+            .await
+            .is_err()
+        );
+    }
 
     #[tokio::test]
     async fn channel_media_control_json_allows_large_attachment_metadata_but_stays_bounded() {
