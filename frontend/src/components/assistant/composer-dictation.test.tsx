@@ -369,7 +369,7 @@ it("live devicechange updates labels; selected capture applies immediately, unpl
   fireEvent.blur(window);
   expect(stopTrack).toHaveBeenCalledTimes(2);
 });
-it("404 leaves device settings usable and clears preparation loading without claiming account/billing failure", async () => {
+it("404 leaves device settings usable without claiming account/billing failure", async () => {
   f.get.mockRejectedValue(
     new ApiError(404, {
       error: "not_found",
@@ -391,16 +391,13 @@ it("404 leaves device settings usable and clears preparation loading without cla
       "unavailable on the connected server",
     ),
   );
-  expect(
-    screen.queryByText("Preparing source and price…"),
-  ).not.toBeInTheDocument();
   expect(stopTrack).toHaveBeenCalledOnce();
   expect(screen.queryByLabelText("Dictation review")).not.toBeInTheDocument();
   expect(
     screen.getByRole("button", { name: "Configure dictation" }),
   ).toBeEnabled();
 });
-it("discloses authored duration and start price before provider connection", async () => {
+it("keeps authored duration and start prices in settings Credit usage, outside dictation review", async () => {
   f.get.mockResolvedValue({
     options: [
       {
@@ -420,13 +417,29 @@ it("discloses authored duration and start price before provider connection", asy
   });
   render(<Harness threadId="thread-A" />);
   configure();
-  expect(
-    await screen.findByText(
-      /0.01 credits per input audio second \+ 0.02 credits per start/,
-    ),
-  ).toHaveTextContent("paid by you");
+  const price = await screen.findByText(
+    /0.01 credits per input audio second \+ 0.02 credits per start/,
+  );
+  expect(price).not.toBeVisible();
+  fireEvent.click(screen.getByText("Credit usage"));
+  expect(price).toHaveTextContent("paid by you");
   expect(f.clients).toHaveLength(0);
   expect(getUserMedia).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole("button", { name: "Dictate a message" }));
+  await act(async () => {});
+  for (const stage of ["capturing", "finalizing", "review"]) {
+    act(() => {
+      f.clients[0]!.callbacks.text({ final: "Keep my speech", interim: "" });
+      f.clients[0]!.callbacks.state(stage);
+    });
+    expect(screen.getByLabelText("Dictation review")).toHaveTextContent(
+      "Keep my speech",
+    );
+    expect(
+      screen.queryByText(/credits per input audio second/),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText(/paid by you/)).not.toBeInTheDocument();
+  }
 });
 
 it("failed capture with real partial text keeps review without implying microphone capture", async () => {
