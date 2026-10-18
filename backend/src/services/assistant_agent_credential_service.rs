@@ -391,6 +391,81 @@ pub async fn exists(db: &Database, user_id: &str) -> AppResult<bool> {
         .is_some())
 }
 
+/// A generation boundary must not invalidate another family's pending work.
+/// Called only for invocation-controlled transitions, within admission's txn.
+pub(crate) async fn require_invocation_boundary_clear(
+    db: &Database,
+    owner: &str,
+    conversation: &str,
+    session: &mut ClientSession,
+) -> AppResult<()> {
+    let checks = [
+        (
+            crate::models::assistant_acknowledgement::COLLECTION_NAME,
+            doc! {"user_id":owner,"conversation_id":conversation,"$or":[
+                {"status":"pending","expires_at":{"$gt":bson::DateTime::now()}},
+                {"status":"allowed","kind":{"$in":["action","skills"]},"expires_at":{"$gt":bson::DateTime::now()}},
+                {"skill_notification_pending":true}
+            ]},
+        ),
+        (
+            crate::models::async_service_operation::COLLECTION_NAME,
+            doc! {"user_id":owner,"conversation_id":conversation,"state":{"$in":["submitting","waiting","cancelling","ready","queued"]}},
+        ),
+        (
+            crate::models::nyxbot_channel::WATCHES_COLLECTION_NAME,
+            doc! {"user_id":owner,"conversation_id":conversation,"status":{"$in":["pending","claimed"]}},
+        ),
+        (
+            crate::models::machine_job::COLLECTION_NAME,
+            doc! {"user_id":owner,"conversation_id":conversation,"state":"running"},
+        ),
+    ];
+    for (collection, filter) in checks {
+        if db
+            .collection::<bson::Document>(collection)
+            .find_one(filter)
+            .projection(doc! {"_id":1})
+            .session(&mut *session)
+            .await?
+            .is_some()
+        {
+            return Err(AppError::Conflict(
+                "Conversation has pending work from an earlier credential generation; finish or cancel it, or choose a new conversation".into(),
+            ));
+        }
+    }
+    // Authored drafts can reuse expired cards. Their durable claims and cards
+    // retain source credentials until publication is finished or discarded.
+    use crate::models::assistant_agent_learning as learning;
+    for (collection, filter, proposal_field) in [
+        (
+            learning::AUTHORED_CLAIMS_COLLECTION_NAME,
+            doc! {"claim.conversation_id":conversation},
+            "claim.proposal_id",
+        ),
+        (
+            crate::models::assistant_acknowledgement::COLLECTION_NAME,
+            doc! {"user_id":owner,"conversation_id":conversation,"authored_skill.proposal_id":{"$exists":true}},
+            "authored_skill.proposal_id",
+        ),
+    ] {
+        let mut cursor = db.collection::<bson::Document>(collection).aggregate([
+            doc! {"$match":filter},
+            doc! {"$lookup":{"from":learning::PROPOSALS_COLLECTION_NAME,"localField":proposal_field,"foreignField":"_id","as":"proposal"}},
+            doc! {"$match":{"proposal.owner_id":owner,"proposal.status":{"$in":["pending","publishing","published_unpinned","publication_failed"]}}},
+            doc! {"$limit":1},
+            doc! {"$project":{"_id":1}},
+        ]).session(&mut *session).await?;
+        if cursor.next(&mut *session).await.transpose()?.is_some() {
+            return Err(AppError::Conflict(
+                "Conversation has an unfinished skill draft from an earlier credential generation; finish or discard it, or choose a new conversation".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Called inside the turn transaction: the conversation, key and ciphertext
 /// become durable together. Touching the key fences concurrent revocation.
 pub async fn load_or_provision_in_session(

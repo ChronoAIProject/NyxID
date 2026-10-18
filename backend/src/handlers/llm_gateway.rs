@@ -2548,6 +2548,10 @@ async fn check_llm_approval(
                 &state.config.frontend_url,
             )
         })?;
+    if let Some(chat) = auth_user.assistant_chat.as_deref() {
+        crate::services::assistant_invocation_service::revalidate_after_approval(&state.db, chat)
+            .await?;
+    }
     Ok(None)
 }
 

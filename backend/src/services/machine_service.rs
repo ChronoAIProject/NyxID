@@ -38,14 +38,24 @@ pub async fn settle_watch(
     let error = error.map(str::to_owned);
     session
         .start_transaction()
-        .and_run2(async move |session| {
+        .and_run((db, watch, error, event), |session, (db, watch, error, event)| Box::pin(async move {
             let result: AppResult<bool> = async {
+                if !super::assistant_invocation_service::fence_in_session(
+                    db,
+                    session,
+                    &watch.user_id,
+                    watch.invocation_id.as_deref(),
+                )
+                .await?
+                {
+                    return Ok(false);
+                }
                 let update = db
                     .collection::<bson::Document>(
                         crate::models::nyxbot_channel::WATCHES_COLLECTION_NAME,
                     )
                     .update_one(
-                        doc! {"_id":&watch.id,"status":"pending"},
+                        doc! {"_id":&watch.id,"user_id":&watch.user_id,"status":{"$in":["pending","claimed"]}},
                         doc! {
                             "$set":{
                                 "status":if error.is_some(){
@@ -53,7 +63,7 @@ pub async fn settle_watch(
                                 }else{
                                     "done"
                                 },
-                                "last_error":&error
+                                "last_error":&*error
                             }
                         },
                     )
@@ -62,27 +72,37 @@ pub async fn settle_watch(
                 if update.modified_count == 0 {
                     return Ok(false);
                 }
-                db.collection::<bson::Document>(
-                    crate::models::assistant_conversation::COLLECTION_NAME,
-                )
-                .update_one(
-                    doc! {"_id":&watch.conversation_id,"user_id":&watch.user_id},
-                    doc! {
-                        "$push":{
-                            "pending_events":{
-                                "$each":[event.clone()],
-                                "$slice":-(super::assistant_nyxagent::MAX_PENDING_EVENTS as i64)
+                let queued = db
+                    .collection::<bson::Document>(
+                        crate::models::assistant_conversation::COLLECTION_NAME,
+                    )
+                    .update_one(
+                        super::assistant_invocation_service::protect_queue(
+                            doc! {"_id":&watch.conversation_id,"user_id":&watch.user_id},
+                            1,
+                            watch.invocation_id.is_some(),
+                        ),
+                        doc! {
+                            "$push":{
+                                "pending_events":{
+                                    "$each":[event.clone()],
+                                    "$slice":-(super::assistant_nyxagent::MAX_PENDING_EVENTS as i64)
+                                }
                             }
-                        }
-                    },
-                )
-                .session(&mut *session)
-                .await?;
+                        },
+                    )
+                    .session(&mut *session)
+                    .await?;
+                if queued.matched_count != 1 {
+                    return Err(AppError::Conflict(
+                        "Assistant event queue is unavailable".into(),
+                    ));
+                }
                 Ok(true)
             }
             .await;
             transactions::transaction_result(result)
-        })
+        }))
         .await
         .map_err(transactions::map_transaction_error)
 }

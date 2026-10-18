@@ -163,6 +163,13 @@ macro_rules! assistant_direct_billing_routes {
     ($apply:ident, $router:expr) => {
         $apply!($router;
             (
+                "/nyxagent/invocations",
+                "/api/v1/assistant/nyxagent/invocations",
+                "handlers::assistant_invocations::create",
+                post(handlers::assistant_invocations::create),
+                crate::services::billing::route_inventory::BillingRoutePolicy::Metered(crate::services::billing::BillingIngress::Proxy)
+            ),
+            (
                 "/nyxagent/turns",
                 "/api/v1/assistant/nyxagent/turns",
                 "handlers::assistant_nyxagent::turns",
@@ -2328,6 +2335,14 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         ),
     ));
     let assistant_routes = Router::new()
+        .route(
+            "/nyxagent/invocations/{key}",
+            get(handlers::assistant_invocations::show),
+        )
+        .route(
+            "/nyxagent/invocations/{key}/cancel",
+            post(handlers::assistant_invocations::cancel),
+        )
         .route(
             "/nyxagent/conversations/{id}/machine-preview-policy",
             get(handlers::machine_activity::get_preview_policy)

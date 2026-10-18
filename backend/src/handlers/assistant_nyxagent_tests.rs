@@ -2448,6 +2448,7 @@ async fn cards_decided_during_a_turn_are_reported_to_the_next_turn_exactly_once(
         .unwrap()
         .unwrap();
     let ack = |kind: &str, status: &str, decided: Option<DateTime<Utc>>| AssistantAcknowledgement {
+        invocation_id: None,
         routing: None,
         link: None,
         requester_agent_id: None,
@@ -4536,6 +4537,8 @@ async fn proxy_model_billing_refusals_settle_with_specific_code_and_original_ups
         auth.api_key_id = Some(row.credential_api_key_id.clone());
         auth.assistant_turn_fence = Some(Box::new(AssistantTurnFence {
             channel_adapter_origin: None,
+            invocation_id: None,
+            invocation_controlled: false,
             platform_origin: None,
             platform_thread: false,
             conversation_id: row.id.clone(),

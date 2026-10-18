@@ -149,6 +149,61 @@ async fn call(
     .await
 }
 
+// The contract does not promise that a successful cancel response means stopped.
+// Only a bounded, declared read of a terminal state can confirm settlement.
+fn terminal_contract_status(
+    contract: &crate::models::async_service_operation::AsyncOperationContract,
+    text: &str,
+) -> bool {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else {
+        return false;
+    };
+    let Some(phase) = value
+        .pointer(&contract.status_field)
+        .and_then(serde_json::Value::as_str)
+    else {
+        return false;
+    };
+    contract
+        .success_states
+        .iter()
+        .chain(&contract.failure_states)
+        .any(|state| state == phase)
+}
+
+async fn tracked_cancel_outcome<F, Fut, V, Verified>(
+    operation_id: Option<&str>,
+    cancel_operation: Option<&str>,
+    timeout: Duration,
+    dispatch: F,
+    verify: V,
+) -> (bool, &'static str)
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = crate::errors::AppResult<u16>>,
+    V: FnOnce() -> Verified,
+    Verified: std::future::Future<Output = crate::errors::AppResult<bool>>,
+{
+    if operation_id.is_none() {
+        return (false, "cancellation_operation_id_missing");
+    }
+    if cancel_operation.is_none() {
+        return (false, "cancellation_unsupported");
+    }
+    let outcome = tokio::time::timeout(timeout, async {
+        let status = dispatch().await?;
+        if !(200..300).contains(&status) {
+            return Ok(false);
+        }
+        verify().await
+    })
+    .await;
+    match outcome {
+        Ok(Ok(true)) => (true, "cancelled"),
+        _ => (false, "cancellation_unknown"),
+    }
+}
+
 async fn step(state: &AppState, w: &AsyncServiceOperation) -> crate::errors::AppResult<()> {
     if w.state == "ready" {
         if watches::enqueue(&state.db, w).await? {
@@ -163,6 +218,38 @@ async fn step(state: &AppState, w: &AsyncServiceOperation) -> crate::errors::App
             && chrono::Utc::now() < w.created_at + chrono::Duration::minutes(2)
         {
             return watches::defer(&state.db, w).await;
+        }
+        if w.delivery.invocation_id.is_some() {
+            if !watches::begin_tracked_cancellation(&state.db, w).await? {
+                return watches::finish_tracked_cancellation(
+                    &state.db,
+                    w,
+                    false,
+                    "cancellation_unknown",
+                )
+                .await;
+            }
+            let (confirmed, reason) = tracked_cancel_outcome(
+                w.operation_id.as_deref(),
+                w.contract.cancel_operation.as_deref(),
+                Duration::from_secs(5),
+                || async {
+                    let name = w
+                        .contract
+                        .cancel_operation
+                        .as_deref()
+                        .expect("validated operation");
+                    Ok(call(state, w, name).await?.status)
+                },
+                || async {
+                    let status = call(state, w, &w.contract.status_operation).await?;
+                    Ok((200..300).contains(&status.status)
+                        && status.text.len() <= watches::RESULT_BYTES
+                        && terminal_contract_status(&w.contract, &status.text))
+                },
+            )
+            .await;
+            return watches::finish_tracked_cancellation(&state.db, w, confirmed, reason).await;
         }
         if let Some(name) = w.contract.cancel_operation.as_deref()
             && w.operation_id.is_some()
@@ -306,4 +393,141 @@ pub(crate) fn spawn_sweep(state: AppState) {
             }
         }
     });
+}
+
+#[cfg(test)]
+mod invocation_cancellation_tests {
+    use super::*;
+    #[tokio::test]
+    async fn invocation_async_cancel_outcomes_do_not_claim_accepted_or_failed_requests_stopped() {
+        let budget = Duration::from_millis(10);
+        for (operation, endpoint, reason) in [
+            (None, Some("cancel"), "cancellation_operation_id_missing"),
+            (Some("id"), None, "cancellation_unsupported"),
+        ] {
+            let result = tracked_cancel_outcome(
+                operation,
+                endpoint,
+                budget,
+                || async { panic!("must not dispatch") },
+                || async { panic!("must not verify") },
+            )
+            .await;
+            assert_eq!(result, (false, reason));
+        }
+        for (status, confirmed) in [
+            (200, true),
+            (204, true),
+            (202, true),
+            (400, false),
+            (503, false),
+        ] {
+            assert_eq!(
+                tracked_cancel_outcome(
+                    Some("id"),
+                    Some("cancel"),
+                    budget,
+                    || async { Ok(status) },
+                    || async { Ok(true) }
+                )
+                .await
+                .0,
+                confirmed
+            );
+        }
+        for status in [200, 202, 204] {
+            assert!(
+                !tracked_cancel_outcome(
+                    Some("id"),
+                    Some("cancel"),
+                    budget,
+                    || async { Ok(status) },
+                    || async { Ok(false) }
+                )
+                .await
+                .0
+            );
+        }
+        assert!(
+            !tracked_cancel_outcome(
+                Some("id"),
+                Some("cancel"),
+                budget,
+                std::future::pending,
+                || async { Ok(true) }
+            )
+            .await
+            .0
+        );
+    }
+}
+
+#[cfg(test)]
+mod invocation_cancel_http_tests {
+    use super::*;
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{method, path},
+    };
+
+    #[tokio::test]
+    async fn invocation_async_cancel_requires_terminal_declared_status_after_http_acceptance() {
+        let contract = serde_json::from_value(serde_json::json!({
+            "status_operation":"status","result_operation":"result","cancel_operation":"cancel",
+            "id_field":"/id","id_parameter":"id","status_field":"/status",
+            "success_states":["done"],"failure_states":["failed","cancelled"],"error_field":null
+        }))
+        .unwrap();
+        for (code, phase, expected) in [
+            (200, "running", false),
+            (200, "cancelling", false),
+            (202, "running", false),
+            (202, "cancelled", true),
+            (204, "done", true),
+            (200, "failed", true),
+            (503, "done", false),
+        ] {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/cancel"))
+                .respond_with(ResponseTemplate::new(code))
+                .expect(1)
+                .mount(&server)
+                .await;
+            Mock::given(method("GET"))
+                .and(path("/status"))
+                .respond_with(
+                    ResponseTemplate::new(200).set_body_json(serde_json::json!({"status":phase})),
+                )
+                .expect(if code < 300 { 1 } else { 0 })
+                .mount(&server)
+                .await;
+            let client = reqwest::Client::new();
+            let cancel = format!("{}/cancel", server.uri());
+            let status = format!("{}/status", server.uri());
+            let outcome = tracked_cancel_outcome(
+                Some("fixture"),
+                Some("cancel"),
+                Duration::from_secs(2),
+                || async {
+                    let response = client.post(&cancel).send().await.map_err(|_| {
+                        crate::errors::AppError::Internal("Loopback cancel failed".into())
+                    })?;
+                    Ok(response.status().as_u16())
+                },
+                || async {
+                    let response = client.get(&status).send().await.map_err(|_| {
+                        crate::errors::AppError::Internal("Loopback status failed".into())
+                    })?;
+                    let text = response.text().await.map_err(|_| {
+                        crate::errors::AppError::Internal("Loopback status failed".into())
+                    })?;
+                    Ok(terminal_contract_status(&contract, &text))
+                },
+            )
+            .await;
+            assert_eq!(outcome.0, expected);
+            server.verify().await;
+        }
+    }
 }

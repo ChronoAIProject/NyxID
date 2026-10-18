@@ -449,3 +449,4 @@ pub(crate) mod platform_entry_receipts;
 pub(crate) mod platform_entry_scope;
 
 pub(crate) mod platform_native_reply_service;
+pub mod assistant_invocation_service;

@@ -531,6 +531,7 @@ pub struct TurnRequest {
 /// subagent, a batch of NyxID events, or a channel message.
 #[derive(Clone)]
 pub struct TurnStart {
+    pub invocation_id: Option<String>,
     pub acknowledgement_id: Option<String>,
     pub retry_of: Option<String>,
     pub channel_event_id: Option<String>,
@@ -697,6 +698,7 @@ impl From<&TurnStart> for TurnStart {
 impl From<&TurnRequest> for TurnStart {
     fn from(request: &TurnRequest) -> Self {
         Self {
+            invocation_id: None,
             acknowledgement_id: request.acknowledgement_id.clone(),
             retry_of: request.retry_of.clone(),
             channel_event_id: None,
@@ -1845,6 +1847,18 @@ pub(crate) async fn begin_owner_turn_in_session(
     platform: Option<&crate::models::assistant_conversation::PlatformTurnOrigin>,
     voice_request_id: Option<&str>,
 ) -> AppResult<OwnerTurnAdmission> {
+    if let Some(ack) = &start.acknowledgement_id
+        && db
+            .collection::<bson::Document>(crate::models::assistant_acknowledgement::COLLECTION_NAME)
+            .find_one(doc! {"_id":ack,"user_id":user_id,"invocation_id":{"$type":"string"}})
+            .session(&mut *session)
+            .await?
+            .is_some()
+    {
+        return Err(AppError::Conflict(
+            "Invocation confirmation continuation is already queued".into(),
+        ));
+    }
     let id = ids.conversation_id.clone();
     let turn_id = ids.turn_id.clone();
     let voice_request_id = voice_request_id.map(str::to_owned);
@@ -1870,6 +1884,8 @@ pub(crate) async fn begin_owner_turn_in_session(
             .ok_or_else(not_found)?
     } else {
         AssistantConversation {
+            invocation_controlled: false,
+            credential_invocation_id: None,
             platform_thread: platform.map(|origin| origin.thread.clone()),
             machine_previews: false,
             platform_cleanup_pending: false,
@@ -2044,6 +2060,26 @@ pub(crate) async fn begin_owner_turn_in_session(
             .session(&mut *session)
             .await?;
     }
+    if row
+        .pending_events
+        .iter()
+        .any(|event| event.invocation_id.is_some())
+    {
+        let before = row.pending_events.len();
+        row.pending_events = super::assistant_invocation_service::filter_events_in_session(
+            db,
+            session,
+            user_id,
+            std::mem::take(&mut row.pending_events),
+        )
+        .await?;
+        if row.pending_events.len() != before {
+            collection.update_one(owner_filter(user_id,&id)?,doc!{"$set":{"pending_events":bson::to_bson(&row.pending_events).map_err(|_|AppError::Internal("Invalid events".into()))?}}).session(&mut *session).await?;
+            if start.origin == TurnOrigin::Event && row.pending_events.is_empty() {
+                return Ok(OwnerTurnAdmission::Drained);
+            }
+        }
+    }
     // Every turn drains queued events: an event turn renders them as
     // its message; other turns carry them in their input context.
     if start.origin == TurnOrigin::Event && row.pending_events.is_empty() {
@@ -2053,7 +2089,8 @@ pub(crate) async fn begin_owner_turn_in_session(
     // queued): a guest turn leaves them for the owner's next turn.
     // A chat app thread's queued messages wait for a turn that
     // answers in that chat, never one the owner starts in the app.
-    let events = if start.guest
+    let events = if start.invocation_id.is_some()
+        || start.guest
         || start.origin == TurnOrigin::Trigger
         || (start.origin == TurnOrigin::User && row.channel.is_some())
     {
@@ -2181,6 +2218,37 @@ pub(crate) async fn begin_owner_turn_in_session(
         }
     };
 
+    if start.invocation_id.is_some() {
+        super::assistant_invocation_service::require_owner_conversation(&row)?;
+    }
+    let next_invocation = start
+        .invocation_id
+        .clone()
+        .or_else(|| events.first().and_then(|event| event.invocation_id.clone()));
+    // NyxAgent authenticates tools with the raw conversation key. Retire that
+    // generation at invocation boundaries so an old worker cannot authenticate
+    // against a later turn's live authority. Continuations of the same family
+    // retain their card/watch binding; ordinary untouched threads keep theirs.
+    if (row.invocation_controlled || next_invocation.is_some())
+        && row.credential_invocation_id != next_invocation
+        && !row.credential_api_key_id.is_empty()
+    {
+        super::assistant_agent_credential_service::require_invocation_boundary_clear(
+            db,
+            user_id,
+            &row.id,
+            &mut *session,
+        )
+        .await?;
+        super::api_key_mutation_service::update_one(
+            db,
+            doc! {"_id":&row.credential_api_key_id,"user_id":user_id},
+            doc! {"$set":{"is_active":false}},
+            Some(&mut *session),
+        )
+        .await?;
+    }
+    row.credential_invocation_id = next_invocation;
     let credential = Box::pin(
         super::assistant_agent_credential_service::load_or_provision_in_session(
             db,
@@ -2299,6 +2367,10 @@ pub(crate) async fn begin_owner_turn_in_session(
             db, session, &row, &lost_turn, &message, now,
         ))
         .await?;
+        super::assistant_invocation_service::settle_in_session(
+            db, session, user_id, &lost_turn, &message,
+        )
+        .await?;
         super::platform_personal_turn_service::settle_saved_reply_in_session(db, session, &message)
             .await?;
         db.collection::<AssistantMessage>(MESSAGES)
@@ -2371,8 +2443,15 @@ pub(crate) async fn begin_owner_turn_in_session(
         (None, Some(retry)) => Some(retry.note.clone()),
         (None, None) => None,
     };
+    if start.invocation_id.is_some() || events.iter().any(|event| event.invocation_id.is_some()) {
+        row.invocation_controlled = true;
+    }
     row.active_turn = Some(ActiveTurn {
         channel_adapter_origin: None,
+        invocation_id: start
+            .invocation_id
+            .clone()
+            .or_else(|| events.first().and_then(|e| e.invocation_id.clone())),
         worker_instance: Some(super::assistant_engine_worker::instance().clone()),
         model_attempt_id: None,
         model_requests_active: 0,
@@ -2463,6 +2542,10 @@ pub(crate) async fn begin_owner_turn_in_session(
     }
     Box::pin(super::async_service_operation::bind_in_session(
         db, &mut row, session,
+    ))
+    .await?;
+    Box::pin(super::assistant_invocation_service::bind_in_session(
+        db, session, &row,
     ))
     .await?;
     // Chats whose queued messages this turn answers get its reply
@@ -2778,6 +2861,12 @@ pub async fn push_events(
     if events.is_empty() {
         return get(db, user_id, id).await.map(Some);
     }
+    if events.iter().any(|event| event.invocation_id.is_some()) {
+        return Box::pin(super::assistant_invocation_service::push_events(
+            db, user_id, id, events,
+        ))
+        .await;
+    }
     let entries = events
         .iter()
         .map(bson::to_bson)
@@ -2786,7 +2875,11 @@ pub async fn push_events(
     Ok(db
         .collection::<AssistantConversation>(CONVERSATIONS)
         .find_one_and_update(
-            doc! {"_id": id, "user_id": user_id},
+            super::assistant_invocation_service::protect_queue(
+                doc! {"_id": id, "user_id": user_id},
+                entries.len(),
+                false,
+            ),
             doc! {"$push": {"pending_events": {
                 "$each": entries,
                 "$slice": -(MAX_PENDING_EVENTS as i64),
@@ -3283,6 +3376,9 @@ async fn finish_turn_inner(
                         &db, session, &current, turn, &message, now,
                     ))
                     .await?;
+                }
+                if let Some(turn) = settled_turn.as_ref() {
+                    super::assistant_invocation_service::settle_in_session(&db,session,&row.user_id,turn,&message).await?;
                 }
                 super::platform_personal_turn_service::settle_saved_reply_in_session(&db, session, &message).await?;
                 db.collection::<AssistantMessage>(MESSAGES)
@@ -4522,6 +4618,10 @@ pub async fn delete(
                 let mut children = Vec::new();
                 for row in &rows {
                     let id = row.id.as_str();
+                    super::assistant_invocation_service::deleted_in_session(
+                        db, session, user_id, id,
+                    )
+                    .await?;
                     super::platform_personal_turn_service::clear_thread_in_session(
                         db, session, row,
                     )

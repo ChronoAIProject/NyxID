@@ -1158,20 +1158,57 @@ async fn push_publication_event(
     owner_id: &str,
     event: &crate::models::assistant_conversation::AgentEvent,
 ) -> AppResult<()> {
-    db.collection::<bson::Document>(crate::models::assistant_conversation::COLLECTION_NAME)
+    if !super::assistant_invocation_service::fence_in_session(
+        db,
+        session,
+        owner_id,
+        event.invocation_id.as_deref(),
+    )
+    .await?
+    {
+        return Ok(());
+    }
+    let conversations =
+        db.collection::<bson::Document>(crate::models::assistant_conversation::COLLECTION_NAME);
+    let queued = conversations
         .update_one(
-            doc! {
-                "_id": conversation_id,
-                "user_id": owner_id,
-                "pending_events": {"$not": {"$elemMatch": {"id": &event.id}}},
-            },
+            super::assistant_invocation_service::protect_queue(
+                doc! {
+                    "_id": conversation_id,
+                    "user_id": owner_id,
+                    "pending_events": {"$not": {"$elemMatch": {"id": &event.id}}},
+                },
+                1,
+                event.invocation_id.is_some(),
+            ),
             doc! {"$push": {"pending_events": {
                 "$each": [bson::to_bson(event).map_err(|_| conflict())?],
                 "$slice": -(super::assistant_nyxagent::MAX_PENDING_EVENTS as i64),
             }}},
         )
-        .session(session)
+        .session(&mut *session)
         .await?;
+    if event.invocation_id.is_some() && queued.matched_count == 0 {
+        // A retry may find the deterministic event already queued. Any other
+        // refusal must abort the enclosing settlement and retain its producer.
+        let already_queued = conversations
+            .find_one(doc! {
+                "_id": conversation_id,
+                "user_id": owner_id,
+                "pending_events": {"$elemMatch": {
+                    "id": &event.id, "invocation_id": &event.invocation_id,
+                }},
+            })
+            .projection(doc! {"_id": 1})
+            .session(&mut *session)
+            .await?
+            .is_some();
+        if !already_queued {
+            return Err(AppError::Conflict(
+                "Invocation publication continuation queue is full or unavailable".into(),
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -1211,7 +1248,8 @@ async fn push_pinned_event(
         Some(&row.agent_id),
     );
     event =
-        crate::models::assistant_acknowledgement::bind_continuation(ack.routing.as_ref(), event);
+        crate::models::assistant_acknowledgement::bind_continuation(ack.routing.as_ref(), event)
+            .for_invocation(ack.invocation_id.as_deref());
     event.id = Uuid::new_v5(
         &Uuid::NAMESPACE_OID,
         format!("skill-publication:{}:{}:pinned", row.id, row.revision).as_bytes(),
@@ -1247,8 +1285,8 @@ async fn push_failure_event(
         .sort(doc! {"created_at":-1})
         .session(&mut *session)
         .await?;
-    let (conversation, routing) = if let Some(ack) = ack {
-        (ack.conversation_id, ack.routing)
+    let (conversation, routing, invocation_id) = if let Some(ack) = ack {
+        (ack.conversation_id, ack.routing, ack.invocation_id)
     } else if let Some(claim) = db
         .collection::<DraftOrigin>(
             crate::models::assistant_agent_learning::AUTHORED_CLAIMS_COLLECTION_NAME,
@@ -1257,7 +1295,11 @@ async fn push_failure_event(
         .session(&mut *session)
         .await?
     {
-        (claim.claim.conversation_id, claim.claim.routing)
+        (
+            claim.claim.conversation_id,
+            claim.claim.routing,
+            claim.claim.invocation_id,
+        )
     } else {
         return Ok(());
     };
@@ -1300,7 +1342,8 @@ async fn push_failure_event(
         ),
         Some(&row.agent_id),
     );
-    event = crate::models::assistant_acknowledgement::bind_continuation(routing.as_ref(), event);
+    event = crate::models::assistant_acknowledgement::bind_continuation(routing.as_ref(), event)
+        .for_invocation(invocation_id.as_deref());
     event.id = event_id;
     push_publication_event(db, session, &conversation, &row.owner_id, &event).await
 }
@@ -2310,6 +2353,7 @@ async fn approve_core(
                         })?;
                     }
                 }
+                next.invocation_id = chat.invocation_id.clone();
                 next.approved_by = Some(actor_for_claim.clone());
                 next.acknowledgement_id = card.clone();
                 next.approval_digest = Some(digest.clone());
@@ -2323,7 +2367,7 @@ async fn approve_core(
                     .collection::<bson::Document>(PROPOSALS_COLLECTION_NAME)
                     .update_one(
                         doc! {"_id":&proposal_id,"revision":revision_filter(proposal_revision),"publication.operation_id":&operation_id,"status":{"$in":["pending","publishing","publication_failed","published_unpinned"]},"$or":[{"publication.lease_expires_at":bson::Bson::Null},{"publication.lease_expires_at":{"$lte":bson::DateTime::now()}}]},
-                        doc! {"$set":{"status":"publishing","publication.approved_by":&next.approved_by,"publication.acknowledgement_id":&next.acknowledgement_id,"publication.approval_digest":&next.approval_digest,"publication.skills_revision":next.skills_revision,"publication.lease_id":&next.lease_id,"publication.lease_expires_at":next.lease_expires_at.map(bson::DateTime::from_chrono),"publication.attempt":next.attempt,"publication.last_stage":"claimed","publication.last_registry_status":bson::Bson::Null,"failure_rules":[],"failure_code":bson::Bson::Null,"updated_at":bson::DateTime::now()}},
+                        doc! {"$set":{"status":"publishing","publication.invocation_id":&next.invocation_id,"publication.approved_by":&next.approved_by,"publication.acknowledgement_id":&next.acknowledgement_id,"publication.approval_digest":&next.approval_digest,"publication.skills_revision":next.skills_revision,"publication.lease_id":&next.lease_id,"publication.lease_expires_at":next.lease_expires_at.map(bson::DateTime::from_chrono),"publication.attempt":next.attempt,"publication.last_stage":"claimed","publication.last_registry_status":bson::Bson::Null,"failure_rules":[],"failure_code":bson::Bson::Null,"updated_at":bson::DateTime::now()}},
                     )
                     .session(&mut *session)
                     .await?;
@@ -2452,6 +2496,53 @@ async fn set_stage(
     Ok(())
 }
 
+/// Serialize publication effects with exact invocation cancellation. Read-only
+/// registry reconciliation can continue, but publication and attachment cannot.
+async fn fence_invocation_publication(
+    db: &Database,
+    session: &mut mongodb::ClientSession,
+    row: &AssistantAgentLearningProposal,
+    publication: &LearningPublication,
+) -> AppResult<()> {
+    let invocation = if publication.invocation_id.is_some() {
+        publication.invocation_id.clone()
+    } else if let Some(card_id) = &publication.acknowledgement_id {
+        db.collection::<crate::models::assistant_acknowledgement::AssistantAcknowledgement>(
+            crate::models::assistant_acknowledgement::COLLECTION_NAME,
+        )
+        .find_one(doc! {"_id":card_id,"user_id":&row.owner_id})
+        .session(&mut *session)
+        .await?
+        .and_then(|card| card.invocation_id)
+    } else {
+        db.collection::<bson::Document>(
+            crate::models::assistant_agent_learning::AUTHORED_CLAIMS_COLLECTION_NAME,
+        )
+        .find_one(doc! {"claim.proposal_id":&row.id})
+        .session(&mut *session)
+        .await?
+        .and_then(|claim| {
+            claim
+                .get_document("claim")
+                .ok()?
+                .get_str("invocation_id")
+                .ok()
+                .map(str::to_owned)
+        })
+    };
+    if !super::assistant_invocation_service::fence_in_session(
+        db,
+        session,
+        &row.owner_id,
+        invocation.as_deref(),
+    )
+    .await?
+    {
+        return Err(AppError::Conflict("Invocation was stopped".into()));
+    }
+    Ok(())
+}
+
 async fn mark_started(
     state: &AppState,
     row: &AssistantAgentLearningProposal,
@@ -2462,9 +2553,12 @@ async fn mark_started(
     let target = target_id(p);
     let operation = p.operation_id.clone();
     let sha = p.sha256.clone();
+    let row = row.clone();
+    let publication = p.clone();
     let mut session = db.client().start_session().await?;
     session.start_transaction().and_run2(async move |session| {
-        let result: AppResult<()> = async {
+        let result: AppResult<()> = Box::pin(async {
+            fence_invocation_publication(&db, session, &row, &publication).await?;
             let changed = db.collection::<bson::Document>(PROPOSALS_COLLECTION_NAME)
                 .update_one(filter.clone(), vec![doc! {"$set":{"publication.started":true,"publication.dispatched_at":{"$ifNull":["$publication.dispatched_at",bson::DateTime::now()]},"publication.last_stage":"publish"}}])
                 .session(&mut *session).await?;
@@ -2477,7 +2571,7 @@ async fn mark_started(
                 if changed.matched_count != 1 { return Err(conflict()); }
             }
             Ok(())
-        }.await;
+        }).await;
         transactions::transaction_result(result)
     }).await.map_err(transactions::map_transaction_error)?;
     Ok(())
@@ -2761,6 +2855,7 @@ async fn execute(
         .start_transaction()
         .and_run2(async move |session| {
             let result: AppResult<i64> = async {
+                Box::pin(fence_invocation_publication(&db, session, &row_for_pin, &publication_for_pin)).await?;
                 let marked = db
                     .collection::<bson::Document>(PROPOSALS_COLLECTION_NAME)
                     .update_one(

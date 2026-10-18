@@ -146,7 +146,7 @@ pub(crate) async fn enqueue(
     request: &AssistantAcknowledgement,
     target: &str,
     attempt: &DeliveryAttempt,
-    event: AgentEvent,
+    mut event: AgentEvent,
 ) -> AppResult<Option<String>> {
     let db = db.clone();
     let owner = request.user_id.clone();
@@ -154,6 +154,7 @@ pub(crate) async fn enqueue(
     let filter = attempt.filter(request);
     let observed_target = attempt.target.clone();
     let target = target.to_owned();
+    event.invocation_id = request.invocation_id.clone();
     let entry = bson::to_bson(&event)
         .map_err(|_| AppError::Internal("Failed to encode skill event".into()))?;
     let mut session = db.client().start_session().await?;
@@ -163,6 +164,10 @@ pub(crate) async fn enqueue(
             let Some(card) = db.collection::<AssistantAcknowledgement>(ACKS)
                 .find_one(doc! {"_id": &request_id, "user_id": &owner, "kind": "skills"})
                 .session(&mut *session).await? else { return Ok(None); };
+            if !super::super::assistant_invocation_service::fence_in_session(&db,session,&owner,card.invocation_id.as_deref()).await? {
+                policy::terminalize_skill_outbox_in_session(&db,&owner,&request_id,"invocation_stopped",session).await?;
+                return Ok(None);
+            }
             let eligible = match policy::skill_notification_eligible(&card, policy::cutover_at(&db))? {
                 policy::SkillEligibility::Eligible(policy::SkillDestination::GroupNyxbotHome { group_id }) => {
                     policy::nyxbot_in_personal_group(&db, &owner, &group_id, Some(&mut *session)).await?
@@ -196,7 +201,7 @@ pub(crate) async fn enqueue(
                 .session(&mut *session).await?;
             if already_queued.is_some() { return Ok(Some(target.clone())); }
             let queued = db.collection::<bson::Document>(CONVERSATIONS)
-                .update_one(doc! {"_id": &target, "user_id": &owner, "role": "orchestrator"},
+                .update_one(super::super::assistant_invocation_service::protect_queue(doc! {"_id": &target, "user_id": &owner, "role": "orchestrator"},1,card.invocation_id.is_some()),
                     doc! {"$push": {"pending_events": {"$each": [&entry], "$slice": -(super::super::assistant_nyxagent::MAX_PENDING_EVENTS as i64)}}})
                 .session(&mut *session).await?;
             if queued.matched_count != 1 { return Err(not_found()); }

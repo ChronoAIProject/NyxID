@@ -207,3 +207,4 @@ pub mod admin_remote_machine_platform;
 mod tools_manager_tests;
 
 pub mod call_adapters;
+pub mod assistant_invocations;

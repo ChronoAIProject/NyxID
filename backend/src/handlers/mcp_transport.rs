@@ -3342,9 +3342,19 @@ async fn authorize_mcp_operation(
                 &req_id,
                 &state.config.frontend_url,
             );
-            tool_result(request_id, &format!("{mapped}"), true)
+            tool_result(request_id.clone(), &format!("{mapped}"), true)
         })?;
-
+    if let Some(chat) = auth.chat.as_ref() {
+        crate::services::assistant_invocation_service::revalidate_after_approval(&state.db, chat)
+            .await
+            .map_err(|_| {
+                tool_result(
+                    request_id,
+                    "The originating invocation turn was stopped or replaced",
+                    true,
+                )
+            })?;
+    }
     Ok(None)
 }
 
@@ -8586,6 +8596,8 @@ mod skill_authoring_discovery_tests {
         auth.api_key_id = Some("chat-key".into());
         auth.chat = Some(ChatAuthority {
             channel_adapter_origin: None,
+            invocation_controlled: false,
+            invocation_id: None,
             platform_thread: false,
             platform_origin: None,
             report_to: None,
