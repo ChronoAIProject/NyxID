@@ -178,6 +178,61 @@ PM additionally reported final W6 ec07a6bb real container acceptance: both
 migration/companion rollback parent harness tests passed and production scratch
 8 checks passed; PM's original logs/ledger own that independent evidence.
 
+## W7 first bounded batch — pins, bootstraps and compiler compatibility
+
+Resolved all24 existing Action repository/ref pairs through authenticated
+GitHub commit APIs; each workflow now uses the full commit. Preserved separate
+attestation v1/v3 producer versions. Resolved10 Docker base indices over HTTPS
+Registry v2 and compared their raw-byte SHA-256 to the registry digest; receipts
+include platforms and source URLs. Production, hosted/node-only, updater, spike
+and Glama roots are covered. Rust1.98.1 is explicit even when its Action uses a
+SHA. Docker and workflow Rust builds enforce the lockfile. Dependabot covers
+Action/base and independent integration directories.
+
+The release/cache workflows no longer execute generated installer/package shell
+commands. Committed cargo-dist0.30.0 archive digests and rustup1.28.2 executable
+digests replace downloaded installer shells. npm11.21.1 has a committed SHA-512
+archive integrity for deliberate lock generation; no force/legacy-peer flags.
+PyYAML6.0.3 wheels have required hashes. The Glama reference builds the supplied
+immutable source context, rather than cloning main. The precise remaining
+mutable OS-repository/host-runner inputs and absence of a bit-for-bit image claim
+are documented in `docs/BUILD_SECURITY.md`.
+
+The proc-macro-error2 vendor source came from the exact original Cargo.lock
+archive SHA256 `11ec05c52be0a07b08061f7dd003e7d7092e0472bc731b4af7bb1ef876109802`.
+Only `extern crate proc_macro` became `pub extern crate proc_macro`; original
+licenses/source metadata and patch receipt are retained. The root patch covers
+all consumers, while the vendor crate is excluded as an independent workspace
+product. `scripts/test-proc-macro-visibility.py` compiles an original negative
+control and the corrected consumer with `-Dpub_use_of_private_extern_crate`:
+original E0365 rejected, corrected accepted with0 future-incompatible warnings.
+Evidence: `w7-vendor-regression.log` and `w7-proc-macro-regression/*.log`.
+A direct workspace dependency-only `cargo check -p proc-macro-error2` exposed a
+Cargo1.98.1 host-feature resolver panic; the standalone consumer and actual
+backend consumer checks exercise the correction without relying on that broken
+selection mode. This is not counted as a passing command.
+
+Host checks: checksummed native cargo-dist and npm bootstraps executed and
+reported exact versions (`w7-{dist,npm}-bootstrap.log`); real `dist plan` produced
+all4 supported targets and the pinned focal index (`w7-dist-plan.json`).
+`check-build-inputs.py` passed;7 build-boundary regressions passed, including
+well-formed wrong download digest, unsafe archive traversal, mutable/unknown
+Action pins, mutable base, unlocked build and generated installer rejection.
+All workflow/Dependabot YAML parsed and reusable permissions check passed using
+the hash-installed PyYAML. `cargo check --locked -p nyxid --bin nyxid-server
+--future-incompat-report`, with bounded jobs2/debug0/incremental0 and the shared
+target, passed in2m16s with0 future-incompatible dependencies
+(`w7-backend-vendor-check.log`). Rust fmt and diff whitespace passed. The Oracle
+worker now has a committed integrity lock and CI uses npm ci; lock generation
+with the checked npm archive reported0 advisories (`w7-oracle-lock.log`).
+
+This batch does not close W7: dependency remediation, source/image/secret scans,
+actual shipped composition SBOM, mandatory signing/publication gates and distinct
+nonpublishing OIDC rehearsal remain subsequent batches. PM's exact W5 image
+acceptance is running. Its independent build comparison found preload ordering
+divergence and an extra stock50x.html; those are open W7/W5 corrections, never a
+reproducibility pass.
+
 ## Remaining authorized batches
 
 W5 final container review/integration; W7 pinned,

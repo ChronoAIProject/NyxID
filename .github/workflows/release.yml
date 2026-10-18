@@ -59,18 +59,15 @@ jobs:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       # Bumped from @v4 by hand to match repo convention; reapply if dist init regenerates.
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           fetch-depth: 0
           persist-credentials: false
           submodules: recursive
-      - name: Install dist
-        # we specify bash to get pipefail; it guards against the `curl` command
-        # failing. otherwise `sh` won't catch that `curl` returned non-0
-        shell: bash
-        run: "curl --proto '=https' --tlsv1.2 -LsSf https://github.com/axodotdev/cargo-dist/releases/download/v0.30.0/cargo-dist-installer.sh | sh"
+      - name: Install checksummed dist
+        run: python3 scripts/bootstrap-build-tool.py cargo-dist --bin-dir "$HOME/.cargo/bin"
       - name: Cache dist
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: cargo-dist-cache
           path: ~/.cargo/bin/dist
@@ -93,7 +90,7 @@ jobs:
         if: ${{ github.event.pull_request }}
         run: dist manifest --output-format=json --artifacts=local --target=x86_64-unknown-linux-gnu > /dev/null
       - name: "Upload dist-manifest.json"
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: artifacts-plan-dist-manifest
           path: plan-dist-manifest.json
@@ -128,49 +125,42 @@ jobs:
         run: |
           git config --global core.longpaths true
       # Bumped from @v4 by hand to match repo convention; reapply if dist init regenerates.
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
           submodules: recursive
-      - name: Install Rust non-interactively if not already installed
+      - name: Install reviewed release dependencies
+        run: sh scripts/install-release-dependencies.sh
+      - name: Install checksummed Rust bootstrap in container
         if: ${{ matrix.container }}
         run: |
-          if ! command -v cargo > /dev/null 2>&1; then
-            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-            echo "$HOME/.cargo/bin" >> $GITHUB_PATH
-          fi
+          python3 scripts/bootstrap-build-tool.py rustup --bin-dir "$HOME/.cargo/bin"
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - name: Select exact Rust toolchain
+        if: ${{ !matrix.container }}
+        uses: dtolnay/rust-toolchain@18f0487477426dce244608110aa2660c2893deb7 # 1.98.1
+        with:
+          toolchain: 1.98.1
       # Added by hand (allow-dirty = ["ci"]); reapply if dist init regenerates.
       # Tag runs cannot share caches with each other, only with `main`, so this
       # restores the dependency cache that release-cache.yml warms on `main`.
       # Keep the key inputs in sync with that workflow.
       - name: Restore Rust build cache
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           shared-key: dist-${{ join(matrix.targets, '-') }}
           save-if: false
-      - name: Install dist
-        run: ${{ matrix.install_dist.run }}
-      # Get the dist-manifest
+      - name: Install checksummed dist
+        run: python3 scripts/bootstrap-build-tool.py cargo-dist --bin-dir "$HOME/.cargo/bin"
       - name: Fetch local artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: artifacts-*
           path: target/distrib/
           merge-multiple: true
-      - name: Install dependencies
-        env:
-          DEBIAN_FRONTEND: noninteractive
-        run: |
-          # cargo-dist 0.30.0 emits `apt-get install …` without `-y`, which
-          # aborts in the aarch64-linux buildpack-deps:focal container because
-          # stdin is non-interactive. Pre-configure apt to assume yes; no-op on
-          # macOS targets and unprivileged host runners (no write access to
-          # /etc/apt/apt.conf.d).
-          if [ -d /etc/apt/apt.conf.d ] && [ -w /etc/apt/apt.conf.d ]; then
-            echo 'APT::Get::Assume-Yes "true";' > /etc/apt/apt.conf.d/99-noninteractive
-          fi
-          ${{ matrix.packages_install }}
       - name: Build artifacts
+        env:
+          DIST_ARGS: ${{ matrix.dist_args }}
         shell: bash
         run: |
           if [[ ",${{ join(matrix.targets, ',') }}," == *",aarch64-unknown-linux-gnu,"* ]]; then
@@ -179,7 +169,8 @@ jobs:
           fi
 
           # Actually do builds and make zips and whatnot
-          dist build ${{ needs.plan.outputs.tag-flag }} --print=linkage --output-format=json ${{ matrix.dist_args }} > dist-manifest.json
+          read -r -a DIST_ARGV <<< "$DIST_ARGS"
+          dist build ${{ needs.plan.outputs.tag-flag }} --print=linkage --output-format=json "${DIST_ARGV[@]}" > dist-manifest.json
           echo "dist ran successfully"
       - id: cargo-dist
         name: Post-build
@@ -195,7 +186,7 @@ jobs:
 
           cp dist-manifest.json "$BUILD_MANIFEST_NAME"
       - name: "Upload artifacts"
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: artifacts-build-local-${{ join(matrix.targets, '_') }}
           path: |
@@ -213,19 +204,19 @@ jobs:
       BUILD_MANIFEST_NAME: target/distrib/global-dist-manifest.json
     steps:
       # Bumped from @v4 by hand to match repo convention; reapply if dist init regenerates.
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
           submodules: recursive
       - name: Install cached dist
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: cargo-dist-cache
           path: ~/.cargo/bin/
       - run: chmod +x ~/.cargo/bin/dist
       # Get all the local artifacts for the global tasks to use (for e.g. checksums)
       - name: Fetch local artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: artifacts-*
           path: target/distrib/
@@ -243,7 +234,7 @@ jobs:
 
           cp dist-manifest.json "$BUILD_MANIFEST_NAME"
       - name: "Upload artifacts"
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: artifacts-build-global
           path: |
@@ -263,12 +254,12 @@ jobs:
       RELEASE_INTEGRITY_SIGNING_KEY: ${{ secrets.RELEASE_INTEGRITY_SIGNING_KEY }}
       RELEASE_INTEGRITY_PUBLISH_TOKEN: ${{ secrets.RELEASE_INTEGRITY_PUBLISH_TOKEN }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           fetch-depth: 0
           persist-credentials: false
           submodules: recursive
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
           node-version-file: .node-version
           cache: npm
@@ -279,7 +270,7 @@ jobs:
           npm ci
           npm run build:credential-accept
       - name: Upload release integrity manifest
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: release-integrity-manifest
           path: frontend/dist/release-integrity/releases.json
@@ -324,20 +315,20 @@ jobs:
       val: ${{ steps.host.outputs.manifest }}
     steps:
       # Bumped from @v4 by hand to match repo convention; reapply if dist init regenerates.
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           fetch-depth: 0
           persist-credentials: false
           submodules: recursive
       - name: Install cached dist
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: cargo-dist-cache
           path: ~/.cargo/bin/
       - run: chmod +x ~/.cargo/bin/dist
       # Fetch artifacts from scratch-storage
       - name: Fetch artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: artifacts-*
           path: target/distrib/
@@ -350,14 +341,14 @@ jobs:
           cat dist-manifest.json
           echo "manifest=$(jq -c "." dist-manifest.json)" >> "$GITHUB_OUTPUT"
       - name: "Upload dist-manifest.json"
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           # Overwrite the previous copy
           name: artifacts-dist-manifest
           path: dist-manifest.json
       # Create a GitHub Release while uploading all files to it
       - name: "Download GitHub Artifacts"
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: artifacts-*
           path: artifacts
@@ -367,7 +358,7 @@ jobs:
           # Remove the granular manifests
           rm -f artifacts/*-dist-manifest.json artifacts/dist-manifest.json
       - name: Attest release artifacts
-        uses: actions/attest-build-provenance@v1
+        uses: actions/attest-build-provenance@ef244123eb79f2f7a7e75d99086184180e6d0018 # v1
         with:
           subject-path: artifacts/*
       - name: Generate changelog
@@ -432,7 +423,7 @@ jobs:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       # Bumped from @v4 by hand to match repo convention; reapply if dist init regenerates.
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
           submodules: recursive

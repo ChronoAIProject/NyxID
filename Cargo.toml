@@ -1,5 +1,6 @@
 [workspace]
 members = ["backend", "cli", "cloud-auth", "mcp-demo", "nyxid-crypto", "service-adapters", "machine", "machine-updater", "permissions"]
+exclude = ["vendor/proc-macro-error2-2.0.1"]
 resolver = "3"
 
 [workspace.package]
@@ -42,7 +43,7 @@ install-updater = false
 
 [workspace.metadata.dist.github-custom-runners]
 aarch64-apple-darwin = "macos-latest"
-aarch64-unknown-linux-gnu = { runner = "ubuntu-24.04-arm", container = { image = "buildpack-deps:focal", host = "aarch64-unknown-linux-gnu", package-manager = "apt" } }
+aarch64-unknown-linux-gnu = { runner = "ubuntu-24.04-arm", container = { image = "buildpack-deps:focal@sha256:2de32588f72f63229c83e3f08529cc15db231b2d95412ab4c30ad49d7cd99591", host = "aarch64-unknown-linux-gnu", package-manager = "apt" } }
 x86_64-apple-darwin = "macos-latest"
 x86_64-unknown-linux-gnu = "ubuntu-24.04"
 global = "ubuntu-24.04"
@@ -79,3 +80,7 @@ opt-level = 3
 inherits = "release"
 lto = "thin"
 strip = true
+
+[patch.crates-io]
+# E0365 correction; original authenticated archive/one-line patch in vendor.
+proc-macro-error2 = { path = "vendor/proc-macro-error2-2.0.1" }

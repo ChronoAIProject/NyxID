@@ -1,4 +1,4 @@
-FROM rust:1.98.1-slim-bookworm AS builder
+FROM rust:1.98.1-slim-bookworm@sha256:ff521445a372125ed4f76e1453a1f8098f2d05332d1601d30db1c1f62757e730 AS builder
 RUN rustup component add clippy
 WORKDIR /build
 COPY cli/tests/machine_context_spike/Cargo.toml cli/tests/machine_context_spike/Cargo.lock cli/tests/machine_context_spike/

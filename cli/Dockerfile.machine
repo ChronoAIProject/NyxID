@@ -1,5 +1,5 @@
 # NyxID machine supervisor with isolated browser and command users.
-FROM rust:1.98.1-bookworm AS builder
+FROM rust:1.98.1-bookworm@sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e AS builder
 
 # libdbus-1-dev is required at compile time by the keyring crate
 RUN apt-get update \
@@ -13,6 +13,7 @@ WORKDIR /build
 # members depended on by the node agent via `cli/Cargo.toml`; missing
 # either makes the workspace refuse to resolve.
 COPY Cargo.toml Cargo.lock ./
+COPY vendor/ vendor/
 COPY backend/ backend/
 COPY cli/ cli/
 COPY cloud-auth/ cloud-auth/
@@ -28,12 +29,12 @@ COPY docs/AI_AGENT_PLAYBOOK.md docs/AI_AGENT_PLAYBOOK.md
 ARG TARGETARCH
 RUN --mount=type=cache,id=nyxid-machine-target-${TARGETARCH},target=/build/target,sharing=locked \
     --mount=type=cache,id=nyxid-machine-registry,target=/usr/local/cargo/registry,sharing=locked \
-    cargo build --release -p nyxid-cli --bin nyxid && mkdir -p /out && cp target/release/nyxid /out/nyxid
+    cargo build --locked --release -p nyxid-cli --bin nyxid && mkdir -p /out && cp target/release/nyxid /out/nyxid
 
 
 # Ubuntu LTS with signed Debian Chromium packages (Ubuntu's chromium is a snap).
 # Debian bookworm packages use an older glibc ABI compatible with Ubuntu noble.
-FROM ubuntu:24.04 AS desktop
+FROM ubuntu:24.04@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac AS desktop
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates curl git python3 nodejs npm ripgrep build-essential pkg-config \

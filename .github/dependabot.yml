@@ -75,3 +75,31 @@ updates:
     labels:
       - dependencies
       - ci
+
+  # Independent published integration and test dependency roots.
+  - package-ecosystem: npm
+    directory: /integrations/oracle/cdp-worker
+    schedule: { interval: weekly }
+  - package-ecosystem: npm
+    directory: /integrations/openclaw
+    schedule: { interval: weekly }
+
+  # Immutable digest updates still require authenticated pin receipts.
+  - package-ecosystem: docker
+    directory: /
+    schedule: { interval: weekly }
+  - package-ecosystem: docker
+    directory: /backend
+    schedule: { interval: weekly }
+  - package-ecosystem: docker
+    directory: /frontend
+    schedule: { interval: weekly }
+  - package-ecosystem: docker
+    directory: /cli
+    schedule: { interval: weekly }
+  - package-ecosystem: docker
+    directory: /cli/tests
+    schedule: { interval: weekly }
+  - package-ecosystem: docker
+    directory: /cli/tests/machine_context_spike
+    schedule: { interval: weekly }

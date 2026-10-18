@@ -1,5 +1,5 @@
 # ── Stage 1: Build ────────────────────────────────────────────────────────────
-FROM rust:1.93-bookworm AS builder
+FROM rust:1.98.1-bookworm@sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e AS builder
 
 WORKDIR /build
 
@@ -18,6 +18,7 @@ ENV NYXID_GIT_HASH=${NYXID_GIT_HASH}
 # is missing, so they must be staged here even though the backend binary
 # only links cloud-auth directly via path (nyxid-crypto is CLI-only).
 COPY Cargo.toml Cargo.lock ./
+COPY vendor/ vendor/
 COPY backend/Cargo.toml backend/Cargo.toml
 COPY cli/Cargo.toml cli/Cargo.toml
 COPY cloud-auth/Cargo.toml cloud-auth/Cargo.toml
@@ -45,7 +46,7 @@ RUN mkdir -p backend/src && echo "fn main() {}" > backend/src/main.rs \
     && mkdir -p machine/src && echo "" > machine/src/lib.rs \
     && mkdir -p machine-updater/src && echo "fn main() {}" > machine-updater/src/main.rs \
     && echo "" > machine-updater/src/lib.rs
-RUN cargo build --release --manifest-path backend/Cargo.toml --features gcp-kms
+RUN cargo build --locked --release --manifest-path backend/Cargo.toml --features gcp-kms
 
 # Remove the dummy build artifacts (forces recompilation of our code only).
 # Drop the cloud-auth artifacts too so its real source is recompiled.
@@ -92,11 +93,11 @@ COPY integrations/oracle/cdp-worker/worker.mjs integrations/oracle/cdp-worker/wo
 RUN touch backend/src/main.rs cloud-auth/src/lib.rs service-adapters/src/lib.rs machine/src/lib.rs machine-updater/src/lib.rs permissions/src/lib.rs
 
 # Build the real binary
-RUN cargo build --release --manifest-path backend/Cargo.toml --features gcp-kms
+RUN cargo build --locked --release --manifest-path backend/Cargo.toml --features gcp-kms
 
 # The standalone page is served by the backend with its own SRI-bound CSP.
 # Keep the Node/lockfile/source/epoch inputs identical to the frontend build.
-FROM node:22.23.2-alpine AS credential-builder
+FROM node:22.23.2-alpine@sha256:b6f26b36c8ff49624cfdac716b8ea1138d606df02586a77d364bb5536a634f85 AS credential-builder
 WORKDIR /build/frontend
 COPY frontend/package.json frontend/package-lock.json ./
 RUN npm ci
@@ -108,7 +109,7 @@ ENV SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH}
 RUN npm run build:credential-accept
 
 # ── Runtime ─────────────────────────────────────────────────────────────────
-FROM debian:bookworm-slim
+FROM debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl \

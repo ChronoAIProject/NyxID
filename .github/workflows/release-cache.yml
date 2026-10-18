@@ -42,13 +42,12 @@ jobs:
     outputs:
       val: ${{ steps.plan.outputs.manifest }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
           submodules: recursive
-      - name: Install dist
-        shell: bash
-        run: "curl --proto '=https' --tlsv1.2 -LsSf https://github.com/axodotdev/cargo-dist/releases/download/v0.30.0/cargo-dist-installer.sh | sh"
+      - name: Install checksummed dist
+        run: python3 scripts/bootstrap-build-tool.py cargo-dist --bin-dir "$HOME/.cargo/bin"
       - id: plan
         run: |
           dist plan --output-format=json > plan-dist-manifest.json
@@ -63,37 +62,34 @@ jobs:
     runs-on: ${{ matrix.runner }}
     container: ${{ matrix.container && matrix.container.image || null }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
           submodules: recursive
-      - name: Install Rust non-interactively if not already installed
+      - name: Install reviewed release dependencies
+        run: sh scripts/install-release-dependencies.sh
+      - name: Install checksummed Rust bootstrap in container
         if: ${{ matrix.container }}
         run: |
-          if ! command -v cargo > /dev/null 2>&1; then
-            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-            echo "$HOME/.cargo/bin" >> $GITHUB_PATH
-          fi
+          python3 scripts/bootstrap-build-tool.py rustup --bin-dir "$HOME/.cargo/bin"
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - name: Select exact Rust toolchain
+        if: ${{ !matrix.container }}
+        uses: dtolnay/rust-toolchain@18f0487477426dce244608110aa2660c2893deb7 # 1.98.1
+        with:
+          toolchain: 1.98.1
       # Keep in sync with the cache step in release.yml's build-local-artifacts.
       - name: Restore Rust build cache
         id: cache
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           shared-key: dist-${{ join(matrix.targets, '-') }}
           save-if: ${{ github.event_name != 'pull_request' }}
-      - name: Install dist
-        if: steps.cache.outputs.cache-hit != 'true'
-        run: ${{ matrix.install_dist.run }}
-      - name: Install dependencies
-        if: steps.cache.outputs.cache-hit != 'true'
-        env:
-          DEBIAN_FRONTEND: noninteractive
-        run: |
-          if [ -d /etc/apt/apt.conf.d ] && [ -w /etc/apt/apt.conf.d ]; then
-            echo 'APT::Get::Assume-Yes "true";' > /etc/apt/apt.conf.d/99-noninteractive
-          fi
-          ${{ matrix.packages_install }}
+      - name: Install checksummed dist
+        run: python3 scripts/bootstrap-build-tool.py cargo-dist --bin-dir "$HOME/.cargo/bin"
       - name: Build artifacts
+        env:
+          DIST_ARGS: ${{ matrix.dist_args }}
         if: steps.cache.outputs.cache-hit != 'true'
         shell: bash
         run: |
@@ -101,4 +97,5 @@ jobs:
             export CC=clang
             export CXX=clang++
           fi
-          dist build --print=linkage --output-format=json ${{ matrix.dist_args }} > /dev/null
+          read -r -a DIST_ARGV <<< "$DIST_ARGS"
+          dist build --print=linkage --output-format=json "${DIST_ARGV[@]}" > /dev/null

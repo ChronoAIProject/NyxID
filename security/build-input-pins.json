@@ -1,0 +1,1090 @@
+{
+  "schema_version": 1,
+  "resolution": "Authenticated GitHub commit API and HTTPS Docker Registry v2; image digest checked against raw response bytes. These are pin-resolution receipts, not upstream signature claims.",
+  "actions": [
+    {
+      "repository": "Swatinem/rust-cache",
+      "ref": "v2",
+      "sha": "6323deb102c322ba6fcbdcafc7e3dddab59af2b6",
+      "api_url": "https://api.github.com/repos/Swatinem/rust-cache/commits/v2",
+      "commit_url": "https://github.com/Swatinem/rust-cache/commit/6323deb102c322ba6fcbdcafc7e3dddab59af2b6"
+    },
+    {
+      "repository": "actions/attest-build-provenance",
+      "ref": "v1",
+      "sha": "ef244123eb79f2f7a7e75d99086184180e6d0018",
+      "api_url": "https://api.github.com/repos/actions/attest-build-provenance/commits/v1",
+      "commit_url": "https://github.com/actions/attest-build-provenance/commit/ef244123eb79f2f7a7e75d99086184180e6d0018"
+    },
+    {
+      "repository": "actions/attest-build-provenance",
+      "ref": "v3",
+      "sha": "977bb373ede98d70efdf65b84cb5f73e068dcc2a",
+      "api_url": "https://api.github.com/repos/actions/attest-build-provenance/commits/v3",
+      "commit_url": "https://github.com/actions/attest-build-provenance/commit/977bb373ede98d70efdf65b84cb5f73e068dcc2a"
+    },
+    {
+      "repository": "actions/cache",
+      "ref": "v4",
+      "sha": "0057852bfaa89a56745cba8c7296529d2fc39830",
+      "api_url": "https://api.github.com/repos/actions/cache/commits/v4",
+      "commit_url": "https://github.com/actions/cache/commit/0057852bfaa89a56745cba8c7296529d2fc39830"
+    },
+    {
+      "repository": "actions/checkout",
+      "ref": "v4",
+      "sha": "11d5960a326750d5838078e36cf38b85af677262",
+      "api_url": "https://api.github.com/repos/actions/checkout/commits/v4",
+      "commit_url": "https://github.com/actions/checkout/commit/11d5960a326750d5838078e36cf38b85af677262"
+    },
+    {
+      "repository": "actions/checkout",
+      "ref": "v6",
+      "sha": "d23441a48e516b6c34aea4fa41551a30e30af803",
+      "api_url": "https://api.github.com/repos/actions/checkout/commits/v6",
+      "commit_url": "https://github.com/actions/checkout/commit/d23441a48e516b6c34aea4fa41551a30e30af803"
+    },
+    {
+      "repository": "actions/download-artifact",
+      "ref": "v4",
+      "sha": "d3f86a106a0bac45b974a628896c90dbdf5c8093",
+      "api_url": "https://api.github.com/repos/actions/download-artifact/commits/v4",
+      "commit_url": "https://github.com/actions/download-artifact/commit/d3f86a106a0bac45b974a628896c90dbdf5c8093"
+    },
+    {
+      "repository": "actions/download-artifact",
+      "ref": "v8",
+      "sha": "9000827ccba6bdab643e8b6fd33ac0654aef8333",
+      "api_url": "https://api.github.com/repos/actions/download-artifact/commits/v8",
+      "commit_url": "https://github.com/actions/download-artifact/commit/9000827ccba6bdab643e8b6fd33ac0654aef8333"
+    },
+    {
+      "repository": "actions/github-script",
+      "ref": "v7",
+      "sha": "f28e40c7f34bde8b3046d885e986cb6290c5673b",
+      "api_url": "https://api.github.com/repos/actions/github-script/commits/v7",
+      "commit_url": "https://github.com/actions/github-script/commit/f28e40c7f34bde8b3046d885e986cb6290c5673b"
+    },
+    {
+      "repository": "actions/setup-node",
+      "ref": "v5",
+      "sha": "a0853c24544627f65ddf259abe73b1d18a591444",
+      "api_url": "https://api.github.com/repos/actions/setup-node/commits/v5",
+      "commit_url": "https://github.com/actions/setup-node/commit/a0853c24544627f65ddf259abe73b1d18a591444"
+    },
+    {
+      "repository": "actions/setup-node",
+      "ref": "v6",
+      "sha": "249970729cb0ef3589644e2896645e5dc5ba9c38",
+      "api_url": "https://api.github.com/repos/actions/setup-node/commits/v6",
+      "commit_url": "https://github.com/actions/setup-node/commit/249970729cb0ef3589644e2896645e5dc5ba9c38"
+    },
+    {
+      "repository": "actions/setup-python",
+      "ref": "v5",
+      "sha": "a26af69be951a213d495a4c3e4e4022e16d87065",
+      "api_url": "https://api.github.com/repos/actions/setup-python/commits/v5",
+      "commit_url": "https://github.com/actions/setup-python/commit/a26af69be951a213d495a4c3e4e4022e16d87065"
+    },
+    {
+      "repository": "actions/upload-artifact",
+      "ref": "v4",
+      "sha": "ea165f8d65b6e75b540449e92b4886f43607fa02",
+      "api_url": "https://api.github.com/repos/actions/upload-artifact/commits/v4",
+      "commit_url": "https://github.com/actions/upload-artifact/commit/ea165f8d65b6e75b540449e92b4886f43607fa02"
+    },
+    {
+      "repository": "actions/upload-artifact",
+      "ref": "v7",
+      "sha": "cf430e030ddbb5b0abf93d22962f4752f3646cd9",
+      "api_url": "https://api.github.com/repos/actions/upload-artifact/commits/v7",
+      "commit_url": "https://github.com/actions/upload-artifact/commit/cf430e030ddbb5b0abf93d22962f4752f3646cd9"
+    },
+    {
+      "repository": "docker/build-push-action",
+      "ref": "v7",
+      "sha": "c3c9e263c25d99ce0380d002d59b67737d91b0dc",
+      "api_url": "https://api.github.com/repos/docker/build-push-action/commits/v7",
+      "commit_url": "https://github.com/docker/build-push-action/commit/c3c9e263c25d99ce0380d002d59b67737d91b0dc"
+    },
+    {
+      "repository": "docker/login-action",
+      "ref": "v4",
+      "sha": "dbcb813823bdd20940b903addbd779551569679f",
+      "api_url": "https://api.github.com/repos/docker/login-action/commits/v4",
+      "commit_url": "https://github.com/docker/login-action/commit/dbcb813823bdd20940b903addbd779551569679f"
+    },
+    {
+      "repository": "docker/metadata-action",
+      "ref": "v6",
+      "sha": "dc802804100637a589fabce1cb79ff13a1411302",
+      "api_url": "https://api.github.com/repos/docker/metadata-action/commits/v6",
+      "commit_url": "https://github.com/docker/metadata-action/commit/dc802804100637a589fabce1cb79ff13a1411302"
+    },
+    {
+      "repository": "docker/setup-buildx-action",
+      "ref": "v4",
+      "sha": "f87e5991a6d7451dcb8d9637bfbc97413f497069",
+      "api_url": "https://api.github.com/repos/docker/setup-buildx-action/commits/v4",
+      "commit_url": "https://github.com/docker/setup-buildx-action/commit/f87e5991a6d7451dcb8d9637bfbc97413f497069"
+    },
+    {
+      "repository": "dorny/paths-filter",
+      "ref": "v4",
+      "sha": "ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d",
+      "api_url": "https://api.github.com/repos/dorny/paths-filter/commits/v4",
+      "commit_url": "https://github.com/dorny/paths-filter/commit/ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d"
+    },
+    {
+      "repository": "dtolnay/rust-toolchain",
+      "ref": "1.98.1",
+      "sha": "18f0487477426dce244608110aa2660c2893deb7",
+      "api_url": "https://api.github.com/repos/dtolnay/rust-toolchain/commits/1.98.1",
+      "commit_url": "https://github.com/dtolnay/rust-toolchain/commit/18f0487477426dce244608110aa2660c2893deb7"
+    },
+    {
+      "repository": "github/codeql-action",
+      "ref": "v3",
+      "sha": "ce5e7eeac396d720fe2d802714996c8ce561e311",
+      "api_url": "https://api.github.com/repos/github/codeql-action/commits/v3",
+      "commit_url": "https://github.com/github/codeql-action/commit/ce5e7eeac396d720fe2d802714996c8ce561e311"
+    },
+    {
+      "repository": "pnpm/action-setup",
+      "ref": "v4",
+      "sha": "b906affcce14559ad1aafd4ab0e942779e9f58b1",
+      "api_url": "https://api.github.com/repos/pnpm/action-setup/commits/v4",
+      "commit_url": "https://github.com/pnpm/action-setup/commit/b906affcce14559ad1aafd4ab0e942779e9f58b1"
+    },
+    {
+      "repository": "taiki-e/install-action",
+      "ref": "v2",
+      "sha": "8cca0918f8471c33515202b73f56ab27f2bed283",
+      "api_url": "https://api.github.com/repos/taiki-e/install-action/commits/v2",
+      "commit_url": "https://github.com/taiki-e/install-action/commit/8cca0918f8471c33515202b73f56ab27f2bed283"
+    },
+    {
+      "repository": "test-summary/action",
+      "ref": "v2.6",
+      "sha": "37b508cfee6d4d080eedd00b5bb240a6a784a6a5",
+      "api_url": "https://api.github.com/repos/test-summary/action/commits/v2.6",
+      "commit_url": "https://github.com/test-summary/action/commit/37b508cfee6d4d080eedd00b5bb240a6a784a6a5"
+    }
+  ],
+  "images": [
+    {
+      "image": "alpine:3.22",
+      "digest": "sha256:5291449c3df73caf6ed85e649dec1b9e818b39a5d8c871e97afc13e9cd5e8fa8",
+      "registry_url": "https://registry-1.docker.io/v2/library/alpine/manifests/3.22",
+      "platforms": [
+        {
+          "digest": "sha256:3e9b4b680bfc9fb5269227cffbd6d42be39fbf7c0b908123913864aa4447e764",
+          "platform": {
+            "architecture": "amd64",
+            "os": "linux"
+          }
+        },
+        {
+          "digest": "sha256:136a7e91b81ee0a601b537ae15392eca6a3c8f6e8496f1f256acf29160bc1fe1",
+          "platform": {
+            "architecture": "unknown",
+            "os": "unknown"
+          }
+        },
+        {
+          "digest": "sha256:450c744b1ef46c709ee72b733c54813f149999273fffb17f2097f79160aba27a",
+          "platform": {
+            "architecture": "arm",
+            "os": "linux",
+            "variant": "v6"
+          }
+        },
+        {
+          "digest": "sha256:f46290174829fe15483524136b84210f8782c5162afc1af82d7a72a562c39a6c",
+          "platform": {
+            "architecture": "unknown",
+            "os": "unknown"
+          }
+        },
+        {
+          "digest": "sha256:947bab19f99aef448855af6d1886613d95d311a1b8bf9d32e7b329eb76ab4e44",
+          "platform": {
+            "architecture": "arm",
+            "os": "linux",
+            "variant": "v7"
+          }
+        },
+        {
+          "digest": "sha256:139bbf958aa59c02fa4993f70c7d51e447dbf87fa73a037f4a1a204a0c4bbbf1",
+          "platform": {
+            "architecture": "unknown",
+            "os": "unknown"
+          }
+        },
+        {
+          "digest": "sha256:2e1a7aa4cbc4e9e5222bb4c24a839aa1a6170ea5492d644777ce7b178824e44f",
+          "platform": {
+            "architecture": "arm64",
+            "os": "linux",
+            "variant": "v8"
+          }
+        },
+        {
+          "digest": "sha256:5c31d531418888d654ec5f9fe128dc369ced192e8fb7bb86108ad6caad39aef7",
+          "platform": {
+            "architecture": "unknown",
+            "os": "unknown"
+          }
+        },
+        {
+          "digest": "sha256:1136d3a024321ad150667cedbb3828db613d57391e471fd87af096a88e2adce5",
+          "platform": {
+            "architecture": "386",
+            "os": "linux"
+          }
+        },
+        {
+          "digest": "sha256:fac6ecbe38dfc1304bd1e4f0d95b2128a9826610431f52295a013347e04cf305",
+          "platform": {
+            "architecture": "unknown",
+            "os": "unknown"
+          }
+        },
+        {
+          "digest": "sha256:d3f9354d41e5bc6cd8b4e7127860553fa3c3a76369c4bedca0b01d8922b29627",
+          "platform": {
+            "architecture": "ppc64le",
+            "os": "linux"
+          }
+        },
+        {
+          "digest": "sha256:e6529a469f2e9a460771b121f69a64144b326d54291a19ccd832d819dea4f90c",
+          "platform": {
+            "architecture": "unknown",
+            "os": "unknown"
+          }
+        },
+        {
+          "digest": "sha256:ddd567990d0fe41158fd851e03e23f1a65c60cb9dd152afe318c9476ecb85e7f",
+          "platform": {
+            "architecture": "riscv64",
+            "os": "linux"
+          }
+        },
+        {
+          "digest": "sha256:d66f3df088e46ca480666689c2011bbf82726fd784997d4c0c31693d0e726105",
+          "platform": {
+            "architecture": "unknown",
+            "os": "unknown"
+          }
+        },
+        {
+          "digest": "sha256:5fd1c1a839a5c24fe563cb20862fca94368fa229800ad960bdc22fe166b06d6c",
+          "platform": {
+            "architecture": "s390x",
+            "os": "linux"
+          }
+        },
+        {
+          "digest": "sha256:8b078795f726190f0ed39dfca3a05d70f376acf3c6e4275356fd69e85510e935",
+          "platform": {
+            "architecture": "unknown",
+            "os": "unknown"
+          }
+        }
+      ],
+      "observed_utc": "2026-10-18T21:55:28.321292+00:00"
+    },
+    {
+      "image": "buildpack-deps:focal",
+      "digest": "sha256:2de32588f72f63229c83e3f08529cc15db231b2d95412ab4c30ad49d7cd99591",
+      "registry_url": "https://registry-1.docker.io/v2/library/buildpack-deps/manifests/focal",
+      "platforms": [
+        {
+          "digest": "sha256:40237ab74606fa355747b8320c7ea04bdfa33506d1bd27fd96d412d5e7e79bc0",
+          "platform": {
+            "architecture": "amd64",
+            "os": "linux"
+          }
+        },
+        {
+          "digest": "sha256:52fc601d3dd8affe2f5418518b99b1cbd1504494573810c19a0199f4414f1d18",
+          "platform": {
+            "architecture": "unknown",
+            "os": "unknown"
+          }
+        },
+        {
+          "digest": "sha256:e303e1b2446f649d83139b176c57e51cf84833273e143f0719ce175361d229ad",
+          "platform": {
+            "architecture": "arm",
+            "os": "linux",
+            "variant": "v7"
+          }
+        },
+        {
+          "digest": "sha256:a4372f1636750fe89babd62d6a2ba1066b497d70314aeff949fac7052e1b5e34",
+          "platform": {
+            "architecture": "unknown",
+            "os": "unknown"
+          }
+        },
+        {
+          "digest": "sha256:a25455522d1e9d512b16e21bca820fabc9fa1e8bb600cfe361a078bf038a3dec",
+          "platform": {
+            "architecture": "arm64",
+            "os": "linux",
+            "variant": "v8"
+          }
+        },
+        {
+          "digest": "sha256:096c6a17f811b05875fdcba9d8231737705b07ba1fbde5bb928f98e92da930eb",
+          "platform": {
+            "architecture": "unknown",
+            "os": "unknown"
+          }
+        },
+        {
+          "digest": "sha256:567ed8b58edf586e270e38c76633fb88fec88485cd9d26be9b08f954625b58d2",
+          "platform": {
+            "architecture": "ppc64le",
+            "os": "linux"
+          }
+        },
+        {
+          "digest": "sha256:3395737b2f25a4453c1eade5bdefb9049c817d9167d9d3b9894993088c9d7b15",
+          "platform": {
+            "architecture": "unknown",
+            "os": "unknown"
+          }
+        },
+        {
+          "digest": "sha256:27e7579fd75f8d3c688ec536af77cba1006a288078005b421a30a6a11cd7b395",
+          "platform": {
+            "architecture": "s390x",
+            "os": "linux"
+          }
+        },
+        {
+          "digest": "sha256:30c7664245969828397555157bde4c714547c4d25401dfd42fb3333c9304eccd",
+          "platform": {
+            "architecture": "unknown",
+            "os": "unknown"
+          }
+        }
+      ],
+      "observed_utc": "2026-10-18T21:55:28.310087+00:00"
+    },
+    {
+      "image": "debian:bookworm-slim",
+      "digest": "sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587",
+      "registry_url": "https://registry-1.docker.io/v2/library/debian/manifests/bookworm-slim",
+      "platforms": [
+        {
+          "digest": "sha256:a4672c0cb26fbdde88e38fa2dfb6c681942306680e41e4378b28770b6e79ee91",
+          "platform": {
+            "architecture": "amd64",
+            "os": "linux"
+          }
+        },
+        {
+          "digest": "sha256:dd0ada2da3f11d4d164cdfc61983795f22c2e820cf35f6868e06a102a65bc361",
+          "platform": {
+            "architecture": "unknown",
+            "os": "unknown"
+          }
+        },
+        {
+          "digest": "sha256:be90e120e527cbcc03b57353d003f8bbb9cb746eeb8ac0648029254b608c1447",
+          "platform": {
+            "architecture": "arm",
+            "os": "linux",
+            "variant": "v7"
+          }
+        },
+        {
+          "digest": "sha256:f9a8ebafc3d3c75aeaa23480dc0b7acef75448a771db965510994d6e04085501",
+          "platform": {
+            "architecture": "unknown",
+            "os": "unknown"
+          }
+        },
+        {
+          "digest": "sha256:a1b86db52ce3daef089e45aabe36dfec4091f82464c25c1fdcf03de197cbe82a",
+          "platform": {
+            "architecture": "arm64",
+            "os": "linux",
+            "variant": "v8"
+          }
+        },
+        {
+          "digest": "sha256:7aa7e71eb91e06f8374c5509601059d1ce5341c4a7b0dca299d1ac710113577e",
+          "platform": {
+            "architecture": "unknown",
+            "os": "unknown"
+          }
+        },
+        {
+          "digest": "sha256:227236678b453cb31ec4d1386dce87c9f76b9682288f365b0139f0d47522d3f3",
+          "platform": {
+            "architecture": "386",
+            "os": "linux"
+          }
+        },
+        {
+          "digest": "sha256:5df172c04ae49997fb58ac88d62f9908042642e3c8d9ed836b1e3aa40489c517",
+          "platform": {
+            "architecture": "unknown",
+            "os": "unknown"
+          }
+        },
+        {
+          "digest": "sha256:653232568eb256bba43ecb106f1410fdedd5070507d83bb546f09e1a1b617e09",
+          "platform": {
+            "architecture": "ppc64le",
+            "os": "linux"
+          }
+        },
+        {
+          "digest": "sha256:a9d915aa9a979fc0de93389c5e7cd3fa60c8d64644b7a1c0a2fcd953ae71dfb1",
+          "platform": {
+            "architecture": "unknown",
+            "os": "unknown"
+          }
+        }
+      ],
+      "observed_utc": "2026-10-18T21:55:28.351922+00:00"
+    },
+    {
+      "image": "debian:trixie-slim",
+      "digest": "sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d765c46aea49f11f",
+      "registry_url": "https://registry-1.docker.io/v2/library/debian/manifests/trixie-slim",
+      "platforms": [
+        {
+          "digest": "sha256:918311b7b6c4c6f68b232ba516584925f6c78ad82b6fd534b98979df6438e483",
+          "platform": {
+            "architecture": "amd64",
+            "os": "linux"
+          }
+        },
+        {
+          "digest": "sha256:00f7e2ab720f80bbdd5967dbd928f8e1cbde8b94b5508237ab984734d0a49635",
+          "platform": {
+            "architecture": "unknown",
+            "os": "unknown"
+          }
+        },
+        {
+          "digest": "sha256:dbc392c622e7b6974de6c1923c46b70ba614fd9d4fb10da0911d24d1e62454b7",
+          "platform": {
+            "architecture": "arm",
+            "os": "linux",
+            "variant": "v5"
+          }
+        },
+        {
+          "digest": "sha256:b0e026a778a82789ee0c275227c138bee1db2a55b26628128121f8b603e42733",
+          "platform": {
+            "architecture": "unknown",
+            "os": "unknown"
+          }
+        },
+        {
+          "digest": "sha256:7b9750e81f0da658a9dea52ae99ed35bbaf98abb4984e057947d18a2da2b87f1",
+          "platform": {
+            "architecture": "arm",
+            "os": "linux",
+            "variant": "v7"
+          }
+        },
+        {
+          "digest": "sha256:cd4b52dad1fc9abbbc6c95cbbf226f82daf6203f51ec9356559a5f32ef77cf33",
+          "platform": {
+            "architecture": "unknown",
+            "os": "unknown"
+          }
+        },
+        {
+          "digest": "sha256:a2ca65377c251208de42e1a2722cb949211236c161b634f6f3663754e2d06850",
+          "platform": {
+            "architecture": "arm64",
+            "os": "linux",
+            "variant": "v8"
+          }
+        },
+        {
+          "digest": "sha256:02bf118e6cc82c5275bef1bd26b8a2234f128c60c52ac0af04eb49b9626a0dad",
+          "platform": {
+            "architecture": "unknown",
+            "os": "unknown"
+          }
+        },
+        {
+          "digest": "sha256:2a0e51379197f8ad59a9736ed1dd0acb9ab90b8a0c71908a792e48ed38044de5",
+          "platform": {
+            "architecture": "386",
+            "os": "linux"
+          }
+        },
+        {
+          "digest": "sha256:cf79bfa4394962cb13c434d67572a8e6c1e22365ebbb45eec71a6c8be3ff69bf",
+          "platform": {
+            "architecture": "unknown",
+            "os": "unknown"
+          }
+        },
+        {
+          "digest": "sha256:0b675684a76c6f792a69e35abd30baaaedb6ed66234c398f2add624106814ff5",
+          "platform": {
+            "architecture": "ppc64le",
+            "os": "linux"
+          }
+        },
+        {
+          "digest": "sha256:a466fd9b87e9c407aa0bb50f6bfb6cca7e084919f7c55ce28001d323078350b4",
+          "platform": {
+            "architecture": "unknown",
+            "os": "unknown"
+          }
+        },
+        {
+          "digest": "sha256:c6d58429cec88e03b2fe5c3d285bf90517be50b20bc1151b1b5a436d05865a9d",
+          "platform": {
+            "architecture": "riscv64",
+            "os": "linux"
+          }
+        },
+        {
+          "digest": "sha256:4800ddb89cd790368713225d0e711e00bd5fbcc7d4f19a5b711d191aaf4f8c18",
+          "platform": {
+            "architecture": "unknown",
+            "os": "unknown"
+          }
+        },
+        {
+          "digest": "sha256:e081eba2bd0cad190f03f0580e07f35c4c51f19ba19fe3c9243b3a48426ecc3e",
+          "platform": {
+            "architecture": "s390x",
+            "os": "linux"
+          }
+        },
+        {
+          "digest": "sha256:cd3d32349c7c48ec757dd6c5ba97f980f0e0b5d1ca2fca45f94a2120500dc2a0",
+          "platform": {
+            "architecture": "unknown",
+            "os": "unknown"
+          }
+        }
+      ],
+      "observed_utc": "2026-10-18T21:55:29.629328+00:00"
+    },
+    {
+      "image": "nginxinc/nginx-unprivileged:1.27-alpine",
+      "digest": "sha256:65e3e85dbaed8ba248841d9d58a899b6197106c23cb0ff1a132b7bfe0547e4c0",
+      "registry_url": "https://registry-1.docker.io/v2/nginxinc/nginx-unprivileged/manifests/1.27-alpine",
+      "platforms": [
+        {
+          "digest": "sha256:28d91bdce70ad09025ea901458fdd149259d8e05982ade79d4ef2c0d9470eb48",
+          "platform": {
+            "architecture": "amd64",
+            "os": "linux"
+          }
+        },
+        {
+          "digest": "sha256:c845dbb6cc5389ab1bc5aa9af14edb460108dcf72090e3ee14c120c983b98625",
+          "platform": {
+            "architecture": "arm",
+            "os": "linux",
+            "variant": "v6"
+          }
+        },
+        {
+          "digest": "sha256:aa6b84a1f676a8922a9ba433134dd10dc232f4dd73fdf3c414829926b59f591e",
+          "platform": {
+            "architecture": "arm",
+            "os": "linux",
+            "variant": "v7"
+          }
+        },
+        {
+          "digest": "sha256:025de0b541bcc6cfbf508e4201aaa37b51d34daaf6d52e5e2753e29a8ddaa869",
+          "platform": {
+            "architecture": "arm64",
+            "os": "linux"
+          }
+        },
+        {
+          "digest": "sha256:cdb016ae00b41734af6fea1d05bda932944cf4d04e167c45cf42512bf2ff93fb",
+          "platform": {
+            "architecture": "386",
+            "os": "linux"
+          }
+        },
+        {
+          "digest": "sha256:c0daff6ec752ef9dfee2035ad1c4f9cfdcb13fba486d02c66995a15c4d493e6b",
+          "platform": {
+            "architecture": "ppc64le",
+            "os": "linux"
+          }
+        },
+        {
+          "digest": "sha256:d1f9f3c042540c4d52b9ba77d82df5aa160be99a3f420afc92cf94b880de5b68",
+          "platform": {
+            "architecture": "riscv64",
+            "os": "linux"
+          }
+        },
+        {
+          "digest": "sha256:f5cec6b6ae8fa190b456e6bdbc1d71a777ffb1a17970f8dec034d84ad2dc56ab",
+          "platform": {
+            "architecture": "s390x",
+            "os": "linux"
+          }
+        },
+        {
+          "digest": "sha256:25bd5820aca090ae0e7d4a0ac958f97908500a08dde95ea306e08de08b13f87a",
+          "platform": {
+            "architecture": "unknown",
+            "os": "unknown"
+          }
+        },
+        {
+          "digest": "sha256:91a882db6c9d26137eee64dbaed02c8b409bfdf8e944f14b9cacfd5946decaad",
+          "platform": {
+            "architecture": "unknown",
+            "os": "unknown"
+          }
+        },
+        {
+          "digest": "sha256:eb4ef7e98b1db1bd81ae68198fe620077c8d6b9f9c638cb612ffd94621e793f1",
+          "platform": {
+            "architecture": "unknown",
+            "os": "unknown"
+          }
+        },
+        {
+          "digest": "sha256:4177c41b863b7b8455a0d210994e2d00025fc67267369725143705080d2f3ef3",
+          "platform": {
+            "architecture": "unknown",
+            "os": "unknown"
+          }
+        },
+        {
+          "digest": "sha256:6fcf150e92ce6852b5ce7d371198a39412b73c9483cbc7b3f82b2d6cff584e5c",
+          "platform": {
+            "architecture": "unknown",
+            "os": "unknown"
+          }
+        },
+        {
+          "digest": "sha256:a3b4db790a85fc3ec56f09c338dd7724334ee616182d8ba43793cf71a8b30d5d",
+          "platform": {
+            "architecture": "unknown",
+            "os": "unknown"
+          }
+        },
+        {
+          "digest": "sha256:8643b1fd6e1e5e38e1d8e47f7065ca6655c684c7b93607e1dd13dccc8b7924d1",
+          "platform": {
+            "architecture": "unknown",
+            "os": "unknown"
+          }
+        },
+        {
+          "digest": "sha256:e8397bfc8525dc92ae3db02413ce5c5170d56459add5a8f36ee55c7faf285867",
+          "platform": {
+            "architecture": "unknown",
+            "os": "unknown"
+          }
+        }
+      ],
+      "observed_utc": "2026-10-18T21:55:29.617949+00:00"
+    },
+    {
+      "image": "node:22.23.2-alpine",
+      "digest": "sha256:b6f26b36c8ff49624cfdac716b8ea1138d606df02586a77d364bb5536a634f85",
+      "registry_url": "https://registry-1.docker.io/v2/library/node/manifests/22.23.2-alpine",
+      "platforms": [
+        {
+          "digest": "sha256:b64da1de5a51067ab8e75f0bc8dbd0905d8894baa22261f439a4572f41291e50",
+          "platform": {
+            "architecture": "amd64",
+            "os": "linux"
+          }
+        },
+        {
+          "digest": "sha256:392560769c9e762259a12943b73e2808305b6152d8a123444b080f48cd44abb5",
+          "platform": {
+            "architecture": "unknown",
+            "os": "unknown"
+          }
+        },
+        {
+          "digest": "sha256:16b35241821e3e249ab8a8e2099fff58feed7ee2c3d74f43f9d9b3236808d44b",
+          "platform": {
+            "architecture": "arm",
+            "os": "linux",
+            "variant": "v6"
+          }
+        },
+        {
+          "digest": "sha256:22ceae60cd7b7c9fa9cc9d4bfe0331d2ff409f9821015e1cc1b208a5154c8b20",
+          "platform": {
+            "architecture": "unknown",
+            "os": "unknown"
+          }
+        },
+        {
+          "digest": "sha256:2187e2784540a35686a8a4bb150bd035277720d27603cfcc9ff66ab0853f05b7",
+          "platform": {
+            "architecture": "arm",
+            "os": "linux",
+            "variant": "v7"
+          }
+        },
+        {
+          "digest": "sha256:dd4e614ebe0185f821c9150366a85b3c321715abb069bb0ce2891d2498a1e41d",
+          "platform": {
+            "architecture": "unknown",
+            "os": "unknown"
+          }
+        },
+        {
+          "digest": "sha256:451d2ebc48dd4484ae9c3b865e2ed1a5ce2dd7be03d4344b506e41ed948e105d",
+          "platform": {
+            "architecture": "arm64",
+            "os": "linux",
+            "variant": "v8"
+          }
+        },
+        {
+          "digest": "sha256:87d9ec43cce825317130b26b004988e342a631d58ee6741d2f87285565c1a0ea",
+          "platform": {
+            "architecture": "unknown",
+            "os": "unknown"
+          }
+        },
+        {
+          "digest": "sha256:a13e916dbc76816ee5ce5cbcc87843bc95a6950c53a91d2efdc18a28e7f34bb1",
+          "platform": {
+            "architecture": "s390x",
+            "os": "linux"
+          }
+        },
+        {
+          "digest": "sha256:dce75336ebc849dd75c01b42674548aad88478eca30de7089ca7e72df3ee4f10",
+          "platform": {
+            "architecture": "unknown",
+            "os": "unknown"
+          }
+        }
+      ],
+      "observed_utc": "2026-10-18T21:55:29.634655+00:00"
+    },
+    {
+      "image": "rust:1.98.1-alpine",
+      "digest": "sha256:7cc1c22d77d9432f7fe012a70e6d3e555af54c2a6832700ed7d553f1769ae89f",
+      "registry_url": "https://registry-1.docker.io/v2/library/rust/manifests/1.98.1-alpine",
+      "platforms": [
+        {
+          "digest": "sha256:6d9066cf04ed2cc9d1a406016f4c9b2574bafda23f9e88bcad8e5d24fa6aec8e",
+          "platform": {
+            "architecture": "amd64",
+            "os": "linux"
+          }
+        },
+        {
+          "digest": "sha256:181bd9dee327ace9f2ff7daf9c7149e498a421985040031349bd8dd1419ad725",
+          "platform": {
+            "architecture": "unknown",
+            "os": "unknown"
+          }
+        },
+        {
+          "digest": "sha256:400acfd2e044747555ff87ead291c3c480b7a02ba54bc7ac1a1bbce927b862cc",
+          "platform": {
+            "architecture": "arm64",
+            "os": "linux",
+            "variant": "v8"
+          }
+        },
+        {
+          "digest": "sha256:76decc47c157f3f73ac36c3c53140034e779a03ec48d2ed55897cb977c60082f",
+          "platform": {
+            "architecture": "unknown",
+            "os": "unknown"
+          }
+        },
+        {
+          "digest": "sha256:8085af582b7b986cea7f12ded81a20dc3cc344922fc0a2858ddd02a161d91527",
+          "platform": {
+            "architecture": "ppc64le",
+            "os": "linux"
+          }
+        },
+        {
+          "digest": "sha256:49aec3222e7a6db791b9580a65fe1b0ece5304d640dfeb3ecfd420d94ca03602",
+          "platform": {
+            "architecture": "unknown",
+            "os": "unknown"
+          }
+        }
+      ],
+      "observed_utc": "2026-10-18T21:55:30.979447+00:00"
+    },
+    {
+      "image": "rust:1.98.1-bookworm",
+      "digest": "sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e",
+      "registry_url": "https://registry-1.docker.io/v2/library/rust/manifests/1.98.1-bookworm",
+      "platforms": [
+        {
+          "digest": "sha256:c49256cbe5ea0188bc658a689500d70c41eb51f009a7a7be209caf60a944f3ec",
+          "platform": {
+            "architecture": "amd64",
+            "os": "linux"
+          }
+        },
+        {
+          "digest": "sha256:c9a80b39cd894ae26b4535826cd68e9cfa81b1c2a94a455d996364039a1cdbd2",
+          "platform": {
+            "architecture": "unknown",
+            "os": "unknown"
+          }
+        },
+        {
+          "digest": "sha256:7648c745ec50b8ded5b0d5895d8c5bff4ea7e554701b878c8624742ba1df28e3",
+          "platform": {
+            "architecture": "arm",
+            "os": "linux",
+            "variant": "v7"
+          }
+        },
+        {
+          "digest": "sha256:b14932de04b646c8c06fecda142803ab7ec7fbcfc201283fa4f590eb349b375a",
+          "platform": {
+            "architecture": "unknown",
+            "os": "unknown"
+          }
+        },
+        {
+          "digest": "sha256:5b993f23fb69746405496e76f91e511d96c82b5b23304fd5d20b4a80a8b223ea",
+          "platform": {
+            "architecture": "arm64",
+            "os": "linux",
+            "variant": "v8"
+          }
+        },
+        {
+          "digest": "sha256:9fa0ff2206e8c7644f8b3bda86abb13cf399cc83ce5b80778f435e44c53d9dfd",
+          "platform": {
+            "architecture": "unknown",
+            "os": "unknown"
+          }
+        },
+        {
+          "digest": "sha256:9c7865a496711c859ce6673aa75f4dca1582dec73a752d10eed1ff9a39a544f0",
+          "platform": {
+            "architecture": "386",
+            "os": "linux"
+          }
+        },
+        {
+          "digest": "sha256:6cd6225667f424cb22158e3bfe75a71f6075c8fc00bca5ab59b15018f0eb2476",
+          "platform": {
+            "architecture": "unknown",
+            "os": "unknown"
+          }
+        },
+        {
+          "digest": "sha256:633aaca1bba4de036c2e98f042d562c3b3af97c6bb6a34a315851dcb2cfc206f",
+          "platform": {
+            "architecture": "ppc64le",
+            "os": "linux"
+          }
+        },
+        {
+          "digest": "sha256:7f2463a18f095cd28f94eadd8536a6aa1b8513121b7928d5814c7065f87487d2",
+          "platform": {
+            "architecture": "unknown",
+            "os": "unknown"
+          }
+        }
+      ],
+      "observed_utc": "2026-10-18T21:55:30.947582+00:00"
+    },
+    {
+      "image": "rust:1.98.1-slim-bookworm",
+      "digest": "sha256:ff521445a372125ed4f76e1453a1f8098f2d05332d1601d30db1c1f62757e730",
+      "registry_url": "https://registry-1.docker.io/v2/library/rust/manifests/1.98.1-slim-bookworm",
+      "platforms": [
+        {
+          "digest": "sha256:dacc9e51f252243eb59d2fb4cb4ad8b0d3f607b6a82c398cf8a321e59ff778a7",
+          "platform": {
+            "architecture": "amd64",
+            "os": "linux"
+          }
+        },
+        {
+          "digest": "sha256:2ade8fcb7e491bd18deabb233a58bc64c1d2e77b0475bfa90c582789dd3b8cba",
+          "platform": {
+            "architecture": "unknown",
+            "os": "unknown"
+          }
+        },
+        {
+          "digest": "sha256:e7a7ba3e1fae016b73793ddb175179360b9aad8664d47ed8e6b3fb6d9163c84e",
+          "platform": {
+            "architecture": "arm",
+            "os": "linux",
+            "variant": "v7"
+          }
+        },
+        {
+          "digest": "sha256:d60cb8ec17219b14b7d9299978fa95ca83e89b4dd0a660076f921b0bd790a4bc",
+          "platform": {
+            "architecture": "unknown",
+            "os": "unknown"
+          }
+        },
+        {
+          "digest": "sha256:3ebe98baef5911f8461cf81ba05644374a3c5ef1f8a33db3977bd4175f5ff1fc",
+          "platform": {
+            "architecture": "arm64",
+            "os": "linux",
+            "variant": "v8"
+          }
+        },
+        {
+          "digest": "sha256:04ae8b246a33fa1c2237ec59b2d397e5bf510fd736932974bf484b619b6cf927",
+          "platform": {
+            "architecture": "unknown",
+            "os": "unknown"
+          }
+        },
+        {
+          "digest": "sha256:2724f873455ec980c5e5b3cd94071d3ab237f7cd846284036a50416150be61ad",
+          "platform": {
+            "architecture": "386",
+            "os": "linux"
+          }
+        },
+        {
+          "digest": "sha256:d09bb55e173a33bad144f2dc89000ea0e4e6f0e13a52dfb06c906342a6993d22",
+          "platform": {
+            "architecture": "unknown",
+            "os": "unknown"
+          }
+        },
+        {
+          "digest": "sha256:c43fb3b3127f0ae248b6be0aee9a25ed410fb14ad5888f1aa690fac6287b1699",
+          "platform": {
+            "architecture": "ppc64le",
+            "os": "linux"
+          }
+        },
+        {
+          "digest": "sha256:787dec5286ce9ebf842d2af75b12ef1720ba424c6a88228e23e0665e4b4a8ffe",
+          "platform": {
+            "architecture": "unknown",
+            "os": "unknown"
+          }
+        }
+      ],
+      "observed_utc": "2026-10-18T21:55:30.929403+00:00"
+    },
+    {
+      "image": "ubuntu:24.04",
+      "digest": "sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac",
+      "registry_url": "https://registry-1.docker.io/v2/library/ubuntu/manifests/24.04",
+      "platforms": [
+        {
+          "digest": "sha256:a2d43bffc46670d7108bb3c0468c67c5557c4c92e83e1e34cbff1322ad1b94dc",
+          "platform": {
+            "architecture": "amd64",
+            "os": "linux"
+          }
+        },
+        {
+          "digest": "sha256:6f9784522ea83c8024d4669fa695c281f2cc7ee3c1eae13b51dd9e879a189292",
+          "platform": {
+            "architecture": "unknown",
+            "os": "unknown"
+          }
+        },
+        {
+          "digest": "sha256:8a5243f8b531eac3eed021a13aa910edfa0ca7664929642723f907e4be374fa4",
+          "platform": {
+            "architecture": "arm",
+            "os": "linux",
+            "variant": "v7"
+          }
+        },
+        {
+          "digest": "sha256:0b52e5b7b901fabb4e373a867d56fe241b4e132456c85277865b5ad8e11cadf9",
+          "platform": {
+            "architecture": "unknown",
+            "os": "unknown"
+          }
+        },
+        {
+          "digest": "sha256:18b33ff3829707f31ada654a963b9ee35f2e6f0241b964bd17a22a9b330cb63d",
+          "platform": {
+            "architecture": "arm64",
+            "os": "linux",
+            "variant": "v8"
+          }
+        },
+        {
+          "digest": "sha256:a08686b5d4d50c3d2c6441e64c3eff628308b831c412ab1de5ad34cc1888cf04",
+          "platform": {
+            "architecture": "unknown",
+            "os": "unknown"
+          }
+        },
+        {
+          "digest": "sha256:f46670d4ceb3d88775a431e6e0a1bdafbf35e4ec11439554252f0c35e8f0057e",
+          "platform": {
+            "architecture": "ppc64le",
+            "os": "linux"
+          }
+        },
+        {
+          "digest": "sha256:d11ba6f1f054626ddfe65c6258b764adfeea1d02d76209be1567fcfcd58e2cbc",
+          "platform": {
+            "architecture": "unknown",
+            "os": "unknown"
+          }
+        },
+        {
+          "digest": "sha256:104f3559ecc356453abe314e84c817b0ce43ec98db993c2a8e77627f8a072bc6",
+          "platform": {
+            "architecture": "riscv64",
+            "os": "linux"
+          }
+        },
+        {
+          "digest": "sha256:8df798065d00def7c7b24e2e9c0629d817d77d2dbb324528484e9203db80d0f6",
+          "platform": {
+            "architecture": "unknown",
+            "os": "unknown"
+          }
+        },
+        {
+          "digest": "sha256:b662d92ed71eed91207e7752aa95c491c98b390cb799e25956fde3a1832ce51a",
+          "platform": {
+            "architecture": "s390x",
+            "os": "linux"
+          }
+        },
+        {
+          "digest": "sha256:b3fa8b04c4bdc3f05232aa222017c5b80e018f6661c9c7fdbdc77e0743b2f31e",
+          "platform": {
+            "architecture": "unknown",
+            "os": "unknown"
+          }
+        }
+      ],
+      "observed_utc": "2026-10-18T21:55:32.225231+00:00"
+    }
+  ]
+}

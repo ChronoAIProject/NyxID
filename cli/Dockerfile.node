@@ -14,7 +14,7 @@
 #     nyxid-node
 
 # -- Stage 1: Build --------------------------------------------------------
-FROM rust:1.93-bookworm AS builder
+FROM rust:1.98.1-bookworm@sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e AS builder
 
 # libdbus-1-dev is required at compile time by the keyring crate
 RUN apt-get update \
@@ -28,6 +28,7 @@ WORKDIR /build
 # members depended on by the node agent via `cli/Cargo.toml`; missing
 # either makes the workspace refuse to resolve.
 COPY Cargo.toml Cargo.lock ./
+COPY vendor/ vendor/
 COPY backend/ backend/
 COPY cli/ cli/
 COPY cloud-auth/ cloud-auth/
@@ -40,10 +41,10 @@ COPY machine-updater/ machine-updater/
 COPY docs/AI_AGENT_PLAYBOOK.md docs/AI_AGENT_PLAYBOOK.md
 
 # Build only the CLI binary (includes node agent subcommand)
-RUN cargo build --release -p nyxid-cli
+RUN cargo build --locked --release -p nyxid-cli
 
 # -- Stage 2: Runtime -------------------------------------------------------
-FROM debian:bookworm-slim
+FROM debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587
 
 # Only ca-certificates needed at runtime. No libdbus -- keychain is not
 # usable in Docker (no secret-service daemon). Node agent uses the file

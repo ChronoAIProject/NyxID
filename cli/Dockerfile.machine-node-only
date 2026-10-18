@@ -9,7 +9,7 @@
 #   docker build -f cli/Dockerfile.machine-node-only \
 #     -t nyxid-node-remote-machine:local .
 
-FROM rust:1.93-bookworm AS toolchain
+FROM rust:1.98.1-bookworm@sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e AS toolchain
 
 FROM toolchain AS builder
 
@@ -20,6 +20,7 @@ RUN sed -i 's|http://|https://|g' /etc/apt/sources.list.d/debian.sources \
 
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
+COPY vendor/ vendor/
 COPY backend/ backend/
 COPY cli/ cli/
 COPY cloud-auth/ cloud-auth/
@@ -31,12 +32,12 @@ COPY machine/ machine/
 COPY machine-updater/ machine-updater/
 COPY docs/AI_AGENT_PLAYBOOK.md docs/AI_AGENT_PLAYBOOK.md
 
-RUN cargo build --release -p nyxid-cli --bin nyxid \
+RUN cargo build --locked --release -p nyxid-cli --bin nyxid \
     && install -Dm0755 target/release/nyxid /out/nyxid
 
 # Ubuntu LTS gives the fixed profile the ordinary shell/file tooling required
 # by the MVP while keeping the process non-root for command execution.
-FROM ubuntu:24.04
+FROM ubuntu:24.04@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac
 ENV DEBIAN_FRONTEND=noninteractive \
     NYXID_MACHINE_MANAGED=1 \
     NYXID_MACHINE_CONTAINER=1 \
