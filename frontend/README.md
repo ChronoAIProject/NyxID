@@ -10,14 +10,14 @@ user credit-summary API is additive and does not replace the user Billing UI.
 ## Local preview readiness
 
 Use the same backend revision as the frontend when reviewing the Credits work.
-`npm run preview` now checks the configured backend before building and starting
+`npm run preview:credits` checks the configured backend before building and starting
 Vite. It stops when either Credits summary route is missing, an API responds with
 HTML, or configured social login cannot return to the local cookie host and URL.
-The server binds only to loopback, uses a strict port, and builds the current source
+The Credits preview binds only to loopback, uses a strict port, and builds the current source
 so an old `dist` directory cannot silently become the preview.
 
 ```sh
-BACKEND_URL=http://127.0.0.1:3001 FRONTEND_URL=http://127.0.0.1:3000 npm run preview
+BACKEND_URL=http://127.0.0.1:3001 FRONTEND_URL=http://127.0.0.1:3000 npm run preview:credits
 ```
 
 `BACKEND_URL` selects the API server. `FRONTEND_URL` must match the origin trusted
@@ -25,6 +25,8 @@ by that backend for CSRF; Vite rewrites proxied Origin/Referer to this value. Th
 preview defaults to `http://127.0.0.1:3000`; `--host localhost` and `--port 4614`
 are supported. Use `npm run preview:check` to run only the read-only checks and
 `npm run test:preview` for their regression suite.
+
+The standard `npm run preview` command continues to serve the existing Vite build.
 
 A passing preflight establishes configuration compatibility, not authenticated
 acceptance. Before sharing a preview, verify sign-in, authenticated admin and user

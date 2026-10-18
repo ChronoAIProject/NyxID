@@ -1,5 +1,55 @@
 # Unified Credits experience
 
+## Release blocked: current-main compatibility audit (2026-10-19)
+
+The release check fetched `origin/main` at
+`f96cf877834445d4976f62691aa192e534535c1f`, 332 commits after this feature's
+original base `baccaa13`. The implementation is preserved in local commit
+`5e6c0ec7`. A trial merge exposed 29 conflicting files and was aborted; the
+branch has not been pushed, a PR has not been opened, and nothing has been
+merged or deployed. Earlier passing tests and the Astra source review cover
+the old base only. They do not establish compatibility with current main.
+
+Blocking findings:
+
+1. **Persisted money and precision.** Main uses `Credits(i128)` at 10^-12
+   resolution, Decimal128 BSON fields such as `amount` and `remaining`, and
+   a balanced v2 ledger. This feature uses required integer `*_micros` fields
+   and the old ledger/admission machinery. Its defaulted cap/reclaim fields
+   support its original legacy schema, but do not make current persisted
+   decimal-credit records compatible. Port to main's money model and keep
+   its exact migration/read adapters; do not downgrade the schema or convert
+   balances back to microcredits.
+2. **Current recipient, allowance and permission contracts.** Main includes
+   organization/group recipients, allowance bundles with multiple units,
+   sparse edits with change review, URL-persisted tabs, and Credits Manager
+   authorization for grant issuance/revocation. Reusing the old page,
+   handlers, or schemas would regress these behaviors. Preserve them while
+   applying the approved admin-only presentation.
+3. **Additional financial admission paths.** Cap and reclaim enforcement
+   must cover ordinary usage, durable pool/public/managed admissions, and
+   Machine reservations in caller-owned lifecycle transactions. Main binds
+   funding to public/managed authority transitions and pool leases; Machine
+   settlement requires evidence and uses reserved funding only. The old
+   general admission replacement cannot replace those fences. Port shared
+   grant predicates/counters into all current paths and verify each path.
+4. **Older backend UI availability.** The summary capability guard disables
+   every mutation, including otherwise supported allowance controls. Keep
+   new policy writes protected from older servers ignoring fields, while
+   preserving supported legacy actions and current role authorization.
+
+The unrelated replacement of standard `npm run preview` has been corrected:
+it remains `vite preview`; the extra preflight is explicitly available as
+`npm run preview:credits`. All nine preview tests pass and `git diff --check`
+passes. The replica-set requirement is already present in current main's
+exact accounting; it is not a newly introduced deployment requirement
+relative to current main.
+
+The required next implementation is a port onto current main, followed by
+legacy integer BSON and current decimal BSON tests, recipient/role/bundle
+regressions, and cap/reclaim/settlement coverage across all financial paths.
+Only after those checks and CI pass is the requested squash merge safe.
+
 ## Current scope: admin Credits page only (2026-10-19 revision)
 
 The user rejected the broader billing redesign. The existing user Billing page, wallet card, included-benefits card, top-up flow, navigation, and routes retain their original presentation. The `Credit grants`, `Free allowances`, and `Schedules` tabs remain in their original order on `/admin/credits`.
