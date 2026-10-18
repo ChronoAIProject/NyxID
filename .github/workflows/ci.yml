@@ -249,7 +249,10 @@ jobs:
         run: |
           pip install --require-hashes --only-binary=:all: -r security/python-build-requirements.txt
       - name: Check reusable workflow permissions against their callers
-        run: python3 scripts/check-reusable-workflow-permissions.py
+        run: |
+          python3 scripts/check-workflow-yaml.py
+          python3 scripts/test-workflow-yaml.py
+          python3 scripts/check-reusable-workflow-permissions.py
       - name: Check pinned inputs and generated release policy
         run: |
           python3 scripts/check-build-inputs.py
@@ -1003,9 +1006,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@18f0487477426dce244608110aa2660c2893deb7 # 1.98.1
         with:
           toolchain: 1.98.1
-        if: steps.base-cache.outputs.cache-hit != 'true'
-        with:
           components: llvm-tools-preview
+        if: steps.base-cache.outputs.cache-hit != 'true'
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         if: steps.base-cache.outputs.cache-hit != 'true'
         with:

@@ -251,6 +251,23 @@ passed20/0 in23.6s against the unchanged W5 product dist
 correction; PM will apply the committed fixture onto its immutable product
 snapshot and rerun, without rebuilding product.
 
+## W7-R1-01 strict workflow parsing correction
+
+PM found a duplicate `with` mapping in the coverage-backend-base Rust Action.
+The permissive YAML parse reported above did not establish mapping uniqueness;
+it could discard the toolchain input. The step now has one mapping containing
+both toolchain1.98.1 and llvm-tools-preview, with its condition preserved.
+
+All workflow YAML (both .yml and .yaml) is now parsed with a nested duplicate-key
+rejecting SafeLoader, also reused by the reusable-permissions checker. CI runs
+this guard and four regressions: duplicate conditional with, nested duplicate
+permission, missing exact Rust toolchain, and the valid conditional step.
+The guard passed7 workflows plus Dependabot and checked all14 Rust Actions for
+explicit1.98.1. Four tests, reusable permissions (1call), and the existing
+build-input guard passed. Exact commands/output: `w7-yaml-r1-01.log` in the
+validation root. This correction supersedes the earlier permissive YAML
+assurance; other W7 dependency/build changes remain separate.
+
 ## Remaining authorized batches
 
 W5 final container review/integration; W7 pinned,
