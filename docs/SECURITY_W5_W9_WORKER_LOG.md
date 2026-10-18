@@ -422,6 +422,37 @@ template-CSS attribution and capture before aggregate CSS emission; both are
 fixed and covered by the final tests. No blocked mobile probe was retried.
 Final exact-source image extraction/scan/browser checks remain PM-owned.
 
+## W7-R1-10 reviewed Node install scripts
+
+The five updated Node roots now disable dependency lifecycle hooks through
+committed `.npmrc` files and record explicit denied packages in `allowScripts`.
+The review catalog binds each script-bearing dependency to its exact lock path,
+name, version and archive integrity, with a reason and supported execution
+path. The guard rejects unknown or changed hooks, stale reviews, omitted roots,
+and blanket approval. Docker copies the policy before installation. SDK
+workspace commands use the supported `--workspaces` spelling. Wizard freshness
+also binds the frontend install policy.
+
+Fresh reviewed-npm11 installs pass with no unreviewed-script warning:
+frontend614 packages/audit0, SDK98 packages/audit0, tools146 audited/audit0,
+and offline-validator/updater transport installs pass. Actual SDK tests pass
+17/17 and all3 workspace builds pass. Composition tests pass11/11, wizard
+build/seal passes, and Rust wizard freshness passes1/1 with0 ignored. Actual
+offline plugin and marketplace schema validation both pass. The policy guard
+and its4 regression tests pass; workflow/build-input guards pass. Evidence is
+`w7-{frontend,sdk}-script-policy-ci.log`, `w7-sdk-script-policy-{tests,build}.log`,
+`w7-frontend-script-policy-tests.log`, `w7-script-policy-wizard{,-freshness}.log`,
+`w7-claude-script-policy-{ci,plugin,marketplace}.log`,
+`w7-tools-script-policy-ci.log`, and `w7-updater-script-policy-ci.log` in the
+validation root. SPA and wizard executable bytes are unchanged by this policy
+batch. Mobile's interrupted patches remain outside this acceptance claim.
+
+PM classified all34 frontend lint warnings:30 fast-refresh export structure,
+3 existing hook dependencies and1 TanStack Virtual compiler compatibility.
+All21 warning files are blob-identical to baseline; there is no new composition
+or selector warning. The existing chunk advisory is also preserved separately
+from this batch's acceptance evidence.
+
 ## Remaining authorized batches
 
 W5 final container review/integration; W7 pinned,

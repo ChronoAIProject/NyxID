@@ -5,5 +5,6 @@
   "description": "Locked WebSocket transport for actual updater container tests",
   "dependencies": {
     "ws": "8.22.0"
-  }
+  },
+  "allowScripts": {}
 }

@@ -108,5 +108,9 @@
     "vite-plugin-singlefile": "^2.3.4",
     "vitest": "^4.1.12"
   },
-  "packageManager": "npm@11.21.1"
+  "packageManager": "npm@11.21.1",
+  "allowScripts": {
+    "core-js": false,
+    "fsevents": false
+  }
 }

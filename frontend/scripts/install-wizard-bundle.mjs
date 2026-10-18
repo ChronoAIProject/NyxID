@@ -50,6 +50,7 @@ const STATIC_ASSETS = [
 ]
 
 const EXTRAS = [
+  "frontend/.npmrc",
   "frontend/package-lock.json",
   "frontend/vite.wizard.config.ts",
   "frontend/wizard.html",

@@ -17,6 +17,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 const EXTRAS: &[&str] = &[
+    "frontend/.npmrc",
     "frontend/package-lock.json",
     "frontend/vite.wizard.config.ts",
     "frontend/wizard.html",

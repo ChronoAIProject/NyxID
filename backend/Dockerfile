@@ -98,12 +98,12 @@ RUN cargo build --locked --release --manifest-path backend/Cargo.toml --features
 # The standalone page is served by the backend with its own SRI-bound CSP.
 # Keep the Node/lockfile/source/epoch inputs identical to the frontend build.
 FROM node:22.23.2-alpine@sha256:b6f26b36c8ff49624cfdac716b8ea1138d606df02586a77d364bb5536a634f85 AS credential-builder
-COPY security/npm-tools/package.json security/npm-tools/package-lock.json /opt/nyxid-build-tools/
+COPY security/npm-tools/package.json security/npm-tools/package-lock.json security/npm-tools/.npmrc /opt/nyxid-build-tools/
 RUN npm ci --ignore-scripts --prefix /opt/nyxid-build-tools
 ENV PATH=/opt/nyxid-build-tools/node_modules/.bin:$PATH
 RUN test "$(npm --version)" = "11.21.1"
 WORKDIR /build/frontend
-COPY frontend/package.json frontend/package-lock.json ./
+COPY frontend/package.json frontend/package-lock.json frontend/.npmrc ./
 RUN npm ci
 COPY frontend/ ./
 ARG NYXID_GIT_HASH=unknown
