@@ -2329,8 +2329,14 @@ async fn channel_bot_watch(state: &AppState, watch: &NyxbotWatch) -> AppResult<(
                         "This bot creation request expired. No bot was linked by this request. Offer a new setup link if the user wants to continue.",
                     )
                 };
-                settle(state, watch, Some(code)).await;
-                wake_with(state, watch, "channel_bot_setup_finished", text.into()).await;
+                settle_and_wake(
+                    state,
+                    watch,
+                    "channel_bot_setup_finished",
+                    text.into(),
+                    Some(code),
+                )
+                .await?;
             }
             return Ok(());
         }

@@ -14,6 +14,48 @@ existing authority; it is not a restricted unattended credential. Specialist
 grants, billing, engine availability, and owner confirmations still apply.
 The CLI neither changes permission modes nor approves cards.
 
+## Local terminal workflow
+
+The `nyxid` executable runs on your computer and calls your configured NyxID
+API. NyxBot execution, conversation history, memory, service credentials,
+permissions, and billing remain on that server. This is a supported way to
+give your existing NyxBot work from a terminal or script. It uses the same
+agent and conversation engine as the web interface; it does not create a
+separate local chatbot or change how that agent is configured.
+
+Log into a dedicated owner profile and choose **full account access** on the
+approval page:
+
+```sh
+nyxid login --profile nyxbot-owner --base-url https://nyx-api.chrono-ai.fun
+nyxid nyxbot run --profile nyxbot-owner \
+  --text 'Summarize my pending work' --output json
+```
+
+The instance must have upgraded replicas and enabled owner invocations as
+described under [Rollout and rollback](#rollout-and-rollback). Installing a new
+CLI does not enable server admission. Explicit credentials in the environment
+still take precedence over the saved profile; a rejected Agent Key does not
+fall back to the owner session.
+
+For an existing self-hosted instance, use its API URL, such as
+`http://localhost:3001`, at login. The CLI starts no listener or local server.
+Self-hosting NyxID still requires its configured NyxAgent and model services;
+this command does not install an offline engine.
+
+`--file` reads only the named prompt file, and `--file -` reads stdin. Their
+contents are sent to the server as prompt text. Running the CLI in a directory
+does not give NyxBot access to that directory, shell, or desktop. Local machine
+work uses separately configured [machine nodes](../MACHINE_NODES.md) and their
+existing grants and confirmations. Specialist configuration and sensitive
+owner decisions remain in the existing NyxID owner interface.
+
+MCP serves a different client workflow: `nyxid mcp` configures external AI
+clients to discover and call connected services. It does not expose this
+owner invocation resource as a delegated tool. No new MCP setup is needed for
+`nyxid nyxbot`; NyxBot's own MCP calls retain the shared authorization,
+approval, and cancellation checks.
+
 ## Commands
 
 ```sh

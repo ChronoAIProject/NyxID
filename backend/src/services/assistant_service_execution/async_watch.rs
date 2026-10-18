@@ -70,12 +70,16 @@ impl AsyncContinuation {
     async fn revalidate_inner(&self, db: &Database, chat: &acks::ChatAuthority) -> AppResult<()> {
         let w = &self.watch;
         let now = Utc::now();
+        let invocation_cleanup_status = w.delivery.invocation_id.is_some()
+            && w.state == "cancelling"
+            && self.name == w.contract.status_operation;
         if chat.user_id != w.user_id
             || chat.api_key_id != w.api_key_id
             || chat.conversation_id != w.conversation_id
             || chat.agent_id != w.agent_id
             || w.expires_at <= now
             || (Some(self.name.as_str()) != w.contract.cancel_operation.as_deref()
+                && !invocation_cleanup_status
                 && w.deadline <= now)
         {
             return Err(denied());
@@ -161,6 +165,7 @@ impl AsyncContinuation {
             "contract":bson::to_bson(&w.contract).map_err(|_| denied())?,
             "state":&w.state,"lease_id":&w.lease_id,"lease_until":{"$gt":bson::DateTime::now()},
             "execution_binding":&w.execution_binding,
+            "delivery.invocation_id":&w.delivery.invocation_id,
         };
         if w.authority_version == 0 {
             filter.insert(
@@ -180,6 +185,46 @@ impl AsyncContinuation {
             .is_none()
         {
             return Err(denied());
+        }
+        if let Some(invocation) = w.delivery.invocation_id.as_deref() {
+            let mut root = doc! {
+                "_id":invocation,"user_id":&w.user_id,"terminal_status":null,
+            };
+            if w.state == "cancelling" {
+                // This capability can only cancel the exact leased operation
+                // once and read its declared status to confirm the outcome.
+                // Root cancellation must not prevent that bounded cleanup.
+                if self.name != w.contract.status_operation
+                    && Some(self.name.as_str()) != w.contract.cancel_operation.as_deref()
+                {
+                    return Err(denied());
+                }
+                let attempt = doc! {
+                    "_id":&w.id,"user_id":&w.user_id,"state":"cancelling",
+                    "lease_id":&w.lease_id,"lease_until":{"$gt":bson::DateTime::now()},
+                    "cancel_attempted":true,
+                };
+                if db
+                    .collection::<Document>(WATCHES)
+                    .find_one(attempt)
+                    .await?
+                    .is_none()
+                {
+                    return Err(denied());
+                }
+            } else {
+                root.insert("cancel_requested", false);
+                root.insert("conversation_deleted", false);
+            }
+            if db
+                .collection::<Document>(crate::models::assistant_invocation::COLLECTION_NAME)
+                .find_one(root)
+                .projection(doc! {"_id":1})
+                .await?
+                .is_none()
+            {
+                return Err(denied());
+            }
         }
         Ok(())
     }

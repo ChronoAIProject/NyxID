@@ -4724,6 +4724,8 @@ mod tests {
             original.assistant_turn_fence = Some(Box::new(
                 crate::services::assistant_acknowledgement_service::AssistantTurnFence {
                     channel_adapter_origin: None,
+                    invocation_id: None,
+                    invocation_controlled: false,
                     platform_thread: false,
                     platform_origin: None,
                     conversation_id: "conversation".into(),

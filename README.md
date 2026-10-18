@@ -244,10 +244,11 @@ For production deployment (TLS, custom domain, email verification), see [docs/DE
 
 ### 2. Pick a workflow
 
-With NyxID running and an Agent Key in hand, pick the workflow that matches what you want to build. Each is a step-by-step procedure that ends with a working integration; the guides are independent and can be completed in any order.
+With a NyxID account, pick the workflow that matches what you want to build and use the identity its guide requires. Each is a step-by-step procedure that ends with a working integration; the guides are independent and can be completed in any order.
 
 | Quickstart | Outcome | NyxID capability |
 |---|---|---|
+| [**Run NyxBot from your terminal**](docs/site/cli/reference/nyxbot.md) | Submit prompts from text, files, or stdin; inspect, wait for, and cancel durable work using a first-party owner login. The CLI runs locally and uses your hosted or self-hosted NyxID instance. | Owner CLI and invocation API; requires server admission enabled |
 | [**n8n: Daily AI News Digest with One NyxID Credential**](docs/quickstarts/n8n.md) | An n8n workflow pulls an RSS feed, summarizes each article with Gemini, and posts to Telegram — using one `Header Auth` credential in n8n while NyxID stores the upstream Gemini and Telegram secrets. | Per-service credential injection |
 | [**Per-Agent Keys for Claude Code and Codex**](docs/quickstarts/claude-code.md) | Two coding agents on one machine, each scoped to a distinct service and credential, attributed independently in the audit log. | Agent isolation, scoped Agent Keys |
 | [**Reach a Localhost API from a Cloud-Hosted Agent**](docs/quickstarts/node-proxy.md) | A private-host API is reachable from a cloud agent without VPN, port forwarding, or a tunneling service. | Credential Node, outbound-only NAT traversal |
@@ -269,6 +270,7 @@ With NyxID running and an Agent Key in hand, pick the workflow that matches what
 | Connecting AI Services | [docs/connecting-services/](docs/connecting-services/) | Add your first (or Nth) AI Service — Web UI / CLI / AI-driven / Direct API |
 | Setup | [docs/SETUP.md](docs/SETUP.md) | Optional self-hosted backend + troubleshooting (macOS, Linux, Windows via WSL) |
 | Nyxbot Onboarding | [docs/NYXBOT_ONBOARDING.md](docs/NYXBOT_ONBOARDING.md) | Onboarding entry, existing integrations, and pending backend contracts |
+| NyxBot CLI and API | [docs/chat/09-owner-cli-api.md](docs/chat/09-owner-cli-api.md) | Owner commands, invocation lifecycle, security boundaries, and rollout |
 | Deployment | [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) | Start here for production setup |
 | AI Agent Playbook | [docs/AI_AGENT_PLAYBOOK.md](docs/AI_AGENT_PLAYBOOK.md) | Start here for agent integration |
 | Architecture | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | System design and data flows |

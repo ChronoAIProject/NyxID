@@ -849,6 +849,49 @@ pub async fn revalidate_after_approval(
         .map_err(transactions::map_transaction_error)
 }
 
+/// A bounded machine job retains its issuing turn's invocation after that turn
+/// settles. Its current conversation authority must never rebind it to another
+/// family, and root deletion/cancellation denies service egress immediately.
+pub async fn require_machine_job_active(
+    db: &Database,
+    job: &crate::models::machine_job::MachineJob,
+    auth: &crate::mw::auth::AuthUser,
+) -> AppResult<()> {
+    if !auth
+        .assistant_chat
+        .as_ref()
+        .is_some_and(|chat| chat.invocation_controlled)
+    {
+        return Ok(());
+    }
+    let Some(turn) = job.issuing_turn_id.as_deref() else {
+        return Err(AppError::MachineAuthorityStale);
+    };
+    let invocation = db
+        .collection::<InvocationTurn>(TURNS)
+        .find_one(doc! {
+            "_id":turn,"user_id":&job.user_id,"conversation_id":&job.conversation_id,
+        })
+        .await?;
+    // An ordinary owner turn after a completed invocation still uses the
+    // mandatory credential boundary but has no invocation receipt of its own.
+    let Some(invocation) = invocation else {
+        return Ok(());
+    };
+    if db
+        .collection::<AssistantInvocation>(INVOCATIONS)
+        .find_one(doc! {
+            "_id":&invocation.invocation_id,"user_id":&job.user_id,
+            "cancel_requested":false,"conversation_deleted":false,"terminal_status":null,
+        })
+        .await?
+        .is_none()
+    {
+        return Err(AppError::MachineTurnStopped);
+    }
+    Ok(())
+}
+
 /// Discard ineligible lineage before selecting a turn. The caller persists
 /// this queue even when nothing remains, so rejected work cannot poison it.
 pub async fn filter_events_in_session(

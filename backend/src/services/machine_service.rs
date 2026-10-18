@@ -634,6 +634,21 @@ async fn fence_turn_operation_in_session(
     if super::assistant_nyxagent::live_turn(&row, Utc::now()).is_none() {
         return Err(AppError::MachineTurnStopped);
     }
+    let invocation = row
+        .active_turn
+        .as_ref()
+        .and_then(|turn| turn.invocation_id.as_deref());
+    if invocation != chat.invocation_id.as_deref()
+        || !super::assistant_invocation_service::fence_in_session(
+            db,
+            session,
+            &chat.user_id,
+            invocation,
+        )
+        .await?
+    {
+        return Err(AppError::MachineTurnStopped);
+    }
     if let Some(origin) = row
         .active_turn
         .as_ref()

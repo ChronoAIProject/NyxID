@@ -212,5 +212,5 @@ pub(crate) mod platform_entry_identity;
 
 pub(crate) mod platform_entry_projection;
 
-pub(crate) mod platform_native_reply_handle;
 pub mod assistant_invocation;
+pub(crate) mod platform_native_reply_handle;

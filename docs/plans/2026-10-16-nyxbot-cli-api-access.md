@@ -75,7 +75,7 @@ safe: they ignore mandatory invocation credential fences. The public reference
 explains the recovery procedure and why receipt cancellation alone is not a
 credential-retirement migration.
 
-## Verification
+## Initial verification
 
 The primary reviewed the implementation personally and resolved 44 findings
 with the same Heca implementer, running verified `gpt-6.1-sol`, `xhigh`, and
@@ -94,7 +94,9 @@ checkout review, the temporary validation logs and file-hash snapshot were no
 longer present; this document remains the durable result record. That review
 rechecked route and feature-flag wiring, new-file whitespace, and documentation
 links, and confirmed that the retained CLI executable is newer than every CLI
-Rust source file. It did not rerun the backend or CLI test suites.
+Rust source file. It did not rerun the backend or CLI test suites. These results
+precede the integration with newer `main` described below; they are not a
+validation claim for that integration.
 
 | Check | Evidence |
 | --- | --- |
@@ -132,6 +134,37 @@ Builds use `CARGO_PROFILE_DEV_DEBUG=0`, `CARGO_PROFILE_TEST_DEBUG=0`,
 compiler memory use. `NYXID_TEST_DATABASE_URL` identifies the isolated MongoDB
 8 replica set. The same upstream Swagger UI archive was supplied locally after
 its original download timed out; source and dependency versions are unchanged.
+
+## Pull request integration (2026-10-19)
+
+The original feature was committed as `4635735aa`, then rebased onto `main`
+at `f96cf8778` as `82b44933a`. The primary reviewed the conflict resolutions
+and range diff. New channel-adapter origin checks and boxed authority values
+are retained alongside invocation identity and cancellation checks.
+
+Integration work extends the newer shared service execution boundary to bind
+the original invocation, checks root cancellation before asynchronous sends,
+and retains only the bounded leased cancel/status cleanup capability. The
+post-deadline status exception applies only to that tracked cleanup; ordinary
+status and result reads retain their original deadlines. Machine operation
+admission and job publication fence the root in their transaction, and service
+egress checks the job's original invocation after its issuing turn settles.
+The newer expired/cancelled channel-setup path settles its watch and queues
+its event atomically. The primary reviewed these changes and the new regression
+tests. Current-source runtime and lint validation are in progress; the PR
+remains a draft until those checks pass.
+
+The public CLI reference is now included in the docs navigation and linked
+from the README, API reference, and MCP reference. It explains local client
+use, owner login, prompt input, conversation follow-ups, recovery, and
+cancellation. No delegated MCP invocation tool is added. The CLI uses the
+existing hosted or self-hosted server; local file, shell, and desktop authority
+still comes from separately configured machine capabilities.
+
+Documentation validation passed: 18 existing tests across docs navigation,
+Markdown rendering, and search; ESLint on the two changed frontend files;
+local guide link and whitespace checks. New validation logs are stored in
+task-specific Git worktree metadata rather than temporary storage.
 
 ## Source references
 

@@ -58,6 +58,7 @@ This document describes every HTTP endpoint exposed by the NyxID backend. All en
   - [Telegram New Channel Creation](#telegram-new-channel-creation)
   - [NyxBot service adapters](#nyxbot-service-adapters)
   - [Webhooks](#webhooks)
+- [Owner NyxBot invocations](#owner-nyxbot-invocations)
 - [Assistant voice and dictation](#assistant-voice-and-dictation)
 
 ---
@@ -8585,6 +8586,40 @@ Human `POST/PUT /api/v1/services` use the same skill validation/history path; up
 
 The operation-contract route returns the authorized catalog service's bounded source OpenAPI document, preserving upstream server declarations. It does not rewrite proxy URLs or grant execution access; generated skills must use the consumer's authorized NyxID service connection. It reads a configured `openapi_spec_url` through NyxID's hardened, size-limited path, resolving known hosted overlay URLs locally. When the URL is absent or empty, it falls back to an embedded overlay registered for the service slug. The configured URL must be readable without downstream credentials; this route never injects a service-account or catalog credential. Authenticated custom documents need a separate, explicitly scoped contract-fetch capability. The route never resolves a user-managed `/keys` service, injects a credential, or returns the caller-wide `/mcp/config` catalog. The discovery response includes the catalog service `id`, `slug`, `name`, and current skill revision. Catalog and MCP responses retain name recommendations and expose optional refs/revision. Ref-only changes do not change the existing `catalog_digest`; `skills_manifest_digest` is a separate versioned digest. Instance names suppress inherited refs. See [Service account curation](SERVICE_ACCOUNTS.md#catalog-skill-curation) for exact payloads, grant limits, history pagination, recovery, runtime confinement, rollout ordering, and the boundary with Ornn package content CRU.
 
+
+## Owner NyxBot invocations
+
+These endpoints let a first-party owner account session or access token drive
+the existing NyxBot engine. Developer OAuth clients, delegated tokens, service
+accounts, relay tokens, and API keys (including Agent Key login) are rejected.
+The local `nyxid nyxbot` commands use this resource; no MCP setup is required.
+
+| Method and path | Behavior |
+| --- | --- |
+| `POST /api/v1/assistant/nyxagent/invocations` | Admit owner work atomically, or return its existing receipt |
+| `GET /api/v1/assistant/nyxagent/invocations/{invocation_id}` | Read durable status, bounded replies, and required actions |
+| `POST /api/v1/assistant/nyxagent/invocations/{invocation_id}/cancel` | Fence that invocation and its associated work, then request cancellation |
+
+Create requires `idempotency_key` (a canonical UUID v4) and `text`. Optional
+`conversation_id` resumes a private owner thread; optional `agent_id` and
+`model` select a new thread and cannot accompany `conversation_id`. Unknown
+fields are rejected. New admissions return HTTP 202, identical retries HTTP
+200, and changed requests with the same owner/key HTTP 409. The public
+invocation ID is that owner-scoped idempotency key.
+
+Existing grants, billing, and owner confirmations apply. A local wait timeout
+does not cancel work. Cancellation cannot undo effects already dispatched to
+an external service; unconfirmed external stops remain `requires_review`.
+
+Admission defaults off behind `assistant:owner-invocations`. Upgrade every
+replica before enabling it. Inspection and cancellation remain available with
+admission off while the engine is enabled. After the first admission, recovery
+is forward-fix-only because older binaries do not enforce the invocation
+credential and cancellation fences.
+
+See the [owner CLI/API reference](chat/09-owner-cli-api.md) for the full
+request/response schema, lifecycle, limits, and rollout contract, and the
+[CLI reference](site/cli/reference/nyxbot.md) for terminal examples.
 
 ## Assistant voice and dictation
 

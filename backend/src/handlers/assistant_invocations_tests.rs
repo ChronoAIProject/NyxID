@@ -505,6 +505,13 @@ async fn invocation_direct_hidden_conversation_id_is_rejected_without_admission(
         ("group_id", mongodb::bson::Bson::String("group".into())),
         ("automation_thread", mongodb::bson::Bson::Boolean(true)),
         (
+            "channel",
+            mongodb::bson::Bson::Document(doc! {
+                "nyxbot_channel_id":"adapter-binding", "partition":"external-session",
+                "platform":"telnyx_relay", "thread":bson::Bson::Null,
+            }),
+        ),
+        (
             "voice_parent_conversation_id",
             mongodb::bson::Bson::String("voice".into()),
         ),
