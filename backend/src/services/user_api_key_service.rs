@@ -2620,6 +2620,7 @@ mod tests {
             attempt_nonce: None,
             connection_id: None,
             connect_link_id: None,
+            authorization_nonce: None,
             consumed: false,
             expires_at: now + Duration::minutes(10),
             created_at: now,

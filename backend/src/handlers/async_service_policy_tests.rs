@@ -2,168 +2,193 @@ use super::*;
 use crate::models::{assistant_settings::AccessMode, org_membership::OrgRole, user::UserType};
 use crate::services::assistant_service_execution as execution;
 
-async fn org_watch(a: &mut AsyncFixture, bound_agent: bool) -> AsyncServiceOperation {
-    let owner = uuid::Uuid::new_v4().to_string();
-    a.f.state
-        .db
-        .collection("users")
-        .insert_one(crate::test_utils::test_user(&owner, UserType::Org))
-        .await
-        .unwrap();
-    a.f.state
-        .db
-        .collection("org_memberships")
-        .insert_one(crate::test_utils::test_membership(
-            &owner,
-            &a.f.owner,
-            OrgRole::Admin,
-            None,
-        ))
-        .await
-        .unwrap();
-    let connection =
-        crate::services::user_service_service::find_user_service_by_id(&a.f.state.db, &a.service)
+// These phases run in the same task. Return from preparation before polling
+// submission, so specialist setup does not overlap the deep MCP egress stack.
+fn org_watch(
+    a: &mut AsyncFixture,
+    bound_agent: bool,
+) -> futures::future::BoxFuture<'_, AsyncServiceOperation> {
+    Box::pin(async move {
+        prepare_org_watch(a, bound_agent).await;
+        submit_org_watch(a).await
+    })
+}
+
+fn prepare_org_watch(
+    a: &mut AsyncFixture,
+    bound_agent: bool,
+) -> futures::future::BoxFuture<'_, ()> {
+    Box::pin(async move {
+        let owner = uuid::Uuid::new_v4().to_string();
+        a.f.state
+            .db
+            .collection("users")
+            .insert_one(crate::test_utils::test_user(&owner, UserType::Org))
             .await
-            .unwrap()
             .unwrap();
-    a.f.state
-        .db
-        .collection::<bson::Document>("user_services")
-        .update_one(doc! {"_id":&a.service}, doc! {"$set":{"user_id":&owner}})
-        .await
-        .unwrap();
-    a.f.state
-        .db
-        .collection::<bson::Document>("user_endpoints")
-        .update_one(
-            doc! {"_id":&connection.endpoint_id},
-            doc! {"$set":{"user_id":&owner}},
-        )
-        .await
-        .unwrap();
-    if bound_agent {
-        use crate::services::{assistant_team_service as team, feature_flag_service as flags};
-        flags::set_platform_override(
+        a.f.state
+            .db
+            .collection("org_memberships")
+            .insert_one(crate::test_utils::test_membership(
+                &owner,
+                &a.f.owner,
+                OrgRole::Admin,
+                None,
+            ))
+            .await
+            .unwrap();
+        let connection = crate::services::user_service_service::find_user_service_by_id(
             &a.f.state.db,
-            "assistant:org-agents",
-            &flags::FlagTarget::Global,
-            true,
-            &a.f.owner,
-        )
-        .await
-        .unwrap();
-        let (agent, row) = team::create_specialist_for(
-            &a.f.state.db,
-            &a.f.state.encryption_keys,
-            &a.f.owner,
-            &owner,
-            team::CreateRequest {
-                name: "async-org".into(),
-                description: "Async org worker".into(),
-                display_name: None,
-                persona: None,
-                targets: Default::default(),
-                account_read: false,
-                machines: None,
-                logins: None,
-                specialty: None,
-                created_by: "user",
-            },
+            &a.service,
         )
         .await
         .unwrap()
         .unwrap();
-        team::set_grants(
-            &a.f.state.db,
-            &a.f.owner,
-            &agent.id,
-            team::GrantChange::Add(crate::models::assistant_agent::AgentGrants {
-                service_ids: vec![a.service.clone()],
-                ..Default::default()
-            }),
-        )
-        .await
-        .unwrap();
-        let row = engine::begin_turn(
-            &a.f.state.db,
-            &a.f.owner,
-            &user_start(&row.id, "Run bounded work"),
-            &a.f.state.encryption_keys,
-        )
-        .await
-        .unwrap();
-        a.f.chat = acks::for_key(&a.f.state.db, &a.f.owner, Some(&row.credential_api_key_id))
-            .await
-            .unwrap()
-            .unwrap();
-        let key = crate::services::key_service::get_api_key(
-            &a.f.state.db,
-            &a.f.owner,
-            &row.credential_api_key_id,
-        )
-        .await
-        .unwrap();
-        assert_eq!(
-            key.assistant_agent_owner_id.as_deref(),
-            Some(owner.as_str())
-        );
-        a.f.auth = crate::mw::auth::api_key_auth_user(&a.f.state.db, &key, None, None, None)
-            .await
-            .unwrap();
-        a.f.row = row;
-    }
-    set_access_mode(&a.f, AccessMode::Nyxmode).await;
-    let auth = authenticate(&a.f).await;
-    let args =
-        json!({"Idempotency-Key":"org-request","script":"print('hello')","language":"python"});
-    let card = result(
-        direct_call(
-            &a.f,
-            &auth,
-            "sandbox__submit_execution_handler",
-            args.clone(),
-        )
-        .await,
-        true,
-    )
-    .await;
-    assert_eq!(card["error"], "acknowledgement_required");
-    assert!(
-        a.calls.lock().unwrap().is_empty(),
-        "org submit awaits owner consent"
-    );
-    let id = card["acknowledgement_id"].as_str().unwrap();
-    acks::decide(&a.f.state.db, &a.f.owner, &a.f.row.id, id, true)
-        .await
-        .unwrap();
-    let mut approved = args;
-    approved["acknowledgement_id"] = json!(id);
-    let response = direct_call(&a.f, &auth, "sandbox__submit_execution_handler", approved).await;
-    let bytes = axum::body::to_bytes(response.into_body(), 100_000)
-        .await
-        .unwrap();
-    let body: Value = serde_json::from_slice(&bytes).unwrap();
-    assert_eq!(body["result"]["isError"], false, "{body}");
-    let watch =
         a.f.state
             .db
-            .collection::<AsyncServiceOperation>(WATCHES)
-            .find_one(doc! {"state":"waiting"})
+            .collection::<bson::Document>("user_services")
+            .update_one(doc! {"_id":&a.service}, doc! {"$set":{"user_id":&owner}})
+            .await
+            .unwrap();
+        a.f.state
+            .db
+            .collection::<bson::Document>("user_endpoints")
+            .update_one(
+                doc! {"_id":&connection.endpoint_id},
+                doc! {"$set":{"user_id":&owner}},
+            )
+            .await
+            .unwrap();
+        if bound_agent {
+            use crate::services::{assistant_team_service as team, feature_flag_service as flags};
+            flags::set_platform_override(
+                &a.f.state.db,
+                "assistant:org-agents",
+                &flags::FlagTarget::Global,
+                true,
+                &a.f.owner,
+            )
+            .await
+            .unwrap();
+            let (agent, row) = team::create_specialist_for(
+                &a.f.state.db,
+                &a.f.state.encryption_keys,
+                &a.f.owner,
+                &owner,
+                team::CreateRequest {
+                    name: "async-org".into(),
+                    description: "Async org worker".into(),
+                    display_name: None,
+                    persona: None,
+                    targets: Default::default(),
+                    account_read: false,
+                    machines: None,
+                    logins: None,
+                    specialty: None,
+                    created_by: "user",
+                },
+            )
             .await
             .unwrap()
             .unwrap();
-    assert!(
-        watch.execution_binding.is_some(),
-        "actual approved submission snapshot persisted"
-    );
-    // Discard only the unsuccessful proposal watch; it cannot poll a provider.
-    a.f.state
-        .db
-        .collection::<bson::Document>(WATCHES)
-        .delete_many(doc! {"operation_id":null})
-        .await
-        .unwrap();
-    watch
+            team::set_grants(
+                &a.f.state.db,
+                &a.f.owner,
+                &agent.id,
+                team::GrantChange::Add(crate::models::assistant_agent::AgentGrants {
+                    service_ids: vec![a.service.clone()],
+                    ..Default::default()
+                }),
+            )
+            .await
+            .unwrap();
+            let row = engine::begin_turn(
+                &a.f.state.db,
+                &a.f.owner,
+                &user_start(&row.id, "Run bounded work"),
+                &a.f.state.encryption_keys,
+            )
+            .await
+            .unwrap();
+            a.f.chat = acks::for_key(&a.f.state.db, &a.f.owner, Some(&row.credential_api_key_id))
+                .await
+                .unwrap()
+                .unwrap();
+            let key = crate::services::key_service::get_api_key(
+                &a.f.state.db,
+                &a.f.owner,
+                &row.credential_api_key_id,
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                key.assistant_agent_owner_id.as_deref(),
+                Some(owner.as_str())
+            );
+            a.f.auth = crate::mw::auth::api_key_auth_user(&a.f.state.db, &key, None, None, None)
+                .await
+                .unwrap();
+            a.f.row = row;
+        }
+    })
+}
+
+fn submit_org_watch(a: &AsyncFixture) -> futures::future::BoxFuture<'_, AsyncServiceOperation> {
+    Box::pin(async move {
+        set_access_mode(&a.f, AccessMode::Nyxmode).await;
+        let auth = authenticate(&a.f).await;
+        let args =
+            json!({"Idempotency-Key":"org-request","script":"print('hello')","language":"python"});
+        let card = result(
+            direct_call(
+                &a.f,
+                &auth,
+                "sandbox__submit_execution_handler",
+                args.clone(),
+            )
+            .await,
+            true,
+        )
+        .await;
+        assert_eq!(card["error"], "acknowledgement_required");
+        assert!(
+            a.calls.lock().unwrap().is_empty(),
+            "org submit awaits owner consent"
+        );
+        let id = card["acknowledgement_id"].as_str().unwrap();
+        acks::decide(&a.f.state.db, &a.f.owner, &a.f.row.id, id, true)
+            .await
+            .unwrap();
+        let mut approved = args;
+        approved["acknowledgement_id"] = json!(id);
+        let response =
+            direct_call(&a.f, &auth, "sandbox__submit_execution_handler", approved).await;
+        let bytes = axum::body::to_bytes(response.into_body(), 100_000)
+            .await
+            .unwrap();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["result"]["isError"], false, "{body}");
+        let watch =
+            a.f.state
+                .db
+                .collection::<AsyncServiceOperation>(WATCHES)
+                .find_one(doc! {"state":"waiting"})
+                .await
+                .unwrap()
+                .unwrap();
+        assert!(
+            watch.execution_binding.is_some(),
+            "actual approved submission snapshot persisted"
+        );
+        // Discard only the unsuccessful proposal watch; it cannot poll a provider.
+        a.f.state
+            .db
+            .collection::<bson::Document>(WATCHES)
+            .delete_many(doc! {"operation_id":null})
+            .await
+            .unwrap();
+        watch
+    })
 }
 
 #[tokio::test]
@@ -379,6 +404,18 @@ async fn held_async_continuation_rechecks_lease_key_membership_and_execution_gen
     ] {
         let mut a = AsyncFixture::new().await;
         let original = org_watch(&mut a, false).await;
+        check_held_continuation(a, original, mutation).await;
+    }
+}
+
+// Each mutation retains its fixture through its final assertion, after setup's
+// poll frame has returned. The original mutation order remains in the driver.
+fn check_held_continuation(
+    a: AsyncFixture,
+    original: AsyncServiceOperation,
+    mutation: &'static str,
+) -> futures::future::BoxFuture<'static, ()> {
+    Box::pin(async move {
         if mutation == "legacy_scope_before_admit" {
             a.f.state
                 .db
@@ -447,7 +484,7 @@ async fn held_async_continuation_rechecks_lease_key_membership_and_execution_gen
                     .is_err()
             );
             assert_eq!(a.calls.lock().unwrap().len(), 1);
-            continue;
+            return;
         }
         let decision = authority
             .admit(
@@ -538,7 +575,7 @@ async fn held_async_continuation_rechecks_lease_key_membership_and_execution_gen
             1,
             "only approved submission reached provider"
         );
-    }
+    })
 }
 
 #[tokio::test]

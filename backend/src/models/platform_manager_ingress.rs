@@ -1,29 +1,38 @@
+use super::platform_entry_projection::{
+    StoredEntryIdentity, StoredEventIdentity, StoredSenderIdentity, checked_identity_record,
+    same_version,
+};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 pub const COLLECTION_NAME: &str = "platform_manager_ingress_receipts";
 
+checked_identity_record! {
 /// Metadata only. A receipt retains its original audience across consent changes.
-#[derive(Clone, Serialize, Deserialize)]
-pub struct PlatformManagerIngress {
+#[derive(Clone, Serialize)]
+pub struct PlatformManagerIngress, RawPlatformManagerIngress {
     #[serde(rename = "_id")]
     pub id: String,
     pub claim_id: String,
     pub profile_id: String,
     pub manager_bot_id: String,
-    pub telegram_bot_id: i64,
+    #[serde(flatten)]
+    pub entry: StoredEntryIdentity,
     pub manager_authority_epoch: i64,
     pub observation_id: String,
-    pub sender_id: i64,
-    pub chat_id: i64,
-    pub update_id: i64,
-    pub message_id: i64,
+    #[serde(flatten, with = "super::platform_entry_projection::ingress_sender")]
+    pub sender: StoredSenderIdentity,
+    #[serde(flatten)]
+    pub event: StoredEventIdentity,
     pub original_private_command: bool,
     pub audience: IngressAudience,
     pub phase: IngressPhase,
     pub execution: Option<IngressExecution>,
     pub decision: Option<IngressDecision>,
     pub reply_id: Option<String>,
+    /// Committed control effect, never rendered text, codes or bearer material.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control_effect: Option<ManagerCommandEffect>,
     /// Delivery owns retry after its metadata-only row is durable. Legacy
     /// receipts default to pending recovery; terminal tombstones are retained.
     #[serde(default)]
@@ -37,6 +46,43 @@ pub struct PlatformManagerIngress {
     pub start_before: DateTime<Utc>,
     #[serde(with = "crate::models::bson_datetime::optional")]
     pub settled_at: Option<DateTime<Utc>>,
+}
+|record| same_version(&record.entry, &record.sender, Some(&record.event)) && super::platform_entry_projection::entry_matches(&record.entry, &record.manager_bot_id)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChatLoginStatus {
+    LoggedOut,
+    Pending,
+    LoggedIn,
+    Unavailable,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ManagerCommandEffect {
+    Link {
+        intent_id: String,
+    },
+    Confirmed {
+        binding_id: String,
+        binding_generation: i64,
+    },
+    LoggedOut,
+    Status {
+        state: ChatLoginStatus,
+    },
+    Help,
+    ManagementUnavailable,
+    Management {
+        binding_id: String,
+        binding_generation: i64,
+        selection: super::platform_manager_management::ManagerManagementView,
+        connect_link_id: Option<String>,
+        #[serde(default)]
+        selection_ref: Option<String>,
+    },
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -58,7 +104,7 @@ pub enum IngressAudience {
     PrivateChatHandoff,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Debug)]
 #[serde(rename_all = "snake_case")]
 pub enum IngressPhase {
     Admitted,

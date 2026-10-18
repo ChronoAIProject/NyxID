@@ -535,6 +535,7 @@ export class NyxAgentTransport {
         turnId: message.turn_id,
         status: failed ? "error" : message.error_code === "cancelled" ? "stopped" : "complete",
         error: failed ? storedError(message.error_code, message.error_detail?.capacity_wait_ms) : undefined,
+        channelDelivery: message.turn_metadata?.channel_delivery,
         turnMetadata: message.turn_metadata ? { attempts: message.turn_metadata.attempts, capacityWaitMs: message.turn_metadata.capacity_wait_ms } : undefined,
         errorDetail: message.error_detail ? { attempts: message.error_detail.attempts, capacityWaitMs: message.error_detail.capacity_wait_ms, upstreamCode: message.upstream_error_code, stage: message.error_detail.stage, httpStatus: message.error_detail.http_status, upstreamRequestId: message.error_detail.upstream_request_id, responseId: message.error_detail.response_id, continuations: message.error_detail.continuations, turnId: message.error_detail.turn_id, occurredAt: message.error_detail.occurred_at } : undefined,
         errorCode: message.error_code,
@@ -590,6 +591,7 @@ export class NyxAgentTransport {
           feedback: settled?.feedback ?? undefined,
           errorCode: settled?.error_code ?? (streaming ? live.state.activeTurn?.error?.code : undefined),
           error: streaming && live.state.activeTurn?.error ? storedError(live.state.activeTurn.error.code, live.state.activeTurn.error.capacity_wait_ms) : undefined,
+          channelDelivery: settled?.turn_metadata?.channel_delivery,
           turnMetadata: streaming ? live.state.activeTurn?.turnMetadata : settled?.turn_metadata
             ? { attempts: settled.turn_metadata.attempts, capacityWaitMs: settled.turn_metadata.capacity_wait_ms } : undefined,
           errorDetail: streaming && live.state.activeTurn?.error?.stage ? {

@@ -1973,11 +1973,20 @@ pub(crate) async fn spawn_mock_token_server(
 /// keys per test, so we share one 2048-bit pair across the entire test
 /// binary and clone the cheap `JwtKeys` handle for each caller.
 pub(crate) fn cached_test_jwt_keys() -> JwtKeys {
-    static CACHED: OnceLock<JwtKeys> = OnceLock::new();
-    CACHED.get_or_init(generate_test_jwt_keys).clone()
+    cached_test_jwt_material().0.clone()
 }
 
-fn generate_test_jwt_keys() -> JwtKeys {
+/// Public JWKS fixtures use the same generated pair as signed test assertions.
+pub(crate) fn cached_test_jwk() -> serde_json::Value {
+    cached_test_jwt_material().1.clone()
+}
+
+fn cached_test_jwt_material() -> &'static (JwtKeys, serde_json::Value) {
+    static CACHED: OnceLock<(JwtKeys, serde_json::Value)> = OnceLock::new();
+    CACHED.get_or_init(generate_test_jwt_material)
+}
+
+fn generate_test_jwt_material() -> (JwtKeys, serde_json::Value) {
     use jsonwebtoken::{DecodingKey, EncodingKey};
     use rsa::pkcs1::{EncodeRsaPrivateKey, EncodeRsaPublicKey};
     use rsa::traits::PublicKeyParts;
@@ -1998,13 +2007,19 @@ fn generate_test_jwt_keys() -> JwtKeys {
     let n_bytes = public_key.n().to_bytes_be();
     let kid = hex::encode(&Sha256::digest(&n_bytes)[..8]);
 
-    JwtKeys {
-        encoding: EncodingKey::from_rsa_pem(private_pem.as_bytes())
-            .expect("build test RSA encoding key"),
-        decoding: DecodingKey::from_rsa_pem(public_pem.as_bytes())
-            .expect("build test RSA decoding key"),
-        kid,
-    }
+    let jwk = crate::crypto::jwt::public_key_jwk(&public_pem)
+        .expect("produce test public JWK from the generated signing pair");
+    assert_eq!(jwk["kid"], kid);
+    (
+        JwtKeys {
+            encoding: EncodingKey::from_rsa_pem(private_pem.as_bytes())
+                .expect("build test RSA encoding key"),
+            decoding: DecodingKey::from_rsa_pem(public_pem.as_bytes())
+                .expect("build test RSA decoding key"),
+            kid,
+        },
+        jwk,
+    )
 }
 
 /// Build a minimal `AppState` for handler tests.
@@ -2896,6 +2911,30 @@ pub async fn scoped_specialist_auth(
 pub(crate) struct LocalMachinePlatform {
     pub profile: crate::models::remote_machine::MachineProfileSpec,
     pub readiness: crate::services::remote_machine_manager::PlatformReadiness,
+}
+
+/// Construct and poll the large native lifecycle journey futures on a scoped
+/// thread. The ordinary libtest/nextest thread only joins and propagates panic.
+pub(crate) fn run_native_journey_test<F, Fut>(name: &'static str, test: F)
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()>,
+{
+    let thread = std::thread::Builder::new()
+        .name(name.into())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(move || {
+            let future: std::pin::Pin<Box<dyn std::future::Future<Output = ()>>> = Box::pin(test());
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("native journey runtime")
+                .block_on(future);
+        })
+        .expect("native journey thread");
+    if let Err(panic) = thread.join() {
+        std::panic::resume_unwind(panic);
+    }
 }
 
 #[cfg(test)]

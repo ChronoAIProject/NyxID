@@ -836,6 +836,41 @@ fn bot_doc(platform: &str, label: &str) -> bson::Document {
     }
 }
 
+async fn hosted_setup_link(
+    state: &AppState,
+    value: &Value,
+) -> crate::models::channel_connect_link::ChannelConnectLink {
+    let url = reqwest::Url::parse(value["url"].as_str().unwrap()).unwrap();
+    assert!(url.path().starts_with("/connect/bot/"));
+    let token = Zeroizing::new(url.path_segments().unwrap().next_back().unwrap().to_owned());
+    let link = crate::services::channel_connect_link_service::by_token(&state.db, &token)
+        .await
+        .unwrap();
+    assert_eq!(link.user_id, OWNER);
+    assert_eq!(link.created_by_user_id, OWNER);
+    assert_eq!(
+        value["expires_in_minutes"],
+        (link.expires_at - link.created_at).num_minutes()
+    );
+    assert_eq!((link.expires_at - link.created_at).num_seconds(), 3600);
+    link
+}
+
+async fn complete_hosted_setup(state: &AppState, link_id: &str, bot_id: &str) {
+    state
+        .db
+        .collection::<bson::Document>(crate::models::channel_connect_link::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id":link_id,"user_id":OWNER},
+            doc! {"$set":{"bot_id":bot_id,"flow":"manual"}},
+        )
+        .await
+        .unwrap();
+    crate::services::channel_connect_link_service::complete(&state.db, link_id)
+        .await
+        .unwrap();
+}
+
 /// NyxBot hands out NyxID's setup page instead of asking for tokens or
 /// pointing at Studio, and the bot the user creates there is linked and
 /// reported without the user coming back to say so.
@@ -863,7 +898,12 @@ async fn setup_links_create_bots_that_link_themselves_and_resume_the_chat() {
     )
     .await
     .unwrap();
-    assert!(!missing["url"].as_str().unwrap().contains("return_to"));
+    assert!(
+        hosted_setup_link(&state, &missing)
+            .await
+            .callback_url
+            .is_none()
+    );
     let group_id = format!("nyxg-{}", Uuid::new_v4().simple());
     state
         .db
@@ -882,12 +922,22 @@ async fn setup_links_create_bots_that_link_themselves_and_resume_the_chat() {
     )
     .await
     .unwrap();
-    assert!(
-        group["url"]
-            .as_str()
-            .unwrap()
-            .contains(&format!("return_to={group_id}"))
-    );
+    let group_callback = hosted_setup_link(&state, &group)
+        .await
+        .callback_url
+        .unwrap();
+    assert!(group_callback.ends_with(&format!("/assistant?c={group_id}")));
+    let foreign = setup_link_tool(
+        &state,
+        &Uuid::new_v4().to_string(),
+        &home.id,
+        "lark",
+        None,
+        &team,
+        LEGACY_PROVENANCE,
+    )
+    .await;
+    assert!(matches!(foreign, Err(AppError::Forbidden(_))));
     state
         .db
         .collection::<bson::Document>(CONVERSATIONS)
@@ -918,12 +968,13 @@ async fn setup_links_create_bots_that_link_themselves_and_resume_the_chat() {
     )
     .await
     .unwrap();
+    let telegram_request = hosted_setup_link(&state, &telegram).await;
+    assert_eq!(telegram_request.label, "Helper");
     assert!(
-        telegram["url"].as_str().unwrap().contains(&format!(
-            "/channel-bots/connect/telegram?label=Helper&return_to={}",
-            home.id
-        )),
-        "{telegram}"
+        telegram_request
+            .callback_url
+            .unwrap()
+            .ends_with(&format!("/assistant?c={}", home.id))
     );
     let (lark, _) = setup_link_tool(
         &state,
@@ -936,11 +987,13 @@ async fn setup_links_create_bots_that_link_themselves_and_resume_the_chat() {
     )
     .await
     .unwrap();
+    let lark_request = hosted_setup_link(&state, &lark).await;
     assert!(
-        lark["url"]
-            .as_str()
+        lark_request
+            .callback_url
+            .as_ref()
             .unwrap()
-            .ends_with(&format!("/channel-bots/connect/lark?return_to={}", home.id))
+            .ends_with(&format!("/assistant?c={}", home.id))
     );
     assert!(
         lark["note"]
@@ -972,6 +1025,25 @@ async fn setup_links_create_bots_that_link_themselves_and_resume_the_chat() {
         .unwrap();
     process_watches(&state).await.unwrap();
     assert_eq!(calls.lock().await.len(), 0);
+    // A competing same-owner bot cannot satisfy the exact hosted request.
+    let competitor = bot_doc("lark", "Other browser tab");
+    let competitor_id = competitor.get_str("_id").unwrap().to_owned();
+    state
+        .db
+        .collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME)
+        .insert_one(competitor)
+        .await
+        .unwrap();
+    process_watches(&state).await.unwrap();
+    assert_eq!(
+        state
+            .db
+            .collection::<NyxbotChannel>(CHANNELS)
+            .count_documents(doc! {"channel_bot_id":&competitor_id})
+            .await
+            .unwrap(),
+        0
+    );
     // The user finishes the setup page: NyxID links the new bot and resumes
     // the chat that asked.
     let created = bot_doc("lark", "Support desk");
@@ -982,6 +1054,7 @@ async fn setup_links_create_bots_that_link_themselves_and_resume_the_chat() {
         .insert_one(created)
         .await
         .unwrap();
+    complete_hosted_setup(&state, &lark_request.id, &bot_id).await;
     process_watches(&state).await.unwrap();
     let channel = state
         .db
@@ -1497,7 +1570,7 @@ async fn live_changes_resume_waiting_chats_without_the_sweep() {
     wait_for_event(&state, &home.id, "finished connecting").await;
     // A setup link: the bot the user creates is linked the moment it is
     // saved, even while its webhook is still being verified.
-    setup_link_tool(
+    let (setup, _) = setup_link_tool(
         &state,
         OWNER,
         &home.id,
@@ -1508,6 +1581,7 @@ async fn live_changes_resume_waiting_chats_without_the_sweep() {
     )
     .await
     .unwrap();
+    let setup = hosted_setup_link(&state, &setup).await;
     let mut created = bot_doc("lark", "Support desk");
     created.insert("status", "pending_webhook");
     let bot_id = created.get_str("_id").unwrap().to_owned();
@@ -1525,6 +1599,7 @@ async fn live_changes_resume_waiting_chats_without_the_sweep() {
         .insert_one(created)
         .await
         .unwrap();
+    complete_hosted_setup(&state, &setup.id, &bot_id).await;
     wait_for_event(&state, &home.id, "now linked to").await;
     assert_eq!(linked().await, 1);
     runner.abort();
@@ -1772,6 +1847,17 @@ async fn linking_an_existing_bot_ends_the_wait_for_a_new_one() {
         kinds(waiting(&state, OWNER, &home.id).await.unwrap()),
         vec!["channel_bot"]
     );
+    // Old unbound watches retain their explicit-link compatibility. New
+    // hosted requests cannot be completed by connecting a different bot.
+    state
+        .db
+        .collection::<bson::Document>(WATCHES)
+        .update_one(
+            doc! {"user_id":OWNER,"kind":"channel_bot","status":"pending"},
+            doc! {"$unset":{"connect_link_id":""}},
+        )
+        .await
+        .unwrap();
     connect_tool(&state, OWNER, &home.id, &bot_id, &team)
         .await
         .unwrap();
@@ -5197,3 +5283,382 @@ async fn watch_completions_are_bound_from_the_causing_turns_snapshot() {
 
 #[path = "nyxbot_mentions_tests.rs"]
 mod mentions_tests;
+
+async fn pending_creation_watch(
+    state: &AppState,
+    home: &str,
+    agent: &crate::models::assistant_agent::AssistantAgent,
+) -> (
+    crate::models::channel_connect_link::ChannelConnectLink,
+    NyxbotWatch,
+) {
+    let (value, _) = setup_link_tool(state, OWNER, home, "lark", None, agent, LEGACY_PROVENANCE)
+        .await
+        .unwrap();
+    let link = hosted_setup_link(state, &value).await;
+    let watch = state
+        .db
+        .collection::<NyxbotWatch>(WATCHES)
+        .find_one(doc! {"connect_link_id":&link.id,"status":"pending"})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        watch.expires_at,
+        link.expires_at + ChronoDuration::minutes(CONNECT_WATCH_GRACE_MINUTES)
+    );
+    (link, watch)
+}
+
+#[tokio::test]
+async fn replaced_hosted_watch_cannot_claim_or_settle_new_request() {
+    let (state, _, server) = setup("nyxbot_watch_replaced").await;
+    let agent = crate::services::assistant_team_service::ensure_nyxbot(&state.db, OWNER)
+        .await
+        .unwrap();
+    let home = crate::services::assistant_team_service::home_thread(
+        &state.db,
+        &state.encryption_keys,
+        &agent,
+    )
+    .await
+    .unwrap();
+    let (old_link, old) = pending_creation_watch(&state, &home.id, &agent).await;
+    let (new_link, new) = pending_creation_watch(&state, &home.id, &agent).await;
+    assert_eq!(
+        old.id, new.id,
+        "replacement deliberately reuses the pending row"
+    );
+    assert_ne!(old_link.id, new_link.id);
+    let bot = bot_doc("lark", "Old request bot");
+    let bot_id = bot.get_str("_id").unwrap().to_owned();
+    state
+        .db
+        .collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME)
+        .insert_one(bot)
+        .await
+        .unwrap();
+    complete_hosted_setup(&state, &old_link.id, &bot_id).await;
+    channel_bot_watch(&state, &old).await.unwrap();
+    assert!(!claim(&state, &old, doc! {}).await.unwrap());
+    super::settle(&state, &old, Some("expired")).await;
+    let retained = state
+        .db
+        .collection::<NyxbotWatch>(WATCHES)
+        .find_one(doc! {"_id":&new.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(retained.status, "pending");
+    assert_eq!(
+        retained.connect_link_id.as_deref(),
+        Some(new_link.id.as_str())
+    );
+    assert_eq!(
+        state
+            .db
+            .collection::<NyxbotChannel>(CHANNELS)
+            .count_documents(doc! {"channel_bot_id":&bot_id})
+            .await
+            .unwrap(),
+        0
+    );
+    server.abort();
+}
+
+#[tokio::test]
+async fn completed_hosted_watch_observed_after_link_expiry_still_connects() {
+    let (state, _, server) = setup("nyxbot_watch_grace").await;
+    let agent = crate::services::assistant_team_service::ensure_nyxbot(&state.db, OWNER)
+        .await
+        .unwrap();
+    let home = crate::services::assistant_team_service::home_thread(
+        &state.db,
+        &state.encryption_keys,
+        &agent,
+    )
+    .await
+    .unwrap();
+    let (link, watch) = pending_creation_watch(&state, &home.id, &agent).await;
+    let bot = bot_doc("lark", "Completed before expiry");
+    let bot_id = bot.get_str("_id").unwrap().to_owned();
+    state
+        .db
+        .collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME)
+        .insert_one(bot)
+        .await
+        .unwrap();
+    complete_hosted_setup(&state, &link.id, &bot_id).await;
+    // Advance the recorded timeline, preserving completion before its deadline.
+    let expiry = Utc::now() - ChronoDuration::seconds(1);
+    state
+        .db
+        .collection::<bson::Document>(crate::models::channel_connect_link::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id":&link.id},
+            doc! {"$set":{"expires_at":bson::DateTime::from_chrono(expiry),
+            "terminal_at":bson::DateTime::from_chrono(expiry-ChronoDuration::seconds(1))}},
+        )
+        .await
+        .unwrap();
+    state.db.collection::<NyxbotWatch>(WATCHES).update_one(doc! {"_id":&watch.id},doc! {"$set":{
+        "expires_at":bson::DateTime::from_chrono(expiry+ChronoDuration::minutes(CONNECT_WATCH_GRACE_MINUTES))}}).await.unwrap();
+    process_watches(&state).await.unwrap();
+    let channel = active_for_bot(&state, OWNER, &bot_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(channel.agent_id.as_deref(), Some(agent.id.as_str()));
+    wait_for_event(&state, &home.id, "now linked to").await;
+    server.abort();
+}
+
+#[tokio::test]
+async fn delayed_hosted_watch_preserves_newer_manual_specialist_choice() {
+    let (state, _, server) = setup("nyxbot_watch_manual_choice").await;
+    let agent = crate::services::assistant_team_service::ensure_nyxbot(&state.db, OWNER)
+        .await
+        .unwrap();
+    let home = crate::services::assistant_team_service::home_thread(
+        &state.db,
+        &state.encryption_keys,
+        &agent,
+    )
+    .await
+    .unwrap();
+    let (link, watch) = pending_creation_watch(&state, &home.id, &agent).await;
+    let (manual, _) = crate::services::assistant_team_service::create_specialist(
+        &state.db,
+        &state.encryption_keys,
+        OWNER,
+        crate::services::assistant_team_service::CreateRequest {
+            machines: None,
+            logins: None,
+            name: "manual-choice".into(),
+            description: "Selected separately by owner".into(),
+            display_name: None,
+            persona: None,
+            targets: Default::default(),
+            account_read: false,
+            specialty: None,
+            created_by: "user",
+        },
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let bot = bot_doc("lark", "Requested bot");
+    let bot_id = bot.get_str("_id").unwrap().to_owned();
+    state
+        .db
+        .collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME)
+        .insert_one(bot)
+        .await
+        .unwrap();
+    complete_hosted_setup(&state, &link.id, &bot_id).await;
+    let (chosen, _) = connect(&state, OWNER, Some(&home.id), &bot_id, &manual)
+        .await
+        .unwrap();
+    channel_bot_watch(&state, &watch).await.unwrap();
+    let retained = active_for_bot(&state, OWNER, &bot_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(retained.id, chosen.id);
+    assert_eq!(retained.agent_id.as_deref(), Some(manual.id.as_str()));
+    let finished = state
+        .db
+        .collection::<NyxbotWatch>(WATCHES)
+        .find_one(doc! {"_id":&watch.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(finished.status, "failed");
+    wait_for_event(&state, &home.id, "could not be linked").await;
+    server.abort();
+}
+
+#[tokio::test]
+async fn declined_and_expired_hosted_creation_settle_exact_watches_and_wake_chat() {
+    let (state, _, server) = setup("nyxbot_watch_terminal").await;
+    let agent = crate::services::assistant_team_service::ensure_nyxbot(&state.db, OWNER)
+        .await
+        .unwrap();
+    let home = crate::services::assistant_team_service::home_thread(
+        &state.db,
+        &state.encryption_keys,
+        &agent,
+    )
+    .await
+    .unwrap();
+    for expired in [false, true] {
+        let (link, watch) = pending_creation_watch(&state, &home.id, &agent).await;
+        if expired {
+            state.db.collection::<bson::Document>(crate::models::channel_connect_link::COLLECTION_NAME)
+                .update_one(doc! {"_id":&link.id},doc! {"$set":{"expires_at":bson::DateTime::from_chrono(Utc::now()-ChronoDuration::seconds(1))}}).await.unwrap();
+        } else {
+            crate::services::channel_connect_link_service::cancel(&state.db, &link)
+                .await
+                .unwrap();
+        }
+        channel_bot_watch(&state, &watch).await.unwrap();
+        let retained = state
+            .db
+            .collection::<NyxbotWatch>(WATCHES)
+            .find_one(doc! {"_id":&watch.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(retained.status, "failed");
+        assert_eq!(
+            retained.last_error.as_deref(),
+            Some(if expired { "expired" } else { "cancelled" })
+        );
+        wait_for_event(
+            &state,
+            &home.id,
+            if expired {
+                "request expired"
+            } else {
+                "user declined"
+            },
+        )
+        .await;
+    }
+    assert_eq!(
+        state
+            .db
+            .collection::<NyxbotChannel>(CHANNELS)
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        0
+    );
+    assert!(
+        !waiting(&state, OWNER, &home.id)
+            .await
+            .unwrap()
+            .iter()
+            .any(|w| w.kind == "channel_bot")
+    );
+    server.abort();
+}
+
+#[tokio::test]
+async fn simultaneous_auto_and_manual_creation_fences_stale_preflight_at_insert() {
+    let (state, _, server) = setup("nyxbot_watch_concurrent_manual").await;
+    let agent = crate::services::assistant_team_service::ensure_nyxbot(&state.db, OWNER)
+        .await
+        .unwrap();
+    let home = crate::services::assistant_team_service::home_thread(
+        &state.db,
+        &state.encryption_keys,
+        &agent,
+    )
+    .await
+    .unwrap();
+    let (link, watch) = pending_creation_watch(&state, &home.id, &agent).await;
+    let (manual, _) = crate::services::assistant_team_service::create_specialist(
+        &state.db,
+        &state.encryption_keys,
+        OWNER,
+        crate::services::assistant_team_service::CreateRequest {
+            machines: None,
+            logins: None,
+            name: "simultaneous-manual-choice".into(),
+            description: "Explicit owner choice during setup completion".into(),
+            display_name: None,
+            persona: None,
+            targets: Default::default(),
+            account_read: false,
+            specialty: None,
+            created_by: "user",
+        },
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let bot = bot_doc("lark", "Simultaneous request bot");
+    let bot_id = bot.get_str("_id").unwrap().to_owned();
+    state
+        .db
+        .collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME)
+        .insert_one(bot)
+        .await
+        .unwrap();
+    complete_hosted_setup(&state, &link.id, &bot_id).await;
+    let arrived = Arc::new(tokio::sync::Barrier::new(3));
+    let manual_release = Arc::new(tokio::sync::Notify::new());
+    let automatic_release = Arc::new(tokio::sync::Notify::new());
+    let manual_gate = Arc::new(ConnectInsertGate {
+        bot_id: bot_id.clone(),
+        arrived: arrived.clone(),
+        release: manual_release.clone(),
+    });
+    let automatic_gate = Arc::new(ConnectInsertGate {
+        bot_id: bot_id.clone(),
+        arrived: arrived.clone(),
+        release: automatic_release.clone(),
+    });
+    let manual_state = state.clone();
+    let manual_bot = bot_id.clone();
+    let manual_home = home.id.clone();
+    let manual_agent = manual.clone();
+    let manual_task = tokio::spawn(CONNECT_INSERT_GATE.scope(manual_gate, async move {
+        connect(
+            &manual_state,
+            OWNER,
+            Some(&manual_home),
+            &manual_bot,
+            &manual_agent,
+        )
+        .await
+    }));
+    let automatic_state = state.clone();
+    let automatic_watch = watch.clone();
+    let automatic_task = tokio::spawn(CONNECT_INSERT_GATE.scope(automatic_gate, async move {
+        channel_bot_watch(&automatic_state, &automatic_watch).await
+    }));
+    // Both callers passed the no-current-channel preflight and created keys.
+    // Hold only this test's two tasks, then make the manual transaction win.
+    tokio::time::timeout(Duration::from_secs(30), arrived.wait())
+        .await
+        .unwrap();
+    manual_release.notify_one();
+    let (chosen, _) = tokio::time::timeout(Duration::from_secs(30), manual_task)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    automatic_release.notify_one();
+    tokio::time::timeout(Duration::from_secs(30), automatic_task)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let retained = active_for_bot(&state, OWNER, &bot_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(retained.id, chosen.id);
+    assert_eq!(retained.agent_id.as_deref(), Some(manual.id.as_str()));
+    assert_eq!(
+        state
+            .db
+            .collection::<NyxbotChannel>(CHANNELS)
+            .count_documents(doc! {"channel_bot_id":&bot_id,"status":{"$in":["pending","active"]}})
+            .await
+            .unwrap(),
+        1
+    );
+    let settled = state
+        .db
+        .collection::<NyxbotWatch>(WATCHES)
+        .find_one(doc! {"_id":&watch.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(settled.status, "failed");
+    wait_for_event(&state, &home.id, "could not be linked").await;
+    server.abort();
+}

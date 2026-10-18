@@ -1205,6 +1205,7 @@ impl PlatformAdapter for LarkFamilyAdapter {
             self.base_url
         );
 
+        crate::services::channel_platform::mark_provider_attempt();
         let resp: serde_json::Value = http
             .post(&url)
             .header("Authorization", format!("Bearer {tenant_token}"))

@@ -86,9 +86,8 @@ pub(crate) async fn decide_personal_reply_in_session(
         || update.command_eligibility != contract::ManagerCommandEligibility::OriginalPrivateMessage
         || update.profile_id != authority.manager.profile_id
         || update.manager_bot_id != authority.manager.manager_bot_id
-        || update.telegram_bot_id != authority.manager.telegram_bot_id
-        || update.sender_id != authority.sender_id
-        || update.chat_id != authority.chat_id
+        || update.entry != authority.manager.entry
+        || update.sender != authority.sender
     {
         return Ok(contract::PlatformDecisionOutcome::Unavailable(
             contract::UnavailableReason::OriginRevoked,
@@ -108,7 +107,7 @@ pub(crate) async fn decide_personal_reply_in_session(
                 conversation_id,
             )
             .await?,
-        contract::ThreadAuthorityResolution::Personal(resolved) if resolved == *authority
+        contract::ThreadAuthorityResolution::Personal(resolved) if *resolved == *authority
     ) {
         return Ok(contract::PlatformDecisionOutcome::Unavailable(
             contract::UnavailableReason::OriginRevoked,

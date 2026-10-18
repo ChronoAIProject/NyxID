@@ -22,7 +22,14 @@ impl Runtime {
         if request.authority.is_some() {
             return false;
         }
-        let now = chrono::Utc::now().timestamp_millis();
+        let Ok(clock) = nyxid_machine::authority::LeaseClock::signed(
+            request.timestamp,
+            authority.expires_at_ms,
+            chrono::Utc::now().timestamp_millis(),
+        ) else {
+            return false;
+        };
+        let now = clock.now_ms;
         let stop = matches!(
             request.operation,
             Operation::AuthorityRevoke | Operation::JobCancel
@@ -65,16 +72,28 @@ impl Runtime {
             .external_authority
             .take()
             .expect("validated external authority");
+        let clock = match nyxid_machine::authority::LeaseClock::signed(
+            request.timestamp,
+            authority.expires_at_ms,
+            chrono::Utc::now().timestamp_millis(),
+        ) {
+            Ok(clock) => clock,
+            Err(error) => {
+                return json!({"error":{"code":12421,"message":"machine_authority_stale: external timing refused","reason":error.reason()}});
+            }
+        };
         let control = match request.operation {
-            Operation::AuthorityRenew => Some(self.external_authority.renew(
+            Operation::AuthorityRenew => Some(self.external_authority.renew_at(
                 &authority,
                 &self.node_id,
                 &self.runtime_id,
+                clock,
             )),
-            Operation::AuthorityRevoke => Some(self.external_authority.revoke(
+            Operation::AuthorityRevoke => Some(self.external_authority.revoke_at(
                 &authority,
                 &self.node_id,
                 &self.runtime_id,
+                clock,
             )),
             _ => None,
         };
@@ -114,11 +133,12 @@ impl Runtime {
             }
             return json!({"job_id":id,"cancel_requested":true});
         }
-        let mut stopped = match self.external_authority.admit(
+        let mut stopped = match self.external_authority.admit_at(
             &authority,
             &self.node_id,
             &self.runtime_id,
             request.operation == Operation::Exec,
+            clock,
         ) {
             Ok(receiver) => receiver,
             Err(_) => {
@@ -450,15 +470,164 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn issue_1844_owner_result_keeps_verified_skew_timing_through_send() {
+        let (_root, runtime, a, _rx) = fixture().await;
+        assert!(start(&runtime, &a).await.get("error").is_none());
+        let mut request = signed_owner(&runtime, &a, Operation::Job);
+        request.timestamp += 3;
+        request.parameters["owner_job_access"]["expires_at_ms"] =
+            json!(chrono::Utc::now().timestamp_millis() + 48_000);
+        request.signature = nyxid_machine::signing::sign(&request, b"external-node-test");
+        let result = runtime.handle(request.clone(), b"external-node-test").await;
+        assert!(result.get("error").is_none(), "{result}");
+        let (tx, mut rx) = tokio::sync::mpsc::channel(2);
+        runtime
+            .send_result(
+                &tx,
+                &request.request_id,
+                Operation::Job,
+                0,
+                &request.parameters,
+                result,
+            )
+            .await;
+        let crate::node::ws_client::NodeWsMessage::Text(wire) = rx.recv().await.unwrap() else {
+            panic!("text")
+        };
+        let result: Value = serde_json::from_str(&wire).unwrap();
+        assert!(result["result"].get("error").is_none(), "{result}");
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn issue_1844_external_expired_activation_retains_revision_without_work() {
+        let (_root, runtime, mut a, _rx) = fixture().await;
+        a.grant_revision = 2;
+        let clock = nyxid_machine::authority::LeaseClock {
+            now_ms: chrono::Utc::now().timestamp_millis(),
+            deadline: std::time::Instant::now(),
+        };
+        assert!(
+            runtime
+                .external_authority
+                .admit_at(&a, &runtime.node_id, &runtime.runtime_id, true, clock)
+                .is_err()
+        );
+        assert!(!runtime.external_authority.live(&a.lease_id));
+        assert!(runtime.external_authority.expired_jobs().is_empty());
+        let reopened = external_authority::Fences::open(&runtime.status_directory).unwrap();
+        a.grant_revision = 1;
+        assert!(
+            reopened
+                .admit(&a, &runtime.node_id, &runtime.runtime_id, true)
+                .is_err()
+        );
+        a.grant_revision = 2;
+        reopened
+            .admit(&a, &runtime.node_id, &runtime.runtime_id, true)
+            .unwrap();
+        a.expires_at_ms += 1;
+        assert!(
+            reopened
+                .renew_at(&a, &runtime.node_id, &runtime.runtime_id, clock)
+                .is_err()
+        );
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn issue_1844_owner_cancel_rechecks_deadline_after_authorization() {
+        let (_root, runtime, a, _rx) = fixture().await;
+        assert!(start(&runtime, &a).await.get("error").is_none());
+        let request = signed_owner(&runtime, &a, Operation::JobCancel);
+        let access = runtime.owner_job_access(&request).unwrap();
+        let result = runtime
+            .handle_owner_job_at(
+                request,
+                access,
+                nyxid_machine::authority::LeaseClock {
+                    now_ms: chrono::Utc::now().timestamp_millis(),
+                    deadline: std::time::Instant::now(),
+                },
+            )
+            .await;
+        assert_eq!(result["error"]["code"], 12421, "{result}");
+        assert!(
+            runtime.jobs.running(a.job_id.as_deref().unwrap()).await,
+            "expired cancellation must have no effect"
+        );
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn issue_1844_owner_cancel_receipt_replay_retains_original_deadline() {
+        let (_root, runtime, a, _rx) = fixture().await;
+        assert!(start(&runtime, &a).await.get("error").is_none());
+        let request = signed_owner(&runtime, &a, Operation::JobCancel);
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(2);
+        let mut first = None;
+        for _ in 0..2 {
+            let result = runtime.handle(request.clone(), b"external-node-test").await;
+            assert_eq!(result["cancel_requested"], true, "{result}");
+            runtime
+                .send_result(
+                    &sender,
+                    &request.request_id,
+                    Operation::JobCancel,
+                    0,
+                    &request.parameters,
+                    result,
+                )
+                .await;
+            let crate::node::ws_client::NodeWsMessage::Text(wire) = receiver.recv().await.unwrap()
+            else {
+                panic!("text")
+            };
+            let result: Value = serde_json::from_str(&wire).unwrap();
+            assert_eq!(result["result"]["cancel_requested"], true, "{result}");
+            let deadline = runtime.owner_job_deadlines.lock().unwrap()[&request.request_id].1;
+            if let Some(original) = first {
+                assert_eq!(deadline, original);
+            } else {
+                first = Some(deadline);
+            }
+        }
+        runtime
+            .owner_job_deadlines
+            .lock()
+            .unwrap()
+            .get_mut(&request.request_id)
+            .unwrap()
+            .1 = std::time::Instant::now();
+        let result = runtime.handle(request.clone(), b"external-node-test").await;
+        runtime
+            .send_result(
+                &sender,
+                &request.request_id,
+                Operation::JobCancel,
+                0,
+                &request.parameters,
+                result,
+            )
+            .await;
+        let crate::node::ws_client::NodeWsMessage::Text(wire) = receiver.recv().await.unwrap()
+        else {
+            panic!("text")
+        };
+        let result: Value = serde_json::from_str(&wire).unwrap();
+        assert_eq!(result["result"]["error"]["code"], 12421, "{result}");
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test]
     async fn owner_output_rechecks_management_expiry_after_socket_backpressure() {
         let (_root, runtime, a, _rx) = fixture().await;
         assert!(start(&runtime, &a).await.get("error").is_none());
         let request = signed_owner(&runtime, &a, Operation::Job);
         let output = runtime.handle(request.clone(), b"external-node-test").await;
         assert!(output.get("error").is_none());
-        let mut parameters = request.parameters.clone();
-        parameters["owner_job_access"]["expires_at_ms"] =
-            json!(chrono::Utc::now().timestamp_millis() + 30);
+        let parameters = request.parameters.clone();
+        let request_id = request.request_id.clone();
         let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
         sender
             .send(crate::node::ws_client::NodeWsMessage::Text("held".into()))
@@ -477,7 +646,15 @@ mod tests {
                 )
                 .await;
         });
-        tokio::time::sleep(std::time::Duration::from_millis(45)).await;
+        // Expire the verified monotonic deadline while output is queued.
+        // No signature mutation or wall-clock sleep can mask this regression.
+        runtime
+            .owner_job_deadlines
+            .lock()
+            .unwrap()
+            .get_mut(&request_id)
+            .unwrap()
+            .1 = std::time::Instant::now();
         receiver.recv().await.unwrap();
         send.await.unwrap();
         let crate::node::ws_client::NodeWsMessage::Text(result) = receiver.recv().await.unwrap()

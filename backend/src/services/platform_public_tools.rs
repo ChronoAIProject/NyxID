@@ -18,6 +18,8 @@ use zeroize::Zeroizing;
 
 pub(crate) const INSTRUCTIONS: &str = "You are the NyxID public guide. Answer only using the approved public FAQ tools. Explain NyxID and its use cases, and offer public_signup_link when the visitor wants to review or create their own account. You have no personal account, memory, connected services, private documents or general tools. Never request passwords, keys or login codes. A signup link does not confer consent; personal linking requires website review and a final original confirmation command in the same private chat.";
 const MAX_RESULT_BYTES: usize = 8192;
+pub(crate) const COMPACT_INSTRUCTIONS: &str = "Summarize this public FAQ conversation as plain text, preserving approved FAQ facts and unresolved questions. Do not call tools or add private account information.";
+pub(crate) const COMPACT_PROMPT: &str = "You are performing a CONTEXT CHECKPOINT COMPACTION. Create a handoff summary for another LLM that will resume the task.\n\nInclude:\n- Current progress and key decisions made\n- Important context, constraints, or user preferences\n- What remains to be done (clear next steps)\n- Any critical data, examples, or references needed to continue\n\nBe concise, structured, and focused on helping the next LLM seamlessly continue the work.\n";
 const WRAPPER: &str = "nyx__call_tool";
 
 fn denied() -> AppError {
@@ -113,7 +115,7 @@ pub(crate) async fn authenticate(
     let manager = ManagerAuthority {
         profile_id: row.profile_id.clone(),
         manager_bot_id: row.manager_bot_id.clone(),
-        telegram_bot_id: row.telegram_bot_id,
+        entry: row.entry.clone(),
         manager_authority_epoch: row.manager_authority_epoch,
     };
     let (_, evidence) = policy::verified_readiness(
@@ -134,11 +136,10 @@ pub(crate) async fn authenticate(
             manager: ManagerAuthority {
                 profile_id: row.profile_id,
                 manager_bot_id: row.manager_bot_id,
-                telegram_bot_id: row.telegram_bot_id,
+                entry: row.entry.clone(),
                 manager_authority_epoch: row.manager_authority_epoch,
             },
-            sender_id: row.sender_id,
-            chat_id: row.chat_id,
+            sender: row.sender.clone(),
             public_policy_revision: row.public_policy_revision,
         },
         public_session_id: row.id,
@@ -183,7 +184,7 @@ pub(crate) fn definitions() -> Value {
     json!({"tools":[
         {"name":"public_faq_search","title":"Search public NyxID help","description":"Search the approved public NyxID FAQ.","inputSchema":{"type":"object","properties":{"query":{"type":"string","minLength":1,"maxLength":256}},"required":["query"],"additionalProperties":false},"annotations":{"readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}},
         {"name":"public_faq_read","title":"Read public NyxID help","description":"Read one article returned by public_faq_search.","inputSchema":{"type":"object","properties":{"article_id":{"type":"string","minLength":1,"maxLength":80}},"required":["article_id"],"additionalProperties":false},"annotations":{"readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}},
-        {"name":"public_signup_link","title":"Review your NyxID account link","description":"Offer this private-chat visitor a link to sign in or create their own NyxID account and review linking. Final confirmation is required in Telegram.","inputSchema":{"type":"object","properties":{},"additionalProperties":false},"annotations":{"readOnlyHint":false,"destructiveHint":false,"idempotentHint":false,"openWorldHint":false}}
+        {"name":"public_signup_link","title":"Review your NyxID account link","description":"Offer this private-chat visitor a link to sign in or create their own NyxID account and review linking. Final confirmation is required in the same original private chat using the controls shown by NyxID.","inputSchema":{"type":"object","properties":{},"additionalProperties":false},"annotations":{"readOnlyHint":false,"destructiveHint":false,"idempotentHint":false,"openWorldHint":false}}
     ]})
 }
 
@@ -365,13 +366,16 @@ pub(crate) async fn execute(
         )
         .await
         .map_err(tx::map_transaction_error)?;
+    let chat = super::platform_chat_presentation::ChatPresentation::for_entry(
+        &authority.context.ingress.manager.entry,
+    )?;
     let output = match value {
         Ok(Some(token)) => {
             let status=super::platform_manager_delivery::deliver_public_signup(state,&authority.context,token).await?;
-            Zeroizing::new(serde_json::to_string(&signup_result(status)).map_err(|_|denied())?)
+            Zeroizing::new(serde_json::to_string(&signup_result(status,chat)).map_err(|_|denied())?)
         }
         Ok(None) => Zeroizing::new(serde_json::to_string(&json!({
-            "status":"already_issued","message":"A link was already issued for this request. If it is unavailable, send an original /link message in this private chat."
+            "status":"already_issued","message":format!("A link was already issued for this request. If it is unavailable, send {} using this private chat's original control surface.",chat.login())
         })).map_err(|_|denied())?),
         Err(value) => Zeroizing::new(serde_json::to_string(&value).map_err(|_|denied())?),
     };
@@ -381,17 +385,20 @@ pub(crate) async fn execute(
     Ok(output)
 }
 
-fn signup_result(status: super::platform_manager_delivery::PublicSignupDeliveryOutcome) -> Value {
+fn signup_result(
+    status: super::platform_manager_delivery::PublicSignupDeliveryOutcome,
+    chat: super::platform_chat_presentation::ChatPresentation,
+) -> Value {
     use super::platform_manager_delivery::PublicSignupDeliveryOutcome;
     match status {
         PublicSignupDeliveryOutcome::Sent => {
             json!({"status":"sent","message":"The account review link was sent separately in this private chat. Website review and a final original confirmation are still required."})
         }
         PublicSignupDeliveryOutcome::Unavailable => {
-            json!({"status":"unavailable","message":"The link could not be delivered. Send an original /link message in this private chat."})
+            json!({"status":"unavailable","message":format!("The link could not be delivered. Send {} using this private chat's original control surface.",chat.login())})
         }
         PublicSignupDeliveryOutcome::Uncertain => {
-            json!({"status":"uncertain","message":"Link delivery could not be confirmed. If no link arrived, send an original /link message in this private chat."})
+            json!({"status":"uncertain","message":format!("Link delivery could not be confirmed. If no link arrived, send {} using this private chat's original control surface.",chat.login())})
         }
     }
 }
@@ -452,7 +459,10 @@ mod tests {
             (Unavailable, "unavailable"),
             (Uncertain, "uncertain"),
         ] {
-            let result = signup_result(state);
+            let result = signup_result(
+                state,
+                super::super::platform_chat_presentation::ChatPresentation::Telegram,
+            );
             assert_eq!(result["status"], expected);
             let encoded = result.to_string();
             assert!(!encoded.contains("nyx_pli_"));

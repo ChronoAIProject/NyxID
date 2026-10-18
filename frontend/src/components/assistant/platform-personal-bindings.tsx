@@ -26,23 +26,22 @@ function OwnedBindings() {
   const [review, setReview] = useState<PersonalBinding>();
   const rows = query.data?.pages.flatMap((page) => page.bindings) ?? [];
   return (
-    <section aria-label="Personal Telegram links" className="space-y-3 text-12">
+    <section aria-label="Personal chat links" className="space-y-3 text-12">
       <p>
-        These platform-operated Telegram bots use your existing NyxBot
-        permissions and personal billing. Each verified identity has its own
-        thread.
+        These platform-operated chat bots use your existing NyxBot permissions
+        and personal billing. Each verified identity has its own thread.
       </p>
       {query.isPending && <p role="status">Loading personal links...</p>}
       {query.error && (
         <ErrorBanner
-          message="Personal Telegram links are unavailable."
+          message="Personal chat links are unavailable."
           onRetry={() => void query.refetch()}
         />
       )}
       {query.isSuccess && rows.length === 0 && (
         <p className="rounded-lg border border-dashed border-border p-4 text-muted-foreground">
-          No personal Telegram links. Send /link in a platform bot's private
-          chat to begin.
+          No personal chat links. Use the login control shown by a platform
+          bot's private chat help to begin.
         </p>
       )}
       {rows.map((row) => (
@@ -52,7 +51,8 @@ function OwnedBindings() {
         >
           <p className="font-medium">{row.manager.display_name}</p>
           <p className="text-muted-foreground">
-            Telegram account {row.sender.display_name ?? row.sender.id} ·{" "}
+            {row.chat.display_name} account{" "}
+            {row.sender.display_name ?? row.sender.id} ·{" "}
             {row.state === "active" ? "Linked" : "Disconnected"}
           </p>
           {row.conversation_id ? (
@@ -60,11 +60,11 @@ function OwnedBindings() {
               className="underline"
               href={`/assistant?c=${encodeURIComponent(row.conversation_id)}`}
             >
-              Open saved Telegram thread
+              Open saved {row.chat.display_name} thread
             </a>
           ) : row.state === "active" ? (
             <p>
-              Send your first private message to create the Telegram thread.
+              {row.chat.question_instruction} This creates its saved thread.
             </p>
           ) : null}
           {row.state === "active" && (
@@ -94,7 +94,9 @@ function OwnedBindings() {
       >
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Disconnect personal Telegram access?</DialogTitle>
+            <DialogTitle>
+              Disconnect personal {review?.chat.display_name ?? "chat"} access?
+            </DialogTitle>
             <DialogDescription>
               Work already started may keep running in NyxID; stop it from the
               app. Your saved thread and pending approvals remain available.

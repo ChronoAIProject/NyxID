@@ -39,7 +39,7 @@ const reasons: Record<NonNullable<PublicReadiness["reason"]>, string> = {
   personal_disabled: "Personal access is paused.",
   public_disabled: "Public access is paused.",
   owner_unavailable: "The owner account is unavailable.",
-  transport_unavailable: "Telegram transport is unavailable.",
+  transport_unavailable: "Chat transport is unavailable.",
   origin_revoked: "This authorization was revoked.",
   engine_unavailable: "NyxAgent is unavailable.",
   insufficient_funds: "The sponsor has insufficient credits.",

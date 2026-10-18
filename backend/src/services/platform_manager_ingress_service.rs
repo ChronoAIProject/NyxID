@@ -6,9 +6,9 @@ use chrono::{Duration, Utc};
 use mongodb::{
     ClientSession, Database, IndexModel,
     bson::{self, Document, doc},
-    options::IndexOptions,
 };
 
+use super::platform_entry_scope as scope;
 use super::platform_manager_contract::*;
 use crate::{
     errors::{AppError, AppResult},
@@ -29,15 +29,8 @@ fn changed() -> AppError {
 }
 
 pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> {
+    super::platform_entry_migration::ensure_indexes(db).await?;
     let collection = db.collection::<Document>(COLLECTION_NAME);
-    collection
-        .create_index(
-            IndexModel::builder()
-                .keys(doc! {"manager_bot_id": 1, "telegram_bot_id": 1, "sender_id": 1, "update_id": 1})
-                .options(IndexOptions::builder().unique(true).build())
-                .build(),
-        )
-        .await?;
     collection
         .create_index(
             IndexModel::builder()
@@ -57,12 +50,21 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
 }
 
 fn update_identity(update: &VerifiedManagerUpdate) -> Document {
-    doc! {
-        "manager_bot_id": &update.manager_bot_id,
-        "telegram_bot_id": update.telegram_bot_id,
-        "sender_id": update.sender_id,
-        "update_id": update.update_id,
+    let mut filter = doc! {"manager_bot_id":&update.manager_bot_id};
+    filter.extend(scope::entry_fields(&update.entry));
+    filter.extend(scope::sender_key_fields(&update.sender, true));
+    match &update.event {
+        EventIdentity::TelegramV1 { update_id, .. } => {
+            filter.insert("update_id", *update_id);
+        }
+        EventIdentity::NativeV2 {
+            platform_event_id, ..
+        } => {
+            filter.insert("profile_id", &update.profile_id);
+            filter.insert("platform_event_id", platform_event_id);
+        }
     }
+    filter
 }
 
 /// Check this before resolving the current audience. A retry never reclassifies.
@@ -95,7 +97,7 @@ pub async fn record_admission_in_session(
     }
     if manager.profile_id != update.profile_id
         || manager.manager_bot_id != update.manager_bot_id
-        || manager.telegram_bot_id != update.telegram_bot_id
+        || manager.entry != update.entry
         || manager.manager_authority_epoch <= 0
         || ingress.receipt_id.is_empty()
         || ingress.claim_id.is_empty()
@@ -107,15 +109,15 @@ pub async fn record_admission_in_session(
             if update.chat_kind == ManagerChatKind::Private
                 && update.command_eligibility
                     == ManagerCommandEligibility::OriginalPrivateMessage
-                && update.sender_id == update.chat_id =>
+                && scope::validate(&update.entry, &update.manager_bot_id, Some(&update.sender))
+                    .is_ok() =>
         {
             IngressAudience::Control
         }
         ManagerAudience::Personal(admitted)
             if admitted.ingress == *ingress
                 && admitted.authority.manager == *manager
-                && admitted.authority.sender_id == update.sender_id
-                && admitted.authority.chat_id == update.chat_id
+                && admitted.authority.sender == update.sender
                 && update.chat_kind == ManagerChatKind::Private =>
         {
             IngressAudience::Personal {
@@ -128,8 +130,7 @@ pub async fn record_admission_in_session(
         ManagerAudience::Public(admitted)
             if admitted.ingress == *ingress
                 && admitted.manager == *manager
-                && admitted.sender_id == update.sender_id
-                && admitted.chat_id == update.chat_id
+                && admitted.sender == update.sender
                 && update.chat_kind == ManagerChatKind::Private =>
         {
             IngressAudience::Public {
@@ -150,13 +151,11 @@ pub async fn record_admission_in_session(
         claim_id: ingress.claim_id.clone(),
         profile_id: manager.profile_id.clone(),
         manager_bot_id: manager.manager_bot_id.clone(),
-        telegram_bot_id: manager.telegram_bot_id,
+        entry: manager.entry.clone(),
         manager_authority_epoch: manager.manager_authority_epoch,
         observation_id: update.observation_id.clone(),
-        sender_id: update.sender_id,
-        chat_id: update.chat_id,
-        update_id: update.update_id,
-        message_id: update.message_id,
+        sender: update.sender.clone(),
+        event: update.event.clone(),
         original_private_command: update.chat_kind == ManagerChatKind::Private
             && update.command_eligibility == ManagerCommandEligibility::OriginalPrivateMessage,
         audience: stored_audience,
@@ -164,6 +163,7 @@ pub async fn record_admission_in_session(
         execution: None,
         decision: None,
         reply_id: None,
+        control_effect: None,
         delivery_recovery_queued: false,
         interrupted_reason: None,
         effect_revision: 0,
@@ -216,9 +216,9 @@ fn personal_filter(admitted: &AdmittedPersonalUpdate) -> Document {
     filter.extend(doc! {
         "profile_id": &authority.manager.profile_id,
         "manager_bot_id": &authority.manager.manager_bot_id,
-        "telegram_bot_id": authority.manager.telegram_bot_id,
+        (scope::entry_key(&authority.manager.entry)):scope::entry_value(&authority.manager.entry),
         "manager_authority_epoch": authority.manager.manager_authority_epoch,
-        "sender_id": authority.sender_id, "chat_id": authority.chat_id,
+        (scope::actor_key(&authority.sender,true)):scope::actor_value(&authority.sender), (scope::destination_key(&authority.sender,true)):scope::destination_value(&authority.sender),
         "audience.kind": "personal", "audience.user_id": &authority.user_id,
         "audience.binding_id": &authority.binding_id,
         "audience.binding_generation": authority.binding_generation,
@@ -319,9 +319,8 @@ impl ManagerIngressTurnStore for IngressTurnStore {
         let update = command.update();
         if update.profile_id != admitted.authority.manager.profile_id
             || update.manager_bot_id != admitted.authority.manager.manager_bot_id
-            || update.telegram_bot_id != admitted.authority.manager.telegram_bot_id
-            || update.sender_id != admitted.authority.sender_id
-            || update.chat_id != admitted.authority.chat_id
+            || update.entry != admitted.authority.manager.entry
+            || update.sender != admitted.authority.sender
         {
             return Err(changed());
         }
@@ -330,9 +329,9 @@ impl ManagerIngressTurnStore for IngressTurnStore {
         filter.extend(doc! {
             "original_private_command": true,
             "observation_id": &update.observation_id,
-            "update_id": update.update_id,
-            "message_id": update.message_id,
+
         });
+        filter.extend(scope::event_fields(&update.event));
         update_exact(
             db,
             session,
@@ -375,9 +374,9 @@ impl ManagerIngressTurnStore for IngressTurnStore {
         filter.extend(doc! {
             "profile_id": &ingress.manager.profile_id,
             "manager_bot_id": &ingress.manager.manager_bot_id,
-            "telegram_bot_id": ingress.manager.telegram_bot_id,
+            (scope::entry_key(&ingress.manager.entry)):scope::entry_value(&ingress.manager.entry),
             "manager_authority_epoch": ingress.manager.manager_authority_epoch,
-            "sender_id": ingress.sender_id, "chat_id": ingress.chat_id,
+            (scope::actor_key(&ingress.sender,true)):scope::actor_value(&ingress.sender), (scope::destination_key(&ingress.sender,true)):scope::destination_value(&ingress.sender),
             "audience.kind": "public", "audience.public_policy_revision": ingress.public_policy_revision,
         });
         unclaimed(&mut filter);
@@ -490,14 +489,20 @@ mod tests {
         ensure_indexes(&db).await.unwrap();
         let update = VerifiedManagerUpdate {
             profile_id: Uuid::new_v4().to_string(),
-            manager_bot_id: Uuid::new_v4().to_string(),
-            telegram_bot_id: 100,
+            manager_bot_id: "100".into(),
+            entry: EntryIdentity::TelegramV1 {
+                telegram_bot_id: 100,
+            },
             observation_id: Uuid::new_v4().to_string(),
-            sender_id: 200,
-            chat_id: 200,
+            sender: SenderIdentity::TelegramV1 {
+                telegram_sender_id: 200,
+                telegram_chat_id: 200,
+            },
             chat_kind: ManagerChatKind::Private,
-            update_id: 300,
-            message_id: 400,
+            event: EventIdentity::TelegramV1 {
+                update_id: 300,
+                message_id: 400,
+            },
             command_eligibility: ManagerCommandEligibility::OriginalPrivateMessage,
         };
         let admitted = AdmittedPersonalUpdate {
@@ -509,11 +514,10 @@ mod tests {
                 manager: ManagerAuthority {
                     profile_id: update.profile_id.clone(),
                     manager_bot_id: update.manager_bot_id.clone(),
-                    telegram_bot_id: update.telegram_bot_id,
+                    entry: update.entry.clone(),
                     manager_authority_epoch: 1,
                 },
-                sender_id: update.sender_id,
-                chat_id: update.chat_id,
+                sender: update.sender.clone(),
                 binding_id: Uuid::new_v4().to_string(),
                 binding_generation: 1,
                 personal_control_revision: 1,
@@ -647,8 +651,7 @@ mod tests {
                 claim_id: Uuid::new_v4().to_string(),
             },
             manager: admitted.authority.manager.clone(),
-            sender_id: update.sender_id,
-            chat_id: update.chat_id,
+            sender: update.sender.clone(),
             public_policy_revision: 8,
         };
         let duplicate = record_admission_in_session(
@@ -755,7 +758,9 @@ mod tests {
         };
         let mut session = db.client().start_session().await.unwrap();
         let mut wrong_update = update.clone();
-        wrong_update.update_id += 1;
+        if let EventIdentity::TelegramV1 { update_id, .. } = &mut wrong_update.event {
+            *update_id += 1;
+        }
         let wrong_command = OriginalManagerCommand::from_verified(
             wrong_update,
             TurnInput {

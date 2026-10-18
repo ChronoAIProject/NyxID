@@ -1,3 +1,6 @@
+use super::platform_entry_projection::{
+    StoredEntryIdentity, StoredSenderIdentity, checked_identity_record, same_version,
+};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -40,17 +43,19 @@ pub struct ReviewedPersonalBinding {
     pub state: super::platform_personal_binding::PersonalBindingState,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
-pub struct PlatformLinkIntent {
+checked_identity_record! {
+#[derive(Clone, Serialize)]
+pub struct PlatformLinkIntent, RawPlatformLinkIntent {
     #[serde(rename = "_id")]
     pub id: String,
     pub purpose: String,
     pub platform_config_id: String,
     pub manager_bot_id: String,
-    pub telegram_bot_id: i64,
+    #[serde(flatten)]
+    pub entry: StoredEntryIdentity,
     pub manager_authority_epoch: i64,
-    pub telegram_sender_id: i64,
-    pub telegram_chat_id: i64,
+    #[serde(flatten)]
+    pub sender: StoredSenderIdentity,
     pub initiation_ref: String,
     pub token_lookup_hmac: String,
     pub token_hmac: String,
@@ -65,19 +70,23 @@ pub struct PlatformLinkIntent {
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub purge_after: DateTime<Utc>,
 }
+|record| same_version(&record.entry, &record.sender, None) && super::platform_entry_projection::entry_matches(&record.entry, &record.manager_bot_id)
+}
 
-#[derive(Clone, Serialize, Deserialize)]
-pub struct PlatformLinkChallenge {
+checked_identity_record! {
+#[derive(Clone, Serialize)]
+pub struct PlatformLinkChallenge, RawPlatformLinkChallenge {
     #[serde(rename = "_id")]
     pub id: String,
     pub intent_id: String,
     pub purpose: String,
     pub platform_config_id: String,
     pub manager_bot_id: String,
-    pub telegram_bot_id: i64,
+    #[serde(flatten)]
+    pub entry: StoredEntryIdentity,
     pub manager_authority_epoch: i64,
-    pub telegram_sender_id: i64,
-    pub telegram_chat_id: i64,
+    #[serde(flatten)]
+    pub sender: StoredSenderIdentity,
     pub reviewed_user_id: String,
     pub reviewed_access_mode: String,
     pub consent_version: u32,
@@ -93,6 +102,8 @@ pub struct PlatformLinkChallenge {
     pub expires_at: DateTime<Utc>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub purge_after: DateTime<Utc>,
+}
+|record| same_version(&record.entry, &record.sender, None) && super::platform_entry_projection::entry_matches(&record.entry, &record.manager_bot_id)
 }
 
 impl std::fmt::Debug for PlatformLinkIntent {

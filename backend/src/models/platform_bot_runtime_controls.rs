@@ -1,3 +1,4 @@
+use super::platform_entry_projection::{StoredEntryIdentity, checked_identity_record};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -16,14 +17,16 @@ pub struct PublicRuntimePolicy {
     pub sender_daily_credits: Credits,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct PlatformBotRuntimeControls {
+checked_identity_record! {
+#[derive(Clone, Debug, Serialize)]
+pub struct PlatformBotRuntimeControls, RawPlatformBotRuntimeControls {
     #[serde(rename = "_id")]
     pub id: String,
     pub contract_version: u32,
     pub platform_config_id: String,
     pub manager_bot_id: String,
-    pub telegram_bot_id: i64,
+    #[serde(flatten)]
+    pub entry: StoredEntryIdentity,
     pub manager_authority_epoch: i64,
     pub personal_control_revision: i64,
     pub public_policy_revision: i64,
@@ -38,6 +41,11 @@ pub struct PlatformBotRuntimeControls {
     pub created_at: DateTime<Utc>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub updated_at: DateTime<Utc>,
+}
+|record| record.contract_version == match &record.entry {
+    StoredEntryIdentity::TelegramV1 { .. } => 1,
+    StoredEntryIdentity::NativeV2 { .. } => 2,
+} && super::platform_entry_projection::entry_matches(&record.entry, &record.manager_bot_id)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

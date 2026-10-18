@@ -952,6 +952,7 @@ fn stale_test_row(now: DateTime<Utc>) -> AssistantConversation {
         credential_api_key_id: "key".into(),
         message_count: 0,
         active_turn: Some(ActiveTurn {
+            channel_adapter_origin: None,
             platform_reply: None,
             execution_started: false,
             machine_scopes: Vec::new(),
@@ -1032,8 +1033,10 @@ fn platform_test_origin(
         thread: PlatformThread {
             platform: "telegram".into(),
             profile_id: "manager-profile".into(),
-            manager_bot_id: "manager".into(),
-            telegram_bot_id: 123,
+            manager_bot_id: "123".into(),
+            entry: crate::models::platform_entry_projection::StoredEntryIdentity::TelegramV1 {
+                telegram_bot_id: 123,
+            },
             binding_id: "personal-binding".into(),
             binding_generation: 7,
             user_id: row.user_id.clone(),
@@ -1041,8 +1044,10 @@ fn platform_test_origin(
         },
         manager_authority_epoch: 3,
         personal_control_revision: 11,
-        sender_id: 456,
-        chat_id: 789,
+        sender: crate::models::platform_entry_projection::StoredSenderIdentity::TelegramV1 {
+            telegram_sender_id: 456,
+            telegram_chat_id: 456,
+        },
         source: PlatformOriginSource::Ingress {
             receipt_id: "receipt".into(),
             claim_id: "claim".into(),
@@ -1072,8 +1077,8 @@ async fn seed_platform_execution(
     db.collection::<bson::Document>(crate::models::platform_manager_ingress::COLLECTION_NAME).insert_one(doc! {
         "_id":receipt_id, "claim_id":claim_id, "phase":"executing", "reply_id":bson::Bson::Null,"decision":bson::Bson::Null,
         "profile_id":&proof.thread.profile_id,"manager_bot_id":&proof.thread.manager_bot_id,
-        "telegram_bot_id":proof.thread.telegram_bot_id,"manager_authority_epoch":proof.manager_authority_epoch,
-        "sender_id":proof.sender_id,"chat_id":proof.chat_id,
+        "telegram_bot_id":crate::services::platform_entry_scope::legacy_bot_id(&proof.thread.entry),"manager_authority_epoch":proof.manager_authority_epoch,
+        "sender_id":crate::services::platform_entry_scope::legacy_sender_id(&proof.sender),"chat_id":crate::services::platform_entry_scope::legacy_chat_id(&proof.sender),
         "audience":{"kind":"personal","user_id":&row.user_id,"binding_id":&proof.thread.binding_id,
             "binding_generation":proof.thread.binding_generation,"personal_control_revision":proof.personal_control_revision},
         "execution":{"conversation_id":&row.id,"turn_id":&turn.turn_id,"payer_user_id":&row.user_id},
@@ -5098,6 +5103,7 @@ async fn platform_thread_requires_live_turn_with_ordinary_rollout_disabled() {
     let db = connect_transaction_test_database("nyxa_platform_gate_off").await;
     let owner = Uuid::new_v4().to_string();
     let mut fence = AssistantTurnFence {
+        channel_adapter_origin: None,
         conversation_id: Uuid::new_v4().to_string(),
         turn_id: None,
         turn_live: false,

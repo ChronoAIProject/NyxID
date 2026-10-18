@@ -74,7 +74,38 @@ describe("machine capability editor", () => {
     query.mockReturnValue({ data: [{ ...machine, revocation_pending: true }] });
     render(<MachineCapabilities agentId="agent" />);
     expect(screen.getByText(/Existing legacy access stays until edited/)).toBeInTheDocument();
-    expect(screen.getByText(/leased work stops within 45 seconds/)).toBeInTheDocument();
+    expect(screen.getByText(/Earlier commands are stopping/)).toBeInTheDocument();
+    expect(screen.queryByText(/Online revocation is immediate/)).not.toBeInTheDocument();
+  });
+  it("shows neutral status while the recovery time is being checked", () => {
+    render(<MachineCapabilityForm machine={{ ...machine, revocation_pending: true, revocation_initialization_pending: true }} agentId="agent" />);
+    expect(screen.getByText(/Checking when earlier commands will stop/)).toBeInTheDocument();
+    expect(screen.queryByText(/Update and reconnect/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/They should stop by/)).not.toBeInTheDocument();
+  });
+  it("shows the recovery time or upgrade action, and a separate recovery error", () => {
+    const deadline = "2026-10-16T02:43:26Z";
+    const { rerender } = render(<MachineCapabilityForm machine={{ ...machine, revocation_pending: true, revocation_expires_at: deadline }} agentId="agent" />);
+    expect(screen.getByText(/They should stop by/)).toHaveTextContent(new Date(deadline).toLocaleString());
+    rerender(<MachineCapabilityForm machine={{ ...machine, revocation_pending: true, revocation_diagnostic: "authority_timing_upgrade_required" }} agentId="agent" />);
+    expect(screen.getByText(/Update and reconnect this machine to confirm permission changes/)).toBeInTheDocument();
+    rerender(<MachineCapabilityForm machine={{ ...machine, revocation_pending: true, revocation_diagnostic: "revocation_deadline_invalid" }} agentId="agent" />);
+    expect(screen.getByText(/Recovery status needs administrator attention/)).toBeInTheDocument();
+  });
+  it("distinguishes execution expiry from undelivered fences and quarantine", () => {
+    const { rerender } = render(<MachineCapabilityForm machine={{ ...machine, revocation_pending: false, execution_revocation_pending: false, delivery_pending: true }} agentId="agent" />);
+    expect(screen.getByText(/Earlier commands have stopped/)).toBeInTheDocument();
+    rerender(<MachineCapabilityForm machine={{ ...machine, revocation_pending: true, execution_revocation_pending: false, delivery_pending: true, quarantine_pending: true }} agentId="agent" />);
+    expect(screen.getByText(/Browser cleanup is pending/)).toBeInTheDocument();
+    expect(screen.queryByText(/Earlier commands are stopping/)).not.toBeInTheDocument();
+  });
+  it("refreshes status explicitly without a capability write", () => {
+    const refetch = vi.fn();
+    query.mockReturnValue({ data: [machine], refetch });
+    render(<MachineCapabilities agentId="agent" />);
+    fireEvent.click(screen.getByRole("button", { name: "Refresh machine status" }));
+    expect(refetch).toHaveBeenCalledOnce();
+    expect(save).not.toHaveBeenCalled();
   });
   it("members can see permissions but cannot edit the machine owner's grants", () => {
     render(<MachineCapabilityForm machine={{ ...machine, can_edit: false }} agentId="agent" />);

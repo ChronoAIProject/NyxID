@@ -1,5 +1,6 @@
 //! Exact cap bookkeeping and a durable bridge to existing sponsor usage meters.
 //! This module never debits a wallet or emits a second billing ledger posting.
+use super::platform_entry_scope as scope;
 use super::{
     api_key_mutation_service as tx,
     billing::{self, BillingRouteContext, MeteredProxyContext},
@@ -70,8 +71,12 @@ pub(crate) struct CallQuote {
     maximum: Credits,
     input: i64,
     output: i64,
+    continuation: bool,
 }
 impl CallQuote {
+    pub(crate) fn set_continuation(&mut self, continuation: bool) {
+        self.continuation = continuation;
+    }
     pub(crate) fn route(&self) -> &BillingRouteContext {
         &self.route
     }
@@ -148,7 +153,7 @@ pub(crate) async fn seed_buckets(db: &Database, context: &PublicExecutionContext
             format!(
                 "sender:{}:{}:{}",
                 context.ingress.manager.profile_id,
-                context.ingress.sender_id,
+                scope::budget_actor(&context.ingress.manager.entry, &context.ingress.sender)?,
                 day.timestamp()
             ),
         ] {
@@ -185,20 +190,10 @@ pub(crate) async fn quote_dispatch(
         || operation.max_output_tokens == 0
         || operation.max_response_bytes == 0
         || operation.max_input_bytes == 0
-        || !context.model_operations.iter().any(|op| {
-            op.service_id == operation.service_id
-                && op.model_id == operation.model_id
-                && op.operation == operation.operation
-                && op.execution_authority_digest == operation.execution_authority_digest
-                && op.max_input_tokens == operation.max_input_tokens
-                && op.max_output_tokens == operation.max_output_tokens
-                && op.method == operation.method
-                && op.canonical_path == operation.canonical_path
-                && op.protocol == operation.protocol
-                && op.endpoint_generation == operation.endpoint_generation
-                && op.max_input_bytes == operation.max_input_bytes
-                && op.max_response_bytes == operation.max_response_bytes
-        })
+        || !context
+            .model_operations
+            .iter()
+            .any(|op| super::platform_public_policy::operation_matches(op, operation))
         || uuid::Uuid::parse_str(call_id).is_err()
     {
         return Err(denied());
@@ -228,6 +223,7 @@ pub(crate) async fn quote_dispatch(
         return Err(denied());
     }
     Ok(CallQuote {
+        continuation: false,
         route,
         maximum,
         input: i64::from(operation.max_input_tokens),
@@ -292,7 +288,7 @@ pub(crate) async fn reserve_loop_in_session(
         receipt_id: context.ingress.ingress.receipt_id.clone(),
         claim_id: context.ingress.ingress.claim_id.clone(),
         profile_id: row.profile_id.clone(),
-        sender_id: row.sender_id,
+        actor: scope::budget_identity(&row.entry, &row.sender)?,
         sponsor_owner_user_id: row.sponsor_owner_user_id,
         credential_api_key_id: key_id.into(),
         policy_digest: context.policy_digest.clone(),
@@ -305,6 +301,8 @@ pub(crate) async fn reserve_loop_in_session(
         spent: Credits::ZERO,
         calls: 0,
         max_calls: i64::from(max_calls),
+        continuations: 0,
+        max_continuations: i64::from(context.limits.max_continuations),
         input_tokens: 0,
         output_tokens: 0,
         max_input_tokens: i64::from(context.limits.max_input_tokens),
@@ -340,7 +338,7 @@ pub(crate) async fn reserve_loop_in_session(
             format!(
                 "sender:{}:{}:{}",
                 row.profile_id,
-                row.sender_id,
+                scope::budget_actor(&row.entry, &row.sender)?,
                 saved.day.timestamp()
             ),
             policy.sender_daily_credits,
@@ -383,16 +381,30 @@ pub(crate) async fn fence_context(
 ) -> AppResult<PlatformPublicSession> {
     let ingress = &context.ingress;
     let manager = &ingress.manager;
-    let row=db.collection::<PlatformPublicSession>(SESSIONS).find_one_and_update(doc! {
+    scope::validate(
+        &manager.entry,
+        &manager.manager_bot_id,
+        Some(&ingress.sender),
+    )?;
+    let mut filter = doc! {
         "_id":&context.public_session_id,"credential_api_key_id":key_id,"sponsor_owner_user_id":&context.sponsor_owner_user_id,
         "policy_digest":&context.policy_digest,"nyxagent_profile":&context.nyxagent_profile,"revoked_at":bson::Bson::Null,
-        "profile_id":&manager.profile_id,"manager_bot_id":&manager.manager_bot_id,"telegram_bot_id":manager.telegram_bot_id,
+        "profile_id":&manager.profile_id,"manager_bot_id":&manager.manager_bot_id,
         "manager_authority_epoch":manager.manager_authority_epoch,"public_policy_revision":ingress.public_policy_revision,
-        "sender_id":ingress.sender_id,"chat_id":ingress.chat_id,"expires_at":{"$gt":bson::DateTime::now()},
+        "expires_at":{"$gt":bson::DateTime::now()},
         "active_turn.turn_id":&context.turn.turn_id,"active_turn.conversation_id":&context.turn.conversation_id,
         "active_turn.receipt_id":&ingress.ingress.receipt_id,"active_turn.claim_id":&ingress.ingress.claim_id,
         "active_turn.stop_requested":false,"active_turn.expires_at":{"$gt":bson::DateTime::now()},
-    },doc! {"$inc":{"effect_revision":1_i64}}).session(&mut *session).await?.ok_or_else(denied)?;
+    };
+    filter.extend(scope::entry_fields(&manager.entry));
+    filter.extend(scope::sender_fields(&ingress.sender, true));
+    scope::exclude_other_version(&mut filter, &manager.entry);
+    let row = db
+        .collection::<PlatformPublicSession>(SESSIONS)
+        .find_one_and_update(filter, doc! {"$inc":{"effect_revision":1_i64}})
+        .session(&mut *session)
+        .await?
+        .ok_or_else(denied)?;
     if !super::platform_public_agent_service::fence_local_session_in_session(db, session, &row)
         .await?
     {
@@ -402,7 +414,7 @@ pub(crate) async fn fence_context(
         (
             crate::models::platform_bot_runtime_controls::COLLECTION_NAME,
             doc! {"platform_config_id":&manager.profile_id,
-            "manager_bot_id":&manager.manager_bot_id,"telegram_bot_id":manager.telegram_bot_id,"manager_authority_epoch":manager.manager_authority_epoch,
+            "manager_bot_id":&manager.manager_bot_id,scope::entry_key(&manager.entry):scope::entry_value(&manager.entry),"manager_authority_epoch":manager.manager_authority_epoch,
             "public_policy_revision":ingress.public_policy_revision,"public_enabled":true,"emergency_stopped":false,"retired":false,
             "public_policy.sponsor_owner_user_id":&context.sponsor_owner_user_id,"public_policy.nyxagent_profile":&context.nyxagent_profile},
         ),
@@ -454,6 +466,7 @@ pub(crate) async fn prepare_call_in_session(
         if existing.loop_id != loop_id
             || existing.route_digest != digest
             || existing.maximum != quote.maximum
+            || existing.continuation != quote.continuation
         {
             return Err(denied());
         }
@@ -466,8 +479,9 @@ pub(crate) async fn prepare_call_in_session(
         "expires_at":{"$gt":bson::DateTime::now()},"$expr":{"$and":[{"$lt":["$calls","$max_calls"]},
         {"$lte":[{"$add":["$allocated","$spent",quote.maximum.decimal()]},"$maximum"]},
         {"$lte":[{"$add":["$input_tokens",quote.input]},"$max_input_tokens"]},
-        {"$lte":[{"$add":["$output_tokens",quote.output]},"$max_output_tokens"]}]}},
-        doc! {"$inc":{"allocated":quote.maximum.decimal(),"calls":1_i64,"input_tokens":quote.input,"output_tokens":quote.output}})
+        {"$lte":[{"$add":["$output_tokens",quote.output]},"$max_output_tokens"]},
+        {"$lte":[{"$add":[{"$ifNull":["$continuations",0_i64]},i64::from(quote.continuation)]},{"$ifNull":["$max_continuations",0_i64]}]}]}},
+        doc! {"$inc":{"allocated":quote.maximum.decimal(),"calls":1_i64,"input_tokens":quote.input,"output_tokens":quote.output,"continuations":i64::from(quote.continuation)}})
         .return_document(ReturnDocument::After).session(&mut *session).await?.ok_or_else(denied)?;
     let row = PublicCallReservation {
         id: admission.call_id.clone(),
@@ -478,6 +492,7 @@ pub(crate) async fn prepare_call_in_session(
         route_digest: digest,
         model_id: admission.model_id.clone(),
         state: PublicCallState::Prepared,
+        continuation: quote.continuation,
         maximum: quote.maximum,
         cap_charge: Credits::ZERO,
         meter_row_ids: vec![],
@@ -954,7 +969,7 @@ mod tests {
             contract_version: 1,
             platform_config_id: row.profile_id.clone(),
             manager_bot_id: row.manager_bot_id.clone(),
-            telegram_bot_id: row.telegram_bot_id,
+            entry: row.entry.clone(),
             manager_authority_epoch: row.manager_authority_epoch,
             personal_control_revision: 1,
             public_policy_revision: row.public_policy_revision,
@@ -994,11 +1009,13 @@ mod tests {
                 manager: ManagerAuthority {
                     profile_id: row.profile_id.clone(),
                     manager_bot_id: row.manager_bot_id.clone(),
-                    telegram_bot_id: row.telegram_bot_id,
+                    entry: row.entry.clone(),
                     manager_authority_epoch: row.manager_authority_epoch,
                 },
-                sender_id: sender,
-                chat_id: sender,
+                sender: SenderIdentity::TelegramV1 {
+                    telegram_sender_id: sender,
+                    telegram_chat_id: sender,
+                },
                 public_policy_revision: row.public_policy_revision,
             },
             public_session_id: row.id.clone(),
@@ -1082,6 +1099,7 @@ mod tests {
             expires_at: ctx.expires_at,
         });
         CallQuote {
+            continuation: false,
             route,
             maximum,
             input: 10,
@@ -1242,6 +1260,158 @@ mod tests {
                 .tool_calls,
             i64::from(ctx.limits.max_tool_calls)
         );
+    }
+    #[tokio::test]
+    async fn local_compaction_counts_once_with_model_and_token_admission() {
+        let db =
+            crate::test_utils::connect_transaction_test_database("public_compaction_budget").await;
+        ensure_indexes(&db).await.unwrap();
+        let (mut ctx, key) = context(&db, 5, None).await;
+        ctx.limits.max_continuations = 1;
+        let row = reserve(
+            db.clone(),
+            ctx.clone(),
+            key.clone(),
+            Credits::from_pico(10).unwrap(),
+        )
+        .await
+        .unwrap();
+        let mut q = quote(&ctx, &key, Credits::from_pico(1).unwrap());
+        q.set_continuation(true);
+        let mut session = db.client().start_session().await.unwrap();
+        session.start_transaction().await.unwrap();
+        let call = prepare_call_in_session(&db, &mut session, &ctx, &row.id, &q)
+            .await
+            .unwrap();
+        assert!(call.continuation);
+        assert_eq!(
+            prepare_call_in_session(&db, &mut session, &ctx, &row.id, &q)
+                .await
+                .unwrap()
+                .id,
+            call.id
+        );
+        session.commit_transaction().await.unwrap();
+        q.set_continuation(false);
+        session.start_transaction().await.unwrap();
+        assert!(
+            prepare_call_in_session(&db, &mut session, &ctx, &row.id, &q)
+                .await
+                .is_err(),
+            "same call identity cannot change continuation semantics"
+        );
+        session.abort_transaction().await.unwrap();
+        let before = db
+            .collection::<PublicBudgetLoop>(LOOPS)
+            .find_one(doc! {"_id":&row.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (
+                before.calls,
+                before.continuations,
+                before.input_tokens,
+                before.output_tokens
+            ),
+            (1, 1, 10, 5)
+        );
+        let mut second = quote(&ctx, &key, Credits::from_pico(1).unwrap());
+        second.set_continuation(true);
+        session.start_transaction().await.unwrap();
+        assert!(
+            prepare_call_in_session(&db, &mut session, &ctx, &row.id, &second)
+                .await
+                .is_err()
+        );
+        session.abort_transaction().await.unwrap();
+        second.set_continuation(false);
+        session.start_transaction().await.unwrap();
+        prepare_call_in_session(&db, &mut session, &ctx, &row.id, &second)
+            .await
+            .unwrap();
+        session.commit_transaction().await.unwrap();
+        let after = db
+            .collection::<PublicBudgetLoop>(LOOPS)
+            .find_one(doc! {"_id":&row.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (
+                after.calls,
+                after.continuations,
+                after.input_tokens,
+                after.output_tokens
+            ),
+            (2, 1, 20, 10)
+        );
+        db.drop().await.unwrap();
+    }
+    #[tokio::test]
+    async fn simultaneous_compactions_share_one_durable_continuation_limit() {
+        let db =
+            crate::test_utils::connect_transaction_test_database("public_compaction_race").await;
+        ensure_indexes(&db).await.unwrap();
+        let (mut ctx, key) = context(&db, 5, None).await;
+        ctx.limits.max_continuations = 1;
+        let row = reserve(
+            db.clone(),
+            ctx.clone(),
+            key.clone(),
+            Credits::from_pico(10).unwrap(),
+        )
+        .await
+        .unwrap();
+        async fn admit(
+            db: Database,
+            ctx: PublicExecutionContext,
+            key: String,
+            loop_id: String,
+        ) -> AppResult<PublicCallReservation> {
+            let mut q = quote(&ctx, &key, Credits::from_pico(1).unwrap());
+            q.set_continuation(true);
+            let mut session = db.client().start_session().await?;
+            session
+                .start_transaction()
+                .and_run((db, ctx, q, loop_id), |session, (db, ctx, q, loop_id)| {
+                    Box::pin(async move {
+                        tx::transaction_result(
+                            prepare_call_in_session(db, session, ctx, loop_id, q).await,
+                        )
+                    })
+                })
+                .await
+                .map_err(tx::map_transaction_error)
+        }
+        let (left, right) = tokio::join!(
+            admit(db.clone(), ctx.clone(), key.clone(), row.id.clone()),
+            admit(db.clone(), ctx, key, row.id.clone())
+        );
+        assert_ne!(left.is_ok(), right.is_ok());
+        let saved = db
+            .collection::<PublicBudgetLoop>(LOOPS)
+            .find_one(doc! {"_id":&row.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (
+                saved.calls,
+                saved.continuations,
+                saved.input_tokens,
+                saved.output_tokens
+            ),
+            (1, 1, 10, 5)
+        );
+        assert_eq!(
+            db.collection::<PublicCallReservation>(CALLS)
+                .count_documents(doc! {"loop_id":&row.id})
+                .await
+                .unwrap(),
+            1
+        );
+        db.drop().await.unwrap();
     }
     #[tokio::test]
     async fn failed_funding_releases_only_prepared_allocation_once() {

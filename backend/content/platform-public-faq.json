@@ -1,9 +1,42 @@
 [
-  {"id":"what-is-nyxid","title":"What is NyxID?","body":"NyxID manages sign-in and lets you connect services to an AI assistant through controlled credentials. You choose which accounts to connect and which access to allow. The public guide can explain NyxID and help you start linking your own account."},
-  {"id":"personal-nyxbot","title":"Using your personal NyxBot in Telegram","body":"Linking connects this private Telegram chat to your own NyxBot. New personal messages can use the access, memory and credits already available to your NyxBot. Review the account and access on the NyxID website, then return to the same private chat and send the confirmation command shown there. A signup link alone does not authorize personal access."},
-  {"id":"public-guide","title":"What the public guide can do","body":"The public guide answers questions from this approved help collection and can offer a link to review or create your own NyxID account. It cannot inspect accounts, connected services, files, messages, secrets or personal memory. Public guide costs use the configured sponsor budget; personal work uses your own account billing after you confirm linking."},
-  {"id":"connect-services","title":"Connecting services","body":"After signing in to NyxID, use the account interface to connect the services you want your NyxBot to use. Review each connection and its access. The public guide cannot connect a service, select another account, grant access or perform work in a connected service for you."},
-  {"id":"approvals","title":"Reviewing actions","body":"Your personal NyxBot follows your account's access settings and may ask for confirmation before an action. Review the action in NyxID or use the exact confirmation command offered in the private Telegram chat. Never send passwords, API keys or one-time login codes to the public guide."},
-  {"id":"unlink","title":"Disconnecting Telegram","body":"Send /unlink in the private manager chat or revoke the Telegram link in your NyxID account. This stops new personal work from that link. Saved history remains in NyxID, and work started independently there may continue. Send /link in the private chat when you want to review linking again."},
-  {"id":"signup-link","title":"Opening a signup or linking link","body":"A signup or linking link opens the NyxID website so you can sign in or create your own account and review the Telegram link. Treat the link as private. The website asks you to return to this same private chat for final confirmation. Opening a link or asking the public guide for one does not link an account."}
+  {
+    "id": "what-is-nyxid",
+    "title": "What is NyxID?",
+    "body": "NyxID manages sign-in and lets you connect services to an AI assistant through controlled credentials. You choose which accounts to connect and which access to allow. The public guide can explain NyxID and help you start linking your own account."
+  },
+  {
+    "id": "personal-nyxbot",
+    "title": "Using your personal NyxBot in chat",
+    "body": "Linking connects an explicitly enabled platform bot's private chat to your own NyxBot. New personal questions can use the access, memory and personal credits already available to your NyxBot. Review the account and access on the NyxID website, then return to the same private chat using the exact confirmation control shown there. Signup and browser sign-in alone do not authorize personal chat. Telegram bot creation and onboarding management are available only in Telegram; linked personal NyxBot account tools can manage your owned resources on supported chat platforms."
+  },
+  {
+    "id": "public-guide",
+    "title": "What the public guide can do",
+    "body": "The public guide answers questions from this approved help collection and can offer a link to review or create your own NyxID account. It cannot inspect accounts, connected services, files, messages, secrets or personal memory. Public guide costs use the configured sponsor budget; personal work uses your own account billing after you confirm linking."
+  },
+  {
+    "id": "connect-services",
+    "title": "Connecting services",
+    "body": "After signing in to NyxID, use the account interface to connect the services you want your NyxBot to use. Review each connection and its access. The public guide cannot connect a service, select another account, grant access or perform work in a connected service for you."
+  },
+  {
+    "id": "approvals",
+    "title": "Reviewing actions",
+    "body": "Your personal NyxBot follows your account's access settings and may ask for confirmation before an action. Review the action in its exact NyxID conversation or use the exact action-card control shown for that chat platform. On Discord use /nyx ask with question set to the card's exact yes CODE or no CODE decision; plain DM replies are not supported by this entry. Never send passwords, API keys or authentication one-time codes to the public guide."
+  },
+  {
+    "id": "unlink",
+    "title": "Disconnecting personal chat",
+    "body": "Use this private chat's logout control or revoke its personal link in NyxID. Telegram uses /logout (alias /unlink); Slack and other enabled private-message entries use the plain message logout (alias unlink); Discord uses /nyx logout. Logout disconnects this chat and cancels pending personal login confirmations. This stops new personal work from that link. Saved history remains in NyxID, and work started independently there may continue. Browser sign-out does not disconnect a linked chat. Use the chat's login control to review linking again."
+  },
+  {
+    "id": "signup-link",
+    "title": "Opening a signup or linking link",
+    "body": "A signup or linking link opens the NyxID website so you can sign in or create your own account and review the personal chat link. Treat the link as private. The website asks you to return to the same original private chat for final confirmation using that platform's displayed control. Opening a link, signing in on the website or asking the public guide for a link does not log this chat in."
+  },
+  {
+    "id": "chat-login-status",
+    "title": "Signing in and checking chat login",
+    "body": "Check live chat login with /status on Telegram, the plain DM message status on Slack and other enabled private-message entries, or /nyx status on Discord. The result distinguishes logged out, pending confirmation, logged in and unavailable personal access. Start with /login on Telegram (alias /link), plain login on Slack and other enabled private-message entries (alias link), or /nyx login on Discord. Review your own account in the website, approve the disclosed access, then use its exact confirmation control in the same private chat. Telegram uses /confirm P-...; Slack and other private-message entries use confirm P-...; Discord uses /nyx confirm with the code option. On Discord ask ordinary public or personal questions with /nyx ask and the question option. On Slack send plain DM text without a slash. Use /help on Telegram, plain help in a supported DM, or /nyx help on Discord for the entry's exact controls. Logout cancels pending proof and personal access; signing out of the browser alone does neither."
+  }
 ]

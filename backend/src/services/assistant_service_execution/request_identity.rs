@@ -74,10 +74,10 @@ pub(super) fn stateless_inference(path: &str, body: &Value) -> bool {
     let Some(object) = body.as_object() else {
         return false;
     };
-    if !object
+    if object
         .get("model")
         .and_then(Value::as_str)
-        .is_some_and(|model| !model.trim().is_empty())
+        .is_none_or(|model| model.trim().is_empty())
     {
         return false;
     }

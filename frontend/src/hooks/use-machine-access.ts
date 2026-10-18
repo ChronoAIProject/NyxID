@@ -1,3 +1,4 @@
+import { useRef } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { assistantJson } from "@/lib/assistant/assistant-http";
 import {
@@ -12,10 +13,19 @@ import { useAgentOwnerMutation } from "./use-agent-owner-mutation";
 const path = (id: string) => `/assistant/nyxagent/agents/${encodeURIComponent(id)}/machines`;
 export function useMachineAccess(id: string, enabled = true) {
   const userId = useAuthStore(s => s.user?.id);
+  const recovery = useRef({ key: "", until: 0 });
   return useQuery({
     queryKey: [...nyxBotQueryKeys.agents(userId), id, "machine-access"],
     queryFn: async () => machineAccessSchema.array().parse(await assistantJson(path(id))),
     enabled: enabled && Boolean(userId), retry: false,
+    refetchInterval: query => {
+      if (!enabled || query.state.error) return false;
+      const pending = query.state.data?.filter(machine => machine.revocation_pending || machine.delivery_pending) ?? [];
+      const key = pending.length ? `${userId}:${id}:${pending.map(machine => `${machine.node_id}:${machine.revision}`).join(",")}` : "";
+      if (recovery.current.key !== key) recovery.current = { key, until: Date.now() + 60_000 };
+      return key && Date.now() < recovery.current.until ? 3_000 : false;
+    },
+    refetchIntervalInBackground: false,
   });
 }
 export function useSetMachineAccess(id: string) {

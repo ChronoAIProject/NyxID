@@ -684,7 +684,11 @@ async fn cleanup(j: Journey) {
     db.drop().await.unwrap();
 }
 
-async fn reach_renewal_margin(j: &Journey, id: &str, cutoff: chrono::DateTime<Utc>) {
+async fn reach_renewal_margin(
+    j: &Journey,
+    id: &str,
+    cutoff: chrono::DateTime<Utc>,
+) -> AppResult<()> {
     tokio::time::timeout(
         std::time::Duration::from_secs((window_seconds() + 30) as u64),
         async {
@@ -693,14 +697,13 @@ async fn reach_renewal_margin(j: &Journey, id: &str, cutoff: chrono::DateTime<Ut
                 if Utc::now() + Duration::seconds(renewal_margin_seconds()) >= cutoff {
                     break;
                 }
-                Box::pin(j.manager.observe(&current(&j.f, id).await))
-                    .await
-                    .unwrap();
+                Box::pin(j.manager.observe(&current(&j.f, id).await)).await?;
             }
+            Ok(())
         },
     )
     .await
-    .expect("UTC funding renewal margin reached within local fixture bound");
+    .expect("UTC funding renewal margin reached within local fixture bound")
 }
 
 #[tokio::test]
@@ -738,13 +741,27 @@ async fn local_journey_paid_http_manager_billing() {
     let original = current(&j.f, id).await;
     let prior_installed = effective_execution_cutoff(&original).unwrap();
     assert_eq!(Some(prior_installed), original.funded_until);
-    reach_renewal_margin(&j, id, original.funded_until.unwrap()).await;
+    // observe() also renews at the margin. Block controller observation before
+    // waiting, so either observer or funding pass can commit only the funds.
     j.kube
         .controller_observes_updates
         .store(false, Ordering::SeqCst);
+    if let Err(error) = reach_renewal_margin(&j, id, prior_installed).await {
+        assert!(
+            matches!(&error, AppError::Conflict(reason) if reason == "managed_platform_observation_pending"),
+            "unexpected observation failure code {}",
+            error.error_code()
+        );
+        assert!(Utc::now() + Duration::seconds(renewal_margin_seconds()) >= prior_installed);
+        let pending = current(&j.f, id).await;
+        assert_eq!(pending.resource_state, ResourceState::Ready);
+        assert!(pending.funded_until.is_some_and(|at| at > prior_installed));
+        assert_eq!(effective_execution_cutoff(&pending), Some(prior_installed));
+    }
     // The preceding observations keep admission fresh while requesting money.
     Box::pin(j.manager.funding_tick()).await.unwrap();
     let funded = current(&j.f, id).await;
+    assert_eq!(funded.resource_state, ResourceState::Ready);
     let newly_funded = funded.funded_until.unwrap();
     assert!(newly_funded > prior_installed);
     assert_eq!(
@@ -793,10 +810,31 @@ async fn local_journey_paid_http_manager_billing() {
     // Establish the UTC margin precondition without rewriting persisted money
     // intervals or assuming one monotonic sleep proves a wall-clock deadline.
     let cutoff = current(&j.f, id).await.funded_until.unwrap();
-    reach_renewal_margin(&j, id, cutoff).await;
+    if let Err(error) = reach_renewal_margin(&j, id, cutoff).await {
+        // observe() can cross the UTC margin during its awaits and attempt
+        // renewal before the explicit funding pass. Lago is already unavailable.
+        assert!(
+            matches!(&error, AppError::Conflict(reason) if reason == "managed_platform_observation_pending"),
+            "unexpected observation failure code {}",
+            error.error_code()
+        );
+        assert!(Utc::now() + Duration::seconds(renewal_margin_seconds()) >= cutoff);
+        let stopped = current(&j.f, id).await;
+        assert_eq!(stopped.resource_state, ResourceState::Stopping);
+        assert_eq!(
+            stopped.stop_reason.as_deref(),
+            Some("runtime_funding_unavailable")
+        );
+        assert_eq!(stopped.funded_until, Some(cutoff));
+    }
     Box::pin(j.manager.funding_tick()).await.unwrap();
     let stopping = current(&j.f, id).await;
     assert_eq!(stopping.resource_state, ResourceState::Stopping);
+    assert_eq!(
+        stopping.stop_reason.as_deref(),
+        Some("runtime_funding_unavailable")
+    );
+    assert_eq!(stopping.funded_until, Some(cutoff));
     assert!(
         effective_execution_cutoff(&stopping).is_none(),
         "stop removes execution coverage before native suspension completes"
@@ -894,6 +932,14 @@ async fn local_journey_paid_http_manager_billing() {
         ResourceState::Deleting,
         "observable resource cleanup remains pending after accounting closes"
     );
+    make_original_delete_due(&j, id).await;
+    Box::pin(j.manager.tick()).await.unwrap();
+    assert!(j.kube.delete_requested.load(Ordering::SeqCst));
+    assert_eq!(
+        current(&j.f, id).await.resource_state,
+        ResourceState::Deleting,
+        "native DELETE acceptance is not garbage collection completion"
+    );
     j.kube.cleanup.store(true, Ordering::SeqCst);
     make_original_delete_due(&j, id).await;
     Box::pin(j.manager.tick()).await.unwrap();
@@ -966,6 +1012,14 @@ async fn local_journey_free_http_cleanup_slot() {
     )
     .await;
     assert_eq!(entitlement["free_slot_available"], false);
+    make_original_delete_due(&j, id).await;
+    Box::pin(j.manager.tick()).await.unwrap();
+    assert!(j.kube.delete_requested.load(Ordering::SeqCst));
+    assert_eq!(
+        current(&j.f, id).await.resource_state,
+        ResourceState::Deleting,
+        "native DELETE acceptance is not garbage collection completion"
+    );
     j.kube.cleanup.store(true, Ordering::SeqCst);
     make_original_delete_due(&j, id).await;
     Box::pin(j.manager.tick()).await.unwrap();

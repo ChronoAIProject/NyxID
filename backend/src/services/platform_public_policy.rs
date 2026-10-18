@@ -35,11 +35,26 @@ pub(crate) fn unavailable() -> AppError {
 
 pub fn candidate_digest(policy: &ManagerRuntimePolicy) -> AppResult<String> {
     let selection = policy.public_policy.as_ref().ok_or_else(unavailable)?;
+    super::platform_entry_scope::validate(
+        &policy.manager.entry,
+        &policy.manager.manager_bot_id,
+        None,
+    )?;
+    let (domain, identity) = match &policy.manager.entry {
+        EntryIdentity::TelegramV1 { telegram_bot_id } => (
+            "nyxid-public-candidate.v1",
+            serde_json::json!(telegram_bot_id),
+        ),
+        EntryIdentity::NativeV2 { platform_entry } => (
+            "nyxid-public-candidate.v2",
+            serde_json::to_value(platform_entry).map_err(|_| unavailable())?,
+        ),
+    };
     Ok(super::mcp_service::canonical_sha256(serde_json::json!([
-        "nyxid-public-candidate.v1",
+        domain,
         policy.manager.profile_id,
         policy.manager.manager_bot_id,
-        policy.manager.telegram_bot_id,
+        identity,
         policy.manager.manager_authority_epoch,
         policy.public_policy_revision,
         selection.sponsor_owner_user_id,
@@ -53,7 +68,7 @@ pub(crate) fn binding(policy: &ManagerRuntimePolicy) -> AppResult<stored::Manage
     Ok(stored::ManagerBinding {
         profile_id: policy.manager.profile_id.clone(),
         manager_bot_id: policy.manager.manager_bot_id.clone(),
-        telegram_bot_id: policy.manager.telegram_bot_id,
+        entry: policy.manager.entry.clone(),
         manager_authority_epoch: policy.manager.manager_authority_epoch,
         public_policy_revision: policy.public_policy_revision,
         sponsor_owner_user_id: policy
@@ -91,6 +106,7 @@ pub(crate) fn evidence_digest(e: &stored::DeploymentEvidence) -> AppResult<Strin
 
 pub(crate) fn operation(op: &stored::ModelOperation) -> AppResult<PublicModelOperation> {
     Ok(PublicModelOperation {
+        reasoning_effort: op.reasoning_effort.clone(),
         service_id: op.service_id.clone(),
         operation: op.operation.clone(),
         method: http::Method::from_bytes(op.method.as_bytes()).map_err(|_| unavailable())?,
@@ -148,7 +164,7 @@ fn evidence(record: &PublicDeploymentRecord) -> AppResult<PublicReadinessEvidenc
         manager: ManagerAuthority {
             profile_id: e.binding.profile_id.clone(),
             manager_bot_id: e.binding.manager_bot_id.clone(),
-            telegram_bot_id: e.binding.telegram_bot_id,
+            entry: e.binding.entry.clone(),
             manager_authority_epoch: e.binding.manager_authority_epoch,
         },
         public_policy_revision: e.binding.public_policy_revision,
@@ -260,7 +276,7 @@ pub(crate) async fn verified_readiness_in_session(
         session,
         &manager.profile_id,
         &manager.manager_bot_id,
-        manager.telegram_bot_id,
+        &manager.entry,
         None,
     )
     .await?
@@ -432,6 +448,7 @@ pub(crate) fn operation_matches(a: &PublicModelOperation, b: &PublicModelOperati
         && a.execution_authority_digest == b.execution_authority_digest
         && a.endpoint_generation == b.endpoint_generation
         && a.model_id == b.model_id
+        && a.reasoning_effort == b.reasoning_effort
         && a.max_input_bytes == b.max_input_bytes
         && a.max_input_tokens == b.max_input_tokens
         && a.max_output_tokens == b.max_output_tokens

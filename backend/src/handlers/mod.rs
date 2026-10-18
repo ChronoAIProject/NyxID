@@ -205,3 +205,5 @@ pub mod machine_external_grant;
 pub mod admin_remote_machine_platform;
 #[cfg(test)]
 mod tools_manager_tests;
+
+pub mod call_adapters;

@@ -23,10 +23,10 @@ pub(crate) fn model_origin(origin: &contract::PlatformTurnOrigin) -> model::Plat
     let authority = &origin.authority;
     model::PlatformTurnOrigin {
         thread: model::PlatformThread {
-            platform: "telegram".into(),
+            platform: super::platform_entry_scope::platform(&authority.manager.entry).into(),
             profile_id: authority.manager.profile_id.clone(),
             manager_bot_id: authority.manager.manager_bot_id.clone(),
-            telegram_bot_id: authority.manager.telegram_bot_id,
+            entry: authority.manager.entry.clone(),
             binding_id: authority.binding_id.clone(),
             binding_generation: authority.binding_generation,
             user_id: authority.user_id.clone(),
@@ -34,8 +34,7 @@ pub(crate) fn model_origin(origin: &contract::PlatformTurnOrigin) -> model::Plat
         },
         manager_authority_epoch: authority.manager.manager_authority_epoch,
         personal_control_revision: authority.personal_control_revision,
-        sender_id: authority.sender_id,
-        chat_id: authority.chat_id,
+        sender: authority.sender.clone(),
         source: match &origin.source {
             contract::PlatformOriginSource::Ingress(claim) => {
                 model::PlatformOriginSource::Ingress {
@@ -55,7 +54,14 @@ pub(crate) fn model_origin(origin: &contract::PlatformTurnOrigin) -> model::Plat
 pub(crate) fn contract_origin(
     origin: &model::PlatformTurnOrigin,
 ) -> AppResult<contract::PlatformTurnOrigin> {
-    if origin.thread.platform != "telegram" {
+    if origin.thread.platform != super::platform_entry_scope::platform(&origin.thread.entry)
+        || super::platform_entry_scope::validate(
+            &origin.thread.entry,
+            &origin.thread.manager_bot_id,
+            Some(&origin.sender),
+        )
+        .is_err()
+    {
         return Err(AppError::AssistantTurnRequired);
     }
     Ok(contract::PlatformTurnOrigin {
@@ -63,11 +69,10 @@ pub(crate) fn contract_origin(
             manager: contract::ManagerAuthority {
                 profile_id: origin.thread.profile_id.clone(),
                 manager_bot_id: origin.thread.manager_bot_id.clone(),
-                telegram_bot_id: origin.thread.telegram_bot_id,
+                entry: origin.thread.entry.clone(),
                 manager_authority_epoch: origin.manager_authority_epoch,
             },
-            sender_id: origin.sender_id,
-            chat_id: origin.chat_id,
+            sender: origin.sender.clone(),
             binding_id: origin.thread.binding_id.clone(),
             binding_generation: origin.thread.binding_generation,
             personal_control_revision: origin.personal_control_revision,
@@ -122,7 +127,7 @@ pub(crate) async fn fresh_thread_event_origin_in_session(
         return Ok(None);
     };
     let origin = model_origin(&contract::PlatformTurnOrigin {
-        authority,
+        authority: *authority,
         nyxbot_agent_id: thread.nyxbot_agent_id.clone(),
         source: contract::PlatformOriginSource::ThreadEvent {
             admission_id: turn_id.to_owned(),
@@ -408,6 +413,15 @@ pub(crate) async fn claim_personal_turn_in_session(
         .await?
         .map(|row| row.id);
     start.agent_id = Some(agent.id.clone());
+    if let Some(selected) =
+        super::platform_manager_management::selected_context_in_session(db, session, authority)
+            .await?
+    {
+        start.note = Some(match start.note.take() {
+            Some(note) => format!("{selected}\n\n{note}"),
+            None => selected,
+        });
+    }
     let origin = contract::PlatformTurnOrigin {
         authority: authority.clone(),
         nyxbot_agent_id: agent.id.clone(),
@@ -651,8 +665,7 @@ impl contract::PersonalTurnProducer for PersonalTurns {
         };
         let destination = contract::ReplyDestination {
             manager: origin.authority.manager.clone(),
-            sender_id: origin.authority.sender_id,
-            chat_id: origin.authority.chat_id,
+            sender: origin.authority.sender.clone(),
             authority: contract::ReplyAuthority::Personal {
                 origin,
                 turn: turn.clone(),

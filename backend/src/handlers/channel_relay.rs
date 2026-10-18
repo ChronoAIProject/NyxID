@@ -555,6 +555,7 @@ async fn load_active_api_key(state: &AppState, api_key_id: &str) -> AppResult<Ap
         .await?
         .ok_or_else(|| AppError::Unauthorized("API key not found".to_string()))?;
 
+    crate::services::key_service::require_ordinary_purpose(api_key.purpose)?;
     let expired = api_key.expires_at.is_some_and(|exp| exp <= Utc::now());
     if !api_key.is_active || expired {
         return Err(AppError::Unauthorized("API key is inactive".to_string()));

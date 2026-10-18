@@ -33,6 +33,9 @@ impl Default for OpenClawAdapter {
 
 #[async_trait::async_trait]
 impl PlatformAdapter for OpenClawAdapter {
+    fn supports_text_reply(&self) -> bool {
+        false
+    }
     fn display_name(&self) -> &str {
         "OpenClaw"
     }

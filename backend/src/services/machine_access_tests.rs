@@ -34,6 +34,7 @@ async fn enable(f: &Fixture) {
 async fn v2(f: &Fixture) -> crate::models::node::Node {
     let mut node = node(f, &f.owner).await;
     node.machine.as_mut().unwrap().authority_versions = vec![2];
+    node.machine.as_mut().unwrap().authority_timing_v1 = true;
     f.state
         .db
         .collection::<Document>(crate::models::node::COLLECTION_NAME)
@@ -2269,5 +2270,714 @@ async fn direct_specialist_machine_capability_request_gets_missing_access_withou
     assert_eq!(data.get_str("target").unwrap(), n.id);
     assert_eq!(data.get_str("decision").unwrap(), "missing_access");
     assert!(!data.get_bool("involved").unwrap());
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn issue_1844_legacy_deadlines_progress_in_bounded_batches_without_partial_bound() {
+    let f = fixture("issue1844_batched_observation").await;
+    enable(&f).await;
+    let n = v2(&f).await;
+    let outbox = f.state.db.collection::<Document>(model::OUTBOX);
+    outbox.insert_many((0..257).map(|_| doc! {"_id":uuid::Uuid::new_v4().to_string(),"agent_id":&f.chat.agent_id,"node_id":&n.id,"pending":true,"revision":2_i64,"claim_until":bson::DateTime::from_millis(0)})).await.unwrap();
+    for expected in [128, 256, 257] {
+        let dto = serde_json::to_value(
+            crate::handlers::machine_access::options(&f.state, &f.owner, &f.chat.agent_id)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            outbox
+                .count_documents(
+                    doc! {"agent_id":&f.chat.agent_id,"execution_expires_at":{"$exists":true}}
+                )
+                .await
+                .unwrap(),
+            expected
+        );
+        assert_eq!(dto[0]["revocation_initialization_pending"], expected < 257);
+        assert_eq!(dto[0]["revocation_expires_at"].is_null(), expected < 257);
+        assert!(dto[0]["revocation_diagnostic"].is_null());
+        assert_eq!(dto[0]["revocation_pending"], true);
+    }
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn issue_1844_deadline_initialization_excludes_unobserved_commits() {
+    let f = fixture("issue1844_observation").await;
+    let outbox = f.state.db.collection::<Document>(model::OUTBOX);
+    let observed = uuid::Uuid::new_v4().to_string();
+    outbox
+        .insert_one(doc! {"_id":&observed,"pending":true})
+        .await
+        .unwrap();
+    let row = outbox
+        .find_one(doc! {"_id":&observed})
+        .await
+        .unwrap()
+        .unwrap();
+    let unseen = uuid::Uuid::new_v4().to_string();
+    outbox
+        .insert_one(doc! {"_id":&unseen,"pending":true})
+        .await
+        .unwrap();
+    let after_commit = f
+        .state
+        .db
+        .run_command(doc! {"hello":1})
+        .await
+        .unwrap()
+        .get_datetime("localTime")
+        .unwrap()
+        .timestamp_millis();
+    access::initialize_observed_revocations(&f.state.db, &[row.get_str("_id").unwrap().to_owned()])
+        .await
+        .unwrap();
+    let initialized = outbox
+        .find_one(doc! {"_id":&observed})
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        initialized
+            .get_datetime("expiry_observed_at")
+            .unwrap()
+            .timestamp_millis()
+            >= after_commit
+    );
+    assert!(
+        initialized
+            .get_datetime("execution_expires_at")
+            .unwrap()
+            .timestamp_millis()
+            >= after_commit + 47_000
+    );
+    let new_row = outbox
+        .find_one(doc! {"_id":&unseen})
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!new_row.contains_key("execution_expires_at"));
+    assert!(!new_row.contains_key("expiry_observed_at"));
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn issue_1844_revocation_uses_one_database_clock_across_replicas() {
+    use futures::TryStreamExt;
+    use mongodb::event::{EventHandler, command::CommandEvent};
+    use std::sync::{Arc, Mutex};
+    let commands = Arc::new(Mutex::new(Vec::<Document>::new()));
+    let recorded = commands.clone();
+    let db = crate::test_utils::connect_transaction_test_database_with_command_handler(
+        "issue1844_database_clock",
+        EventHandler::callback(move |event| {
+            if let CommandEvent::Started(event) = event {
+                recorded.lock().unwrap().push(event.command);
+            }
+        }),
+    )
+    .await;
+    let outbox = db.collection::<Document>(model::OUTBOX);
+    let id = uuid::Uuid::new_v4().to_string();
+    let agent = uuid::Uuid::new_v4().to_string();
+    let node = uuid::Uuid::new_v4().to_string();
+    // Legacy creation timestamps cannot supply a clock or restart the grace.
+    outbox
+        .insert_one(doc! {"_id":&id,"agent_id":&agent,"node_id":&node,
+        "pending":true,"created_at":bson::DateTime::from_millis(0)})
+        .await
+        .unwrap();
+    let before = db.run_command(doc! {"hello":1}).await.unwrap();
+    commands.lock().unwrap().clear();
+    let status = access::revocation_status(&db, &agent, std::slice::from_ref(&node))
+        .await
+        .unwrap();
+    assert!(status[&node].get_bool("execution_pending").unwrap());
+    let issued = outbox.find_one(doc! {"_id":&id}).await.unwrap().unwrap();
+    let after = db.run_command(doc! {"hello":1}).await.unwrap();
+    let observed = issued.get_datetime("expiry_observed_at").unwrap();
+    assert!(observed >= before.get_datetime("localTime").unwrap());
+    assert!(observed <= after.get_datetime("localTime").unwrap());
+    assert_eq!(
+        issued
+            .get_datetime("execution_expires_at")
+            .unwrap()
+            .timestamp_millis()
+            - observed.timestamp_millis(),
+        47_000
+    );
+    // Check the actual commands sent by production, rather than a copied test
+    // pipeline: both sides must reference the database clock, even when the
+    // application replicas' clocks would disagree. Literal app dates regress it.
+    {
+        let sent = commands.lock().unwrap();
+        let update = sent
+            .iter()
+            .find(|command| command.get_str("update").ok() == Some(model::OUTBOX))
+            .unwrap();
+        let set = update.get_array("updates").unwrap()[0]
+            .as_document()
+            .unwrap()
+            .get_array("u")
+            .expect("deadline initialization must be a database expression")[0]
+            .as_document()
+            .unwrap()
+            .get_document("$set")
+            .unwrap();
+        assert_eq!(set.get_str("expiry_observed_at").unwrap(), "$$NOW");
+        assert_eq!(
+            set.get_document("execution_expires_at")
+                .unwrap()
+                .get_array("$add")
+                .unwrap(),
+            &vec![
+                bson::Bson::String("$$NOW".into()),
+                bson::Bson::Int64(47_000)
+            ]
+        );
+        let aggregate = sent
+            .iter()
+            .find(|command| command.get_str("aggregate").ok() == Some(model::OUTBOX))
+            .unwrap();
+        let group = aggregate.get_array("pipeline").unwrap()[1]
+            .as_document()
+            .unwrap()
+            .get_document("$group")
+            .unwrap();
+        let comparison = group
+            .get_document("execution_pending")
+            .unwrap()
+            .get_document("$max")
+            .unwrap()
+            .get_array("$cond")
+            .unwrap()[1]
+            .as_document()
+            .unwrap()
+            .get_array("$gt")
+            .unwrap();
+        assert_eq!(comparison[1].as_str(), Some("$$NOW"));
+    }
+    // Exercise the real projection on each side of the DB deadline without
+    // sleeping or changing any host clock. Delivery and quarantine stay durable.
+    for (offset, pending) in [(5_000_i64, true), (-1, false)] {
+        outbox
+            .update_one(
+                doc! {"_id":&id},
+                vec![doc! {"$set":{
+                "execution_expires_at":{"$add":["$$NOW",offset]},"quarantine_profiles":true}}],
+            )
+            .await
+            .unwrap();
+        let status = access::revocation_status(&db, &agent, std::slice::from_ref(&node))
+            .await
+            .unwrap();
+        assert_eq!(
+            status[&node].get_bool("execution_pending").unwrap(),
+            pending
+        );
+        assert!(status[&node].get_bool("quarantine_pending").unwrap());
+        let rows: Vec<Document> = outbox
+            .find(doc! {"_id":&id,"pending":true})
+            .await
+            .unwrap()
+            .try_collect()
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert!(!rows[0].contains_key("acknowledged_at"));
+    }
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn issue_1844_revocation_expiry_preserves_delivery_quarantine_and_legacy_recovery() {
+    let f = fixture("issue1844_pending").await;
+    enable(&f).await;
+    let n = v2(&f).await;
+    let outbox = f.state.db.collection::<Document>(model::OUTBOX);
+    let id = uuid::Uuid::new_v4().to_string();
+    outbox.insert_one(doc! {"_id":&id,"agent_id":&f.chat.agent_id,"node_id":&n.id,"revision":2_i64,"pending":true,"claim_until":bson::DateTime::from_millis(0)}).await.unwrap();
+    let read = || async {
+        serde_json::to_value(
+            crate::handlers::machine_access::options(&f.state, &f.owner, &f.chat.agent_id)
+                .await
+                .unwrap(),
+        )
+        .unwrap()
+    };
+    let first = read().await;
+    assert_eq!(first[0]["revocation_pending"], true);
+    let initialized = outbox.find_one(doc! {"_id":&id}).await.unwrap().unwrap();
+    let deadline = initialized.get_datetime("execution_expires_at").unwrap();
+    assert!(deadline.timestamp_millis() >= chrono::Utc::now().timestamp_millis() + 45_000);
+    let _ = read().await;
+    assert_eq!(
+        outbox
+            .find_one(doc! {"_id":&id})
+            .await
+            .unwrap()
+            .unwrap()
+            .get_datetime("execution_expires_at")
+            .unwrap(),
+        deadline,
+        "reading never restarts recovery grace"
+    );
+    outbox
+        .update_one(
+            doc! {"_id":&id},
+            doc! {"$set":{"execution_expires_at":bson::DateTime::from_millis(0)}},
+        )
+        .await
+        .unwrap();
+    let expired = read().await;
+    assert_eq!(expired[0]["revocation_pending"], false);
+    assert_eq!(expired[0]["delivery_pending"], true);
+    let row = outbox.find_one(doc! {"_id":&id}).await.unwrap().unwrap();
+    assert!(row.get_bool("pending").unwrap());
+    assert!(!row.contains_key("acknowledged_at"));
+    // Expiry cannot perform profile quarantine or claim its acknowledgement.
+    outbox
+        .update_one(doc! {"_id":&id}, doc! {"$set":{"quarantine_profiles":true}})
+        .await
+        .unwrap();
+    let quarantine = read().await;
+    assert_eq!(quarantine[0]["execution_revocation_pending"], false);
+    assert_eq!(quarantine[0]["quarantine_pending"], true);
+    assert_eq!(quarantine[0]["revocation_pending"], true);
+    for malformed in [bson::Bson::Null, bson::Bson::String("yesterday".into())] {
+        outbox
+            .update_one(
+                doc! {"_id":&id},
+                doc! {"$set":{"execution_expires_at":malformed,"quarantine_profiles":false}},
+            )
+            .await
+            .unwrap();
+        let invalid = read().await;
+        assert_eq!(invalid[0]["revocation_pending"], true);
+        assert!(invalid[0]["revocation_expires_at"].is_null());
+        assert_eq!(
+            invalid[0]["revocation_diagnostic"],
+            "revocation_deadline_invalid"
+        );
+    }
+    outbox
+        .update_one(
+            doc! {"_id":&id},
+            doc! {"$set":{"execution_expires_at":bson::DateTime::from_millis(0)}},
+        )
+        .await
+        .unwrap();
+    f.state
+        .db
+        .collection::<Document>(crate::models::node::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id":&n.id},
+            doc! {"$set":{"machine.authority_timing_v1":false}},
+        )
+        .await
+        .unwrap();
+    let old_node = read().await;
+    assert_eq!(old_node[0]["revocation_pending"], true);
+    assert_eq!(
+        old_node[0]["revocation_diagnostic"],
+        "authority_timing_upgrade_required"
+    );
+    // Deliver the retained work after expiry; only this actual ACK clears it.
+    let (peer, mut requests) =
+        super::machine_integration_tests::peer(&f, &n, json!({"accepted":true})).await;
+    access::revoke_one(&f.state, row).await.unwrap();
+    assert_eq!(
+        requests.recv().await.unwrap().operation,
+        Operation::AuthorityRevoke
+    );
+    let delivered = read().await;
+    assert_eq!(delivered[0]["delivery_pending"], false);
+    assert!(
+        outbox
+            .find_one(doc! {"_id":&id})
+            .await
+            .unwrap()
+            .unwrap()
+            .contains_key("acknowledged_at")
+    );
+    peer.abort();
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn issue_1844_revocation_projection_groups_before_limit() {
+    let f = fixture("issue1844_projection").await;
+    enable(&f).await;
+    let a = v2(&f).await;
+    let b = v2(&f).await;
+    let mut rows = Vec::new();
+    for i in 0..502 {
+        rows.push(doc!{"_id":uuid::Uuid::new_v4().to_string(),"agent_id":&f.chat.agent_id,"node_id":if i==501 {&b.id} else {&a.id},"revision":i+2_i64,"pending":true,"execution_expires_at":bson::DateTime::from_chrono(chrono::Utc::now()+chrono::Duration::seconds(47)),"claim_until":bson::DateTime::from_millis(0)});
+    }
+    f.state
+        .db
+        .collection::<Document>(model::OUTBOX)
+        .insert_many(rows)
+        .await
+        .unwrap();
+    let dto = serde_json::to_value(
+        crate::handlers::machine_access::options(&f.state, &f.owner, &f.chat.agent_id)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(dto.as_array().unwrap().len(), 2);
+    assert!(
+        dto.as_array()
+            .unwrap()
+            .iter()
+            .all(|row| row["revocation_pending"] == true)
+    );
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn issue_1844_runtime_restart_refreshes_admission_and_old_renewals_stay_dead() {
+    let f = fixture("issue1844_runtime").await;
+    enable(&f).await;
+    let old_node = v2(&f).await;
+    access::configure(
+        &f.state.db,
+        &f.owner,
+        &f.chat.agent_id,
+        &old_node.id,
+        selection(
+            1,
+            Capabilities {
+                shell: true,
+                files: true,
+                ..Default::default()
+            },
+        ),
+    )
+    .await
+    .unwrap();
+    let first = access::admit(
+        &f.state.db,
+        &f.chat,
+        &old_node,
+        Operation::Exec,
+        &json!({}),
+        None,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let lease = f
+        .state
+        .db
+        .collection::<model::Lease>(model::LEASES)
+        .find_one(doc! {"_id":&first.lease_id})
+        .await
+        .unwrap()
+        .unwrap();
+    let mut node = old_node.clone();
+    node.machine.as_mut().unwrap().runtime_id = uuid::Uuid::new_v4().to_string();
+    f.state
+        .db
+        .collection::<Document>(crate::models::node::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id":&node.id},
+            doc! {"$set":{"machine":bson::to_bson(&node.machine).unwrap()}},
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        access::admit(
+            &f.state.db,
+            &f.chat,
+            &old_node,
+            Operation::Exec,
+            &json!({}),
+            None
+        )
+        .await,
+        Err(AppError::MachineAuthorityStale)
+    ));
+    assert!(access::renew_one(&f.state, lease).await.is_err());
+    let fresh = access::admit(
+        &f.state.db,
+        &f.chat,
+        &node,
+        Operation::Exec,
+        &json!({}),
+        None,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(fresh.runtime_id, node.machine.unwrap().runtime_id);
+    assert_ne!(fresh.lease_id, first.lease_id);
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn issue_1844_renewal_snapshot_cannot_cross_grant_mutation() {
+    let f = fixture("issue1844_renewal_race").await;
+    enable(&f).await;
+    let n = v2(&f).await;
+    access::configure(
+        &f.state.db,
+        &f.owner,
+        &f.chat.agent_id,
+        &n.id,
+        selection(
+            1,
+            Capabilities {
+                shell: true,
+                ..Default::default()
+            },
+        ),
+    )
+    .await
+    .unwrap();
+    let a = access::admit(&f.state.db, &f.chat, &n, Operation::Exec, &json!({}), None)
+        .await
+        .unwrap()
+        .unwrap();
+    let lease = f
+        .state
+        .db
+        .collection::<model::Lease>(model::LEASES)
+        .find_one(doc! {"_id":&a.lease_id})
+        .await
+        .unwrap()
+        .unwrap();
+    let mut session = f.state.db.client().start_session().await.unwrap();
+    session.start_transaction().await.unwrap();
+    // A real Mongo snapshot sees the old grants, then the revocation commits.
+    f.state
+        .db
+        .collection::<Document>(AGENTS)
+        .find_one(doc! {"_id":&f.chat.agent_id})
+        .session(&mut session)
+        .await
+        .unwrap()
+        .unwrap();
+    access::configure(
+        &f.state.db,
+        &f.owner,
+        &f.chat.agent_id,
+        &n.id,
+        selection(2, Capabilities::default()),
+    )
+    .await
+    .unwrap();
+    assert!(
+        access::fence_renewal_in_session(&f.state.db, &lease, &mut session)
+            .await
+            .is_err()
+    );
+    let _ = session.abort_transaction().await;
+    let mut session = f.state.db.client().start_session().await.unwrap();
+    session.start_transaction().await.unwrap();
+    assert!(
+        access::fence_renewal_in_session(&f.state.db, &lease, &mut session)
+            .await
+            .is_err(),
+        "a fresh transaction cannot extend the old revision either"
+    );
+    let _ = session.abort_transaction().await;
+    f.state.db.drop().await.unwrap();
+}
+
+// Task-local and database-scoped: pause only an explicitly selected renewal's
+// first real Mongo snapshot. No synthetic errors, timing sleeps or node effects.
+#[derive(Clone)]
+struct RenewalSnapshotHook {
+    database: String,
+    collision: super::api_key_mutation_service::TransactionCollisionHook,
+    resume: std::sync::Arc<tokio::sync::Semaphore>,
+}
+tokio::task_local! {
+    static RENEWAL_SNAPSHOT_HOOK: RenewalSnapshotHook;
+}
+pub(super) async fn renewal_snapshot_loaded(
+    db: &mongodb::Database,
+    lease: &model::Lease,
+    session: &mut mongodb::ClientSession,
+) -> crate::errors::AppResult<()> {
+    let Some(hook) = RENEWAL_SNAPSHOT_HOOK.try_with(Clone::clone).ok() else {
+        return Ok(());
+    };
+    if hook.database != db.name() {
+        return Ok(());
+    }
+    hook.collision.begin_attempt();
+    db.collection::<Document>(AGENTS)
+        .find_one(doc! {"_id":&lease.authority.agent_id})
+        .session(session)
+        .await?;
+    if hook.collision.attempts() == 1 {
+        hook.collision.after_reads().await;
+        hook.resume.acquire().await.unwrap().forget();
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn issue_1844_concurrent_renewals_retry_live_fences_without_replaying_control() {
+    use super::api_key_mutation_service::TransactionCollisionHook;
+    use std::sync::Arc;
+    let f = Box::pin(fixture("issue1844_renewal_contention")).await;
+    enable(&f).await;
+    let n = v2(&f).await;
+    Box::pin(access::configure(
+        &f.state.db,
+        &f.owner,
+        &f.chat.agent_id,
+        &n.id,
+        selection(
+            1,
+            Capabilities {
+                shell: true,
+                ..Default::default()
+            },
+        ),
+    ))
+    .await
+    .unwrap();
+    let leases = f.state.db.collection::<model::Lease>(model::LEASES);
+    let mut originals = Vec::new();
+    for _ in 0..8 {
+        let authority = Box::pin(access::admit(
+            &f.state.db,
+            &f.chat,
+            &n,
+            Operation::Exec,
+            &json!({}),
+            None,
+        ))
+        .await
+        .unwrap()
+        .unwrap();
+        originals.push(
+            leases
+                .find_one(doc! {"_id":&authority.lease_id})
+                .await
+                .unwrap()
+                .unwrap(),
+        );
+    }
+    let (peer, mut requests) =
+        super::machine_integration_tests::peer(&f, &n, json!({"accepted":true})).await;
+    let barrier = Arc::new(tokio::sync::Barrier::new(originals.len() + 1));
+    let resume = Arc::new(tokio::sync::Semaphore::new(0));
+    let hooks = originals
+        .iter()
+        .map(|_| RenewalSnapshotHook {
+            database: f.state.db.name().to_owned(),
+            collision: TransactionCollisionHook::new(barrier.clone()),
+            resume: resume.clone(),
+        })
+        .collect::<Vec<_>>();
+    let state = &f.state;
+    let renewals = futures::future::join_all(originals.iter().zip(&hooks).map(|(lease, hook)| {
+        RENEWAL_SNAPSHOT_HOOK.scope(hook.clone(), async move {
+            // Match the production sweep's complete caller budget, including
+            // transient transaction retries and the single signed control send.
+            tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                Box::pin(access::renew_one(state, lease.clone())),
+            )
+            .await
+            .expect("valid concurrent renewal must fit the sweep budget")
+            .expect("same-node/agent conflicts must retry")
+        })
+    }));
+    let release = async {
+        barrier.wait().await;
+        resume.add_permits(originals.len());
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        tokio::join!(renewals, release)
+    })
+    .await
+    .unwrap();
+    assert!(
+        hooks
+            .iter()
+            .map(|hook| hook.collision.attempts())
+            .sum::<usize>()
+            > originals.len(),
+        "shared snapshots must cause a real Mongo write conflict and retry"
+    );
+    let mut seen = std::collections::BTreeSet::new();
+    for _ in &originals {
+        let request = requests.recv().await.unwrap();
+        assert_eq!(request.operation, Operation::AuthorityRenew);
+        let authority = request.authority.unwrap();
+        assert!(
+            seen.insert(authority.lease_id.clone()),
+            "one control send per renewal"
+        );
+        let stored = f
+            .state
+            .db
+            .collection::<Document>(model::LEASES)
+            .find_one(doc! {"_id":&authority.lease_id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.get_i64("renewal_fence").unwrap(), 1);
+        assert_eq!(
+            stored
+                .get_document("authority")
+                .unwrap()
+                .get_i64("expires_at_ms")
+                .unwrap(),
+            authority.expires_at_ms
+        );
+    }
+    assert!(requests.try_recv().is_err());
+
+    // A competing grant mutation after the first snapshot causes the same
+    // transient conflict, but the retried live revision check must refuse it.
+    let barrier = Arc::new(tokio::sync::Barrier::new(2));
+    let hook = RenewalSnapshotHook {
+        database: f.state.db.name().to_owned(),
+        collision: TransactionCollisionHook::new(barrier.clone()),
+        resume: Arc::new(tokio::sync::Semaphore::new(0)),
+    };
+    let renewal = RENEWAL_SNAPSHOT_HOOK.scope(
+        hook.clone(),
+        Box::pin(access::renew_one(&f.state, originals[0].clone())),
+    );
+    let revoke = async {
+        barrier.wait().await;
+        Box::pin(access::configure(
+            &f.state.db,
+            &f.owner,
+            &f.chat.agent_id,
+            &n.id,
+            selection(2, Capabilities::default()),
+        ))
+        .await
+        .unwrap();
+        hook.resume.add_permits(1);
+    };
+    let (result, ()) = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        tokio::join!(renewal, revoke)
+    })
+    .await
+    .unwrap();
+    assert!(matches!(result, Err(AppError::MachinePermissionRevoked)));
+    assert!(
+        hook.collision.attempts() >= 2,
+        "stale snapshot retries against the new revision"
+    );
+    assert!(
+        requests.try_recv().is_err(),
+        "revoked authority sends no renewal control"
+    );
+    peer.abort();
     f.state.db.drop().await.unwrap();
 }

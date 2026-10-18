@@ -754,7 +754,7 @@ async fn insert_registered_bot_inner(
                 return Err(AppError::Conflict("This bot is already connected. Open its existing connection in Channel Bots to complete setup. Check Personal and organization scopes, or ask the connection owner for access.".into()));
             }
             if matches!(bot.platform.as_str(), "telegram" | "telegram-new") && db.collection::<bson::Document>(crate::models::platform_bot_config::COLLECTION_NAME)
-                .find_one(doc! {"manager_bot_id": &bot.platform_bot_id}).session(&mut *session).await?.is_some() {
+                .find_one(doc! {"manager_bot_id": &bot.platform_bot_id, "native_entry": bson::Bson::Null}).session(&mut *session).await?.is_some() {
                 return Err(AppError::Forbidden("Platform manager registration is controlled through platform configuration".into()));
             }
             if matches!(bot.platform.as_str(), "telegram" | "telegram-new") && let Some(manager) = db.collection::<crate::models::platform_credential::PlatformCredential>(crate::models::platform_credential::COLLECTION_NAME).find_one(doc! {"provider": "telegram-new", "fields.manager_bot_id": &bot.platform_bot_id}).session(&mut *session).await? {

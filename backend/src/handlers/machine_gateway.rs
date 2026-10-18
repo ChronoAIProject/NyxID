@@ -219,102 +219,16 @@ impl Session {
             .try_with(Clone::clone)
             .ok();
         tokio::spawn(async move {
-            let execute = async {
-                let response = tokio::time::timeout(
-                    Duration::from_secs(header_timeout),
-                    authorize_and_execute(&state, &session, &node_id, request, rx),
-                )
-                .await;
-                let response = match response {
-                    Ok(Ok(response)) => response,
-                    Ok(Err(error)) => error.into_response(),
-                    Err(_) => AppError::NodeProxyTimeout.into_response(),
-                };
-                let status = response.status().as_u16();
-                let headers: Vec<_> = response
-                    .headers()
-                    .iter()
-                    .filter(|(k, _)| {
-                        matches!(
-                            k.as_str(),
-                            "content-type"
-                                | "content-encoding"
-                                | "content-length"
-                                | "cache-control"
-                                | "retry-after"
-                                | "content-disposition"
-                        )
-                    })
-                    .filter_map(|(k, v)| {
-                        v.to_str()
-                            .ok()
-                            .map(|v| (k.as_str().to_owned(), v.to_owned()))
-                    })
-                    .collect();
-                if session
-                    .sender
-                    .send(NodeOutboundMessage::Text(
-                        json!({
-                            "type":"machine_service_response",
-                            "request_id":id,
-                            "status":status,
-                            "headers":headers
-                        })
-                        .to_string(),
-                    ))
-                    .await
-                    .is_ok()
-                {
-                    let mut body = response.into_body().into_data_stream();
-                    let mut sequence = 0;
-                    let mut aborted = false;
-                    while let Some(result) = body.next().await {
-                        let Ok(bytes) = result else {
-                            aborted = true;
-                            break;
-                        };
-                        for chunk in bytes.chunks(nyxid_machine::STREAM_CHUNK_BYTES) {
-                            let Ok(frame) = (Frame {
-                                kind: Kind::GatewayDownload,
-                                end: false,
-                                id: uuid,
-                                sequence,
-                                bytes: chunk,
-                            })
-                            .encode() else {
-                                return;
-                            };
-                            if session
-                                .sender
-                                .send(NodeOutboundMessage::Binary(frame))
-                                .await
-                                .is_err()
-                            {
-                                return;
-                            }
-                            sequence += 1;
-                        }
-                    }
-                    if let Ok(frame) = (Frame {
-                        kind: if aborted {
-                            Kind::GatewayDownloadAbort
-                        } else {
-                            Kind::GatewayDownload
-                        },
-                        end: true,
-                        id: uuid,
-                        sequence,
-                        bytes: &[],
-                    })
-                    .encode()
-                    {
-                        let _ = session
-                            .sender
-                            .send(NodeOutboundMessage::Binary(frame))
-                            .await;
-                    }
-                }
-            };
+            let execute = execute_service_response(
+                &state,
+                &session,
+                &node_id,
+                request,
+                rx,
+                &id,
+                uuid,
+                header_timeout,
+            );
             #[cfg(test)]
             let execute = async {
                 if let Some(builder) = target_client {
@@ -352,6 +266,117 @@ impl Session {
         self.closed.cancel();
         self.uploads.lock().await.clear();
     }
+}
+
+// Construct the response future outside Session's select/task-local poll frames.
+// Its header/body temporaries must not multiply the nested proxy stack cost.
+#[allow(clippy::too_many_arguments)]
+fn execute_service_response<'a>(
+    state: &'a AppState,
+    session: &'a Session,
+    node_id: &'a str,
+    request: nyxid_machine::Request,
+    rx: mpsc::Receiver<Result<Vec<u8>, std::io::Error>>,
+    id: &'a str,
+    uuid: uuid::Uuid,
+    header_timeout: u64,
+) -> futures::future::BoxFuture<'a, ()> {
+    Box::pin(async move {
+        let response = tokio::time::timeout(
+            Duration::from_secs(header_timeout),
+            authorize_and_execute(state, session, node_id, request, rx),
+        )
+        .await;
+        let response = match response {
+            Ok(Ok(response)) => response,
+            Ok(Err(error)) => error.into_response(),
+            Err(_) => AppError::NodeProxyTimeout.into_response(),
+        };
+        let status = response.status().as_u16();
+        let headers: Vec<_> = response
+            .headers()
+            .iter()
+            .filter(|(k, _)| {
+                matches!(
+                    k.as_str(),
+                    "content-type"
+                        | "content-encoding"
+                        | "content-length"
+                        | "cache-control"
+                        | "retry-after"
+                        | "content-disposition"
+                )
+            })
+            .filter_map(|(k, v)| {
+                v.to_str()
+                    .ok()
+                    .map(|v| (k.as_str().to_owned(), v.to_owned()))
+            })
+            .collect();
+        if session
+            .sender
+            .send(NodeOutboundMessage::Text(
+                json!({
+                    "type":"machine_service_response",
+                    "request_id":id,
+                    "status":status,
+                    "headers":headers
+                })
+                .to_string(),
+            ))
+            .await
+            .is_ok()
+        {
+            let mut body = response.into_body().into_data_stream();
+            let mut sequence = 0;
+            let mut aborted = false;
+            while let Some(result) = body.next().await {
+                let Ok(bytes) = result else {
+                    aborted = true;
+                    break;
+                };
+                for chunk in bytes.chunks(nyxid_machine::STREAM_CHUNK_BYTES) {
+                    let Ok(frame) = (Frame {
+                        kind: Kind::GatewayDownload,
+                        end: false,
+                        id: uuid,
+                        sequence,
+                        bytes: chunk,
+                    })
+                    .encode() else {
+                        return;
+                    };
+                    if session
+                        .sender
+                        .send(NodeOutboundMessage::Binary(frame))
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                    sequence += 1;
+                }
+            }
+            if let Ok(frame) = (Frame {
+                kind: if aborted {
+                    Kind::GatewayDownloadAbort
+                } else {
+                    Kind::GatewayDownload
+                },
+                end: true,
+                id: uuid,
+                sequence,
+                bytes: &[],
+            })
+            .encode()
+            {
+                let _ = session
+                    .sender
+                    .send(NodeOutboundMessage::Binary(frame))
+                    .await;
+            }
+        }
+    })
 }
 
 async fn authorize_and_execute(

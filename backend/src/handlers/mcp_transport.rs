@@ -3697,7 +3697,7 @@ async fn handle_account_tool(
         allow_all_nodes: auth.allow_all_nodes,
         allowed_service_ids: auth.allowed_service_ids.clone(),
         resource_uris: None,
-        assistant_turn_fence: auth.chat.as_ref().map(|chat| chat.turn_fence()),
+        assistant_turn_fence: auth.chat.as_ref().map(|chat| Box::new(chat.turn_fence())),
         assistant_chat: auth.chat.clone().map(std::sync::Arc::new),
         allowed_node_ids: auth.allowed_node_ids.clone(),
         api_key_id: auth.api_key_id.clone(),
@@ -8585,6 +8585,7 @@ mod skill_authoring_discovery_tests {
         auth.is_api_key = true;
         auth.api_key_id = Some("chat-key".into());
         auth.chat = Some(ChatAuthority {
+            channel_adapter_origin: None,
             platform_thread: false,
             platform_origin: None,
             report_to: None,

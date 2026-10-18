@@ -480,11 +480,28 @@ and are never affected by this cap. Renewal streams bounded batches with 64
 concurrent requests every ten seconds, independently of the one-second revocation
 sweep and compatibility migration. A brief socket loss preserves the running job;
 reconnect can renew it while the last 45-second signed lease is still live.
-Push revocation remains immediate, with the offline deadline as its backstop. Lease messages are never retried past an
-expired local deadline. The compatibility snapshot uses bounded driver batches, without applying
-new-assignment limits to existing access. Node fence storage is private, capped at 2 MiB and
-persisted before activation. Context metadata remains separate from process or
-filesystem isolation.
+Push revocation cancels promptly after delivery, with the local monotonic deadline
+as its offline backstop. The clock-safe timing revision consumes a bounded
+five-second clock uncertainty from the signed lease, rather than extending the
+45-second local cancellation bound. Chat, external and owner-job access use the
+same signed timing semantics. Renewal transactions fence current assignment and
+runtime; the status projection additionally allows two seconds for older
+in-flight renewal writers. A fresh call acquires live runtime-bound authority;
+capability reads do not refresh it. A restart never revives an old lease.
+
+Execution expiry is separate from durable delivery and required profile
+quarantine. Expiry may settle execution pending only for nodes advertising
+`authority_timing_v1`; it never discards undelivered fences, claims ACK, or clears
+cleanup. Legacy outbox rows start one durable first-observation window, while
+malformed deadlines fail closed. Details and supported recovery are in
+[MACHINE_NODES.md](MACHINE_NODES.md#per-agent-capabilities-m12) and
+[NYXID_NODE.md](NYXID_NODE.md#recovering-machine-authority).
+
+Lease messages are never retried past an expired local deadline. The compatibility
+snapshot uses bounded driver batches, without applying new-assignment limits to
+existing access. Node fence storage is private, capped at 2 MiB and persisted
+before activation. If persistence outlasts activation, retain the fence and deny
+work. Context metadata remains separate from process or filesystem isolation.
 
 ### 8.5 M1.3 feasibility gate (2026-10-04)
 
