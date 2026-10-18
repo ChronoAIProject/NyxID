@@ -218,6 +218,9 @@ jobs:
               - '.claude-plugin/**'
               - 'scripts/validate-claude-plugin.py'
               - 'scripts/sync-plugins.py'
+              - '.github/tools/claude/**'
+              - 'security/build-tools.json'
+              - 'scripts/bootstrap-build-tool.py'
             oracle_worker:
               - 'integrations/oracle/cdp-worker/**'
               - '.node-version'
@@ -228,6 +231,8 @@ jobs:
               - '.github/workflows/**'
               - '.github/actions/**'
               - '.github/scripts/**'
+              - '.github/tools/**'
+              - 'security/**'
 
   # ---------------------------------------------------------------------------
   # Reusable workflow permissions: a ci.yml job requesting a scope that the
@@ -316,7 +321,6 @@ jobs:
     needs: changes
     runs-on: ubuntu-latest
     env:
-      CLAUDE_CODE_VERSION: 2.1.284
       PACKAGE_CHANGED: ${{ inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.claude_plugin == 'true' }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -326,9 +330,12 @@ jobs:
         if: env.PACKAGE_CHANGED == 'true'
         with:
           node-version-file: .node-version
-      - name: Install pinned Claude Code
+      - name: Install locked offline plugin validator
         if: env.PACKAGE_CHANGED == 'true'
-        run: npm install --global "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"
+        run: |
+          python3 scripts/bootstrap-build-tool.py npm --bin-dir "$RUNNER_TEMP/nyxid-node-tools"
+          "$RUNNER_TEMP/nyxid-node-tools/npm" ci --ignore-scripts --prefix .github/tools/claude
+          echo "$GITHUB_WORKSPACE/.github/tools/claude/node_modules/.bin" >> "$GITHUB_PATH"
       - name: Check generated plugin files match integrations/plugin-source
         if: env.PACKAGE_CHANGED == 'true'
         run: python3 scripts/sync-plugins.py --check

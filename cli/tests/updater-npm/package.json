@@ -1,0 +1,9 @@
+{
+  "name": "nyxid-updater-test-transport",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Locked WebSocket transport for actual updater container tests",
+  "dependencies": {
+    "ws": "8.22.0"
+  }
+}

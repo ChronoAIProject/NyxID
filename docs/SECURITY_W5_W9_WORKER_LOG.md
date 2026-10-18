@@ -337,6 +337,27 @@ Mobile R1-05/R1-06 remain OPEN. Candidate uncommitted patches and prior evidence
 are preserved separately. Provider-rejected/interrupted verification is not a
 pass; no implicated probe is retried or routed through another agent/model.
 
+## W7 independent Node dependency roots
+
+The SDK retains its baseline Vite7 demo line (resolved7.3.7) and updates
+Vitest to4.1.12. Checked npm11.21.1 installed the lock successfully; the raw
+SDK audit reports0 vulnerabilities (baseline11), all17 tests across3 files
+pass, and all3 workspace builds pass. Evidence is `w7-sdk-{ci,tests,build}.log`
+and the corresponding audit JSON in the validation root. These results are
+independent of the still-open mobile findings.
+
+The actual updater container transport now installs ws8.22.0 through a
+committed npm lock rather than resolving an unversioned package during image
+construction. Host locked install passes with0 reported advisories
+(`w7-updater-npm-ci.log`); final container execution remains an integration
+gate. The offline Claude plugin validator similarly installs from its complete
+integrity lock using the reviewed npm bootstrap instead of a global npm
+resolution. Locked install and raw audit pass0 (`w7-claude-validator-ci.log`,
+`w7-claude-validator-audit.json`); no AI session/reviewer was launched.
+Path filters and Dependabot include the independent validator, test transport,
+Node tools and separate Cargo spike roots. Strict YAML (7 workflows,14 explicit
+Rust toolchains), reusable permissions and build-input guards pass.
+
 ## Remaining authorized batches
 
 W5 final container review/integration; W7 pinned,

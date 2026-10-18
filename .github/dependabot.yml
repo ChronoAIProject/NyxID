@@ -83,6 +83,18 @@ updates:
   - package-ecosystem: npm
     directory: /integrations/openclaw
     schedule: { interval: weekly }
+  - package-ecosystem: npm
+    directory: /cli/tests/updater-npm
+    schedule: { interval: weekly }
+  - package-ecosystem: npm
+    directory: /security/npm-tools
+    schedule: { interval: weekly }
+  - package-ecosystem: npm
+    directory: /.github/tools/claude
+    schedule: { interval: weekly }
+  - package-ecosystem: cargo
+    directory: /cli/tests/machine_context_spike
+    schedule: { interval: weekly }
 
   # Immutable digest updates still require authenticated pin receipts.
   - package-ecosystem: docker
