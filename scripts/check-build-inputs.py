@@ -9,12 +9,49 @@ import subprocess
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def check(root):
+def check_image(image, pins, where):
+    if not isinstance(image, str) or not re.fullmatch(r"[^\s@]+@sha256:[0-9a-f]{64}", image):
+        return [where + ": unpinned consumed image " + str(image)]
+    if image not in pins:
+        return [where + ": image pin lacks resolution receipt " + image]
+    return []
+
+
+def check_containers(value, pins, where):
+    errors = []
+    if isinstance(value, dict):
+        for key, child in value.items():
+            if key == "container":
+                image = child.get("image") if isinstance(child, dict) else child
+                errors.extend(check_image(image, pins, where + ".container"))
+            else:
+                errors.extend(check_containers(child, pins, where + "." + key))
+    elif isinstance(value, list):
+        for index, child in enumerate(value):
+            errors.extend(check_containers(child, pins, f"{where}[{index}]"))
+    return errors
+
+
+def check(root, plan=None):
     errors = []
     receipts = json.loads((root / "security/build-input-pins.json").read_text())
     action_pins = {(a["repository"].lower(), a["sha"]) for a in receipts["actions"]}
     image_pins = {a["image"] + "@" + a["digest"] for a in receipts["images"]}
-    for path in sorted((root / ".github/workflows").glob("*.yml")):
+    # Use Cargo's own TOML parser; do not infer dist containers from Dockerfiles
+    # or from permissive regular expressions over the source manifest.
+    metadata = json.loads(subprocess.check_output(
+        ["cargo", "metadata", "--locked", "--no-deps", "--format-version=1"], cwd=root, text=True))
+    errors.extend(check_containers(metadata["metadata"].get("dist", {}), image_pins, "Cargo dist metadata"))
+    if plan is not None:
+        errors.extend(check_containers(plan, image_pins, "generated dist plan"))
+    fixtures = json.loads((root / "security/test-images.json").read_text())["images"]
+    for role, image in fixtures.items():
+        errors.extend(check_image(image, image_pins, "test fixture " + role))
+    mongo = (root / ".github/scripts/start-test-mongodb.sh").read_text()
+    for image in re.findall(r"\bmongo:[^\s\\]+", mongo):
+        errors.extend(check_image(image, image_pins, "Mongo test fixture"))
+    for path in sorted(path for path in (root / ".github/workflows").iterdir()
+                       if path.suffix in (".yml", ".yaml")):
         text = path.read_text()
         for match in re.finditer(r"uses:\s*([^\s#]+)", text):
             value = match[1].strip('"\'')
@@ -45,8 +82,7 @@ def check(root):
             # These two test images consume the exact image just built by CI;
             # production inputs cannot use this exception.
             dynamic_test = name in ("cli/tests/Dockerfile.machine", "cli/tests/Dockerfile.updater-browser") and image == "${MACHINE_IMAGE}"
-            published_fixture = name == "cli/tests/machine_context_spike/Dockerfile" and re.fullmatch(r"ghcr.io/chronoaiproject/nyxid/nyxid-node-machine@sha256:[0-9a-f]{64}", image)
-            if image not in stages and image != "scratch" and not dynamic_test and not published_fixture:
+            if image not in stages and image != "scratch" and not dynamic_test:
                 if not re.fullmatch(r"[^\s@]+@sha256:[0-9a-f]{64}", image):
                     errors.append(name + ": unpinned base " + image)
                 elif image not in image_pins:
@@ -67,11 +103,13 @@ def check(root):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=ROOT)
+    parser.add_argument("--dist-plan", type=Path, help="actual cargo-dist JSON plan to validate before matrix consumption")
     args = parser.parse_args()
-    errors = check(args.root)
+    errors = check(args.root, json.loads(args.dist_plan.read_text()) if args.dist_plan else None)
     if errors:
         raise SystemExit("\n".join(errors))
-    print("Action/base pins, resolution receipts, locked Rust builds and generated release bootstrap policy passed")
+    print("Action/base/fixture pins, Cargo dist containers, resolution receipts, "
+          "locked Rust builds and generated release bootstrap policy passed")
 
 
 if __name__ == "__main__":

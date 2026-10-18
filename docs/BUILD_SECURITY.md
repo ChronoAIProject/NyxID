@@ -39,6 +39,18 @@ exact same CI build, rather than claiming a preexisting release digest. The
 context-spike fixture names an immutable published machine digest. Production
 Dockerfiles have no parameterized base-image exception.
 
+`security/test-images.json` pins the historical0.40 machine,0.41 machine/updater
+and BusyBox mailbox fixtures. The migration harness pulls its old bytes by
+digest before creating the local historical tag expected by the test adapter;
+it never fetches that tag. The production harness consumes the pinned fixtures
+directly. Registry receipts also cover the already-pinned Mongo8 test image and
+context-spike base. `check-build-inputs.py` validates these inputs and Cargo's
+parsed dist container metadata, including an actual generated plan supplied by
+`--dist-plan`. Both release workflows check the plan before consuming its matrix.
+Workflow checks cover both .yml and .yaml. The guard has eleven regressions;
+it checks the inventoried image definitions, rather than claiming to statically
+resolve arbitrary image construction in application code.
+
 The reproducibility contract currently fixes source revision, language tools,
 dependency locks, Actions, base image indices and explicit downloaded tool
 checksums. **Bit-for-bit image reproducibility is not claimed**: Ubuntu/Debian/

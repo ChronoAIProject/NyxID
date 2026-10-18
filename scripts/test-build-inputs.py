@@ -3,6 +3,7 @@
 import hashlib
 import importlib.util
 import io
+import json
 from pathlib import Path
 import shutil
 import subprocess
@@ -29,14 +30,17 @@ class BuildPolicy(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)
-        for directory in (".github/workflows", "security"):
+        for directory in (".github/workflows", ".github/scripts", "security"):
             shutil.copytree(ROOT / directory, self.root / directory)
         self.dockerfiles = subprocess.check_output(["git", "ls-files", "*Dockerfile*"], cwd=ROOT, text=True).splitlines()
         for name in self.dockerfiles:
             target = self.root / name
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(ROOT / name, target)
-        self.mock = patch.object(policy.subprocess, "check_output", return_value="\n".join(self.dockerfiles))
+        self.metadata = json.loads(subprocess.check_output(
+            ["cargo", "metadata", "--locked", "--no-deps", "--format-version=1"], cwd=ROOT, text=True))
+        self.mock = patch.object(policy.subprocess, "check_output", side_effect=lambda command, **_: (
+            json.dumps(self.metadata) if command[0] == "cargo" else "\n".join(self.dockerfiles)))
         self.mock.start()
         self.addCleanup(self.mock.stop)
         self.addCleanup(self.temporary.cleanup)
@@ -59,6 +63,28 @@ class BuildPolicy(unittest.TestCase):
 
     def test_mutable_base_rejected(self):
         self.mutate("frontend/Dockerfile", "node:22.23.2-alpine@sha256:b6f26b36c8ff49624cfdac716b8ea1138d606df02586a77d364bb5536a634f85", "node:22.23.2-alpine", "unpinned base")
+
+    def test_cargo_dist_metadata_mutable_image_rejected(self):
+        self.metadata["metadata"]["dist"]["github-custom-runners"]["aarch64-unknown-linux-gnu"]["container"]["image"] = "buildpack-deps:focal"
+        self.assertTrue(any("Cargo dist metadata" in error and "unpinned consumed image" in error
+                            for error in policy.check(self.root)))
+
+    def test_generated_plan_mutable_image_rejected(self):
+        plan = {"ci": {"github": {"artifacts_matrix": {"include": [{"container": {"image": "buildpack-deps:focal"}}]}}}}
+        self.assertTrue(any("generated dist plan" in error and "unpinned consumed image" in error
+                            for error in policy.check(self.root, plan)))
+
+    def test_mutable_remote_fixture_rejected(self):
+        fixtures = self.root / "security/test-images.json"
+        value = json.loads(fixtures.read_text())
+        value["images"]["mailbox"] = "busybox:latest"
+        fixtures.write_text(json.dumps(value))
+        self.assertTrue(any("test fixture mailbox: unpinned consumed image" in error
+                            for error in policy.check(self.root)))
+
+    def test_yaml_extension_action_rejected(self):
+        (self.root / ".github/workflows/new.yaml").write_text("jobs: {test: {steps: [{uses: actions/checkout@v6}]}}")
+        self.assertTrue(any("new.yaml: unpinned Action" in error for error in policy.check(self.root)))
 
     def test_generated_installer_rejected(self):
         self.mutate(".github/workflows/release.yml", "python3 scripts/bootstrap-build-tool.py cargo-dist", "${{ matrix.install_dist.run }} #", "executable generated")

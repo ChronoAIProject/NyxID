@@ -1085,6 +1085,278 @@
         }
       ],
       "observed_utc": "2026-10-18T21:55:32.225231+00:00"
+    },
+    {
+      "image": "ghcr.io/chronoaiproject/nyxid/nyxid-node-machine:0.40.0",
+      "digest": "sha256:a475ebe5bd219345e99dd230ff34aed25b430fdb815203b2f526f31dc2366f32",
+      "registry_url": "https://ghcr.io/v2/chronoaiproject/nyxid/nyxid-node-machine/manifests/0.40.0",
+      "platforms": [
+        {
+          "digest": "sha256:1ab2bd3afb808138b5eca462dc50940eb857a4fbd593f4e27a7e2defd4ba18f2",
+          "platform": {
+            "architecture": "arm64",
+            "os": "linux"
+          }
+        },
+        {
+          "digest": "sha256:a80d4166a5557b60859e5f1e17cde02a4c5b7a83e25c916d0af470d71fcdea3a",
+          "platform": {
+            "architecture": "amd64",
+            "os": "linux"
+          }
+        }
+      ],
+      "observed_utc": "2026-10-18T22:14:47.811661+00:00"
+    },
+    {
+      "image": "ghcr.io/chronoaiproject/nyxid/nyxid-node-machine:0.41.0",
+      "digest": "sha256:98f85eb9f75d8cae7ccd7d3a1356274d6265ff13ae102cb873133d2ab6cf5e27",
+      "registry_url": "https://ghcr.io/v2/chronoaiproject/nyxid/nyxid-node-machine/manifests/0.41.0",
+      "platforms": [
+        {
+          "digest": "sha256:e095a8a4371dee06bd781feddcff45fab2b0d364c77c162c042a817f3511b72c",
+          "platform": {
+            "architecture": "arm64",
+            "os": "linux"
+          }
+        },
+        {
+          "digest": "sha256:f37c9e2bfc5b531d06b493da27986c9e12d3a60d2e7f281349bc9da51b283917",
+          "platform": {
+            "architecture": "amd64",
+            "os": "linux"
+          }
+        }
+      ],
+      "observed_utc": "2026-10-18T22:14:48.391991+00:00"
+    },
+    {
+      "image": "ghcr.io/chronoaiproject/nyxid/nyxid-machine-updater:0.41.0",
+      "digest": "sha256:04964cd9f4779b3010f64576d4d3ee8cf164b476d8e6148d4567130b61a079e9",
+      "registry_url": "https://ghcr.io/v2/chronoaiproject/nyxid/nyxid-machine-updater/manifests/0.41.0",
+      "platforms": [
+        {
+          "digest": "sha256:481e607d3da686f59c8a6c468031384a1a134f0f9598617ebcaef5ce7d38dce2",
+          "platform": {
+            "architecture": "arm64",
+            "os": "linux"
+          }
+        },
+        {
+          "digest": "sha256:dbc925a85e3a4df28d18c1c9bbe173b587a5c018302f768795f9a489781f82f0",
+          "platform": {
+            "architecture": "amd64",
+            "os": "linux"
+          }
+        }
+      ],
+      "observed_utc": "2026-10-18T22:14:48.968876+00:00"
+    },
+    {
+      "image": "busybox:1.37.0",
+      "digest": "sha256:bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e",
+      "registry_url": "https://registry-1.docker.io/v2/library/busybox/manifests/1.37.0",
+      "platforms": [
+        {
+          "digest": "sha256:66a6306db78bf2dbf3487f293aa8d6990d8e506fdffab9cc43fe422becf886e4",
+          "platform": {
+            "architecture": "amd64",
+            "os": "linux"
+          }
+        },
+        {
+          "digest": "sha256:4c1f36753ad7ca27822b3caf7fa5ecb469b9a7ac64103b1d8bb5b0f286ea78f3",
+          "platform": {
+            "architecture": "unknown",
+            "os": "unknown"
+          }
+        },
+        {
+          "digest": "sha256:88132f86ce62d9462471f3758c3080ee2709b782ece90f847f8c09b6fafc2bf7",
+          "platform": {
+            "architecture": "arm",
+            "os": "linux",
+            "variant": "v5"
+          }
+        },
+        {
+          "digest": "sha256:8c65029ccb063b50c7d99c3385df7a6f6ca8758c46a781c65f992576f19e75bd",
+          "platform": {
+            "architecture": "unknown",
+            "os": "unknown"
+          }
+        },
+        {
+          "digest": "sha256:80ddcd89e4e9e4eda71e4e5d9c9442d6a8156eb9da7b2b0c7bf91248784a17ba",
+          "platform": {
+            "architecture": "arm",
+            "os": "linux",
+            "variant": "v6"
+          }
+        },
+        {
+          "digest": "sha256:91aa2a66a996afa9821eed6758ed0489ee891c50f4b8940b7b3db500b79f029f",
+          "platform": {
+            "architecture": "arm",
+            "os": "linux",
+            "variant": "v7"
+          }
+        },
+        {
+          "digest": "sha256:279b93ed4487cad22ab549f54a184788ceff616b149fa61b84adc3b62cfd440c",
+          "platform": {
+            "architecture": "unknown",
+            "os": "unknown"
+          }
+        },
+        {
+          "digest": "sha256:d82c2ab94640ded77cf76514ce6a84870761105058a4a9e51b05a8a79be97a6c",
+          "platform": {
+            "architecture": "arm64",
+            "os": "linux",
+            "variant": "v8"
+          }
+        },
+        {
+          "digest": "sha256:280c63bbb0cd39cb8ec327889b13ef50050d280e8e3b34fbf39d371a626ac02b",
+          "platform": {
+            "architecture": "unknown",
+            "os": "unknown"
+          }
+        },
+        {
+          "digest": "sha256:a88c21a22c5ddc9dada27459a93cfa69dd1d155578f8e8664d451854accb3e79",
+          "platform": {
+            "architecture": "386",
+            "os": "linux"
+          }
+        },
+        {
+          "digest": "sha256:a0706161519106ac9e227836f0f943f02517b76505648f2c68c5c290682166d7",
+          "platform": {
+            "architecture": "unknown",
+            "os": "unknown"
+          }
+        },
+        {
+          "digest": "sha256:025d95c7d9b648f6202fabbd9a33182fcbac04164069078e6fe3702bd2450283",
+          "platform": {
+            "architecture": "ppc64le",
+            "os": "linux"
+          }
+        },
+        {
+          "digest": "sha256:6fb3f83a41e6d11698b0dcb4e856214fd247042f348237e3b63e698368dea448",
+          "platform": {
+            "architecture": "unknown",
+            "os": "unknown"
+          }
+        },
+        {
+          "digest": "sha256:be2e8702261d743f7b1ba1b1cb4499927664d7a82baedf87564306426dda680a",
+          "platform": {
+            "architecture": "riscv64",
+            "os": "linux"
+          }
+        },
+        {
+          "digest": "sha256:fedb281243849349c260d6df90fb2e4b4678e598a40119bc8aff0c63fc271b0f",
+          "platform": {
+            "architecture": "unknown",
+            "os": "unknown"
+          }
+        },
+        {
+          "digest": "sha256:7f0d4675ec87f3f46c04f2285079906361c789390de0917d850a9d253fffd2aa",
+          "platform": {
+            "architecture": "s390x",
+            "os": "linux"
+          }
+        },
+        {
+          "digest": "sha256:4680953cb4fcd19d321188c2d5ff6712a01124e90c6e06b21a18fcceeec54fbb",
+          "platform": {
+            "architecture": "unknown",
+            "os": "unknown"
+          }
+        }
+      ],
+      "observed_utc": "2026-10-18T22:14:50.330161+00:00"
+    },
+    {
+      "image": "mongo:8.0",
+      "digest": "sha256:4968f22d0c6c10ef29952f3e807f62872ba22b3312f25803564fbfc08255efc2",
+      "registry_url": "https://registry-1.docker.io/v2/library/mongo/manifests/sha256:4968f22d0c6c10ef29952f3e807f62872ba22b3312f25803564fbfc08255efc2",
+      "platforms": [
+        {
+          "digest": "sha256:a70d9916fd916ddfdf6fd8552784c599eb26f88c59951c7bcdc50abd158e8be7",
+          "platform": {
+            "architecture": "amd64",
+            "os": "linux"
+          }
+        },
+        {
+          "digest": "sha256:8e2c13a5b1afc454f3255d2ec9289fccc54dd2a2fd75723cd2a1650b7b0ac1de",
+          "platform": {
+            "architecture": "unknown",
+            "os": "unknown"
+          }
+        },
+        {
+          "digest": "sha256:9535c3627cc8c14b2768c7fd825dcd52c3247ba39f96d1cc5c129948d5fd5028",
+          "platform": {
+            "architecture": "arm64",
+            "os": "linux",
+            "variant": "v8"
+          }
+        },
+        {
+          "digest": "sha256:90817801fb8dbd6ac5e566a23d608c604cb8cc9da34698335b4ee8994cb6fa19",
+          "platform": {
+            "architecture": "unknown",
+            "os": "unknown"
+          }
+        },
+        {
+          "digest": "sha256:62aca0ad2d44f39892635f80b8af91173a44b89074ea989781f5e8b96eb7c093",
+          "platform": {
+            "architecture": "amd64",
+            "os": "windows",
+            "os.version": "10.0.26100.33438"
+          }
+        },
+        {
+          "digest": "sha256:c5b80ae2b37cd0968af61e79b397c75069d59475ea2c48cccf4b455bbae872e3",
+          "platform": {
+            "architecture": "amd64",
+            "os": "windows",
+            "os.version": "10.0.20348.5622"
+          }
+        }
+      ],
+      "observed_utc": "2026-10-18T22:14:51.775882+00:00"
+    },
+    {
+      "image": "ghcr.io/chronoaiproject/nyxid/nyxid-node-machine",
+      "digest": "sha256:2f1fe82573fa86f99c3cca219be33ab846f17a7374cc40bcf51e2a56a1b4f7d4",
+      "registry_url": "https://ghcr.io/v2/chronoaiproject/nyxid/nyxid-node-machine/manifests/sha256:2f1fe82573fa86f99c3cca219be33ab846f17a7374cc40bcf51e2a56a1b4f7d4",
+      "platforms": [
+        {
+          "digest": "sha256:4d51510ce05d670a39f860ee500a6edf0a6a24c805b63215efaa7d1da7103a02",
+          "platform": {
+            "architecture": "amd64",
+            "os": "linux"
+          }
+        },
+        {
+          "digest": "sha256:c32e20a094f39c65076a9e9ee096611160174dcf1ca91c447988aec59fef1f65",
+          "platform": {
+            "architecture": "arm64",
+            "os": "linux"
+          }
+        }
+      ],
+      "observed_utc": "2026-10-18T22:14:52.390390+00:00"
     }
   ]
 }

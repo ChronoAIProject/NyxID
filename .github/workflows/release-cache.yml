@@ -51,6 +51,7 @@ jobs:
       - id: plan
         run: |
           dist plan --output-format=json > plan-dist-manifest.json
+          python3 scripts/check-build-inputs.py --dist-plan plan-dist-manifest.json
           echo "manifest=$(jq -c "." plan-dist-manifest.json)" >> "$GITHUB_OUTPUT"
 
   warm:

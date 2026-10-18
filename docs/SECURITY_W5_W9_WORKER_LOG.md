@@ -268,6 +268,30 @@ build-input guard passed. Exact commands/output: `w7-yaml-r1-01.log` in the
 validation root. This correction supersedes the earlier permissive YAML
 assurance; other W7 dependency/build changes remain separate.
 
+## W7-R1-03 consumed fixture and generated container coverage
+
+The build guard now reads Cargo's parsed dist metadata and validates actual
+cargo-dist JSON plans before both release workflows consume their matrices.
+It also covers .yaml Actions and centrally inventoried remote test images.
+Eleven regressions passed (the original7 plus mutable Cargo container,
+generated-plan container, remote fixture and .yaml Action cases).
+
+Registry HTTPS responses were fetched for historical machine0.40/0.41,
+updater0.41 and BusyBox1.37; each raw response SHA256 matched its registry
+Docker-Content-Digest. The existing pinned Mongo8 and context-spike digest
+responses were independently fetched and verified too. Receipts retain exact
+URLs/platform indices/observed time in build-input-pins.json (16images total).
+The migration harness pulls immutable old bytes then creates only the local
+tag expected by its cfg(test) adapter. Production fixtures/mailbox execute
+pinned bytes. Local newly built images remain explicit inputs. This does not
+claim static resolution of arbitrary runtime image-construction expressions.
+
+Exact commands/output: `w7-input-r1-03.log`;11 tests, real generated plan,
+strict YAML/all14 Rust inputs, shell and Node syntax checks pass. The unchanged
+W6 real Docker execution remains its prior evidence; final-source Docker
+harness execution after these fixture changes is an integration check to run
+with the final W9 machine source, rather than being claimed from syntax checks.
+
 ## Remaining authorized batches
 
 W5 final container review/integration; W7 pinned,
