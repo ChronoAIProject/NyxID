@@ -335,7 +335,7 @@ jobs:
         run: |
           python3 scripts/bootstrap-build-tool.py npm --bin-dir "$RUNNER_TEMP/nyxid-node-tools"
           "$RUNNER_TEMP/nyxid-node-tools/npm" ci --ignore-scripts --prefix .github/tools/claude
-          echo "$GITHUB_WORKSPACE/.github/tools/claude/node_modules/.bin" >> "$GITHUB_PATH"
+          echo "$GITHUB_WORKSPACE/.github/tools/claude/bin" >> "$GITHUB_PATH"
       - name: Check generated plugin files match integrations/plugin-source
         if: env.PACKAGE_CHANGED == 'true'
         run: python3 scripts/sync-plugins.py --check
@@ -746,6 +746,10 @@ jobs:
           node-version-file: .node-version
           cache: npm
           cache-dependency-path: frontend/package-lock.json
+      - name: Use reviewed npm11 installer
+        run: |
+          python3 "$GITHUB_WORKSPACE/scripts/bootstrap-build-tool.py" npm --bin-dir "$RUNNER_TEMP/nyxid-node-tools"
+          echo "$RUNNER_TEMP/nyxid-node-tools" >> "$GITHUB_PATH"
       - run: npm ci
       - run: npm run lint
       - run: npm run test
@@ -834,6 +838,10 @@ jobs:
           node-version-file: .node-version
           cache: npm
           cache-dependency-path: sdk/package-lock.json
+      - name: Use reviewed npm11 installer
+        run: |
+          python3 "$GITHUB_WORKSPACE/scripts/bootstrap-build-tool.py" npm --bin-dir "$RUNNER_TEMP/nyxid-node-tools"
+          echo "$RUNNER_TEMP/nyxid-node-tools" >> "$GITHUB_PATH"
       - run: npm ci
       - run: npm run build
 
@@ -1194,6 +1202,10 @@ jobs:
           node-version-file: .node-version
           cache: npm
           cache-dependency-path: frontend/package-lock.json
+      - name: Use reviewed npm11 installer
+        run: |
+          python3 "$GITHUB_WORKSPACE/scripts/bootstrap-build-tool.py" npm --bin-dir "$RUNNER_TEMP/nyxid-node-tools"
+          echo "$RUNNER_TEMP/nyxid-node-tools" >> "$GITHUB_PATH"
       - run: npm ci
 
       # Head: measure WITHOUT the gate (override the line threshold to 0) so the

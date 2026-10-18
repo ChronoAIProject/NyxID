@@ -358,6 +358,21 @@ Path filters and Dependabot include the independent validator, test transport,
 Node tools and separate Cargo spike roots. Strict YAML (7 workflows,14 explicit
 Rust toolchains), reusable permissions and build-input guards pass.
 
+## W7-R1-07 offline validator execution correction
+
+The prior locked install/audit success did not prove the default executable
+worked: upstream's script-disabled bin is a placeholder. A repository launcher
+now selects the installed integrity-locked native optional package, validates
+its platform/version and permits only `plugin validate --strict PATH`. It never
+executes upstream install/fallback downloads or opens a model session. Both
+actual commands now pass locally: `scripts/validate-claude-plugin.py
+--require-claude` with that launcher on PATH, and marketplace validation at `.`.
+Evidence: `w7-claude-offline-{plugin,marketplace}.log`. Strict YAML and reusable
+permissions pass. Frontend/SDK/coverage CI npm installs now explicitly use the
+reviewed npm11 bootstrap, and updater test compilation adds the missing
+`--locked`. This corrects the executable gap; the earlier install result alone
+must not be treated as actual schema-validation acceptance.
+
 ## Remaining authorized batches
 
 W5 final container review/integration; W7 pinned,

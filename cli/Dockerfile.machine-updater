@@ -25,7 +25,7 @@ ENTRYPOINT ["/nyxid-machine-updater"]
 FROM builder AS tests-build
 RUN --mount=type=cache,id=nyxid-machine-updater-target-${TARGETARCH},target=/build/target,sharing=locked \
     --mount=type=cache,id=nyxid-machine-registry,target=/usr/local/cargo/registry,sharing=locked \
-    cargo test --release -p nyxid-machine-updater --no-run --message-format=json > /tmp/tests.json \
+    cargo test --locked --release -p nyxid-machine-updater --no-run --message-format=json > /tmp/tests.json \
     && python3 -c 'import json,shutil; [shutil.copy(v["executable"],"/updater-tests") for l in open("/tmp/tests.json") if (v:=json.loads(l)).get("executable") and v.get("profile",{}).get("test") and v.get("target",{}).get("kind")==["bin"]]'
 FROM alpine:3.22@sha256:5291449c3df73caf6ed85e649dec1b9e818b39a5d8c871e97afc13e9cd5e8fa8 AS e2e
 RUN apk add --no-cache nodejs npm openssl
