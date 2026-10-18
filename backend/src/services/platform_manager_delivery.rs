@@ -1,6 +1,7 @@
 //! Single-send delivery of retained personal replies and ephemeral command output.
 use super::{
     api_key_mutation_service as tx, platform_bot_runtime_control_service as controls,
+    platform_chat_presentation::ChatPresentation, platform_entry_scope as scope,
     platform_manager_contract::*, platform_personal_turn_service as personal,
 };
 use crate::{
@@ -35,8 +36,22 @@ use tokio::sync::Semaphore;
 use zeroize::Zeroizing;
 
 static PERSONAL_SENDS: Semaphore = Semaphore::const_new(16);
+static CONTROL_SENDS: Semaphore = Semaphore::const_new(4);
 static STATUS_SENDS: Semaphore = Semaphore::const_new(4);
 static PUBLIC_SENDS: Semaphore = Semaphore::const_new(4);
+
+#[cfg(test)]
+tokio::task_local! {
+    static TEST_CONTROL_CAPACITY: Arc<Semaphore>;
+}
+
+#[cfg(test)]
+pub(super) async fn with_control_capacity_for_test<T>(
+    capacity: Arc<Semaphore>,
+    work: impl std::future::Future<Output = T>,
+) -> T {
+    TEST_CONTROL_CAPACITY.scope(capacity, work).await
+}
 
 pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
     db.collection::<Delivery>(COLLECTION_NAME)
@@ -85,7 +100,7 @@ pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
 }
 
 fn refused() -> AppError {
-    AppError::Conflict("Telegram reply authority is unavailable".into())
+    AppError::Conflict("Chat reply authority is unavailable".into())
 }
 
 pub(crate) fn fixed_text(reason: UnavailableReason) -> &'static str {
@@ -127,7 +142,34 @@ pub(crate) fn fixed_text(reason: UnavailableReason) -> &'static str {
     }
 }
 
+fn fixed_text_for(reason: UnavailableReason, entry: &EntryIdentity) -> AppResult<String> {
+    let chat = ChatPresentation::for_entry(entry)?;
+    Ok(if chat == ChatPresentation::Telegram {
+        fixed_text(reason).to_owned()
+    } else {
+        fixed_text(reason).replace("/link", chat.login())
+    })
+}
+
+fn manager_lane(row: &Delivery) -> String {
+    match &row.entry {
+        EntryIdentity::TelegramV1 { .. } => row.manager_bot_id.clone(),
+        EntryIdentity::NativeV2 { .. } => {
+            super::mcp_service::canonical_sha256(serde_json::json!([
+                "native-manager-send-lane:v2",
+                row.profile_id,
+                row.entry,
+            ]))
+        }
+    }
+}
+
+#[cfg(test)]
 pub(crate) fn render_saved(message: &AssistantMessage, frontend: &str) -> String {
+    render_saved_for(message, frontend, ChatPresentation::Telegram)
+}
+
+fn render_saved_for(message: &AssistantMessage, frontend: &str, chat: ChatPresentation) -> String {
     let mut text = message.text.clone();
     if !message.attachments.is_empty() {
         text.push_str("\n\nImages or files are available in your NyxID conversation.");
@@ -135,10 +177,12 @@ pub(crate) fn render_saved(message: &AssistantMessage, frontend: &str) -> String
     if text.trim().is_empty() {
         text = "Your NyxBot turn finished. Open the conversation in NyxID for details.".into();
     }
-    // One Telegram operation per durable claim. Oversized output stays in the app.
-    if text.encode_utf16().count() > 3900 {
-        text =
-            "Your NyxBot reply is ready in NyxID; it is too long for one Telegram message.".into();
+    // One provider operation per durable claim. Oversized output stays in the app.
+    if text.encode_utf16().count() > chat.text_limit().saturating_sub(196) {
+        text = format!(
+            "Your NyxBot reply is ready in NyxID; it is too long for one {} message.",
+            chat.name()
+        );
     }
     if let Ok(mut url) = reqwest::Url::parse(frontend) {
         url.set_path("/assistant");
@@ -147,7 +191,7 @@ pub(crate) fn render_saved(message: &AssistantMessage, frontend: &str) -> String
             .append_pair("c", &message.conversation_id);
         url.set_fragment(None);
         let link = format!("\n\nReview actions and continue this conversation in NyxID: {url}");
-        if text.encode_utf16().count() + link.encode_utf16().count() <= 4096 {
+        if text.encode_utf16().count() + link.encode_utf16().count() <= chat.text_limit() {
             text.push_str(&link);
         }
     }
@@ -179,8 +223,7 @@ pub(crate) fn captured_destination(
     }
     Ok(Some(ReplyDestination {
         manager: origin.authority.manager.clone(),
-        sender_id: origin.authority.sender_id,
-        chat_id: origin.authority.chat_id,
+        sender: origin.authority.sender.clone(),
         authority: ReplyAuthority::Personal {
             origin,
             turn: TurnRef {
@@ -215,8 +258,7 @@ async fn load_personal_saved(
     };
     if captured != *origin
         || exact.manager != destination.manager
-        || exact.sender_id != destination.sender_id
-        || exact.chat_id != destination.chat_id
+        || exact.sender != destination.sender
     {
         return Err(refused());
     }
@@ -229,7 +271,8 @@ fn append_card_notices(
     cards: &[crate::models::assistant_acknowledgement::AssistantAcknowledgement],
     key_id: &str,
     group_id: Option<&str>,
-) -> String {
+    chat: ChatPresentation,
+) -> AppResult<String> {
     use crate::models::assistant_acknowledgement::CardRouting;
     let mut rendered = message.clone();
     let mut notices = String::new();
@@ -268,9 +311,8 @@ fn append_card_notices(
                 continue;
             }
             let summary = super::assistant_nyxagent::excerpt(&card.summary, 260);
-            notices.push_str(&format!(
-                "\n\nAction: {summary}\nReply yes {code} to allow or no {code} to deny."
-            ));
+            let instruction = chat.action_instruction(&code)?;
+            notices.push_str(&format!("\n\nAction: {summary}\n{instruction}"));
         }
     }
     if !cards.is_empty() && notices.is_empty() {
@@ -280,7 +322,7 @@ fn append_card_notices(
         rendered.text = "Your full NyxBot reply is ready in NyxID.".into();
     }
     rendered.text.push_str(&notices);
-    render_saved(&rendered, frontend)
+    Ok(render_saved_for(&rendered, frontend, chat))
 }
 
 pub(crate) async fn render_personal(
@@ -326,13 +368,15 @@ pub(crate) async fn render_personal(
             ),
         };
     let thread = thread.ok_or_else(refused)?;
-    Ok(append_card_notices(
+    let entry = &thread.platform_thread.as_ref().ok_or_else(refused)?.entry;
+    append_card_notices(
         message,
         &state.config.frontend_url,
         &cards,
         &thread.credential_api_key_id,
         thread.group_id.as_deref(),
-    ))
+        ChatPresentation::for_entry(entry)?,
+    )
 }
 
 /// Reloads only the actual durable Saved reply. Destination is never caller chosen.
@@ -350,7 +394,18 @@ pub(crate) async fn saved_personal_reply(
     .await
 }
 
-pub(crate) async fn saved_personal_reply_with_api(
+pub(crate) fn saved_personal_reply_with_api<'a>(
+    state: &'a AppState,
+    row: &'a AssistantConversation,
+    reply: &'a ReplyRef,
+    api: &'a super::telegram_new_api::TelegramApi<'_>,
+) -> futures::future::BoxFuture<'a, AppResult<Option<DeliveryOutcome>>> {
+    // Owner turn settlement also calls this for replies without a platform route.
+    // Keep the transport-specific delivery future outside those caller frames.
+    Box::pin(saved_personal_reply_with_api_impl(state, row, reply, api))
+}
+
+async fn saved_personal_reply_with_api_impl(
     state: &AppState,
     row: &AssistantConversation,
     reply: &ReplyRef,
@@ -386,8 +441,7 @@ fn receipt_claim(
         (ReplyAuthority::Personal { origin, turn }, DeliveryRef::Reply(reply))
             if *turn == reply.turn
                 && destination.manager == origin.authority.manager
-                && destination.sender_id == origin.authority.sender_id
-                && destination.chat_id == origin.authority.chat_id =>
+                && destination.sender == origin.authority.sender =>
         {
             match &origin.source {
                 PlatformOriginSource::Ingress(claim) => Ok(Some(claim.clone())),
@@ -414,7 +468,7 @@ async fn enqueue(
     let identity = match &reference {
         DeliveryReference::Reply { reply_id, .. }
         | DeliveryReference::PublicReply { reply_id, .. } => format!("reply:{reply_id}"),
-        DeliveryReference::Command => "command".into(),
+        DeliveryReference::Command { .. } => "command".into(),
         DeliveryReference::PublicSignup { intent_id, .. } => format!("public-signup:{intent_id}"),
         _ => "fixed".into(),
     };
@@ -428,23 +482,33 @@ async fn enqueue(
         ) => format!("event:{admission_id}"),
         _ => return Err(refused()),
     };
-    let dedupe_key = hex::encode(Sha256::digest(
-        format!(
-            "manager-send:v1:{}:{}:{}:{identity}",
-            destination.manager.profile_id, destination.manager.telegram_bot_id, admission
-        )
-        .as_bytes(),
-    ));
+    let dedupe_key = match &destination.manager.entry {
+        EntryIdentity::TelegramV1 { telegram_bot_id } => hex::encode(Sha256::digest(
+            format!(
+                "manager-send:v1:{}:{}:{}:{identity}",
+                destination.manager.profile_id, telegram_bot_id, admission
+            )
+            .as_bytes(),
+        )),
+        EntryIdentity::NativeV2 { .. } => {
+            super::mcp_service::canonical_sha256(serde_json::json!([
+                "manager-send:v2",
+                destination.manager.profile_id,
+                destination.manager.entry,
+                admission,
+                identity,
+            ]))
+        }
+    };
     let now = Utc::now();
     let row = Delivery {
         id: uuid::Uuid::new_v4().to_string(),
         dedupe_key: dedupe_key.clone(),
         profile_id: destination.manager.profile_id.clone(),
         manager_bot_id: destination.manager.manager_bot_id.clone(),
-        telegram_bot_id: destination.manager.telegram_bot_id,
+        entry: destination.manager.entry.clone(),
         manager_authority_epoch: destination.manager.manager_authority_epoch,
-        sender_id: destination.sender_id,
-        chat_id: destination.chat_id,
+        sender: destination.sender.clone(),
         ingress_id: ingress.map(|claim| claim.receipt_id.clone()),
         ingress_claim_id: ingress.map(|claim| claim.claim_id.clone()),
         origin,
@@ -453,6 +517,7 @@ async fn enqueue(
         state: DeliveryState::Pending,
         claim_id: None,
         telegram_message_ids: vec![],
+        platform_message_ids: vec![],
         expires_at: destination.expires_at,
         retry_at: now,
         updated_at: now,
@@ -520,12 +585,17 @@ async fn fence_transport_in_session(
         return Err(refused());
     }
     let receipt = match (&row.ingress_id, &row.ingress_claim_id) {
-        (Some(id), Some(claim)) => Some(state.db.collection::<PlatformManagerIngress>(INGRESS).find_one(doc! {
-        "_id":id,"claim_id":claim,"profile_id":&row.profile_id,
-        "manager_bot_id":&row.manager_bot_id,"telegram_bot_id":row.telegram_bot_id,
-        "manager_authority_epoch":row.manager_authority_epoch,"sender_id":row.sender_id,"chat_id":row.chat_id,
-    }).session(&mut *session).await?.ok_or_else(refused)?),
-        (None,None) if matches!(row.reference,DeliveryReference::Reply { .. }) => None,
+        (Some(id), Some(claim)) => {
+            let receipt = state.db.collection::<PlatformManagerIngress>(INGRESS)
+                .find_one(doc! {"_id":id,"claim_id":claim,"profile_id":&row.profile_id,
+                    "manager_bot_id":&row.manager_bot_id,"manager_authority_epoch":row.manager_authority_epoch})
+                .session(&mut *session).await?.ok_or_else(refused)?;
+            if receipt.entry != row.entry || receipt.sender != row.sender {
+                return Err(refused());
+            }
+            Some(receipt)
+        }
+        (None, None) if matches!(row.reference, DeliveryReference::Reply { .. }) => None,
         _ => return Err(refused()),
     };
     let profile=state.db.collection::<PlatformBotConfig>(PROFILES).find_one(doc! {"_id":&row.profile_id,"manager_bot_id":&row.manager_bot_id,"deleted_at":bson::Bson::Null}).session(&mut *session).await?.ok_or_else(refused)?;
@@ -534,45 +604,54 @@ async fn fence_transport_in_session(
         .ok_or_else(refused)?;
     if policy.retired
         || policy.manager_authority_epoch != row.manager_authority_epoch
-        || policy.telegram_bot_id != row.telegram_bot_id
+        || policy.entry != row.entry
         || policy.manager_bot_id != row.manager_bot_id
     {
         return Err(refused());
     }
-    let current = state
-        .db
-        .collection::<PlatformCredential>(crate::models::platform_credential::COLLECTION_NAME)
-        .find_one(doc! {"provider":"telegram-new"})
-        .session(&mut *session)
-        .await?;
-    if let Some(credential) = &current
-        && credential
-            .fields
-            .get("manager_bot_id")
-            .is_some_and(|id| id != &row.manager_bot_id)
-    {
-        return Err(refused());
-    }
-    if !current.as_ref().is_some_and(|credential| {
-        credential.fields.get("webhook_ready").map(String::as_str) == Some("true")
-            && credential.fields.get("observation_id") == Some(&profile.observation_id)
-    }) {
-        return Ok(None);
-    }
+    let observation = match &row.entry {
+        EntryIdentity::TelegramV1 { .. } => {
+            let current = state
+                .db
+                .collection::<PlatformCredential>(
+                    crate::models::platform_credential::COLLECTION_NAME,
+                )
+                .find_one(doc! {"provider":"telegram-new"})
+                .session(&mut *session)
+                .await?;
+            if current
+                .as_ref()
+                .and_then(|credential| credential.fields.get("manager_bot_id"))
+                .is_some_and(|id| id != &row.manager_bot_id)
+            {
+                return Err(refused());
+            }
+            if !current.as_ref().is_some_and(|credential| {
+                credential.fields.get("webhook_ready").map(String::as_str) == Some("true")
+                    && credential.fields.get("observation_id") == Some(&profile.observation_id)
+            }) {
+                return Ok(None);
+            }
+            profile.observation_id.clone()
+        }
+        EntryIdentity::NativeV2 { .. } => {
+            receipt.as_ref().ok_or_else(refused)?.observation_id.clone()
+        }
+    };
     let controls = controls::fence_manager_in_session(
         &state.db,
         session,
         &row.profile_id,
         &row.manager_bot_id,
-        row.telegram_bot_id,
-        Some(&profile.observation_id),
+        &row.entry,
+        Some(&observation),
     )
     .await?
     .ok_or_else(refused)?;
     if controls.manager_authority_epoch != row.manager_authority_epoch || controls.retired {
         return Err(refused());
     }
-    Ok(Some((receipt, controls, profile.observation_id)))
+    Ok(Some((receipt, controls, observation)))
 }
 
 /// Fixed system notice after a saved public failure. No execution proof,
@@ -600,8 +679,12 @@ async fn fence_public_failure_notice(
         || controls.emergency_stopped
         || controls.retired
         || *public_policy_revision != controls.public_policy_revision
-        || delivery.sender_id <= 0
-        || delivery.sender_id != delivery.chat_id
+        || scope::validate(
+            &delivery.entry,
+            &delivery.manager_bot_id,
+            Some(&delivery.sender),
+        )
+        .is_err()
     {
         return Err(refused());
     }
@@ -649,9 +732,9 @@ async fn fence_public_failure_notice(
     let public = state.db.collection::<PlatformPublicSession>(SESSIONS)
         .find_one_and_update(doc! {
             "_id": public_session_id, "profile_id": &delivery.profile_id,
-            "manager_bot_id": &delivery.manager_bot_id, "telegram_bot_id": delivery.telegram_bot_id,
+            "manager_bot_id": &delivery.manager_bot_id, scope::entry_key(&delivery.entry):scope::entry_value(&delivery.entry),
             "manager_authority_epoch": delivery.manager_authority_epoch,
-            "sender_id": delivery.sender_id, "chat_id": delivery.chat_id,
+            scope::actor_key(&delivery.sender,true):scope::actor_value(&delivery.sender), scope::destination_key(&delivery.sender,true):scope::destination_value(&delivery.sender),
             "public_policy_revision": public_policy_revision,
             "sponsor_owner_user_id": &execution.payer_user_id, "policy_digest": policy_digest,
             "$expr": {"$gt": ["$expires_at", "$$NOW"]},
@@ -711,9 +794,8 @@ async fn validate_in_session(
             let origin = row.origin.as_ref().ok_or_else(refused)?;
             let origin = personal::contract_origin(origin)?;
             if origin.authority.manager != controls::policy(&controls).manager
-                || origin.authority.sender_id != row.sender_id
-                || origin.authority.chat_id != row.chat_id
-                || row.sender_id != row.chat_id
+                || origin.authority.sender != row.sender
+                || scope::validate(&row.entry, &row.manager_bot_id, Some(&row.sender)).is_err()
             {
                 return Err(refused());
             }
@@ -792,18 +874,122 @@ async fn validate_in_session(
                 return Err(refused());
             }
         }
-        DeliveryReference::Command => {
+        DeliveryReference::Command { effect } => {
             let receipt = receipt.as_ref().ok_or_else(refused)?;
+            let effect = effect.as_ref().ok_or_else(refused)?;
             if receipt.audience != IngressAudience::Control
                 || !receipt.original_private_command
                 || receipt.phase != IngressPhase::Settled
-                || row.sender_id != row.chat_id
+                || scope::validate(&row.entry, &row.manager_bot_id, Some(&row.sender)).is_err()
+                || receipt.control_effect.as_ref() != Some(effect)
             {
                 return Err(refused());
             }
+            let update = VerifiedManagerUpdate {
+                profile_id: row.profile_id.clone(),
+                manager_bot_id: row.manager_bot_id.clone(),
+                entry: row.entry.clone(),
+                observation_id: observation.clone(),
+                sender: row.sender.clone(),
+                chat_kind: ManagerChatKind::Private,
+                event: receipt.event.clone(),
+                command_eligibility: ManagerCommandEligibility::OriginalPrivateMessage,
+            };
+            if !super::platform_manager_command_service::fence_effect_in_session(
+                &state.db,
+                session,
+                &update,
+                &receipt.id,
+                effect,
+            )
+            .await?
+            {
+                return Err(refused());
+            }
+            if let Some(reply) = effect.static_reply()
+                && reply
+                    .render(&state.config.frontend_url, &row.entry)?
+                    .as_str()
+                    != body
+            {
+                return Err(refused());
+            }
+            if let crate::models::platform_manager_ingress::ManagerCommandEffect::Management {
+                selection,
+                ..
+            } = effect
+            {
+                let token = if matches!(
+                    selection,
+                    crate::models::platform_manager_management::ManagerManagementView::Onboarding
+                ) {
+                    let url = body
+                        .strip_prefix(
+                            "Create a Telegram bot for the NyxID account linked to this chat: ",
+                        )
+                        .and_then(|value| value.split_once('\n').map(|(url, _)| url))
+                        .and_then(|value| reqwest::Url::parse(value).ok())
+                        .ok_or_else(refused)?;
+                    Some(Zeroizing::new(
+                        url.path_segments()
+                            .and_then(|mut parts| parts.next_back())
+                            .ok_or_else(refused)?
+                            .to_owned(),
+                    ))
+                } else {
+                    None
+                };
+                if super::platform_manager_management::render_in_session(
+                    &state.db,
+                    session,
+                    &update,
+                    effect,
+                    &state.config.frontend_url,
+                    token.as_deref().map(String::as_str),
+                )
+                .await?
+                .as_str()
+                    != body
+                {
+                    return Err(refused());
+                }
+            }
+            if let crate::models::platform_manager_ingress::ManagerCommandEffect::Link {
+                intent_id,
+            } = effect
+            {
+                let url = body
+                    .strip_prefix("Review your NyxID account at ")
+                    .and_then(|value| value.split_once('\n').map(|(url, _)| url))
+                    .and_then(|url| reqwest::Url::parse(url).ok())
+                    .ok_or_else(refused)?;
+                let token = Zeroizing::new(
+                    url.fragment()
+                        .and_then(|f| f.strip_prefix("intent_token="))
+                        .ok_or_else(refused)?
+                        .to_owned(),
+                );
+                if !super::platform_link_intent_service::command_token_matches_in_session(
+                    &state.db,
+                    session,
+                    state.auth_device_hmac_key.as_slice(),
+                    intent_id,
+                    &token,
+                )
+                .await?
+                    || (super::platform_manager_command_service::PersonalCommandReply::Link {
+                        token,
+                    })
+                    .render(&state.config.frontend_url, &row.entry)?
+                    .as_str()
+                        != body
+                {
+                    return Err(refused());
+                }
+            }
         }
         DeliveryReference::Fixed { reason } if reason == "PublicTurnFailed" => {
-            if body != fixed_text(UnavailableReason::PublicTurnFailed) {
+            if body != fixed_text_for(UnavailableReason::PublicTurnFailed, &row.entry)? {
                 return Err(refused());
             }
             fence_public_failure_notice(
@@ -853,13 +1039,239 @@ async fn validate_in_session(
     Ok(Some(observation))
 }
 
+struct NativeSendPreparation {
+    adapter: Arc<dyn super::channel_platform::PlatformAdapter>,
+    deadline: chrono::DateTime<Utc>,
+}
+
+async fn prepare_native_send(
+    state: &AppState,
+    row: &Delivery,
+    deadline: Option<chrono::DateTime<Utc>>,
+) -> AppResult<Option<NativeSendPreparation>> {
+    let EntryIdentity::NativeV2 { platform_entry } = &row.entry else {
+        return Ok(None);
+    };
+    prepare_selected_native_send(state, row, platform_entry, deadline).await
+}
+
+fn prepare_selected_native_send<'a>(
+    state: &'a AppState,
+    row: &'a Delivery,
+    platform_entry: &'a crate::models::platform_entry_identity::NativeEntryIdentity,
+    deadline: Option<chrono::DateTime<Utc>>,
+) -> futures::future::BoxFuture<'a, AppResult<Option<NativeSendPreparation>>> {
+    Box::pin(prepare_selected_native_send_impl(
+        state,
+        row,
+        platform_entry,
+        deadline,
+    ))
+}
+
+async fn prepare_selected_native_send_impl(
+    state: &AppState,
+    row: &Delivery,
+    platform_entry: &crate::models::platform_entry_identity::NativeEntryIdentity,
+    deadline: Option<chrono::DateTime<Utc>>,
+) -> AppResult<Option<NativeSendPreparation>> {
+    let deadline = deadline.ok_or_else(refused)?;
+    let remaining = (deadline - Utc::now()).to_std().map_err(|_| refused())?;
+    tokio::time::timeout(remaining, async {
+        let ingress = state
+            .db
+            .collection::<PlatformManagerIngress>(INGRESS)
+            .find_one(doc! {
+                "_id":row.ingress_id.as_ref().ok_or_else(refused)?,
+                "claim_id":row.ingress_claim_id.as_ref().ok_or_else(refused)?,
+                "profile_id":&row.profile_id,"manager_authority_epoch":row.manager_authority_epoch,
+            })
+            .await?
+            .ok_or_else(refused)?;
+        if ingress.entry != row.entry || ingress.sender != row.sender {
+            return Err(refused());
+        }
+        let receipt = state
+            .db
+            .collection::<crate::models::platform_entry_identity::NativeEntryReceipt>(
+                crate::models::platform_entry_identity::NATIVE_RECEIPTS,
+            )
+            .find_one(doc! {"_id":&ingress.observation_id,"profile_id":&row.profile_id})
+            .await?
+            .ok_or_else(refused)?;
+        let SenderIdentity::NativeV2 { platform_sender } = &row.sender else {
+            return Err(refused());
+        };
+        if receipt.configuration.identity != *platform_entry
+            || receipt.sender != *platform_sender
+            || receipt.manager_authority_epoch != row.manager_authority_epoch
+        {
+            return Err(refused());
+        }
+        let adapter =
+            super::platform_native_reply_service::send_adapter(state, platform_entry.platform)?;
+        super::platform_native_reply_service::refresh_before_claim(
+            state,
+            &receipt,
+            deadline,
+            adapter.as_ref(),
+        )
+        .await?;
+        Ok(Some(NativeSendPreparation {
+            adapter,
+            deadline: deadline.min(receipt.expires_at),
+        }))
+    })
+    .await
+    .map_err(|_| refused())?
+}
+
+fn native_send_deadline(row: &Delivery) -> AppResult<Option<chrono::DateTime<Utc>>> {
+    if !matches!(row.entry, EntryIdentity::NativeV2 { .. }) {
+        return Ok(None);
+    }
+    let budget = std::time::Duration::from_secs(20);
+    #[cfg(test)]
+    let budget = TEST_NATIVE_SEND_BUDGET
+        .try_with(|value| *value)
+        .unwrap_or(budget)
+        .min(budget);
+    Ok(Some(row.expires_at.min(
+        Utc::now() + Duration::from_std(budget).map_err(|_| refused())?,
+    )))
+}
+
+#[cfg(test)]
+pub(crate) struct NativeDeliveryStall {
+    pub entered: std::sync::atomic::AtomicBool,
+    pub duration: std::time::Duration,
+}
+
+#[cfg(test)]
+tokio::task_local! {
+    pub(crate) static TEST_NATIVE_SEND_BUDGET: std::time::Duration;
+    pub(crate) static TEST_NATIVE_CLAIM_STALL: Arc<NativeDeliveryStall>;
+    pub(crate) static TEST_NATIVE_FINISH_STALL: Arc<NativeDeliveryStall>;
+    pub(crate) static TEST_NATIVE_CLEANUP_STALL: Arc<NativeDeliveryStall>;
+}
+
+#[cfg(test)]
+async fn stall_native_claim_for_test(native: bool) {
+    if native && let Ok(stall) = TEST_NATIVE_CLAIM_STALL.try_with(Arc::clone) {
+        stall
+            .entered
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        tokio::time::sleep(stall.duration).await;
+    }
+}
+
+async fn before_native_deadline<T>(
+    deadline: Option<chrono::DateTime<Utc>>,
+    future: impl std::future::Future<Output = AppResult<T>>,
+) -> Option<AppResult<T>> {
+    let Some(deadline) = deadline else {
+        return Some(future.await);
+    };
+    let remaining = (deadline - Utc::now()).to_std().ok()?;
+    tokio::time::timeout(remaining, future).await.ok()
+}
+
+async fn cleanup_before_deadline(
+    deadline: Option<chrono::DateTime<Utc>>,
+    future: impl std::future::Future<Output = AppResult<()>>,
+) -> AppResult<bool> {
+    #[cfg(test)]
+    let future = async {
+        if deadline.is_some()
+            && let Ok(stall) = TEST_NATIVE_CLEANUP_STALL.try_with(Arc::clone)
+        {
+            stall
+                .entered
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            tokio::time::sleep(stall.duration).await;
+        }
+        future.await
+    };
+    let result = before_native_deadline(deadline, future).await;
+    match result {
+        Some(result) => result.map(|()| true),
+        None => Ok(false),
+    }
+}
+
+enum CapturedMaterial {
+    Telegram(Box<PlatformCredential>),
+    Native(Box<super::platform_native_reply_service::NativeSendAuthority>),
+}
 enum CapturedSend {
     Duplicate,
     Deferred,
-    Ready(Box<PlatformCredential>),
+    Ready(CapturedMaterial),
 }
 
-async fn send(
+async fn capture_material_in_session(
+    state: &AppState,
+    session: &mut mongodb::ClientSession,
+    row: &Delivery,
+    claim: &str,
+    observation: &str,
+    native: Option<&NativeSendPreparation>,
+) -> AppResult<CapturedSend> {
+    if let EntryIdentity::NativeV2 { .. } = &row.entry {
+        let native = native.ok_or_else(refused)?;
+        if native.deadline <= Utc::now() {
+            return Err(refused());
+        }
+        let ingress = state
+            .db
+            .collection::<PlatformManagerIngress>(INGRESS)
+            .find_one(doc! {
+                "_id":row.ingress_id.as_ref().ok_or_else(refused)?,
+                "claim_id":row.ingress_claim_id.as_ref().ok_or_else(refused)?,
+                "observation_id":observation,
+            })
+            .session(&mut *session)
+            .await?
+            .ok_or_else(refused)?;
+        let material = super::platform_native_reply_service::capture_in_session(
+            state,
+            session,
+            row,
+            claim,
+            &ingress,
+            native.adapter.as_ref(),
+            native.deadline,
+        )
+        .await?;
+        return Ok(CapturedSend::Ready(CapturedMaterial::Native(Box::new(
+            material,
+        ))));
+    }
+    let credential=state.db.collection::<PlatformCredential>(crate::models::platform_credential::COLLECTION_NAME)
+        .find_one(doc! {"provider":"telegram-new","fields.manager_bot_id":&row.manager_bot_id,"fields.observation_id":observation,"fields.webhook_ready":"true"})
+        .session(&mut *session).await?.ok_or_else(refused)?;
+    Ok(CapturedSend::Ready(CapturedMaterial::Telegram(Box::new(
+        credential,
+    ))))
+}
+
+#[cfg(test)]
+tokio::task_local! {
+    pub(crate) static TEST_BEFORE_COMMAND_CLAIM: Arc<tokio::sync::Barrier>;
+}
+
+fn send<'a>(
+    state: &'a AppState,
+    identity: Arc<dyn ManagerIdentityProducer>,
+    public: Option<Arc<dyn PublicTurnProducer>>,
+    row: Delivery,
+    body: Zeroizing<String>,
+    api: &'a super::telegram_new_api::TelegramApi<'_>,
+) -> futures::future::BoxFuture<'a, AppResult<DeliveryOutcome>> {
+    Box::pin(send_impl(state, identity, public, row, body, api))
+}
+
+async fn send_impl(
     state: &AppState,
     identity: Arc<dyn ManagerIdentityProducer>,
     public: Option<Arc<dyn PublicTurnProducer>>,
@@ -870,8 +1282,11 @@ async fn send(
     if row.state != DeliveryState::Pending {
         return Ok(DeliveryOutcome::Duplicate);
     }
-    if row.expires_at <= Utc::now() || body.encode_utf16().count() > 4096 {
-        refuse_pending(state, &row).await?;
+    let native_deadline = native_send_deadline(&row)?;
+    if row.expires_at <= Utc::now()
+        || body.encode_utf16().count() > ChatPresentation::for_entry(&row.entry)?.text_limit()
+    {
+        cleanup_before_deadline(native_deadline, refuse_pending(state, &row)).await?;
         return Ok(DeliveryOutcome::Refused(
             UnavailableReason::TransportUnavailable,
         ));
@@ -881,12 +1296,21 @@ async fn send(
             retry_at: row.retry_at,
         });
     }
-    let personal = matches!(
-        row.reference,
-        DeliveryReference::Reply { .. } | DeliveryReference::Command
-    );
+    let personal = matches!(row.reference, DeliveryReference::Reply { .. });
+    let control = matches!(row.reference, DeliveryReference::Command { .. });
     let public_lane = matches!(row.reference, DeliveryReference::PublicReply { .. });
-    let permits = if public_lane {
+    #[cfg(test)]
+    let test_control_capacity = TEST_CONTROL_CAPACITY.try_with(Arc::clone).ok();
+    let permits = if control {
+        #[cfg(test)]
+        if let Some(capacity) = &test_control_capacity {
+            capacity.as_ref()
+        } else {
+            &CONTROL_SENDS
+        }
+        #[cfg(not(test))]
+        &CONTROL_SENDS
+    } else if public_lane {
         &PUBLIC_SENDS
     } else if personal {
         &PERSONAL_SENDS
@@ -895,14 +1319,20 @@ async fn send(
     };
     let pacing = super::coordination_service::RateWindowStore::admit(
         &state.db,
-        if public_lane {
+        if control {
+            "manager_control_send"
+        } else if public_lane {
             "manager_public_send"
         } else if personal {
             "manager_personal_send"
         } else {
             "manager_status_send"
         },
-        &format!("{}:{}", row.manager_bot_id, row.sender_id),
+        &format!(
+            "{}:{}",
+            manager_lane(&row),
+            scope::actor_string(&row.sender)
+        ),
         1,
         std::time::Duration::from_secs(1),
     )
@@ -911,87 +1341,141 @@ async fn send(
     // cannot consume the personal reserve; provider 429 remains authoritative.
     let manager_pacing = super::coordination_service::RateWindowStore::admit(
         &state.db,
-        if public_lane {
+        if control {
+            "manager_control_lane"
+        } else if public_lane {
             "manager_public_lane"
         } else if personal {
             "manager_personal_lane"
         } else {
             "manager_status_lane"
         },
-        &row.manager_bot_id,
+        &manager_lane(&row),
         if personal { 24 } else { 4 },
         std::time::Duration::from_secs(1),
     )
     .await?;
     let permit = permits.try_acquire();
     if !pacing.allowed || !manager_pacing.allowed || permit.is_err() {
-        if matches!(row.reference, DeliveryReference::Command) {
+        if matches!(row.reference, DeliveryReference::Command { .. }) {
+            cleanup_before_deadline(native_deadline, refuse_pending(state, &row)).await?;
+            return Ok(DeliveryOutcome::Refused(UnavailableReason::CapacityLimited));
+        }
+        let retry_at = Utc::now() + Duration::seconds(1);
+        let persisted = cleanup_before_deadline(native_deadline, async {
             state
                 .db
                 .collection::<Delivery>(COLLECTION_NAME)
                 .update_one(
                     doc! {"_id":&row.id,"state":"pending"},
-                    doc! {"$set":{"state":"refused","updated_at":bson::DateTime::now()}},
+                    doc! {"$set":{"retry_at":bson::DateTime::from_chrono(retry_at)}},
                 )
                 .await?;
-            return Ok(DeliveryOutcome::Refused(UnavailableReason::CapacityLimited));
-        }
-        let retry_at = Utc::now() + Duration::seconds(1);
-        state
-            .db
-            .collection::<Delivery>(COLLECTION_NAME)
-            .update_one(
-                doc! {"_id":&row.id,"state":"pending"},
-                doc! {"$set":{"retry_at":bson::DateTime::from_chrono(retry_at)}},
-            )
-            .await?;
-        return Ok(DeliveryOutcome::Deferred { retry_at });
+            Ok(())
+        })
+        .await?;
+        return Ok(if persisted {
+            DeliveryOutcome::Deferred { retry_at }
+        } else {
+            DeliveryOutcome::Refused(UnavailableReason::TransportUnavailable)
+        });
     }
     let _permit = permit.map_err(|_| refused())?;
+    #[cfg(test)]
+    if control && let Ok(barrier) = TEST_BEFORE_COMMAND_CLAIM.try_with(Arc::clone) {
+        tokio::time::timeout(std::time::Duration::from_secs(20), barrier.wait())
+            .await
+            .expect("management send barrier");
+        tokio::time::timeout(std::time::Duration::from_secs(20), barrier.wait())
+            .await
+            .expect("management send barrier");
+    }
+    let native = match prepare_native_send(state, &row, native_deadline).await {
+        Ok(native) => native,
+        Err(
+            AppError::Conflict(_)
+            | AppError::NotFound(_)
+            | AppError::ValidationError(_)
+            | AppError::Forbidden(_),
+        ) => {
+            cleanup_before_deadline(native_deadline, refuse_pending(state, &row)).await?;
+            return Ok(DeliveryOutcome::Refused(
+                UnavailableReason::TransportUnavailable,
+            ));
+        }
+        Err(error) => return Err(error),
+    };
+    let native_deadline = native
+        .as_ref()
+        .map(|prepared| prepared.deadline)
+        .or(native_deadline);
     let claim_id = uuid::Uuid::new_v4().to_string();
-    let mut session = state.db.client().start_session().await?;
     let captured = state.clone();
     let delivery = row.clone();
     let worker_claim = claim_id.clone();
-    let result=session.start_transaction().and_run((captured,identity,public,delivery,worker_claim,body.clone()),|session,(state,identity,public,row,claim,body)|Box::pin(async move {
+    let result = before_native_deadline(native_deadline, async {
+        let mut session = state.db.client().start_session().await?;
+        session.start_transaction().and_run((captured,identity,public,delivery,worker_claim,body.clone(),native.as_ref()),|session,(state,identity,public,row,claim,body,native)|Box::pin(async move {
+        #[cfg(test)]
+        stall_native_claim_for_test(native.is_some()).await;
         let result:AppResult<_>=async {
             let Some(observation)=validate_in_session(state,identity.as_ref(),public.as_deref(),session,row,body.as_str()).await? else {return Ok(CapturedSend::Deferred);};
-            if state.db.collection::<Delivery>(COLLECTION_NAME).update_one(doc! {"_id":&row.id,"state":"pending","expires_at":{"$gt":bson::DateTime::now()}},doc! {"$set":{"state":"dispatching","claim_id":claim,"updated_at":bson::DateTime::now()}}).session(&mut *session).await?.matched_count!=1{return Ok(CapturedSend::Duplicate);}
-            let credential=state.db.collection::<PlatformCredential>(crate::models::platform_credential::COLLECTION_NAME).find_one(doc! {"provider":"telegram-new","fields.manager_bot_id":&row.manager_bot_id,"fields.observation_id":observation,"fields.webhook_ready":"true"}).session(&mut *session).await?.ok_or_else(refused)?;
-            Ok(CapturedSend::Ready(Box::new(credential)))
+            if state.db.collection::<Delivery>(COLLECTION_NAME).update_one(doc! {"_id":&row.id,"state":"pending","expires_at":{"$gt":bson::DateTime::now()}},doc! {"$set":{"state":"dispatching","claim_id":&*claim,"updated_at":bson::DateTime::now()}}).session(&mut *session).await?.matched_count!=1{return Ok(CapturedSend::Duplicate);}
+            capture_material_in_session(state,session,row,claim,&observation,*native).await
         }.await;
         tx::transaction_result(result)
-    })).await.map_err(tx::map_transaction_error);
+    })).await.map_err(tx::map_transaction_error)
+    }).await;
+    let Some(result) = result else {
+        // No provider call occurs before the claimed transaction returns. A
+        // dropped/unknown commit is left for durable dispatching recovery.
+        return Ok(DeliveryOutcome::Refused(
+            UnavailableReason::TransportUnavailable,
+        ));
+    };
+
     let credential = match result {
         Ok(CapturedSend::Ready(value)) => value,
         Ok(CapturedSend::Duplicate) => return Ok(DeliveryOutcome::Duplicate),
         Ok(CapturedSend::Deferred) => {
-            if matches!(row.reference, DeliveryReference::Command) {
-                refuse_pending(state, &row).await?;
+            if matches!(row.reference, DeliveryReference::Command { .. }) {
+                cleanup_before_deadline(native_deadline, refuse_pending(state, &row)).await?;
                 return Ok(DeliveryOutcome::Refused(
                     UnavailableReason::TransportUnavailable,
                 ));
             }
             let retry_at = Utc::now() + Duration::seconds(5);
-            state.db.collection::<Delivery>(COLLECTION_NAME).update_one(doc! {"_id":&row.id,"state":"pending"},doc! {"$set":{"retry_at":bson::DateTime::from_chrono(retry_at),"updated_at":bson::DateTime::now()}}).await?;
-            return Ok(DeliveryOutcome::Deferred { retry_at });
+            let persisted = cleanup_before_deadline(native_deadline, async {
+                state.db.collection::<Delivery>(COLLECTION_NAME).update_one(doc! {"_id":&row.id,"state":"pending"},doc! {"$set":{"retry_at":bson::DateTime::from_chrono(retry_at),"updated_at":bson::DateTime::now()}}).await?;
+                Ok(())
+            }).await?;
+            return Ok(if persisted {
+                DeliveryOutcome::Deferred { retry_at }
+            } else {
+                DeliveryOutcome::Refused(UnavailableReason::TransportUnavailable)
+            });
         }
         Err(error) => {
-            if matches!(error, AppError::Conflict(_) | AppError::NotFound(_)) {
-                state
-                    .db
-                    .collection::<Delivery>(COLLECTION_NAME)
-                    .update_one(
-                        doc! {"_id":&row.id,"state":"pending"},
-                        doc! {"$set":{"state":"refused","updated_at":bson::DateTime::now()}},
-                    )
-                    .await?;
+            if matches!(error, AppError::Conflict(_) | AppError::NotFound(_))
+                || (native_deadline.is_some()
+                    && matches!(error, AppError::Forbidden(_) | AppError::ValidationError(_)))
+            {
+                cleanup_before_deadline(native_deadline, refuse_pending(state, &row)).await?;
                 return Ok(DeliveryOutcome::Refused(UnavailableReason::OriginRevoked));
             }
             return Err(error);
         }
     };
-    send_claimed(state, &row, &claim_id, body, credential, api).await
+    send_claimed(
+        state,
+        &row,
+        &claim_id,
+        body,
+        credential,
+        native.as_ref(),
+        api,
+    )
+    .await
 }
 
 async fn send_claimed(
@@ -999,9 +1483,87 @@ async fn send_claimed(
     row: &Delivery,
     claim_id: &str,
     body: Zeroizing<String>,
+    material: CapturedMaterial,
+    native: Option<&NativeSendPreparation>,
+    api: &super::telegram_new_api::TelegramApi<'_>,
+) -> AppResult<DeliveryOutcome> {
+    match material {
+        CapturedMaterial::Telegram(credential) => {
+            send_telegram_claimed(state, row, claim_id, body, credential, api).await
+        }
+        CapturedMaterial::Native(authority) => {
+            let native = native.ok_or_else(refused)?;
+            let deadline = native.deadline.min(authority.deadline());
+            let result = super::platform_native_reply_service::send_claimed(
+                state,
+                *authority,
+                body,
+                native.adapter.as_ref(),
+            )
+            .await?;
+            use super::platform_native_reply_service::NativeSendOutcome;
+            let (status, ids, outcome) = match result {
+                NativeSendOutcome::Sent {
+                    platform_message_id,
+                } => {
+                    let ids = vec![platform_message_id];
+                    (
+                        "sent",
+                        ids.clone(),
+                        DeliveryOutcome::NativeSent {
+                            platform_message_ids: ids,
+                        },
+                    )
+                }
+                NativeSendOutcome::Refused => (
+                    "refused",
+                    vec![],
+                    DeliveryOutcome::Refused(UnavailableReason::TransportUnavailable),
+                ),
+                NativeSendOutcome::Uncertain => ("uncertain", vec![], DeliveryOutcome::Uncertain),
+            };
+            let remaining = (deadline - Utc::now()).to_std().unwrap_or_default();
+            let persisted = tokio::time::timeout(remaining, async {
+                #[cfg(test)]
+                if let Ok(stall) = TEST_NATIVE_FINISH_STALL.try_with(Arc::clone) {
+                    stall.entered.store(true, std::sync::atomic::Ordering::SeqCst);
+                    tokio::time::sleep(stall.duration).await;
+                }
+                state.db.collection::<Delivery>(COLLECTION_NAME).update_one(
+                doc! {"_id":&row.id,"state":"dispatching","claim_id":claim_id},
+                doc! {"$set":{"state":status,"platform_message_ids":ids,"updated_at":bson::DateTime::now()}},
+                ).await
+            }).await;
+            if !matches!(persisted, Ok(Ok(result)) if result.matched_count == 1) {
+                return Ok(if matches!(outcome, DeliveryOutcome::Refused(_)) {
+                    outcome
+                } else {
+                    DeliveryOutcome::Uncertain
+                });
+            }
+            Ok(outcome)
+        }
+    }
+}
+
+async fn send_telegram_claimed(
+    state: &AppState,
+    row: &Delivery,
+    claim_id: &str,
+    body: Zeroizing<String>,
     credential: Box<PlatformCredential>,
     api: &super::telegram_new_api::TelegramApi<'_>,
 ) -> AppResult<DeliveryOutcome> {
+    let EntryIdentity::TelegramV1 { telegram_bot_id } = &row.entry else {
+        return Err(refused());
+    };
+    let SenderIdentity::TelegramV1 {
+        telegram_chat_id: chat_id,
+        ..
+    } = &row.sender
+    else {
+        return Err(refused());
+    };
     let values = super::platform_credential_service::decrypt_snapshot(
         &state.encryption_keys,
         Some(credential.as_ref()),
@@ -1014,7 +1576,7 @@ async fn send_claimed(
         .split(':')
         .next()
         .and_then(|id| id.parse::<i64>().ok())
-        != Some(row.telegram_bot_id)
+        != Some(*telegram_bot_id)
     {
         finish(state, row, claim_id, "refused", vec![], None).await?;
         return Ok(DeliveryOutcome::Refused(
@@ -1025,7 +1587,7 @@ async fn send_claimed(
     // rejection and may defer retained replies, but never a one-time bearer.
     let result=api.http.post(format!("{}/bot{token}/sendMessage",api.base_url))
         .timeout(std::time::Duration::from_secs(20))
-        .json(&serde_json::json!({"chat_id":row.chat_id,"text":body.as_str(),"protect_content":true,"link_preview_options":{"is_disabled":true}}))
+        .json(&serde_json::json!({"chat_id":chat_id,"text":body.as_str(),"protect_content":true,"link_preview_options":{"is_disabled":true}}))
         .send().await;
     let envelope = match result {
         Ok(mut response) => {
@@ -1066,7 +1628,7 @@ async fn send_claimed(
             && envelope["error_code"] == 429
             && !matches!(
                 row.reference,
-                DeliveryReference::Command | DeliveryReference::PublicSignup { .. }
+                DeliveryReference::Command { .. } | DeliveryReference::PublicSignup { .. }
             )
             && let Some(delay) = envelope["parameters"]["retry_after"]
                 .as_i64()
@@ -1147,7 +1709,7 @@ pub async fn deliver(
             DeliveryReference::Fixed {
                 reason: format!("{reason:?}"),
             },
-            Zeroizing::new(fixed_text(reason).into()),
+            Zeroizing::new(fixed_text_for(reason, &destination.manager.entry)?),
             None,
             None,
         ),
@@ -1224,13 +1786,12 @@ fn public_destination(row: &Delivery) -> AppResult<ReplyDestination> {
     let manager = ManagerAuthority {
         profile_id: row.profile_id.clone(),
         manager_bot_id: row.manager_bot_id.clone(),
-        telegram_bot_id: row.telegram_bot_id,
+        entry: row.entry.clone(),
         manager_authority_epoch: row.manager_authority_epoch,
     };
     let ingress = PublicIngress {
         manager: manager.clone(),
-        sender_id: row.sender_id,
-        chat_id: row.chat_id,
+        sender: row.sender.clone(),
         ingress: IngressClaim {
             receipt_id: row.ingress_id.clone().ok_or_else(refused)?,
             claim_id: row.ingress_claim_id.clone().ok_or_else(refused)?,
@@ -1239,8 +1800,7 @@ fn public_destination(row: &Delivery) -> AppResult<ReplyDestination> {
     };
     Ok(ReplyDestination {
         manager,
-        sender_id: row.sender_id,
-        chat_id: row.chat_id,
+        sender: row.sender.clone(),
         expires_at: row.expires_at,
         authority: ReplyAuthority::Public {
             ingress,
@@ -1300,18 +1860,57 @@ pub async fn deliver_command(
 ) -> AppResult<DeliveryOutcome> {
     let destination = ReplyDestination {
         manager: command.manager,
-        sender_id: command.sender_id,
-        chat_id: command.chat_id,
+        sender: command.sender.clone(),
         authority: ReplyAuthority::Fixed {
             ingress: command.ingress.clone(),
         },
         expires_at: Utc::now() + Duration::minutes(1),
     };
-    let body = command.reply.render(&state.config.frontend_url)?;
+    let body = if let super::platform_manager_command_service::PersonalCommandReply::Management {
+        connect_token,
+    } = &command.reply
+    {
+        let mut session = state.db.client().start_session().await?;
+        let receipt = state
+            .db
+            .collection::<PlatformManagerIngress>(INGRESS)
+            .find_one(doc! {"_id":&command.ingress.receipt_id,"claim_id":&command.ingress.claim_id})
+            .session(&mut session)
+            .await?
+            .ok_or_else(refused)?;
+        let update = VerifiedManagerUpdate {
+            profile_id: receipt.profile_id,
+            manager_bot_id: receipt.manager_bot_id,
+            entry: receipt.entry.clone(),
+            observation_id: receipt.observation_id,
+            sender: receipt.sender.clone(),
+            chat_kind: ManagerChatKind::Private,
+            event: receipt.event.clone(),
+            command_eligibility: ManagerCommandEligibility::OriginalPrivateMessage,
+        };
+        super::platform_manager_management::render_in_session(
+            &state.db,
+            &mut session,
+            &update,
+            &command.effect,
+            &state.config.frontend_url,
+            connect_token.as_deref().map(String::as_str),
+        )
+        .await?
+    } else {
+        command
+            .effect
+            .static_reply()
+            .as_ref()
+            .unwrap_or(&command.reply)
+            .render(&state.config.frontend_url, &destination.manager.entry)?
+    };
     let row = enqueue(
         state,
         &destination,
-        DeliveryReference::Command,
+        DeliveryReference::Command {
+            effect: Some(command.effect),
+        },
         Some(&command.ingress),
         None,
         None,
@@ -1353,8 +1952,12 @@ pub(crate) async fn deliver_public_signup_with_api(
 ) -> AppResult<PublicSignupDeliveryOutcome> {
     use super::platform_link_intent_service as intents;
     let ingress = &context.ingress;
-    if ingress.sender_id <= 0
-        || ingress.sender_id != ingress.chat_id
+    if scope::validate(
+        &ingress.manager.entry,
+        &ingress.manager.manager_bot_id,
+        Some(&ingress.sender),
+    )
+    .is_err()
         || context.expires_at <= Utc::now()
     {
         return Ok(PublicSignupDeliveryOutcome::Unavailable);
@@ -1364,15 +1967,19 @@ pub(crate) async fn deliver_public_signup_with_api(
     let intent =
         match intents::preview(&state.db, state.auth_device_hmac_key.as_slice(), &token).await {
             Ok(intent) => intent,
-            Err(AppError::Conflict(_) | AppError::NotFound(_) | AppError::ValidationError(_)) => {
+            Err(
+                AppError::Conflict(_)
+                | AppError::NotFound(_)
+                | AppError::ValidationError(_)
+                | AppError::Forbidden(_),
+            ) => {
                 return Ok(PublicSignupDeliveryOutcome::Unavailable);
             }
             Err(error) => return Err(error),
         };
     let destination = ReplyDestination {
         manager: ingress.manager.clone(),
-        sender_id: ingress.sender_id,
-        chat_id: ingress.chat_id,
+        sender: ingress.sender.clone(),
         authority: ReplyAuthority::Public {
             ingress: ingress.clone(),
             public_session_id: context.public_session_id.clone(),
@@ -1397,10 +2004,15 @@ pub(crate) async fn deliver_public_signup_with_api(
     if row.state != DeliveryState::Pending {
         return Ok(PublicSignupDeliveryOutcome::Unavailable);
     }
+    let native_deadline = native_send_deadline(&row)?;
     let pacing = super::coordination_service::RateWindowStore::admit(
         &state.db,
         "manager_public_send",
-        &format!("{}:{}", row.manager_bot_id, row.sender_id),
+        &format!(
+            "{}:{}",
+            manager_lane(&row),
+            scope::actor_string(&row.sender)
+        ),
         1,
         std::time::Duration::from_secs(1),
     )
@@ -1408,22 +2020,42 @@ pub(crate) async fn deliver_public_signup_with_api(
     let lane = super::coordination_service::RateWindowStore::admit(
         &state.db,
         "manager_public_lane",
-        &row.manager_bot_id,
+        &manager_lane(&row),
         4,
         std::time::Duration::from_secs(1),
     )
     .await?;
     let permit = PUBLIC_SENDS.try_acquire();
     if !pacing.allowed || !lane.allowed || permit.is_err() {
-        refuse_pending(state, &row).await?;
+        cleanup_before_deadline(native_deadline, refuse_pending(state, &row)).await?;
         return Ok(PublicSignupDeliveryOutcome::Unavailable);
     }
     let _permit = permit.map_err(|_| refused())?;
+    let native = match prepare_native_send(state, &row, native_deadline).await {
+        Ok(native) => native,
+        Err(
+            AppError::Conflict(_)
+            | AppError::NotFound(_)
+            | AppError::ValidationError(_)
+            | AppError::Forbidden(_),
+        ) => {
+            cleanup_before_deadline(native_deadline, refuse_pending(state, &row)).await?;
+            return Ok(PublicSignupDeliveryOutcome::Unavailable);
+        }
+        Err(error) => return Err(error),
+    };
+    let native_deadline = native
+        .as_ref()
+        .map(|prepared| prepared.deadline)
+        .or(native_deadline);
     let claim = uuid::Uuid::new_v4().to_string();
-    let mut session = state.db.client().start_session().await?;
-    let result = session.start_transaction().and_run(
-        (state, context, &row, token.as_str(), &claim),
-        |session, (state, context, row, token, claim)| Box::pin(async move {
+    let result = before_native_deadline(native_deadline, async {
+        let mut session = state.db.client().start_session().await?;
+        session.start_transaction().and_run(
+        (state, context, &row, token.as_str(), &claim, native.as_ref()),
+        |session, (state, context, row, token, claim, native)| Box::pin(async move {
+            #[cfg(test)]
+            stall_native_claim_for_test(native.is_some()).await;
             let result: AppResult<_> = async {
                 let Some((_, _, observation)) = fence_transport_in_session(state, session, row).await? else {
                     return Ok(CapturedSend::Deferred);
@@ -1438,9 +2070,9 @@ pub(crate) async fn deliver_public_signup_with_api(
                     && turn_id == &context.turn.turn_id && expected == &intent_id)
                     || row.profile_id != context.ingress.manager.profile_id
                     || row.manager_bot_id != context.ingress.manager.manager_bot_id
-                    || row.telegram_bot_id != context.ingress.manager.telegram_bot_id
+                    || row.entry != context.ingress.manager.entry
                     || row.manager_authority_epoch != context.ingress.manager.manager_authority_epoch
-                    || row.sender_id != context.ingress.sender_id || row.chat_id != context.ingress.chat_id
+                    || row.sender != context.ingress.sender
                     || row.ingress_id.as_ref() != Some(&context.ingress.ingress.receipt_id)
                     || row.ingress_claim_id.as_ref() != Some(&context.ingress.ingress.claim_id)
                 {
@@ -1452,34 +2084,47 @@ pub(crate) async fn deliver_public_signup_with_api(
                 ).session(&mut *session).await?.matched_count != 1 {
                     return Ok(CapturedSend::Duplicate);
                 }
-                let credential=state.db.collection::<PlatformCredential>(crate::models::platform_credential::COLLECTION_NAME)
-                    .find_one(doc! {"provider":"telegram-new","fields.manager_bot_id":&row.manager_bot_id,"fields.observation_id":observation,"fields.webhook_ready":"true"})
-                    .session(&mut *session).await?.ok_or_else(refused)?;
-                Ok(CapturedSend::Ready(Box::new(credential)))
+                capture_material_in_session(state,session,row,claim,&observation,*native).await
             }.await;
             tx::transaction_result(result)
         }),
-    ).await.map_err(tx::map_transaction_error);
+    ).await.map_err(tx::map_transaction_error)
+    }).await;
+    let Some(result) = result else {
+        return Ok(PublicSignupDeliveryOutcome::Unavailable);
+    };
+
     let credential = match result {
         Ok(CapturedSend::Ready(credential)) => credential,
         Ok(CapturedSend::Duplicate) => return Ok(PublicSignupDeliveryOutcome::Unavailable),
         Ok(CapturedSend::Deferred)
-        | Err(AppError::Conflict(_) | AppError::NotFound(_) | AppError::ValidationError(_)) => {
-            refuse_pending(state, &row).await?;
+        | Err(
+            AppError::Conflict(_)
+            | AppError::NotFound(_)
+            | AppError::ValidationError(_)
+            | AppError::Forbidden(_),
+        ) => {
+            cleanup_before_deadline(native_deadline, refuse_pending(state, &row)).await?;
             return Ok(PublicSignupDeliveryOutcome::Unavailable);
         }
         Err(error) => return Err(error),
     };
     let body = super::platform_manager_command_service::PersonalCommandReply::Link { token }
-        .render(&state.config.frontend_url)?;
-    if body.encode_utf16().count() > 4096 {
-        finish(state, &row, &claim, "refused", vec![], None).await?;
+        .render(&state.config.frontend_url, &row.entry)?;
+    if body.encode_utf16().count() > ChatPresentation::for_entry(&row.entry)?.text_limit() {
+        cleanup_before_deadline(
+            native_deadline,
+            finish(state, &row, &claim, "refused", vec![], None),
+        )
+        .await?;
         return Ok(PublicSignupDeliveryOutcome::Unavailable);
     }
-    let outcome = send_claimed(state, &row, &claim, body, credential, api).await?;
+    let outcome = send_claimed(state, &row, &claim, body, credential, native.as_ref(), api).await?;
     report_delivery(&outcome, "public_signup");
     Ok(match outcome {
-        DeliveryOutcome::Sent { .. } => PublicSignupDeliveryOutcome::Sent,
+        DeliveryOutcome::Sent { .. } | DeliveryOutcome::NativeSent { .. } => {
+            PublicSignupDeliveryOutcome::Sent
+        }
         DeliveryOutcome::Uncertain => PublicSignupDeliveryOutcome::Uncertain,
         DeliveryOutcome::Duplicate
         | DeliveryOutcome::Deferred { .. }
@@ -1495,6 +2140,13 @@ fn report_delivery(outcome: &DeliveryOutcome, source: &'static str) {
             source,
             message_count = telegram_message_ids.len(),
             "Manager delivery confirmed by Telegram"
+        ),
+        DeliveryOutcome::NativeSent {
+            platform_message_ids,
+        } => tracing::debug!(
+            source,
+            message_count = platform_message_ids.len(),
+            "Manager native reply sent"
         ),
         DeliveryOutcome::Duplicate => tracing::debug!(source, "Manager delivery already claimed"),
         DeliveryOutcome::Deferred { retry_at } => {
@@ -1547,7 +2199,7 @@ pub async fn sweep(
         } else if row.expires_at <= now
             || matches!(
                 row.reference,
-                DeliveryReference::Command | DeliveryReference::PublicSignup { .. }
+                DeliveryReference::Command { .. } | DeliveryReference::PublicSignup { .. }
             )
         {
             refuse_pending(state, &row).await?;
@@ -1589,11 +2241,11 @@ pub async fn sweep(
                         Err(error) => return Err(error),
                     }
                 }
-                DeliveryReference::Fixed { reason } => {
-                    fixed_reason(reason).map(|reason| fixed_text(reason).to_owned())
-                }
+                DeliveryReference::Fixed { reason } => fixed_reason(reason)
+                    .map(|reason| fixed_text_for(reason, &row.entry))
+                    .transpose()?,
                 DeliveryReference::Handoff => Some(handoff_text().to_owned()),
-                DeliveryReference::Command | DeliveryReference::PublicSignup { .. } => None,
+                DeliveryReference::Command { .. } | DeliveryReference::PublicSignup { .. } => None,
             };
             if let Some(body) = body {
                 match send(
@@ -1667,4 +2319,152 @@ fn fixed_reason(reason: &str) -> Option<UnavailableReason> {
     ]
     .into_iter()
     .find(|candidate| format!("{candidate:?}") == reason)
+}
+
+#[cfg(test)]
+mod native_render_tests {
+    use super::*;
+    use crate::models::{
+        assistant_acknowledgement::AssistantAcknowledgement, platform_entry_identity::EntryPlatform,
+    };
+
+    fn saved(text: &str) -> AssistantMessage {
+        bson::from_document(doc! {
+            "_id":uuid::Uuid::new_v4().to_string(),
+            "conversation_id":"nyxa-0123456789abcdef0123456789abcdef",
+            "user_id":uuid::Uuid::new_v4().to_string(),
+            "seq":2_i64,"turn_id":"turn","role":"assistant",
+            "text":text,"status":"completed","created_at":bson::DateTime::now(),
+        })
+        .unwrap()
+    }
+
+    fn card(message: &AssistantMessage) -> AssistantAcknowledgement {
+        bson::from_document(doc! {
+            "_id":uuid::Uuid::new_v4().to_string(),
+            "conversation_id":&message.conversation_id,"user_id":&message.user_id,
+            "api_key_id":"exact-thread-key","kind":"action",
+            "requested_turn_id":&message.turn_id,"routing":{"kind":"not_involved"},
+            "summary":"🔐変更".repeat(260),"status":"pending",
+            "created_at":bson::DateTime::now(),
+            "expires_at":bson::DateTime::from_chrono(Utc::now()+Duration::minutes(10)),
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn long_unicode_native_reply_and_action_cards_use_one_bounded_message_or_exact_app_review() {
+        let chat = ChatPresentation::Native(EntryPlatform::Discord);
+        let message = saved(&"🧑🏽‍💻相談".repeat(600));
+        let frontend = "https://app.nyxid.test/old?discard=secret#discard";
+        let rendered = render_saved_for(&message, frontend, chat);
+        assert!(rendered.encode_utf16().count() <= 2000);
+        assert!(rendered.contains("too long for one Discord message"));
+        assert!(rendered.contains("/assistant?c=nyxa-0123456789abcdef0123456789abcdef"));
+        assert!(!rendered.contains("discard"));
+
+        let action = card(&message);
+        let code = super::super::assistant_acknowledgement_service::confirm_code(&action.id);
+        let rendered = append_card_notices(
+            &message,
+            frontend,
+            std::slice::from_ref(&action),
+            "exact-thread-key",
+            None,
+            chat,
+        )
+        .unwrap();
+        assert!(rendered.encode_utf16().count() <= 2000);
+        assert!(rendered.contains(&format!("/nyx ask question:\"yes {code}\"")));
+        assert!(rendered.contains(&format!("/nyx ask question:\"no {code}\"")));
+        assert!(!rendered.contains("Reply yes"));
+        assert!(rendered.contains("/assistant?c=nyxa-0123456789abcdef0123456789abcdef"));
+
+        let mut cards = vec![action];
+        while cards.len() < 3 {
+            let candidate = card(&message);
+            let candidate_code =
+                super::super::assistant_acknowledgement_service::confirm_code(&candidate.id);
+            if cards.iter().all(|other| {
+                super::super::assistant_acknowledgement_service::confirm_code(&other.id)
+                    != candidate_code
+            }) {
+                cards.push(candidate);
+            }
+        }
+        let rendered =
+            append_card_notices(&message, frontend, &cards, "exact-thread-key", None, chat)
+                .unwrap();
+        assert!(rendered.encode_utf16().count() <= 2000);
+        assert!(rendered.contains("/assistant?c=nyxa-0123456789abcdef0123456789abcdef"));
+        assert!(rendered.contains("Action:"));
+        assert!(!rendered.contains("Reply yes"));
+    }
+}
+
+#[cfg(test)]
+mod future_size_tests {
+    use super::*;
+
+    type SendArgs = (
+        &'static AppState,
+        Arc<dyn ManagerIdentityProducer>,
+        Option<Arc<dyn PublicTurnProducer>>,
+        Delivery,
+        Zeroizing<String>,
+        &'static super::super::telegram_new_api::TelegramApi<'static>,
+    );
+
+    fn future_size<Args, F: std::future::Future>(_: impl FnOnce(Args) -> F) -> usize {
+        std::mem::size_of::<F>()
+    }
+
+    #[test]
+    fn native_delivery_keeps_shared_settlement_and_send_futures_small() {
+        let saved = future_size(
+            |(state, row, reply): (
+                &'static AppState,
+                &'static AssistantConversation,
+                &'static ReplyRef,
+            )| { saved_personal_reply(state, row, reply) },
+        );
+        let prepare = future_size(
+            |(state, row, deadline): (
+                &'static AppState,
+                &'static Delivery,
+                Option<chrono::DateTime<Utc>>,
+            )| { prepare_native_send(state, row, deadline) },
+        );
+        let send = future_size(|(state, identity, public, row, body, api): SendArgs| {
+            send(state, identity, public, row, body, api)
+        });
+        let native = future_size(
+            |(state, authority, body, adapter): (
+                &'static AppState,
+                super::super::platform_native_reply_service::NativeSendAuthority,
+                Zeroizing<String>,
+                &'static dyn super::super::channel_platform::PlatformAdapter,
+            )| {
+                super::super::platform_native_reply_service::send_claimed(
+                    state, authority, body, adapter,
+                )
+            },
+        );
+        assert!(
+            saved < 16 * 1024,
+            "saved reply caller future grew to {saved} bytes"
+        );
+        assert!(
+            prepare < 16 * 1024,
+            "native selection future grew to {prepare} bytes"
+        );
+        assert!(
+            send < 1024,
+            "shared send caller future grew to {send} bytes"
+        );
+        assert!(
+            native < 1024,
+            "native send caller future grew to {native} bytes"
+        );
+    }
 }

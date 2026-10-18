@@ -1369,6 +1369,44 @@ impl VerifiedExternalSource {
     }
 }
 
+/// Cancellation validates and fences its current source without requiring an
+/// active Machine grant. It cannot admit execution, output access or renewal.
+pub(super) async fn admit_stop_source_in_session(
+    db: &Database,
+    source: &VerifiedExternalSource,
+    session: &mut ClientSession,
+) -> AppResult<()> {
+    if source.authentication_expires_at() <= Utc::now() {
+        return Err(AppError::MachinePermissionRevoked);
+    }
+    owner_in_session(db, &source.user_id, session).await?;
+    match &source.source {
+        Source::ApiKey {
+            api_key_id,
+            credential_id,
+        } => {
+            load_key(db, &source.user_id, api_key_id, session).await?;
+            let mut filter = doc! {"_id":api_key_id,"user_id":&source.user_id,"is_active":true};
+            filter.extend(expiry_filter());
+            touch_source(db, KEYS, filter, session).await?;
+            if let Some(child) = credential_id {
+                super::machine_external_source_service::fence_child_in_session(
+                    db,
+                    &source.user_id,
+                    api_key_id,
+                    child,
+                    session,
+                )
+                .await?;
+            }
+        }
+        Source::OAuth { client_id, consent } => {
+            validate_oauth_source(db, &source.user_id, client_id, consent, session).await?;
+        }
+    }
+    Ok(())
+}
+
 #[derive(Clone)]
 pub struct AdmittedGrant {
     pub grant: MachineExternalGrant,

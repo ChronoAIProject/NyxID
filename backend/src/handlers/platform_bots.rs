@@ -43,6 +43,9 @@ pub struct ConfigResponse {
     pub channel_bot_id: String,
     pub manager_bot_id: String,
     pub execution_profile: &'static str,
+    pub platform: &'static str,
+    pub supported_transports: Vec<&'static str>,
+    pub transport: &'static str,
     pub generation: i64,
     pub enabled: bool,
     pub funding_owner_user_id: String,
@@ -52,12 +55,42 @@ pub struct ConfigResponse {
 
 impl From<PlatformBotConfig> for ConfigResponse {
     fn from(row: PlatformBotConfig) -> Self {
+        let (platform, supported_transports, transport) =
+            row.native_entry
+                .as_ref()
+                .map_or(("telegram", vec!["direct"], "direct"), |entry| {
+                    (
+                        crate::services::platform_entry_native::platform_name(
+                            entry.identity.platform,
+                        ),
+                        crate::services::platform_entry_gateway_service::supported_transports(
+                            entry.identity.platform,
+                        )
+                        .to_vec(),
+                        if matches!(
+                            entry.transport,
+                            crate::models::platform_entry_identity::EntryTransport::Direct
+                        ) {
+                            "direct"
+                        } else {
+                            "gateway"
+                        },
+                    )
+                });
+        let execution_profile = if row.native_entry.is_some() {
+            "native_entry"
+        } else {
+            "platform_onboarding"
+        };
         Self {
+            platform,
+            supported_transports,
+            transport,
             guide: row.guide.map(Into::into),
             id: row.id,
             channel_bot_id: row.channel_bot_id,
             manager_bot_id: row.manager_bot_id,
-            execution_profile: "platform_onboarding",
+            execution_profile,
             generation: row.generation,
             enabled: row.enabled,
             funding_owner_user_id: row.funding_owner_user_id,
@@ -204,14 +237,42 @@ pub async fn repair(
     Path(id): Path<uuid::Uuid>,
     Json(body): Json<GenerationRequest>,
 ) -> AppResult<(HeaderMap, Json<ConfigResponse>)> {
-    admin(&state, &auth).await?;
+    #[cfg(test)]
+    if let Ok(base) = tests::REPAIR_API_BASE.try_with(Clone::clone) {
+        return repair_with_service(
+            &state,
+            &auth,
+            id,
+            body,
+            &crate::services::telegram_new_tests::service(&state, &base),
+        )
+        .await;
+    }
+    repair_with_service(
+        &state,
+        &auth,
+        id,
+        body,
+        &super::telegram_new::service(&state),
+    )
+    .await
+}
+
+async fn repair_with_service(
+    state: &AppState,
+    auth: &AuthUser,
+    id: uuid::Uuid,
+    body: GenerationRequest,
+    service: &crate::services::telegram_new_service::TelegramNewService<'_>,
+) -> AppResult<(HeaderMap, Json<ConfigResponse>)> {
+    admin(state, auth).await?;
     let row = configs::get(&state.db, &id.to_string()).await?;
+    configs::require_telegram_manager(&row)?;
     if row.generation != body.generation || row.deleted_at.is_some() {
         return Err(crate::errors::AppError::Conflict(
             "Platform configuration changed".into(),
         ));
     }
-    let service = super::telegram_new::service(&state);
     service
         .configure_manager(
             &auth.user_id.to_string(),
@@ -220,11 +281,11 @@ pub async fn repair(
         )
         .await?;
     let row = configs::get(&state.db, &id.to_string()).await?;
-    let row = configs::verify_manager(&service, &row.id, row.generation, &auth.user_id.to_string())
+    let row = configs::verify_manager(service, &row.id, row.generation, &auth.user_id.to_string())
         .await?;
     audit_service::log_for_user(
         state.db.clone(),
-        &auth,
+        auth,
         "platform_bot_repaired",
         Some(serde_json::json!({"platform_config_id": row.id, "generation": row.generation})),
     );
@@ -288,6 +349,203 @@ mod tests {
         },
     };
     use mongodb::bson::doc;
+    tokio::task_local! { pub(super) static REPAIR_API_BASE: String; }
+
+    #[tokio::test]
+    async fn native_repair_http_refuses_before_telegram_effects_and_legacy_repair_still_works() {
+        use crate::models::platform_bot_config::PlatformExecutionProfile;
+        use axum::{
+            Router,
+            body::Body,
+            http::{Request, StatusCode},
+            routing::post,
+        };
+        use tower::ServiceExt;
+        use wiremock::{
+            Mock, ResponseTemplate,
+            matchers::{method, path},
+        };
+        let (state, actor, server) = crate::services::telegram_new_tests::fixture().await;
+        crate::services::role_service::seed_system_roles(&state.db)
+            .await
+            .unwrap();
+        let roles = crate::services::role_service::get_platform_role_ids(&state.db)
+            .await
+            .unwrap();
+        state
+            .db
+            .collection::<User>(crate::models::user::COLLECTION_NAME)
+            .update_one(
+                doc! {"_id":&actor},
+                doc! {"$set":{"role_ids":[roles.admin]}},
+            )
+            .await
+            .unwrap();
+        let bot =
+            crate::services::telegram_new_tests::register_manager_channel(&state, &actor, &server)
+                .await;
+        let funding =
+            crate::services::org_service::create_org_user(&state.db, "Repair funding", None, None)
+                .await
+                .unwrap()
+                .id;
+        crate::services::org_service::create_membership(
+            &state.db,
+            &funding,
+            &actor,
+            crate::models::org_membership::OrgRole::Admin,
+            crate::models::org_membership::MemberScopeSource::Inherit,
+            None,
+        )
+        .await
+        .unwrap();
+        let legacy = configs::convert(&state.db, &actor, &bot.id, &funding)
+            .await
+            .unwrap();
+        let mut native = legacy.clone();
+        native.id = uuid::Uuid::new_v4().to_string();
+        native.channel_bot_id = uuid::Uuid::new_v4().to_string();
+        native.identity_version = Some(2);
+        native.execution_profile = PlatformExecutionProfile::NativeEntry;
+        native.native_entry = Some(
+            crate::models::platform_entry_identity::NativeEntryConfiguration {
+                identity: crate::models::platform_entry_identity::NativeEntryIdentity {
+                    version: 2,
+                    platform: crate::models::platform_entry_identity::EntryPlatform::X,
+                    channel_bot_id: native.channel_bot_id.clone(),
+                    platform_bot_id: native.manager_bot_id.clone(),
+                },
+                transport: crate::models::platform_entry_identity::EntryTransport::Direct,
+                transport_generation: 1,
+                credential_fingerprint: "11".repeat(32),
+                control_surface:
+                    crate::models::platform_entry_identity::NativeControlSurface::PrivateMessage,
+            },
+        );
+        state
+            .db
+            .collection::<PlatformBotConfig>(crate::models::platform_bot_config::COLLECTION_NAME)
+            .insert_one(&native)
+            .await
+            .unwrap();
+        let before_profile =
+            bson::to_document(&configs::get(&state.db, &legacy.id).await.unwrap()).unwrap();
+        let before_credential = state
+            .db
+            .collection::<bson::Document>(crate::models::platform_credential::COLLECTION_NAME)
+            .find_one(doc! {"provider":"telegram-new"})
+            .await
+            .unwrap()
+            .unwrap();
+        let before = server.received_requests().await.unwrap().len();
+        let auth = test_auth_user(&actor);
+        let app = Router::new()
+            .route(
+                "/platform-bots/{id}/repair",
+                post(
+                    move |State(state): State<AppState>,
+                          Path(id): Path<uuid::Uuid>,
+                          Json(body): Json<GenerationRequest>| {
+                        let auth = auth.clone();
+                        async move { repair(State(state), auth, Path(id), Json(body)).await }
+                    },
+                ),
+            )
+            .with_state(state.clone());
+        let request = |id: &str, generation: i64| {
+            Request::builder()
+                .method("POST")
+                .uri(format!("/platform-bots/{id}/repair"))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({"generation":generation}).to_string(),
+                ))
+                .unwrap()
+        };
+        let refused = REPAIR_API_BASE
+            .scope(
+                server.uri(),
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(25),
+                    app.clone().oneshot(request(&native.id, native.generation)),
+                ),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(refused.status(), StatusCode::CONFLICT);
+        let base = server.uri();
+        assert!(
+            configs::verify_manager(
+                &crate::services::telegram_new_tests::service(&state, &base),
+                &native.id,
+                native.generation,
+                &actor
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(server.received_requests().await.unwrap().len(), before);
+        assert_eq!(
+            bson::to_document(&configs::get(&state.db, &legacy.id).await.unwrap()).unwrap(),
+            before_profile
+        );
+        assert_eq!(
+            state
+                .db
+                .collection::<bson::Document>(crate::models::platform_credential::COLLECTION_NAME)
+                .find_one(doc! {"provider":"telegram-new"})
+                .await
+                .unwrap()
+                .unwrap(),
+            before_credential
+        );
+        Mock::given(method("POST")).and(path("/bot100:manager-test-secret/getMe")).respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok":true,"result":{"id":100,"is_bot":true,"username":"NyxSetupBot","can_manage_bots":true}}))).mount(&server).await;
+        Mock::given(method("POST"))
+            .and(path("/bot100:manager-test-secret/setWebhook"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"ok":true,"result":true})),
+            )
+            .mount(&server)
+            .await;
+        let repaired = REPAIR_API_BASE
+            .scope(
+                server.uri(),
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(25),
+                    app.oneshot(request(&legacy.id, legacy.generation)),
+                ),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(repaired.status(), StatusCode::OK);
+        assert!(
+            server
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .skip(before)
+                .any(|request| request.url.path().ends_with("/setWebhook"))
+        );
+        assert!(
+            configs::get(&state.db, &legacy.id)
+                .await
+                .unwrap()
+                .generation
+                > legacy.generation
+        );
+        assert_eq!(
+            configs::get(&state.db, &native.id)
+                .await
+                .unwrap()
+                .generation,
+            native.generation
+        );
+        state.db.drop().await.unwrap();
+    }
 
     #[tokio::test]
     async fn platform_onboarding_control_reads_require_live_first_party_admin() {
@@ -1150,4 +1408,313 @@ mod runtime_input_tests {
         assert_eq!(value["public_readiness"]["reason"], "runtime_uninitialized");
         assert!(value["public_readiness"]["evidence_digest"].is_null());
     }
+}
+
+#[derive(Clone, Copy, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NativeTransportInput {
+    Direct,
+    Gateway,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativeConversionRequest {
+    pub channel_bot_id: uuid::Uuid,
+    pub funding_owner_user_id: uuid::Uuid,
+    pub transport: NativeTransportInput,
+    pub recovery: Option<NativeSetupRecovery>,
+    pub lifecycle_review: Option<NativeLifecycleReview>,
+    pub replacement_connection_id: Option<uuid::Uuid>,
+    pub public_key: Option<String>,
+}
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativeLifecycleReview {
+    pub channel_bot_id: uuid::Uuid,
+    pub profile_id: uuid::Uuid,
+    pub generation: Option<i64>,
+    pub reviewed_by: uuid::Uuid,
+    pub snapshot_digest: String,
+}
+impl NativeLifecycleReview {
+    fn into_service(self) -> crate::services::platform_entry_admin_service::NativeLifecycleReview {
+        crate::services::platform_entry_admin_service::NativeLifecycleReview {
+            channel_bot_id: self.channel_bot_id.to_string(),
+            profile_id: self.profile_id.to_string(),
+            generation: self.generation,
+            reviewed_by: self.reviewed_by.to_string(),
+            snapshot_digest: self.snapshot_digest,
+        }
+    }
+}
+pub async fn review_native_lifecycle(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(bot): Path<uuid::Uuid>,
+) -> AppResult<(HeaderMap, Json<NativeLifecycleReview>)> {
+    admin(&state, &auth).await?;
+    let review = crate::services::platform_entry_admin_service::review_lifecycle(
+        &state,
+        &auth.user_id.to_string(),
+        &bot.to_string(),
+    )
+    .await?;
+    Ok((
+        private_headers(),
+        Json(NativeLifecycleReview {
+            channel_bot_id: bot,
+            profile_id: uuid::Uuid::parse_str(&review.profile_id).map_err(|_| {
+                crate::errors::AppError::Internal("Invalid native profile identity".into())
+            })?,
+            generation: review.generation,
+            reviewed_by: auth.user_id,
+            snapshot_digest: review.snapshot_digest,
+        }),
+    ))
+}
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum NativeSetupRecovery {
+    Discord {
+        attempt_id: String,
+        application_id: String,
+        command_id: Option<String>,
+        observed_schema_digest: Option<String>,
+        schema_digest: String,
+        requested_by: String,
+        channel_bot_id: String,
+        credential_fingerprint: String,
+    },
+    Gateway {
+        record_id: String,
+        attempt_id: String,
+        revision: i64,
+        request_hash: String,
+        credential_fingerprint: String,
+        remote_channel_id: Option<String>,
+        remote_version: Option<i64>,
+        remote_ready: bool,
+    },
+}
+impl From<crate::services::platform_entry_gateway_service::GatewayRecoveryReview>
+    for NativeSetupRecovery
+{
+    fn from(row: crate::services::platform_entry_gateway_service::GatewayRecoveryReview) -> Self {
+        Self::Gateway {
+            record_id: row.record_id,
+            attempt_id: row.attempt_id,
+            revision: row.revision,
+            request_hash: row.request_hash,
+            credential_fingerprint: row.credential_fingerprint,
+            remote_channel_id: row.remote_channel_id,
+            remote_version: row.remote_version,
+            remote_ready: row.remote_ready,
+        }
+    }
+}
+impl From<crate::services::platform_entry_discord_installation::RecoveryReview>
+    for NativeSetupRecovery
+{
+    fn from(row: crate::services::platform_entry_discord_installation::RecoveryReview) -> Self {
+        Self::Discord {
+            attempt_id: row.attempt_id,
+            application_id: row.application_id,
+            command_id: row.command_id,
+            observed_schema_digest: row.observed_schema_digest,
+            schema_digest: row.schema_digest,
+            requested_by: row.requested_by,
+            channel_bot_id: row.channel_bot_id,
+            credential_fingerprint: row.credential_fingerprint,
+        }
+    }
+}
+#[derive(Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum NativeConversionResponse {
+    Converted { profile: ConfigResponse },
+    Recovery { review: NativeSetupRecovery },
+}
+#[derive(Serialize)]
+pub struct NativePlatformTransports {
+    pub platform: &'static str,
+    pub transports: Vec<&'static str>,
+}
+pub async fn native_transports(
+    State(state): State<AppState>,
+    auth: AuthUser,
+) -> AppResult<(HeaderMap, Json<Vec<NativePlatformTransports>>)> {
+    admin(&state, &auth).await?;
+    use crate::models::platform_entry_identity::EntryPlatform::*;
+    Ok((
+        private_headers(),
+        Json(
+            [Discord, Slack, Whatsapp, Lark, Feishu, X]
+                .into_iter()
+                .map(|platform| NativePlatformTransports {
+                    platform: crate::services::platform_entry_native::platform_name(platform),
+                    transports:
+                        crate::services::platform_entry_gateway_service::supported_transports(
+                            platform,
+                        )
+                        .to_vec(),
+                })
+                .collect(),
+        ),
+    ))
+}
+pub async fn convert_native(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Json(body): Json<NativeConversionRequest>,
+) -> AppResult<(HeaderMap, Json<NativeConversionResponse>)> {
+    admin(&state, &auth).await?;
+    if let Some(review) = body.lifecycle_review {
+        if review.channel_bot_id != body.channel_bot_id {
+            return Err(crate::errors::AppError::ValidationError(
+                "Native review target changed".into(),
+            ));
+        }
+        let review = review.into_service();
+        let connection = body.replacement_connection_id.map(|id| id.to_string());
+        crate::services::platform_entry_admin_service::reserve_reviewed_update(
+            &state,
+            &auth.user_id.to_string(),
+            &body.funding_owner_user_id.to_string(),
+            match body.transport {
+                NativeTransportInput::Direct => {
+                    crate::services::platform_entry_admin_service::NativeTransportChoice::Direct
+                }
+                NativeTransportInput::Gateway => {
+                    crate::services::platform_entry_admin_service::NativeTransportChoice::Gateway
+                }
+            },
+            &review,
+            connection.as_deref(),
+            body.public_key.as_deref(),
+        )
+        .await?;
+    } else if body.replacement_connection_id.is_some() || body.public_key.is_some() {
+        return Err(crate::errors::AppError::ValidationError(
+            "Review the exact native setup before replacing credentials".into(),
+        ));
+    }
+    let mut discord = None;
+    let mut gateway = None;
+    if let Some(review) = body.recovery {
+        // Reviews are metadata, bounded before comparison with the retained
+        // server snapshot. None of these values supplies provider authority.
+        let encoded = serde_json::to_vec(&review)
+            .map_err(|_| crate::errors::AppError::ValidationError("Invalid setup review".into()))?;
+        if encoded.len() > 4096 {
+            return Err(crate::errors::AppError::ValidationError(
+                "Invalid setup review".into(),
+            ));
+        }
+        match review {
+            NativeSetupRecovery::Discord {
+                attempt_id,
+                application_id,
+                command_id,
+                observed_schema_digest,
+                schema_digest,
+                requested_by,
+                channel_bot_id,
+                credential_fingerprint,
+            } => {
+                discord = Some(
+                    crate::services::platform_entry_discord_installation::RecoveryReview {
+                        attempt_id,
+                        application_id,
+                        command_id,
+                        observed_schema_digest,
+                        schema_digest,
+                        requested_by,
+                        channel_bot_id,
+                        credential_fingerprint,
+                    },
+                );
+            }
+            NativeSetupRecovery::Gateway {
+                record_id,
+                attempt_id,
+                revision,
+                request_hash,
+                credential_fingerprint,
+                remote_channel_id,
+                remote_version,
+                remote_ready,
+            } => {
+                gateway = Some(
+                    crate::services::platform_entry_gateway_service::GatewayRecoveryReview {
+                        record_id,
+                        attempt_id,
+                        revision,
+                        request_hash,
+                        credential_fingerprint,
+                        remote_channel_id,
+                        remote_version,
+                        remote_ready,
+                    },
+                );
+            }
+        }
+    }
+    let transport = match body.transport {
+        NativeTransportInput::Direct => {
+            crate::services::platform_entry_admin_service::NativeTransportChoice::Direct
+        }
+        NativeTransportInput::Gateway => {
+            crate::services::platform_entry_admin_service::NativeTransportChoice::Gateway
+        }
+    };
+    let outcome = crate::services::platform_entry_admin_service::convert(
+        &state,
+        &auth.user_id.to_string(),
+        &body.channel_bot_id.to_string(),
+        &body.funding_owner_user_id.to_string(),
+        transport,
+        discord.as_ref(),
+        gateway.as_ref(),
+    )
+    .await?;
+    use crate::services::platform_entry_admin_service::NativeConversionOutcome;
+    let response = match outcome {
+        NativeConversionOutcome::Converted(row) => {
+            audit_service::log_for_user(
+                state.db.clone(),
+                &auth,
+                "platform_bot_converted",
+                Some(serde_json::json!({"platform_config_id":row.id,"generation":row.generation})),
+            );
+            NativeConversionResponse::Converted {
+                profile: (*row).into(),
+            }
+        }
+        NativeConversionOutcome::DiscordRecovery(review) => NativeConversionResponse::Recovery {
+            review: review.into(),
+        },
+        NativeConversionOutcome::GatewayRecovery(review) => NativeConversionResponse::Recovery {
+            review: review.into(),
+        },
+    };
+    Ok((private_headers(), Json(response)))
+}
+pub async fn inspect_native_gateway(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(bot): Path<uuid::Uuid>,
+) -> AppResult<(HeaderMap, Json<NativeSetupRecovery>)> {
+    admin(&state, &auth).await?;
+    Ok((
+        private_headers(),
+        Json(
+            crate::services::platform_entry_admin_service::inspect_gateway(
+                &state,
+                &auth.user_id.to_string(),
+                &bot.to_string(),
+            )
+            .await?
+            .into(),
+        ),
+    ))
 }

@@ -342,6 +342,7 @@ fn provider_update_fields(body: &UpdateProviderRequest) -> ProviderUpdateFields 
         client_id: _,
         client_secret: _,
         supports_pkce,
+        authorization_nonce_required,
         device_code_url,
         device_token_url,
         device_verification_url,
@@ -373,6 +374,7 @@ fn provider_update_fields(body: &UpdateProviderRequest) -> ProviderUpdateFields 
         revocation_url.as_ref().map(|_| "revocation_url"),
         revocation.as_ref().map(|_| "revocation"),
         supports_pkce.map(|_| "supports_pkce"),
+        authorization_nonce_required.map(|_| "authorization_nonce_required"),
         device_code_url.as_ref().map(|_| "device_code_url"),
         device_token_url.as_ref().map(|_| "device_token_url"),
         device_verification_url
@@ -773,4 +775,78 @@ fn forbid_tool_fields(fields: Vec<&'static str>) -> AppResult<()> {
         "A Tools Manager cannot set these fields; ask an Admin: {}",
         fields.join(", ")
     )))
+}
+
+#[cfg(test)]
+mod authorization_nonce_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn authorization_nonce_preserves_shared_provider_client_and_connection_permissions() {
+        use mongodb::bson::doc;
+        let db = crate::test_utils::connect_test_database("auth_nonce_permissions")
+            .await
+            .expect("MongoDB required");
+        let state = crate::test_utils::test_app_state(db.clone());
+        let mut provider: ProviderConfig = mongodb::bson::from_document(doc! {
+            "_id": "provider", "slug": "provider", "name": "Provider", "provider_type": "oauth2",
+            "is_active": true, "created_by": "admin", "created_at": mongodb::bson::DateTime::now(), "updated_at": mongodb::bson::DateTime::now(),
+        }).unwrap();
+        provider.client_id_encrypted =
+            Some(state.encryption_keys.encrypt(b"client").await.unwrap());
+        provider.client_secret_encrypted =
+            Some(state.encryption_keys.encrypt(b"secret").await.unwrap());
+        for required in [true, false] {
+            let mut request: UpdateProviderRequest = serde_json::from_value(
+                serde_json::json!({"authorization_nonce_required":required}),
+            )
+            .unwrap();
+            assert!(matches!(
+                check_provider_update(&state, "manager", &provider, &request).await,
+                Err(AppError::Forbidden(_))
+            ));
+            request.client_id = Some("client".into());
+            request.client_secret = Some("secret".into());
+            check_provider_update(&state, "manager", &provider, &request)
+                .await
+                .unwrap();
+            db.collection::<mongodb::bson::Document>(crate::models::user_api_key::COLLECTION_NAME)
+                .insert_one(doc! {"_id":"foreign-key", "provider_config_id": &provider.id})
+                .await
+                .unwrap();
+            assert!(matches!(
+                check_provider_update(&state, "manager", &provider, &request).await,
+                Err(AppError::Forbidden(_))
+            ));
+            let descriptive: UpdateProviderRequest =
+                serde_json::from_value(serde_json::json!({"name":"Allowed metadata"})).unwrap();
+            check_provider_update(&state, "manager", &provider, &descriptive)
+                .await
+                .unwrap();
+            check_provider_update(&state, "admin", &provider, &request)
+                .await
+                .unwrap();
+            db.collection::<mongodb::bson::Document>(crate::models::user_api_key::COLLECTION_NAME)
+                .delete_one(doc! {"_id":"foreign-key"})
+                .await
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn authorization_nonce_is_client_bound_including_explicit_disable() {
+        for required in [true, false] {
+            let request: UpdateProviderRequest = serde_json::from_value(serde_json::json!({
+                "authorization_nonce_required": required,
+            }))
+            .unwrap();
+            let fields = provider_update_fields(&request);
+            assert!(fields.admin_only.is_empty());
+            assert_eq!(fields.client_bound, ["authorization_nonce_required"]);
+        }
+        let request: UpdateProviderRequest =
+            serde_json::from_value(serde_json::json!({"name": "Unrelated edit"})).unwrap();
+        assert!(request.authorization_nonce_required.is_none());
+        assert!(provider_update_fields(&request).client_bound.is_empty());
+    }
 }

@@ -1,11 +1,16 @@
 # Platform BotFather
 
-Platform BotFather is an explicitly opted-in native Telegram onboarding manager.
-It collects a static assistant or restaurant draft, links the private Telegram
-sender to a first-party human account, and provisions only the client-reviewed
-specialist and exact Telegram child. The restaurant template publishes facts,
-FAQ and HTTPS request links; it never confirms a booking, takes payment or grants
-connector/machine access.
+Platform BotFather is an explicitly opted-in public entry to NyxID and a person's
+NyxBot. Visitors can ask NyxID FAQs or request a signup/sign-in link. A browser
+account review followed by confirmation in the original private chat links that
+sender to their own NyxBot. Telegram also provides native bot creation and
+management for the linked account.
+
+The separate legacy onboarding guide collects a static assistant or restaurant
+draft and provisions only the client-reviewed specialist and exact Telegram child.
+The restaurant template publishes facts, FAQ and HTTPS request links; it never
+confirms a booking, takes payment or grants connector/machine access. Its bounded
+onboarding binding does not select the account used for personal NyxBot chat.
 
 ## Authority and ownership
 
@@ -20,11 +25,28 @@ opt-in retain their personal behavior. Converted manager and installation marker
 survive setup/profile retention or deletion. There is no personal-route fallback
 for an opted-in manager or child.
 
-The guide uses no personal assistant key, personal connection, inventory, tools,
-private context or upstream session, including when an administrator chats with
-it. A linked sender can access only narrowly projected, approved onboarding
-setups. Web and Telegram edit the same encrypted draft; chat transcripts are not
-merged. Anonymous drafts require explicit adoption after linking.
+Public FAQ execution and the legacy guide use no personal assistant key,
+connection, inventory, tools, private context or upstream session, including when
+an administrator chats with them. Public FAQ execution uses a dedicated public
+credential, three approved tools and the validated runtime's signed limits.
+
+Personal chat uses the currently confirmed personal binding, its live owner and
+binding generation. It reuses that person's NyxBot, ordinary account tools,
+permissions, memories, conversation credentials and billing. The conversation is
+available in NyxID for web continuation. A legacy onboarding binding, a website
+login or signup alone never establishes personal chat authority. Web and the
+legacy Telegram guide edit the same encrypted onboarding draft; anonymous drafts
+require explicit adoption.
+
+With the public/personal runtime configured, `/start` and `/help` explain the
+entry flow. `/login` (also `/link`) creates a short-lived account-review link;
+`/status` reports live chat login state; `/logout` (also `/unlink`) disconnects
+the exact chat authority and cancels its pending proofs. An already-issued
+legacy onboarding confirmation remains a separate bounded compatibility flow.
+Telegram `/onboarding`, `/setups`, `/setup <id>`, `/bots` and `/bot <id>` use the
+current personal account, even if the legacy guide is disabled. Bot creation
+links require the same account in the browser. A selected setup supplies context
+to the next personal turn and grants no approval.
 
 The client owns the specialist, child and published facts. A platform manager
 operator does not acquire client-resource ownership. Public child inference
@@ -40,9 +62,11 @@ it separately checks that the owned specialist still exists.
 2. Save a paused guide configuration in `/admin/platform-bots`, discover its live
    advertised models, then explicitly validate and enable the selected exact
    model. Readiness/discovery use sponsor funding and can consume sponsor credits.
-3. Clients enter `/onboarding` or the manager's bare `/start`, link their account
-   using web approval plus same-private-chat confirmation, and resume or adopt
-   their draft. Linking grants bounded onboarding authority only.
+3. Clients use `/login`, complete first-party signup/sign-in and account review,
+   then send the provided confirmation in the original private chat. The same
+   chat becomes their personal NyxBot. `/onboarding` offers account-bound native
+   creation and guided setup; `/setups` lists their drafts. Legacy guide-only
+   profiles retain their bounded onboarding flow and confirmation protocol.
 4. The client publishes and reviews the exact saved facts, limits and resource
    plan. Approval binds the owner, revision, digest, profile/binding generations,
    planned stable IDs and zero-capability policy.
@@ -61,6 +85,68 @@ Pending pages refresh at bounded intervals and have manual refresh. Metadata-onl
 status notices and interrupted-delivery notices use bounded durable retries;
 browser status is authoritative if a Telegram notice is lost. Message bodies are
 not a durable delivery queue, and interrupted model work is not replayed.
+
+## Native chat entries and operator recovery
+
+In `/admin/platform-bots`, an administrator can convert an existing channel into
+a shared native entry. Select the channel, a sponsor organization you administer,
+and an explicit delivery transport. The UI loads the supported choices from
+`GET /api/v1/admin/platform-bots/native/transports`:
+
+| Platform | Supported transports | Private chat surface |
+| --- | --- | --- |
+| Discord | Direct or gateway | Installed `/nyx` application command |
+| Slack | Direct or gateway | Authenticated direct messages |
+| WhatsApp | Direct or gateway | Authenticated private messages |
+| Lark / Feishu | Direct | Authenticated private messages with raw event verification |
+| X | Direct | Authenticated private messages |
+
+An unsupported gateway choice is refused before setup or provider work. Select a
+supported transport explicitly; losing a selected gateway makes the entry
+unavailable and requires reviewed recovery. The entry never switches to direct
+delivery automatically. Telegram retains its existing conversion and native bot
+creation workflow described above.
+
+Discord uses `/nyx help`, `/nyx login`, `/nyx status`, `/nyx logout`, `/nyx confirm`
+and `/nyx ask`. Use `/nyx ask` for questions and personal action-card replies.
+Other native private-message surfaces accept the supported text controls such as
+`/help`, `/login`, `/status` and `/logout`. Follow the exact confirmation command
+returned after browser account review in the original private chat; browser
+approval alone does not sign the chat in. Forwarded, group and mismatched sender
+events cannot establish personal authority. Telegram's `/onboarding`, `/setups`
+and `/bots` management controls remain Telegram-only.
+
+Conversion and updates start with both public and personal access paused. Finish
+verification, review the runtime funding/model configuration, and explicitly
+enable each intended audience. The runtime panel reports readiness and access
+state; the legacy guide's enabled flag does not describe native availability.
+
+If setup fails or its outcome is uncertain, the channel keeps a durable pending
+marker and refuses ordinary owner routing. Use **Continue reserved native setup**
+for the retained attempt. For a gateway, **Inspect retained gateway setup** reads
+the exact reserved remote record; review the result and choose **Retry reviewed
+native setup**. Inspection and retry bind the retained attempt, request and
+credentials. Do not remove markers, rotate dedicated transport keys through
+ordinary key APIs, or create a substitute owner route to work around a failure.
+
+Use **Review failed or changed native setup**, or **Review current native entry**
+on an existing profile, when credentials, the configuring administrator, funding
+authorization or selected transport need a new review. Select replacement
+credentials belonging to the channel's existing owner, confirm the review, then
+choose **Update reviewed native entry and pause**. A successor administrator must
+have live platform-admin and sponsor access; review does not transfer the channel
+owner or its transport payer. Reservation pauses the entry and revokes old chat
+receipts, confirmations and turns before provider work. A failed verification
+retains a recoverable reservation. A successful update also stays paused until
+explicit re-enablement, and prior authority remains invalid afterward.
+
+The corresponding authenticated API is `POST /api/v1/admin/platform-bots/native`
+for conversion or a reviewed update, with the server-returned review from
+`POST /api/v1/admin/platform-bots/native/{bot}/review`. Gateway inspection uses
+`POST /api/v1/admin/platform-bots/native/{bot}/inspect`; retry submits the exact
+returned recovery review. Retirement uses the existing platform-profile retire
+control and retains routing/credential tombstones. Native repair uses this review
+workflow; the Telegram repair endpoint refuses native profiles.
 
 ## Funding and limits
 
@@ -125,6 +211,24 @@ rollout, all replicas handling manager/child traffic must enforce the new marker
 worker scopes and admission checks. Rolling back to a binary that ignores those
 markers is unsafe; pause/deactivate opted-in traffic using a compatible enforcing
 binary and retain tombstones. Do not remove markers to simulate rollback.
+Upgrade all ingress, callback, command and delivery replicas to understand opaque
+v2 native identities before the first native conversion or update writes v2
+records. Paused and pending setup already persist those records and routing
+constraints. After that point, keep v1-only binaries out of serving and automatic
+restart paths. Retained Telegram v1 proofs and saved deliveries remain compatible,
+but a v1-only binary cannot safely recover a native v2 entry. Preserve the selected
+transport, installation ownership and retirement markers throughout rollback or
+recovery.
+
+Startup also upgrades the shared `platform_public_turns` index so legacy
+deduplication and multiple runtime transcripts can coexist. Before starting an
+upgraded replica, prevent older binaries from entering startup, including through
+automatic restarts; keep them out of restart paths throughout the rolling upgrade
+and afterward. An older startup can recreate the unrestricted index or fail once
+multiple runtime transcripts exist. This requirement also applies to deployments
+using only the legacy Telegram public runtime, before any native conversion.
+Use compatible binaries for rollback or recovery and retain both legacy rows and
+runtime transcripts.
 
 Required external validation remains explicit: signed native manager creation and
 stale-form delivery, manager token rotation and shared webhook preservation,

@@ -1,3 +1,6 @@
+use super::platform_entry_projection::{
+    StoredEntryIdentity, StoredSenderIdentity, checked_identity_record, same_version,
+};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -6,18 +9,21 @@ pub const CLEANUP_RECORDS: &str = "platform_public_cleanup_records";
 pub const READINESS_RECORDS: &str = "platform_public_readiness_records";
 pub const REVOCATION_SCOPES: &str = "platform_public_revocation_scopes";
 
+checked_identity_record! {
 /// Public context never belongs to an assistant owner conversation. The key
 /// binding is immutable; revoked rows remain until exact cleanup is confirmed.
-#[derive(Clone, Serialize, Deserialize)]
-pub struct PlatformPublicSession {
+
+#[derive(Clone, Serialize)]
+pub struct PlatformPublicSession, RawPlatformPublicSession {
     #[serde(rename = "_id")]
     pub id: String,
     pub profile_id: String,
     pub manager_bot_id: String,
-    pub telegram_bot_id: i64,
+    #[serde(flatten)]
+    pub entry: StoredEntryIdentity,
     pub manager_authority_epoch: i64,
-    pub sender_id: i64,
-    pub chat_id: i64,
+    #[serde(flatten, with = "super::platform_entry_projection::ingress_sender")]
+    pub sender: StoredSenderIdentity,
     pub sponsor_owner_user_id: String,
     pub public_policy_revision: i64,
     pub policy_digest: String,
@@ -43,6 +49,8 @@ pub struct PlatformPublicSession {
     /// Absolute lifetime; a request or upstream touch never extends this field.
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub expires_at: DateTime<Utc>,
+}
+|record| same_version(&record.entry, &record.sender, None) && super::platform_entry_projection::entry_matches(&record.entry, &record.manager_bot_id)
 }
 
 fn default_true() -> bool {
@@ -129,10 +137,14 @@ mod tests {
             id: "session-sensitive".into(),
             profile_id: "profile".into(),
             manager_bot_id: "99".into(),
-            telegram_bot_id: 99,
+            entry: StoredEntryIdentity::TelegramV1 {
+                telegram_bot_id: 99,
+            },
             manager_authority_epoch: 1,
-            sender_id: 5,
-            chat_id: 5,
+            sender: StoredSenderIdentity::TelegramV1 {
+                telegram_sender_id: 5,
+                telegram_chat_id: 5,
+            },
             sponsor_owner_user_id: "sponsor-sensitive".into(),
             public_policy_revision: 1,
             policy_digest: "candidate".into(),

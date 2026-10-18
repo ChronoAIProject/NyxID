@@ -8,6 +8,13 @@ NyxID Channel Bot Relay turns NyxID into a **multi-platform messaging gateway**.
 
 Combined with [Agent Isolation](./AGENT_ISOLATION.md), the same NyxID user can wire different messaging platforms (or even different conversations on the same platform) to different AI agents -- each with independent credentials, rate limits, and audit trails.
 
+[NyxBot service adapters](NYXBOT_SERVICE_ADAPTERS.md) add typed phone, SMS and
+external speech interfaces to the executable registry. Telnyx, Twilio and
+ElevenLabs use dedicated bindings and guest specialist sessions. The versioned
+`/api/v1/channel-adapters` catalog describes those interfaces alongside existing
+messaging adapters; `/api/v1/channel-platforms` retains the channel-bot contract
+documented here.
+
 ---
 
 For Telegram's optional native bot creation, see [Telegram bot creation](TELEGRAM_NEW.md). The **Telegram** option uses the separate `telegram-new` adapter; **Telegram bot token** uses the existing `telegram` adapter and token setup. These are display labels; platform identifiers and existing connections remain unchanged.

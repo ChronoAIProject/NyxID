@@ -174,6 +174,12 @@ export function ProviderDetailPage() {
               badge
               badgeVariant={provider.supports_pkce ? "success" : "secondary"}
             />
+            {provider.provider_type === "oauth2" && (
+              <DetailRow
+                label="Authorization nonce required"
+                value={provider.authorization_nonce_required ? "Yes (hosted OAuth)" : "No"}
+              />
+            )}
             {provider.default_scopes && provider.default_scopes.length > 0 && (
               <div className="flex items-start justify-between px-4 py-2.5 text-12">
                 <span className="text-muted-foreground">Default Scopes</span>

@@ -16,7 +16,8 @@ pub struct PublicBudgetLoop {
     pub receipt_id: String,
     pub claim_id: String,
     pub profile_id: String,
-    pub sender_id: i64,
+    #[serde(flatten)]
+    pub actor: super::platform_entry_projection::StoredBudgetIdentity,
     pub sponsor_owner_user_id: String,
     pub credential_api_key_id: String,
     pub policy_digest: String,
@@ -35,6 +36,10 @@ pub struct PublicBudgetLoop {
     pub spent: Credits,
     pub calls: i64,
     pub max_calls: i64,
+    #[serde(default)]
+    pub continuations: i64,
+    #[serde(default)]
+    pub max_continuations: i64,
     pub input_tokens: i64,
     pub output_tokens: i64,
     pub max_input_tokens: i64,
@@ -69,6 +74,8 @@ pub struct PublicCallReservation {
     pub route_digest: String,
     pub model_id: String,
     pub state: PublicCallState,
+    #[serde(default)]
+    pub continuation: bool,
     #[serde(with = "super::credits::whole")]
     pub maximum: Credits,
     #[serde(with = "super::credits::whole")]

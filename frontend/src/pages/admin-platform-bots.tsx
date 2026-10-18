@@ -1,3 +1,4 @@
+import { NativePlatformEntrySetup } from "@/components/native-platform-entry-setup";
 import { ManagerRuntimeSettings } from "@/components/platform-manager-runtime";
 import { useState } from "react";
 import { z } from "zod";
@@ -235,11 +236,17 @@ function AdminProfiles() {
                               : "an organization"}
                           </option>
                           {name === "channel_bot_id"
-                            ? targets.data?.bots.map((bot) => (
-                                <option key={bot.id} value={bot.id}>
-                                  {bot.label} · @{bot.platform_bot_username}
-                                </option>
-                              ))
+                            ? targets.data?.bots
+                                .filter(
+                                  (bot) =>
+                                    bot.credential_source ===
+                                    "telegram_manager",
+                                )
+                                .map((bot) => (
+                                  <option key={bot.id} value={bot.id}>
+                                    {bot.label} · @{bot.platform_bot_username}
+                                  </option>
+                                ))
                             : targets.data?.orgs.map((org) => (
                                 <option key={org.id} value={org.id}>
                                   {org.display_name ?? org.slug}
@@ -271,6 +278,7 @@ function AdminProfiles() {
           </form>
         </Form>
       </DetailSection>
+      <NativePlatformEntrySetup />
       {action.error && <ErrorBanner message={action.error.message} />}
       {profiles.error && (
         <ErrorBanner
@@ -289,37 +297,50 @@ function AdminProfiles() {
           title={`Manager ${profile.manager_bot_id}`}
         >
           <div className="space-y-3 p-4 text-12">
-            <Badge
-              variant={
-                profile.deleted_at
-                  ? "secondary"
+            {(profile.execution_profile === "platform_onboarding" ||
+              profile.deleted_at) && (
+              <Badge
+                variant={
+                  profile.deleted_at
+                    ? "secondary"
+                    : profile.enabled
+                      ? "success"
+                      : "warning"
+                }
+              >
+                {profile.deleted_at
+                  ? "Retired"
                   : profile.enabled
-                    ? "success"
-                    : "warning"
-              }
-            >
-              {profile.deleted_at
-                ? "Retired"
-                : profile.enabled
-                  ? "Enabled"
-                  : "Paused"}
-            </Badge>
+                    ? "Enabled"
+                    : "Paused"}
+              </Badge>
+            )}
+            <p>
+              {profile.platform ?? "telegram"} · {profile.transport ?? "direct"}{" "}
+              transport
+            </p>
             <p className="break-all">
               Profile: {profile.id} · Generation {profile.generation}
             </p>
             <p className="text-sm text-muted-foreground">
-              Changing this profile pauses replies from existing client bots.
-              Clients must review their setups again before replies resume.
+              {profile.execution_profile === "native_entry"
+                ? "Live public and personal access settings below show this entry’s current state. A reviewed update pauses both modes and revokes prior chat authority before verification."
+                : "Changing this profile pauses replies from existing client bots. Clients must review their setups again before replies resume."}
             </p>
             <p className="break-all">
               Funding organization: {profile.funding_owner_user_id}
             </p>
             <p className="text-muted-foreground">
-              The platform guide has no administrator inventory, private context
-              or credentials. Repair retains the shared native creation webhook.
+              {profile.execution_profile === "native_entry"
+                ? "This shared entry keeps owner routing closed. Review credentials and the selected transport to recover or update it, then explicitly enable access."
+                : "The platform guide has no administrator inventory, private context or credentials. Repair retains the shared native creation webhook."}
             </p>
+            {!profile.deleted_at &&
+              profile.execution_profile === "native_entry" && (
+                <NativePlatformEntrySetup profile={profile} />
+              )}
             {!profile.deleted_at && (
-            <ManagerRuntimeSettings
+              <ManagerRuntimeSettings
                 key={`${profile.id}:${profile.generation}`}
                 profile={profile}
               />
@@ -330,18 +351,26 @@ function AdminProfiles() {
             />
             {!profile.deleted_at && (
               <div className="flex flex-wrap gap-2">
-                <Button
-                  disabled={action.isPending}
-                  onClick={() => action.mutate({ action: "verify", profile })}
-                >
-                  Verify manager
-                </Button>
-                <Button
-                  disabled={action.isPending}
-                  onClick={() => action.mutate({ action: "repair", profile })}
-                >
-                  Repair webhook
-                </Button>
+                {profile.execution_profile === "platform_onboarding" && (
+                  <>
+                    <Button
+                      disabled={action.isPending}
+                      onClick={() =>
+                        action.mutate({ action: "verify", profile })
+                      }
+                    >
+                      Verify manager
+                    </Button>
+                    <Button
+                      disabled={action.isPending}
+                      onClick={() =>
+                        action.mutate({ action: "repair", profile })
+                      }
+                    >
+                      Repair webhook
+                    </Button>
+                  </>
+                )}
                 <Button
                   disabled={action.isPending}
                   onClick={() => action.mutate({ action: "pause", profile })}

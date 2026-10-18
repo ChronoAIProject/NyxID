@@ -346,13 +346,28 @@ impl Handshake {
         config.billing_enabled = true;
         config.lago_api_url = Some(lago.uri());
         config.lago_api_key = Some("local-test-lago-key".into());
-        let state = crate::test_utils::test_app_state_with_config(db.clone(), config);
         let callback_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let callback_base = format!("http://{}", callback_listener.local_addr().unwrap());
+        config.base_url = callback_base.clone();
+        let mut state = crate::test_utils::test_app_state_with_config(db.clone(), config);
+        state.jwk_json = crate::test_utils::cached_test_jwk();
+        assert_eq!(state.jwk_json["kid"], state.jwt_keys.kid);
         let callback_app = axum::Router::new()
             .route(
                 "/api/v1/public-nyxbot/models/{service_id}/{*path}",
                 post(crate::handlers::platform_public_model::dispatch),
+            )
+            .route(
+                "/.well-known/jwks.json",
+                axum::routing::get(crate::handlers::oidc_discovery::jwks),
+            )
+            .route(
+                "/mcp",
+                post(crate::handlers::mcp_transport::mcp_post).layer(axum::Extension(
+                    crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
+                        crate::services::billing::BillingIngress::Mcp,
+                    ),
+                )),
             )
             .with_state(state.clone());
         let callback_task = tokio::spawn(async move {
@@ -427,6 +442,8 @@ impl Handshake {
         .unwrap();
         let now = Utc::now();
         let profile = PlatformBotConfig {
+            identity_version: None,
+            native_entry: None,
             id: e.binding.profile_id.clone(),
             channel_bot_id: uuid::Uuid::new_v4().to_string(),
             manager_bot_id: e.binding.manager_bot_id.clone(),
@@ -487,9 +504,9 @@ impl Handshake {
             axum::serve(runtime_listener, runtime_app).await.unwrap();
         });
         Mock::given(method("POST")).and(path("/v1/responses"))
-            .respond_with(ResponseTemplate::new(provider_status).set_body_json(json!({"model":provider_model,
-                "output":[{"type":"message","content":[{"type":"output_text","text":"OK"}]}],
-                "usage":{"input_tokens":20,"output_tokens":3,"input_tokens_details":{"cached_tokens":4}}})))
+            .respond_with(ResponseTemplate::new(provider_status).set_body_json(json!({"id":"resp_handshake_probe","object":"response","status":"completed","model":provider_model,
+                "output":[{"id":"msg_handshake_probe","type":"message","role":"assistant","content":[{"type":"output_text","text":"OK"}]}],
+                "usage":{"input_tokens":20,"output_tokens":3,"total_tokens":23,"input_tokens_details":{"cached_tokens":4}}})))
             .mount(&provider).await;
         let producers = crate::services::platform_manager_transport::compose(
             state.clone(),
@@ -665,8 +682,10 @@ impl Handshake {
         let ingress = PublicIngress {
             manager: self.reviewed.manager.clone(),
             public_policy_revision: self.reviewed.public_policy_revision,
-            sender_id: sender,
-            chat_id: sender,
+            sender: crate::models::platform_entry_projection::StoredSenderIdentity::TelegramV1 {
+                telegram_sender_id: sender,
+                telegram_chat_id: sender,
+            },
             ingress: IngressClaim {
                 receipt_id: uuid::Uuid::new_v4().to_string(),
                 claim_id: uuid::Uuid::new_v4().to_string(),
@@ -683,13 +702,18 @@ impl Handshake {
                 claim_id: ingress.ingress.claim_id.clone(),
                 profile_id: self.profile.id.clone(),
                 manager_bot_id: self.profile.manager_bot_id.clone(),
-                telegram_bot_id: ingress.manager.telegram_bot_id,
+                entry: ingress.manager.entry.clone(),
                 manager_authority_epoch: ingress.manager.manager_authority_epoch,
                 observation_id: self.profile.observation_id.clone(),
-                sender_id: sender,
-                chat_id: sender,
-                update_id: now.timestamp_millis(),
-                message_id: 1,
+                sender:
+                    crate::models::platform_entry_projection::StoredSenderIdentity::TelegramV1 {
+                        telegram_sender_id: sender,
+                        telegram_chat_id: sender,
+                    },
+                event: crate::models::platform_entry_projection::StoredEventIdentity::TelegramV1 {
+                    update_id: now.timestamp_millis(),
+                    message_id: 1,
+                },
                 original_private_command: false,
                 audience: IngressAudience::Public {
                     public_policy_revision: ingress.public_policy_revision,
@@ -698,6 +722,7 @@ impl Handshake {
                 execution: None,
                 decision: None,
                 reply_id: None,
+                control_effect: None,
                 delivery_recovery_queued: false,
                 interrupted_reason: None,
                 effect_revision: 0,
@@ -1401,5 +1426,730 @@ async fn failed_dispatched_settlement_preserves_original_unknown_handle_cleanup_
         .await
         .unwrap();
     assert_ne!(fresh.public_session_id, original.id);
+    fixture.state.db.drop().await.unwrap();
+}
+
+/// Runs the actual upstream control endpoints with locally generated NyxID
+/// discovery, signed authority and the pinned runtime. Provider HTTP is local;
+/// model callbacks below exercise real NyxID funding/grammar/settlement. This
+/// deliberately performs no platform delivery.
+#[tokio::test]
+#[ignore = "Set NYXAGENT_PUBLIC_TEST_BINARY, NYXAGENT_PUBLIC_TEST_POLICY and CODEX_APP_SERVER_BINARY; local paired runtime fixture"]
+async fn actual_upstream_discovery_readiness_and_four_call_default_budget_settlement() {
+    use base64::Engine;
+    let binary = std::env::var("NYXAGENT_PUBLIC_TEST_BINARY")
+        .expect("task-built upstream executable required");
+    let policy_file =
+        std::env::var("NYXAGENT_PUBLIC_TEST_POLICY").expect("upstream public policy required");
+    let codex = std::env::var("CODEX_APP_SERVER_BINARY")
+        .expect("SHA-pinned standalone runtime wrapper required");
+    let policy: Value = serde_json::from_slice(&std::fs::read(&policy_file).unwrap()).unwrap();
+    assert_eq!(policy["runtime"]["channel"], "rust-v0.160.1");
+    assert_eq!(
+        policy["public"]["profiles"]["public-guide"]["serviceSlug"],
+        "chrono-llm-public"
+    );
+    let mut fixture =
+        Handshake::new("public_actual_upstream_pairing", NORMAL, 200, "gpt-6.1-sol").await;
+    let isolated = tempfile::tempdir().unwrap();
+    let port = {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        listener.local_addr().unwrap().port()
+    };
+    let runtime_base = format!("http://127.0.0.1:{port}");
+    let callback_origin = fixture.runtime.callback_url.origin().ascii_serialization();
+    let log_path = std::env::temp_dir().join(format!(
+        "nyxid-public-paired-runtime-{}.log",
+        uuid::Uuid::new_v4()
+    ));
+    let log = std::fs::File::create(&log_path).unwrap();
+    let mut child = tokio::process::Command::new(&binary)
+        .env_clear()
+        .env("PATH", std::env::var("PATH").unwrap())
+        .env("HOME", isolated.path())
+        .env("ENVIRONMENT", "test")
+        .env("PORT", port.to_string())
+        .env("POLICY_FILE", &policy_file)
+        .env("CODEX_APP_SERVER_BINARY", codex)
+        .env("CODEX_RUNTIME_VERSION", "rust-v0.160.1")
+        .env("RUNTIME_CACHE", isolated.path().join("runtimes"))
+        .env("NYXID_BASE_URL", &callback_origin)
+        .env("NYXID_ISSUER", &fixture.state.config.jwt_issuer)
+        .env(
+            "SESSION_ENCRYPTION_KEY",
+            base64::engine::general_purpose::STANDARD.encode(rand::random::<[u8; 32]>()),
+        )
+        .env(
+            "SESSION_BINDING_KEY",
+            base64::engine::general_purpose::STANDARD.encode(rand::random::<[u8; 32]>()),
+        )
+        .env("STORAGE_BACKEND", "memory")
+        .env("MAX_CONCURRENT_TURNS", "1")
+        .current_dir(isolated.path())
+        .stdin(std::process::Stdio::null())
+        .stdout(log.try_clone().unwrap())
+        .stderr(log)
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        loop {
+            assert!(
+                child.try_wait().unwrap().is_none(),
+                "upstream exited; inspect {}",
+                log_path.display()
+            );
+            if fixture
+                .state
+                .http_client
+                .get(format!("{runtime_base}/healthz"))
+                .send()
+                .await
+                .is_ok_and(|response| response.status().is_success())
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .unwrap();
+    fixture
+        .state
+        .db
+        .collection::<DownstreamService>(SERVICES)
+        .update_one(
+            doc! {"slug":super::super::super::assistant_nyxagent::SERVICE_SLUG},
+            doc! {"$set":{"base_url":&runtime_base}},
+        )
+        .await
+        .unwrap();
+    fixture
+        .reviewed
+        .public_policy
+        .as_mut()
+        .unwrap()
+        .nyxagent_profile = "nyxagent/public-guide".into();
+    let (discovery, deployed) = discover(&fixture.state, &fixture.reviewed).await.unwrap();
+    assert_eq!(discovery.profiles.len(), 1);
+    let (_, actual_manifest) = deployed.unwrap();
+    validate_manifest(&actual_manifest).unwrap();
+    let profile = &actual_manifest.profiles[0];
+    let op = &profile.model_operations[0];
+    let catalogs = model_bindings(
+        &fixture.state.db,
+        &fixture
+            .reviewed
+            .public_policy
+            .as_ref()
+            .unwrap()
+            .sponsor_owner_user_id,
+    )
+    .await
+    .unwrap();
+    let advertised = catalogs
+        .iter()
+        .find(|c| c["service_id"] == op.service_id)
+        .unwrap();
+    for (name, value) in [
+        ("max_input_bytes", 8192),
+        ("max_input_tokens", 8192),
+        ("max_output_tokens", 512),
+    ] {
+        assert_eq!(advertised[name], value);
+    }
+    assert_eq!(op.max_input_bytes, 8192);
+    assert_eq!(op.max_input_tokens, 8192);
+    assert_eq!(op.max_output_tokens, 512);
+    assert_eq!(op.reasoning_effort.as_deref(), Some("low"));
+    assert_eq!(profile.limits.max_model_calls, 4);
+    assert_eq!(profile.limits.max_input_tokens, 32768);
+    assert_eq!(profile.limits.max_output_tokens, 2048);
+    if let Ok(path) = std::env::var("NYXID_PUBLIC_PAIRED_MANIFEST_OUT") {
+        std::fs::write(
+            path,
+            serde_json::to_vec_pretty(
+                &json!({"catalog_bindings":catalogs,"manifest":actual_manifest}),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    }
+    fixture.consent().await;
+    assert!(matches!(
+        fixture.probe().await.unwrap(),
+        PublicReadiness::Ready(_)
+    ));
+    fixture.activate().await;
+    let before = fixture.wallet().await;
+    let ingress = fixture.ingress(1001).await;
+    let context = fixture
+        .producers
+        .public
+        .prepare_public_context(&fixture.state.db, &ingress)
+        .await
+        .unwrap();
+    let runtime = credentials::producer(fixture.state.clone());
+    let prepared = runtime
+        .prepare(
+            &fixture.state.db,
+            &context,
+            TurnInput {
+                text: "What is NyxID?".into(),
+            },
+        )
+        .await
+        .unwrap();
+    assert!(
+        prepared
+            .credential
+            .raw_key
+            .starts_with(crate::crypto::token::AGENT_KEY_PREFIX)
+    );
+    let public_key = fixture
+        .state
+        .db
+        .collection::<crate::models::api_key::ApiKey>(crate::models::api_key::COLLECTION_NAME)
+        .find_one(doc! {"_id":&prepared.credential.api_key_id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        public_key.purpose,
+        crate::models::api_key::ApiKeyPurpose::PublicNyxbot
+    );
+    let turn = fixture
+        .state
+        .db
+        .collection::<crate::models::platform_public_turn::PlatformPublicTurn>(
+            crate::models::platform_public_turn::COLLECTION_NAME,
+        )
+        .find_one(doc! {"_id":&context.turn.turn_id})
+        .await
+        .unwrap()
+        .unwrap();
+    let mut session = fixture.state.db.client().start_session().await.unwrap();
+    session
+        .start_transaction()
+        .and_run2(async |session| {
+            tx::transaction_result(
+                proxy::mark_outer_attempt_in_session(
+                    &fixture.state.db,
+                    session,
+                    &context,
+                    &prepared.credential.api_key_id,
+                    &turn.nyxagent_service_id,
+                    &turn.nyxagent_catalog_digest,
+                )
+                .await,
+            )
+        })
+        .await
+        .unwrap();
+    let initial = fixture
+        .state
+        .db
+        .collection::<crate::models::platform_public_budget::PublicBudgetLoop>(
+            crate::models::platform_public_budget::LOOPS,
+        )
+        .find_one(doc! {"turn_id":&context.turn.turn_id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(initial.maximum, "0.4276224".parse().unwrap());
+    assert!(
+        initial.maximum
+            < fixture
+                .reviewed
+                .public_policy
+                .as_ref()
+                .unwrap()
+                .sender_daily_credits
+    );
+    assert_eq!(
+        fixture
+            .reviewed
+            .public_policy
+            .as_ref()
+            .unwrap()
+            .sender_daily_credits,
+        "0.5".parse().unwrap()
+    );
+    assert_eq!(
+        fixture
+            .reviewed
+            .public_policy
+            .as_ref()
+            .unwrap()
+            .total_daily_credits,
+        Credits::from_whole(10)
+    );
+    fixture.provider.reset().await;
+    Mock::given(method("POST")).and(path("/v1/responses")).respond_with(ResponseTemplate::new(200)
+        .set_body_json(json!({"model":op.model_id,"output":[{"type":"message","content":[{"type":"output_text","text":"Bounded answer"}]}],
+            "usage":{"input_tokens":8192,"output_tokens":512,"output_tokens_details":{"reasoning_tokens":128}}})))
+        .mount(&fixture.provider).await;
+    let captured: Value = serde_json::from_str(include_str!(
+        "../../../../../docs/fixtures/codex-public-responses-0.160.1-native-schema-derived.json"
+    ))
+    .unwrap();
+    let mut calls = vec![];
+    for raw in captured["calls"].as_array().unwrap() {
+        let mut body = raw["callback"].clone();
+        body["model"] = json!(op.model_id);
+        let body = serde_json::to_vec(&body).unwrap();
+        assert!(body.len() <= 8192);
+        let call = uuid::Uuid::new_v4().to_string();
+        let response = proxy::dispatch_model(
+            &fixture.state,
+            &context,
+            proxy::ModelRequest {
+                key_id: &prepared.credential.api_key_id,
+                service_id: &op.service_id,
+                path: &op.canonical_path,
+                body: &body,
+                call_id: &call,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        to_bytes(response.into_body(), 65536).await.unwrap();
+        calls.push(call);
+    }
+    assert_eq!(calls.len(), 4);
+    assert_eq!(fixture.provider.received_requests().await.unwrap().len(), 4);
+    let mut body = captured["calls"][0]["callback"].clone();
+    body["model"] = json!(op.model_id);
+    assert!(
+        proxy::dispatch_model(
+            &fixture.state,
+            &context,
+            proxy::ModelRequest {
+                key_id: &prepared.credential.api_key_id,
+                service_id: &op.service_id,
+                path: &op.canonical_path,
+                body: &serde_json::to_vec(&body).unwrap(),
+                call_id: &uuid::Uuid::new_v4().to_string(),
+            }
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(fixture.provider.received_requests().await.unwrap().len(), 4);
+    runtime
+        .settle(
+            &fixture.state.db,
+            &context,
+            &uuid::Uuid::new_v4().to_string(),
+            &crate::services::assistant_nyxagent::TurnResult {
+                text: "Bounded answer".into(),
+                session_id: None,
+                response_id: None,
+                error: None,
+            },
+        )
+        .await
+        .unwrap();
+    let settled = fixture
+        .state
+        .db
+        .collection::<crate::models::platform_public_budget::PublicBudgetLoop>(
+            crate::models::platform_public_budget::LOOPS,
+        )
+        .find_one(doc! {"_id":&initial.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(settled.closed);
+    assert_eq!(
+        (settled.calls, settled.input_tokens, settled.output_tokens),
+        (4, 32768, 2048)
+    );
+    assert_eq!(settled.held, Credits::ZERO);
+    assert_eq!(settled.spent, "0.2048".parse().unwrap());
+    let wallet = fixture.wallet().await;
+    assert_eq!(wallet.reserved_credits, Credits::ZERO);
+    assert_eq!(wallet.balance_credits, before.balance_credits);
+    assert_eq!(
+        wallet
+            .pending_lago_debits
+            .checked_sub(before.pending_lago_debits)
+            .unwrap(),
+        settled.spent
+    );
+    let before_available = before.available_credits().unwrap();
+    let after_available = wallet.available_credits().unwrap();
+    assert_eq!(
+        before_available.checked_sub(after_available).unwrap(),
+        settled.spent
+    );
+    let call_meters: Vec<_> = fixture
+        .meters()
+        .await
+        .into_iter()
+        .filter(|m| calls.contains(&m.billing_request_id))
+        .collect();
+    assert_eq!(
+        call_meters.len(),
+        20,
+        "four model calls each settle the five priced components"
+    );
+    for call in &calls {
+        assert_eq!(
+            call_meters
+                .iter()
+                .filter(|m| &m.billing_request_id == call)
+                .count(),
+            5
+        );
+    }
+    for meter in call_meters {
+        assert_eq!(meter.service_id.as_deref(), Some(op.service_id.as_str()));
+        assert_eq!(meter.billing_owner_id, context.sponsor_owner_user_id);
+        assert_eq!(meter.actor_user_id, context.sponsor_owner_user_id);
+        assert_eq!(
+            meter.api_key_id.as_deref(),
+            Some(prepared.credential.api_key_id.as_str())
+        );
+        assert!(meter.funding.as_ref().is_some_and(|f| f.settled));
+    }
+    // The manual callback segment has no observed upstream session handle.
+    // Check its cap independently of the runtime's earlier ambiguity fence.
+    // Settled spend plus a new full-loop maximum exceeds the approved 0.50 cap.
+    assert!(settled.spent.checked_add(initial.maximum).unwrap() > "0.5".parse().unwrap());
+    let retained = fixture
+        .state
+        .db
+        .collection::<PlatformPublicSession>(SESSIONS)
+        .find_one(doc! {"_id":&context.public_session_id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(retained.upstream_may_exist && retained.upstream_binding_ciphertext.is_empty());
+    let retry_ingress = fixture.ingress(1001).await;
+    let retry_context = fixture
+        .producers
+        .public
+        .prepare_public_context(&fixture.state.db, &retry_ingress)
+        .await
+        .unwrap();
+    assert_eq!(retry_context.public_session_id, context.public_session_id);
+    let buckets: Vec<Document> = fixture
+        .state
+        .db
+        .collection::<Document>(crate::models::platform_public_budget::BUCKETS)
+        .find(doc! {"_id":{"$in":&initial.bucket_ids}})
+        .sort(doc! {"_id":1})
+        .await
+        .unwrap()
+        .try_collect()
+        .await
+        .unwrap();
+    assert_eq!(buckets.len(), 2);
+    let mut cap_session = fixture.state.db.client().start_session().await.unwrap();
+    let retry = cap_session
+        .start_transaction()
+        .and_run2(async |session| {
+            let result: crate::errors::AppResult<_> = async {
+                let proof = crate::services::platform_public_policy::verified_context_in_session(
+                    &fixture.state.db,
+                    session,
+                    &retry_context,
+                )
+                .await?;
+                crate::services::platform_public_budget_service::reserve_loop_in_session(
+                    &fixture.state.db,
+                    session,
+                    &proof,
+                    &retry_context,
+                    &prepared.credential.api_key_id,
+                    initial.maximum,
+                    retry_context.limits.max_model_calls,
+                )
+                .await
+                .map(|_| ())
+            }
+            .await;
+            tx::transaction_result(result)
+        })
+        .await
+        .map_err(tx::map_transaction_error);
+    assert!(matches!(retry, Err(crate::errors::AppError::RateLimited)));
+    let after_buckets: Vec<Document> = fixture
+        .state
+        .db
+        .collection::<Document>(crate::models::platform_public_budget::BUCKETS)
+        .find(doc! {"_id":{"$in":&initial.bucket_ids}})
+        .sort(doc! {"_id":1})
+        .await
+        .unwrap()
+        .try_collect()
+        .await
+        .unwrap();
+    assert_eq!(after_buckets, buckets);
+    let ambiguous_retry = runtime
+        .prepare(
+            &fixture.state.db,
+            &retry_context,
+            TurnInput {
+                text: "Please explain that again".into(),
+            },
+        )
+        .await;
+    assert!(
+        matches!(
+            ambiguous_retry,
+            Err(crate::errors::AppError::Conflict(ref reason))
+                if reason == "Public runtime unavailable; validate the deployed public contract before enabling"
+        ),
+        "a dispatched session without an observed handle must refuse reuse",
+    );
+    assert!(
+        fixture
+            .state
+            .db
+            .collection::<PlatformPublicSession>(SESSIONS)
+            .find_one(doc! {"_id":&retry_context.public_session_id})
+            .await
+            .unwrap()
+            .unwrap()
+            .active_turn
+            .is_none(),
+        "refused runtime preparation must release its exact turn lease",
+    );
+    assert_eq!(fixture.provider.received_requests().await.unwrap().len(), 4);
+    assert_eq!(fixture.wallet().await.reserved_credits, Credits::ZERO);
+    assert!(
+        fixture
+            .state
+            .db
+            .collection::<crate::models::platform_public_budget::PublicBudgetLoop>(
+                crate::models::platform_public_budget::LOOPS
+            )
+            .find_one(doc! {"turn_id":&retry_context.turn.turn_id})
+            .await
+            .unwrap()
+            .is_none()
+    );
+    // A separate signed turn exercises the actual local no-tool compact grammar
+    // against the same producer-selected operation and durable continuation cap.
+    let compact_ingress = fixture.ingress(1002).await;
+    let compact_context = fixture
+        .producers
+        .public
+        .prepare_public_context(&fixture.state.db, &compact_ingress)
+        .await
+        .unwrap();
+    assert_ne!(compact_context.public_session_id, context.public_session_id);
+    let compact_prepared = runtime
+        .prepare(
+            &fixture.state.db,
+            &compact_context,
+            TurnInput {
+                text: "Summarize the earlier help".into(),
+            },
+        )
+        .await
+        .unwrap();
+    assert!(compact_prepared.upstream_session_id.is_none());
+    let compact_turn = fixture
+        .state
+        .db
+        .collection::<crate::models::platform_public_turn::PlatformPublicTurn>(
+            crate::models::platform_public_turn::COLLECTION_NAME,
+        )
+        .find_one(doc! {"_id":&compact_context.turn.turn_id})
+        .await
+        .unwrap()
+        .unwrap();
+    let mut tx_session = fixture.state.db.client().start_session().await.unwrap();
+    tx_session
+        .start_transaction()
+        .and_run2(async |session| {
+            tx::transaction_result(
+                proxy::mark_outer_attempt_in_session(
+                    &fixture.state.db,
+                    session,
+                    &compact_context,
+                    &compact_prepared.credential.api_key_id,
+                    &compact_turn.nyxagent_service_id,
+                    &compact_turn.nyxagent_catalog_digest,
+                )
+                .await,
+            )
+        })
+        .await
+        .unwrap();
+    let mut compact = captured["compact"]["callback"].clone();
+    compact["model"] = json!(op.model_id);
+    assert_eq!(compact["tools"], json!([]));
+    assert_eq!(
+        compact["instructions"],
+        crate::services::platform_public_tools::COMPACT_INSTRUCTIONS
+    );
+    let compact_bytes = serde_json::to_vec(&compact).unwrap();
+    let response = proxy::dispatch_model(
+        &fixture.state,
+        &compact_context,
+        proxy::ModelRequest {
+            key_id: &compact_prepared.credential.api_key_id,
+            service_id: &op.service_id,
+            path: &op.canonical_path,
+            body: &compact_bytes,
+            call_id: &uuid::Uuid::new_v4().to_string(),
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    to_bytes(response.into_body(), 65536).await.unwrap();
+    let compact_loop = fixture
+        .state
+        .db
+        .collection::<crate::models::platform_public_budget::PublicBudgetLoop>(
+            crate::models::platform_public_budget::LOOPS,
+        )
+        .find_one(doc! {"turn_id":&compact_context.turn.turn_id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(compact_loop.continuations, 1);
+    let provider_calls = fixture.provider.received_requests().await.unwrap().len();
+    assert!(
+        proxy::dispatch_model(
+            &fixture.state,
+            &compact_context,
+            proxy::ModelRequest {
+                key_id: &compact_prepared.credential.api_key_id,
+                service_id: &op.service_id,
+                path: &op.canonical_path,
+                body: &compact_bytes,
+                call_id: &uuid::Uuid::new_v4().to_string()
+            }
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(
+        fixture.provider.received_requests().await.unwrap().len(),
+        provider_calls
+    );
+    runtime
+        .settle(
+            &fixture.state.db,
+            &compact_context,
+            &uuid::Uuid::new_v4().to_string(),
+            &crate::services::assistant_nyxagent::TurnResult {
+                text: "Earlier approved facts summarized".into(),
+                session_id: None,
+                response_id: None,
+                error: None,
+            },
+        )
+        .await
+        .unwrap();
+
+    // Finally launch the real pinned Codex runtime through NyxID's generated
+    // public key, shared egress, live MCP initialization/list, model callback and
+    // successful settlement. The provider produces only a final answer here;
+    // no signup or platform delivery can be attempted by this fixture.
+    fixture.provider.reset().await;
+    let final_item = json!({"id":"msg_paired","type":"message","role":"assistant","status":"completed",
+        "content":[{"type":"output_text","text":"NyxID manages sign-in and connected services."}]});
+    let final_response = json!({"id":"resp_paired","object":"response","status":"completed","model":op.model_id,
+        "output":[final_item],"usage":{"input_tokens":100,"output_tokens":12,"total_tokens":112,"output_tokens_details":{"reasoning_tokens":4}}});
+    let mut added_item = final_item.clone();
+    added_item["status"] = "in_progress".into();
+    added_item["content"] = json!([]);
+    let events = [
+        json!({"type":"response.created","response":{"id":"resp_paired","model":op.model_id,"status":"in_progress","output":[]}}),
+        json!({"type":"response.output_item.added","output_index":0,"item":added_item}),
+        json!({"type":"response.content_part.added","output_index":0,"item_id":final_item["id"],"content_index":0,"part":{"type":"output_text","text":""}}),
+        json!({"type":"response.output_text.delta","output_index":0,"item_id":final_item["id"],"content_index":0,"delta":final_item["content"][0]["text"]}),
+        json!({"type":"response.output_text.done","output_index":0,"item_id":final_item["id"],"content_index":0,"text":final_item["content"][0]["text"]}),
+        json!({"type":"response.content_part.done","output_index":0,"item_id":final_item["id"],"content_index":0,"part":final_item["content"][0]}),
+        json!({"type":"response.output_item.done","output_index":0,"item":final_item}),
+        json!({"type":"response.completed","response":final_response}),
+    ];
+    let stream: String = events
+        .into_iter()
+        .map(|event| {
+            format!(
+                "event: {}\ndata: {event}\n\n",
+                event["type"].as_str().unwrap()
+            )
+        })
+        .collect();
+    Mock::given(method("POST"))
+        .and(path("/v1/responses"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_raw(stream.into_bytes(), "text/event-stream"),
+        )
+        .mount(&fixture.provider)
+        .await;
+    let live_ingress = fixture.ingress(1003).await;
+    let live_context = fixture
+        .producers
+        .public
+        .prepare_public_context(&fixture.state.db, &live_ingress)
+        .await
+        .unwrap();
+    assert_ne!(live_context.public_session_id, context.public_session_id);
+    assert_ne!(
+        live_context.public_session_id,
+        compact_context.public_session_id
+    );
+    let (events, mut received) = tokio::sync::mpsc::channel(8);
+    fixture
+        .producers
+        .public
+        .run_public_turn(
+            &fixture.state.db,
+            live_context.clone(),
+            TurnInput {
+                text: "What is NyxID?".into(),
+            },
+            events,
+        )
+        .await
+        .unwrap();
+    let mut replies = 0;
+    let mut settlements = 0;
+    while let Some(event) = received.recv().await {
+        match event {
+            ExecutionEvent::ReplyReady(_) => replies += 1,
+            ExecutionEvent::Settled { turn } => {
+                assert_eq!(turn, live_context.turn);
+                settlements += 1;
+            }
+        }
+    }
+    assert_eq!((replies, settlements), (1, 1));
+    let saved = fixture
+        .state
+        .db
+        .collection::<crate::models::platform_public_turn::PlatformPublicTurn>(
+            crate::models::platform_public_turn::COLLECTION_NAME,
+        )
+        .find_one(doc! {"_id":&live_context.turn.turn_id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(saved.outcome.as_deref(), Some("settled"));
+    let text = crate::services::assistant_agent_credential_service::decrypt_runtime_key(
+        &fixture.state.encryption_keys,
+        &saved.reply_ciphertext,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        text.as_str(),
+        "NyxID manages sign-in and connected services."
+    );
+    assert_eq!(fixture.provider.received_requests().await.unwrap().len(), 1);
+    child.kill().await.unwrap();
+    child.wait().await.unwrap();
+    eprintln!("actual paired runtime log: {}", log_path.display());
     fixture.state.db.drop().await.unwrap();
 }

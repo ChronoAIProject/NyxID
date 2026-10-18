@@ -2851,6 +2851,8 @@ async fn platform_onboarding_native_command_errors_reply_safely_and_provider_fai
     let channel = register_manager_channel(&state, &actor, &server).await;
     let now = Utc::now();
     let profile = PlatformBotConfig {
+        identity_version: None,
+        native_entry: None,
         guide: None,
         id: uuid::Uuid::new_v4().to_string(),
         channel_bot_id: channel.id.clone(),

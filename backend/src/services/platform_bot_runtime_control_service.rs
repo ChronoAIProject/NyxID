@@ -6,6 +6,7 @@ use super::{
         ManagerAuthority, ManagerRuntimePolicy, PublicPolicySelection, PublicReadinessEvidence,
     },
 };
+use super::{platform_entry_scope as scope, platform_manager_contract::EntryIdentity};
 use crate::{
     errors::{AppError, AppResult},
     models::{platform_bot_config::PlatformBotConfig, platform_bot_runtime_controls::*},
@@ -111,7 +112,7 @@ pub fn policy(row: &PlatformBotRuntimeControls) -> ManagerRuntimePolicy {
         manager: ManagerAuthority {
             profile_id: row.platform_config_id.clone(),
             manager_bot_id: row.manager_bot_id.clone(),
-            telegram_bot_id: row.telegram_bot_id,
+            entry: row.entry.clone(),
             manager_authority_epoch: row.manager_authority_epoch,
         },
         personal_enabled: row.personal_enabled,
@@ -135,7 +136,7 @@ pub(crate) async fn fence_manager_in_session(
     session: &mut ClientSession,
     profile_id: &str,
     manager_id: &str,
-    telegram_id: i64,
+    entry: &EntryIdentity,
     observation: Option<&str>,
 ) -> AppResult<Option<PlatformBotRuntimeControls>> {
     check_manager_in_session(
@@ -143,7 +144,7 @@ pub(crate) async fn fence_manager_in_session(
         session,
         profile_id,
         manager_id,
-        telegram_id,
+        entry,
         observation,
         true,
     )
@@ -157,7 +158,7 @@ pub(crate) async fn validate_manager_in_session(
     session: &mut ClientSession,
     profile_id: &str,
     manager_id: &str,
-    telegram_id: i64,
+    entry: &EntryIdentity,
     observation: Option<&str>,
 ) -> AppResult<Option<PlatformBotRuntimeControls>> {
     check_manager_in_session(
@@ -165,7 +166,7 @@ pub(crate) async fn validate_manager_in_session(
         session,
         profile_id,
         manager_id,
-        telegram_id,
+        entry,
         observation,
         false,
     )
@@ -177,7 +178,7 @@ async fn check_manager_in_session(
     session: &mut ClientSession,
     profile_id: &str,
     manager_id: &str,
-    telegram_id: i64,
+    entry: &EntryIdentity,
     observation: Option<&str>,
     write_fence: bool,
 ) -> AppResult<Option<PlatformBotRuntimeControls>> {
@@ -203,37 +204,62 @@ async fn check_manager_in_session(
     let Some(profile) = profile else {
         return Ok(None);
     };
-    if manager_id.parse::<i64>().ok() != Some(telegram_id) || telegram_id <= 0 {
+    if profile_identity(&profile)? != *entry {
         return Ok(None);
     }
-    let mut credential_filter = doc! {"provider":"telegram-new","fields.manager_bot_id":manager_id,"fields.webhook_ready":"true"};
-    if let Some(value) = observation {
-        credential_filter.insert("fields.observation_id", value);
-    }
-    let credentials =
-        db.collection::<Document>(crate::models::platform_credential::COLLECTION_NAME);
-    let credential_exists = if write_fence {
-        credentials
-            .update_one(
-                credential_filter,
-                doc! {"$inc":{"personal_effect_revision":1_i64}},
-            )
-            .session(&mut *session)
-            .await?
-            .matched_count
-            == 1
-    } else {
-        credentials
-            .find_one(credential_filter)
-            .session(&mut *session)
-            .await?
-            .is_some()
-    };
-    if !credential_exists {
-        return Ok(None);
+    let mut receipt_epoch = None;
+    match entry {
+        EntryIdentity::TelegramV1 { .. } => {
+            let mut credential_filter = doc! {"provider":"telegram-new","fields.manager_bot_id":manager_id,"fields.webhook_ready":"true"};
+            if let Some(value) = observation {
+                credential_filter.insert("fields.observation_id", value);
+            }
+            let credentials =
+                db.collection::<Document>(crate::models::platform_credential::COLLECTION_NAME);
+            let exists = if write_fence {
+                credentials
+                    .update_one(
+                        credential_filter,
+                        doc! {"$inc":{"personal_effect_revision":1_i64}},
+                    )
+                    .session(&mut *session)
+                    .await?
+                    .matched_count
+                    == 1
+            } else {
+                credentials
+                    .find_one(credential_filter)
+                    .session(&mut *session)
+                    .await?
+                    .is_some()
+            };
+            if !exists {
+                return Ok(None);
+            }
+        }
+        EntryIdentity::NativeV2 { .. } => {
+            let configuration = profile.native_entry.as_ref().ok_or_else(changed)?;
+            if !native_transport_ready(db, session, &profile, write_fence).await? {
+                return Ok(None);
+            }
+            if let Some(receipt_id) = observation {
+                let receipt=db.collection::<crate::models::platform_entry_identity::NativeEntryReceipt>(crate::models::platform_entry_identity::NATIVE_RECEIPTS)
+                    .find_one(doc! {"_id":receipt_id,"profile_id":profile_id,"configuration":bson::to_bson(configuration).map_err(|_|changed())?,
+                        "original_private_human":true,"expires_at":{"$gt":bson::DateTime::now()}}).session(&mut *session).await?;
+                let Some(receipt) = receipt else {
+                    return Ok(None);
+                };
+                receipt_epoch = Some(receipt.manager_authority_epoch);
+            }
+        }
     }
     let bots = db.collection::<Document>(crate::models::channel_bot::COLLECTION_NAME);
-    let bot_filter = doc! {"_id":&profile.channel_bot_id,"platform_profile_id":profile_id,"platform_bot_id":manager_id,"is_active":true};
+    let mut bot_filter = doc! {"_id":&profile.channel_bot_id,"platform_profile_id":profile_id,"platform_bot_id":manager_id,"is_active":true};
+    if matches!(entry, EntryIdentity::NativeV2 { .. }) {
+        bot_filter.insert("platform_entry_version", 2_i32);
+        bot_filter.insert("status", "active");
+        bot_filter.insert("platform_entry_pending", doc! {"$exists":false});
+    }
     let bot_exists = if write_fence {
         bots.update_one(bot_filter, doc! {"$inc":{"personal_effect_revision":1_i64}})
             .session(&mut *session)
@@ -250,13 +276,86 @@ async fn check_manager_in_session(
         return Ok(None);
     }
     let controls = db.collection::<PlatformBotRuntimeControls>(COLLECTION_NAME);
-    let controls_filter = doc! {"platform_config_id":profile_id,"manager_bot_id":manager_id,"telegram_bot_id":telegram_id,"contract_version":1_i32};
+    let mut controls_filter = doc! {"platform_config_id":profile_id,"manager_bot_id":manager_id,"contract_version":scope::version(entry)};
+    controls_filter.extend(scope::entry_fields(entry));
+    if let Some(epoch) = receipt_epoch {
+        controls_filter.insert("manager_authority_epoch", epoch);
+    }
     Ok(if write_fence {
         controls.find_one_and_update(controls_filter,vec![doc! {"$set":{"effect_revision":{"$add":[{"$ifNull":["$effect_revision",0_i64]},1_i64]},"updated_at":"$$NOW"}}])
             .return_document(ReturnDocument::After).session(session).await?
     } else {
         controls.find_one(controls_filter).session(session).await?
     })
+}
+
+pub(super) async fn native_transport_ready(
+    db: &Database,
+    session: &mut ClientSession,
+    profile: &PlatformBotConfig,
+    write_fence: bool,
+) -> AppResult<bool> {
+    if db.collection::<Document>(crate::models::channel_bot::COLLECTION_NAME)
+        .find_one(doc! {"_id":&profile.channel_bot_id,"platform_profile_id":&profile.id,"platform_entry_pending":{"$exists":false}})
+        .session(&mut *session).await?.is_none() {return Ok(false);}
+    let configuration = profile.native_entry.as_ref().ok_or_else(changed)?;
+    super::platform_entry_identity::validate_configuration(configuration)?;
+    if !super::platform_entry_migration::native_writes_ready(db).await?
+        || !super::platform_entry_gateway_service::evaluate_selected_transport(
+            db,
+            session,
+            &profile.id,
+            configuration,
+            write_fence,
+        )
+        .await?
+    {
+        return Ok(false);
+    }
+    let bot = super::channel_bot_service::get_bot(db, &profile.channel_bot_id).await?;
+    if bot.platform != super::platform_entry_native::platform_name(configuration.identity.platform)
+        || bot.platform_bot_id != configuration.identity.platform_bot_id
+        || !bot.is_active
+        || bot.status != "active"
+    {
+        return Ok(false);
+    }
+    let cache =
+        std::sync::Arc::new(super::provider_token_exchange_service::TokenExchangeCache::new());
+    let adapter = super::channel_adapters::resolve_adapter(&bot.platform, &cache)?;
+    let credentials = super::platform_entry_credentials::EntryCredentialSnapshot::load(
+        db,
+        adapter.as_ref(),
+        &bot,
+    )
+    .await?;
+    Ok(
+        credentials.fingerprint()? == configuration.credential_fingerprint
+            && (!write_fence || credentials.fence_in_session(db, session).await?),
+    )
+}
+
+pub(crate) fn profile_identity(profile: &PlatformBotConfig) -> AppResult<EntryIdentity> {
+    let identity = match (&profile.native_entry, profile.identity_version) {
+        (None, None | Some(1)) => EntryIdentity::TelegramV1 {
+            telegram_bot_id: profile.manager_bot_id.parse().map_err(|_| changed())?,
+        },
+        (Some(configuration), Some(2))
+            if profile.execution_profile
+                == crate::models::platform_bot_config::PlatformExecutionProfile::NativeEntry =>
+        {
+            super::platform_entry_identity::validate_configuration(configuration)?;
+            if configuration.identity.channel_bot_id != profile.channel_bot_id {
+                return Err(changed());
+            }
+            EntryIdentity::NativeV2 {
+                platform_entry: configuration.identity.clone(),
+            }
+        }
+        _ => return Err(changed()),
+    };
+    scope::validate(&identity, &profile.manager_bot_id, None)?;
+    Ok(identity)
 }
 
 fn candidate(
@@ -272,12 +371,14 @@ fn candidate_for_review(
     change: &RuntimeChange,
     allow_unselected: bool,
 ) -> AppResult<PlatformBotRuntimeControls> {
+    let entry = profile_identity(profile)?;
     let initializing = current.is_none();
     let mut row = if let Some(row) = current {
         if change.initialize
             || row.manager_bot_id != profile.manager_bot_id
             || row.platform_config_id != profile.id
-            || row.contract_version != 1
+            || row.contract_version != scope::version(&entry)
+            || row.entry != entry
             || row.retired
             || row.manager_authority_epoch != change.expected_manager_authority_epoch
             || row.personal_control_revision != change.expected_personal_control_revision
@@ -297,10 +398,10 @@ fn candidate_for_review(
         }
         PlatformBotRuntimeControls {
             id: uuid::Uuid::new_v4().to_string(),
-            contract_version: 1,
+            contract_version: scope::version(&entry),
             platform_config_id: profile.id.clone(),
             manager_bot_id: profile.manager_bot_id.clone(),
-            telegram_bot_id: profile.manager_bot_id.parse().map_err(|_| changed())?,
+            entry: entry.clone(),
             manager_authority_epoch: 1,
             personal_control_revision: 1,
             public_policy_revision: 1,
@@ -484,18 +585,18 @@ pub async fn update(
                         proposed.effect_revision = rebuilt.effect_revision;
                         proposed.updated_at = Utc::now();
                         if proposed.personal_enabled || proposed.public_enabled {
-                            for (collection, filter) in [
-                                (crate::models::platform_credential::COLLECTION_NAME,
-                                    doc! {"provider": "telegram-new", "fields.manager_bot_id": &live.manager_bot_id, "fields.webhook_ready": "true"}),
-                                (crate::models::channel_bot::COLLECTION_NAME,
-                                    doc! {"_id": &live.channel_bot_id, "platform_profile_id": &*profile_id, "platform_bot_id": &live.manager_bot_id, "is_active": true}),
-                            ] {
-                                let fenced = db.collection::<Document>(collection)
-                                    .update_one(filter, doc! {"$inc": {"runtime_configuration_revision": 1_i64}})
-                                    .session(&mut *session).await?;
-                                if fenced.matched_count != 1 {
-                                    return Err(changed());
-                                }
+                            let native=matches!(profile_identity(&live)?,EntryIdentity::NativeV2 {..});
+                            if native {
+                                if !native_transport_ready(db,session,&live,true).await? {return Err(changed());}
+                            } else if db.collection::<Document>(crate::models::platform_credential::COLLECTION_NAME)
+                                .update_one(doc! {"provider":"telegram-new","fields.manager_bot_id":&live.manager_bot_id,"fields.webhook_ready":"true"},doc! {"$inc":{"runtime_configuration_revision":1_i64}})
+                                .session(&mut *session).await?.matched_count != 1 {
+                                return Err(changed());
+                            }
+                            let mut bot_filter=doc! {"_id":&live.channel_bot_id,"platform_profile_id":&*profile_id,"platform_bot_id":&live.manager_bot_id,"is_active":true};
+                            if native {bot_filter.insert("platform_entry_version",2);bot_filter.insert("status","active");}
+                            if db.collection::<Document>(crate::models::channel_bot::COLLECTION_NAME).update_one(bot_filter,doc! {"$inc":{"runtime_configuration_revision":1_i64}}).session(&mut *session).await?.matched_count != 1 {
+                                return Err(changed());
                             }
                         }
                         let old_activation = db.collection::<PublicDeploymentActivation>(ACTIVATIONS)

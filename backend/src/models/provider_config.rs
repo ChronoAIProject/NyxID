@@ -113,6 +113,9 @@ pub struct ProviderConfig {
     pub client_secret_encrypted: Option<Vec<u8>>,
     #[serde(default)]
     pub supports_pkce: bool,
+    /// Generate an outbound nonce for each hosted OAuth2 authorization-code attempt.
+    #[serde(default)]
+    pub authorization_nonce_required: bool,
 
     // --- Device code flow fields ---
     /// For device_code flow: the URL to request a device code (RFC 8628 step 1)
@@ -171,7 +174,7 @@ pub struct ProviderConfig {
 
     /// Provider-specific extra auth URL parameters (e.g., {"access_type": "offline"} for Google)
     /// Blocklist: client_id, client_secret, redirect_uri, response_type, state, code,
-    ///            code_challenge, code_challenge_method, scope
+    ///            code_challenge, code_challenge_method, scope, nonce
     #[serde(default)]
     pub extra_auth_params: Option<HashMap<String, String>>,
 
@@ -259,6 +262,7 @@ mod tests {
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
+            authorization_nonce_required: true,
             requires_gateway_url: false,
             created_by: "admin".to_string(),
             revocation_seed_version: 1,
@@ -270,6 +274,7 @@ mod tests {
         assert_eq!(config.slug, restored.slug);
         assert_eq!(config.provider_type, restored.provider_type);
         assert!(restored.supports_pkce);
+        assert!(restored.authorization_nonce_required);
         assert_eq!(restored.credential_mode, "admin");
         assert!(!restored.requires_gateway_url);
         assert_eq!(config.revocation, restored.revocation);
@@ -309,6 +314,7 @@ mod tests {
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
+            authorization_nonce_required: false,
             requires_gateway_url: false,
             created_by: "admin".to_string(),
             revocation_seed_version: 0,
@@ -336,6 +342,7 @@ mod tests {
             "updated_at": bson::DateTime::from_chrono(Utc::now()),
         };
         let restored: ProviderConfig = bson::from_document(doc).expect("deserialize");
+        assert!(!restored.authorization_nonce_required);
         assert_eq!(restored.credential_mode, "admin");
         assert!(restored.revocation.is_none());
         assert_eq!(restored.revocation_seed_version, 0);

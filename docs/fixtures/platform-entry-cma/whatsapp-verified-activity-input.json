@@ -1,0 +1,38 @@
+{
+  "activity": {
+    "schema_version": 1,
+    "event_id": "57f5e7de-ca4e-44b2-a0d2-a1442ed0c415",
+    "kind": {
+      "type": "message",
+      "text": "/status",
+      "attachments": [],
+      "mentions_bot": false
+    },
+    "actor": {
+      "id": "human-opaque",
+      "kind": "unknown"
+    },
+    "conversation": {
+      "id": "private-opaque",
+      "kind": "private"
+    },
+    "occurred_at": "2026-10-17T05:06:02.849688+00:00",
+    "source": {
+      "type": "nyxid_relay",
+      "platform": "whatsapp",
+      "route_id": "44444444-4444-4444-8444-444444444444"
+    }
+  },
+  "input": [
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "input_text",
+          "text": "/status"
+        }
+      ]
+    }
+  ],
+  "channel_id": "cmaeg1.ch.1.25gflScYpJHjAKW-i-M3OjCyzoFwMRh1-lgmnsr4hV7nIukiggRWu6SJLUHUQ3p7dRhMqlxpW-A0dPRDf1dOGHlBPQMRzbmBXHGCglBsdjPat_700cL48REfsqlSLz9Ur6eelrKadgSTvg_PWMwatfPXCISTrjPg4UXOKYDzBL6yMCnUEO9FwQhL4TnqNBPKx5iOHLINnUVNHdoweMuwh5p7pelpO_OaUIzmjLk1LQVKbXMWXL9GTPQTWB5v"
+}

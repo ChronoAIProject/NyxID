@@ -10,7 +10,6 @@ use mongodb::options::ReturnDocument;
 use mongodb::{
     Database, IndexModel,
     bson::{self, Document, doc},
-    options::IndexOptions,
 };
 
 use super::api_key_mutation_service::{map_transaction_error, transaction_result};
@@ -25,10 +24,40 @@ use crate::{
 pub(crate) async fn any_profile(db: &Database) -> AppResult<bool> {
     Ok(db
         .collection::<Document>(COLLECTION_NAME)
-        .find_one(doc! {})
+        .find_one(doc! {"native_entry":bson::Bson::Null})
         .projection(doc! {"_id": 1})
         .await?
         .is_some())
+}
+
+pub(crate) async fn fence_funding_admin(
+    db: &Database,
+    actor: &str,
+    funding: &str,
+    session: &mut mongodb::ClientSession,
+) -> AppResult<()> {
+    if db
+        .collection::<Document>(crate::models::user::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id":funding,"user_type":"org","is_active":true},
+            doc! {"$inc":{"platform_funding_revision":1_i64}},
+        )
+        .session(&mut *session)
+        .await?
+        .matched_count
+        != 1
+    {
+        return Err(AppError::ValidationError(
+            "Platform funding requires an active dedicated organization wallet".into(),
+        ));
+    }
+    if db.collection::<Document>(crate::models::org_membership::COLLECTION_NAME)
+        .update_one(doc! {"org_user_id":funding,"member_user_id":actor,"role":"admin","revoked_at":bson::Bson::Null},
+            doc! {"$inc":{"platform_funding_revision":1_i64}})
+        .session(&mut *session).await?.matched_count != 1 {
+        return Err(AppError::Forbidden("Funding organization authority changed".into()));
+    }
+    Ok(())
 }
 
 fn require_first_party(first_party: bool) -> AppResult<()> {
@@ -48,7 +77,7 @@ pub(crate) async fn admit_manager_admin(
 ) -> AppResult<()> {
     if db
         .collection::<Document>(COLLECTION_NAME)
-        .find_one(doc! {"manager_bot_id": manager})
+        .find_one(doc! {"manager_bot_id": manager,"native_entry":bson::Bson::Null})
         .await?
         .is_none()
     {
@@ -64,7 +93,7 @@ pub(crate) async fn admit_manager_admin(
             let result: AppResult<()> = async {
                 if db
                     .collection::<Document>(COLLECTION_NAME)
-                    .find_one(doc! {"manager_bot_id": &manager})
+                    .find_one(doc! {"manager_bot_id": &manager,"native_entry":bson::Bson::Null})
                     .session(&mut *session)
                     .await?
                     .is_some()
@@ -90,7 +119,7 @@ pub(crate) async fn finalize_manager_delivery(
 ) -> AppResult<()> {
     if db
         .collection::<Document>(COLLECTION_NAME)
-        .find_one(doc! {"manager_bot_id": manager})
+        .find_one(doc! {"manager_bot_id": manager,"native_entry":bson::Bson::Null})
         .await?
         .is_none()
     {
@@ -106,7 +135,7 @@ pub(crate) async fn finalize_manager_delivery(
     let mut session = db.client().start_session().await?;
     session.start_transaction().and_run2(async move |session| {
         let result: AppResult<()> = async {
-            if db.collection::<Document>(COLLECTION_NAME).find_one(doc! {"manager_bot_id": &manager}).session(&mut *session).await?.is_some() {
+            if db.collection::<Document>(COLLECTION_NAME).find_one(doc! {"manager_bot_id": &manager,"native_entry":bson::Bson::Null}).session(&mut *session).await?.is_some() {
                 require_first_party(first_party)?;
                 fence_admin(&db, &actor, session).await?;
             }
@@ -144,14 +173,7 @@ pub(crate) async fn fence_admin(
 }
 
 pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> {
-    db.collection::<PlatformBotConfig>(COLLECTION_NAME)
-        .create_index(
-            IndexModel::builder()
-                .keys(doc! {"manager_bot_id": 1})
-                .options(IndexOptions::builder().unique(true).build())
-                .build(),
-        )
-        .await?;
+    super::platform_entry_migration::ensure_indexes(db).await?;
     db.collection::<Document>(crate::models::platform_bot_config::CLEANUP_COLLECTION)
         .create_index(
             IndexModel::builder()
@@ -199,18 +221,109 @@ pub(crate) async fn convert(
     super::telegram_new_service::with_operation(
         db,
         &format!("telegram-manager-identity:{manager}"),
-        convert_locked(db, actor, bot, funding),
+        convert_locked(db, actor, bot, funding, None),
     )
     .await
 }
 
 /// The admin handler is the only production caller. Conversion is permanent:
 /// pause and deletion retain both the manager identity and the bot-row fence.
+pub(crate) async fn convert_native(
+    state: &crate::AppState,
+    authority: &super::platform_entry_admin_service::NativeConversionAuthority,
+) -> AppResult<PlatformBotConfig> {
+    if let Some(previous) = authority.previous_profile() {
+        return update_native(state, authority, previous).await;
+    }
+    convert_locked(
+        &state.db,
+        authority.actor(),
+        &authority.bot().id,
+        authority.funding(),
+        Some(authority),
+    )
+    .await
+}
+
+async fn update_native(
+    state: &crate::AppState,
+    authority: &super::platform_entry_admin_service::NativeConversionAuthority,
+    previous: &PlatformBotConfig,
+) -> AppResult<PlatformBotConfig> {
+    let mut session = state.db.client().start_session().await?;
+    session.start_transaction().and_run((state, authority, previous), |session, (state, authority, previous)| Box::pin(async move {
+        transaction_result(async {
+            authority.fence_in_session(&state.db, session).await?;
+            let configuration = authority.configuration();
+            if state.db.collection::<Document>(crate::models::channel_bot::COLLECTION_NAME).update_one(
+                doc! {"_id":&authority.bot().id,"platform_profile_id":&previous.id,"platform_entry_version":2,"platform_entry_pending.profile_id":&previous.id,"platform_entry_pending.actor":authority.actor()},
+                doc! {"$unset":{"platform_entry_pending":""},"$inc":{"route_revision":1_i64}}).session(&mut *session).await?.matched_count!=1 {return Err(AppError::Conflict("Native setup changed; review it again".into()));}
+            let updated=state.db.collection::<PlatformBotConfig>(COLLECTION_NAME).find_one_and_update(
+                doc! {"_id":&previous.id,"generation":previous.generation,"enabled":false,"deleted_at":bson::Bson::Null},
+                doc! {"$set":{"manager_bot_id":&configuration.identity.platform_bot_id,"native_entry":bson::to_bson(configuration).map_err(|_|AppError::Internal("Cannot encode native entry".into()))?,
+                    "observation_id":&configuration.credential_fingerprint,"configured_by":authority.actor(),"funding_owner_user_id":authority.funding(),"enabled":false,"updated_at":bson::DateTime::now()},"$inc":{"generation":1_i64}})
+                .return_document(mongodb::options::ReturnDocument::After).session(&mut *session).await?.ok_or_else(||AppError::Conflict("Native setup changed; review it again".into()))?;
+            let entry=super::platform_manager_contract::EntryIdentity::NativeV2 {platform_entry:configuration.identity.clone()};
+            let mut fields=super::platform_entry_scope::entry_fields(&entry);
+            fields.extend(doc! {"manager_bot_id":&configuration.identity.platform_bot_id,"personal_enabled":false,"public_enabled":false,"updated_at":bson::DateTime::now()});
+            state.db.collection::<Document>(crate::models::platform_bot_runtime_controls::COLLECTION_NAME).update_one(
+                doc! {"platform_config_id":&previous.id,"retired":false,"personal_enabled":false,"public_enabled":false},doc! {"$set":fields}).session(&mut *session).await?;
+            Ok(updated)
+        }.await)
+    })).await.map_err(map_transaction_error)
+}
+
+/// These deterministic blockers are checked before reserving native conversion
+/// and again in the final conversion transaction. Routing mutations serialize
+/// against the bot's route_revision claim.
+pub(super) async fn conversion_prerequisites_in_session(
+    db: &Database,
+    session: &mut mongodb::ClientSession,
+    bot_id: &str,
+) -> AppResult<()> {
+    if db
+        .collection::<Document>(crate::models::nyxbot_channel::COLLECTION_NAME)
+        .find_one(doc! {"channel_bot_id": bot_id, "$or": [
+            {"status": "pending"},
+            {"pending_agent_api_key_id": {"$ne": bson::Bson::Null}},
+            {"pending_route_api_key_id": {"$ne": bson::Bson::Null}},
+            {"status": "active", "transport": "gateway", "gateway_channel_id": bson::Bson::Null}
+        ]})
+        .session(&mut *session)
+        .await?
+        .is_some()
+    {
+        return Err(AppError::Conflict(
+            "Finish or cancel the channel transport attempt before platform conversion".into(),
+        ));
+    }
+    let mut routes = db
+        .collection::<Document>(crate::models::channel_conversation::COLLECTION_NAME)
+        .find(doc! {"channel_bot_id":bot_id})
+        .session(&mut *session)
+        .await?;
+    let mut route_keys = Vec::<String>::new();
+    while let Some(route) = routes.next(&mut *session).await.transpose()? {
+        if let Ok(key) = route.get_str("agent_api_key_id") {
+            route_keys.push(key.into());
+        }
+    }
+    // Route callback keys may be shared with the owner's other bots;
+    // revoking one would silently break those unrelated routes.
+    if db.collection::<Document>(crate::models::channel_conversation::COLLECTION_NAME)
+        .find_one(doc! {"agent_api_key_id": {"$in": &route_keys}, "channel_bot_id": {"$ne": bot_id}, "is_active": true})
+        .session(&mut *session).await?.is_some() {
+        return Err(AppError::Conflict("A manager route key is shared with another bot. Give the manager routes a dedicated key before platform conversion".into()));
+    }
+    Ok(())
+}
+
 async fn convert_locked(
     db: &Database,
     actor: &str,
     channel_bot_id: &str,
     funding_owner: &str,
+    native: Option<&super::platform_entry_admin_service::NativeConversionAuthority>,
 ) -> AppResult<PlatformBotConfig> {
     let access = super::org_service::resolve_owner_access(db, actor, funding_owner).await?;
     if !access.can_write() {
@@ -218,55 +331,57 @@ async fn convert_locked(
             "Funding organization write authority required".into(),
         ));
     }
-    let id = uuid::Uuid::new_v4().to_string();
+    let id = native
+        .map(|authority| authority.profile_id.clone())
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let db = db.clone();
     let actor = actor.to_owned();
     let bot_id = channel_bot_id.to_owned();
     let funding = funding_owner.to_owned();
     let mut session = db.client().start_session().await?;
-    session.start_transaction().and_run2(async move |session| {
+    session.start_transaction().and_run((db, actor, bot_id, funding, id, native), |session, (db, actor, bot_id, funding, id, native)| Box::pin(async move {
+        let native = *native;
+        let db = db.clone();
+        let actor = actor.clone();
+        let bot_id = bot_id.clone();
+        let funding = funding.clone();
+        let id = id.clone();
         let result: AppResult<_> = async {
             fence_admin(&db, &actor, session).await?;
-            if db.collection::<Document>(crate::models::nyxbot_channel::COLLECTION_NAME)
-                .find_one(doc! {"channel_bot_id": &bot_id, "$or": [
-                    {"status": "pending"},
-                    {"pending_agent_api_key_id": {"$ne": bson::Bson::Null}},
-                    {"pending_route_api_key_id": {"$ne": bson::Bson::Null}},
-                    {"status": "active", "transport": "gateway", "gateway_channel_id": bson::Bson::Null}
-                ]}).session(&mut *session).await?.is_some()
-            {
-                return Err(AppError::Conflict("Finish or cancel the channel transport attempt before platform conversion".into()));
-            }
-            let funding_user = db.collection::<Document>(crate::models::user::COLLECTION_NAME)
-                .find_one(doc! {"_id": &funding, "user_type": "org", "is_active": true})
-                .session(&mut *session).await?;
-            if funding_user.is_none() {
-                return Err(AppError::ValidationError("Platform funding requires an active dedicated organization wallet".into()));
-            }
-            if db.collection::<Document>(crate::models::org_membership::COLLECTION_NAME)
-                .find_one_and_update(doc! {"org_user_id": &funding, "member_user_id": &actor, "role": "admin", "revoked_at": bson::Bson::Null},
-                    doc! {"$inc": {"platform_funding_revision": 1_i64}})
-                .session(&mut *session).await?.is_none() {
-                return Err(AppError::Forbidden("Funding organization authority changed".into()));
+            conversion_prerequisites_in_session(&db,session,&bot_id).await?;
+            fence_funding_admin(&db,&actor,&funding,session).await?;
+            if let Some(authority) = native { authority.fence_in_session(&db, session).await?; }
+            let mut target = doc! {"_id": &bot_id, "is_active": true, "platform_profile_id": {"$exists": false}};
+            let mut values = doc! {"platform_profile_id": &id};
+            if native.is_some() { values.insert("platform_entry_version",2); }
+            else {
+                target.insert("credential_source","telegram_manager");
+                target.insert("platform_entry_pending",doc! {"$exists":false});
             }
             let bot = db.collection::<Document>(crate::models::channel_bot::COLLECTION_NAME)
-                .find_one_and_update(doc! {"_id": &bot_id, "credential_source": "telegram_manager", "is_active": true, "platform_profile_id": {"$exists": false}},
-                    doc! {"$set": {"platform_profile_id": &id}, "$inc": {"route_revision": 1_i64}})
+                .find_one_and_update(target,
+                    doc! {"$set":values,"$unset":{"platform_entry_pending":""},"$inc":{"route_revision":1_i64}})
                 .session(&mut *session).await?
                 .ok_or_else(|| AppError::Conflict("Manager channel is unavailable or already platform managed".into()))?;
             let manager_id = bot.get_str("platform_bot_id").map_err(|_| AppError::Conflict("Manager identity unavailable".into()))?;
-            let manager = db.collection::<Document>(crate::models::platform_credential::COLLECTION_NAME)
-                .find_one(doc! {"provider": "telegram-new", "fields.manager_bot_id": manager_id, "fields.webhook_ready": "true"})
-                .session(&mut *session).await?
-                .ok_or_else(|| AppError::Conflict("Manager configuration is not ready".into()))?;
-            let observation = manager.get_document("fields").ok().and_then(|f| f.get_str("observation_id").ok())
-                .ok_or_else(|| AppError::Conflict("Manager observation identity unavailable".into()))?;
+            let (observation, execution_profile, identity_version, native_entry) = if let Some(authority) = native {
+                let configuration=authority.configuration();
+                if configuration.identity.channel_bot_id!=bot_id || configuration.identity.platform_bot_id!=manager_id {return Err(AppError::Conflict("Native conversion target changed".into()));}
+                (configuration.credential_fingerprint.clone(),PlatformExecutionProfile::NativeEntry,Some(2),Some(configuration.clone()))
+            } else {
+                let manager = db.collection::<Document>(crate::models::platform_credential::COLLECTION_NAME)
+                    .find_one(doc! {"provider":"telegram-new","fields.manager_bot_id":manager_id,"fields.webhook_ready":"true"})
+                    .session(&mut *session).await?.ok_or_else(||AppError::Conflict("Manager configuration is not ready".into()))?;
+                let observation=manager.get_document("fields").ok().and_then(|fields|fields.get_str("observation_id").ok())
+                    .ok_or_else(||AppError::Conflict("Manager observation identity unavailable".into()))?.to_owned();
+                (observation,PlatformExecutionProfile::PlatformOnboarding,Some(1),None)
+            };
             let now = Utc::now();
             let profile = PlatformBotConfig { guide: None,
-            id: id.clone(), channel_bot_id: bot_id.clone(), manager_bot_id: manager_id.into(),
-                observation_id: observation.into(), execution_profile: PlatformExecutionProfile::PlatformOnboarding,
-                generation: 1, enabled: false, funding_owner_user_id: funding.clone(), configured_by: actor.clone(),
-                created_at: now, updated_at: now, deleted_at: None };
+                id:id.clone(),channel_bot_id:bot_id.clone(),manager_bot_id:manager_id.into(),
+                identity_version,native_entry,observation_id:observation,execution_profile,
+                generation:1,enabled:false,funding_owner_user_id:funding.clone(),configured_by:actor.clone(),
+                created_at:now,updated_at:now,deleted_at:None };
             db.collection::<PlatformBotConfig>(COLLECTION_NAME).insert_one(&profile).session(&mut *session).await?;
 
             let mut key_ids = Vec::<String>::new();
@@ -289,13 +404,6 @@ async fn convert_locked(
             let mut route_keys = Vec::<String>::new();
             while let Some(route) = routes.next(&mut *session).await.transpose()? {
                 if let Ok(key) = route.get_str("agent_api_key_id") { route_keys.push(key.into()); }
-            }
-            // Route callback keys may be shared with the owner's other bots;
-            // revoking one would silently break those unrelated routes.
-            if db.collection::<Document>(crate::models::channel_conversation::COLLECTION_NAME)
-                .find_one(doc! {"agent_api_key_id": {"$in": &route_keys}, "channel_bot_id": {"$ne": &bot_id}, "is_active": true})
-                .session(&mut *session).await?.is_some() {
-                return Err(AppError::Conflict("A manager route key is shared with another bot. Give the manager routes a dedicated key before platform conversion".into()));
             }
             key_ids.extend(route_keys);
             let conversations = db.collection::<Document>(crate::models::assistant_conversation::COLLECTION_NAME);
@@ -339,7 +447,7 @@ async fn convert_locked(
             Ok(profile)
         }.await;
         transaction_result(result)
-    }).await.map_err(map_transaction_error)
+    })).await.map_err(map_transaction_error)
 }
 
 pub(crate) async fn disable(
@@ -377,8 +485,24 @@ pub(crate) async fn disable(
 }
 
 pub(crate) async fn invalidate_manager(db: &Database, manager: &str) -> AppResult<()> {
-    db.collection::<Document>(COLLECTION_NAME).update_many(doc! {"manager_bot_id": manager},
+    db.collection::<Document>(COLLECTION_NAME).update_many(doc! {"manager_bot_id": manager,"native_entry":bson::Bson::Null},
         doc! {"$set": {"enabled": false, "updated_at": bson::DateTime::now()}, "$inc": {"generation": 1_i64}}).await?;
+    Ok(())
+}
+
+pub(crate) fn require_telegram_manager(row: &PlatformBotConfig) -> AppResult<()> {
+    if row.native_entry.is_some()
+        || row.identity_version.is_some_and(|version| version != 1)
+        || row.execution_profile != PlatformExecutionProfile::PlatformOnboarding
+        || !row
+            .manager_bot_id
+            .parse::<i64>()
+            .is_ok_and(|id| id > 0 && id.to_string() == row.manager_bot_id)
+    {
+        return Err(AppError::Conflict(
+            "Telegram manager operation requires a legacy Telegram profile".into(),
+        ));
+    }
     Ok(())
 }
 
@@ -389,6 +513,7 @@ pub(crate) async fn verify_manager(
     actor: &str,
 ) -> AppResult<PlatformBotConfig> {
     let row = get(service.db, id).await?;
+    require_telegram_manager(&row)?;
     if row.deleted_at.is_some() || row.generation != generation {
         return Err(AppError::Conflict("Platform configuration changed".into()));
     }
@@ -409,6 +534,7 @@ pub(crate) async fn verify_manager(
         .await?;
     super::telegram_new_admin::validate_manager_webhook(&webhook, &service.manager_callback())?;
     let current = get(service.db, id).await?;
+    require_telegram_manager(&current)?;
     if current.generation != generation || current.deleted_at.is_some() {
         return Err(AppError::Conflict(
             "Platform configuration changed during verification".into(),
@@ -710,6 +836,65 @@ mod tests {
             "fields": {"manager_bot_id": "123", "webhook_ready": "true", "observation_id": "observation"}
         }).await.unwrap();
         (test_app_state(db), actor, funding, bot)
+    }
+
+    #[tokio::test]
+    async fn telegram_manager_admin_conversion_and_rotation_do_not_select_same_id_native_entry() {
+        let (state, actor, funding, bot) = fixture("native_manager_remote_namespace").await;
+        let native_id = uuid::Uuid::new_v4().to_string();
+        let native_channel = uuid::Uuid::new_v4().to_string();
+        let rows = state.db.collection::<Document>(COLLECTION_NAME);
+        rows.insert_one(
+            doc! {"_id":&native_id,"channel_bot_id":&native_channel,"manager_bot_id":"123",
+            "identity_version":2,"enabled":true,"generation":5_i64,
+            "native_entry":{"identity":{"version":2,"platform":"x","channel_bot_id":&native_channel,
+                "platform_bot_id":"123"}}},
+        )
+        .await
+        .unwrap();
+        assert!(!any_profile(&state.db).await.unwrap());
+        admit_manager_admin(&state.db, &actor, false, "123")
+            .await
+            .unwrap();
+        finalize_manager_delivery(&state.db, &actor, false, "123", "fresh-observation".into())
+            .await
+            .unwrap();
+        let legacy = convert(&state.db, &actor, &bot, &funding).await.unwrap();
+        assert_ne!(legacy.id, native_id);
+        assert!(any_profile(&state.db).await.unwrap());
+        assert!(
+            admit_manager_admin(&state.db, &actor, false, "123")
+                .await
+                .is_err()
+        );
+        rows.update_one(doc! {"_id":&legacy.id}, doc! {"$set":{"enabled":true}})
+            .await
+            .unwrap();
+        invalidate_manager(&state.db, "123").await.unwrap();
+        let old = rows
+            .find_one(doc! {"_id":&legacy.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!old.get_bool("enabled").unwrap());
+        assert_eq!(old.get_i64("generation").unwrap(), legacy.generation + 1);
+        let native = rows
+            .find_one(doc! {"_id":&native_id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(native.get_bool("enabled").unwrap());
+        assert_eq!(native.get_i64("generation").unwrap(), 5);
+        assert_eq!(
+            native
+                .get_document("native_entry")
+                .unwrap()
+                .get_document("identity")
+                .unwrap()
+                .get_str("platform")
+                .unwrap(),
+            "x"
+        );
     }
 
     #[tokio::test]

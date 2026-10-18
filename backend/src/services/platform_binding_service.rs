@@ -52,18 +52,23 @@ async fn admit_decision(db: &Database, actor: &str) -> AppResult<()> {
     }
 }
 
-pub fn code_hash(key: &[u8], code: &str) -> AppResult<String> {
+/// Legacy display formatting is part of the issued proof contract.
+/// This only normalizes syntax; it does not authenticate or consume a proof.
+pub(crate) fn normalize_code(code: &str) -> Option<String> {
     if code.len() > 32 {
-        return Err(unavailable());
+        return None;
     }
     let normalized = code
         .chars()
         .filter(|c| *c != '-' && !c.is_ascii_whitespace())
         .map(|c| c.to_ascii_uppercase())
         .collect::<String>();
-    if normalized.len() != 8 || !normalized.bytes().all(|c| c.is_ascii_alphanumeric()) {
-        return Err(unavailable());
-    }
+    (normalized.len() == 8 && normalized.bytes().all(|c| c.is_ascii_alphanumeric()))
+        .then_some(normalized)
+}
+
+pub fn code_hash(key: &[u8], code: &str) -> AppResult<String> {
+    let normalized = normalize_code(code).ok_or_else(unavailable)?;
     Ok(super::auth_device_service::hmac_hex(
         key,
         format!("platform-onboarding-binding:v1:{normalized}").as_bytes(),
@@ -618,6 +623,8 @@ mod tests {
             .unwrap();
         let now = Utc::now();
         let profile = PlatformBotConfig {
+            identity_version: None,
+            native_entry: None,
             guide: None,
             id: uuid::Uuid::new_v4().to_string(),
             channel_bot_id: uuid::Uuid::new_v4().to_string(),

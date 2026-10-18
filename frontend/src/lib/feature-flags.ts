@@ -36,6 +36,7 @@ export const FEATURE_FLAG = {
   AGENT_OPERATION_SCOPES: "assistant:operation-scopes",
   AGENT_LEARNING: "assistant:agent-learning",
   SKILL_PIN_DISABLE: "assistant:skill-pin-disable",
+  NYXBOT_ADAPTERS: "nyxbot:service-adapters",
   NYXBOT_THREAD_FOLLOW: "nyxbot:thread-follow",
   NYXBOT_GATEWAY_LARK: "nyxbot:gateway-lark",
   NYXBOT_GATEWAY_FEISHU: "nyxbot:gateway-feishu",

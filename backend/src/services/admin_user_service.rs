@@ -646,6 +646,23 @@ async fn delete_user_cascade_internal(
         .await?
         .ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
 
+    // Stop admission before erasing credentials. Unsettled provider evidence
+    // retains its owner until cleanup/settlement; deletion is safely retryable.
+    super::call_channels::owner_admission::close(db, target_user_id).await?;
+    db.collection::<bson::Document>(crate::models::channel_adapter::BINDINGS)
+        .update_many(
+            doc! {"user_id":target_user_id,"enabled":true},
+            doc! {"$set":{"enabled":false},"$inc":{"revision":1}},
+        )
+        .await?;
+    db.collection::<bson::Document>(crate::models::channel_adapter::SESSIONS)
+        .update_many(
+            doc! {"user_id":target_user_id,"state":{"$ne":"closed"}},
+            doc! {"$inc":{"generation":1},"$set":{"lease_expires_at":bson::DateTime::now()}},
+        )
+        .await?;
+    if db.collection::<bson::Document>(crate::models::channel_adapter::SESSIONS).find_one(doc!{"user_id":target_user_id,"$or":[{"state":{"$ne":"closed"}},{"billing_finalized":false}]}).await?.is_some() || db.collection::<bson::Document>(crate::models::channel_adapter::EVENTS).find_one(doc!{"user_id":target_user_id,"event_kind":"sms_send","billing_finalized":false}).await?.is_some(){return Err(AppError::Conflict("External call or message usage is still being reconciled. Retry deletion after it settles.".into()));}
+
     // Busy email effects must leave the user able to authenticate and retry.
     crate::services::channel_bot_service::delete_owner_aurinko_channels(db, target_user_id).await?;
 
@@ -671,6 +688,11 @@ async fn delete_user_cascade_internal(
     let user_filter = doc! { "user_id": target_user_id };
 
     let user_scoped_collections = [
+        crate::models::channel_adapter::BINDINGS,
+        crate::models::channel_adapter::ALLOCATIONS,
+        crate::models::channel_adapter::SESSIONS,
+        crate::models::channel_adapter::EVENTS,
+        crate::models::channel_adapter::CLAIMS,
         crate::models::async_service_operation::COLLECTION_NAME,
         crate::models::async_service_operation::QUOTAS_COLLECTION_NAME,
         crate::models::saved_login::COLLECTION_NAME,

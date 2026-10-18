@@ -2,21 +2,71 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct ManagerBinding {
     pub profile_id: String,
     pub manager_bot_id: String,
-    pub telegram_bot_id: i64,
+    #[serde(flatten)]
+    pub entry: super::platform_entry_projection::StoredEntryIdentity,
     pub manager_authority_epoch: i64,
     pub public_policy_revision: i64,
     pub sponsor_owner_user_id: String,
     pub candidate_digest: String,
 }
 
+impl<'de> Deserialize<'de> for ManagerBinding {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use super::platform_entry_projection::{Field, StoredEntryIdentity, entry_matches};
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Raw {
+            profile_id: String,
+            manager_bot_id: String,
+            #[serde(default)]
+            telegram_bot_id: Field<i64>,
+            #[serde(default)]
+            platform_entry: Field<super::platform_entry_identity::NativeEntryIdentity>,
+            manager_authority_epoch: i64,
+            public_policy_revision: i64,
+            sponsor_owner_user_id: String,
+            candidate_digest: String,
+        }
+        let raw = Raw::deserialize(deserializer)?;
+        let entry = match (raw.telegram_bot_id, raw.platform_entry) {
+            (Field::Present(telegram_bot_id), Field::Missing) => {
+                StoredEntryIdentity::TelegramV1 { telegram_bot_id }
+            }
+            (Field::Missing, Field::Present(platform_entry)) => {
+                StoredEntryIdentity::NativeV2 { platform_entry }
+            }
+            _ => {
+                return Err(serde::de::Error::custom(
+                    "one supported platform identity required",
+                ));
+            }
+        };
+        if !entry_matches(&entry, &raw.manager_bot_id) {
+            return Err(serde::de::Error::custom("platform identity mismatch"));
+        }
+        Ok(Self {
+            profile_id: raw.profile_id,
+            manager_bot_id: raw.manager_bot_id,
+            entry,
+            manager_authority_epoch: raw.manager_authority_epoch,
+            public_policy_revision: raw.public_policy_revision,
+            sponsor_owner_user_id: raw.sponsor_owner_user_id,
+            candidate_digest: raw.candidate_digest,
+        })
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModelOperation {
+    /// Absent for legacy v1 profiles. Present values are part of the signed
+    /// manifest and policy digest, so callbacks cannot select another effort.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
     pub service_id: String,
     pub operation: String,
     pub method: String,
@@ -171,4 +221,66 @@ pub struct PublicDeploymentActivation {
     pub effect_revision: i64,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub activated_at: DateTime<Utc>,
+}
+
+#[cfg(test)]
+mod identity_wire_tests {
+    use super::*;
+
+    #[test]
+    fn shared_manager_binding_identity_wire_grammar() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../docs/fixtures/public-manager-identities-v1.json"
+        ))
+        .unwrap();
+        for case in fixture["cases"].as_array().unwrap() {
+            let decoded = serde_json::from_value::<ManagerBinding>(case["binding"].clone());
+            assert_eq!(
+                decoded.is_ok(),
+                case["valid"].as_bool().unwrap(),
+                "{}",
+                case["name"]
+            );
+            if let Ok(binding) = decoded {
+                assert_eq!(serde_json::to_value(binding).unwrap(), case["binding"]);
+            }
+        }
+    }
+
+    #[test]
+    fn canonical_legacy_binding_bytes_remain_identical() {
+        #[derive(Serialize)]
+        struct Original<'a> {
+            profile_id: &'a str,
+            manager_bot_id: &'a str,
+            telegram_bot_id: i64,
+            manager_authority_epoch: i64,
+            public_policy_revision: i64,
+            sponsor_owner_user_id: &'a str,
+            candidate_digest: &'a str,
+        }
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../docs/fixtures/public-manager-identities-v1.json"
+        ))
+        .unwrap();
+        let binding: ManagerBinding =
+            serde_json::from_value(fixture["cases"][0]["binding"].clone()).unwrap();
+        let original = Original {
+            profile_id: &binding.profile_id,
+            manager_bot_id: &binding.manager_bot_id,
+            telegram_bot_id: 123,
+            manager_authority_epoch: binding.manager_authority_epoch,
+            public_policy_revision: binding.public_policy_revision,
+            sponsor_owner_user_id: &binding.sponsor_owner_user_id,
+            candidate_digest: &binding.candidate_digest,
+        };
+        assert_eq!(
+            serde_json::to_vec(&binding).unwrap(),
+            serde_json::to_vec(&original).unwrap()
+        );
+        assert_eq!(
+            bson::to_vec(&binding).unwrap(),
+            bson::to_vec(&original).unwrap()
+        );
+    }
 }

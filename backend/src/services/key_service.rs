@@ -778,7 +778,7 @@ pub async fn active_auto_connected_service_ids(
 pub async fn list_api_keys(db: &mongodb::Database, user_id: &str) -> AppResult<Vec<ApiKey>> {
     let keys: Vec<ApiKey> = db
         .collection::<ApiKey>(API_KEYS)
-        .find(doc! { "user_id": user_id, "is_active": true, "purpose": {"$ne": "public_nyxbot"} })
+        .find(doc! { "user_id": user_id, "is_active": true, "purpose": {"$nin": ["public_nyxbot", "shared_entry_transport"]} })
         .sort(doc! { "created_at": -1 })
         .await?
         .try_collect()
@@ -790,7 +790,7 @@ pub async fn list_api_keys(db: &mongodb::Database, user_id: &str) -> AppResult<V
 /// Get a single API key by ID, verifying ownership.
 pub async fn get_api_key(db: &mongodb::Database, user_id: &str, key_id: &str) -> AppResult<ApiKey> {
     db.collection::<ApiKey>(API_KEYS)
-        .find_one(doc! { "_id": key_id, "user_id": user_id, "is_active": true, "purpose": {"$ne": "public_nyxbot"} })
+        .find_one(doc! { "_id": key_id, "user_id": user_id, "is_active": true, "purpose": {"$nin": ["public_nyxbot", "shared_entry_transport"]} })
         .await?
         .ok_or_else(|| AppError::NotFound("API key not found".to_string()))
 }
@@ -822,7 +822,7 @@ pub(crate) async fn delete_api_key_in_session(
 ) -> AppResult<Vec<crate::models::api_key_credential::ApiKeyCredential>> {
     let collection = db.collection::<ApiKey>(API_KEYS);
     let read = collection
-        .find_one(doc! {"_id": key_id, "user_id": user_id, "purpose": {"$ne": "public_nyxbot"}});
+        .find_one(doc! {"_id": key_id, "user_id": user_id, "purpose": {"$nin": ["public_nyxbot", "shared_entry_transport"]}});
     let key = match session.as_deref_mut() {
         Some(session) => read.session(session).await?,
         None => read.await?,
@@ -1039,7 +1039,7 @@ async fn rotate_api_key_with_scope_authorization_and_id_inner(
                     .session(&mut *session)
                     .await?
                 {
-                    if existing.user_id != user_id || existing.purpose == ApiKeyPurpose::PublicNyxbot {
+                    if existing.user_id != user_id || matches!(existing.purpose, ApiKeyPurpose::PublicNyxbot | ApiKeyPurpose::SharedEntryTransport) {
                         return Err(AppError::NotFound("API key not found".to_string()));
                     }
                     if existing.rotation_predecessor_id.as_deref() == Some(predecessor_id.as_str())
@@ -1064,7 +1064,7 @@ async fn rotate_api_key_with_scope_authorization_and_id_inner(
                     .session(&mut *session)
                     .await?
                     .ok_or_else(|| AppError::NotFound("API key not found".to_string()))?;
-                if old_key.purpose == ApiKeyPurpose::PublicNyxbot {
+                if matches!(old_key.purpose, ApiKeyPurpose::PublicNyxbot | ApiKeyPurpose::SharedEntryTransport) {
                     return Err(AppError::NotFound("API key not found".into()));
                 }
                 if old_key.purpose == ApiKeyPurpose::PermissionBound {
@@ -1478,7 +1478,7 @@ pub async fn update_api_key_scope_with_expected_state_version(
 ) -> AppResult<ApiKey> {
     let existing = db
         .collection::<ApiKey>(API_KEYS)
-        .find_one(doc! { "_id": key_id, "user_id": user_id, "is_active": true, "purpose": {"$ne": "public_nyxbot"} })
+        .find_one(doc! { "_id": key_id, "user_id": user_id, "is_active": true, "purpose": {"$nin": ["public_nyxbot", "shared_entry_transport"]} })
         .await?
         .ok_or_else(|| AppError::NotFound("API key not found".to_string()))?;
     if let Some(expected) = expected_state_version
@@ -1656,7 +1656,7 @@ pub async fn update_api_key_scope_with_expected_state_version(
         return Ok(existing);
     }
 
-    let mut filter = doc! { "_id": key_id, "user_id": user_id, "is_active": true, "purpose": {"$ne": "public_nyxbot"} };
+    let mut filter = doc! { "_id": key_id, "user_id": user_id, "is_active": true, "purpose": {"$nin": ["public_nyxbot", "shared_entry_transport"]} };
     if let Some(expected) = expected_state_version {
         filter.insert("state_version", expected);
     }
@@ -1675,7 +1675,10 @@ pub async fn update_api_key_scope_with_expected_state_version(
 /// Public runtime keys never acquire ordinary owner, service or node authority.
 /// This boundary is independent of feature flags and of caller-supplied scopes.
 pub(crate) fn require_ordinary_purpose(purpose: ApiKeyPurpose) -> AppResult<()> {
-    if purpose == ApiKeyPurpose::PublicNyxbot {
+    if matches!(
+        purpose,
+        ApiKeyPurpose::PublicNyxbot | ApiKeyPurpose::SharedEntryTransport
+    ) {
         return Err(AppError::Forbidden(
             "Public runtime keys cannot use ordinary execution".into(),
         ));
@@ -1715,7 +1718,11 @@ pub async fn validate_api_key(
         (parent, Some(child.id))
     };
 
-    if key.purpose == ApiKeyPurpose::PublicNyxbot && credential_id.is_some() {
+    if matches!(
+        key.purpose,
+        ApiKeyPurpose::PublicNyxbot | ApiKeyPurpose::SharedEntryTransport
+    ) && credential_id.is_some()
+    {
         return Err(AppError::Unauthorized(
             "Public runtime keys cannot have child credentials".into(),
         ));

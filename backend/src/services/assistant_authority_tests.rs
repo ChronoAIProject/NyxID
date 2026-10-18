@@ -309,6 +309,7 @@ pub(crate) async fn chat_for_row(
 
 fn orchestrator_chat() -> acks::ChatAuthority {
     acks::ChatAuthority {
+        channel_adapter_origin: None,
         platform_thread: false,
         platform_origin: None,
         org_agent_access: None,
@@ -890,7 +891,7 @@ fn minimal_args(name: &str, id: &str) -> Value {
 
 #[test]
 fn native_inventory_is_closed_and_schemas_exclude_secret_inputs() {
-    assert_eq!(tools::TOOL_NAMES.len(), 22);
+    assert_eq!(tools::TOOL_NAMES.len(), 23);
     let service = tools::virtual_service(&orchestrator_chat());
     // NyxBot also gets the team and memory tools; specialists get read-only
     // account tools plus their own agent tools. The flag-gated drafting tool
@@ -1242,6 +1243,27 @@ async fn native_inventory(full: bool) {
         "webhook_secret_hash": "not-returned", "status": "active", "is_active": true,
         "created_at": now, "updated_at": now,
     }).await.unwrap();
+    let adapters = call(&f, "list_channel_adapters", json!({})).await;
+    assert!(
+        adapters["setup_url"]
+            .as_str()
+            .unwrap()
+            .ends_with("/assistant?panel=nyxbot")
+    );
+    let profiles = adapters["adapters"].as_array().unwrap();
+    for expected in [
+        "telnyx.conversation_relay",
+        "telnyx.messaging",
+        "twilio.conversation_relay",
+        "twilio.messaging",
+        "elevenlabs.custom_llm",
+    ] {
+        assert!(
+            profiles
+                .iter()
+                .any(|profile| profile["adapter_id"] == expected)
+        );
+    }
     call(&f, "list_channel_bots", json!({})).await;
     assert_eq!(
         call(&f, "get_channel_bot", json!({"bot_id": bot})).await["label"],

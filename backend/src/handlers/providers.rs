@@ -31,6 +31,7 @@ pub struct CreateProviderRequest {
     pub client_id: Option<String>,
     pub client_secret: Option<String>,
     pub supports_pkce: Option<bool>,
+    pub authorization_nonce_required: Option<bool>,
     // Device code flow fields
     pub device_code_url: Option<String>,
     pub device_token_url: Option<String>,
@@ -85,6 +86,7 @@ pub struct UpdateProviderRequest {
     pub client_id: Option<String>,
     pub client_secret: Option<String>,
     pub supports_pkce: Option<bool>,
+    pub authorization_nonce_required: Option<bool>,
     pub device_code_url: Option<String>,
     pub device_token_url: Option<String>,
     pub device_verification_url: Option<String>,
@@ -182,6 +184,7 @@ pub struct ProviderResponse {
     pub has_client_secret: bool,
     pub default_scopes: Option<Vec<String>>,
     pub supports_pkce: bool,
+    pub authorization_nonce_required: bool,
     pub device_code_url: Option<String>,
     pub device_token_url: Option<String>,
     pub device_verification_url: Option<String>,
@@ -248,6 +251,7 @@ fn provider_to_response(p: crate::models::provider_config::ProviderConfig) -> Pr
         has_client_secret: p.client_secret_encrypted.is_some(),
         default_scopes: p.default_scopes,
         supports_pkce: p.supports_pkce,
+        authorization_nonce_required: p.authorization_nonce_required,
         device_code_url: p.device_code_url,
         device_token_url: p.device_token_url,
         device_verification_url: p.device_verification_url,
@@ -615,6 +619,7 @@ pub async fn create_provider(
         body.token_request_encoding,
         body.oauth_request_headers.unwrap_or_default(),
         body.supports_oauth_scopes.unwrap_or(true),
+        body.authorization_nonce_required.unwrap_or(false),
     )
     .await?;
 
@@ -733,6 +738,7 @@ pub async fn update_provider(
         client_id: body.client_id,
         client_secret: body.client_secret,
         supports_pkce: body.supports_pkce,
+        authorization_nonce_required: body.authorization_nonce_required,
         device_code_url: body.device_code_url,
         device_token_url: body.device_token_url,
         device_verification_url: body.device_verification_url,
@@ -955,6 +961,7 @@ mod tests {
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
+            authorization_nonce_required: false,
             requires_gateway_url: false,
             created_by: "system".to_string(),
             revocation_seed_version: 0,

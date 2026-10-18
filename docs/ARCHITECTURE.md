@@ -25,6 +25,25 @@ binding. Machine jobs persist their command-use grant on `machine_jobs` for thei
 existing bounded lifetime. No secret or payload is stored in these digests or
 forwarded to providers. See [NyxBot service execution](NYXBOT_SERVICE_EXECUTION.md).
 
+NyxBot phone/speech adapters extend the executable channel registry with typed
+messaging, conversation and Custom LLM interfaces. Versioned capabilities derive
+from that registry; persisted bindings separately compute live readiness.
+`handlers/call_adapters.rs` handles HTTP DTOs and provider ingress, while
+`services/call_channels` owns verification, guest admission, provider transport,
+recovery and settlement. Calls reuse the specialist engine and existing tool
+permissions. Instructions refresh between turns; FAQ reads use ordinary
+credential-brokered tools. See [NyxBot service adapters](NYXBOT_SERVICE_ADAPTERS.md).
+
+The metadata collections are `channel_adapter_bindings`,
+`channel_adapter_accounts`, `channel_adapter_allocations`,
+`channel_adapter_resource_claims`, `channel_adapter_sessions` and
+`channel_adapter_events`. Credentials stay in the existing encrypted stores;
+conversation text stays in normal assistant conversations/messages. Transactional
+owner/binding/session fences order admission against disable and deletion.
+Settlement reuses admitted billing meters and retains pending provider evidence
+until cleanup completes. The default-off rollout requires all API replicas to
+understand adapter-origin tool authority before activation.
+
 ## Table of Contents
 
 - [System Overview](#system-overview)

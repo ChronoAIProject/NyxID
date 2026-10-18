@@ -1,4 +1,12 @@
 //! Local Mongo transactions and a local Telegram HTTP server; never live accounts.
+#[path = "platform_manager_journey_tests/account_parity.rs"]
+mod account_parity;
+#[path = "platform_manager_journey_tests/legacy_compatibility.rs"]
+mod legacy_compatibility;
+#[path = "platform_manager_journey_tests/management.rs"]
+mod management;
+#[path = "platform_manager_journey_tests/native_personal.rs"]
+mod native_personal;
 use super::*;
 use crate::{
     models::{
@@ -20,7 +28,7 @@ use wiremock::{
     matchers::{method, path},
 };
 
-struct SavedReplyEgress(AtomicUsize);
+struct SavedReplyEgress(AtomicUsize, tokio::sync::Mutex<Vec<Value>>);
 #[async_trait]
 impl NyxAgentEgress for SavedReplyEgress {
     async fn request(
@@ -37,6 +45,7 @@ impl NyxAgentEgress for SavedReplyEgress {
             }
         ));
         assert_eq!(request.relative_path, "v1/responses");
+        self.1.lock().await.push(request.body.clone().unwrap());
         self.0.fetch_add(1, Ordering::SeqCst);
         use axum::response::IntoResponse;
         let session = "1234567890abcdef1234567890abcdef";
@@ -60,10 +69,30 @@ impl crate::services::assistant_nyxagent_runtime::OwnerTurnSettledHook for TestS
     }
 }
 
+struct PersonalDeliveryGate {
+    capacity: Arc<tokio::sync::Semaphore>,
+    arrived: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+    finished: tokio::sync::Notify,
+    outcome: tokio::sync::Mutex<Option<(String, DeliveryOutcome)>>,
+}
+impl PersonalDeliveryGate {
+    fn new() -> Self {
+        Self {
+            capacity: Arc::new(tokio::sync::Semaphore::new(0)),
+            arrived: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+            finished: tokio::sync::Notify::new(),
+            outcome: tokio::sync::Mutex::new(None),
+        }
+    }
+}
+
 struct LocalTransport {
     state: AppState,
     identity: Arc<dyn ManagerIdentityProducer>,
     base: String,
+    personal_gate: Option<Arc<PersonalDeliveryGate>>,
 }
 #[async_trait]
 impl ManagerTransportProducer for LocalTransport {
@@ -81,18 +110,33 @@ impl ManagerTransportProducer for LocalTransport {
         reference: &DeliveryRef,
         content: ReplyContent,
     ) -> AppResult<DeliveryOutcome> {
-        delivery::deliver(
+        let api = super::super::telegram_new_api::TelegramApi {
+            http: &self.state.http_client,
+            base_url: &self.base,
+        };
+        let send = delivery::deliver(
             &self.state,
             self.identity.clone(),
             destination,
             reference,
             content,
-            &super::super::telegram_new_api::TelegramApi {
-                http: &self.state.http_client,
-                base_url: &self.base,
-            },
-        )
-        .await
+            &api,
+        );
+        if let Some(gate) = &self.personal_gate
+            && let DeliveryRef::Reply(reply) = reference
+        {
+            gate.arrived.notify_one();
+            tokio::time::timeout(std::time::Duration::from_secs(20), gate.release.notified())
+                .await
+                .expect("first personal delivery released");
+            let outcome =
+                delivery::with_control_capacity_for_test(gate.capacity.clone(), send).await?;
+            *gate.outcome.lock().await = Some((reply.reply_id.clone(), outcome.clone()));
+            gate.finished.notify_one();
+            Ok(outcome)
+        } else {
+            send.await
+        }
     }
 }
 
@@ -129,6 +173,8 @@ impl Journey {
         .unwrap();
         let now = Utc::now();
         let profile = PlatformBotConfig {
+            identity_version: None,
+            native_entry: None,
             id: uuid::Uuid::new_v4().to_string(),
             channel_bot_id: bot.id.clone(),
             manager_bot_id: "100".into(),
@@ -168,7 +214,9 @@ impl Journey {
                 contract_version: 1,
                 platform_config_id: profile.id.clone(),
                 manager_bot_id: "100".into(),
-                telegram_bot_id: 100,
+                entry: crate::models::platform_entry_projection::StoredEntryIdentity::TelegramV1 {
+                    telegram_bot_id: 100,
+                },
                 manager_authority_epoch: 1,
                 personal_control_revision: 1,
                 public_policy_revision: 1,
@@ -184,7 +232,10 @@ impl Journey {
             })
             .await
             .unwrap();
-        let egress = Arc::new(SavedReplyEgress(AtomicUsize::new(0)));
+        let egress = Arc::new(SavedReplyEgress(
+            AtomicUsize::new(0),
+            tokio::sync::Mutex::new(Vec::new()),
+        ));
         let public_runtime =
             super::super::platform_public_credential_service::producer(state.clone());
         let execution = super::super::assistant_nyxagent_runtime::producer(
@@ -203,6 +254,7 @@ impl Journey {
             state: state.clone(),
             identity,
             base: server.uri(),
+            personal_gate: None,
         });
         Self {
             state,
@@ -266,13 +318,15 @@ impl Journey {
         .unwrap();
         let mut public = super::super::platform_public_agent_service::tests::fixture(
             &self.state.db,
-            update.sender_id,
+            crate::services::platform_entry_scope::legacy_sender_id(&update.sender),
             false,
         )
         .await;
         public.profile_id = self.profile.id.clone();
         public.manager_bot_id = "100".into();
-        public.telegram_bot_id = 100;
+        public.entry = EntryIdentity::TelegramV1 {
+            telegram_bot_id: 100,
+        };
         public.manager_authority_epoch = 1;
         self.state
             .db
@@ -307,11 +361,13 @@ impl Journey {
                 manager: ManagerAuthority {
                     profile_id: public.profile_id.clone(),
                     manager_bot_id: public.manager_bot_id.clone(),
-                    telegram_bot_id: 100,
+                    entry:
+                        crate::models::platform_entry_projection::StoredEntryIdentity::TelegramV1 {
+                            telegram_bot_id: 100,
+                        },
                     manager_authority_epoch: 1,
                 },
-                sender_id: public.sender_id,
-                chat_id: public.chat_id,
+                sender: public.sender.clone(),
                 public_policy_revision: public.public_policy_revision,
             },
             public_session_id: public.id.clone(),
@@ -423,6 +479,97 @@ impl Journey {
         );
         tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
     }
+
+    async fn control(
+        &self,
+        id: i64,
+        text: &str,
+    ) -> Option<super::super::platform_manager_command_service::CommittedCommand> {
+        self.control_as(id, text, 700).await
+    }
+    async fn control_as(
+        &self,
+        id: i64,
+        text: &str,
+        sender: i64,
+    ) -> Option<super::super::platform_manager_command_service::CommittedCommand> {
+        let mut payload = self.update(id, text, false);
+        payload["message"]["from"]["id"] = json!(sender);
+        payload["message"]["chat"]["id"] = json!(sender);
+        let update = dispatch::verified_message(
+            &self.profile.id,
+            "100",
+            100,
+            &self.profile.observation_id,
+            &payload,
+        )
+        .unwrap();
+        let command =
+            OriginalManagerCommand::from_verified(update, TurnInput { text: text.into() }).unwrap();
+        commands::execute(
+            &self.state.db,
+            self.state.auth_device_hmac_key.as_slice(),
+            self.state.audit_chain_hmac_key.as_slice(),
+            &command,
+            super::super::platform_manager_management::parse(text, "manager_bot")
+                .map(commands::PersonalCommandKind::Management)
+                .or_else(|| commands::personal_command(text, "manager_bot"))
+                .unwrap(),
+            &bindings::LifecycleProducer {
+                personal: self.producers.personal.clone(),
+                public: self.producers.public.clone(),
+            },
+        )
+        .await
+        .unwrap()
+    }
+    async fn confirm_login(
+        &self,
+        id: i64,
+    ) -> super::super::platform_manager_command_service::CommittedCommand {
+        let login = self.control(id, "/login").await.unwrap();
+        let commands::PersonalCommandReply::Link { token } = login.reply else {
+            panic!("Expected a fresh login review");
+        };
+        let review = super::super::platform_link_intent_service::review(
+            &self.state.db,
+            self.state.auth_device_hmac_key.as_slice(),
+            &self.owner,
+            &token,
+        )
+        .await
+        .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+        let approved = super::super::platform_link_intent_service::approve(
+            &self.state.db,
+            self.state.auth_device_hmac_key.as_slice(),
+            &self.owner,
+            &review.id,
+            &review.review_digest,
+            false,
+        )
+        .await
+        .unwrap();
+        self.control(id + 1, approved.confirmation_command.as_ref().unwrap())
+            .await
+            .unwrap()
+    }
+    async fn send_control(
+        &self,
+        command: super::super::platform_manager_command_service::CommittedCommand,
+    ) -> DeliveryOutcome {
+        delivery::deliver_command(
+            &self.state,
+            self.producers.identity.clone(),
+            command,
+            &super::super::telegram_new_api::TelegramApi {
+                http: &self.state.http_client,
+                base_url: &self.server.uri(),
+            },
+        )
+        .await
+        .unwrap()
+    }
     async fn saved(&self) -> (ReplyDestination, ReplyRef, AssistantMessage) {
         let message = tokio::time::timeout(std::time::Duration::from_secs(15), async {
             loop {
@@ -451,8 +598,7 @@ impl Journey {
         };
         let destination = ReplyDestination {
             manager: origin.authority.manager.clone(),
-            sender_id: origin.authority.sender_id,
-            chat_id: origin.authority.chat_id,
+            sender: origin.authority.sender.clone(),
             authority: ReplyAuthority::Personal {
                 origin,
                 turn: turn.clone(),
@@ -468,7 +614,249 @@ impl Journey {
 }
 
 #[tokio::test]
-async fn native_personal_link_saved_reply_web_history_and_unlink_journey() {
+async fn committed_control_effects_reject_confirm_logout_and_bearer_delivery_races() {
+    // Each scenario has a fresh transport budget, so authority refusal cannot
+    // be accidentally masked by a pacing refusal from the preceding scenario.
+    for scenario in [
+        "confirm-logout",
+        "logout-login",
+        "logout-confirm",
+        "link-logout",
+    ] {
+        let j = Journey::new().await;
+        let stale = match scenario {
+            "confirm-logout" => {
+                let confirmed = j.confirm_login(300).await;
+                j.control(302, "/logout").await.unwrap();
+                confirmed
+            }
+            "logout-login" => {
+                let logout = j.control(310, "/logout").await.unwrap();
+                j.control(311, "/login").await.unwrap();
+                logout
+            }
+            "logout-confirm" => {
+                let logout = j.control(320, "/logout").await.unwrap();
+                j.confirm_login(321).await;
+                logout
+            }
+            "link-logout" => {
+                let login = j.control(330, "/login").await.unwrap();
+                j.control(331, "/logout").await.unwrap();
+                login
+            }
+            _ => unreachable!(),
+        };
+        let receipt = j
+            .state
+            .db
+            .collection::<PlatformManagerIngress>(INGRESS)
+            .find_one(doc! {"_id": &stale.ingress.receipt_id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(receipt.control_effect.as_ref(), Some(&stale.effect));
+        assert!(
+            matches!(
+                j.send_control(stale).await,
+                DeliveryOutcome::Refused(UnavailableReason::OriginRevoked)
+            ),
+            "{scenario}"
+        );
+        assert!(j.sends().await.is_empty(), "{scenario}");
+        let stored = j
+            .state
+            .db
+            .collection::<Document>(crate::models::platform_manager_delivery::COLLECTION_NAME)
+            .find_one(doc! {"reference.kind":"command"})
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            stored
+                .get_document("reference")
+                .unwrap()
+                .contains_key("effect")
+        );
+        assert!(!stored.contains_key("command_status"));
+    }
+}
+
+#[tokio::test]
+async fn public_control_capacity_does_not_delay_logout_effects_or_personal_delivery() {
+    let mut j = Journey::new().await;
+    let gate = Arc::new(PersonalDeliveryGate::new());
+    let transport = Arc::new(LocalTransport {
+        state: j.state.clone(),
+        identity: j.producers.identity.clone(),
+        base: j.server.uri(),
+        personal_gate: Some(gate.clone()),
+    });
+    Arc::get_mut(&mut j.producers).unwrap().transport = transport;
+    j.confirm_login(400).await;
+    delivery::with_control_capacity_for_test(gate.capacity.clone(), async {
+        j.webhook(&j.update(402, "Save a personal reply", false))
+            .await;
+        let (_, reply, _) = j.saved().await;
+        tokio::time::timeout(std::time::Duration::from_secs(20), gate.arrived.notified())
+            .await
+            .expect("actual first personal send reaches transport gate");
+        let before = j.sends().await.len();
+        // Real commands commit under saturated delivery capacity. A visitor's
+        // pending proof is cancelled even when its acknowledgement cannot be sent.
+        j.control_as(403, "/login", 701).await.unwrap();
+        let logout = j.control_as(404, "/logout", 701).await.unwrap();
+        assert!(matches!(
+            j.send_control(logout).await,
+            DeliveryOutcome::Refused(UnavailableReason::CapacityLimited)
+        ));
+        assert_eq!(
+            j.state
+                .db
+                .collection::<Document>(crate::models::platform_link_intent::COLLECTION_NAME)
+                .count_documents(doc! {"telegram_sender_id":701_i64,"state":"pending"})
+                .await
+                .unwrap(),
+            0
+        );
+        for id in 405..413 {
+            let command = j
+                .control_as(id, if id % 2 == 0 { "/status" } else { "/help" }, 700 + id)
+                .await
+                .unwrap();
+            assert!(matches!(
+                j.send_control(command).await,
+                DeliveryOutcome::Refused(UnavailableReason::CapacityLimited)
+            ));
+        }
+        assert_eq!(
+            j.sends().await.len(),
+            before,
+            "control acknowledgements remain unsent while saturated"
+        );
+        gate.release.notify_one();
+        tokio::time::timeout(std::time::Duration::from_secs(30), gate.finished.notified())
+            .await
+            .expect("actual first personal send completes while controls remain saturated");
+        let outcome = gate.outcome.lock().await;
+        let (reply_id, sent) = outcome.as_ref().expect("captured first-send outcome");
+        assert_eq!(reply_id, &reply.reply_id);
+        assert!(matches!(sent, DeliveryOutcome::Sent { .. }), "{sent:?}");
+        assert_eq!(
+            j.sends().await.len(),
+            before + 1,
+            "exactly the original personal reply was sent"
+        );
+        assert!(j.sends().await.iter().any(|s| {
+            s["text"]
+                .as_str()
+                .unwrap()
+                .contains("Retained personal answer")
+        }));
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn login_status_logout_use_live_sender_authority_and_cancel_pending_proofs() {
+    use commands::{ChatLoginStatus as Status, PersonalCommandReply as Reply};
+    let j = Journey::new().await;
+    assert!(matches!(
+        j.control(101, "/status").await.unwrap().reply,
+        Reply::Status(Status::LoggedOut)
+    ));
+    assert!(matches!(
+        j.control(102, "/login").await.unwrap().reply,
+        Reply::Link { .. }
+    ));
+    assert!(j.control(102, "/login").await.is_none());
+    assert!(matches!(
+        j.control(103, "/status").await.unwrap().reply,
+        Reply::Status(Status::Pending)
+    ));
+    j.control(104, "/logout").await.unwrap();
+    assert!(matches!(
+        j.control(105, "/status").await.unwrap().reply,
+        Reply::Status(Status::LoggedOut)
+    ));
+    let pending = j
+        .state
+        .db
+        .collection::<Document>(crate::models::platform_link_intent::COLLECTION_NAME)
+        .count_documents(doc! {"platform_config_id": &j.profile.id, "state": "pending"})
+        .await
+        .unwrap();
+    assert_eq!(pending, 0);
+    j.link().await;
+    assert!(matches!(
+        j.control(106, "/status").await.unwrap().reply,
+        Reply::Status(Status::LoggedIn)
+    ));
+    assert!(matches!(
+        j.control(107, "/login").await.unwrap().reply,
+        Reply::Status(Status::LoggedIn)
+    ));
+    j.state
+        .db
+        .collection::<Document>(crate::models::user::COLLECTION_NAME)
+        .update_one(doc! {"_id": &j.owner}, doc! {"$set": {"is_active": false}})
+        .await
+        .unwrap();
+    assert!(matches!(
+        j.control(108, "/status").await.unwrap().reply,
+        Reply::Status(Status::Unavailable)
+    ));
+    j.control(109, "/logout").await.unwrap();
+    assert!(matches!(
+        j.control(110, "/status").await.unwrap().reply,
+        Reply::Status(Status::LoggedOut)
+    ));
+    assert_eq!(j.egress.0.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn status_changed_before_send_is_refused_and_other_sender_stays_logged_out() {
+    let j = Journey::new().await;
+    j.link().await;
+    let status = j.control(201, "/status").await.unwrap();
+    let mut other = j.update(202, "/status", false);
+    other["message"]["from"]["id"] = json!(701);
+    other["message"]["chat"]["id"] = json!(701);
+    j.webhook(&other).await;
+    let sent = j.sends().await;
+    let other_status = sent.iter().find(|send| send["chat_id"] == 701).unwrap();
+    assert!(
+        other_status["text"]
+            .as_str()
+            .unwrap()
+            .contains("logged out")
+    );
+    j.control(203, "/logout").await.unwrap();
+    let outcome = delivery::deliver_command(
+        &j.state,
+        j.producers.identity.clone(),
+        status,
+        &super::super::telegram_new_api::TelegramApi {
+            http: &j.state.http_client,
+            base_url: &j.server.uri(),
+        },
+    )
+    .await
+    .unwrap();
+    assert!(matches!(outcome, DeliveryOutcome::Refused(_)));
+    for (id, command) in [
+        (204, "/login"),
+        (205, "/logout"),
+        (206, "/status"),
+        (207, "/help"),
+    ] {
+        j.webhook(&j.update(id, command, true)).await;
+    }
+    assert_eq!(j.egress.0.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn telegram_personal_link_saved_reply_web_history_and_unlink_journey() {
     let j = Journey::new().await;
     // An unlinked update keeps its original fixed audience after subsequent consent.
     let old = j.update(2, "before linking", false);
@@ -752,7 +1140,14 @@ async fn exact_saved_body_destination_and_revoke_before_send_fail_closed() {
     );
     let body = delivery::render_saved(&saved, &j.state.config.frontend_url);
     let mut wrong = destination.clone();
-    wrong.chat_id = 701;
+    if let SenderIdentity::TelegramV1 {
+        telegram_chat_id, ..
+    } = &mut wrong.sender
+    {
+        *telegram_chat_id = 701;
+    } else {
+        panic!("legacy fixture");
+    }
     assert!(j.deliver(&wrong, &reply, body.clone()).await.is_err());
     assert_eq!(
         j.state
@@ -1401,8 +1796,7 @@ async fn public_reply_branch_refuses_missing_retained_public_turn_before_owner_h
     let (context, _) = j.public_signup().await;
     let destination = ReplyDestination {
         manager: context.ingress.manager.clone(),
-        sender_id: context.ingress.sender_id,
-        chat_id: context.ingress.chat_id,
+        sender: context.ingress.sender.clone(),
         authority: ReplyAuthority::Public {
             ingress: context.ingress.clone(),
             public_session_id: context.public_session_id.clone(),
@@ -1593,8 +1987,7 @@ async fn asynchronous_public_failure_sends_only_fixed_notice_and_live_revocation
                 } else {
                     PublicRevocationScope::Sender {
                         manager: context.ingress.manager.clone(),
-                        sender_id: context.ingress.sender_id,
-                        chat_id: context.ingress.chat_id,
+                        sender: context.ingress.sender.clone(),
                     }
                 };
                 let mut txn = j.state.db.client().start_session().await.unwrap();
@@ -1628,8 +2021,7 @@ async fn asynchronous_public_failure_sends_only_fixed_notice_and_live_revocation
         }
         let destination = ReplyDestination {
             manager: context.ingress.manager.clone(),
-            sender_id: context.ingress.sender_id,
-            chat_id: context.ingress.chat_id,
+            sender: context.ingress.sender.clone(),
             authority: ReplyAuthority::Public {
                 ingress: context.ingress.clone(),
                 public_session_id: session.id,
@@ -1804,4 +2196,416 @@ async fn pending_action_renderer_uses_exact_turn_key_routing_and_unique_codes() 
         .is_err()
     );
     assert_eq!(j.sends().await.len(), 2);
+}
+
+#[tokio::test]
+async fn retired_owner_or_control_authority_can_logout_to_public_without_revival() {
+    use crate::models::platform_personal_binding::PersonalRevocationReason;
+    use commands::{ChatLoginStatus as Status, PersonalCommandReply as Reply};
+    for reason in [
+        PersonalRevocationReason::OwnerDisabled,
+        PersonalRevocationReason::OwnerDeleted,
+        PersonalRevocationReason::Replaced,
+    ] {
+        let j = Journey::new().await;
+        j.confirm_login(600).await;
+        let binding = j.state.db.collection::<PlatformPersonalBinding>(crate::models::platform_personal_binding::COLLECTION_NAME)
+            .find_one(doc! {"platform_config_id":&j.profile.id,"telegram_sender_id":700_i64,"state":"active"}).await.unwrap().unwrap();
+        if matches!(
+            reason,
+            PersonalRevocationReason::OwnerDisabled | PersonalRevocationReason::OwnerDeleted
+        ) {
+            j.state
+                .db
+                .collection::<Document>(crate::models::user::COLLECTION_NAME)
+                .update_one(doc! {"_id":&j.owner}, doc! {"$set":{"is_active":false}})
+                .await
+                .unwrap();
+            super::super::platform_personal_owner_lifecycle::retire(
+                &j.state.db,
+                &j.owner,
+                reason == PersonalRevocationReason::OwnerDeleted,
+            )
+            .await
+            .unwrap();
+        } else {
+            let effects = bindings::LifecycleProducer {
+                personal: j.producers.personal.clone(),
+                public: j.producers.public.clone(),
+            };
+            let mut session = j.state.db.client().start_session().await.unwrap();
+            session.start_transaction().await.unwrap();
+            bindings::revoke_binding_in_session(
+                &j.state.db,
+                &mut session,
+                &binding,
+                reason,
+                &effects,
+                None,
+            )
+            .await
+            .unwrap();
+            session.commit_transaction().await.unwrap();
+        }
+        assert!(matches!(
+            j.control(602, "/status").await.unwrap().reply,
+            Reply::Status(Status::Unavailable)
+        ));
+        // A fresh proof may be pending even though old personal authority retired.
+        let pending = j.control(603, "/login").await.unwrap();
+        assert!(matches!(pending.reply, Reply::Link { .. }));
+        j.control(604, "/logout").await.unwrap();
+        assert!(matches!(
+            j.control(605, "/status").await.unwrap().reply,
+            Reply::Status(Status::LoggedOut)
+        ));
+        let retired = j
+            .state
+            .db
+            .collection::<PlatformPersonalBinding>(
+                crate::models::platform_personal_binding::COLLECTION_NAME,
+            )
+            .find_one(doc! {"_id":&binding.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(retired.state, PersonalBindingState::Revoked);
+        assert_eq!(retired.revocation_reason, Some(reason));
+        assert!(retired.logged_out_at.is_some());
+        assert_eq!(
+            j.state
+                .db
+                .collection::<Document>(crate::models::platform_link_intent::COLLECTION_NAME)
+                .count_documents(doc! {"platform_config_id":&j.profile.id,"state":"pending"})
+                .await
+                .unwrap(),
+            0
+        );
+        j.webhook(&j.update(606, "What is NyxID?", false)).await;
+        let receipt = j
+            .state
+            .db
+            .collection::<PlatformManagerIngress>(INGRESS)
+            .find_one(doc! {"profile_id":&j.profile.id,"update_id":606_i64})
+            .await
+            .unwrap()
+            .unwrap();
+        // This fixture has no public runtime enabled: reaching PublicDisabled
+        // proves unlinked/public classification instead of old owner authority.
+        assert!(
+            matches!(receipt.audience, IngressAudience::Fixed { reason } if reason == "public_disabled")
+        );
+        assert_eq!(j.egress.0.load(Ordering::SeqCst), 0);
+    }
+}
+
+#[tokio::test]
+async fn login_delivery_rejects_substituted_bearer_for_committed_intent() {
+    let j = Journey::new().await;
+    let mut target = j.control(650, "/login").await.unwrap();
+    let other = j.control_as(651, "/login", 701).await.unwrap();
+    target.reply = other.reply;
+    assert!(matches!(
+        j.send_control(target).await,
+        DeliveryOutcome::Refused(UnavailableReason::OriginRevoked)
+    ));
+    assert!(j.sends().await.is_empty());
+}
+
+/// Real auth, persisted proof/binding and trusted local Telegram ingress. No
+/// real email/provider/model/send path is used by this regression.
+#[tokio::test]
+async fn default_and_configured_signup_login_mfa_review_and_same_chat_confirmation() {
+    use crate::handlers::auth::{self, LoginRequest, RegisterRequest};
+    use axum::{
+        Json,
+        body::{Body, to_bytes},
+        extract::{ConnectInfo, State},
+        http::{HeaderMap, Request, StatusCode},
+    };
+    use tower::ServiceExt;
+    async fn api(app: &axum::Router, path: &str, token: &str, body: Value) -> (StatusCode, Value) {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1{path}"))
+                    .header("content-type", "application/json")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), 128 * 1024).await.unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap())
+    }
+    for auto_verify in [false, true] {
+        let mut j = Journey::new().await;
+        j.state.config.email_auth_enabled = true;
+        j.state.config.auto_verify_email = auto_verify;
+        let login = j.control(3000, "/login").await.unwrap();
+        let commands::PersonalCommandReply::Link { token: intent } = login.reply else {
+            panic!("login must issue intent");
+        };
+        let email = format!("{}@signup.test", uuid::Uuid::new_v4());
+        let password = zeroize::Zeroizing::new(format!("Signup-1!{}", uuid::Uuid::new_v4()));
+        let invite = super::super::invite_code_service::create_invite_code(
+            &j.state.db,
+            &j.owner,
+            1,
+            Some("Local personal signup journey"),
+        )
+        .await
+        .unwrap();
+        let peer = ConnectInfo("127.0.0.1:45678".parse().unwrap());
+        let Json(registered) = auth::register(
+            State(j.state.clone()),
+            peer,
+            HeaderMap::new(),
+            Json(RegisterRequest {
+                email: email.clone(),
+                password: password.to_string(),
+                invite_code: Some(invite.code),
+                display_name: Some("Signup visitor".into()),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            registered.message,
+            "Registration processed. You can now sign in."
+        );
+        let user = j
+            .state
+            .db
+            .collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+            .find_one(doc! {"_id":&registered.user_id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(user.email_verified, auto_verify);
+        assert_eq!(
+            j.state
+                .db
+                .collection::<PlatformPersonalBinding>(
+                    crate::models::platform_personal_binding::COLLECTION_NAME
+                )
+                .count_documents(doc! {"state":"active"})
+                .await
+                .unwrap(),
+            0,
+            "signup alone is not chat login"
+        );
+        let (_, Json(logged_in)) = auth::login(
+            State(j.state.clone()),
+            peer,
+            HeaderMap::new(),
+            Json(LoginRequest {
+                email: email.clone(),
+                password: password.to_string(),
+                mfa_code: None,
+                client: Some("token".into()),
+            }),
+        )
+        .await
+        .unwrap();
+        let mut access = zeroize::Zeroizing::new(logged_in.access_token.unwrap());
+        let (_, private) = crate::routes::build_router_with_state(j.state.clone());
+        let app = private.with_state(j.state.clone());
+        if auto_verify {
+            let (status, setup) = api(&app, "/auth/mfa/setup", &access, json!({})).await;
+            assert_eq!(status, StatusCode::OK);
+            let totp = totp_rs::TOTP::new(
+                totp_rs::Algorithm::SHA1,
+                6,
+                1,
+                30,
+                totp_rs::Secret::Encoded(setup["secret"].as_str().unwrap().to_owned())
+                    .to_bytes()
+                    .unwrap(),
+                Some("NyxID".into()),
+                registered.user_id.clone(),
+            )
+            .unwrap();
+            assert_eq!(
+                api(
+                    &app,
+                    "/auth/mfa/confirm",
+                    &access,
+                    json!({"code":totp.generate_current().unwrap()})
+                )
+                .await
+                .0,
+                StatusCode::OK
+            );
+            let pending = auth::login(
+                State(j.state.clone()),
+                peer,
+                HeaderMap::new(),
+                Json(LoginRequest {
+                    email: email.clone(),
+                    password: password.to_string(),
+                    mfa_code: None,
+                    client: Some("token".into()),
+                }),
+            )
+            .await
+            .unwrap_err();
+            let AppError::MfaRequired { session_token } = pending else {
+                panic!("configured MFA must challenge");
+            };
+            let pending = zeroize::Zeroizing::new(session_token);
+            assert_eq!(
+                api(
+                    &app,
+                    "/platform-personal-links/review",
+                    &pending,
+                    json!({"intent_token":intent.as_str()})
+                )
+                .await
+                .0,
+                StatusCode::UNAUTHORIZED
+            );
+            // Exclude every accepted skew code, plus adjacent time steps so a
+            // boundary crossed during the handler cannot turn this into a pass.
+            let step = Utc::now().timestamp() as u64 / 30;
+            let excluded = (step.saturating_sub(2)..=step + 2)
+                .map(|value| totp.generate(value * 30))
+                .collect::<std::collections::HashSet<_>>();
+            let wrong = (0..1_000_000)
+                .map(|value| format!("{value:06}"))
+                .find(|code| !excluded.contains(code))
+                .unwrap();
+            assert!(!totp.check_current(&wrong).unwrap());
+            let sessions = j
+                .state
+                .db
+                .collection::<bson::Document>(crate::models::session::COLLECTION_NAME);
+            let authenticated_filter = doc! {"user_id":&registered.user_id,"revoked":false,"user_agent":{"$ne":"mfa_pending"}};
+            let before = sessions
+                .count_documents(authenticated_filter.clone())
+                .await
+                .unwrap();
+            let rejected = crate::handlers::mfa::verify(
+                State(j.state.clone()),
+                peer,
+                HeaderMap::new(),
+                Json(crate::handlers::mfa::MfaLoginVerifyRequest {
+                    code: wrong,
+                    mfa_token: pending.to_string(),
+                    client: Some("token".into()),
+                }),
+            )
+            .await;
+            assert!(
+                matches!(rejected, Err(AppError::AuthenticationFailed(message)) if message == "Invalid MFA code")
+            );
+            assert_eq!(
+                sessions
+                    .count_documents(authenticated_filter)
+                    .await
+                    .unwrap(),
+                before
+            );
+            assert!(sessions.find_one(doc! {"token_hash":crate::crypto::token::hash_token(&pending),"user_agent":"mfa_pending","revoked":false}).await.unwrap().is_some());
+            assert_eq!(
+                j.state
+                    .db
+                    .collection::<PlatformPersonalBinding>(
+                        crate::models::platform_personal_binding::COLLECTION_NAME
+                    )
+                    .count_documents(doc! {"state":"active"})
+                    .await
+                    .unwrap(),
+                0
+            );
+            assert_eq!(
+                api(
+                    &app,
+                    "/platform-personal-links/review",
+                    &pending,
+                    json!({"intent_token":intent.as_str()})
+                )
+                .await
+                .0,
+                StatusCode::UNAUTHORIZED
+            );
+            let code = totp.generate_current().unwrap();
+            let (_, Json(verified)) = crate::handlers::mfa::verify(
+                State(j.state.clone()),
+                peer,
+                HeaderMap::new(),
+                Json(crate::handlers::mfa::MfaLoginVerifyRequest {
+                    code,
+                    mfa_token: pending.to_string(),
+                    client: Some("token".into()),
+                }),
+            )
+            .await
+            .unwrap();
+            access = zeroize::Zeroizing::new(verified.access_token.unwrap());
+        }
+        let (status, review) = api(
+            &app,
+            "/platform-personal-links/review",
+            &access,
+            json!({"intent_token":intent.as_str()}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(review["account"]["id"], registered.user_id);
+        assert_eq!(review["billing"], "personal");
+        assert_eq!(
+            j.control(3001, "/status").await.unwrap().effect,
+            commands::ManagerCommandEffect::Status {
+                state: commands::ChatLoginStatus::Pending
+            }
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+        let (status,approved) = api(&app,"/platform-personal-links/approve",&access,json!({"challenge_id":review["challenge_id"],"review_digest":review["review_digest"],"replace_existing":false})).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(approved["status"], "awaiting_chat_confirmation");
+        assert_eq!(
+            j.state
+                .db
+                .collection::<PlatformPersonalBinding>(
+                    crate::models::platform_personal_binding::COLLECTION_NAME
+                )
+                .count_documents(doc! {"state":"active"})
+                .await
+                .unwrap(),
+            0,
+            "browser review alone is not chat login"
+        );
+        let command = approved["confirmation_command"].as_str().unwrap();
+        assert!(matches!(
+            j.control(3002, command).await.unwrap().effect,
+            commands::ManagerCommandEffect::Confirmed { .. }
+        ));
+        let binding = j
+            .state
+            .db
+            .collection::<PlatformPersonalBinding>(
+                crate::models::platform_personal_binding::COLLECTION_NAME,
+            )
+            .find_one(doc! {"state":"active"})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(binding.user_id, registered.user_id);
+        assert_eq!(
+            crate::services::platform_entry_scope::legacy_sender_id(&binding.sender),
+            700
+        );
+        assert_eq!(
+            j.control(3003, "/status").await.unwrap().effect,
+            commands::ManagerCommandEffect::Status {
+                state: commands::ChatLoginStatus::LoggedIn
+            }
+        );
+        j.state.db.drop().await.unwrap();
+    }
 }

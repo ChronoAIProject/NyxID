@@ -30,6 +30,30 @@ use crate::services::channel_inbound_service::InboundDeps as WebhookHandlerDeps;
 // Adapter-driven webhook handlers
 // ---------------------------------------------------------------------------
 
+type ManagerProducers =
+    std::sync::Arc<crate::services::platform_manager_contract::PlatformManagerProducers>;
+
+pub async fn channel_webhook_with_runtime(
+    State(state): State<AppState>,
+    Path((platform, bot_id)): Path<(String, String)>,
+    uri: axum::http::Uri,
+    headers: HeaderMap,
+    producers: Option<axum::Extension<ManagerProducers>>,
+    body: Bytes,
+) -> axum::response::Response {
+    channel_webhook_with_producers(
+        State(state),
+        Path((platform, bot_id)),
+        uri,
+        headers,
+        body,
+        "https://api.telegram.org",
+        producers.map(|axum::Extension(value)| value),
+    )
+    .await
+}
+
+#[cfg(test)]
 pub async fn channel_webhook(
     State(state): State<AppState>,
     Path((platform, bot_id)): Path<(String, String)>,
@@ -48,6 +72,7 @@ pub async fn channel_webhook(
     .await
 }
 
+#[cfg(test)]
 pub(crate) async fn channel_webhook_with_api(
     State(state): State<AppState>,
     Path((platform, bot_id)): Path<(String, String)>,
@@ -55,6 +80,27 @@ pub(crate) async fn channel_webhook_with_api(
     headers: HeaderMap,
     body: Bytes,
     telegram_api_base: &str,
+) -> axum::response::Response {
+    channel_webhook_with_producers(
+        State(state),
+        Path((platform, bot_id)),
+        uri,
+        headers,
+        body,
+        telegram_api_base,
+        None,
+    )
+    .await
+}
+
+pub(crate) async fn channel_webhook_with_producers(
+    State(state): State<AppState>,
+    Path((platform, bot_id)): Path<(String, String)>,
+    uri: axum::http::Uri,
+    headers: HeaderMap,
+    body: Bytes,
+    telegram_api_base: &str,
+    producers: Option<ManagerProducers>,
 ) -> axum::response::Response {
     use crate::services::channel_platform::WebhookPolicy;
     let Ok(adapter) = resolve_adapter(&platform, &state.token_exchange_cache) else {
@@ -106,6 +152,27 @@ pub(crate) async fn channel_webhook_with_api(
             Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
         }
     }
+    if platform == "discord" {
+        let verified = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            crate::services::platform_entry_native::authenticate_discord_ack(
+                &state.db,
+                adapter.as_ref(),
+                &bot_id,
+                &headers,
+                &body,
+            ),
+        )
+        .await;
+        match verified {
+            Ok(Ok(())) => {}
+            Ok(Err(
+                crate::errors::AppError::ChannelWebhookVerificationFailed(_)
+                | crate::errors::AppError::Forbidden(_),
+            )) => return StatusCode::UNAUTHORIZED.into_response(),
+            Ok(Err(_)) | Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
+        }
+    }
     let empty_ack_is_text = adapter.registration().empty_ack_is_text;
     match adapter.webhook_policy(&body) {
         WebhookPolicy::RetryAwareInline => {
@@ -151,7 +218,7 @@ pub(crate) async fn channel_webhook_with_api(
         }
         WebhookPolicy::Challenge(response) => Json(response).into_response(),
         WebhookPolicy::Immediate(response) => {
-            tokio::spawn(async move {
+            crate::services::platform_native_reply_service::spawn_in_native_scope(async move {
                 // A WABA override covers all of its numbers. Managed callbacks
                 // fan out through the same verified dispatcher as the app route.
                 if adapter.platform_webhook()
@@ -161,16 +228,24 @@ pub(crate) async fn channel_webhook_with_api(
                             bot.platform == platform && bot.credential_source == "platform"
                         })
                 {
-                    if dispatch_platform_webhook(&state, &platform, &headers, &body)
-                        .await
-                        .is_err()
+                    if dispatch_platform_webhook_with_producers(
+                        &state,
+                        &platform,
+                        &headers,
+                        &body,
+                        producers.clone(),
+                    )
+                    .await
+                    .is_err()
                     {
                         tracing::warn!(bot_id = %bot_id, platform = %platform, "managed channel webhook processing failed");
                     }
                     return;
                 }
-                if let Err(e) =
-                    handle_webhook_inner(&state, &bot_id, &platform, &headers, &body).await
+                if let Err(e) = handle_webhook_inner_with_producers(
+                    &state, &bot_id, &platform, &headers, &body, producers,
+                )
+                .await
                 {
                     tracing::warn!(bot_id = %bot_id, platform = %platform, error = %e, "channel webhook processing failed (suppressed)");
                 }
@@ -178,7 +253,11 @@ pub(crate) async fn channel_webhook_with_api(
             webhook_response(response, empty_ack_is_text)
         }
         WebhookPolicy::Inline => {
-            match handle_webhook_inner(&state, &bot_id, &platform, &headers, &body).await {
+            match handle_webhook_inner_with_producers(
+                &state, &bot_id, &platform, &headers, &body, producers,
+            )
+            .await
+            {
                 Ok(response) => webhook_response(response, empty_ack_is_text),
                 Err(e) => {
                     tracing::warn!(bot_id = %bot_id, platform = %platform, error = %e, "channel webhook processing failed (suppressed)");
@@ -247,15 +326,17 @@ pub async fn platform_webhook(
     State(state): State<AppState>,
     Path(platform): Path<String>,
     headers: HeaderMap,
+    producers: Option<axum::Extension<ManagerProducers>>,
     body: Bytes,
 ) -> axum::response::Response {
+    let producers = producers.map(|axum::Extension(value)| value);
     if !resolve_adapter(&platform, &state.token_exchange_cache)
         .is_ok_and(|adapter| adapter.platform_webhook())
     {
         return StatusCode::NOT_FOUND.into_response();
     }
-    tokio::spawn(async move {
-        if dispatch_platform_webhook(&state, &platform, &headers, &body)
+    crate::services::platform_native_reply_service::spawn_in_native_scope(async move {
+        if dispatch_platform_webhook_with_producers(&state, &platform, &headers, &body, producers)
             .await
             .is_err()
         {
@@ -265,11 +346,22 @@ pub async fn platform_webhook(
     StatusCode::OK.into_response()
 }
 
+#[cfg(test)]
 pub(super) async fn dispatch_platform_webhook(
     state: &AppState,
     platform: &str,
     headers: &HeaderMap,
     body: &[u8],
+) -> crate::errors::AppResult<()> {
+    dispatch_platform_webhook_with_producers(state, platform, headers, body, None).await
+}
+
+pub(crate) async fn dispatch_platform_webhook_with_producers(
+    state: &AppState,
+    platform: &str,
+    headers: &HeaderMap,
+    body: &[u8],
+    producers: Option<ManagerProducers>,
 ) -> crate::errors::AppResult<()> {
     let adapter = resolve_adapter(platform, &state.token_exchange_cache)?;
     let descriptor = adapter
@@ -338,9 +430,16 @@ pub(super) async fn dispatch_platform_webhook(
             continue;
         };
         // Reuse per-bot verification and phone filtering for managed credentials.
-        if handle_webhook_inner(state, &bot.id, platform, headers, body)
-            .await
-            .is_err()
+        if handle_webhook_inner_with_producers(
+            state,
+            &bot.id,
+            platform,
+            headers,
+            body,
+            producers.clone(),
+        )
+        .await
+        .is_err()
         {
             tracing::warn!(platform, bot_id = %bot.id, "platform webhook bot processing failed");
         }
@@ -409,6 +508,7 @@ pub async fn channel_subscription(
 ///
 /// Returns errors for logging; the outer platform handler suppresses them and
 /// always returns 200 OK to prevent platforms from retrying failed deliveries.
+#[cfg(test)]
 async fn handle_webhook_inner(
     state: &AppState,
     bot_id: &str,
@@ -416,6 +516,32 @@ async fn handle_webhook_inner(
     headers: &HeaderMap,
     body: &[u8],
 ) -> Result<Option<serde_json::Value>, Box<dyn std::error::Error + Send + Sync>> {
+    handle_webhook_inner_with_producers(state, bot_id, expected_platform, headers, body, None).await
+}
+
+pub(crate) async fn handle_webhook_inner_with_producers(
+    state: &AppState,
+    bot_id: &str,
+    expected_platform: &str,
+    headers: &HeaderMap,
+    body: &[u8],
+    producers: Option<ManagerProducers>,
+) -> Result<Option<serde_json::Value>, Box<dyn std::error::Error + Send + Sync>> {
+    match crate::services::platform_entry_ingress_service::intercept(
+        state,
+        bot_id,
+        expected_platform,
+        headers,
+        body,
+        producers,
+    )
+    .await?
+    {
+        crate::services::platform_entry_ingress_service::NativeWebhook::Ordinary => {}
+        crate::services::platform_entry_ingress_service::NativeWebhook::Consumed(response) => {
+            return Ok(response);
+        }
+    }
     handle_webhook_inner_with_deps(
         WebhookHandlerDeps::from(state),
         bot_id,
@@ -1549,7 +1675,7 @@ mod tests {
         let address = listener.local_addr().unwrap();
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
 
-        tokio::spawn(async move {
+        crate::services::platform_native_reply_service::spawn_in_native_scope(async move {
             axum::serve(listener, app)
                 .with_graceful_shutdown(async {
                     let _ = shutdown_rx.await;

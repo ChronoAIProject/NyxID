@@ -1858,6 +1858,7 @@ mod public_admission_tests {
             expires_at: Utc::now() + Duration::minutes(1),
         });
         let call = PublicCallReservation {
+            continuation: false,
             id: ctx.public_admission.as_ref().unwrap().call_id.clone(),
             loop_id: Uuid::new_v4().to_string(),
             sponsor_owner_user_id: ctx.billing_owner_id.clone(),

@@ -292,7 +292,14 @@ export function useAdminPlatformTargets() {
       return {
         bots: bots.bots.filter(
           (bot) =>
-            bot.credential_source === "telegram_manager" && bot.is_active,
+            bot.is_active &&
+            (bot.credential_source === "telegram_manager" ||
+              (["discord", "slack", "whatsapp", "lark", "feishu", "x"].includes(
+                bot.platform,
+              ) &&
+                ["active", "failed", "invalid", "pending_webhook"].includes(
+                  bot.status,
+                ))),
         ),
         orgs: orgListResponseSchema
           .parse(orgs)
@@ -515,27 +522,58 @@ export function useGatewayCleanup(profile: PlatformProfile) {
   const actor = useAuthStore((s) => s.user?.id);
   const admin = useAuthStore((s) => canAdminWrite(s.user));
   return useQuery({
-    queryKey: ["admin", actor, "platform-bots", profile.id, profile.generation, "cleanup"],
+    queryKey: [
+      "admin",
+      actor,
+      "platform-bots",
+      profile.id,
+      profile.generation,
+      "cleanup",
+    ],
     enabled: !!actor && admin,
     gcTime: 0,
-    queryFn: async () => z.array(gatewayCleanupTaskSchema).parse(await apiClient(`/admin/platform-bots/${profile.id}/cleanup`, {
-      authorityGuard: actorGuard(actor, true),
-    })),
+    queryFn: async () =>
+      z.array(gatewayCleanupTaskSchema).parse(
+        await apiClient(`/admin/platform-bots/${profile.id}/cleanup`, {
+          authorityGuard: actorGuard(actor, true),
+        }),
+      ),
   });
 }
 export function useGatewayCleanupAction(profile: PlatformProfile) {
   const actor = useAuthStore((s) => s.user?.id);
   const client = useQueryClient();
   return useMutation({
-    mutationFn: async (input: { task: string; action: "inspect" } | { task: string; action: "retry_original" | "preserve_changed" | "confirm_missing"; review: GatewayCleanupReview }) => {
-      const result = await apiClient(`/admin/platform-bots/${profile.id}/cleanup/${input.task}/${input.action === "inspect" ? "inspect" : "resolve"}`, {
-        method: "POST",
-        body: input.action === "inspect" ? {} : { profile_generation: input.review.profile_generation, captured_version: input.review.captured_version,
-          observed_version: input.review.observed_version, action: input.action },
-        authorityGuard: actorGuard(actor, true),
-      });
-      return input.action === "inspect" ? gatewayCleanupReviewSchema.parse(result) : null;
+    mutationFn: async (
+      input:
+        | { task: string; action: "inspect" }
+        | {
+            task: string;
+            action: "retry_original" | "preserve_changed" | "confirm_missing";
+            review: GatewayCleanupReview;
+          },
+    ) => {
+      const result = await apiClient(
+        `/admin/platform-bots/${profile.id}/cleanup/${input.task}/${input.action === "inspect" ? "inspect" : "resolve"}`,
+        {
+          method: "POST",
+          body:
+            input.action === "inspect"
+              ? {}
+              : {
+                  profile_generation: input.review.profile_generation,
+                  captured_version: input.review.captured_version,
+                  observed_version: input.review.observed_version,
+                  action: input.action,
+                },
+          authorityGuard: actorGuard(actor, true),
+        },
+      );
+      return input.action === "inspect"
+        ? gatewayCleanupReviewSchema.parse(result)
+        : null;
     },
-    onSuccess: () => client.invalidateQueries({ queryKey: ["admin", actor, "platform-bots"] }),
+    onSuccess: () =>
+      client.invalidateQueries({ queryKey: ["admin", actor, "platform-bots"] }),
   });
 }

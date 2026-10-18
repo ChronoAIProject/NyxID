@@ -634,11 +634,15 @@ async fn execution_factory_selects_public_prepare_and_rejects_ordinary_context_b
             manager: contract::ManagerAuthority {
                 profile_id: "manager".into(),
                 manager_bot_id: "bot".into(),
-                telegram_bot_id: 1,
+                entry: crate::models::platform_entry_projection::StoredEntryIdentity::TelegramV1 {
+                    telegram_bot_id: 1,
+                },
                 manager_authority_epoch: 1,
             },
-            sender_id: 1,
-            chat_id: 1,
+            sender: crate::models::platform_entry_projection::StoredSenderIdentity::TelegramV1 {
+                telegram_sender_id: 1,
+                telegram_chat_id: 1,
+            },
             public_policy_revision: 1,
         },
         public_session_id: "public".into(),
@@ -949,13 +953,14 @@ async fn admitted_command(
     let update = contract::VerifiedManagerUpdate {
         profile_id: authority.manager.profile_id.clone(),
         manager_bot_id: authority.manager.manager_bot_id.clone(),
-        telegram_bot_id: authority.manager.telegram_bot_id,
+        entry: authority.manager.entry.clone(),
         observation_id: profile.observation_id,
-        sender_id: authority.sender_id,
-        chat_id: authority.chat_id,
+        sender: authority.sender.clone(),
         chat_kind: contract::ManagerChatKind::Private,
-        update_id: 100,
-        message_id: 100,
+        event: crate::models::platform_entry_projection::StoredEventIdentity::TelegramV1 {
+            update_id: 100,
+            message_id: 100,
+        },
         command_eligibility: contract::ManagerCommandEligibility::OriginalPrivateMessage,
     };
     let contract::IngressAdmission::Claimed {

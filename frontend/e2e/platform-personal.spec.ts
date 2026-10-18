@@ -47,6 +47,10 @@ const conversation = {
 async function fixture(page: Page, signedIn = true) {
   const state = {
     signedIn,
+    registered: false,
+    emailVerified: false,
+    requireMfa: false,
+    mfaVerified: false,
     timeOffset: 0,
     confirmed: false,
     revoked: false,
@@ -76,7 +80,7 @@ async function fixture(page: Page, signedIn = true) {
             display_name: "Owner",
             is_active: true,
             is_admin: true,
-            email_verified: true,
+            email_verified: state.emailVerified,
             created_at: at,
             capabilities: { enabled_features: ["assistant:nyxagent-engine"] },
           }
@@ -84,11 +88,42 @@ async function fixture(page: Page, signedIn = true) {
     } else if (path === "/public/config")
       json = {
         invite_code_required: true,
+        email_auth_enabled: true,
         social_providers: [],
         telemetry_share_analytics: false,
         telemetry_dsn: null,
       };
-    else if (path === "/platform-personal-links/preview")
+    else if (path === "/auth/register") {
+      expect(req.postDataJSON().invite_code).toBe("NYX-ABCDEFGH");
+      state.registered = true;
+      json = {
+        user_id: "owner",
+        message: "Registration processed. You can now sign in.",
+      };
+    } else if (path === "/auth/login") {
+      if (state.requireMfa) {
+        status = 403;
+        json = {
+          error_code: 2002,
+          error: "mfa_required",
+          message: "MFA required",
+          session_token: "synthetic-pending-mfa",
+        };
+      } else {
+        state.signedIn = true;
+        json = { user_id: "owner" };
+      }
+    } else if (path === "/auth/mfa/verify") {
+      expect(req.postDataJSON().mfa_token).toBe("synthetic-pending-mfa");
+      if (req.postDataJSON().code === "123456") {
+        state.signedIn = true;
+        state.mfaVerified = true;
+        json = { user_id: "owner" };
+      } else {
+        status = 401;
+        json = { error_code: 1001, message: "Invalid MFA code" };
+      }
+    } else if (path === "/platform-personal-links/preview")
       json = {
         purpose: "personal_nyxbot",
         status: "pending",
@@ -101,6 +136,8 @@ async function fixture(page: Page, signedIn = true) {
         requires_same_chat_confirmation: true,
       };
     else if (path === "/platform-personal-links/review") {
+      expect(state.signedIn).toBe(true);
+      expect(!state.requireMfa || state.mfaVerified).toBe(true);
       state.reviews++;
       json = {
         challenge_id: challengeId,
@@ -214,6 +251,29 @@ async function fixture(page: Page, signedIn = true) {
   return state;
 }
 
+async function submitEmailLogin(page: Page) {
+  await expect(
+    page.getByRole("heading", { name: "Welcome back", exact: true }),
+  ).toBeVisible();
+  const form = page.locator("form").filter({
+    has: page.getByPlaceholder("Enter your password", { exact: true }),
+  });
+  await expect(form).toHaveCount(1);
+  await form
+    .getByPlaceholder("you@example.com", { exact: true })
+    .fill("owner@example.com");
+  await form
+    .getByPlaceholder("Enter your password", { exact: true })
+    .fill("Synthetic-Password-1!");
+  const loginResponse = page.waitForResponse(
+    (response) =>
+      new URL(response.url()).pathname === "/api/v1/auth/login" &&
+      response.request().method() === "POST",
+  );
+  await form.getByRole("button", { name: "Sign in", exact: true }).click();
+  return loginResponse;
+}
+
 test("fragment intent survives registration navigation without bypassing invitations or approving consent", async ({
   page,
 }) => {
@@ -232,6 +292,89 @@ test("fragment intent survives registration navigation without bypassing invitat
   expect(
     await page.evaluate(() => localStorage.getItem("nyxid:personal-link:v1")),
   ).toBeNull();
+});
+
+for (const autoVerified of [false, true]) {
+  test(`registration and sign-in preserve chat intent with email_verified=${autoVerified}`, async ({
+    page,
+  }) => {
+    const state = await fixture(page, false);
+    state.emailVerified = autoVerified;
+    await page.goto(`/nyxbot/link#intent_token=${token}`);
+    await page.getByRole("link", { name: "Register", exact: true }).click();
+    await page.getByPlaceholder("NYX-XXXXXXXX").fill("NYX-ABCDEFGH");
+    await page.getByRole("button", { name: "Continue with Email" }).click();
+    await page.getByPlaceholder("John Doe").fill("Owner");
+    await page
+      .getByPlaceholder("you@example.com")
+      .last()
+      .fill("owner@example.com");
+    await page
+      .getByPlaceholder("Min 8 characters")
+      .fill("Synthetic-Password-1!");
+    await page
+      .getByPlaceholder("Re-enter your password")
+      .fill("Synthetic-Password-1!");
+    await page
+      .getByRole("button", { name: "Create Account", exact: true })
+      .click();
+    await expect(
+      page.getByText("Registration processed. You can now sign in."),
+    ).toBeVisible();
+    expect(state.registered).toBe(true);
+    expect(state.reviews).toBe(0);
+    expect(state.signedIn).toBe(false);
+    expect((await submitEmailLogin(page)).status()).toBe(200);
+    expect(
+      state.writes.filter((write) => write.path === "/auth/login"),
+    ).toHaveLength(1);
+    await expect(page).toHaveURL(/\/nyxbot\/link$/);
+    await page.getByRole("button", { name: "Review personal access" }).click();
+    await expect(page.getByText("NyxID account: Owner", { exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "Approve personal access" }).click();
+    await expect(
+      page.getByText("/confirm P-ABCD-EFGH", { exact: true }),
+    ).toBeVisible();
+    expect(state.confirmed).toBe(false);
+    expect(
+      state.writes.filter((w) => w.path === "/platform-personal-links/review"),
+    ).toHaveLength(1);
+    state.confirmed = true;
+    await page.getByRole("button", { name: "Refresh status" }).click();
+    await expect(page.getByText("Telegram is linked.")).toBeVisible();
+  });
+}
+
+test("MFA must finish before personal review and retains original intent after a rejected code", async ({
+  page,
+}) => {
+  const state = await fixture(page, false);
+  state.requireMfa = true;
+  await page.goto(`/nyxbot/link#intent_token=${token}`);
+  await page.getByRole("link", { name: "Sign in", exact: true }).click();
+  expect((await submitEmailLogin(page)).status()).toBe(403);
+  expect(
+    state.writes.filter((write) => write.path === "/auth/login"),
+  ).toHaveLength(1);
+  await expect(
+    page.getByRole("heading", { name: "MFA verification" }),
+  ).toBeVisible();
+  expect(state.reviews).toBe(0);
+  await page.getByLabel("Enter 6-digit verification code").fill("111111");
+  await page.getByRole("button", { name: "Verify", exact: true }).click();
+  await expect(page.getByText("Invalid MFA code")).toBeVisible();
+  expect(state.reviews).toBe(0);
+  expect(state.signedIn).toBe(false);
+  await page.getByLabel("Enter 6-digit verification code").fill("123456");
+  await page.getByRole("button", { name: "Verify", exact: true }).click();
+  await expect(page).toHaveURL(/\/nyxbot\/link$/);
+  expect(state.mfaVerified).toBe(true);
+  await page.getByRole("button", { name: "Review personal access" }).click();
+  await page.getByRole("button", { name: "Approve personal access" }).click();
+  await expect(
+    page.getByText("/confirm P-ABCD-EFGH", { exact: true }),
+  ).toBeVisible();
+  expect(state.confirmed).toBe(false);
 });
 
 test("one-time approval is never reconstructed after reload, then same-chat confirmation clears intent", async ({

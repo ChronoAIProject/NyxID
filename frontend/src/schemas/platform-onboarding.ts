@@ -144,7 +144,12 @@ export const platformProfileSchema = z.object({
   id: z.uuid(),
   channel_bot_id: z.uuid(),
   manager_bot_id: z.string(),
-  execution_profile: z.literal("platform_onboarding"),
+  execution_profile: z.enum(["platform_onboarding", "native_entry"]),
+  platform: z
+    .enum(["telegram", "discord", "slack", "whatsapp", "lark", "feishu", "x"])
+    .optional(),
+  transport: z.enum(["direct", "gateway"]).optional(),
+  supported_transports: z.array(z.enum(["direct", "gateway"])).optional(),
   generation: z.number().int(),
   enabled: z.boolean(),
   funding_owner_user_id: z.uuid(),

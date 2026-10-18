@@ -265,6 +265,7 @@ async fn ensure_core_indexes(db: &Database) -> Result<(), mongodb::error::Error>
     }
     crate::services::coordination_service::ensure_indexes(db).await?;
     crate::services::service_concurrency_service::ensure_indexes(db).await?;
+    crate::services::platform_entry_migration::ensure_indexes(db).await?;
     crate::services::platform_bot_config_service::ensure_indexes(db).await?;
     crate::services::platform_setup_service::ensure_indexes(db).await?;
     crate::services::platform_binding_service::ensure_indexes(db).await?;
@@ -3417,6 +3418,9 @@ async fn ensure_service_indexes(db: &Database) -> Result<(), mongodb::error::Err
 
     crate::services::oracle_login_profile_service::ensure_indexes(db).await?;
     crate::services::oracle_worker_enrollment_service::ensure_indexes(db).await?;
+    crate::services::call_channels::session::ensure_indexes(db)
+        .await
+        .map_err(|e| mongodb::error::Error::custom(e.to_string()))?;
 
     // ── oracle_login_snapshots ──
     let oracle_login_snapshots =

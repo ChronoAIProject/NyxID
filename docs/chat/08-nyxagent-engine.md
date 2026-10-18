@@ -465,10 +465,16 @@ account inventory is:
 | Area | Tools (prefix every name with `nyxid__`) | Destructive |
 | --- | --- | --- |
 | Agent keys | `list_agent_keys`, `get_agent_key`, `update_agent_key`, `delete_agent_key`, `list_agent_key_bindings`, `bind_agent_key_credential`, `unbind_agent_key_credential` | `delete_agent_key`, `unbind_agent_key_credential` |
+| Phone and speech capabilities | `list_channel_adapters` | None |
 | Channel bots/routes | `list_channel_bots`, `get_channel_bot`, `update_channel_bot`, `delete_channel_bot`, `list_channel_routes`, `set_channel_route`, `delete_channel_route` | `delete_channel_bot`, `delete_channel_route` |
 | Connected services | `list_my_services`, `set_service_enabled`, `delete_service` | `delete_service` |
 | Nodes | `list_nodes`, `delete_node` | `delete_node` |
 | Approvals | `list_approval_configs`, `set_approval_mode`, `list_pending_approvals` | None |
+
+`list_channel_adapters` returns the compiled capability catalog, rollout status
+and a link to owner setup. Binding management and secret issuance require the
+first-party owner UI or API. See [NyxBot service adapters](../NYXBOT_SERVICE_ADAPTERS.md)
+for phone/SMS and ElevenLabs setup, guest FAQ access and live instruction updates.
 
 Key updates accept metadata, callback URL, rate limits, service/node flags,
 `allowed_service_slugs` resolved to owner-visible IDs and node IDs. Bot updates
