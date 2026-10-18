@@ -1,41 +1,52 @@
-# Claim links carry a short-lived bearer. Redact them before access logging and
-# suppress the initial document's referrer before the browser loads any assets.
+# Proxy claim protection is additional to the SPA's unconditional no-referrer.
 map $request_uri $nyxid_has_claim {
     default 0;
+    # $request_uri retains the initial path across the SPA's /index.html
+    # internal redirect; $uri does not.
+    ~^/channel-bots(?:[?]|$) 1;
     ~[?&]claim(?:=|&|$) 1;
 }
-map $nyxid_has_claim $nyxid_referrer_policy {
-    0 "strict-origin-when-cross-origin";
-    default "no-referrer";
-}
-map $nyxid_has_claim $nyxid_access_request {
-    0 $request;
-    default "$request_method $uri?claim=REDACTED $server_protocol";
-}
-map $http_referer $nyxid_access_referrer {
-    default $http_referer;
-    ~[?&]claim= "REDACTED";
+# Never write raw queries or Referer values. This also protects encoded names,
+# duplicate parameters and asset requests from a client ignoring the policy.
+map $request_uri $nyxid_access_path {
+    default $uri;
+    ~^(?<nyxid_path_without_query>[^?]*) $nyxid_path_without_query;
 }
 log_format nyxid_frontend '$remote_addr - $remote_user [$time_local] '
-    '"$nyxid_access_request" $status $body_bytes_sent '
-    '"$nyxid_access_referrer" "$http_user_agent"';
+    '"$request_method $nyxid_access_path $server_protocol" $status $body_bytes_sent '
+    '"-" "$http_user_agent"';
 
-include /etc/nginx/legal-cache.conf;
+# Proxy responses keep their own API/OAuth/credential policy. A proxy failure
+# receives a restrictive fallback, never the SPA's policy.
+map $upstream_http_content_security_policy $nyxid_proxy_csp {
+    default $upstream_http_content_security_policy;
+    "" "default-src 'none'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'";
+}
+map "$nyxid_has_claim:$upstream_http_referrer_policy" $nyxid_proxy_referrer {
+    default $upstream_http_referrer_policy;
+    ~^1: "no-referrer";
+    "0:" "strict-origin-when-cross-origin";
+}
+map $upstream_http_permissions_policy $nyxid_proxy_permissions {
+    default $upstream_http_permissions_policy;
+    "" "camera=(), microphone=(), geolocation=(), interest-cohort=()";
+}
+
+include @@LEGAL_CACHE@@;
 
 server {
-    listen 8080;
+    listen @@PORT@@;
     server_name _;
 
     # Disable absolute redirects to prevent internal port leaks in reverse proxy setups (e.g. :8080)
     absolute_redirect off;
 
-    root /usr/share/nginx/html;
+    root @@ROOT@@;
     index index.html;
 
-    # Security headers
-    add_header X-Frame-Options "DENY" always;
-    add_header X-Content-Type-Options "nosniff" always;
-    add_header Referrer-Policy $nyxid_referrer_policy always;
+    # nginx 1.27 stops inheriting add_header as soon as a child adds any.
+    # Every location includes its complete, response-specific header policy.
+    include @@STATIC_HEADERS@@;
     access_log /var/log/nginx/access.log nyxid_frontend;
 
     # Gzip compression
@@ -46,8 +57,9 @@ server {
     gzip_types text/plain text/css application/json application/javascript text/xml application/xml application/xml+rss text/javascript image/svg+xml;
 
     # Proxy API requests to the backend
-    location /api/ {
-        proxy_pass ${BACKEND_URL};
+    location ^~ /api/ {
+        include @@PROXY_HEADERS@@;
+        proxy_pass @@BACKEND_URL@@;
         proxy_http_version 1.1;
         proxy_buffer_size 32k;
         proxy_buffers 8 32k;
@@ -64,19 +76,32 @@ server {
         # nginx's default 1 MiB cap from rejecting complete 2 MiB text replies.
         location ~ ^/api/v1/channel-relay/(reply|thread-reply)$ {
             client_max_body_size 32m;
-            proxy_pass ${BACKEND_URL};
+            proxy_pass @@BACKEND_URL@@;
         }
+    }
+
+    # Standalone credential scripts are verified and served by the backend.
+    # ^~ prevents the static .js regex from intercepting this prefix.
+    location ^~ /credential-accept/ {
+        include @@PROXY_HEADERS@@;
+        proxy_pass @@BACKEND_URL@@;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
     }
 
     # TEMPORARY: pre-rename backends redirect popup completions to /oauth.
     # Remove after one full release cycle with no old backend callbacks.
     location = /oauth {
+        include @@STATIC_HEADERS@@;
         return 302 /oauth-complete$is_args$args;
     }
 
     # Proxy OAuth requests to the backend
-    location /oauth/ {
-        proxy_pass ${BACKEND_URL};
+    location ^~ /oauth/ {
+        include @@PROXY_HEADERS@@;
+        proxy_pass @@BACKEND_URL@@;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
@@ -84,8 +109,9 @@ server {
     }
 
     # Proxy OIDC discovery endpoints to the backend
-    location /.well-known {
-        proxy_pass ${BACKEND_URL};
+    location ^~ /.well-known {
+        include @@PROXY_HEADERS@@;
+        proxy_pass @@BACKEND_URL@@;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
@@ -93,8 +119,9 @@ server {
     }
 
     # Proxy MCP StreamableHTTP endpoint to the backend
-    location /mcp {
-        proxy_pass ${BACKEND_URL};
+    location ^~ /mcp {
+        include @@PROXY_HEADERS@@;
+        proxy_pass @@BACKEND_URL@@;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
@@ -105,21 +132,17 @@ server {
     }
 
     # Proxy health check to the backend
-    location /health {
-        proxy_pass ${BACKEND_URL};
+    location ^~ /health {
+        include @@PROXY_HEADERS@@;
+        proxy_pass @@BACKEND_URL@@;
         proxy_set_header Host $host;
         proxy_hide_header Cache-Control;
         add_header Cache-Control "no-store" always;
-        add_header X-Frame-Options "DENY" always;
-        add_header X-Content-Type-Options "nosniff" always;
-        add_header Referrer-Policy $nyxid_referrer_policy always;
     }
 
     location = /build-version.json {
         add_header Cache-Control "no-store" always;
-        add_header X-Frame-Options "DENY" always;
-        add_header X-Content-Type-Options "nosniff" always;
-        add_header Referrer-Policy $nyxid_referrer_policy always;
+        include @@STATIC_HEADERS@@;
         try_files $uri =404;
     }
 
@@ -127,9 +150,7 @@ server {
     location ~* \.(?:js|css|woff2?|svg|png|jpg|jpeg|gif|ico)$ {
         expires 1y;
         add_header Cache-Control "public, immutable";
-        add_header X-Frame-Options "DENY" always;
-        add_header X-Content-Type-Options "nosniff" always;
-        add_header Referrer-Policy $nyxid_referrer_policy always;
+        include @@STATIC_HEADERS@@;
         try_files $uri =404;
     }
 
@@ -143,9 +164,7 @@ server {
         if ($http_if_none_match = $nyxid_legal_etag) { return 304; }
         add_header ETag $nyxid_legal_etag;
         add_header Cache-Control "public, max-age=86400, must-revalidate";
-        add_header X-Frame-Options "DENY" always;
-        add_header X-Content-Type-Options "nosniff" always;
-        add_header Referrer-Policy $nyxid_referrer_policy always;
+        include @@STATIC_HEADERS@@;
         try_files /privacy.html =404;
     }
 
@@ -157,9 +176,7 @@ server {
         if ($http_if_none_match = $nyxid_legal_etag) { return 304; }
         add_header ETag $nyxid_legal_etag;
         add_header Cache-Control "public, max-age=86400, must-revalidate";
-        add_header X-Frame-Options "DENY" always;
-        add_header X-Content-Type-Options "nosniff" always;
-        add_header Referrer-Policy $nyxid_referrer_policy always;
+        include @@STATIC_HEADERS@@;
         try_files /terms.html =404;
     }
 
@@ -172,9 +189,7 @@ server {
     # still served by the `$uri` match; client routes fall through to index.html.
     location / {
         add_header Cache-Control "no-cache" always;
-        add_header X-Frame-Options "DENY" always;
-        add_header X-Content-Type-Options "nosniff" always;
-        add_header Referrer-Policy $nyxid_referrer_policy always;
+        include @@STATIC_HEADERS@@;
         try_files $uri /index.html;
     }
 }

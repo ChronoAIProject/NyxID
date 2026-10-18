@@ -87,9 +87,100 @@ private `proc_macro` extern crate (E0365, rust-lang/rust#127909). This is record
 for W7 dependency remediation, not hidden and not counted as a W6 failure.
 `w7-future-incompat-inventory.log` retains Cargo's report.
 
+## W5 production browser delivery — host evidence, PM image validation pending
+
+Implemented a validated origin-only nginx renderer and enforcing SPA CSP with
+no script inline/eval permission. Complete per-location headers preserve the
+backend API/OAuth/standalone policies, including backend paths ending `.js`.
+Trusted deployment HTTPS alone enables bare one-year HSTS; Host/forwarded proto
+cannot enable it. The backend wrapper now encloses early limiter/router errors.
+All SPA delivery uses no-referrer; actual literal/encoded/duplicate query names,
+encoded/trailing receiver paths and same-origin resource/external referrers are
+covered before JavaScript runs. Access logs omit queries and Referer values.
+
+Backend packaging now includes the standalone credential HTML/scripts/manifest;
+frontend and backend credential builders share Node22.23.2, npm lockfile and
+source/epoch inputs. Actual shipped-image parity remains a required W7 release
+gate. Runtime API/telemetry URLs are validated and custom connection origins
+require explicit deployment admission. Bundled PostHog disables remote config,
+lazy dependency scripts, flags/surveys/replay while preserving consent/DNT and
+redaction. Font/theme inline handlers were removed; Unicorn has pinned SRI.
+
+The real production browser exposed two compatibility failures: Zod compiled
+schemas using eval, and MFA did not refresh the live auth store before protected
+navigation. Exact build aliases initialize Zod's interpreter before every schema
+in SPA/standalone/wizard entry graphs. MFA uses the existing session check, with
+PM's one-shot correction: successful/uncertain POSTs are never replayed during
+session-confirm retry; 503 preserves confirmation, 401 returns to login for a
+fresh challenge, and network uncertainty checks the cookie first. Backend MFA
+policy is unchanged. Telegram's vendor data-onauth eval callback was replaced
+by bounded schema-validated messages bound to exact origin AND owned frame,
+with duplicate/in-flight protection and listener cleanup.
+
+Committed regression harness sources are documented in
+`docs/BROWSER_SECURITY_POLICY.md`. Recorded public vendor/font fixtures retain
+source/length/SHA256 receipts; cached offline copy was also verified. The harness
+serves actual built dist through generated nginx, mocks transport only, collects
+real CSP violation events and asserts expected rejection destinations. The
+credential transport fixture does not execute the Rust handler; its tests are
+separate. Native nginx1.31.6 results do not substitute for production1.27.
+
+Final host evidence uses the validation root above:
+
+- `SOURCE_COMMIT=ec07a6bb SOURCE_DATE_EPOCH=1792358680 npm run build` from frontend:
+  passed (`w5-frontend-build-final.log`).
+- `npm test -- src/hooks/use-auth.test.tsx src/components/auth/mfa-verify-form.test.tsx src/stores/auth-store.test.ts src/lib/telemetry.test.ts src/schemas/runtime-config.test.ts`:
+  5 files,85 tests passed (`w5-vitest-final.log`). The runtime/telemetry cases
+  reject missing authority and raw empty query/fragment delimiters; admitted
+  origins are canonicalized before API path concatenation.
+- `python3 frontend/scripts/test-nginx-policy.py`:4 passed, including origin/policy
+  injection and split-origin/response-specific policy checks.
+- `verify-production-policy.py` against plain and configured-HTTPS servers:
+  22 HTTP responses each passed (`w5-http-boundary-final.json`,
+  `w5-https-boundary-final.json`); includes real nginx502/413, nested reply
+  2MiB success/33MiB rejection, legal304/405 and header uniqueness.
+  The loopback hop is HTTP behind a configured HTTPS boundary, not a TLS test.
+- Targeted ESLint, Python compile, Rust fmt and diff whitespace checks passed.
+
+The final browser command is `npm exec playwright test -- --config
+playwright.production.config.ts`, with `NYXID_PRODUCTION_TEST_URL`, actual
+`NYXID_NGINX_ACCESS_LOG`, recorded `NYXID_TEST_FONT`, Chrome executable and
+external JSON output as documented:22 passed,0 failed in30.6s
+(`w5-native-browser-final.log`, `w5-native-browser-results.json`). Every test
+rejects unexpected CSP violations; the injection case annotates only its three
+intended directive/destination pairs. Earlier16/16 browser evidence was
+expanded for review. First-failure traces remain outside source; the latest
+runtime-negative initial failure was a test locator expecting an absent alert
+role, corrected to the actual visible error while preserving CSP rejection.
+
+Final backend command, with the bounded Cargo environment above, was
+`cargo test --locked -p nyxid --bin nyxid-server mw::security_headers -- --nocapture`:
+23 passed,0 failed,0 ignored (`w5-backend-headers-final.log`), including outermost
+429/404 handling. The resulting final-source test binary
+`target/debug/deps/nyxid_server-38b69207024186fc handlers::credential_accept --nocapture`
+then passed4,0 failed,0 ignored (`w5-backend-credential-final.log`). These tests
+exercise local HTTP/handler policy and do not claim database integration.
+The host linker reported its large unwind-table performance warning; the known
+proc-macro-error2 future-incompatibility remains assigned to W7.
+
+`SOURCE_COMMIT=ec07a6bb SOURCE_DATE_EPOCH=1792358680 npm run build:wizard` passed
+and regenerated the embedded wizard assets. The unchanged Rust wizard freshness
+test, compiled standalone against existing sha2/hex dependencies to avoid a
+second full CLI rebuild, passed1/0 (`w5-wizard-freshness-final.log`).
+
+PM owns exact frontend image1.27/browser, default-entrypoint and invalid-env
+execution on this stable source. `smoke-frontend-image.py` runs the packaged
+default entrypoint without overrides; image-server mode verifies extracted
+dist byte parity and records actual image metadata/headers/logs. Those container
+checks are pending, never counted as native passes.
+
+PM additionally reported final W6 ec07a6bb real container acceptance: both
+migration/companion rollback parent harness tests passed and production scratch
+8 checks passed; PM's original logs/ledger own that independent evidence.
+
 ## Remaining authorized batches
 
-W5 production CSP/header/runtime-origin delivery and browser matrix; W7 pinned,
+W5 final container review/integration; W7 pinned,
 locked and scanned builds, shipped-artifact SBOMs and mandatory official manifest
 signing; W9 all new-key creation defaults, readiness, real OS identity/key-service
 boundaries and resumable full secret migration; W8 strict attribution, complete

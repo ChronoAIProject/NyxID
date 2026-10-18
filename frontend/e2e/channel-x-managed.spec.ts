@@ -1,4 +1,5 @@
-import { expect, test } from "@playwright/test";
+import { expect } from "@playwright/test";
+import { test } from "./production-policy-fixture";
 import { mockDashboard } from "./managed-onboarding-fixtures";
 
 const connection = "11111111-1111-4111-8111-111111111111";

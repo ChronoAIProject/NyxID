@@ -1,3 +1,4 @@
+import "./lib/zod-csp";
 /* eslint-disable react-refresh/only-export-components -- standalone entry exports a pure helper for focused tests. */
 
 /**

@@ -65,6 +65,8 @@ services:
       - "127.0.0.1:3000:8080"
     environment:
       BACKEND_URL: http://backend:3001
+      NYXID_PUBLIC_ORIGIN: ${FRONTEND_URL:-http://localhost:3000}
+      NYXID_BROWSER_CONNECT_ORIGINS: ${NYXID_BROWSER_CONNECT_ORIGINS:-}
     depends_on:
       - backend
 

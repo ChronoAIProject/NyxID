@@ -2,6 +2,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { renderHook, waitFor } from "@testing-library/react";
 import type { PropsWithChildren } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { ApiError } from "@/lib/api-client";
 import {
   useLogin,
   useLogout,
@@ -20,17 +21,18 @@ const { mockGet, mockPost, storeFns } = vi.hoisted(() => ({
     logout: vi.fn(),
     setUser: vi.fn(),
     clearMfaState: vi.fn(),
+    checkAuth: vi.fn(),
   },
 }));
 
-vi.mock("@/lib/api-client", () => ({
+vi.mock("@/lib/api-client", async () => ({
+  ...await vi.importActual<typeof import("@/lib/api-client")>("@/lib/api-client"),
   api: { get: mockGet, post: mockPost },
 }));
 
 // `use-auth` reads store actions via selectors: useAuthStore((s) => s.login).
 vi.mock("@/stores/auth-store", () => ({
-  useAuthStore: (selector: (s: typeof storeFns) => unknown) =>
-    selector(storeFns),
+  useAuthStore: (selector: (s: typeof storeFns) => unknown) => selector(storeFns),
 }));
 
 function setup() {
@@ -50,6 +52,7 @@ function setup() {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  storeFns.checkAuth.mockResolvedValue(undefined);
 });
 
 describe("useUser", () => {
@@ -150,6 +153,61 @@ describe("useMfaSetup", () => {
 });
 
 describe("useMfaVerify", () => {
+  it("serializes concurrent submissions without replaying the one-shot POST", async () => {
+    let finish!: () => void;
+    mockPost.mockReturnValueOnce(new Promise<void>((resolve) => { finish = resolve; }));
+    const { wrapper } = setup();
+    const { result } = renderHook(() => useMfaVerify(), { wrapper });
+    const data = { code: "123456", mfa_token: "one-shot" };
+    const first = result.current.mutateAsync(data);
+    const second = result.current.mutateAsync(data);
+    await waitFor(() => expect(mockPost).toHaveBeenCalledTimes(1));
+    finish();
+    await Promise.all([first, second]);
+    expect(mockPost).toHaveBeenCalledTimes(1);
+  });
+  it("retries only session confirmation after a one-shot verify succeeds and refresh fails", async () => {
+    mockPost.mockResolvedValue(undefined);
+    storeFns.checkAuth.mockRejectedValueOnce(new Error("Unavailable"));
+    const { wrapper } = setup();
+    const { result } = renderHook(() => useMfaVerify(), { wrapper });
+    await expect(result.current.mutateAsync({ code: "123456", mfa_token: "mfa-tok" })).rejects.toThrow("Could not confirm your session");
+    expect(storeFns.clearMfaState).not.toHaveBeenCalled();
+    await result.current.mutateAsync({ code: "123456", mfa_token: "mfa-tok" });
+    expect(mockPost).toHaveBeenCalledTimes(1);
+    expect(storeFns.checkAuth).toHaveBeenCalledTimes(2);
+    expect(storeFns.clearMfaState).toHaveBeenCalledTimes(1);
+  });
+  it("discards the pending challenge and restarts login when session confirmation returns 401", async () => {
+    mockPost.mockResolvedValue(undefined);
+    storeFns.checkAuth.mockRejectedValueOnce(new ApiError(401, { error: "unauthorized", error_code: 1001, message: "Not authenticated" }));
+    const { wrapper } = setup();
+    const { result } = renderHook(() => useMfaVerify(), { wrapper });
+    await expect(result.current.mutateAsync({ code: "123456", mfa_token: "consumed" })).rejects.toThrow("Could not confirm your session");
+    expect(storeFns.clearMfaState).toHaveBeenCalledTimes(1);
+    expect(mockPost).toHaveBeenCalledTimes(1);
+  });
+  for (const error of [new TypeError("Network lost"), new ApiError(503, { error: "unavailable", error_code: 5000, message: "Unavailable" })]) {
+    it(`checks the session before retry after uncertain POST: ${error.name}`, async () => {
+      mockPost.mockRejectedValueOnce(error);
+      storeFns.checkAuth.mockRejectedValueOnce(new Error("Unavailable"));
+      const { wrapper } = setup();
+      const { result } = renderHook(() => useMfaVerify(), { wrapper });
+      await expect(result.current.mutateAsync({ code: "123456", mfa_token: "uncertain" })).rejects.toThrow("Could not confirm your session");
+      await result.current.mutateAsync({ code: "123456", mfa_token: "uncertain" });
+      expect(mockPost).toHaveBeenCalledTimes(1);
+      expect(storeFns.checkAuth).toHaveBeenCalledTimes(2);
+    });
+  }
+  it("allows a corrected code after a definite challenge rejection", async () => {
+    mockPost.mockRejectedValueOnce(new ApiError(400, { error: "invalid_code", error_code: 2003, message: "Invalid code" })).mockResolvedValueOnce(undefined);
+    const { wrapper } = setup();
+    const { result } = renderHook(() => useMfaVerify(), { wrapper });
+    await expect(result.current.mutateAsync({ code: "000000", mfa_token: "pending" })).rejects.toThrow("Invalid code");
+    expect(storeFns.checkAuth).not.toHaveBeenCalled();
+    await result.current.mutateAsync({ code: "123456", mfa_token: "pending" });
+    expect(mockPost).toHaveBeenCalledTimes(2);
+  });
   it("injects client:web, clears MFA state and invalidates the user query", async () => {
     mockPost.mockResolvedValue(undefined);
     const { wrapper, invalidateSpy } = setup();
@@ -163,6 +221,9 @@ describe("useMfaVerify", () => {
       client: "web",
     });
     expect(storeFns.clearMfaState).toHaveBeenCalledTimes(1);
+    expect(storeFns.checkAuth).toHaveBeenCalledTimes(1);
+    expect(storeFns.checkAuth).toHaveBeenCalledWith({ requireSession: true });
+    expect(storeFns.checkAuth.mock.invocationCallOrder[0]).toBeLessThan(storeFns.clearMfaState.mock.invocationCallOrder[0]!);
     expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["user"] });
   });
 });

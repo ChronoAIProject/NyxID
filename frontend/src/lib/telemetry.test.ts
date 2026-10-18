@@ -15,7 +15,7 @@ const mockPosthog = vi.hoisted(() => ({
   has_opted_out_capturing: vi.fn(() => false),
 }));
 
-vi.mock("posthog-js", () => ({
+vi.mock("posthog-js/dist/module.no-external", () => ({
   default: mockPosthog,
 }));
 
@@ -135,6 +135,15 @@ describe("initTelemetry", () => {
       "phc_test_dsn",
       expect.objectContaining({ api_host: "https://us.i.posthog.com" }),
     );
+  });
+  it.each(["https:api.example", "https://api.example?", "https://api.example#", "https:///api.example"])("does not initialize telemetry with ambiguous host %s", (host) => {
+    initTelemetry({ ...validArgs, host });
+    expect(mockPosthog.init).not.toHaveBeenCalled();
+    expect(isTelemetryActive()).toBe(false);
+  });
+  it("canonicalizes a validated telemetry origin before endpoint concatenation", () => {
+    initTelemetry({ ...validArgs, host: "https://API.example:443/" });
+    expect(mockPosthog.init).toHaveBeenCalledWith("phc_test_dsn", expect.objectContaining({ api_host: "https://api.example" }));
   });
 });
 

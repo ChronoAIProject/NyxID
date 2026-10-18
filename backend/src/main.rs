@@ -1552,36 +1552,41 @@ async fn server_main() {
     // Applying it to one branch, or merging a router after it, would
     // silently exempt those routes.
     let internal_node_dispatch = state.node_dispatch.clone();
-    let app = mw::security_headers::with_response_headers(
-        public_oauth
-            .merge(private_api)
-            .with_state(state)
-            .layer(DefaultBodyLimit::max(1_048_576))
-            .layer(axum_mw::from_fn_with_state::<
-                _,
-                _,
-                (
-                    axum::extract::State<mw::rate_limit::DeviceCodeRateLimiters>,
-                    axum::http::Request<axum::body::Body>,
-                ),
-            >(
-                device_code_rate_limiters,
-                mw::rate_limit::device_code_rate_limit_middleware,
-            )),
-    )
-    .layer(axum_mw::from_fn(mw::rate_limit::rate_limit_middleware))
-    // Derive `TelemetryContext` from the `X-NyxID-Client` headers on
-    // every request and stash it in request extensions so handlers
-    // can read it when they emit events. Header-only; the
-    // `surface="agent"` override for api-key auth happens at emit
-    // time in `emit_event` (see `docs/TELEMETRY.md` §5.1).
-    .layer(axum_mw::from_fn(mw::telemetry::telemetry_mw))
-    .layer(Extension(per_ip_rate_limiter))
-    .layer(Extension(global_rate_limiter))
-    .layer(Extension(trusted_proxy_ranges))
-    .layer(Extension(rate_limit_exempt_ips))
-    .layer(TraceLayer::new_for_http().make_span_with(mw::request_trace::span::<axum::body::Body>))
-    .layer(axum_mw::from_fn(mw::assistant_trace::assistant_trace));
+    let public_backend_url = state.config.base_url.clone();
+    let app = public_oauth
+        .merge(private_api)
+        .with_state(state)
+        .layer(DefaultBodyLimit::max(1_048_576))
+        .layer(axum_mw::from_fn_with_state::<
+            _,
+            _,
+            (
+                axum::extract::State<mw::rate_limit::DeviceCodeRateLimiters>,
+                axum::http::Request<axum::body::Body>,
+            ),
+        >(
+            device_code_rate_limiters,
+            mw::rate_limit::device_code_rate_limit_middleware,
+        ))
+        .layer(axum_mw::from_fn(mw::rate_limit::rate_limit_middleware))
+        // Derive `TelemetryContext` from the `X-NyxID-Client` headers on
+        // every request and stash it in request extensions so handlers
+        // can read it when they emit events. Header-only; the
+        // `surface="agent"` override for api-key auth happens at emit
+        // time in `emit_event` (see `docs/TELEMETRY.md` §5.1).
+        .layer(axum_mw::from_fn(mw::telemetry::telemetry_mw))
+        .layer(Extension(per_ip_rate_limiter))
+        .layer(Extension(global_rate_limiter))
+        .layer(Extension(trusted_proxy_ranges))
+        .layer(Extension(rate_limit_exempt_ips))
+        .layer(
+            TraceLayer::new_for_http().make_span_with(mw::request_trace::span::<axum::body::Body>),
+        )
+        .layer(axum_mw::from_fn(mw::assistant_trace::assistant_trace));
+    // Wrap last so early middleware errors (including rate limits) receive
+    // the same deployment-controlled policy as handler responses.
+    let app = mw::security_headers::with_response_headers_for_origin(app, &public_backend_url)
+        .expect("BASE_URL must be a valid public HTTP(S) URL without credentials");
 
     // Bind both listeners before serving. Internal routes never enter the
     // public router and therefore cannot be exposed by an ingress path rule.
