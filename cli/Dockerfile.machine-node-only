@@ -19,6 +19,10 @@ RUN sed -i 's|http://|https://|g' /etc/apt/sources.list.d/debian.sources \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build
+COPY scripts/bootstrap-build-tool.py /opt/nyxid-build-inputs/scripts/bootstrap-build-tool.py
+COPY security/build-tools.json /opt/nyxid-build-inputs/security/build-tools.json
+RUN python3 /opt/nyxid-build-inputs/scripts/bootstrap-build-tool.py cargo-auditable --bin-dir /usr/local/cargo/bin
+
 COPY Cargo.toml Cargo.lock ./
 COPY vendor/ vendor/
 COPY backend/ backend/
@@ -32,7 +36,7 @@ COPY machine/ machine/
 COPY machine-updater/ machine-updater/
 COPY docs/AI_AGENT_PLAYBOOK.md docs/AI_AGENT_PLAYBOOK.md
 
-RUN cargo build --locked --release -p nyxid-cli --bin nyxid \
+RUN cargo auditable build --locked --release -p nyxid-cli --bin nyxid \
     && install -Dm0755 target/release/nyxid /out/nyxid
 
 # Ubuntu LTS gives the fixed profile the ordinary shell/file tooling required

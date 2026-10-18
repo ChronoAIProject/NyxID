@@ -41,6 +41,8 @@ def check(root, plan=None):
     # or from permissive regular expressions over the source manifest.
     metadata = json.loads(subprocess.check_output(
         ["cargo", "metadata", "--locked", "--no-deps", "--format-version=1"], cwd=root, text=True))
+    if metadata["metadata"].get("dist", {}).get("cargo-auditable") is not True:
+        errors.append("Cargo dist metadata: shipped binaries require cargo-auditable")
     errors.extend(check_containers(metadata["metadata"].get("dist", {}), image_pins, "Cargo dist metadata"))
     if plan is not None:
         errors.extend(check_containers(plan, image_pins, "generated dist plan"))
@@ -63,11 +65,13 @@ def check(root, plan=None):
                 errors.append(str(path.relative_to(root)) + ": unpinned Action " + value)
             elif (repo, ref) not in action_pins:
                 errors.append(str(path.relative_to(root)) + ": Action pin lacks resolution receipt " + value)
-        if re.search(r"matrix\.(?:install_dist|packages_install)", text):
+        # cargo-dist also emits an unchecked latest installer for auditable.
+        # Reject dot and bracket access before regeneration can consume it.
+        if re.search(r"matrix\s*(?:\.\s*(?:install_dist|install_cargo_auditable|packages_install)\b|\[\s*['\"](?:install_dist|install_cargo_auditable|packages_install)['\"]\s*\])", text):
             errors.append(str(path.relative_to(root)) + ": executable generated installer/package input")
         if "sh.rustup.rs" in text or "cargo-dist-installer.sh" in text:
             errors.append(str(path.relative_to(root)) + ": unchecked bootstrap installer")
-        if re.search(r"cargo build(?![^\n]*(?:--locked|--frozen))", text):
+        if re.search(r"cargo (?:auditable )?build(?![^\n]*(?:--locked|--frozen))", text):
             errors.append(str(path.relative_to(root)) + ": Rust build does not enforce lockfile")
     paths = subprocess.check_output(["git", "ls-files", "*Dockerfile*"], cwd=root, text=True).splitlines()
     for name in paths:
@@ -91,12 +95,17 @@ def check(root, plan=None):
                 stages.add(stage)
         if "sh.rustup.rs" in text:
             errors.append(name + ": unchecked Rust installer")
-        if re.search(r"cargo build(?![^\n]*(?:--locked|--frozen))", text):
+        if re.search(r"cargo (?:auditable )?build(?![^\n]*(?:--locked|--frozen))", text):
             errors.append(name + ": Rust build does not enforce lockfile")
+        commands = '\n'.join(line for line in text.splitlines() if not line.lstrip().startswith('#'))
+        if name not in ("cli/tests/machine_context_spike/Dockerfile",) and re.search(r"\bcargo build\b", commands):
+            errors.append(name + ": shipped Rust build omits auditable metadata")
     for name in ("release.yml", "release-cache.yml"):
         text = (root / ".github/workflows" / name).read_text()
         if "scripts/bootstrap-build-tool.py cargo-dist" not in text:
             errors.append(name + ": missing checksummed dist bootstrap")
+        if "scripts/bootstrap-build-tool.py cargo-auditable" not in text:
+            errors.append(name + ": missing checksummed cargo-auditable bootstrap")
     return errors
 
 

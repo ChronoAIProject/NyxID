@@ -15,7 +15,8 @@ WORKDIR /src
 # Build the reviewed checkout; the external Glama UI must select an immutable
 # source revision and supply this same repository context.
 COPY . .
-RUN cargo build --locked --release -p nyxid-mcp-demo \
+RUN python3 scripts/bootstrap-build-tool.py cargo-auditable --bin-dir /usr/local/cargo/bin
+RUN cargo auditable build --locked --release -p nyxid-mcp-demo \
  && strip target/release/nyxid-mcp-demo
 
 FROM debian:trixie-slim@sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d765c46aea49f11f

@@ -472,6 +472,65 @@ freshness passes1/1 with0 ignored. Evidence is
 host correction; the failed738 image log remains preserved, and PM owns the
 exact descendant container rerun. No functional-image pass is claimed here.
 
+## W7 final Rust metadata, standard SBOM and bootstrap batch
+
+The shipped Rust Docker builds and cargo-dist metadata now require the pinned
+cargo-auditable0.7.7 tool. The shared bootstrap selects Darwin/GNU/musl by the
+actual host ABI and rejects unknown/unavailable per-tool targets (R1-14).
+Generated installer admission rejects install_cargo_auditable in dot and
+bracket syntax (R1-13), alongside existing generated dist/package commands.
+The isolated locked artifact-tools root uses maintained auditable-info0.10.1,
+has Dependabot/fmt/Clippy coverage, and its actual Cargo dependency scan passed.
+
+Actual host dist builds with strip=true passed: updater4m43s and CLI8m15s.
+The final updater Mach-O is11276944bytes, SHA256
+dbeb3b99e24ed29dcd76cbaebe047827f2681cccd9ba4e4100cb4582e8414f73,
+with353 metadata packages (301runtime/52build). The final CLI Mach-O is
+33215904bytes, SHA256
+7b2e3f7ef6053fef2c2313ce21bbfe2c468af5e4eea1d1ac11c8b5265cd6d007,
+with541 packages (485runtime/56build). Independent pinned Syft1.54.1 inventories
+match both runtime sets. Stable Cargo metadata can conservatively include
+extra dependencies generally; this is not per-crate emitted-byte attribution.
+
+The CLI final binary contains all9 sealed wizard assets, including its seal;
+the raw seal SHA256 is
+f54eca14dbd0fd6d0eace932fb4c231ee17f479cba10082df2d8882bbef52f3c.
+The CLI CycloneDX1.6 document has614 components including the retained JS/CSS,
+static files and HTML provenance; updater has353. Both actual documents pass
+the pinned official schema offline. Registry purls are limited to authenticated
+registry-source metadata; local patched code has exact reviewed-file/patch and
+upstream-ancestor pedigree. Unsupported git/custom origins fail. Pedigree does
+not exempt the dependency/version from source/ancestor vulnerability scanning.
+
+Pinned Alpine rust1.98.1 image bootstrap selected the actual musl tool, compiled
+a locked two-package fixture, stripped it, and ran it with expected output42.
+The maintained parser reads its retained ELF metadata. Native guest GNU
+bootstrap and the same locked fixture compile also pass. These fixture runs
+establish ABI selection and stripped-ELF handling; they do not replace final
+application ELF/image acceptance. The scratch context and exact commands are
+retained in w7-auditable-alpine-context.tar and the adjacent build/runtime logs.
+
+Focused checks pass: build-input14, embedded-byte3, binary-SBOM7, official-schema3;
+artifact-tools fmt/Clippy, strict workflow YAML and existing build-input checks
+pass. An actual executable without dependency metadata is rejected. The new
+validator has6 integrity-locked Python packages (159official wheel hashes),
+requires Python3.9+, and runs under explicit Python3.12 CI. It is not installed
+in focal's Python3.8 local-build job. Official CycloneDX schemas/LICENSE resolve
+to55343ba19dee1785acf1ce9191540d5fd7b590db; PM independently matched all schema
+bytes and159wheel hashes.
+
+Evidence in the validation root: w7-auditable-{cli,updater}-build.log,
+w7-{cli,updater}-binary-{info.json,syft.json,cdx.json} (the actual names use
+binary.syft.json/binary.cdx.json), w7-cli-{wizard-seal.log,embedded-wizard.json},
+w7-auditable-alpine-{build.log,runtime.log,binary-info.json},
+w7-auditable-gnu-bootstrap.log, w7-artifact-tools-trivy.json,
+w7-artifact-missing-metadata.json and w7-rust-*-tests.log. These application
+binaries are working-batch subjects built on1dbac798 with the recorded source
+diff; they are not signed clean-release provenance. Actual final archives,
+all four CLI platforms, final backend/machine subjects, immutable distro
+packages and mandatory producer/signing/scanning gates remain separate work.
+Mobile R1-05/R1-06 remain OPEN and untouched.
+
 ## Remaining authorized batches
 
 W5 final container review/integration; W7 pinned,

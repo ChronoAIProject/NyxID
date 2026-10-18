@@ -16,6 +16,10 @@ WORKDIR /build
 # `cloud-auth/` (NyxID#716) and `nyxid-crypto/` (NyxID#773) are workspace
 # members depended on by the node agent via `cli/Cargo.toml`; missing
 # either makes the workspace refuse to resolve.
+COPY scripts/bootstrap-build-tool.py /opt/nyxid-build-inputs/scripts/bootstrap-build-tool.py
+COPY security/build-tools.json /opt/nyxid-build-inputs/security/build-tools.json
+RUN python3 /opt/nyxid-build-inputs/scripts/bootstrap-build-tool.py cargo-auditable --bin-dir /usr/local/cargo/bin
+
 COPY Cargo.toml Cargo.lock ./
 COPY vendor/ vendor/
 COPY backend/ backend/
@@ -41,8 +45,8 @@ RUN --mount=type=cache,id=nyxid-machine-target-${TARGETARCH},target=/build/targe
       cp -a cli/container/public-cargo-cache/cache cli/container/public-cargo-cache/index /usr/local/cargo/registry/ \
       && printf '%s\n' '{"dl":"https://static.crates.io/crates","api":"https://crates.io"}' \
         > /usr/local/cargo/registry/index/index.crates.io-1949cf8c6b5b557f/config.json \
-      && cargo build --locked --offline --release -p nyxid-cli --bin nyxid; \
-    else cargo build --locked --release -p nyxid-cli --bin nyxid; fi \
+      && cargo auditable build --locked --offline --release -p nyxid-cli --bin nyxid; \
+    else cargo auditable build --locked --release -p nyxid-cli --bin nyxid; fi \
     && mkdir -p /out && cp target/release/nyxid /out/nyxid
 
 

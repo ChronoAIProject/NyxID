@@ -65,7 +65,9 @@ jobs:
           persist-credentials: false
           submodules: recursive
       - name: Install checksummed dist
-        run: python3 scripts/bootstrap-build-tool.py cargo-dist --bin-dir "$HOME/.cargo/bin"
+        run: |
+          python3 scripts/bootstrap-build-tool.py cargo-dist --bin-dir "$HOME/.cargo/bin"
+          python3 scripts/bootstrap-build-tool.py cargo-auditable --bin-dir "$HOME/.cargo/bin"
       - name: Cache dist
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -152,7 +154,9 @@ jobs:
           shared-key: dist-${{ join(matrix.targets, '-') }}
           save-if: false
       - name: Install checksummed dist
-        run: python3 scripts/bootstrap-build-tool.py cargo-dist --bin-dir "$HOME/.cargo/bin"
+        run: |
+          python3 scripts/bootstrap-build-tool.py cargo-dist --bin-dir "$HOME/.cargo/bin"
+          python3 scripts/bootstrap-build-tool.py cargo-auditable --bin-dir "$HOME/.cargo/bin"
       - name: Fetch local artifacts
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:

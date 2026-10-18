@@ -1,0 +1,13 @@
+[package]
+name = "nyxid-artifact-info"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+
+[workspace]
+
+[dependencies]
+auditable-info = "=0.10.1"
+serde_json = "=1.0.150"
+sha2 = "=0.10.9"

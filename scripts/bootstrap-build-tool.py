@@ -23,12 +23,37 @@ ROOT = Path(__file__).resolve().parents[1]
 MAX_DOWNLOAD = 128 * 1024 * 1024
 
 
-def host_target():
-    arch = {"arm64": "aarch64", "aarch64": "aarch64", "amd64": "x86_64", "x86_64": "x86_64"}.get(platform.machine())
-    system = {"Darwin": "apple-darwin", "Linux": "unknown-linux-gnu"}.get(platform.system())
+def target_for_host(machine, system, libc=None):
+    arch = {"arm64": "aarch64", "aarch64": "aarch64", "amd64": "x86_64", "x86_64": "x86_64"}.get(machine)
+    system = "apple-darwin" if system == "Darwin" else "unknown-linux-" + libc if system == "Linux" and libc in ("gnu", "musl") else None
     if not arch or not system:
-        raise ValueError("unsupported build host")
+        raise ValueError("unsupported build host or libc")
     return arch + "-" + system
+
+
+def host_target():
+    libc = None
+    if platform.system() == "Linux":
+        try:
+            if os.confstr("CS_GNU_LIBC_VERSION").startswith("glibc "):
+                libc = "gnu"
+        except (ValueError, OSError, AttributeError):
+            pass
+        # Python's libc_ver often returns empty on Alpine. The runtime loader
+        # is authoritative there; do not default unknown Linux to GNU.
+        if libc is None and platform.libc_ver()[0] == "musl":
+            libc = "musl"
+        if libc is None and any(Path("/lib").glob("ld-musl-*.so.1")):
+            libc = "musl"
+    return target_for_host(platform.machine(), platform.system(), libc)
+
+
+def target_input(tool, item, target):
+    if "targets" not in item:
+        return item
+    if target not in item["targets"]:
+        raise ValueError("unsupported " + tool + " host target: " + target)
+    return item["targets"][target]
 
 
 def download_verified(item, path):
@@ -80,31 +105,32 @@ def unpack_npm(archive, destination):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("tool", choices=["cargo-dist", "rustup", "npm"])
+    parser.add_argument("tool", choices=["cargo-dist", "cargo-auditable", "syft", "rustup", "npm"])
     parser.add_argument("--bin-dir", type=Path, required=True)
     args = parser.parse_args()
     catalog = json.loads((ROOT / "security/build-tools.json").read_text())
     args.bin_dir.mkdir(parents=True, exist_ok=True)
     destination = args.bin_dir.resolve()
     target = host_target()
-    item = catalog[args.tool]
-    if "targets" in item:
-        item = item["targets"][target]
+    item = target_input(args.tool, catalog[args.tool], target)
     with tempfile.TemporaryDirectory(prefix="nyxid-build-tool-", dir=destination) as temporary:
         stage = Path(temporary)
         archive = stage / "download"
         download_verified(item, archive)
-        if args.tool == "cargo-dist":
+        if args.tool in ("cargo-dist", "cargo-auditable", "syft"):
+            executable = "dist" if args.tool == "cargo-dist" else args.tool
+            names = ("dist", "cargo-dist") if args.tool == "cargo-dist" else (executable,)
             with tarfile.open(archive) as package:
-                members = [m for m in package if m.isfile() and PurePosixPath(m.name).name in ("dist", "cargo-dist")]
+                members = [m for m in package if m.isfile() and PurePosixPath(m.name).name in names]
                 if len(members) != 1 or members[0].size > MAX_DOWNLOAD:
-                    raise ValueError("expected one dist executable")
-                binary = stage / "dist"
+                    raise ValueError("expected one reviewed tool executable")
+                binary = stage / executable
                 with package.extractfile(members[0]) as source, binary.open("wb") as output:
                     shutil.copyfileobj(source, output)
                 binary.chmod(0o755)
-                os.replace(binary, destination / "dist")
-            subprocess.run([str(destination / "dist"), "--version"], check=True)
+                os.replace(binary, destination / executable)
+            version_args = ["auditable", "--version"] if args.tool == "cargo-auditable" else ["version"] if args.tool == "syft" else ["--version"]
+            subprocess.run([str(destination / executable), *version_args], check=True)
         elif args.tool == "rustup":
             archive.chmod(0o755)
             subprocess.run([str(archive), "-y", "--no-modify-path", "--profile", "minimal", "--default-toolchain", catalog["rust_toolchain"]], check=True)

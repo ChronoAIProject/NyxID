@@ -250,9 +250,10 @@ jobs:
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.12"
-      - name: Install PyYAML
+      - name: Install integrity-locked workflow and SBOM validators
         run: |
           pip install --require-hashes --only-binary=:all: -r security/python-build-requirements.txt
+          pip install --require-hashes --only-binary=:all: -r security/python-sbom-requirements.txt
       - name: Check reusable workflow permissions against their callers
         run: |
           python3 scripts/check-workflow-yaml.py
@@ -264,6 +265,9 @@ jobs:
           python3 scripts/test-build-inputs.py
           python3 scripts/check-node-install-policy.py
           python3 scripts/test_node_install_policy.py
+          python3 scripts/test_embedded_wizard.py
+          python3 scripts/test_rust_binary_sbom.py
+          python3 scripts/test_cyclonedx.py
 
   # ---------------------------------------------------------------------------
   # Permission engine: no database or Google credentials required.
@@ -387,6 +391,7 @@ jobs:
           toolchain: 1.98.1
           components: rustfmt
       - run: cargo fmt --all -- --check
+      - run: cargo fmt --manifest-path security/artifact-tools/Cargo.toml -- --check
 
   # ---------------------------------------------------------------------------
   # Rust: clippy lint
@@ -416,6 +421,8 @@ jobs:
         run: python3 .github/scripts/ci_resources.py clippy cargo clippy --locked --workspace --all-targets -- -D warnings
       - name: Check vendored compiler regression with original negative control
         run: python3 scripts/test-proc-macro-visibility.py --evidence-dir "$RUNNER_TEMP/proc-macro-visibility"
+      - name: Check locked artifact metadata tools
+        run: cargo clippy --locked --manifest-path security/artifact-tools/Cargo.toml --all-targets -- -D warnings
 
   # ---------------------------------------------------------------------------
   # Rust: backend tests
@@ -820,7 +827,15 @@ jobs:
         with:
           key: wizard-freshness
       - name: Verify wizard bundle freshness
-        run: cargo test -p nyxid-cli --test wizard_bundle_freshness
+        run: cargo test --locked -p nyxid-cli --test wizard_bundle_freshness
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version-file: .node-version
+      - name: Verify final wizard seal against source provenance
+        run: |
+          python3 scripts/bootstrap-build-tool.py npm --bin-dir "$RUNNER_TEMP/wizard-npm"
+          "$RUNNER_TEMP/wizard-npm/npm" ci --prefix frontend
+          node frontend/scripts/seal-shipped-composition.mjs wizard verify
 
   # ---------------------------------------------------------------------------
   # SDK: build all packages

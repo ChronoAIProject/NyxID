@@ -89,8 +89,34 @@ class BuildPolicy(unittest.TestCase):
     def test_generated_installer_rejected(self):
         self.mutate(".github/workflows/release.yml", "python3 scripts/bootstrap-build-tool.py cargo-dist", "${{ matrix.install_dist.run }} #", "executable generated")
 
+    def test_generated_auditable_installer_dot_and_brackets_rejected(self):
+        path = self.root / ".github/workflows/installer.yaml"
+        for expression in ("matrix.install_cargo_auditable.run", "matrix['install_cargo_auditable']['run']", 'matrix["install_cargo_auditable"].run'):
+            path.write_text("run: ${{ " + expression + " }}\n")
+            self.assertTrue(any("installer.yaml: executable generated" in error for error in policy.check(self.root)), expression)
+
+    def test_bootstrap_targets_preserve_libc_and_reject_unknown(self):
+        catalog = json.loads((ROOT / "security/build-tools.json").read_text())
+        for system, arch, libc, expected in (("Darwin", "arm64", None, "aarch64-apple-darwin"),
+                ("Darwin", "x86_64", None, "x86_64-apple-darwin"),
+                ("Linux", "aarch64", "gnu", "aarch64-unknown-linux-gnu"),
+                ("Linux", "x86_64", "musl", "x86_64-unknown-linux-musl")):
+            target = bootstrap.target_for_host(arch, system, libc)
+            self.assertEqual(target, expected)
+            self.assertIn(target, catalog["cargo-auditable"]["targets"])
+        for arch, system, libc in (("arm64", "Linux", None), ("mips", "Linux", "gnu"), ("arm64", "Other", None)):
+            with self.assertRaisesRegex(ValueError, "unsupported build host"):
+                bootstrap.target_for_host(arch, system, libc)
+        with self.assertRaisesRegex(ValueError, "unsupported syft host target"):
+            bootstrap.target_input("syft", catalog["syft"], "aarch64-unknown-linux-musl")
+
     def test_unlocked_rust_build_rejected(self):
-        self.mutate("backend/Dockerfile", "cargo build --locked", "cargo build", "does not enforce lockfile")
+        self.mutate("backend/Dockerfile", "cargo auditable build --locked", "cargo auditable build", "does not enforce lockfile")
+
+    def test_missing_binary_dependency_metadata_rejected(self):
+        self.mutate("backend/Dockerfile", "cargo auditable build --locked", "cargo build --locked", "omits auditable metadata")
+        self.metadata["metadata"]["dist"]["cargo-auditable"] = False
+        self.assertTrue(any("require cargo-auditable" in error for error in policy.check(self.root)))
 
     def test_download_checksum_failure(self):
         response = io.BytesIO(b"well-formed executable with altered bytes")

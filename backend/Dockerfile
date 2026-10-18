@@ -17,6 +17,10 @@ ENV NYXID_GIT_HASH=${NYXID_GIT_HASH}
 # members; cargo refuses to resolve the workspace if any member's manifest
 # is missing, so they must be staged here even though the backend binary
 # only links cloud-auth directly via path (nyxid-crypto is CLI-only).
+COPY scripts/bootstrap-build-tool.py /opt/nyxid-build-inputs/scripts/bootstrap-build-tool.py
+COPY security/build-tools.json /opt/nyxid-build-inputs/security/build-tools.json
+RUN python3 /opt/nyxid-build-inputs/scripts/bootstrap-build-tool.py cargo-auditable --bin-dir /usr/local/cargo/bin
+
 COPY Cargo.toml Cargo.lock ./
 COPY vendor/ vendor/
 COPY backend/Cargo.toml backend/Cargo.toml
@@ -46,7 +50,7 @@ RUN mkdir -p backend/src && echo "fn main() {}" > backend/src/main.rs \
     && mkdir -p machine/src && echo "" > machine/src/lib.rs \
     && mkdir -p machine-updater/src && echo "fn main() {}" > machine-updater/src/main.rs \
     && echo "" > machine-updater/src/lib.rs
-RUN cargo build --locked --release --manifest-path backend/Cargo.toml --features gcp-kms
+RUN cargo auditable build --locked --release --manifest-path backend/Cargo.toml --features gcp-kms
 
 # Remove the dummy build artifacts (forces recompilation of our code only).
 # Drop the cloud-auth artifacts too so its real source is recompiled.
@@ -93,7 +97,7 @@ COPY integrations/oracle/cdp-worker/worker.mjs integrations/oracle/cdp-worker/wo
 RUN touch backend/src/main.rs cloud-auth/src/lib.rs service-adapters/src/lib.rs machine/src/lib.rs machine-updater/src/lib.rs permissions/src/lib.rs
 
 # Build the real binary
-RUN cargo build --locked --release --manifest-path backend/Cargo.toml --features gcp-kms
+RUN cargo auditable build --locked --release --manifest-path backend/Cargo.toml --features gcp-kms
 
 # The standalone page is served by the backend with its own SRI-bound CSP.
 # Keep the Node/lockfile/source/epoch inputs identical to the frontend build.

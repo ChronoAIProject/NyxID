@@ -47,7 +47,9 @@ jobs:
           persist-credentials: false
           submodules: recursive
       - name: Install checksummed dist
-        run: python3 scripts/bootstrap-build-tool.py cargo-dist --bin-dir "$HOME/.cargo/bin"
+        run: |
+          python3 scripts/bootstrap-build-tool.py cargo-dist --bin-dir "$HOME/.cargo/bin"
+          python3 scripts/bootstrap-build-tool.py cargo-auditable --bin-dir "$HOME/.cargo/bin"
       - id: plan
         run: |
           dist plan --output-format=json > plan-dist-manifest.json
@@ -87,7 +89,9 @@ jobs:
           shared-key: dist-${{ join(matrix.targets, '-') }}
           save-if: ${{ github.event_name != 'pull_request' }}
       - name: Install checksummed dist
-        run: python3 scripts/bootstrap-build-tool.py cargo-dist --bin-dir "$HOME/.cargo/bin"
+        run: |
+          python3 scripts/bootstrap-build-tool.py cargo-dist --bin-dir "$HOME/.cargo/bin"
+          python3 scripts/bootstrap-build-tool.py cargo-auditable --bin-dir "$HOME/.cargo/bin"
       - name: Build artifacts
         env:
           DIST_ARGS: ${{ matrix.dist_args }}

@@ -2,6 +2,10 @@
 FROM rust:1.98.1-alpine@sha256:7cc1c22d77d9432f7fe012a70e6d3e555af54c2a6832700ed7d553f1769ae89f AS builder
 RUN apk add --no-cache build-base cmake clang lld perl linux-headers python3
 WORKDIR /build
+COPY scripts/bootstrap-build-tool.py /opt/nyxid-build-inputs/scripts/bootstrap-build-tool.py
+COPY security/build-tools.json /opt/nyxid-build-inputs/security/build-tools.json
+RUN python3 /opt/nyxid-build-inputs/scripts/bootstrap-build-tool.py cargo-auditable --bin-dir /usr/local/cargo/bin
+
 COPY Cargo.toml Cargo.lock ./
 COPY vendor/ vendor/
 COPY backend/ backend/
@@ -16,7 +20,7 @@ COPY machine-updater/ machine-updater/
 ARG TARGETARCH
 RUN --mount=type=cache,id=nyxid-machine-updater-target-${TARGETARCH},target=/build/target,sharing=locked \
     --mount=type=cache,id=nyxid-machine-registry,target=/usr/local/cargo/registry,sharing=locked \
-    cargo build --locked --release -p nyxid-machine-updater && cp target/release/nyxid-machine-updater /nyxid-machine-updater
+    cargo auditable build --locked --release -p nyxid-machine-updater && cp target/release/nyxid-machine-updater /nyxid-machine-updater
 FROM scratch AS production
 COPY --from=builder /nyxid-machine-updater /nyxid-machine-updater
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt

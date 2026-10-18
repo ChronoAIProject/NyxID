@@ -27,6 +27,10 @@ WORKDIR /build
 # `cloud-auth/` (NyxID#716) and `nyxid-crypto/` (NyxID#773) are workspace
 # members depended on by the node agent via `cli/Cargo.toml`; missing
 # either makes the workspace refuse to resolve.
+COPY scripts/bootstrap-build-tool.py /opt/nyxid-build-inputs/scripts/bootstrap-build-tool.py
+COPY security/build-tools.json /opt/nyxid-build-inputs/security/build-tools.json
+RUN python3 /opt/nyxid-build-inputs/scripts/bootstrap-build-tool.py cargo-auditable --bin-dir /usr/local/cargo/bin
+
 COPY Cargo.toml Cargo.lock ./
 COPY vendor/ vendor/
 COPY backend/ backend/
@@ -41,7 +45,7 @@ COPY machine-updater/ machine-updater/
 COPY docs/AI_AGENT_PLAYBOOK.md docs/AI_AGENT_PLAYBOOK.md
 
 # Build only the CLI binary (includes node agent subcommand)
-RUN cargo build --locked --release -p nyxid-cli
+RUN cargo auditable build --locked --release -p nyxid-cli
 
 # -- Stage 2: Runtime -------------------------------------------------------
 FROM debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587

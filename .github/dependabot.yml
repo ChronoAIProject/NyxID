@@ -95,6 +95,9 @@ updates:
   - package-ecosystem: cargo
     directory: /cli/tests/machine_context_spike
     schedule: { interval: weekly }
+  - package-ecosystem: cargo
+    directory: /security/artifact-tools
+    schedule: { interval: weekly }
 
   # Immutable digest updates still require authenticated pin receipts.
   - package-ecosystem: docker
