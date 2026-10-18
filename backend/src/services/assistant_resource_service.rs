@@ -1102,11 +1102,16 @@ mod tests {
                 "{p}"
             );
         }
-        for url in [
-            "https://127.0.0.1/image",
-            "http://example.org/image",
-            "https://[::1]/image",
-        ] {
+        assert!(
+            super::super::channel_media_service::media_client(
+                "http://example.org/image",
+                None,
+                None,
+            )
+            .await
+            .is_err()
+        );
+        for url in ["https://127.0.0.1/image", "https://[::1]/image"] {
             assert!(fetch_url(url, None).await.is_err());
         }
     }
