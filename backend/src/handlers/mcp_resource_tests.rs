@@ -509,7 +509,6 @@ async fn org_resource_journey(
         .await
         .unwrap();
     let auth = next_resource_turn(&f, Some(initial_ack)).await;
-    select_source(&f, &auth, &instance_id, &org, &catalog.id).await;
     let source = call(
         &f.state,
         &auth,
@@ -631,7 +630,6 @@ async fn org_resource_journey(
         .unwrap();
     }
     let continued = next_resource_turn(&f, Some(next_ack)).await;
-    select_source(&f, &continued, &instance_id, &org, &catalog.id).await;
     let wrong_intent = call(
         &f.state,
         &continued,
@@ -648,6 +646,15 @@ async fn org_resource_journey(
     )
     .await;
     assert_eq!(attached["result"]["isError"], false, "{attached}");
+    let consumed = f
+        .state
+        .db
+        .collection::<bson::Document>("assistant_acknowledgements")
+        .find_one(doc! {"_id":next_ack})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(consumed.get_str("status").unwrap(), "used");
     let current = engine::get(&f.state.db, &f.owner, &f.row.id).await.unwrap();
     let images = &current.active_turn.as_ref().unwrap().attachments;
     assert_eq!(images.len(), 1);

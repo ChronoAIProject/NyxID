@@ -2095,6 +2095,17 @@ continuation rounds when the deployment advertises image input. The content
 route checks the live turn, conversation key, owner, retention and organization
 access before returning pixels. Image-round failure preserves the completed
 answer; budget and time continuations keep their existing text-only input.
+
+Source images use the shared `nyx__resource_get` runtime and provider adapters,
+starting with published Notion page and block-child reads. The short-lived
+`assistant_resources` collection binds opaque refs to owner, conversation,
+turn, agent, key and audience, plus immutable source identity and revision;
+it stores no file URL or credential. Redemption replays the authorized source
+read and commits validated bytes through the existing encrypted attachment
+transaction. An exact approved continuation receives a fresh current-turn ref
+only after rechecking the original pending intent and expiry. See
+[Source resources](chat/10-source-resources.md).
+
 See [Uploads](chat/10-uploads.md) and [NyxAgent engine](chat/08-nyxagent-engine.md).
 
 Skill permission decisions use an outbox embedded in

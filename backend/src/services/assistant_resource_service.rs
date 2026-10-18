@@ -199,6 +199,7 @@ async fn issue_many(
     let mut session = db.client().start_session().await?;
     let db = db.clone();
     let chat = chat.clone();
+    let continuation = continuation.cloned();
     session
         .start_transaction()
         .and_run2(async move |session| {
@@ -230,7 +231,7 @@ async fn issue_many(
                         .map_or(0, Vec::len);
                     let mut remaining = resource_adapter::MAX_RESOURCES.saturating_sub(used);
                     let records = db.collection::<AssistantResource>(COLLECTION_NAME);
-                    if let Some(original) = continuation {
+                    if let Some(original) = continuation.as_ref() {
                         // Recheck after the source GET, before allocating a fresh lifetime.
                         let current = records.find_one(doc! {
                         "_id":&original.id,"user_id":&chat.user_id,
@@ -393,6 +394,7 @@ pub async fn bind_confirmation(
     let db = db.clone();
     let chat = chat.clone();
     let row = row.clone();
+    let acknowledgement_id = acknowledgement_id.to_owned();
     session.start_transaction().and_run2(async move |session| {
         let operation: AppResult<_> = async {
             // Taking the parent write lock serializes this intent with Stop/settlement.
