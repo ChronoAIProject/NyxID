@@ -281,21 +281,55 @@ accepted rates. Funds exhaustion pauses; top-up requires a manual resume.
 
 Native observations do not establish an independent physical stop bound during
 control-plane/node partition or prove that an old instance has lost every
-storage write capability. Known force deletion, unhealthy/unreachable nodes,
-stale observations, UID or ownership conflicts, and indeterminate predecessors
-stay reconciling or cleanup-pending and block automatic new writers. A forced
+storage write capability. For ordinary running and new-writer admission, known
+force deletion, unhealthy/unreachable nodes, stale observations, UID or ownership
+conflicts, and indeterminate predecessors retain their guards and block new writers. A forced
 Pod deletion followed by NotFound cannot authorize a successor. Use the existing
 retry/operator handling path after investigating the underlying resource; do
 not clear the guard by inventing a stop timestamp.
 
-Delete immediately revokes access, retains its owner-authorized idempotent
-operation and waits for observed Sandbox/Pod/PVC closure and necessary bound-PV
-observations. Present resources, finalizers, unknown ownership and Retain-policy
-leftovers retain cleanup responsibility and relevant quota. Selected CSI
-reclamation semantics govern the lower-level outcome. Submitted deletion and
-API object removal do not promise physical erasure. Cleanup and unresolved
-accounting are tracked separately; unknown runtime periods are not universally
-charged, and later top-ups do not fund uncapped residual platform costs.
+Delete immediately revokes access and retains its original owner-authorized
+operation. Completion uses original-identity-bound Kubernetes cleanup results
+from the normal Agent Sandbox/Kubernetes lifecycle: applicable persisted
+control-plane workload evidence, original Sandbox/Pod/PVC and bound-PV release,
+complete related Pod/claim/PV/VolumeAttachment inventories, terminal NyxID
+creation dispatches and accounting. Pending claims do not need to become Bound.
+Direct runtime history, CSI request-terminal logs and GCE disk facts are not
+required; no direct GCE/CSI/CRI API or cloud credential permission is added.
+Present resources, finalizers, identity conflicts, claim users, attachments and
+Retain/unknown policy keep their cleanup responsibility and relevant quota.
+Normal API release is not a physical shutdown, never-provisioned or
+cloud-erasure claim. Cleanup and accounting retry separately, while final
+deleted state, operation success and slot release wait for both. Unknown runtime
+periods are not universally charged, and later top-ups do not fund uncapped
+residual costs.
+
+Initial absence of the original Sandbox and Pods can establish
+`ControlPlaneWorkloadAbsent` after complete original-scope reads, verified
+original identities and terminal NyxID creation work; one 404 is insufficient.
+Its actual observation time is the accounting upper bound, with generation zero
+and empty resourceVersion representing no live object. Paid settlement rechecks
+original-work terminality. Legacy cloud disk handles remain discovery hints and
+do not require external proof when Kubernetes cleanup is complete; actual
+Kubernetes PV/claim/CSI identity conflicts still block.
+
+Finalized Machine tombstones also receive bounded, fair continued scans under
+that same original delete authorization, current evidence version and persisted
+control-plane workload-evidence gate, reusing the same cleanup orchestration.
+Each pass handles at most eight tombstones with four concurrent scans and a
+45-second per-scan timeout. Late original Sandbox/Pod/PVC cleanup uses retained
+UID, owner and claim bindings; Pod DELETE also requires the full original tuple
+and UID/resourceVersion. PVs wait for normal GC/reclaim and receive no direct
+DELETE. Read failures, incomplete inventories and conflicting or replacement
+resources remain blockers. The Machine stays deleted and the original operation
+stays Succeeded; cleanup progress becomes pending while a late resource or
+blocker remains and returns to complete after inventories clear. These scans do
+not reopen execution, rerun settlement or move funds or slots again. The
+existing investigation inventory is a read-only diagnostic view, not the cleanup
+scanner.
+
+See [deletion recovery](../../docs/REMOTE_MACHINE_DELETE_RECOVERY.md) for the
+versioned evidence and original-operation recovery contract.
 
 ## Existing investigation entry and uncertainty runbook
 
@@ -324,12 +358,19 @@ a read-only investigation entry, not a repair or quarantine-clear endpoint.
    can allow pending observations to progress. It does not automatically clear
    a persisted `native_uncertainty` latch. The admin view, owner action routes
    and background retries provide no successful manual-clear API.
-4. For a latched uncertainty, investigate the predecessor in the selected
-   runtime and the original workspace in its selected CSI. Do not clear the
-   latch directly in MongoDB, replace the workspace, remove protection
-   finalizers merely to obtain absence, or force-delete and treat NotFound as a
-   reset. Preserve resource/quota responsibility and unresolved accounting
-   separately while those facts remain uncertain.
+4. For an accepted delete with an explicitly supported uncertainty reason,
+   allow its private recovery path to validate the exact Sandbox controller
+   Suspended observation, or known original Sandbox/Pod absence through complete
+   scoped Kubernetes reads and terminal NyxID creation work, plus normal cleanup. Keep the latch and
+   investigation record. Missing runtime history, CSI terminal logs or GCE
+   facts do not block this delete contract. Known force deletion, unsupported
+   reasons, identity conflicts, claim users, attachments, Retain and incomplete
+   Kubernetes queries still retain their responsibilities. Do not clear the
+   latch in MongoDB, replace the workspace, remove protection finalizers or
+   treat a lone NotFound as complete evidence. No prior stop record is mandatory
+   for a valid ControlPlaneWorkloadAbsent result; it retains the actual first
+   complete-query observation bound, generation zero and empty resourceVersion
+   without claiming a Suspended object or physical-stop time.
 5. Manual recovery cannot reopen a writer without validated evidence from the
    selected runtime establishing that the predecessor is safe to replace and
    that the original workspace binding remains authoritative. This MVP does
@@ -405,10 +446,12 @@ from cluster acceptance.
 Still required on the selected cluster: actual API/controller generation and
 suspension transitions, healthy and partitioned node behavior, Pod-bound
 bootstrap/WSS admission, default or selected runtime limits, same-PVC pause and
-resume, CSI reclaim/finalizer/Retain handling, workspace/full-disk reporting,
-optional monitoring provenance, real Billing funding integration and actual
-external-client journeys. This revision's detailed results and source provenance
-belong in `docs/REMOTE_NYX_MACHINE_HOSTED_STORAGE_VERIFICATION_20261015.md`;
+resume, Kubernetes PV reclaim/finalizer/Retain handling, delete recovery with
+complete inventories, finalized-tombstone late-resource scans and original
+dispatch/accounting gates, workspace/full-disk
+reporting, optional monitoring provenance, real Billing funding integration and
+actual external-client journeys. Hosted-image/storage phase results and source
+provenance belong in `docs/REMOTE_NYX_MACHINE_HOSTED_STORAGE_VERIFICATION_20261015.md`;
 the preceding single-current phase retains its own dated verification record.
 
 Explicitly deferred platform work: independent partition-resistant stop bounds,
@@ -416,4 +459,4 @@ cross-runtime deadline enforcement, strong predecessor storage exclusion and
 physical cloud/CSI cleanup proof. None is a claimed property of native API
 observations or a baseline MVP provider configuration prerequisite.
 
-Current revision evidence: [hosted image and optional storage checks](../../docs/REMOTE_NYX_MACHINE_HOSTED_STORAGE_VERIFICATION_20261015.md). Earlier dated results remain stage-specific history.
+Hosted-image/storage phase evidence: [hosted image and optional storage checks](../../docs/REMOTE_NYX_MACHINE_HOSTED_STORAGE_VERIFICATION_20261015.md). Earlier dated results remain stage-specific history.

@@ -423,6 +423,33 @@ pub struct NodeObservation {
     pub deletion_timestamp: Option<String>,
 }
 
+/// A Node Lease is an identity/freshness observation, never runtime stop proof.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+pub struct NodeLeaseObservation {
+    pub name: String,
+    pub namespace: String,
+    pub uid: Option<String>,
+    pub resource_version: Option<String>,
+    pub owner_node_uid: Option<String>,
+    pub holder_identity: Option<String>,
+    pub renew_time: Option<String>,
+    pub lease_duration_seconds: Option<i64>,
+    pub deletion_timestamp: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+pub struct VolumeAttachmentObservation {
+    pub name: String,
+    pub uid: Option<String>,
+    pub resource_version: Option<String>,
+    pub persistent_volume_name: Option<String>,
+    pub node_name: Option<String>,
+    pub attacher: Option<String>,
+    /// Missing status is unknown, rather than detached.
+    pub attached: Option<bool>,
+    pub deletion_timestamp: Option<String>,
+}
+
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 pub struct PersistentVolumeObservation {
     pub name: String,
@@ -435,6 +462,10 @@ pub struct PersistentVolumeObservation {
     pub phase: Option<String>,
     pub deletion_timestamp: Option<String>,
     pub finalizers: Vec<String>,
+    #[serde(default)]
+    pub csi_driver: Option<String>,
+    #[serde(default)]
+    pub csi_volume_handle: Option<String>,
 }
 
 /// Metadata-only inventory, independent of a surviving Sandbox. Labels are
@@ -712,6 +743,79 @@ impl PersistentVolumeObservation {
             phase: text_at(object, "/status/phase"),
             deletion_timestamp: text_at(object, "/metadata/deletionTimestamp"),
             finalizers: string_array_at(object, "/metadata/finalizers"),
+            csi_driver: text_at(object, "/spec/csi/driver"),
+            csi_volume_handle: text_at(object, "/spec/csi/volumeHandle"),
+        })
+    }
+}
+
+impl NodeLeaseObservation {
+    fn from_object(object: &Value) -> Result<Self> {
+        let node_owners: Vec<_> = object
+            .pointer("/metadata/ownerReferences")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter(|owner| {
+                owner.get("apiVersion").and_then(Value::as_str) == Some("v1")
+                    && owner.get("kind").and_then(Value::as_str) == Some("Node")
+            })
+            .collect();
+        Ok(Self {
+            name: text_at(object, "/metadata/name").context("Lease name missing")?,
+            namespace: text_at(object, "/metadata/namespace").context("Lease namespace missing")?,
+            uid: text_at(object, "/metadata/uid"),
+            resource_version: text_at(object, "/metadata/resourceVersion"),
+            owner_node_uid: (node_owners.len() == 1)
+                .then(|| text_at(node_owners[0], "/uid"))
+                .flatten(),
+            holder_identity: text_at(object, "/spec/holderIdentity"),
+            renew_time: text_at(object, "/spec/renewTime"),
+            lease_duration_seconds: object
+                .pointer("/spec/leaseDurationSeconds")
+                .and_then(Value::as_i64),
+            deletion_timestamp: text_at(object, "/metadata/deletionTimestamp"),
+        })
+    }
+}
+
+impl VolumeAttachmentObservation {
+    fn from_object(object: &Value) -> Result<Self> {
+        let source = object
+            .pointer("/spec/source")
+            .and_then(Value::as_object)
+            .context("VolumeAttachment source invalid")?;
+        match (
+            source.get("persistentVolumeName"),
+            source.get("inlineVolumeSpec"),
+        ) {
+            (Some(Value::String(name)), None) => validate_resource_segment(name)?,
+            (None, Some(Value::Object(_))) => (),
+            _ => return Err(anyhow!("VolumeAttachment source invalid")),
+        }
+        for field in ["nodeName", "attacher"] {
+            validate_resource_segment(
+                object
+                    .pointer(&format!("/spec/{field}"))
+                    .and_then(Value::as_str)
+                    .context("VolumeAttachment identity invalid")?,
+            )?;
+        }
+        if let Some(attached) = object.pointer("/status/attached") {
+            ensure!(
+                attached.is_boolean(),
+                "VolumeAttachment attached status invalid"
+            );
+        }
+        Ok(Self {
+            name: text_at(object, "/metadata/name").context("VolumeAttachment name missing")?,
+            uid: text_at(object, "/metadata/uid"),
+            resource_version: text_at(object, "/metadata/resourceVersion"),
+            persistent_volume_name: text_at(object, "/spec/source/persistentVolumeName"),
+            node_name: text_at(object, "/spec/nodeName"),
+            attacher: text_at(object, "/spec/attacher"),
+            attached: object.pointer("/status/attached").and_then(Value::as_bool),
+            deletion_timestamp: text_at(object, "/metadata/deletionTimestamp"),
         })
     }
 }
@@ -847,14 +951,88 @@ impl SandboxObservation {
 }
 
 fn validate_resource_segment(value: &str) -> Result<()> {
+    ensure!(dns_subdomain(value), "invalid Kubernetes resource name");
+    Ok(())
+}
+
+fn validate_identity_token(value: &str) -> Result<()> {
     ensure!(
-        !value.is_empty()
-            && value.len() <= 253
-            && value.bytes().all(|byte| byte.is_ascii_lowercase()
-                || byte.is_ascii_digit()
-                || matches!(byte, b'-' | b'.')),
-        "invalid Kubernetes resource name"
+        !value.is_empty() && value.len() <= 1024 && !value.chars().any(char::is_control),
+        "Kubernetes identity precondition is invalid"
     );
+    Ok(())
+}
+
+/// Recovery inventories are deliberately stricter than diagnostic listings.
+/// Dropping an unparseable object could hide a live writer or late volume.
+fn validate_recovery_object(
+    object: &Value,
+    kind: &str,
+    version: &str,
+    namespaced: bool,
+) -> Result<()> {
+    ensure!(
+        object.get("kind").and_then(Value::as_str) == Some(kind)
+            && object.get("apiVersion").and_then(Value::as_str) == Some(version),
+        "Kubernetes recovery resource type invalid"
+    );
+    validate_resource_segment(
+        object
+            .pointer("/metadata/name")
+            .and_then(Value::as_str)
+            .context("Kubernetes recovery resource name missing")?,
+    )?;
+    for path in ["/metadata/uid", "/metadata/resourceVersion"] {
+        validate_identity_token(
+            object
+                .pointer(path)
+                .and_then(Value::as_str)
+                .context("Kubernetes recovery resource identity missing")?,
+        )?;
+    }
+    if namespaced {
+        validate_resource_segment(
+            object
+                .pointer("/metadata/namespace")
+                .and_then(Value::as_str)
+                .context("Kubernetes recovery namespace missing")?,
+        )?;
+    }
+    if let Some(owners) = object.pointer("/metadata/ownerReferences") {
+        for owner in owners
+            .as_array()
+            .context("Kubernetes recovery owner references invalid")?
+        {
+            for field in ["apiVersion", "kind", "name", "uid"] {
+                validate_identity_token(
+                    owner
+                        .get(field)
+                        .and_then(Value::as_str)
+                        .context("Kubernetes recovery owner reference invalid")?,
+                )?;
+            }
+            for field in ["controller", "blockOwnerDeletion"] {
+                if let Some(value) = owner.get(field) {
+                    ensure!(value.is_boolean(), "Kubernetes recovery owner flag invalid");
+                }
+            }
+        }
+    }
+    if kind == "PersistentVolume"
+        && let Some(claim) = object.pointer("/spec/claimRef")
+    {
+        for field in ["name", "namespace"] {
+            validate_resource_segment(
+                claim
+                    .get(field)
+                    .and_then(Value::as_str)
+                    .context("PersistentVolume claim reference invalid")?,
+            )?;
+        }
+        if let Some(uid) = claim.get("uid") {
+            validate_identity_token(uid.as_str().context("PersistentVolume claim UID invalid")?)?;
+        }
+    }
     Ok(())
 }
 
@@ -1275,6 +1453,165 @@ impl SandboxApi {
         Ok(true)
     }
 
+    /// Suspend the exact original object without rendering today's Pod/PVC
+    /// templates. Kubernetes atomically tests UID/RV and the original tuple;
+    /// an object replaced or changed after the read rejects the whole patch.
+    /// This does not certify controller acknowledgement or physical stopping.
+    pub async fn suspend_if_identity(
+        &self,
+        intent: &SandboxIntent,
+        expected_uid: &str,
+        expected_resource_version: &str,
+    ) -> Result<SandboxObservation> {
+        validate_resource_segment(&intent.namespace)?;
+        validate_resource_segment(&intent.name)?;
+        validate_identity_token(expected_uid)?;
+        validate_identity_token(expected_resource_version)?;
+        validate_identity_token(&intent.operation_id)?;
+        let url = self.resource_url(&intent.namespace, Some(&intent.name))?;
+        let current = self
+            .read_recovery_optional_object(url.clone())
+            .await?
+            .context("Original Sandbox absent before suspension")?;
+        validate_recovery_object(&current, KIND, "agents.x-k8s.io/v1beta1", true)?;
+        ensure!(
+            current.pointer("/metadata/name").and_then(Value::as_str) == Some(intent.name.as_str())
+                && current
+                    .pointer("/metadata/namespace")
+                    .and_then(Value::as_str)
+                    == Some(intent.namespace.as_str()),
+            "Original Sandbox identity conflict"
+        );
+        let expected = [
+            ("/metadata/uid", expected_uid.to_owned()),
+            (
+                "/metadata/resourceVersion",
+                expected_resource_version.to_owned(),
+            ),
+            (
+                "/metadata/labels/nyxid.dev~1owner-id",
+                intent.owner_id.clone(),
+            ),
+            (
+                "/metadata/labels/nyxid.dev~1machine-id",
+                intent.machine_id.clone(),
+            ),
+            (
+                "/metadata/labels/nyxid.dev~1runtime-generation",
+                intent.runtime_generation.to_string(),
+            ),
+            (
+                "/metadata/labels/nyxid.dev~1credential-epoch",
+                intent.credential_epoch.to_string(),
+            ),
+            (
+                "/metadata/labels/nyxid.dev~1writer-fence",
+                intent.writer_fence.clone(),
+            ),
+        ];
+        let mut patch = Vec::new();
+        for (path, value) in expected {
+            validate_identity_token(&value)?;
+            ensure!(
+                current.pointer(path).and_then(Value::as_str) == Some(value.as_str()),
+                "Original Sandbox identity precondition failed"
+            );
+            patch.push(json!({"op":"test","path":path,"value":value}));
+        }
+        patch.push(json!({"op":"add","path":"/metadata/labels/nyxid.dev~1operation-id","value":intent.operation_id}));
+        patch.push(json!({"op":"add","path":"/spec/operatingMode","value":"Suspended"}));
+        if current.pointer("/spec/shutdownTime").is_some() {
+            patch.push(json!({"op":"remove","path":"/spec/shutdownTime"}));
+        }
+        let request = self
+            .client
+            .patch(url)
+            .header(header::CONTENT_TYPE, "application/json-patch+json")
+            .json(&patch);
+        let request = self.authorize(request).await?;
+        let response = request.send().await?;
+        ensure!(
+            response.status().is_success(),
+            "UID/RV-preconditioned Sandbox suspension failed ({})",
+            response.status()
+        );
+        let observation =
+            SandboxObservation::from_object(&Self::read_recovery_json(response).await?)?;
+        ensure!(
+            observation.sandbox_uid.as_deref() == Some(expected_uid)
+                && observation.name == intent.name
+                && observation.namespace == intent.namespace
+                && observation.operation_id.as_deref() == Some(intent.operation_id.as_str())
+                && observation.desired_suspended,
+            "Original Sandbox suspension response identity invalid"
+        );
+        Ok(observation)
+    }
+
+    /// Delete acceptance is not completion evidence. The server evaluates both
+    /// preconditions atomically; 404 only skips this precise resource's DELETE.
+    pub async fn delete_if_identity(
+        &self,
+        namespace: &str,
+        name: &str,
+        expected_uid: &str,
+        expected_resource_version: &str,
+    ) -> Result<bool> {
+        validate_resource_segment(namespace)?;
+        validate_resource_segment(name)?;
+        self.delete_url_if_identity(
+            self.resource_url(namespace, Some(name))?,
+            expected_uid,
+            expected_resource_version,
+        )
+        .await
+    }
+
+    /// Restricted residual-child cleanup. Caller authorization and original
+    /// ownership verification are required before this exact-identity request.
+    /// No force/grace override, finalizer patch, PV or cloud delete is exposed.
+    pub async fn delete_resource_if_identity(
+        &self,
+        namespace: &str,
+        resource: &str,
+        name: &str,
+        expected_uid: &str,
+        expected_resource_version: &str,
+    ) -> Result<bool> {
+        ensure!(
+            matches!(resource, "pods" | "persistentvolumeclaims"),
+            "unsupported cleanup resource"
+        );
+        validate_resource_segment(namespace)?;
+        validate_resource_segment(name)?;
+        let mut url = self.base_url.clone();
+        url.set_path(&format!("/api/v1/namespaces/{namespace}/{resource}/{name}"));
+        self.delete_url_if_identity(url, expected_uid, expected_resource_version)
+            .await
+    }
+
+    async fn delete_url_if_identity(
+        &self,
+        url: Url,
+        expected_uid: &str,
+        expected_resource_version: &str,
+    ) -> Result<bool> {
+        validate_identity_token(expected_uid)?;
+        validate_identity_token(expected_resource_version)?;
+        let request = self.client.delete(url).header(header::CONTENT_TYPE, "application/json")
+            .json(&json!({"preconditions":{"uid":expected_uid,"resourceVersion":expected_resource_version}}));
+        let response = self.authorize(request).await?.send().await?;
+        if response.status() == StatusCode::NOT_FOUND {
+            return Ok(false);
+        }
+        ensure!(
+            response.status().is_success(),
+            "UID/RV-preconditioned Kubernetes delete failed ({})",
+            response.status()
+        );
+        Ok(true)
+    }
+
     pub async fn delete_if_uid(
         &self,
         namespace: &str,
@@ -1465,30 +1802,326 @@ impl SandboxApi {
         Ok(Some(response.json().await?))
     }
 
-    /// Observe controller-created Pods/PVCs by ownerReference. The manager has
-    /// read-only RBAC for these resources and never creates, patches, deletes,
-    /// or execs them.
+    async fn read_recovery_json(mut response: reqwest::Response) -> Result<Value> {
+        const MAX_BYTES: usize = 1024 * 1024;
+        ensure!(
+            response
+                .content_length()
+                .is_none_or(|length| length <= MAX_BYTES as u64),
+            "Kubernetes recovery response too large"
+        );
+        let mut bytes = Vec::new();
+        while let Some(chunk) = response.chunk().await? {
+            ensure!(
+                bytes.len().saturating_add(chunk.len()) <= MAX_BYTES,
+                "Kubernetes recovery response too large"
+            );
+            bytes.extend_from_slice(&chunk);
+        }
+        serde_json::from_slice(&bytes).context("Kubernetes recovery response invalid")
+    }
+
+    async fn read_recovery_optional_object(&self, url: Url) -> Result<Option<Value>> {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let response = self.request(Method::GET, url).await?;
+            if response.status() == StatusCode::NOT_FOUND {
+                return Ok(None);
+            }
+            ensure!(
+                response.status().is_success(),
+                "Kubernetes recovery observation failed ({})",
+                response.status()
+            );
+            Ok(Some(Self::read_recovery_json(response).await?))
+        })
+        .await
+        .context("Kubernetes recovery observation timed out")?
+    }
+
+    /// A complete bounded list of one resource kind. Pagination shares one
+    /// Kubernetes list RV; failures never return a partial inventory. Separate
+    /// calls for Pods, PVs and attachments are not an atomic cluster snapshot.
+    async fn recovery_objects(
+        &self,
+        base: Url,
+        kind: &str,
+        version: &str,
+        namespaced: bool,
+    ) -> Result<Vec<Value>> {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let mut collected = Vec::new();
+            let mut continuation: Option<String> = None;
+            let mut tokens = std::collections::HashSet::new();
+            let mut identities = std::collections::HashSet::new();
+            let mut resource_version: Option<String> = None;
+            let list_kind = format!("{kind}List");
+            for _ in 0..64 {
+                let mut url = base.clone();
+                url.query_pairs_mut().append_pair("limit", "100");
+                if let Some(token) = &continuation {
+                    url.query_pairs_mut().append_pair("continue", token);
+                }
+                let response = self.request(Method::GET, url).await?;
+                ensure!(
+                    response.status().is_success(),
+                    "Kubernetes recovery inventory failed ({})",
+                    response.status()
+                );
+                let body = Self::read_recovery_json(response).await?;
+                ensure!(
+                    body.get("kind").and_then(Value::as_str) == Some(list_kind.as_str())
+                        && body.get("apiVersion").and_then(Value::as_str) == Some(version),
+                    "Kubernetes recovery inventory type invalid"
+                );
+                let page_version = body
+                    .pointer("/metadata/resourceVersion")
+                    .and_then(Value::as_str)
+                    .context("Kubernetes recovery inventory version missing")?;
+                validate_identity_token(page_version)?;
+                ensure!(
+                    resource_version
+                        .as_deref()
+                        .is_none_or(|value| value == page_version),
+                    "Kubernetes recovery inventory changed during pagination"
+                );
+                resource_version = Some(page_version.to_owned());
+                let items = body
+                    .get("items")
+                    .and_then(Value::as_array)
+                    .context("Kubernetes recovery inventory items missing")?;
+                ensure!(
+                    items.len() <= 100,
+                    "Kubernetes recovery inventory page too large"
+                );
+                for object in items {
+                    validate_recovery_object(object, kind, version, namespaced)?;
+                    let uid = text_at(object, "/metadata/uid")
+                        .context("Kubernetes recovery resource UID missing")?;
+                    ensure!(
+                        identities.insert(uid),
+                        "Kubernetes recovery inventory duplicate identity"
+                    );
+                    collected.push(object.clone());
+                }
+                continuation = match body.pointer("/metadata/continue") {
+                    None => None,
+                    Some(Value::String(value)) if value.is_empty() => None,
+                    Some(Value::String(value)) => Some(value.clone()),
+                    Some(_) => {
+                        return Err(anyhow!(
+                            "Kubernetes recovery inventory continuation malformed"
+                        ));
+                    }
+                };
+                let remaining = match body.pointer("/metadata/remainingItemCount") {
+                    None => None,
+                    Some(count) => Some(
+                        count
+                            .as_u64()
+                            .context("Kubernetes recovery remaining item count invalid")?,
+                    ),
+                };
+                let Some(next) = &continuation else {
+                    ensure!(
+                        remaining.is_none_or(|count| count == 0),
+                        "Kubernetes recovery inventory continuation missing"
+                    );
+                    return Ok(collected);
+                };
+                ensure!(
+                    next.len() <= 16 * 1024 && tokens.insert(next.clone()),
+                    "Kubernetes recovery inventory continuation invalid"
+                );
+            }
+            Err(anyhow!(
+                "Kubernetes recovery inventory exceeds bounded capacity"
+            ))
+        })
+        .await
+        .context("Kubernetes recovery inventory timed out")?
+    }
+
+    /// Discover original UID/owner candidates throughout the cluster, and any
+    /// Pod using the original namespaced claim, independently of labels. This
+    /// returns candidates; ownership conflicts remain visible to the caller.
+    pub async fn recovery_pods(
+        &self,
+        namespace: &str,
+        original_pod_uid: Option<&str>,
+        sandbox_uid: Option<&str>,
+        claim_name: Option<&str>,
+    ) -> Result<Vec<OwnedResourceObservation>> {
+        validate_resource_segment(namespace)?;
+        for uid in [original_pod_uid, sandbox_uid].into_iter().flatten() {
+            validate_identity_token(uid)?;
+        }
+        if let Some(claim) = claim_name {
+            validate_resource_segment(claim)?;
+        }
+        ensure!(
+            original_pod_uid.is_some() || sandbox_uid.is_some() || claim_name.is_some(),
+            "Kubernetes Pod recovery anchor missing"
+        );
+        let mut url = self.base_url.clone();
+        url.set_path("/api/v1/pods");
+        let mut matches = Vec::new();
+        for object in self.recovery_objects(url, "Pod", "v1", true).await? {
+            ensure!(
+                object.get("spec").is_some_and(Value::is_object),
+                "Kubernetes recovery Pod specification missing"
+            );
+            let observed = OwnedResourceObservation::from_object(&object)
+                .context("Kubernetes recovery Pod metadata invalid")?;
+            let volumes = match object.pointer("/spec/volumes") {
+                None => None,
+                Some(volumes) => Some(
+                    volumes
+                        .as_array()
+                        .context("Kubernetes recovery Pod volumes malformed")?,
+                ),
+            };
+            let mut uses_claim = false;
+            for volume in volumes.into_iter().flatten() {
+                ensure!(
+                    volume.is_object(),
+                    "Kubernetes recovery Pod volume malformed"
+                );
+                if let Some(claim) = volume.get("persistentVolumeClaim") {
+                    let name = claim
+                        .get("claimName")
+                        .and_then(Value::as_str)
+                        .context("Kubernetes recovery Pod claim name missing")?;
+                    validate_resource_segment(name)?;
+                    uses_claim |= observed.namespace.as_deref() == Some(namespace)
+                        && claim_name == Some(name);
+                }
+            }
+            if original_pod_uid.is_some_and(|uid| observed.uid.as_deref() == Some(uid))
+                || sandbox_uid
+                    .is_some_and(|uid| observed.owner_uids.iter().any(|owner| owner == uid))
+                || uses_claim
+            {
+                matches.push(observed);
+            }
+        }
+        Ok(matches)
+    }
+
+    pub async fn claim_users(
+        &self,
+        namespace: &str,
+        claim_name: &str,
+    ) -> Result<Vec<OwnedResourceObservation>> {
+        self.recovery_pods(namespace, None, None, Some(claim_name))
+            .await
+    }
+
+    pub async fn node_lease(&self, name: &str) -> Result<Option<NodeLeaseObservation>> {
+        validate_resource_segment(name)?;
+        let mut url = self.base_url.clone();
+        url.set_path(&format!(
+            "/apis/coordination.k8s.io/v1/namespaces/kube-node-lease/leases/{name}"
+        ));
+        let Some(object) = self.read_recovery_optional_object(url).await? else {
+            return Ok(None);
+        };
+        validate_recovery_object(&object, "Lease", "coordination.k8s.io/v1", true)?;
+        let observation = NodeLeaseObservation::from_object(&object)?;
+        ensure!(
+            observation.name == name && observation.namespace == "kube-node-lease",
+            "Kubernetes Node Lease identity conflict"
+        );
+        Ok(Some(observation))
+    }
+
+    /// Includes a same-name claim as a conflict candidate even when its original
+    /// UID is unknown. Discovery alone never authorizes adoption or deletion.
+    /// Empty candidates never prove CSI terminality or absence of cloud disks.
+    pub async fn persistent_volumes_for_claim(
+        &self,
+        namespace: &str,
+        name: &str,
+        uid: Option<&str>,
+    ) -> Result<Vec<PersistentVolumeObservation>> {
+        validate_resource_segment(namespace)?;
+        validate_resource_segment(name)?;
+        if let Some(uid) = uid {
+            validate_identity_token(uid)?;
+        }
+        let mut url = self.base_url.clone();
+        url.set_path("/api/v1/persistentvolumes");
+        self.recovery_objects(url, "PersistentVolume", "v1", false)
+            .await?
+            .iter()
+            .map(PersistentVolumeObservation::from_object)
+            .collect::<Result<Vec<_>>>()
+            .map(|rows| {
+                rows.into_iter()
+                    .filter(|row| {
+                        uid.is_some_and(|uid| row.claim_uid.as_deref() == Some(uid))
+                            || (row.claim_namespace.as_deref() == Some(namespace)
+                                && row.claim_name.as_deref() == Some(name))
+                    })
+                    .collect()
+            })
+    }
+
+    pub async fn volume_attachments(
+        &self,
+        pv_name: &str,
+    ) -> Result<Vec<VolumeAttachmentObservation>> {
+        validate_resource_segment(pv_name)?;
+        let mut url = self.base_url.clone();
+        url.set_path("/apis/storage.k8s.io/v1/volumeattachments");
+        self.recovery_objects(url, "VolumeAttachment", "storage.k8s.io/v1", false)
+            .await?
+            .iter()
+            .map(VolumeAttachmentObservation::from_object)
+            .collect::<Result<Vec<_>>>()
+            .map(|rows| {
+                rows.into_iter()
+                    .filter(|row| row.persistent_volume_name.as_deref() == Some(pv_name))
+                    .collect()
+            })
+    }
+
+    /// Observe controller-created Pods/PVCs by ownerReference. Cleanup callers
+    /// consume this inventory, so every page and item must be valid before any
+    /// ownership filtering. Invalid or incomplete data is never an empty list.
+    /// This read does not establish runtime or storage termination.
     pub async fn list_owned_resources(
         &self,
         namespace: &str,
         resource: &str,
         sandbox_uid: &str,
     ) -> Result<Vec<OwnedResourceObservation>> {
-        ensure!(
-            matches!(resource, "pods" | "persistentvolumeclaims"),
-            "unsupported observed resource"
-        );
-        ensure!(
-            !namespace.is_empty() && !namespace.contains('/'),
-            "invalid namespace"
-        );
+        let kind = match resource {
+            "pods" => "Pod",
+            "persistentvolumeclaims" => "PersistentVolumeClaim",
+            _ => return Err(anyhow!("unsupported observed resource")),
+        };
+        validate_resource_segment(namespace)?;
+        validate_identity_token(sandbox_uid)?;
         let mut url = self.base_url.clone();
         url.set_path(&format!("/api/v1/namespaces/{namespace}/{resource}"));
-        Ok(self
-            .list_objects(url)
+        let rows = self
+            .recovery_objects(url, kind, "v1", true)
             .await?
             .iter()
-            .filter_map(OwnedResourceObservation::from_object)
+            .map(|object| {
+                ensure!(
+                    object
+                        .pointer("/metadata/namespace")
+                        .and_then(Value::as_str)
+                        == Some(namespace),
+                    "Kubernetes owned inventory namespace invalid"
+                );
+                OwnedResourceObservation::from_object(object)
+                    .context("Kubernetes owned inventory resource metadata invalid")
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok(rows
+            .into_iter()
             .filter(|item| item.owner_uids.iter().any(|uid| uid == sandbox_uid))
             .collect())
     }
@@ -1501,6 +2134,439 @@ mod tests {
         Mock, MockServer, ResponseTemplate,
         matchers::{body_json, header, method, path, query_param},
     };
+
+    #[tokio::test]
+    async fn delete_recovery_suspend_preserves_templates_and_uses_uid_rv_tests() {
+        let server = MockServer::start().await;
+        let mut desired = intent(&server);
+        desired.running = false;
+        // Deletion must not depend on today's image/profile admission settings.
+        desired.image = "deployment-image-is-currently-unavailable".into();
+        let mut live = object(&desired, "original-uid");
+        live["metadata"]["labels"]["nyxid.dev/operation-id"] = json!("old-operation");
+        live["spec"]["shutdownTime"] = json!("2026-10-17T01:00:00Z");
+        live["spec"]["podTemplate"]["metadata"]["annotations"] = json!({"retained":"original"});
+        let response = live.clone();
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(live))
+            .mount(&server)
+            .await;
+        let tuple = desired.clone();
+        Mock::given(method("PATCH"))
+            .and(header("authorization", "Bearer test-token"))
+            .and(header("content-type", "application/json-patch+json"))
+            .respond_with(move |request: &wiremock::Request| {
+                let patch: Value = serde_json::from_slice(&request.body).unwrap();
+                let operations = patch.as_array().unwrap();
+                assert!(operations.contains(&json!({"op":"test","path":"/metadata/uid","value":"original-uid"})));
+                assert!(operations.contains(&json!({"op":"test","path":"/metadata/resourceVersion","value":"7"})));
+                assert!(operations.contains(&json!({"op":"add","path":"/metadata/labels/nyxid.dev~1operation-id","value":tuple.operation_id})));
+                assert!(operations.contains(&json!({"op":"add","path":"/spec/operatingMode","value":"Suspended"})));
+                assert!(operations.contains(&json!({"op":"remove","path":"/spec/shutdownTime"})));
+                assert!(operations.iter().all(|operation| !operation["path"].as_str().unwrap().contains("Template")));
+                let mut response = response.clone();
+                response["spec"]["operatingMode"] = json!("Suspended");
+                response["metadata"]["labels"]["nyxid.dev/operation-id"] = json!(tuple.operation_id);
+                ResponseTemplate::new(200).set_body_json(response)
+            })
+            .expect(1).mount(&server).await;
+        let api =
+            SandboxApi::new(server.uri().parse().unwrap(), Some("test-token".into())).unwrap();
+        assert!(
+            api.suspend_if_identity(&desired, "original-uid", "7")
+                .await
+                .unwrap()
+                .desired_suspended
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_recovery_suspend_rejects_replacement_stale_version_and_tuple() {
+        for drift in [
+            "uid",
+            "resourceVersion",
+            "writer-fence",
+            "machine-id",
+            "owner-id",
+            "runtime-generation",
+            "credential-epoch",
+        ] {
+            let server = MockServer::start().await;
+            let desired = intent(&server);
+            let mut live = object(&desired, "original-uid");
+            if matches!(drift, "uid" | "resourceVersion") {
+                live["metadata"][drift] = json!("replacement");
+            } else {
+                live["metadata"]["labels"][format!("nyxid.dev/{drift}")] = json!("replacement");
+            }
+            Mock::given(method("GET"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(live))
+                .mount(&server)
+                .await;
+            let api = SandboxApi::new(server.uri().parse().unwrap(), None).unwrap();
+            assert!(
+                api.suspend_if_identity(&desired, "original-uid", "7")
+                    .await
+                    .is_err(),
+                "accepted {drift}"
+            );
+            assert!(
+                server
+                    .received_requests()
+                    .await
+                    .unwrap()
+                    .iter()
+                    .all(|r| r.method.as_str() == "GET")
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn delete_recovery_exact_deletes_send_both_preconditions_and_keep_404_local() {
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(header("authorization", "Bearer test-token"))
+            .and(body_json(
+                json!({"preconditions":{"uid":"original-uid","resourceVersion":"7"}}),
+            ))
+            .respond_with(|request: &wiremock::Request| {
+                if request.url.path().ends_with("/absent") {
+                    ResponseTemplate::new(404)
+                } else {
+                    ResponseTemplate::new(202)
+                }
+            })
+            .expect(3)
+            .mount(&server)
+            .await;
+        let api =
+            SandboxApi::new(server.uri().parse().unwrap(), Some("test-token".into())).unwrap();
+        assert!(
+            api.delete_if_identity("nyxid-machine", "original", "original-uid", "7")
+                .await
+                .unwrap()
+        );
+        assert!(
+            api.delete_resource_if_identity(
+                "nyxid-machine",
+                "pods",
+                "original",
+                "original-uid",
+                "7"
+            )
+            .await
+            .unwrap()
+        );
+        assert!(
+            !api.delete_resource_if_identity(
+                "nyxid-machine",
+                "persistentvolumeclaims",
+                "absent",
+                "original-uid",
+                "7"
+            )
+            .await
+            .unwrap()
+        );
+        assert!(
+            api.delete_resource_if_identity(
+                "nyxid-machine",
+                "secrets",
+                "original",
+                "original-uid",
+                "7"
+            )
+            .await
+            .is_err()
+        );
+        assert!(
+            api.delete_resource_if_identity("nyxid-machine", "pods", "original", "", "7")
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_recovery_rejects_dot_path_segments_before_request() {
+        let server = MockServer::start().await;
+        let api = SandboxApi::new(server.uri().parse().unwrap(), None).unwrap();
+        assert!(
+            api.delete_resource_if_identity("nyxid-machine", "pods", "..", "uid", "7")
+                .await
+                .is_err()
+        );
+        assert!(
+            api.delete_if_identity("..", "original", "uid", "7")
+                .await
+                .is_err()
+        );
+        assert!(server.received_requests().await.unwrap().is_empty());
+    }
+
+    fn recovery_pod(name: &str, uid: &str, namespace: &str) -> Value {
+        json!({"apiVersion":"v1","kind":"Pod","metadata":{"name":name,"uid":uid,"namespace":namespace,"resourceVersion":"3"},"spec":{"containers":[{"name":"node"}],"volumes":[]}})
+    }
+
+    #[tokio::test]
+    async fn delete_recovery_pod_search_is_complete_without_labels_and_claims_are_namespaced() {
+        let server = MockServer::start().await;
+        let original = recovery_pod("original", "old-pod", "other-namespace");
+        let mut owned = recovery_pod("owned", "owned-pod", "nyxid-machine");
+        owned["metadata"]["ownerReferences"] = json!([{"apiVersion":"agents.x-k8s.io/v1beta1","kind":"Sandbox","name":"original","uid":"sandbox-uid","controller":true}]);
+        let mut user = recovery_pod("claim-user", "user-pod", "nyxid-machine");
+        // A non-workspace volume still counts as a writer using the claim.
+        user["spec"]["volumes"] =
+            json!([{"name":"other","persistentVolumeClaim":{"claimName":"original-claim"}}]);
+        let mut different_namespace = user.clone();
+        different_namespace["metadata"]["namespace"] = json!("unrelated");
+        different_namespace["metadata"]["uid"] = json!("unrelated-pod");
+        different_namespace["metadata"]["ownerReferences"] = json!([{
+            "apiVersion":"apps/v1","kind":"ReplicaSet","name":"foreign",
+            "uid":"foreign-owner","controller":true,"blockOwnerDeletion":false
+        }]);
+        Mock::given(method("GET")).and(path("/api/v1/pods"))
+            .and(query_param("limit","100"))
+            .respond_with(move |request:&wiremock::Request| {
+                assert!(!request.url.query_pairs().any(|(key,_)| key=="labelSelector"));
+                if request.url.query_pairs().any(|(key,value)|key=="continue"&&value=="next") {
+                    ResponseTemplate::new(200).set_body_json(json!({"kind":"PodList","apiVersion":"v1","metadata":{"resourceVersion":"40"},"items":[user.clone(),different_namespace.clone()]}))
+                } else {
+                    ResponseTemplate::new(200).set_body_json(json!({"kind":"PodList","apiVersion":"v1","metadata":{"resourceVersion":"40","continue":"next"},"items":[original.clone(),owned.clone()]}))
+                }
+            }).expect(4).mount(&server).await;
+        let api = SandboxApi::new(server.uri().parse().unwrap(), None).unwrap();
+        let rows = api
+            .recovery_pods(
+                "nyxid-machine",
+                Some("old-pod"),
+                Some("sandbox-uid"),
+                Some("original-claim"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            rows.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(),
+            vec!["original", "owned", "claim-user"]
+        );
+        let users = api
+            .claim_users("nyxid-machine", "original-claim")
+            .await
+            .unwrap();
+        assert_eq!(users.len(), 1);
+        assert_eq!(users[0].name, "claim-user");
+    }
+
+    #[tokio::test]
+    async fn delete_recovery_pods_and_claim_users_reject_malformed_foreign_owners_before_filtering()
+    {
+        let mut malformed_owners = Vec::new();
+        let valid = json!({"apiVersion":"apps/v1","kind":"ReplicaSet","name":"foreign","uid":"foreign-uid","controller":true,"blockOwnerDeletion":false});
+        for field in ["apiVersion", "kind", "name", "uid"] {
+            let mut missing = valid.clone();
+            missing.as_object_mut().unwrap().remove(field);
+            malformed_owners.push((format!("missing-{field}"), missing));
+            let mut wrong_type = valid.clone();
+            wrong_type[field] = json!(23);
+            malformed_owners.push((format!("nonstring-{field}"), wrong_type));
+            let mut empty = valid.clone();
+            empty[field] = json!("");
+            malformed_owners.push((format!("empty-{field}"), empty));
+        }
+        for field in ["controller", "blockOwnerDeletion"] {
+            let mut owner = valid.clone();
+            owner[field] = json!("true");
+            malformed_owners.push((format!("nonboolean-{field}"), owner));
+        }
+        for (defect, owner) in malformed_owners {
+            let server = MockServer::start().await;
+            let mut unrelated = recovery_pod("foreign-pod", "foreign-pod-uid", "other-namespace");
+            unrelated["metadata"]["ownerReferences"] = json!([owner]);
+            Mock::given(method("GET"))
+                .and(path("/api/v1/pods"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "apiVersion":"v1","kind":"PodList",
+                    "metadata":{"resourceVersion":"complete"},"items":[unrelated]
+                })))
+                .expect(2)
+                .mount(&server)
+                .await;
+            let api = SandboxApi::new(server.uri().parse().unwrap(), None).unwrap();
+            let recovery = api
+                .recovery_pods(
+                    "nyxid-machine",
+                    Some("original-pod"),
+                    Some("sandbox-uid"),
+                    Some("claim"),
+                )
+                .await;
+            let users = api.claim_users("nyxid-machine", "claim").await;
+            assert!(
+                recovery.is_err(),
+                "recovery_pods silently filtered {defect}"
+            );
+            assert!(users.is_err(), "claim_users silently filtered {defect}");
+        }
+    }
+
+    #[tokio::test]
+    async fn delete_recovery_inventory_rejects_incomplete_malformed_and_changed_pages() {
+        for body in [
+            json!({"kind":"PodList","apiVersion":"v1","metadata":{"resourceVersion":"40","continue":123},"items":[]}),
+            json!({"kind":"PodList","apiVersion":"v1","metadata":{"resourceVersion":"40"},"items":[{"kind":"Pod","metadata":{"uid":"unknown"}}]}),
+            json!({"kind":"PodList","apiVersion":"v1","metadata":{},"items":[]}),
+        ] {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(body))
+                .mount(&server)
+                .await;
+            let api = SandboxApi::new(server.uri().parse().unwrap(), None).unwrap();
+            assert!(api.claim_users("nyxid-machine", "claim").await.is_err());
+        }
+        let server = MockServer::start().await;
+        Mock::given(method("GET")).respond_with(|request:&wiremock::Request| {
+            if request.url.query_pairs().any(|(key,_)|key=="continue") {
+                ResponseTemplate::new(200).set_body_json(json!({"kind":"PodList","apiVersion":"v1","metadata":{"resourceVersion":"41"},"items":[]}))
+            } else {ResponseTemplate::new(200).set_body_json(json!({"kind":"PodList","apiVersion":"v1","metadata":{"resourceVersion":"40","continue":"next"},"items":[]}))}
+        }).mount(&server).await;
+        let api = SandboxApi::new(server.uri().parse().unwrap(), None).unwrap();
+        assert!(api.claim_users("nyxid-machine", "claim").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn delete_recovery_inventory_refuses_forbidden_looping_oversized_and_duplicate_pages() {
+        let pod = recovery_pod("original", "uid", "nyxid-machine");
+        for response in [
+            ResponseTemplate::new(403),
+            ResponseTemplate::new(200).set_body_json(json!({"kind":"PodList","apiVersion":"v1","metadata":{"resourceVersion":"40","continue":"loop"},"items":[]})),
+            ResponseTemplate::new(200).set_body_json(json!({"kind":"PodList","apiVersion":"v1","metadata":{"resourceVersion":"40"},"items":vec![pod.clone();101]})),
+            ResponseTemplate::new(200).set_body_json(json!({"kind":"PodList","apiVersion":"v1","metadata":{"resourceVersion":"40"},"items":[pod.clone(),pod.clone()]})),
+            ResponseTemplate::new(200).set_body_raw("x".repeat(1024*1024+1),"application/json"),
+        ] {
+            let server=MockServer::start().await;
+            Mock::given(method("GET")).respond_with(response).mount(&server).await;
+            let api=SandboxApi::new(server.uri().parse().unwrap(),None).unwrap();
+            assert!(api.claim_users("nyxid-machine","claim").await.is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn delete_recovery_inventory_rejects_remaining_items_without_continuation() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "apiVersion":"v1","kind":"PodList",
+                "metadata":{"resourceVersion":"40","remainingItemCount":1},"items":[]
+            })))
+            .mount(&server)
+            .await;
+        let api = SandboxApi::new(server.uri().parse().unwrap(), None).unwrap();
+        assert!(api.claim_users("nyxid-machine", "claim").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn delete_recovery_inventory_has_an_aggregate_deadline() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_delay(std::time::Duration::from_secs(10)))
+            .mount(&server)
+            .await;
+        let api = SandboxApi::new(server.uri().parse().unwrap(), None).unwrap();
+        let start = std::time::Instant::now();
+        let error = api.claim_users("nyxid-machine", "claim").await.unwrap_err();
+        assert!(error.to_string().contains("timed out"));
+        assert!(start.elapsed() < std::time::Duration::from_secs(7));
+    }
+
+    #[tokio::test]
+    async fn delete_recovery_exact_reads_distinguish_absence_from_forbidden_and_malformed() {
+        for status in [404, 403] {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .respond_with(ResponseTemplate::new(status))
+                .mount(&server)
+                .await;
+            let api = SandboxApi::new(server.uri().parse().unwrap(), None).unwrap();
+            let result = api.node_lease("original-node").await;
+            if status == 404 {
+                assert!(result.unwrap().is_none());
+            } else {
+                assert!(result.is_err());
+            }
+        }
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"metadata":{"name":"replacement"}})),
+            )
+            .mount(&server)
+            .await;
+        let api = SandboxApi::new(server.uri().parse().unwrap(), None).unwrap();
+        assert!(api.node_lease("original-node").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn delete_recovery_reads_original_lease_pv_candidates_csi_and_attachments() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET")).and(path("/apis/coordination.k8s.io/v1/namespaces/kube-node-lease/leases/original-node"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"apiVersion":"coordination.k8s.io/v1","kind":"Lease","metadata":{"name":"original-node","namespace":"kube-node-lease","uid":"lease-uid","resourceVersion":"8","ownerReferences":[{"apiVersion":"v1","kind":"Node","name":"original-node","uid":"node-uid"}]},"spec":{"holderIdentity":"original-node","renewTime":"2026-10-17T01:00:00Z","leaseDurationSeconds":40}})))
+            .mount(&server).await;
+        let original = json!({"apiVersion":"v1","kind":"PersistentVolume","metadata":{"name":"original-pv","uid":"pv-uid","resourceVersion":"9"},"spec":{"claimRef":{"namespace":"nyxid-machine","name":"claim","uid":"claim-uid"},"csi":{"driver":"pd.csi.storage.gke.io","volumeHandle":"projects/project/zones/zone/disks/disk"},"persistentVolumeReclaimPolicy":"Delete"}});
+        let mut conflict = original.clone();
+        conflict["metadata"]["name"] = json!("conflicting-pv");
+        conflict["metadata"]["uid"] = json!("other-pv-uid");
+        conflict["spec"]["claimRef"]["uid"] = json!("replacement-claim");
+        let mut uid_only = original.clone();
+        uid_only["metadata"]["name"] = json!("uid-only-pv");
+        uid_only["metadata"]["uid"] = json!("uid-only-pv-uid");
+        uid_only["spec"]["claimRef"]["name"] = json!("different-claim");
+        let mut unbound = original.clone();
+        unbound["metadata"]["name"] = json!("unbound-pv");
+        unbound["metadata"]["uid"] = json!("unbound-pv-uid");
+        unbound["spec"].as_object_mut().unwrap().remove("claimRef");
+        Mock::given(method("GET")).and(path("/api/v1/persistentvolumes"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"apiVersion":"v1","kind":"PersistentVolumeList","metadata":{"resourceVersion":"10"},"items":[original,conflict,uid_only,unbound]})))
+            .mount(&server).await;
+        Mock::given(method("GET")).and(path("/apis/storage.k8s.io/v1/volumeattachments"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"apiVersion":"storage.k8s.io/v1","kind":"VolumeAttachmentList","metadata":{"resourceVersion":"10"},"items":[{"apiVersion":"storage.k8s.io/v1","kind":"VolumeAttachment","metadata":{"name":"attachment","uid":"va-uid","resourceVersion":"10"},"spec":{"source":{"persistentVolumeName":"original-pv"},"nodeName":"original-node","attacher":"pd.csi.storage.gke.io"},"status":{"attached":false}}]})))
+            .mount(&server).await;
+        let api = SandboxApi::new(server.uri().parse().unwrap(), None).unwrap();
+        let lease = api.node_lease("original-node").await.unwrap().unwrap();
+        assert_eq!(lease.owner_node_uid.as_deref(), Some("node-uid"));
+        assert_eq!(lease.renew_time.as_deref(), Some("2026-10-17T01:00:00Z"));
+        assert_eq!(lease.lease_duration_seconds, Some(40));
+        let pvs = api
+            .persistent_volumes_for_claim("nyxid-machine", "claim", Some("claim-uid"))
+            .await
+            .unwrap();
+        assert_eq!(pvs.len(), 3);
+        assert!(pvs.iter().any(|pv| pv.name == "uid-only-pv"));
+        let named = api
+            .persistent_volumes_for_claim("nyxid-machine", "claim", None)
+            .await
+            .unwrap();
+        assert_eq!(named.len(), 2);
+        assert!(
+            named
+                .iter()
+                .all(|pv| pv.claim_name.as_deref() == Some("claim"))
+        );
+        assert!(
+            api.persistent_volumes_for_claim("nyxid-machine", "claim", Some(""))
+                .await
+                .is_err()
+        );
+        assert_eq!(pvs[0].csi_driver.as_deref(), Some("pd.csi.storage.gke.io"));
+        assert_eq!(
+            pvs[0].csi_volume_handle.as_deref(),
+            Some("projects/project/zones/zone/disks/disk")
+        );
+        let attachments = api.volume_attachments("original-pv").await.unwrap();
+        assert_eq!(attachments.len(), 1);
+        assert_eq!(attachments[0].attached, Some(false));
+        assert_eq!(attachments[0].node_name.as_deref(), Some("original-node"));
+    }
 
     #[tokio::test]
     async fn optional_runtime_class_is_omitted_and_explicit_class_is_preserved() {
@@ -2663,13 +3729,14 @@ mod tests {
     #[tokio::test]
     async fn list_owned_resources_filters_by_sandbox_owner_uid() {
         let server = MockServer::start().await;
+        let mut owned = recovery_owned_resource("Pod", "owned", "pod-1", "sandbox-uid");
+        owned["status"] = json!({"phase":"Running"});
+        let foreign = recovery_owned_resource("Pod", "foreign", "pod-2", "other");
         Mock::given(method("GET"))
             .and(path("/api/v1/namespaces/nyxid-machine/pods"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "items": [
-                    {"kind": "Pod", "metadata": {"name": "owned", "uid": "pod-1", "ownerReferences": [{"uid": "sandbox-uid"}]}, "status": {"phase": "Running"}},
-                    {"kind": "Pod", "metadata": {"name": "foreign", "uid": "pod-2", "ownerReferences": [{"uid": "other"}]}, "status": {"phase": "Running"}}
-                ]
+                "kind":"PodList","apiVersion":"v1","metadata":{"resourceVersion":"40"},
+                "items": [owned, foreign]
             })))
             .mount(&server)
             .await;
@@ -2681,6 +3748,212 @@ mod tests {
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].name, "owned");
         assert_eq!(listed[0].phase.as_deref(), Some("Running"));
+    }
+
+    fn recovery_owned_resource(kind: &str, name: &str, uid: &str, sandbox_uid: &str) -> Value {
+        json!({"kind":kind,"apiVersion":"v1","metadata":{
+            "name":name,"namespace":"nyxid-machine","uid":uid,"resourceVersion":"3",
+            "ownerReferences":[{"apiVersion":"agents.x-k8s.io/v1beta1","kind":"Sandbox",
+                "name":"original-sandbox","uid":sandbox_uid,"controller":true}]}})
+    }
+
+    #[tokio::test]
+    async fn owned_cleanup_inventory_rejects_nonstring_continuation() {
+        for (resource, kind) in [
+            ("pods", "Pod"),
+            ("persistentvolumeclaims", "PersistentVolumeClaim"),
+        ] {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path(format!("/api/v1/namespaces/nyxid-machine/{resource}")))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "kind":format!("{kind}List"),"apiVersion":"v1",
+                    "metadata":{"resourceVersion":"40","continue":123},"items":[]
+                })))
+                .expect(1)
+                .mount(&server)
+                .await;
+            let api = SandboxApi::new(server.uri().parse().unwrap(), None).unwrap();
+            let error = api
+                .list_owned_resources("nyxid-machine", resource, "sandbox-uid")
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains("continuation malformed"));
+        }
+    }
+
+    #[tokio::test]
+    async fn owned_cleanup_inventory_rejects_remaining_items_without_continuation() {
+        for (resource, kind) in [
+            ("pods", "Pod"),
+            ("persistentvolumeclaims", "PersistentVolumeClaim"),
+        ] {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "kind":format!("{kind}List"),"apiVersion":"v1",
+                    "metadata":{"resourceVersion":"40","remainingItemCount":1},"items":[]
+                })))
+                .expect(1)
+                .mount(&server)
+                .await;
+            let api = SandboxApi::new(server.uri().parse().unwrap(), None).unwrap();
+            let error = api
+                .list_owned_resources("nyxid-machine", resource, "sandbox-uid")
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains("continuation missing"));
+        }
+    }
+
+    #[tokio::test]
+    async fn owned_cleanup_inventory_rejects_malformed_items_before_ownership_filtering() {
+        for (resource, kind) in [
+            ("pods", "Pod"),
+            ("persistentvolumeclaims", "PersistentVolumeClaim"),
+        ] {
+            let valid = recovery_owned_resource(kind, "original", "original-uid", "sandbox-uid");
+            for defect in [
+                "missing-name",
+                "missing-uid",
+                "invalid-owners",
+                "missing-owner-uid",
+                "missing-owner-kind",
+                "invalid-controller",
+                "wrong-namespace",
+            ] {
+                let server = MockServer::start().await;
+                // Even a malformed unrelated item must not be silently dropped.
+                let mut malformed = recovery_owned_resource(
+                    kind,
+                    "malformed",
+                    "malformed-uid",
+                    "different-sandbox",
+                );
+                match defect {
+                    "missing-name" => {
+                        malformed["metadata"]
+                            .as_object_mut()
+                            .unwrap()
+                            .remove("name");
+                    }
+                    "missing-uid" => {
+                        malformed["metadata"].as_object_mut().unwrap().remove("uid");
+                    }
+                    "invalid-owners" => {
+                        malformed["metadata"]["ownerReferences"] = json!({"uid":"sandbox-uid"})
+                    }
+                    "missing-owner-uid" => {
+                        malformed["metadata"]["ownerReferences"][0]
+                            .as_object_mut()
+                            .unwrap()
+                            .remove("uid");
+                    }
+                    "missing-owner-kind" => {
+                        malformed["metadata"]["ownerReferences"][0]
+                            .as_object_mut()
+                            .unwrap()
+                            .remove("kind");
+                    }
+                    "invalid-controller" => {
+                        malformed["metadata"]["ownerReferences"][0]["controller"] = json!("true")
+                    }
+                    "wrong-namespace" => {
+                        malformed["metadata"]["namespace"] = json!("other-namespace")
+                    }
+                    _ => unreachable!(),
+                }
+                Mock::given(method("GET"))
+                    .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                        "kind":format!("{kind}List"),"apiVersion":"v1",
+                        "metadata":{"resourceVersion":"40"},"items":[valid.clone(),malformed]
+                    })))
+                    .expect(1)
+                    .mount(&server)
+                    .await;
+                let api = SandboxApi::new(server.uri().parse().unwrap(), None).unwrap();
+                assert!(
+                    api.list_owned_resources("nyxid-machine", resource, "sandbox-uid")
+                        .await
+                        .is_err(),
+                    "accepted {resource} {defect}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn owned_cleanup_inventory_returns_only_matches_after_complete_valid_pagination() {
+        for (resource, kind) in [
+            ("pods", "Pod"),
+            ("persistentvolumeclaims", "PersistentVolumeClaim"),
+        ] {
+            let server = MockServer::start().await;
+            let original = recovery_owned_resource(kind, "original", "original-uid", "sandbox-uid");
+            let late = recovery_owned_resource(kind, "late", "late-uid", "sandbox-uid");
+            let foreign =
+                recovery_owned_resource(kind, "foreign", "foreign-uid", "different-sandbox");
+            Mock::given(method("GET"))
+                .and(path(format!("/api/v1/namespaces/nyxid-machine/{resource}")))
+                .and(query_param("limit", "100"))
+                .respond_with(move |request: &wiremock::Request| {
+                    assert!(!request.url.query_pairs().any(|(key,_)| key == "labelSelector"));
+                    if request.url.query_pairs().any(|(key,value)| key == "continue" && value == "next") {
+                        ResponseTemplate::new(200).set_body_json(json!({
+                            "kind":format!("{kind}List"),"apiVersion":"v1",
+                            "metadata":{"resourceVersion":"40","remainingItemCount":0},"items":[late.clone()]
+                        }))
+                    } else {
+                        ResponseTemplate::new(200).set_body_json(json!({
+                            "kind":format!("{kind}List"),"apiVersion":"v1",
+                            "metadata":{"resourceVersion":"40","continue":"next","remainingItemCount":1},"items":[original.clone(),foreign.clone()]
+                        }))
+                    }
+                })
+                .expect(2).mount(&server).await;
+            let api = SandboxApi::new(server.uri().parse().unwrap(), None).unwrap();
+            let rows = api
+                .list_owned_resources("nyxid-machine", resource, "sandbox-uid")
+                .await
+                .unwrap();
+            assert_eq!(
+                rows.iter().map(|row| row.name.as_str()).collect::<Vec<_>>(),
+                vec!["original", "late"]
+            );
+            assert!(rows.iter().all(|row| row.ownership_valid));
+        }
+    }
+
+    #[tokio::test]
+    async fn owned_cleanup_inventory_rejects_later_invalid_page_without_partial_results() {
+        let server = MockServer::start().await;
+        let original = recovery_owned_resource(
+            "PersistentVolumeClaim",
+            "original",
+            "original-uid",
+            "sandbox-uid",
+        );
+        Mock::given(method("GET"))
+            .respond_with(move |request: &wiremock::Request| {
+                if request.url.query_pairs().any(|(key,_)| key == "continue") {
+                    ResponseTemplate::new(200).set_body_json(json!({
+                        "kind":"PersistentVolumeClaimList","apiVersion":"v1",
+                        "metadata":{"resourceVersion":"41"},"items":[]
+                    }))
+                } else {
+                    ResponseTemplate::new(200).set_body_json(json!({
+                        "kind":"PersistentVolumeClaimList","apiVersion":"v1",
+                        "metadata":{"resourceVersion":"40","continue":"next"},"items":[original.clone()]
+                    }))
+                }
+            })
+            .expect(2).mount(&server).await;
+        let api = SandboxApi::new(server.uri().parse().unwrap(), None).unwrap();
+        let error = api
+            .list_owned_resources("nyxid-machine", "persistentvolumeclaims", "sandbox-uid")
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("changed during pagination"));
     }
 
     #[tokio::test]

@@ -224,6 +224,9 @@ impl CreateMachineInput {
             native_pv_reclaim_policy: None,
             native_run_not_after: None,
             runtime_submission_started_at: None,
+            delete_recovery: None,
+            delete_suspension_generation: None,
+            delete_suspension_operation_id: None,
             cleanup_state: CleanupState::NotRequired.as_str().into(),
             stop_reason: None,
             cleanup_evidence_digest: None,
@@ -308,6 +311,13 @@ pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
         .create_index(
             IndexModel::builder()
                 .keys(doc! {"owner_id": 1, "resource_state": 1})
+                .build(),
+        )
+        .await?;
+    machines
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"resource_state":1,"manager_observed_at":1,"_id":1})
                 .build(),
         )
         .await?;
@@ -747,9 +757,11 @@ async fn create_machine_inner(
         state: EffectState::Pending,
         attempts: 0,
         claim_id: None,
+        undispatched_claim_id: None,
         claimed_until: None,
         last_error: None,
         available_at: Some(now),
+        submission: None,
         created_at: now,
         updated_at: now,
     };
@@ -1171,10 +1183,11 @@ async fn request_action_inner(
                     desired_mode: if matches!(input_owned.action, LifecycleAction::Pause | LifecycleAction::Delete | LifecycleAction::Rekey) { "suspended".into() } else { "running".into() },
                     state: EffectState::Pending,
                     attempts: 0,
-                    claim_id: None,
+                    claim_id: None, undispatched_claim_id: None,
                     claimed_until: None,
                     last_error: None,
                     available_at: Some(now),
+                    submission: None,
                     created_at: now,
                     updated_at: now,
                 };
@@ -1608,11 +1621,15 @@ pub async fn finalize_unallocated_delete(
             let machine = db_owned.collection::<ManagedMachine>(MACHINES).find_one(doc! {
                 "_id": &machine_id, "resource_state": "deleting", "runtime_generation": 0,
                 "sandbox_uid": bson::Bson::Null, "pod_uid": bson::Bson::Null, "pvc_uid": bson::Bson::Null,
+                "pvc_name": bson::Bson::Null, "native_pv_name": bson::Bson::Null, "native_pv_uid": bson::Bson::Null,
+                "runtime_submission_started_at": bson::Bson::Null, "bootstrap_delivery_id": bson::Bson::Null,
+                "native_uncertainty": bson::Bson::Null, "writer_admitted": false,
             }).session(&mut *session).await?;
             let Some(machine) = machine else { return Ok(None) };
             if !deletion_authorized_in_session(&db_owned, session, &machine_id).await? {
                 return Err(AppError::Conflict("machine_owner_deletion_basis_required".into()));
             }
+            if !super::remote_machine_operation_service::creation_responsibilities_terminal_in_session(&db_owned,session,&machine).await? {return Ok(None);}
             super::remote_machine_runtime::require_accounting_final_in_session(&db_owned,session,&machine).await?;
             let node = db_owned.collection::<Document>(crate::models::node::COLLECTION_NAME).find_one(doc! {"_id": &machine_id, "is_active": false, "signing_secret_encrypted": bson::Bson::Null}).session(&mut *session).await?;
             if node.is_none() { return Ok(None); }
@@ -1849,7 +1866,8 @@ pub async fn suspend_ineligible_with_billing(
                     id: effect_id.clone(), operation_id: operation_id.clone(), machine_id: current.node_id.clone(), owner_id: current.owner_id.clone(),
                     kind: EffectKind::for_action(action), effect_digest: request_digest(&json!({"machine_id":current.node_id,"safety_generation":current.runtime_generation})),
                     namespace: current.sandbox_namespace.clone(), sandbox_name: current.sandbox_name.clone(), desired_mode: "suspended".into(),
-                    state: EffectState::Pending, attempts: 0, claim_id: None, claimed_until: None, last_error: None, available_at: Some(now), created_at: now, updated_at: now,
+                    state: EffectState::Pending, attempts: 0, claim_id: None, undispatched_claim_id: None, claimed_until: None, last_error: None, available_at: Some(now),
+                    submission: None, created_at: now, updated_at: now,
                 };
                 let updated = db_owned.collection::<Document>(MACHINES)
                     .update_one(doc! {"_id": &current.node_id, "revision": current.revision}, doc! {"$set": {"resource_state":if deletion {"deleting"} else {"stopping"}, "stop_reason": reason, "authorization_state": "revoked", "writer_admitted": false, "active_operation_id": &operation_id, "cleanup_state": "pending", "eligibility_checked_at": bson::DateTime::from_chrono(now), "updated_at": bson::DateTime::from_chrono(now)}, "$inc": {"revision": 1}})
@@ -1916,7 +1934,7 @@ pub(super) async fn deletion_authorized_in_session(
     Ok(has_owner_deletion_basis(&machine))
 }
 
-fn has_owner_deletion_basis(machine: &ManagedMachine) -> bool {
+pub(crate) fn has_owner_deletion_basis(machine: &ManagedMachine) -> bool {
     use crate::models::remote_machine::MachineDeletionSource;
     machine.deletion_basis.as_ref().is_some_and(|basis| {
         basis.owner_id == machine.owner_id
