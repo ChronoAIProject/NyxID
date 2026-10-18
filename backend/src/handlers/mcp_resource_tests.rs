@@ -30,10 +30,7 @@ async fn call(state: &AppState, auth: &McpAuthContext, name: &str, arguments: Va
         crate::services::billing::route_inventory::internal_node_dispatch_permit(),
     ))
     .await;
-    let classified_failure = response
-        .extensions()
-        .get::<crate::models::assistant_conversation::ToolFailure>()
-        .is_some();
+    let classified_failure = tool_failure(&response).is_some();
     let bytes = axum::body::to_bytes(response.into_body(), 3 * 1024 * 1024)
         .await
         .unwrap();

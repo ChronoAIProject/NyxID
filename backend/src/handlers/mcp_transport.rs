@@ -79,6 +79,7 @@ struct JsonRpcError {
 enum ToolOutcome {
     Completed,
     Error,
+    PolicyRefusal,
 }
 
 #[derive(Clone)]
@@ -103,7 +104,13 @@ struct RpcFailureCode(i32);
 
 fn tool_failure(response: &Response) -> Option<crate::models::assistant_conversation::ToolFailure> {
     use crate::models::assistant_conversation::ToolFailure;
-    if tool_succeeded(response) {
+    if tool_succeeded(response)
+        || (response.status().is_success()
+            && matches!(
+                response.extensions().get::<ToolOutcome>(),
+                Some(ToolOutcome::PolicyRefusal)
+            ))
+    {
         return None;
     }
     if let Some(failure) = response.extensions().get::<ToolFailure>() {
@@ -271,6 +278,21 @@ fn content_result(
         id,
         serde_json::json!({ "content": content, "isError": is_error }),
     )
+}
+
+fn classify_service_tool_response(
+    response: &mut Response,
+    is_policy_refusal: bool,
+    failure: Option<crate::models::assistant_conversation::ToolFailure>,
+) {
+    if is_policy_refusal {
+        response
+            .extensions_mut()
+            .remove::<crate::models::assistant_conversation::ToolFailure>();
+        response.extensions_mut().insert(ToolOutcome::PolicyRefusal);
+    } else if let Some(failure) = failure {
+        response.extensions_mut().insert(failure);
+    }
 }
 
 /// Largest image embedded in an MCP result. NyxAgent caps a whole MCP
@@ -3297,7 +3319,8 @@ fn dispatch_service_tool<'a>(
         );
 
         let concurrency = response.concurrency.take();
-        let (content, is_error, failure) = if response.is_policy_refusal() {
+        let is_policy_refusal = response.is_policy_refusal();
+        let (content, is_error, failure) = if is_policy_refusal {
             if let (Some((row, output)), Some(chat)) = (&resource, auth.chat.as_ref())
                 && let Ok(refusal) = serde_json::from_str::<serde_json::Value>(&response.text)
                 && refusal["error"] == "acknowledgement_required"
@@ -3348,9 +3371,7 @@ fn dispatch_service_tool<'a>(
             .await;
         }
         let mut result = content_result(request.id.clone(), content, is_error);
-        if let Some(failure) = failure {
-            result.extensions_mut().insert(failure);
-        }
+        classify_service_tool_response(&mut result, is_policy_refusal, failure);
         match concurrency {
             Some(lease) => lease.hold_response(result),
             None => result,
@@ -4516,6 +4537,7 @@ async fn handle_meta_call_tool(
     );
 
     let concurrency = response.concurrency.take();
+    let is_policy_refusal = response.is_policy_refusal();
     let (content, is_error, failure) = service_tool_content(state, auth, tool_name, response).await;
     if !is_error
         && !matches!(
@@ -4549,9 +4571,7 @@ async fn handle_meta_call_tool(
     } else {
         content_result(request_id, content, is_error)
     };
-    if let Some(failure) = failure {
-        result.extensions_mut().insert(failure);
-    }
+    classify_service_tool_response(&mut result, is_policy_refusal, failure);
     match concurrency {
         Some(lease) => lease.hold_response(result),
         None => result,
@@ -6771,10 +6791,7 @@ mod tests {
 
     #[tokio::test]
     async fn downstream_http_failure_survives_mcp_success_envelope() {
-        let db =
-            crate::test_utils::connect_transaction_test_database("mcp_downstream_activity_shape")
-                .await;
-        let state = test_app_state(db.clone());
+        let state = crate::test_utils::test_app_state_no_db().await;
         let auth = api_key_auth(Vec::new());
         for status in [404, 409, 429, 500] {
             let downstream = if status == 409 {
@@ -6782,26 +6799,29 @@ mod tests {
             } else {
                 "Downstream error"
             };
-            let (content, is_error, failure) = service_tool_content(
-                &state,
-                &auth,
-                "catalog__operation",
-                mcp_service::tool_response(status, Some("application/json"), downstream.as_bytes()),
-            )
-            .await;
+            let provider_response =
+                mcp_service::tool_response(status, Some("application/json"), downstream.as_bytes());
+            let is_policy_refusal = provider_response.is_policy_refusal();
+            assert!(!is_policy_refusal);
+            let (content, is_error, failure) =
+                service_tool_content(&state, &auth, "catalog__operation", provider_response).await;
             assert!(is_error);
             assert_eq!(
                 content[0]["text"],
                 format!("Error ({status}): {downstream}")
             );
-            let mut response = content_result(None, content, is_error);
-            response.extensions_mut().insert(failure.unwrap());
-            assert_eq!(response.status(), StatusCode::OK);
-            let failure = tool_failure(&response).unwrap();
-            assert_eq!(failure.kind, "service_status");
-            assert_eq!(failure.status, Some(status));
+            for mut response in [
+                content_result(None, content.clone(), is_error),
+                content_result_with_notifications(None, content.clone(), is_error, Vec::new()),
+            ] {
+                classify_service_tool_response(&mut response, is_policy_refusal, failure.clone());
+                assert_eq!(response.status(), StatusCode::OK);
+                assert!(!tool_succeeded(&response));
+                let failure = tool_failure(&response).unwrap();
+                assert_eq!(failure.kind, "service_status");
+                assert_eq!(failure.status, Some(status));
+            }
         }
-        db.drop().await.unwrap();
     }
 
     #[test]
@@ -8731,6 +8751,65 @@ mod org_agent_mcp_tests {
 mod typed_outcome_tests {
     use super::*;
     use serde_json::json;
+
+    #[tokio::test]
+    async fn trusted_policy_refusal_preserves_error_result_without_activity_failure() {
+        let refusal = json!({
+            "error": "acknowledgement_required",
+            "acknowledgement_id": "fixture",
+        })
+        .to_string();
+        let content = vec![json!({"type":"text","text":refusal})];
+        let result = json!({"content":content,"isError":true});
+        let digest = result_digest(&result).0;
+
+        for is_policy_refusal in [false, true] {
+            for (is_sse, mut response) in [
+                (false, content_result(Some(json!(1)), content.clone(), true)),
+                (
+                    true,
+                    content_result_with_notifications(
+                        Some(json!(1)),
+                        content.clone(),
+                        true,
+                        vec![json!({"method":"notifications/tools/list_changed"})],
+                    ),
+                ),
+            ] {
+                classify_service_tool_response(&mut response, is_policy_refusal, None);
+                assert!(!tool_succeeded(&response));
+                assert_eq!(tool_failure(&response).is_none(), is_policy_refusal);
+                if is_policy_refusal {
+                    assert!(
+                        response
+                            .extensions()
+                            .get::<crate::models::assistant_conversation::ToolFailure>()
+                            .is_none()
+                    );
+                } else {
+                    assert_eq!(tool_failure(&response).unwrap().kind, "tool_error");
+                }
+                assert_eq!(
+                    response.extensions().get::<ToolResultDigest>().unwrap().0,
+                    digest
+                );
+
+                let body = axum::body::to_bytes(response.into_body(), 4096)
+                    .await
+                    .unwrap();
+                let wire = std::str::from_utf8(&body).unwrap();
+                let payload = if is_sse {
+                    wire.lines()
+                        .find_map(|line| line.strip_prefix("data: "))
+                        .unwrap()
+                } else {
+                    wire
+                };
+                let rpc: serde_json::Value = serde_json::from_str(payload).unwrap();
+                assert_eq!(rpc["result"], result);
+            }
+        }
+    }
 
     #[test]
     fn missing_live_activity_only_exempts_discovery_operations() {
