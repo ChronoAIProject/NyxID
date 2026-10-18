@@ -1534,6 +1534,7 @@ mod tests {
             "/api/v1/webhooks/telegram",
             "/api/v1/integrations/openclaw/mappings",
             "/api/v1/billing/wallet",
+            "/api/v1/billing/credits",
             "/api/v1/oracle/pools",
             "/api/v1/channel-bots",
             "/api/v1/channel-conversations/conversation-id",

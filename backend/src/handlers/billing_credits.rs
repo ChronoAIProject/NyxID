@@ -32,6 +32,9 @@ pub struct IssueGrantRequest {
     pub service_refs: Vec<String>,
     pub expires_at: Option<DateTime<Utc>>,
     pub reason: Option<String>,
+    #[serde(default)]
+    pub service_limits: Vec<crate::models::credit_service_limit::CreditServiceLimitInput>,
+    pub request_id: Option<String>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -77,6 +80,31 @@ pub struct BillingBenefitsQuery {
 }
 
 #[derive(Debug, Serialize, ToSchema)]
+pub struct CreditServiceLimitResponse {
+    pub key: String,
+    pub service_ids: Vec<String>,
+    pub service_slugs: Vec<String>,
+    pub label: Option<String>,
+    pub limit_micros: String,
+    pub consumed_micros: String,
+    pub reserved_micros: String,
+}
+
+pub(super) fn service_limit_response(
+    rule: crate::models::credit_service_limit::CreditServiceLimit,
+) -> CreditServiceLimitResponse {
+    CreditServiceLimitResponse {
+        key: rule.key,
+        service_ids: rule.service_ids,
+        service_slugs: rule.service_slugs,
+        label: rule.label,
+        limit_micros: rule.limit_micros.to_string(),
+        consumed_micros: rule.consumed_micros.to_string(),
+        reserved_micros: rule.reserved_micros.to_string(),
+    }
+}
+
+#[derive(Debug, Serialize, ToSchema)]
 pub struct CreditGrantResponse {
     pub id: String,
     pub batch_id: String,
@@ -94,6 +122,14 @@ pub struct CreditGrantResponse {
     pub amount_micros: i64,
     pub remaining_micros: i64,
     pub reserved_micros: i64,
+    pub allocated_micros_exact: String,
+    pub remaining_micros_exact: String,
+    pub reserved_micros_exact: String,
+    pub used_micros: String,
+    pub available_micros: String,
+    pub reclaimed_micros: String,
+    pub revoke_requested_at: Option<DateTime<Utc>>,
+    pub service_limits: Vec<CreditServiceLimitResponse>,
     pub scope: BillingServiceScope,
     pub expires_at: Option<DateTime<Utc>>,
     pub reason: Option<String>,
@@ -198,6 +234,8 @@ pub async fn issue_grant(
             expires_at: body.expires_at,
             reason: body.reason,
             granted_by: auth_user.user_id.to_string(),
+            request_id: body.request_id,
+            service_limits: body.service_limits,
         },
     )
     .await?;
@@ -304,6 +342,7 @@ pub async fn admin_list_grants(
     delete,
     path = "/api/v1/admin/credits/grants/{grant_id}",
     tag = "Admin Credits",
+    description = "Request reclaim of this allocation's unspent remainder. Accepted during request holds: the response remains active with revoke_requested_at until admitted work and existing settlement operations finish. New holds and extra consumption stop immediately. Repeated requests return the same pending or terminal allocation; no other funds or recurring policy are changed.",
     params(("grant_id" = String, Path)),
     responses((status = 200, body = CreditGrantResponse)),
     security(("bearer_auth" = []))
@@ -314,12 +353,25 @@ pub async fn revoke_grant(
     Path(grant_id): Path<String>,
 ) -> AppResult<Json<CreditGrantResponse>> {
     require_admin(&state, &auth_user).await?;
-    let grant = billing::grants::revoke_grant(&state.db, &grant_id).await?;
+    let grant = billing::grants::request_revoke_grant(
+        &state.db,
+        &grant_id,
+        Some(&auth_user.user_id.to_string()),
+    )
+    .await?;
     audit_service::log_for_user(
         state.db.clone(),
         &auth_user,
-        "billing.credit_grant.revoked",
-        Some(serde_json::json!({ "grant_id": grant_id })),
+        match grant.status {
+            CreditGrantStatus::Revoked => "billing.credit_grant.revoked",
+            CreditGrantStatus::Active => "billing.credit_grant.reclaim_requested",
+            _ => "billing.credit_grant.reclaim_unchanged",
+        },
+        Some(
+            serde_json::json!({ "grant_id": grant_id, "status": grant.status,
+            "pending": grant.status == CreditGrantStatus::Active && grant.revoke_requested_at.is_some(),
+            "requested_by": grant.revoke_requested_by, "requested_at": grant.revoke_requested_at }),
+        ),
     );
     Ok(Json(grant_response(grant, None, None)))
 }
@@ -488,6 +540,9 @@ fn grant_response(
     recipient_billing_enabled: Option<bool>,
 ) -> CreditGrantResponse {
     let activation_state = activation_state(&grant);
+    let used_micros = billing::grants::used_micros(&grant).to_string();
+    let available_micros =
+        billing::grants::eligible_available_micros(&grant, Utc::now()).to_string();
     let schedule_id = grant
         .schedule_origin
         .as_ref()
@@ -496,6 +551,8 @@ fn grant_response(
         .schedule_origin
         .as_ref()
         .map(|origin| origin.period_start);
+    let held = billing::service_limits::held_micros(&grant);
+    let display_rules = billing::service_limits::rules_with_commitments(&grant);
     CreditGrantResponse {
         id: grant.id,
         batch_id: grant.batch_id,
@@ -511,6 +568,22 @@ fn grant_response(
         amount_micros: grant.amount_micros,
         remaining_micros: grant.remaining_micros,
         reserved_micros: grant.reserved_micros,
+        allocated_micros_exact: grant.amount_micros.to_string(),
+        remaining_micros_exact: grant.remaining_micros.to_string(),
+        reserved_micros_exact: held.to_string(),
+        used_micros,
+        available_micros,
+        reclaimed_micros: if grant.status == CreditGrantStatus::Revoked {
+            grant.terminal_amount_micros
+        } else {
+            0
+        }
+        .to_string(),
+        revoke_requested_at: grant.revoke_requested_at,
+        service_limits: display_rules
+            .into_iter()
+            .map(service_limit_response)
+            .collect(),
         scope: grant.scope,
         expires_at: grant.expires_at,
         reason: grant.reason,
@@ -672,6 +745,9 @@ mod tests {
             State(state.clone()),
             operator.clone(),
             Json(IssueGrantRequest {
+                service_limits: Vec::new(),
+                request_id: None,
+
                 amount_credits: 1,
                 target_kind: BillingTargetKind::AllUsers,
                 target_user_ids: Vec::new(),
@@ -767,6 +843,9 @@ mod tests {
             State(state.clone()),
             admin.clone(),
             Json(IssueGrantRequest {
+                service_limits: Vec::new(),
+                request_id: None,
+
                 amount_credits: 0,
                 target_kind: BillingTargetKind::AllUsers,
                 target_user_ids: Vec::new(),
@@ -794,5 +873,69 @@ mod tests {
 
         assert!(matches!(grant, AppError::ValidationError(_)));
         assert!(matches!(allowance, AppError::ValidationError(_)));
+    }
+    #[tokio::test]
+    async fn reclaim_handler_reports_and_audits_pending_request_before_final_removal() {
+        let (state, admin_id, _, user_id) = setup("billing_reclaim_pending_audit")
+            .await
+            .expect("real Mongo required");
+        let admin = test_auth_user(&admin_id);
+        let Json(issued) = issue_grant(
+            State(state.clone()),
+            admin.clone(),
+            Json(IssueGrantRequest {
+                amount_credits: 1000,
+                target_kind: BillingTargetKind::SelectedUsers,
+                target_user_ids: vec![user_id],
+                all_services: true,
+                service_refs: vec![],
+                service_limits: vec![],
+                expires_at: None,
+                reason: None,
+                request_id: None,
+            }),
+        )
+        .await
+        .unwrap();
+        let id = state
+            .db
+            .collection::<CreditGrant>(crate::models::credit_grant::COLLECTION_NAME)
+            .find_one(doc! { "batch_id": &issued.batch_id })
+            .await
+            .unwrap()
+            .unwrap()
+            .id;
+        state
+            .db
+            .collection::<CreditGrant>(crate::models::credit_grant::COLLECTION_NAME)
+            .update_one(
+                doc! { "_id": &id },
+                doc! { "$set": { "reserved_micros": 40_000_000_i64 } },
+            )
+            .await
+            .unwrap();
+        let Json(pending) = revoke_grant(State(state.clone()), admin.clone(), Path(id.clone()))
+            .await
+            .unwrap();
+        assert_eq!(pending.status, CreditGrantStatus::Active);
+        assert!(pending.revoke_requested_at.is_some());
+        assert_eq!(pending.remaining_micros_exact, "1000000000");
+        assert_eq!(pending.available_micros, "0");
+        let Json(replayed) = revoke_grant(State(state.clone()), admin, Path(id.clone()))
+            .await
+            .unwrap();
+        assert_eq!(replayed.revoke_requested_at, pending.revoke_requested_at);
+        let audit = state.db.collection::<crate::models::audit_log::AuditLog>(
+            crate::models::audit_log::COLLECTION_NAME,
+        );
+        let entry = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if let Some(entry) = audit.find_one(doc! { "event_type": "billing.credit_grant.reclaim_requested", "event_data.grant_id": &id }).await.unwrap() { break entry; }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        }).await.unwrap();
+        assert_eq!(entry.user_id.as_deref(), Some(admin_id.as_str()));
+        assert_eq!(entry.event_data.unwrap()["pending"], true);
+        assert_eq!(audit.count_documents(doc! { "event_type": "billing.credit_grant.revoked", "event_data.grant_id": &id }).await.unwrap(), 0);
     }
 }

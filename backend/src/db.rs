@@ -2446,6 +2446,19 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
     credit_grants
         .create_index(
             IndexModel::builder()
+                .keys(doc! { "active_settlement.usage_row_id": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .name("settlement_usage_row".to_string())
+                        .sparse(true)
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+    credit_grants
+        .create_index(
+            IndexModel::builder()
                 .keys(doc! { "active_settlement.updated_at": 1 })
                 .options(IndexOptions::builder().sparse(true).build())
                 .build(),
@@ -2543,6 +2556,19 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
             IndexModel::builder()
                 .keys(doc! { "allowance_id": 1, "owner_user_id": 1, "period_start": 1 })
                 .options(IndexOptions::builder().unique(true).build())
+                .build(),
+        )
+        .await?;
+    allowance_periods
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "active_settlement.usage_row_id": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .name("settlement_usage_row".to_string())
+                        .sparse(true)
+                        .build(),
+                )
                 .build(),
         )
         .await?;
@@ -4587,6 +4613,44 @@ mod tests {
         ensure_indexes(&db)
             .await
             .expect("ensure_indexes should be idempotent on second call");
+
+        for collection in [CREDIT_GRANTS, USAGE_ALLOWANCE_PERIODS] {
+            let indexes: Vec<IndexModel> = db
+                .collection::<Document>(collection)
+                .list_indexes()
+                .await
+                .unwrap()
+                .try_collect()
+                .await
+                .unwrap();
+            let lookup = indexes
+                .iter()
+                .find(|index| {
+                    index.options.as_ref().and_then(|o| o.name.as_deref())
+                        == Some("settlement_usage_row")
+                })
+                .expect("per-usage settlement lookup index");
+            assert_eq!(lookup.keys, doc! { "active_settlement.usage_row_id": 1 });
+            assert_eq!(lookup.options.as_ref().and_then(|o| o.sparse), Some(true));
+            db.collection::<Document>(collection).insert_one(doc! { "_id": "lookup-smoke", "active_settlement": { "usage_row_id": "usage-lookup" } }).await.unwrap();
+            let plan = db.run_command(doc! { "explain": { "find": collection, "filter": { "active_settlement.usage_row_id": "usage-lookup" }, "hint": "settlement_usage_row" }, "verbosity": "executionStats" }).await.unwrap();
+            assert_eq!(
+                match plan
+                    .get_document("executionStats")
+                    .unwrap()
+                    .get("nReturned")
+                {
+                    Some(mongodb::bson::Bson::Int32(value)) => i64::from(*value),
+                    Some(mongodb::bson::Bson::Int64(value)) => *value,
+                    value => panic!("Expected exact integer nReturned, got {value:?}"),
+                },
+                1
+            );
+            db.collection::<Document>(collection)
+                .delete_one(doc! { "_id": "lookup-smoke" })
+                .await
+                .unwrap();
+        }
 
         let notification_indexes: Vec<IndexModel> = db
             .collection::<Document>("mcp_session_notifications")

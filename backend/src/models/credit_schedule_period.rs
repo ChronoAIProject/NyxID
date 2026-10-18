@@ -32,6 +32,8 @@ pub struct CreditSchedulePeriod {
     #[serde(default)]
     pub target_user_ids: Vec<String>,
     pub scope: BillingServiceScope,
+    #[serde(default)]
+    pub service_limits: Vec<super::credit_service_limit::CreditServiceLimit>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -1,7 +1,12 @@
 import { render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import type { CreditGrant } from "@/schemas/billing-credits";
-import { Dialog, DialogContent, DialogHeader } from "@/components/ui/dialog";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { GrantRevokeDescription } from "./grant-revoke-description";
 
 const grant = {
@@ -25,20 +30,23 @@ const grant = {
 } satisfies CreditGrant;
 
 describe("GrantRevokeDescription", () => {
-  it("explains scheduled revocation scope and how to stop future periods", () => {
+  it("explains scheduled reclaim scope and how to stop future periods", () => {
     render(
       <Dialog open>
         <DialogContent>
           <DialogHeader>
+            <DialogTitle>Reclaim remaining credits</DialogTitle>
             <GrantRevokeDescription grant={grant} />
           </DialogHeader>
         </DialogContent>
       </Dialog>,
     );
 
-    expect(screen.getByText(/affects this period only/i)).toBeInTheDocument();
+    expect(screen.getByText("Allocation grant-1")).toBeInTheDocument();
+    expect(screen.getByText(/Recurring schedule-1/)).toBeInTheDocument();
+    expect(screen.getByText(/affects this allocation only/i)).toBeInTheDocument();
     expect(
-      screen.getByText(/Pausing the schedule stops future disbursements/i),
+      screen.getByText(/Pausing recurring credits stops future issuance/i),
     ).toBeInTheDocument();
   });
 });

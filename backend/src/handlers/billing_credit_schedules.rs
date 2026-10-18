@@ -35,6 +35,9 @@ pub struct CreateCreditScheduleRequest {
     #[serde(default)]
     pub service_refs: Vec<String>,
     pub reason: Option<String>,
+    #[serde(default)]
+    pub service_limits: Vec<crate::models::credit_service_limit::CreditServiceLimitInput>,
+    pub request_id: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize, ToSchema)]
@@ -52,6 +55,7 @@ pub struct UpdateCreditScheduleRequest {
     )]
     pub reason: Option<Option<String>>,
     pub is_active: Option<bool>,
+    pub service_limits: Option<Vec<crate::models::credit_service_limit::CreditServiceLimitInput>>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -83,6 +87,7 @@ pub struct CreditScheduleResponse {
     pub target_kind: BillingTargetKind,
     pub target_user_ids: Vec<String>,
     pub scope: BillingServiceScope,
+    pub service_limits: Vec<super::billing_credits::CreditServiceLimitResponse>,
     pub reason: Option<String>,
     pub is_active: bool,
     pub created_by: String,
@@ -127,6 +132,8 @@ pub async fn create_schedule(
             service_refs: body.service_refs,
             reason: body.reason,
             created_by: auth_user.user_id.to_string(),
+            service_limits: body.service_limits,
+            request_id: body.request_id,
         },
     )
     .await?;
@@ -190,6 +197,7 @@ pub async fn update_schedule(
             service_refs: body.service_refs,
             reason: body.reason,
             is_active: body.is_active,
+            service_limits: body.service_limits,
         },
     )
     .await?;
@@ -260,6 +268,11 @@ fn schedule_response(
         target_kind: schedule.target_kind,
         target_user_ids: schedule.target_user_ids,
         scope: schedule.scope,
+        service_limits: schedule
+            .service_limits
+            .into_iter()
+            .map(super::billing_credits::service_limit_response)
+            .collect(),
         reason: schedule.reason,
         is_active: schedule.is_active,
         created_by: schedule.created_by,
@@ -361,6 +374,9 @@ mod tests {
         targets: Vec<String>,
     ) -> CreateCreditScheduleRequest {
         CreateCreditScheduleRequest {
+            service_limits: Vec::new(),
+            request_id: None,
+
             amount_credits: 10,
             recurrence: ScheduleRecurrence::Monthly,
             expiry: CreditExpiryPolicy::EndOfPeriod,
@@ -513,6 +529,9 @@ mod tests {
         billing::grants::issue_grants(
             &state.db,
             IssueCreditGrantInput {
+                service_limits: Vec::new(),
+                request_id: None,
+
                 amount_credits: 1,
                 target_kind: BillingTargetKind::SelectedUsers,
                 target_user_ids: vec![user_id],

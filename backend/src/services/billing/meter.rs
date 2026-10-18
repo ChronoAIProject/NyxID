@@ -95,6 +95,54 @@ pub async fn open(
     if !ctx.is_metered() {
         return Ok(MeteredProxyContext::disabled());
     }
+    // Meter-only capture has no financial holds and remains compatible with
+    // standalone MongoDB. Duplicate unreserved rows are harmless here.
+    if reservation.is_none() {
+        return open_impl(db, ctx, None, None).await;
+    }
+    let mut session = db.client().start_session().await?;
+    let tx_db = db.clone();
+    let tx_ctx = ctx.clone();
+    let tx_reservation = reservation.cloned();
+    let result = session
+        .start_transaction()
+        .and_run2(async move |session| {
+            super::admission::transaction_result(
+                open_in_session(&tx_db, &tx_ctx, tx_reservation.as_ref(), session).await,
+            )
+        })
+        .await
+        .map_err(super::admission::map_transaction_error);
+    match result {
+        Err(AppError::DatabaseError(ref error)) if is_duplicate_key_error(error) => {
+            if has_complete_meter(db, ctx).await? {
+                Ok(MeteredProxyContext::from_route(ctx))
+            } else {
+                result
+            }
+        }
+        _ => result,
+    }
+}
+
+pub(crate) async fn open_in_session(
+    db: &mongodb::Database,
+    ctx: &BillingRouteContext,
+    reservation: Option<&BillingReservation>,
+    session: &mut mongodb::ClientSession,
+) -> AppResult<MeteredProxyContext> {
+    open_impl(db, ctx, reservation, Some(session)).await
+}
+
+async fn open_impl(
+    db: &mongodb::Database,
+    ctx: &BillingRouteContext,
+    reservation: Option<&BillingReservation>,
+    mut session: Option<&mut mongodb::ClientSession>,
+) -> AppResult<MeteredProxyContext> {
+    if !ctx.is_metered() {
+        return Ok(MeteredProxyContext::disabled());
+    }
 
     let mut inserted_row_ids = Vec::with_capacity(2);
     let result: AppResult<()> = async {
@@ -107,6 +155,7 @@ pub async fn open(
                 ctx.platform_lago_metric_code.clone(),
                 reservation,
                 None,
+                session.as_deref_mut(),
             )
             .await?;
             match inserted {
@@ -129,6 +178,7 @@ pub async fn open(
                 resale.lago_metric_code.clone(),
                 reservation,
                 None,
+                session.as_deref_mut(),
             )
             .await?;
             match inserted {
@@ -145,25 +195,10 @@ pub async fn open(
     }
     .await;
     if let Err(error) = result {
-        // The caller releases this attempt's reservation. Delete only rows
-        // inserted by this attempt: a broad request-id cleanup could erase an
-        // earlier idempotent attempt and release its funding twice.
-        if !inserted_row_ids.is_empty()
-            && let Err(cleanup_error) = db
-                .collection::<UsageMeterRow>(USAGE_METER)
-                .delete_many(doc! {
-                    "_id": { "$in": &inserted_row_ids },
-                    "status": "reserved",
-                    "forwarded": false,
-                    "released": false,
-                })
-                .await
-        {
-            tracing::error!(
-                billing_request_id = %ctx.billing_request_id,
-                error = %cleanup_error,
-                "failed to remove partial usage-meter setup"
-            );
+        if session.is_none() && !inserted_row_ids.is_empty() {
+            db.collection::<UsageMeterRow>(USAGE_METER).delete_many(doc! {
+                "_id": { "$in": &inserted_row_ids }, "status": "reserved", "forwarded": false, "released": false,
+            }).await?;
         }
         return Err(error);
     }
@@ -370,6 +405,7 @@ async fn insert_reserved_row(
     lago_metric_code: String,
     reservation: Option<&BillingReservation>,
     flush_seq: Option<i64>,
+    session: Option<&mut mongodb::ClientSession>,
 ) -> AppResult<Option<String>> {
     let now = Utc::now();
     let transaction_id = transaction_id(&ctx.billing_request_id, layer, flush_seq);
@@ -430,18 +466,20 @@ async fn insert_reserved_row(
         last_error: None,
     };
 
-    let inserted = db
-        .collection::<UsageMeterRow>(USAGE_METER)
-        .insert_one(&row)
-        .await
-        .map(|_| true)
-        .or_else(|error| {
+    let collection = db.collection::<UsageMeterRow>(USAGE_METER);
+    let action = collection.insert_one(&row);
+    let inserted = match session {
+        // Never swallow a command error in a transaction: MongoDB has already
+        // aborted it. The caller resolves a committed concurrent winner outside.
+        Some(session) => action.session(session).await.map(|_| true)?,
+        None => action.await.map(|_| true).or_else(|error| {
             if is_duplicate_key_error(&error) {
                 Ok(false)
             } else {
                 Err(error)
             }
-        })?;
+        })?,
+    };
     Ok(inserted.then_some(row.id))
 }
 

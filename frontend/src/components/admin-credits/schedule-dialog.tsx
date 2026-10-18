@@ -1,3 +1,4 @@
+import { useRef, useState } from "react";
 import type { UseFormReturn } from "react-hook-form";
 import type { CreditSchedule, ScheduleForm } from "@/schemas/billing-credits";
 import type { DownstreamService } from "@/types/api";
@@ -19,6 +20,7 @@ import {
   FormItem,
   FormLabel,
   FormMessage,
+  FormSubmitErrors,
 } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
 import {
@@ -29,6 +31,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
+import { ServiceLimitsEditor } from "./service-limits-editor";
 import { ServicePicker, UserPicker } from "./credit-pickers";
 
 type ScheduleFormApi = UseFormReturn<ScheduleForm>;
@@ -38,6 +41,9 @@ export function ScheduleDialog({
   onOpenChange,
   form,
   services,
+  servicesLoading,
+  servicesError,
+  onRetryServices,
   pending,
   editingSchedule,
   onSubmit,
@@ -46,53 +52,147 @@ export function ScheduleDialog({
   readonly onOpenChange: (open: boolean) => void;
   readonly form: ScheduleFormApi;
   readonly services: readonly DownstreamService[];
+  readonly servicesLoading: boolean;
+  readonly servicesError: boolean;
+  readonly onRetryServices: () => void;
   readonly pending: boolean;
-  readonly editingSchedule: CreditSchedule | null;
+  readonly editingSchedule: CreditSchedule;
   readonly onSubmit: (value: ScheduleForm) => Promise<void>;
 }) {
   const expiry = form.watch("expiry");
   const targetKind = form.watch("target_kind");
   const allServices = form.watch("all_services");
+  const [ownersDiscoveryFailed, setOwnersDiscoveryFailed] = useState(false);
+  const [ownersLoading, setOwnersLoading] = useState(false);
+  const submitting = useRef(false);
+  const targetIds = form.watch("target_user_ids");
+  const amount = form.watch("amount_credits");
+  const serviceRefs = form.watch("service_refs");
+  const rules = form.watch("service_limits") ?? [];
+  const needsServiceDiscovery = !allServices || rules.length > 0;
+  const discoveryFailed =
+    (targetKind === "selected_users" && ownersDiscoveryFailed) ||
+    (needsServiceDiscovery && servicesError);
+  const discoveryBlocked =
+    discoveryFailed ||
+    (targetKind === "selected_users" && ownersLoading) ||
+    (needsServiceDiscovery && servicesLoading);
+  const requiredFieldsPresent =
+    Number.isFinite(amount) &&
+    amount >= 1 &&
+    rules.every(
+      (rule) =>
+        Number.isInteger(rule.amount_credits) &&
+        rule.amount_credits >= 1 &&
+        rule.service_refs.length > 0,
+    ) &&
+    (targetKind === "all_users" || targetIds.length > 0) &&
+    (allServices || serviceRefs.length > 0) &&
+    (expiry.kind !== "after_days" || Number.isFinite(expiry.days));
+  const canSubmit =
+    form.formState.isDirty &&
+    requiredFieldsPresent &&
+    !discoveryBlocked &&
+    !pending;
+
+  function handleOpenChange(nextOpen: boolean) {
+    if (!pending && !submitting.current) onOpenChange(nextOpen);
+  }
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent scrollMode="body" className="md:max-w-2xl">
+    <Dialog open={open} onOpenChange={handleOpenChange}>
+      <DialogContent
+        scrollMode="body"
+        className="overflow-clip md:max-w-2xl md:overflow-clip [&>div]:overflow-clip"
+      >
         <DialogHeader className="shrink-0 pr-6">
-          <DialogTitle>
-            {editingSchedule
-              ? "Edit credit schedule"
-              : "Create credit schedule"}
-          </DialogTitle>
+          <DialogTitle>Edit recurring credits</DialogTitle>
           <DialogDescription>
-            Disburse wallet credits on a UTC cycle. Credits are wallet currency,
-            not service units such as tokens, requests, or bytes.
+            Set the amount, recipients, expiry, and service limits for future
+            allocations.
           </DialogDescription>
         </DialogHeader>
         <Form {...form}>
-          <form onSubmit={form.handleSubmit(onSubmit)}>
+          <form
+            onSubmit={form.handleSubmit(async (value) => {
+              if (!canSubmit || submitting.current) return;
+              submitting.current = true;
+              try {
+                await onSubmit(value);
+              } finally {
+                submitting.current = false;
+              }
+            })}
+          >
             <DialogBody className="-mx-1 px-1">
               <div className="space-y-5 pb-1">
+                <div
+                  className="rounded-lg bg-muted/40 p-3 text-[11px] text-muted-foreground [overflow-wrap:anywhere]"
+                  aria-live="polite"
+                >
+                  <p className="font-medium text-foreground">
+                    Shared total:{" "}
+                    {Number.isFinite(amount)
+                      ? new Intl.NumberFormat().format(amount)
+                      : "—"}{" "}
+                    credits per owner
+                  </p>
+                  {targetKind === "selected_users" &&
+                  targetIds.length > 0 &&
+                  Number.isFinite(amount) ? (
+                    <p>
+                      {new Intl.NumberFormat().format(amount)} ×{" "}
+                      {targetIds.length} owners ={" "}
+                      {new Intl.NumberFormat().format(
+                        amount * targetIds.length,
+                      )}{" "}
+                      credits issued across selected owners.
+                    </p>
+                  ) : null}
+                  {rules.map((rule, index) => (
+                    <p key={index}>
+                      {rule.label || `Limit ${String(index + 1)}`}:{" "}
+                      {rule.service_refs
+                        .map(
+                          (ref) =>
+                            services.find((service) => service.id === ref)
+                              ?.name ?? ref,
+                        )
+                        .join(", ") || "Choose services"}{" "}
+                      · up to{" "}
+                      {Number.isFinite(rule.amount_credits)
+                        ? new Intl.NumberFormat().format(rule.amount_credits)
+                        : "—"}{" "}
+                      credits from each allocation.
+                    </p>
+                  ))}
+                  {rules.length ? (
+                    <p>Limits share this total; no credits are set aside.</p>
+                  ) : null}
+                </div>
                 <div className="grid gap-4 sm:grid-cols-2">
                   <FormField
                     control={form.control}
                     name="amount_credits"
                     render={({ field }) => (
                       <FormItem>
-                        <FormLabel>Wallet credits per owner</FormLabel>
+                        <FormLabel>Credits per owner</FormLabel>
                         <FormControl>
                           <Input
                             type="number"
                             min={1}
                             max={1_000_000}
                             {...field}
+                            value={
+                              Number.isFinite(field.value) ? field.value : ""
+                            }
                             onChange={(event) =>
                               field.onChange(event.target.valueAsNumber)
                             }
                           />
                         </FormControl>
                         <FormDescription className="text-[11px]">
-                          Minted as an ordinary promotional credit grant each
-                          period.
+                          Allocates a fresh shared total for each UTC period.
                         </FormDescription>
                         <FormMessage />
                       </FormItem>
@@ -120,12 +220,10 @@ export function ScheduleDialog({
                             <SelectItem value="monthly">Monthly</SelectItem>
                           </SelectContent>
                         </Select>
-                        {editingSchedule ? (
-                          <FormDescription className="text-[11px]">
-                            Pause this schedule and create another to change its
-                            recurrence.
-                          </FormDescription>
-                        ) : null}
+                        <FormDescription className="text-[11px]">
+                          Pause this policy and add another one to change its
+                          recurrence.
+                        </FormDescription>
                         <FormMessage />
                       </FormItem>
                     )}
@@ -152,7 +250,7 @@ export function ScheduleDialog({
                           />
                           <ExpiryOption
                             label="After a fixed number of days"
-                            description="From disbursement"
+                            description="From issuance"
                             checked={field.value.kind === "after_days"}
                             onChange={() =>
                               field.onChange({ kind: "after_days", days: 30 })
@@ -183,7 +281,9 @@ export function ScheduleDialog({
                             min={1}
                             max={3_650}
                             {...field}
-                            value={Number.isNaN(field.value) ? "" : field.value}
+                            value={
+                              Number.isFinite(field.value) ? field.value : ""
+                            }
                             onChange={(event) =>
                               field.onChange(event.target.valueAsNumber)
                             }
@@ -195,7 +295,12 @@ export function ScheduleDialog({
                   />
                 ) : null}
 
-                <TargetFields form={form} targetKind={targetKind} />
+                <TargetFields
+                  form={form}
+                  targetKind={targetKind}
+                  onOwnersError={setOwnersDiscoveryFailed}
+                  onOwnersLoading={setOwnersLoading}
+                />
 
                 <FormField
                   control={form.control}
@@ -233,6 +338,9 @@ export function ScheduleDialog({
                             selected={field.value}
                             onChange={field.onChange}
                             multiple
+                            loading={servicesLoading}
+                            error={servicesError}
+                            onRetry={onRetryServices}
                           />
                         </FormControl>
                         <FormDescription className="text-[11px]">
@@ -245,6 +353,34 @@ export function ScheduleDialog({
                   />
                 ) : null}
 
+                <ServiceLimitsEditor
+                  rules={rules}
+                  onChange={(value) => form.setValue("service_limits", value)}
+                  errors={form.formState.errors.service_limits}
+                  services={services}
+                  loading={servicesLoading}
+                  error={servicesError}
+                  onRetry={onRetryServices}
+                  disabled={pending || form.formState.isSubmitting}
+                />
+                <p
+                  className="text-[11px] text-muted-foreground"
+                  aria-live="polite"
+                >
+                  {Number.isFinite(amount)
+                    ? new Intl.NumberFormat().format(amount)
+                    : "—"}{" "}
+                  credits per owner.{" "}
+                  {targetKind === "all_users"
+                    ? "Every eligible owner"
+                    : `${String(targetIds.length)} selected owner${targetIds.length === 1 ? "" : "s"}`}{" "}
+                  receives this amount; it is not split between recipients.
+                  {rules.length
+                    ? ` ${String(rules.length)} service limit${rules.length === 1 ? " shares" : "s share"} each allocation’s total.`
+                    : " Eligible services share the total without additional limits."}{" "}
+                  Each future allocation receives fresh limits and usage
+                  counters. Changes apply to future issuance only.
+                </p>
                 <FormField
                   control={form.control}
                   name="reason"
@@ -265,16 +401,41 @@ export function ScheduleDialog({
                 />
               </div>
             </DialogBody>
-            <DialogFooter className="pt-4 md:pt-4">
+            <DialogFooter className="flex-wrap pt-4 md:pt-4">
+              {discoveryBlocked || form.formState.submitCount > 0 ? (
+                <div className="basis-full text-xs">
+                  <FormSubmitErrors />
+                  {discoveryBlocked ? (
+                    <p
+                      role={discoveryFailed ? "alert" : "status"}
+                      className={
+                        discoveryFailed
+                          ? "text-destructive"
+                          : "text-muted-foreground"
+                      }
+                    >
+                      {discoveryFailed
+                        ? "Required owners or services could not be loaded. Use Retry in the picker before submitting."
+                        : "Loading owners or services. Please wait before submitting."}
+                    </p>
+                  ) : null}
+                </div>
+              ) : null}
               <Button
                 type="button"
                 variant="ghost"
-                onClick={() => onOpenChange(false)}
+                disabled={pending || form.formState.isSubmitting}
+                onClick={() => handleOpenChange(false)}
               >
                 Cancel
               </Button>
-              <Button type="submit" variant="primary" isLoading={pending}>
-                {editingSchedule ? "Save changes" : "Create schedule"}
+              <Button
+                type="submit"
+                variant="primary"
+                disabled={!canSubmit || form.formState.isSubmitting}
+                isLoading={pending || form.formState.isSubmitting}
+              >
+                Save changes
               </Button>
             </DialogFooter>
           </form>
@@ -318,8 +479,12 @@ function ExpiryOption({
 function TargetFields({
   form,
   targetKind,
+  onOwnersError,
+  onOwnersLoading,
 }: {
   readonly form: ScheduleFormApi;
+  readonly onOwnersError: (failed: boolean) => void;
+  readonly onOwnersLoading: (loading: boolean) => void;
   readonly targetKind: ScheduleForm["target_kind"];
 }) {
   return (
@@ -363,7 +528,12 @@ function TargetFields({
             <FormItem>
               <FormLabel>Owners</FormLabel>
               <FormControl>
-                <UserPicker selected={field.value} onChange={field.onChange} />
+                <UserPicker
+                  selected={field.value}
+                  onChange={field.onChange}
+                  onErrorStateChange={onOwnersError}
+                  onLoadingStateChange={onOwnersLoading}
+                />
               </FormControl>
               <FormMessage />
             </FormItem>

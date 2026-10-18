@@ -185,6 +185,78 @@ pub async fn list_current_for_user(
     Ok(balances)
 }
 
+/// Read the current allowance windows without materializing missing period
+/// rows. Billing summary endpoints use this path because a GET must not create
+/// accounting state; the reservation path continues to use
+/// [`ensure_current_period`] when a real usage request is admitted.
+pub async fn list_current_for_user_read_only(
+    db: &mongodb::Database,
+    owner_user_id: &str,
+    now: DateTime<Utc>,
+) -> AppResult<Vec<(UsageAllowance, UsageAllowancePeriod)>> {
+    let definitions: Vec<UsageAllowance> = db
+        .collection::<UsageAllowance>(USAGE_ALLOWANCES)
+        .find(doc! {
+            "is_active": true,
+            "$or": [
+                { "target_kind": "all_users" },
+                {
+                    "target_kind": "selected_users",
+                    "target_user_ids": owner_user_id,
+                },
+            ],
+        })
+        .sort(doc! { "service_slug": 1, "created_at": 1 })
+        .await?
+        .try_collect()
+        .await?;
+
+    let periods = db.collection::<UsageAllowancePeriod>(USAGE_ALLOWANCE_PERIODS);
+    let mut balances = Vec::with_capacity(definitions.len());
+    for allowance in definitions {
+        let window = allowance_window(allowance.recurrence, allowance.created_at, now);
+        let id = period_id(&allowance.id, owner_user_id, window.start);
+        let period = periods.find_one(doc! { "_id": &id }).await?;
+        balances.push((
+            allowance.clone(),
+            project_current_period(&allowance, owner_user_id, window, period)?,
+        ));
+    }
+    Ok(balances)
+}
+
+fn project_current_period(
+    allowance: &UsageAllowance,
+    owner_user_id: &str,
+    window: AllowanceWindow,
+    period: Option<UsageAllowancePeriod>,
+) -> AppResult<UsageAllowancePeriod> {
+    let mut period = period.unwrap_or_else(|| UsageAllowancePeriod {
+        id: period_id(&allowance.id, owner_user_id, window.start),
+        allowance_id: allowance.id.clone(),
+        owner_user_id: owner_user_id.to_string(),
+        total_quantity: allowance.quantity,
+        consumed_quantity: 0,
+        reserved_quantity: 0,
+        period_start: window.start,
+        period_end: window.end,
+        active_settlement: None,
+        created_at: allowance.created_at,
+        updated_at: allowance.updated_at,
+    });
+    // Keep the read projection identical to ensure_current_period: reducing a
+    // policy cannot invalidate units already consumed or reserved, while an
+    // increase applies immediately to the current window.
+    let consumed_plus_reserved = period
+        .consumed_quantity
+        .checked_add(period.reserved_quantity)
+        .ok_or_else(|| AppError::Internal("allowance quantity overflow".to_string()))?;
+    period.total_quantity = allowance.quantity.max(consumed_plus_reserved);
+    period.period_start = window.start;
+    period.period_end = window.end;
+    Ok(period)
+}
+
 pub async fn applicable_allowances(
     db: &mongodb::Database,
     owner_user_id: &str,
@@ -283,6 +355,58 @@ pub async fn ensure_current_period(
     }
     periods
         .find_one(doc! { "_id": &period_id })
+        .await?
+        .ok_or_else(|| AppError::Internal("usage allowance period disappeared".to_string()))
+}
+
+pub(crate) async fn ensure_current_period_in_session(
+    db: &mongodb::Database,
+    allowance: &UsageAllowance,
+    owner_user_id: &str,
+    now: DateTime<Utc>,
+    session: &mut mongodb::ClientSession,
+) -> AppResult<UsageAllowancePeriod> {
+    let window = allowance_window(allowance.recurrence, allowance.created_at, now);
+    let period_id = period_id(&allowance.id, owner_user_id, window.start);
+    let created_at = Utc::now();
+    let period_end = window.end.map_or(bson::Bson::Null, |value| {
+        bson::DateTime::from_chrono(value).into()
+    });
+    let update = vec![doc! { "$set": {
+        "allowance_id": { "$ifNull": ["$allowance_id", &allowance.id] },
+        "owner_user_id": { "$ifNull": ["$owner_user_id", owner_user_id] },
+        "consumed_quantity": { "$ifNull": ["$consumed_quantity", 0_i64] },
+        "reserved_quantity": { "$ifNull": ["$reserved_quantity", 0_i64] },
+        // Admin reductions apply to the remaining current-period balance but
+        // can never invalidate consumption or an in-flight reservation
+        // admitted under the old definition.
+        "total_quantity": { "$max": [
+            allowance.quantity,
+            { "$add": [
+                { "$ifNull": ["$consumed_quantity", 0_i64] },
+                { "$ifNull": ["$reserved_quantity", 0_i64] },
+            ] },
+        ] },
+        "period_start": { "$ifNull": [
+            "$period_start",
+            bson::DateTime::from_chrono(window.start),
+        ] },
+        "period_end": period_end,
+        "created_at": { "$ifNull": [
+            "$created_at",
+            bson::DateTime::from_chrono(created_at),
+        ] },
+        "updated_at": bson::DateTime::from_chrono(created_at),
+    } }];
+    let periods = db.collection::<UsageAllowancePeriod>(USAGE_ALLOWANCE_PERIODS);
+    periods
+        .update_one(doc! { "_id": &period_id }, update)
+        .upsert(true)
+        .session(&mut *session)
+        .await?;
+    periods
+        .find_one(doc! { "_id": &period_id })
+        .session(session)
         .await?
         .ok_or_else(|| AppError::Internal("usage allowance period disappeared".to_string()))
 }
@@ -402,7 +526,7 @@ async fn resolve_service(db: &mongodb::Database, reference: &str) -> AppResult<D
 
 #[cfg(test)]
 mod tests {
-    use chrono::{Duration, TimeZone};
+    use chrono::{Duration, TimeZone, Utc};
 
     use crate::models::billing_target::BillingTargetKind;
     use crate::models::user::{UserProfileConfig, UserType};
@@ -504,6 +628,104 @@ mod tests {
         assert_eq!(clamped.consumed_quantity, 6);
         assert_eq!(clamped.reserved_quantity, 3);
         assert_eq!(available_period_quantity(&clamped), 0);
+    }
+
+    #[tokio::test]
+    async fn read_only_current_period_projects_edited_quantity_without_writing() {
+        let db = connect_test_database("allowance_read_only_projection")
+            .await
+            .expect("read-only allowance projection test requires NYXID_TEST_DATABASE_URL");
+        let now = Utc.with_ymd_and_hms(2026, 8, 21, 13, 45, 0).unwrap();
+        let allowance = UsageAllowance {
+            id: "allowance-read-only".to_string(),
+            service_id: "service-1".to_string(),
+            service_slug: "llm-one".to_string(),
+            metric: BillingMetric::Tokens,
+            quantity: 10,
+            recurrence: AllowanceRecurrence::Daily,
+            target_kind: BillingTargetKind::AllUsers,
+            target_user_ids: Vec::new(),
+            is_active: true,
+            created_by: "admin-1".to_string(),
+            created_at: now - Duration::days(2),
+            updated_at: now,
+        };
+        db.collection::<UsageAllowance>(USAGE_ALLOWANCES)
+            .insert_one(&allowance)
+            .await
+            .expect("insert allowance");
+        let period = ensure_current_period(&db, &allowance, "owner-read-only", now)
+            .await
+            .expect("create period");
+        db.collection::<UsageAllowancePeriod>(USAGE_ALLOWANCE_PERIODS)
+            .update_one(
+                doc! { "_id": &period.id },
+                doc! { "$set": { "consumed_quantity": 6_i64, "reserved_quantity": 3_i64 } },
+            )
+            .await
+            .expect("seed usage");
+        db.collection::<UsageAllowance>(USAGE_ALLOWANCES)
+            .update_one(
+                doc! { "_id": &allowance.id },
+                doc! { "$set": { "quantity": 4_i64 } },
+            )
+            .await
+            .expect("edit allowance");
+
+        let projected = list_current_for_user_read_only(&db, "owner-read-only", now)
+            .await
+            .expect("read current allowance");
+        assert_eq!(projected[0].1.total_quantity, 9);
+        assert_eq!(projected[0].1.consumed_quantity, 6);
+        assert_eq!(projected[0].1.reserved_quantity, 3);
+        let stored = db
+            .collection::<UsageAllowancePeriod>(USAGE_ALLOWANCE_PERIODS)
+            .find_one(doc! { "_id": &period.id })
+            .await
+            .expect("read stored period")
+            .expect("stored period");
+        assert_eq!(stored.total_quantity, 10);
+    }
+
+    #[tokio::test]
+    async fn read_only_current_period_projects_missing_period_without_writing() {
+        let db = connect_test_database("allowance_read_only_missing_period")
+            .await
+            .expect("read-only allowance projection test requires NYXID_TEST_DATABASE_URL");
+        let now = Utc.with_ymd_and_hms(2026, 8, 21, 13, 45, 0).unwrap();
+        let allowance = UsageAllowance {
+            id: "allowance-read-only-missing".to_string(),
+            service_id: "service-1".to_string(),
+            service_slug: "llm-one".to_string(),
+            metric: BillingMetric::Tokens,
+            quantity: 12,
+            recurrence: AllowanceRecurrence::Monthly,
+            target_kind: BillingTargetKind::AllUsers,
+            target_user_ids: Vec::new(),
+            is_active: true,
+            created_by: "admin-1".to_string(),
+            created_at: now - Duration::days(40),
+            updated_at: now,
+        };
+        db.collection::<UsageAllowance>(USAGE_ALLOWANCES)
+            .insert_one(&allowance)
+            .await
+            .expect("insert allowance");
+
+        let projected = list_current_for_user_read_only(&db, "owner-missing", now)
+            .await
+            .expect("read missing current allowance period");
+        assert_eq!(projected.len(), 1);
+        assert_eq!(projected[0].1.total_quantity, allowance.quantity);
+        assert_eq!(projected[0].1.consumed_quantity, 0);
+        assert_eq!(projected[0].1.reserved_quantity, 0);
+        assert_eq!(
+            db.collection::<UsageAllowancePeriod>(USAGE_ALLOWANCE_PERIODS)
+                .count_documents(doc! {})
+                .await
+                .expect("count periods"),
+            0
+        );
     }
 
     #[tokio::test]

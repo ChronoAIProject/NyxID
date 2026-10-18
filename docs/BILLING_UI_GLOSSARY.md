@@ -311,3 +311,8 @@ Ranked by how likely a user is to be misled.
 
 18. **`lago_metric_code` is fetched but never shown** (`schemas/billing.ts:28`) — the one field that
     would let a user reconcile a line against their Lago invoice.
+
+
+## Admin Credits controls
+
+The admin Credits page preserves its `Credit grants`, `Free allowances`, and `Schedules` tabs. Its compact balance covers remaining issued credits; purchased wallet credits stay on the existing user Billing page. Each allocation shows allocated, used, and remaining credits, service limits, expiry, and a reclaim action. Service/group limits share the allocation total and do not reserve separate pots. Reclaim removes only that allocation’s unused balance; previously spent credits and other allocations remain independent. Recurring policies support daily, weekly, and monthly issuance with fresh limits per period.

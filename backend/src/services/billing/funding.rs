@@ -33,17 +33,14 @@ pub struct FundingSettlement {
     pub lago_billable_quantity_micros: i64,
 }
 
-pub async fn reserve_estimated_funding(
+pub(crate) async fn reserve_estimated_funding_in_session(
     db: &mongodb::Database,
     ctx: &BillingRouteContext,
     layers: &mut [LayerReservation],
+    session: &mut mongodb::ClientSession,
 ) -> AppResult<()> {
-    for index in 0..layers.len() {
-        let result = reserve_layer(db, ctx, &mut layers[index]).await;
-        if let Err(error) = result {
-            release_layer_reservations(db, &layers[..=index]).await?;
-            return Err(error);
-        }
+    for layer in layers {
+        reserve_layer(db, ctx, layer, session).await?;
     }
     Ok(())
 }
@@ -52,6 +49,7 @@ async fn reserve_layer(
     db: &mongodb::Database,
     ctx: &BillingRouteContext,
     layer: &mut LayerReservation,
+    session: &mut mongodb::ClientSession,
 ) -> AppResult<()> {
     let mut uncovered_quantity = layer.estimated_quantity.max(0);
     if layer.layer == BillingLayer::Platform && uncovered_quantity > 0 {
@@ -64,6 +62,7 @@ async fn reserve_layer(
             ctx.service_slug.as_deref(),
             ctx.platform_metric,
             uncovered_quantity,
+            session,
         )
         .await?;
         let reserved_units: i64 = layer
@@ -84,6 +83,7 @@ async fn reserve_layer(
             .or(ctx.user_service_id.as_deref()),
         ctx.service_slug.as_deref(),
         estimated_micros,
+        session,
     )
     .await?;
     let grant_micros: i64 = layer
@@ -103,6 +103,7 @@ async fn reserve_allowances(
     service_slug: Option<&str>,
     metric: crate::models::service_billing::BillingMetric,
     quantity: i64,
+    session: &mut mongodb::ClientSession,
 ) -> AppResult<Vec<AllowanceReservationAllocation>> {
     let definitions = super::allowances::applicable_allowances(
         db,
@@ -115,8 +116,14 @@ async fn reserve_allowances(
     let now = Utc::now();
     let mut candidates = Vec::new();
     for definition in definitions {
-        let period =
-            super::allowances::ensure_current_period(db, &definition, owner_user_id, now).await?;
+        let period = super::allowances::ensure_current_period_in_session(
+            db,
+            &definition,
+            owner_user_id,
+            now,
+            session,
+        )
+        .await?;
         candidates.push((definition, period));
     }
     candidates.sort_by(|(_, left), (_, right)| expiry_order(left.period_end, right.period_end));
@@ -131,11 +138,18 @@ async fn reserve_allowances(
         if wanted <= 0 {
             continue;
         }
+        if period.active_settlement.is_some() {
+            return Err(AppError::Conflict(format!(
+                "billing allowance settlement pending:{}",
+                period.id
+            )));
+        }
         let updated = db
             .collection::<UsageAllowancePeriod>(USAGE_ALLOWANCE_PERIODS)
             .update_one(
                 doc! {
                     "_id": &period.id,
+                    "active_settlement": Bson::Null,
                     "$expr": {
                         "$gte": [
                             {
@@ -153,9 +167,12 @@ async fn reserve_allowances(
                     "$set": { "updated_at": bson::DateTime::from_chrono(Utc::now()) },
                 },
             )
+            .session(&mut *session)
             .await?;
         if updated.modified_count == 0 {
-            continue;
+            return Err(AppError::Conflict(
+                "billing funding changed during reservation; retry".into(),
+            ));
         }
         allocations.push(AllowanceReservationAllocation {
             allowance_id: allowance.id,
@@ -173,9 +190,15 @@ async fn reserve_grants(
     service_id: Option<&str>,
     service_slug: Option<&str>,
     amount_micros: i64,
+    session: &mut mongodb::ClientSession,
 ) -> AppResult<Vec<GrantReservationAllocation>> {
     let now = Utc::now();
-    let mut grants = super::grants::list_active_for_user(db, owner_user_id, now).await?;
+    let mut cursor = db.collection::<CreditGrant>(CREDIT_GRANTS).find(doc! {
+        "recipient_user_id": owner_user_id, "status": "active", "revoke_requested_at": Bson::Null,
+        "issued_ledgered_at": { "$type": "date" }, "remaining_micros": { "$gt": 0_i64 },
+        "$or": [{ "expires_at": Bson::Null }, { "expires_at": { "$gt": bson::DateTime::from_chrono(now) } }],
+    }).session(&mut *session).await?;
+    let mut grants: Vec<CreditGrant> = cursor.stream(&mut *session).try_collect().await?;
     grants.retain(|grant| {
         super::grants::service_scope_applies(&grant.scope, service_id, service_slug)
     });
@@ -190,45 +213,56 @@ async fn reserve_grants(
         if needed == 0 {
             break;
         }
-        let wanted = needed.min(super::grants::available_grant_micros(&grant));
+        let rule = super::service_limits::matching_rule(&grant, service_id, service_slug);
+        let wanted = needed.min(super::service_limits::available_for_service(
+            &grant,
+            service_id,
+            service_slug,
+        ));
         if wanted <= 0 {
             continue;
+        }
+        if grant.active_settlement.is_some() {
+            return Err(AppError::Conflict(format!(
+                "billing grant settlement pending:{}",
+                grant.id
+            )));
+        }
+        let mut filter = spendable_grant_filter(&grant.id, wanted, now);
+        let mut inc = doc! { "reserved_micros": wanted };
+        if let Some(rule) = rule {
+            let index = grant
+                .service_limits
+                .iter()
+                .position(|r| r.key == rule.key)
+                .expect("matched rule");
+            add_rule_filter(&mut filter, index, 0, wanted);
+            inc.insert(format!("service_limits.{index}.reserved_micros"), wanted);
         }
         let updated = db
             .collection::<CreditGrant>(CREDIT_GRANTS)
             .update_one(
-                spendable_grant_filter(&grant.id, wanted, now),
+                filter,
                 doc! {
-                    "$inc": { "reserved_micros": wanted },
+                    "$inc": inc,
                     "$set": { "updated_at": bson::DateTime::from_chrono(Utc::now()) },
                 },
             )
+            .session(&mut *session)
             .await?;
         if updated.modified_count == 0 {
-            continue;
+            return Err(AppError::Conflict(
+                "billing funding changed during reservation; retry".into(),
+            ));
         }
         allocations.push(GrantReservationAllocation {
+            service_limit_key: rule.map(|r| r.key.clone()),
             grant_id: grant.id,
             amount_micros: wanted,
         });
         needed -= wanted;
     }
     Ok(allocations)
-}
-
-pub async fn release_layer_reservations(
-    db: &mongodb::Database,
-    layers: &[LayerReservation],
-) -> AppResult<()> {
-    for layer in layers {
-        for reservation in &layer.allowance_reservations {
-            release_allowance_reservation(db, reservation).await?;
-        }
-        for reservation in &layer.grant_reservations {
-            release_grant_reservation(db, reservation).await?;
-        }
-    }
-    Ok(())
 }
 
 pub async fn release_usage_reservations(
@@ -268,6 +302,7 @@ pub async fn release_usage_reservations(
                 &operation_id,
                 reservation.amount_micros.max(0),
                 0,
+                reservation.service_limit_key.as_deref(),
                 true,
             )
             .await?;
@@ -320,6 +355,37 @@ pub async fn recover_terminal_releases(db: &mongodb::Database) -> AppResult<u64>
 /// allocation is guarded by the operation id, and grant ledger appends are
 /// deduplicated. This also recovers locks on rows that exhausted the normal
 /// settlement retry budget before a later request needs the same benefit.
+pub(super) async fn help_grant_settlement_lock(
+    db: &mongodb::Database,
+    grant_id: &str,
+) -> AppResult<()> {
+    if let Some(grant) = db
+        .collection::<CreditGrant>(CREDIT_GRANTS)
+        .find_one(doc! { "_id": grant_id })
+        .await?
+    {
+        if let Some(lock) = grant.active_settlement {
+            complete_grant_lock(db, grant_id, &lock).await?;
+        }
+    }
+    Ok(())
+}
+pub(super) async fn help_allowance_settlement_lock(
+    db: &mongodb::Database,
+    period_id: &str,
+) -> AppResult<()> {
+    if let Some(period) = db
+        .collection::<UsageAllowancePeriod>(USAGE_ALLOWANCE_PERIODS)
+        .find_one(doc! { "_id": period_id })
+        .await?
+    {
+        if let Some(lock) = period.active_settlement {
+            complete_allowance_lock(db, period_id, &period.allowance_id, &lock).await?;
+        }
+    }
+    Ok(())
+}
+
 async fn recover_resource_settlement_locks(db: &mongodb::Database) -> AppResult<u64> {
     let allowance_periods: Vec<UsageAllowancePeriod> = db
         .collection::<UsageAllowancePeriod>(USAGE_ALLOWANCE_PERIODS)
@@ -354,54 +420,103 @@ async fn recover_resource_settlement_locks(db: &mongodb::Database) -> AppResult<
     Ok(recovered)
 }
 
-async fn release_allowance_reservation(
-    db: &mongodb::Database,
-    reservation: &AllowanceReservationAllocation,
-) -> AppResult<()> {
-    if reservation.quantity <= 0 {
-        return Ok(());
-    }
-    db.collection::<UsageAllowancePeriod>(USAGE_ALLOWANCE_PERIODS)
-        .update_one(
-            doc! {
-                "_id": &reservation.period_id,
-                "reserved_quantity": { "$gte": reservation.quantity },
-            },
-            doc! {
-                "$inc": { "reserved_quantity": -reservation.quantity },
-                "$set": { "updated_at": bson::DateTime::from_chrono(Utc::now()) },
-            },
-        )
+// A durable resource lock belongs to its usage row even after the claim lease
+// changes or the resource is exhausted. Finish these before recomputing funding.
+async fn finish_usage_resource_locks(db: &mongodb::Database, usage_id: &str) -> AppResult<()> {
+    let mut periods = db
+        .collection::<UsageAllowancePeriod>(USAGE_ALLOWANCE_PERIODS)
+        .find(doc! { "active_settlement.usage_row_id": usage_id })
         .await?;
+    while let Some(period) = periods.try_next().await? {
+        if let Some(lock) = period.active_settlement {
+            complete_allowance_lock(db, &period.id, &period.allowance_id, &lock).await?;
+        }
+    }
+    let mut grants = db
+        .collection::<CreditGrant>(CREDIT_GRANTS)
+        .find(doc! { "active_settlement.usage_row_id": usage_id })
+        .await?;
+    while let Some(grant) = grants.try_next().await? {
+        if let Some(lock) = grant.active_settlement {
+            complete_grant_lock(db, &grant.id, &lock).await?;
+        }
+    }
     Ok(())
 }
 
-async fn release_grant_reservation(
+/// Conditional WRITE is essential: a snapshot read alone allows takeover and
+/// wallet settlement to commit concurrently on a different resource. The nonce
+/// guarantees a write conflict with takeover/finalization in either order.
+async fn fence_resource_operation(
     db: &mongodb::Database,
-    reservation: &GrantReservationAllocation,
-) -> AppResult<()> {
-    if reservation.amount_micros <= 0 {
-        return Ok(());
+    session: &mut mongodb::ClientSession,
+    usage_id: &str,
+    expected_claim: Option<&str>,
+    release: bool,
+) -> mongodb::error::Result<()> {
+    let mut filter =
+        doc! { "_id": usage_id, "funding.settled": { "$ne": true }, "released": release };
+    if release {
+        filter.insert("status", doc! { "$in": ["failed", "abandoned"] });
+    } else {
+        let claim = expected_claim
+            .ok_or_else(|| mongodb::error::Error::custom("Usage settlement claim missing"))?;
+        filter.insert("funding.settlement_claim_id", claim);
     }
-    db.collection::<CreditGrant>(CREDIT_GRANTS)
+    let result = db
+        .collection::<UsageMeterRow>(USAGE_METER)
         .update_one(
-            doc! {
-                "_id": &reservation.grant_id,
-                "reserved_micros": { "$gte": reservation.amount_micros },
-            },
-            doc! {
-                "$inc": { "reserved_micros": -reservation.amount_micros },
-                "$set": { "updated_at": bson::DateTime::from_chrono(Utc::now()) },
-            },
+            filter,
+            doc! { "$set": { "funding.resource_operation_fence": Uuid::new_v4().to_string() } },
         )
+        .session(session)
         .await?;
+    if result.modified_count != 1 {
+        return Err(mongodb::error::Error::custom(
+            "Usage settlement ownership changed",
+        ));
+    }
     Ok(())
+}
+fn allowance_consumed(row: &UsageMeterRow) -> i64 {
+    row.funding.as_ref().map_or(0, |f| {
+        f.allowance_consumptions
+            .iter()
+            .fold(0_i64, |sum, a| sum.saturating_add(a.quantity.max(0)))
+    })
+}
+fn grant_consumed(row: &UsageMeterRow) -> i64 {
+    row.funding.as_ref().map_or(0, |f| {
+        f.grant_consumptions
+            .iter()
+            .fold(0_i64, |sum, a| sum.saturating_add(a.amount_micros.max(0)))
+    })
+}
+
+fn add_rule_filter(filter: &mut Document, index: usize, reserved: i64, consume: i64) {
+    // Dot indexes in aggregation field paths do not index arrays; explicitly
+    // take the frozen element before comparing exact integer counters.
+    let rule = doc! { "$arrayElemAt": ["$service_limits", index as i64] };
+    let expression = doc! { "$let": { "vars": { "rule": rule }, "in": { "$and": [
+        { "$gte": ["$$rule.reserved_micros", reserved] },
+        { "$gte": [{ "$add": [{ "$subtract": ["$$rule.limit_micros", { "$add": ["$$rule.consumed_micros", "$$rule.reserved_micros"] }] }, reserved] }, consume] },
+    ] } } };
+    filter
+        .entry("$and".to_string())
+        .or_insert_with(|| Bson::Array(Vec::new()));
+    filter
+        .get_array_mut("$and")
+        .expect("and conditions")
+        .push(doc! { "$expr": expression }.into());
 }
 
 fn spendable_grant_filter(grant_id: &str, amount_micros: i64, now: DateTime<Utc>) -> Document {
     doc! {
         "_id": grant_id,
         "status": "active",
+        "active_settlement": Bson::Null,
+        "revoke_requested_at": Bson::Null,
+        "issued_ledgered_at": { "$type": "date" },
         "$and": [
             { "$or": [
                 { "expires_at": Bson::Null },
@@ -502,6 +617,8 @@ pub async fn settle_usage_funding(
         )));
     };
 
+    finish_usage_resource_locks(db, &claimed.id).await?;
+    refresh_claimed_funding(db, &mut claimed, &claim_id).await?;
     let quantity = claimed.quantity.unwrap_or(0).max(0);
     let rate_micros = settlement_rate_micros(db, &claimed).await?;
     let mut allowance_covered = claimed
@@ -544,8 +661,8 @@ pub async fn settle_usage_funding(
         )
         .await?
         {
-            allowance_covered = allowance_covered.saturating_add(consume).min(quantity);
-            refresh_claimed_funding(db, &mut claimed).await?;
+            refresh_claimed_funding(db, &mut claimed, &claim_id).await?;
+            allowance_covered = allowance_consumed(&claimed).min(quantity);
         }
     }
 
@@ -597,8 +714,8 @@ pub async fn settle_usage_funding(
             )
             .await?
             {
-                allowance_covered = allowance_covered.saturating_add(consume).min(quantity);
-                refresh_claimed_funding(db, &mut claimed).await?;
+                refresh_claimed_funding(db, &mut claimed, &claim_id).await?;
+                allowance_covered = allowance_consumed(&claimed).min(quantity);
             }
         }
     }
@@ -639,14 +756,13 @@ pub async fn settle_usage_funding(
             &operation_id,
             reservation.amount_micros.max(0),
             consume,
+            reservation.service_limit_key.as_deref(),
             true,
         )
         .await?
         {
-            grant_covered_micros = grant_covered_micros
-                .saturating_add(consume)
-                .min(total_charge_micros);
-            refresh_claimed_funding(db, &mut claimed).await?;
+            refresh_claimed_funding(db, &mut claimed, &claim_id).await?;
+            grant_covered_micros = grant_consumed(&claimed).min(total_charge_micros);
         }
     }
 
@@ -674,18 +790,34 @@ pub async fn settle_usage_funding(
                 finish_grant_operation_if_locked(db, &grant.id, &operation_id).await?;
                 continue;
             }
-            let consume = super::grants::available_grant_micros(&grant)
-                .min(total_charge_micros.saturating_sub(grant_covered_micros));
+            let rule = super::service_limits::matching_rule(
+                &grant,
+                claimed.service_id.as_deref(),
+                claimed.service_slug.as_deref(),
+            );
+            let consume = super::service_limits::available_for_service(
+                &grant,
+                claimed.service_id.as_deref(),
+                claimed.service_slug.as_deref(),
+            )
+            .min(total_charge_micros.saturating_sub(grant_covered_micros));
             if consume <= 0 {
                 continue;
             }
-            if settle_grant_resource(db, &claimed, &grant.id, &operation_id, 0, consume, false)
-                .await?
+            if settle_grant_resource(
+                db,
+                &claimed,
+                &grant.id,
+                &operation_id,
+                0,
+                consume,
+                rule.map(|r| r.key.as_str()),
+                false,
+            )
+            .await?
             {
-                grant_covered_micros = grant_covered_micros
-                    .saturating_add(consume)
-                    .min(total_charge_micros);
-                refresh_claimed_funding(db, &mut claimed).await?;
+                refresh_claimed_funding(db, &mut claimed, &claim_id).await?;
+                grant_covered_micros = grant_consumed(&claimed).min(total_charge_micros);
             }
         }
     }
@@ -760,12 +892,27 @@ async fn settlement_rate_micros(db: &mongodb::Database, row: &UsageMeterRow) -> 
         .max(0))
 }
 
-async fn refresh_claimed_funding(db: &mongodb::Database, row: &mut UsageMeterRow) -> AppResult<()> {
-    *row = db
+async fn refresh_claimed_funding(
+    db: &mongodb::Database,
+    row: &mut UsageMeterRow,
+    expected_claim: &str,
+) -> AppResult<()> {
+    let current = db
         .collection::<UsageMeterRow>(USAGE_METER)
         .find_one(doc! { "_id": &row.id })
         .await?
         .ok_or_else(|| AppError::Internal("usage funding row disappeared".to_string()))?;
+    if current.released
+        || !current
+            .funding
+            .as_ref()
+            .is_some_and(|f| !f.settled && f.settlement_claim_id.as_deref() == Some(expected_claim))
+    {
+        return Err(AppError::Conflict(
+            "Usage settlement ownership changed".into(),
+        ));
+    }
+    *row = current;
     Ok(())
 }
 
@@ -840,7 +987,12 @@ async fn settle_allowance_resource(
     consume_quantity: i64,
     honor_reservation: bool,
 ) -> AppResult<bool> {
-    let lock = AllowanceSettlementLock {
+    let release = operation_id.contains(":allowance-release:");
+    let expected_claim = row
+        .funding
+        .as_ref()
+        .and_then(|f| f.settlement_claim_id.clone());
+    let proposed_lock = AllowanceSettlementLock {
         operation_id: operation_id.to_string(),
         usage_row_id: row.id.clone(),
         reserved_quantity,
@@ -849,6 +1001,33 @@ async fn settle_allowance_resource(
         updated_at: Utc::now(),
     };
     for _ in 0..RESOURCE_LOCK_RETRIES {
+        let Some(period) = db
+            .collection::<UsageAllowancePeriod>(USAGE_ALLOWANCE_PERIODS)
+            .find_one(doc! { "_id": period_id })
+            .await?
+        else {
+            return Ok(false);
+        };
+        if let Some(active) = period.active_settlement.as_ref() {
+            complete_allowance_lock(db, period_id, &period.allowance_id, active).await?;
+            if active.operation_id == operation_id {
+                return Ok(true);
+            }
+            continue;
+        }
+        let mut lock = proposed_lock.clone();
+        if !honor_reservation {
+            if period.period_end.is_some_and(|end| end <= Utc::now()) {
+                return Ok(false);
+            }
+            lock.consume_quantity = lock
+                .consume_quantity
+                .min(super::allowances::available_period_quantity(&period));
+            if lock.consume_quantity <= 0 {
+                return Ok(false);
+            }
+        }
+        let consume_quantity = lock.consume_quantity;
         let mut filter = doc! {
             "_id": period_id,
             "$or": [
@@ -884,17 +1063,54 @@ async fn settle_allowance_resource(
         let lock_bson = bson::to_bson(&lock).map_err(|error| {
             AppError::Internal(format!("failed to encode allowance lock: {error}"))
         })?;
-        let result = db
-            .collection::<UsageAllowancePeriod>(USAGE_ALLOWANCE_PERIODS)
-            .update_one(
-                filter,
-                doc! { "$set": {
-                    "active_settlement": lock_bson,
-                    "updated_at": bson::DateTime::from_chrono(Utc::now()),
-                } },
-            )
+        let tx_db = db.clone();
+        let usage_id = row.id.clone();
+        let op_id = operation_id.to_owned();
+        let expected_claim = expected_claim.clone();
+        let lock_update = doc! { "$set": { "active_settlement": lock_bson,
+        "updated_at": bson::DateTime::from_chrono(Utc::now()) } };
+        let mut session = db.client().start_session().await?;
+        let (already_recorded, acquired) = session
+            .start_transaction()
+            .and_run2(async move |session| {
+                let current = tx_db
+                    .collection::<UsageMeterRow>(USAGE_METER)
+                    .find_one(doc! { "_id": &usage_id })
+                    .session(&mut *session)
+                    .await?;
+                if current
+                    .as_ref()
+                    .is_some_and(|r| has_allowance_operation(r, &op_id))
+                {
+                    return Ok((true, false));
+                }
+                // No usage row means no durable owner for this operation.
+                if current.is_none() {
+                    return Err(mongodb::error::Error::custom(
+                        "Usage funding owner disappeared",
+                    ));
+                }
+                fence_resource_operation(
+                    &tx_db,
+                    session,
+                    &usage_id,
+                    expected_claim.as_deref(),
+                    release,
+                )
+                .await?;
+                let result = tx_db
+                    .collection::<UsageAllowancePeriod>(USAGE_ALLOWANCE_PERIODS)
+                    .update_one(filter.clone(), lock_update.clone())
+                    .session(&mut *session)
+                    .await?;
+                Ok((false, result.modified_count == 1))
+            })
             .await?;
-        if result.modified_count == 1 {
+        if already_recorded {
+            finish_allowance_operation_if_locked(db, period_id, operation_id).await?;
+            return Ok(true);
+        }
+        if acquired {
             complete_allowance_lock(db, period_id, allowance_id, &lock).await?;
             return Ok(true);
         }
@@ -906,7 +1122,7 @@ async fn settle_allowance_resource(
             return Ok(false);
         };
         let Some(active) = period.active_settlement else {
-            return Ok(false);
+            continue;
         };
         complete_allowance_lock(db, period_id, &period.allowance_id, &active).await?;
         if active.operation_id == operation_id {
@@ -988,17 +1204,61 @@ async fn settle_grant_resource(
     operation_id: &str,
     reserved_micros: i64,
     consume_micros: i64,
+    service_limit_key: Option<&str>,
     honor_reservation: bool,
 ) -> AppResult<bool> {
-    let lock = CreditGrantSettlementLock {
+    let release = operation_id.contains(":grant-release:");
+    let expected_claim = row
+        .funding
+        .as_ref()
+        .and_then(|f| f.settlement_claim_id.clone());
+    let proposed_lock = CreditGrantSettlementLock {
         operation_id: operation_id.to_string(),
         usage_row_id: row.id.clone(),
         reserved_micros,
         consume_micros,
+        service_limit_key: service_limit_key.map(str::to_owned),
         applied: false,
         updated_at: Utc::now(),
     };
     for _ in 0..RESOURCE_LOCK_RETRIES {
+        let Some(grant) = db
+            .collection::<CreditGrant>(CREDIT_GRANTS)
+            .find_one(doc! { "_id": grant_id })
+            .await?
+        else {
+            return Ok(false);
+        };
+        if let Some(active) = grant.active_settlement.as_ref() {
+            complete_grant_lock(db, grant_id, active).await?;
+            if active.operation_id == operation_id {
+                return Ok(true);
+            }
+            continue;
+        }
+        if grant.status != crate::models::credit_grant::CreditGrantStatus::Active {
+            return Ok(false);
+        }
+        let mut lock = proposed_lock.clone();
+        if !honor_reservation {
+            if grant.revoke_requested_at.is_some()
+                || grant.issued_ledgered_at.is_none()
+                || grant.expires_at.is_some_and(|end| end <= Utc::now())
+            {
+                return Ok(false);
+            }
+            lock.consume_micros =
+                lock.consume_micros
+                    .min(super::service_limits::available_for_service(
+                        &grant,
+                        row.service_id.as_deref(),
+                        row.service_slug.as_deref(),
+                    ));
+            if lock.consume_micros <= 0 {
+                return Ok(false);
+            }
+        }
+        let consume_micros = lock.consume_micros;
         let mut filter = doc! {
             "_id": grant_id,
             "status": "active",
@@ -1030,19 +1290,78 @@ async fn settle_grant_resource(
                 ] }],
             );
         }
+        if !honor_reservation {
+            filter.insert("revoke_requested_at", Bson::Null);
+            filter.insert("issued_ledgered_at", doc! { "$type": "date" });
+        }
+        if let Some(key) = service_limit_key {
+            let index = grant
+                .service_limits
+                .iter()
+                .position(|r| r.key == key)
+                .ok_or_else(|| AppError::Internal("Reserved service limit is missing".into()))?;
+            add_rule_filter(&mut filter, index, reserved_micros, consume_micros);
+        } else if super::service_limits::matching_rule(
+            &grant,
+            row.service_id.as_deref(),
+            row.service_slug.as_deref(),
+        )
+        .is_some()
+        {
+            return Err(AppError::Internal(
+                "Service limit identity missing from settlement".into(),
+            ));
+        }
         let lock_bson = bson::to_bson(&lock)
             .map_err(|error| AppError::Internal(format!("failed to encode grant lock: {error}")))?;
-        let result = db
-            .collection::<CreditGrant>(CREDIT_GRANTS)
-            .update_one(
-                filter,
-                doc! { "$set": {
-                    "active_settlement": lock_bson,
-                    "updated_at": bson::DateTime::from_chrono(Utc::now()),
-                } },
-            )
+        let tx_db = db.clone();
+        let usage_id = row.id.clone();
+        let op_id = operation_id.to_owned();
+        let expected_claim = expected_claim.clone();
+        let lock_update = doc! { "$set": { "active_settlement": lock_bson,
+        "updated_at": bson::DateTime::from_chrono(Utc::now()) } };
+        let mut session = db.client().start_session().await?;
+        let (already_recorded, acquired) = session
+            .start_transaction()
+            .and_run2(async move |session| {
+                let current = tx_db
+                    .collection::<UsageMeterRow>(USAGE_METER)
+                    .find_one(doc! { "_id": &usage_id })
+                    .session(&mut *session)
+                    .await?;
+                if current
+                    .as_ref()
+                    .is_some_and(|r| has_grant_operation(r, &op_id))
+                {
+                    return Ok((true, false));
+                }
+                // No usage row means no durable owner for this operation.
+                if current.is_none() {
+                    return Err(mongodb::error::Error::custom(
+                        "Usage funding owner disappeared",
+                    ));
+                }
+                fence_resource_operation(
+                    &tx_db,
+                    session,
+                    &usage_id,
+                    expected_claim.as_deref(),
+                    release,
+                )
+                .await?;
+                let result = tx_db
+                    .collection::<CreditGrant>(CREDIT_GRANTS)
+                    .update_one(filter.clone(), lock_update.clone())
+                    .session(&mut *session)
+                    .await?;
+                Ok((false, result.modified_count == 1))
+            })
             .await?;
-        if result.modified_count == 1 {
+        if already_recorded {
+            finish_grant_operation_if_locked(db, grant_id, operation_id).await?;
+            return Ok(true);
+        }
+        if acquired {
             complete_grant_lock(db, grant_id, &lock).await?;
             return Ok(true);
         }
@@ -1054,7 +1373,7 @@ async fn settle_grant_resource(
             return Ok(false);
         };
         let Some(active) = grant.active_settlement else {
-            return Ok(false);
+            continue;
         };
         complete_grant_lock(db, grant_id, &active).await?;
         if active.operation_id == operation_id {
@@ -1083,11 +1402,18 @@ async fn complete_grant_lock(
                 vec![doc! { "$set": {
                     "reserved_micros": { "$subtract": ["$reserved_micros", lock.reserved_micros] },
                     "remaining_micros": { "$subtract": ["$remaining_micros", lock.consume_micros] },
+                    "service_limits": { "$map": { "input": { "$ifNull": ["$service_limits", []] }, "as": "rule", "in": {
+                        "$cond": [{ "$eq": ["$$rule.key", lock.service_limit_key.as_deref()] },
+                            { "$mergeObjects": ["$$rule", {
+                                "reserved_micros": { "$subtract": ["$$rule.reserved_micros", lock.reserved_micros] },
+                                "consumed_micros": { "$add": ["$$rule.consumed_micros", lock.consume_micros] },
+                            }] }, "$$rule"]
+                    } } },
                     "status": { "$cond": [
-                        { "$lte": [
+                        { "$and": [{ "$eq": [{ "$ifNull": ["$revoke_requested_at", Bson::Null] }, Bson::Null] }, { "$lte": [
                             { "$subtract": ["$remaining_micros", lock.consume_micros] },
                             0_i64,
-                        ] },
+                        ] }] },
                         "consumed",
                         "$status",
                     ] },
@@ -1110,6 +1436,7 @@ async fn complete_grant_lock(
         operation_id: lock.operation_id.clone(),
         grant_id: grant_id.to_string(),
         amount_micros: lock.consume_micros,
+        service_limit_key: lock.service_limit_key.clone(),
     };
     let allocation_bson = bson::to_bson(&allocation).map_err(|error| {
         AppError::Internal(format!("failed to encode grant consumption: {error}"))
@@ -1168,6 +1495,7 @@ async fn complete_grant_lock(
             },
         )
         .await?;
+    super::grants::finalize_reclaim(db, grant_id).await?;
     Ok(())
 }
 
@@ -1284,6 +1612,10 @@ mod tests {
             .expect("insert allowance period");
         db.collection::<CreditGrant>(CREDIT_GRANTS)
             .insert_one(CreditGrant {
+                service_limits: Vec::new(),
+                revoke_requested_at: None,
+                revoke_requested_by: None,
+
                 id: grant_id.to_string(),
                 batch_id: "batch-1".to_string(),
                 schedule_origin: None,
@@ -1341,6 +1673,8 @@ mod tests {
                     quantity: 1,
                 }],
                 grant_reservations: vec![GrantReservationAllocation {
+                    service_limit_key: None,
+
                     grant_id: grant_id.to_string(),
                     amount_micros: 500_000,
                 }],
@@ -1417,6 +1751,8 @@ mod tests {
             .await
             .expect("delete tail ledger entry to simulate crash");
         let lock = CreditGrantSettlementLock {
+            service_limit_key: None,
+
             operation_id: allocation.operation_id.clone(),
             usage_row_id: row_id.to_string(),
             reserved_micros: 0,
@@ -1452,6 +1788,296 @@ mod tests {
                 .await
                 .expect("count recovered ledger entry"),
             1
+        );
+    }
+}
+
+#[cfg(test)]
+mod expanded_race_tests {
+    use super::super::expanded_tests::{add_allowance, allocation, database, row, saved, setup};
+    use super::super::reservation::tests::route_context;
+    use super::*;
+    use crate::models::usage_meter::UsageFunding;
+
+    async fn claimed_row(db: &mongodb::Database) -> UsageMeterRow {
+        let ctx = route_context("owner");
+        super::super::meter::open(db, &ctx, None).await.unwrap();
+        let current = row(db, &ctx.billing_request_id).await;
+        db.collection::<UsageMeterRow>(USAGE_METER).update_one(doc! { "_id": &current.id }, doc! { "$set": {
+            "quantity": 1_i64, "status": "finalized", "funding": bson::to_bson(&UsageFunding {
+                credits_per_unit_micros: 1_000_000,
+                settlement_claim_id: Some("old-worker".into()),
+                settlement_claimed_at: Some(Utc::now() - Duration::seconds(120)),
+                ..Default::default()
+            }).unwrap()
+        } }).await.unwrap();
+        row(db, &ctx.billing_request_id).await
+    }
+
+    #[tokio::test]
+    async fn taken_over_worker_cannot_acquire_new_grant_or_allowance_locks() {
+        let db = database("billing_stale_consumption_claim_fence").await;
+        setup(&db, "owner", 1).await;
+        let stale = claimed_row(&db).await;
+        let settled = settle_usage_funding(&db, &stale).await.unwrap();
+        assert_eq!(settled.wallet_charge_credits, 1);
+        // These sources appear only after the successor finalized wallet funding.
+        let grant = allocation("owner", 100_000_000, Some(100_000_000));
+        db.collection::<CreditGrant>(CREDIT_GRANTS)
+            .insert_one(&grant)
+            .await
+            .unwrap();
+        let allowance = add_allowance(&db, "owner").await;
+        let period =
+            super::super::allowances::ensure_current_period(&db, &allowance, "owner", Utc::now())
+                .await
+                .unwrap();
+        assert!(
+            settle_grant_resource(
+                &db,
+                &stale,
+                &grant.id,
+                "stale-grant-extra",
+                0,
+                1_000_000,
+                Some("catalog-cap"),
+                false
+            )
+            .await
+            .is_err()
+        );
+        assert!(
+            settle_allowance_resource(
+                &db,
+                &stale,
+                &allowance.id,
+                &period.id,
+                "stale-allowance-extra",
+                0,
+                1,
+                false
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(saved(&db, &grant.id).await.remaining_micros, 100_000_000);
+        assert_eq!(
+            db.collection::<UsageAllowancePeriod>(USAGE_ALLOWANCE_PERIODS)
+                .find_one(doc! { "_id": &period.id })
+                .await
+                .unwrap()
+                .unwrap()
+                .consumed_quantity,
+            0
+        );
+        let current = row(&db, &stale.billing_request_id).await;
+        assert_eq!(current.funding.unwrap().wallet_charge_credits, Some(1));
+        assert_eq!(
+            db.collection::<crate::models::billing_ledger::BillingLedgerEntry>(
+                crate::models::billing_ledger::COLLECTION_NAME
+            )
+            .count_documents(doc! { "event_type": "grant_consumed" })
+            .await
+            .unwrap(),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn takeover_recovers_applied_unrecorded_exhausted_resources_before_wallet() {
+        for allowance_funded in [false, true] {
+            let db = database(if allowance_funded {
+                "billing_takeover_exhausted_allowance"
+            } else {
+                "billing_takeover_exhausted_grant"
+            })
+            .await;
+            setup(&db, "owner", 1).await;
+            let stale = claimed_row(&db).await;
+            if allowance_funded {
+                let allowance = add_allowance(&db, "owner").await;
+                let period = super::super::allowances::ensure_current_period(
+                    &db,
+                    &allowance,
+                    "owner",
+                    Utc::now(),
+                )
+                .await
+                .unwrap();
+                let lock = AllowanceSettlementLock {
+                    operation_id: format!("{}:allowance-extra:{}", stale.id, period.id),
+                    usage_row_id: stale.id.clone(),
+                    reserved_quantity: 0,
+                    consume_quantity: 1,
+                    applied: true,
+                    updated_at: Utc::now(),
+                };
+                db.collection::<UsageAllowancePeriod>(USAGE_ALLOWANCE_PERIODS).update_one(doc! { "_id": &period.id }, doc! { "$set": { "consumed_quantity": 1_i64, "active_settlement": bson::to_bson(&lock).unwrap() } }).await.unwrap();
+            } else {
+                let mut grant = allocation("owner", 1_000_000, Some(1_000_000));
+                grant.remaining_micros = 0;
+                grant.status = crate::models::credit_grant::CreditGrantStatus::Consumed;
+                grant.service_limits[0].consumed_micros = 1_000_000;
+                grant.active_settlement = Some(CreditGrantSettlementLock {
+                    operation_id: format!("{}:grant-extra:{}", stale.id, grant.id),
+                    usage_row_id: stale.id.clone(),
+                    reserved_micros: 0,
+                    consume_micros: 1_000_000,
+                    service_limit_key: Some("catalog-cap".into()),
+                    applied: true,
+                    updated_at: Utc::now(),
+                });
+                db.collection::<CreditGrant>(CREDIT_GRANTS)
+                    .insert_one(&grant)
+                    .await
+                    .unwrap();
+            }
+            assert_eq!(
+                settle_usage_funding(&db, &stale)
+                    .await
+                    .unwrap()
+                    .wallet_charge_credits,
+                0
+            );
+            let current = row(&db, &stale.billing_request_id).await;
+            let f = current.funding.as_ref().unwrap();
+            assert_eq!(
+                if allowance_funded {
+                    f.allowance_consumptions.len()
+                } else {
+                    f.grant_consumptions.len()
+                },
+                1
+            );
+            assert_eq!(
+                settle_usage_funding(&db, &current)
+                    .await
+                    .unwrap()
+                    .wallet_charge_credits,
+                0
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn resource_fence_write_conflicts_with_concurrent_claim_takeover() {
+        let db = database("billing_claim_fence_write_conflict").await;
+        setup(&db, "owner", 1).await;
+        let stale = claimed_row(&db).await;
+        let mut session = db.client().start_session().await.unwrap();
+        session.start_transaction().await.unwrap();
+        // Establish the old snapshot before the successor replaces the claim.
+        db.collection::<UsageMeterRow>(USAGE_METER)
+            .find_one(doc! { "_id": &stale.id })
+            .session(&mut session)
+            .await
+            .unwrap();
+        settle_usage_funding(&db, &stale).await.unwrap();
+        assert!(
+            fence_resource_operation(&db, &mut session, &stale.id, Some("old-worker"), false)
+                .await
+                .is_err()
+        );
+        let _ = session.abort_transaction().await;
+    }
+
+    #[tokio::test]
+    async fn capped_consumption_ledger_failure_retains_lock_until_reclaim_can_finish() {
+        let db = database("billing_capped_reclaim_ledger_retry").await;
+        setup(&db, "owner", 1).await;
+        let usage = claimed_row(&db).await;
+        let mut grant = allocation("owner", 100_000_000, Some(50_000_000));
+        let lock = CreditGrantSettlementLock {
+            operation_id: "capped-consume-before-ledger".into(),
+            usage_row_id: usage.id.clone(),
+            reserved_micros: 40_000_000,
+            consume_micros: 30_000_000,
+            service_limit_key: Some("catalog-cap".into()),
+            applied: false,
+            updated_at: Utc::now(),
+        };
+        grant.reserved_micros = 40_000_000;
+        grant.service_limits[0].reserved_micros = 40_000_000;
+        grant.active_settlement = Some(lock.clone());
+        db.collection::<CreditGrant>(CREDIT_GRANTS)
+            .insert_one(&grant)
+            .await
+            .unwrap();
+        super::super::grants::request_revoke_grant(&db, &grant.id, Some("admin"))
+            .await
+            .unwrap();
+        // A validator rejects the consumption journal only. Financial apply and
+        // history recording happen, but the bridge must remain durable.
+        let ledger = crate::models::billing_ledger::COLLECTION_NAME;
+        db.create_collection(ledger).await.unwrap();
+        db.run_command(doc! { "collMod": ledger, "validator": { "event_type": { "$ne": "grant_consumed" } }, "validationLevel": "strict" }).await.unwrap();
+        assert!(complete_grant_lock(&db, &grant.id, &lock).await.is_err());
+        let pending = saved(&db, &grant.id).await;
+        assert_eq!(pending.remaining_micros, 70_000_000);
+        assert_eq!(pending.service_limits[0].consumed_micros, 30_000_000);
+        assert!(pending.active_settlement.unwrap().applied);
+        assert!(pending.revoked_at.is_none());
+        db.run_command(doc! { "collMod": ledger, "validator": {} })
+            .await
+            .unwrap();
+        help_grant_settlement_lock(&db, &grant.id).await.unwrap();
+        help_grant_settlement_lock(&db, &grant.id).await.unwrap();
+        let terminal = saved(&db, &grant.id).await;
+        assert_eq!(terminal.terminal_amount_micros, 70_000_000);
+        assert_eq!(terminal.service_limits[0].consumed_micros, 30_000_000);
+        assert_eq!(terminal.service_limits[0].reserved_micros, 0);
+        assert!(terminal.active_settlement.is_none());
+        assert_eq!(db.collection::<crate::models::billing_ledger::BillingLedgerEntry>(ledger).count_documents(doc! { "dedupe_key": format!("grant-consumed:{}:{}", grant.id, lock.operation_id) }).await.unwrap(), 1);
+        assert_eq!(
+            db.collection::<crate::models::billing_ledger::BillingLedgerEntry>(ledger)
+                .count_documents(doc! { "dedupe_key": format!("grant-revoked:{}", grant.id) })
+                .await
+                .unwrap(),
+            1
+        );
+    }
+    #[tokio::test]
+    async fn funding_refresh_never_adopts_a_successor_claim() {
+        let db = database("billing_immutable_settlement_claim_refresh").await;
+        setup(&db, "owner", 1).await;
+        let mut stale = claimed_row(&db).await;
+        db.collection::<UsageMeterRow>(USAGE_METER)
+            .update_one(
+                doc! { "_id": &stale.id },
+                doc! { "$set": { "funding.settlement_claim_id": "successor" } },
+            )
+            .await
+            .unwrap();
+        assert!(
+            refresh_claimed_funding(&db, &mut stale, "old-worker")
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            stale
+                .funding
+                .as_ref()
+                .unwrap()
+                .settlement_claim_id
+                .as_deref(),
+            Some("old-worker")
+        );
+        db.collection::<UsageMeterRow>(USAGE_METER)
+            .update_one(
+                doc! { "_id": &stale.id },
+                doc! { "$set": { "funding.settlement_claim_id": "old-worker" } },
+            )
+            .await
+            .unwrap();
+        refresh_claimed_funding(&db, &mut stale, "old-worker")
+            .await
+            .unwrap();
+        // The same fence applies after a later operation's history refresh.
+        db.collection::<UsageMeterRow>(USAGE_METER).update_one(doc! { "_id": &stale.id }, doc! { "$set": { "funding.settlement_claim_id": "successor", "funding.settled": true } }).await.unwrap();
+        assert!(
+            refresh_claimed_funding(&db, &mut stale, "old-worker")
+                .await
+                .is_err()
         );
     }
 }

@@ -32,7 +32,7 @@ function schedule(overrides: Partial<CreditSchedule> = {}): CreditSchedule {
 }
 
 describe("SchedulesTable", () => {
-  it("shows current-period progress and exposes pause as a switch", async () => {
+  it("shows current-period progress and exposes pause as a menu item", async () => {
     const onToggle = vi.fn();
     const user = userEvent.setup();
     render(
@@ -45,9 +45,13 @@ describe("SchedulesTable", () => {
       />,
     );
 
-    expect(screen.getByText("Disbursing 412")).toBeInTheDocument();
-    const toggle = screen.getByRole("switch", { name: "Pause schedule" });
-    await user.click(toggle);
+    expect(screen.getAllByText("Issuing 412")).not.toHaveLength(0);
+    await user.click(
+      screen.getByRole("button", { name: "Recurring credits actions" }),
+    );
+    await user.click(
+      await screen.findByRole("menuitem", { name: "Pause recurring credits" }),
+    );
     expect(onToggle).toHaveBeenCalledWith(
       expect.objectContaining({
         id: "schedule-1",
@@ -78,7 +82,7 @@ describe("SchedulesTable", () => {
       />,
     );
 
-    expect(screen.getByText(/Complete.*1,204.*expires/)).toBeInTheDocument();
+    expect(screen.getAllByText(/Complete.*1,204.*expires/)).not.toHaveLength(0);
   });
 
   it("surfaces periods abandoned before completion", () => {
@@ -92,6 +96,7 @@ describe("SchedulesTable", () => {
       />,
     );
 
-    expect(screen.getByText("2 skipped periods")).toBeInTheDocument();
+    expect(screen.getAllByText("2 skipped periods")).toHaveLength(2);
+    expect(screen.getAllByText("2 skipped periods")[1]?.closest("article")).toBeInTheDocument();
   });
 });

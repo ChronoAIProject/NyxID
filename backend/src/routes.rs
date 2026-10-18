@@ -918,6 +918,10 @@ fn build_router_internal(
                 .post(handlers::billing_credits::issue_grant),
         )
         .route(
+            "/credits/summary",
+            get(handlers::billing_credit_summary::admin_credit_summary),
+        )
+        .route(
             "/credits/grants/{grant_id}",
             delete(handlers::billing_credits::revoke_grant),
         )
@@ -1316,6 +1320,10 @@ fn build_router_internal(
 
     let billing_routes = Router::new()
         .route("/usage", get(handlers::billing::get_usage))
+        .route(
+            "/credits",
+            get(handlers::billing_credit_summary::user_credit_summary),
+        )
         .route(
             "/wallet",
             get(handlers::billing::get_wallet).post(handlers::billing::provision_wallet),

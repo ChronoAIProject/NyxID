@@ -1,4 +1,4 @@
-import { useDeferredValue, useMemo, useState } from "react";
+import { useDeferredValue, useEffect, useMemo, useState } from "react";
 import { Search } from "lucide-react";
 import { useAdminUsers } from "@/hooks/use-admin";
 import { resolveServiceBillingMetric } from "@/lib/billing-units";
@@ -11,9 +11,13 @@ import { Input } from "@/components/ui/input";
 export function UserPicker({
   selected,
   onChange,
+  onErrorStateChange,
+  onLoadingStateChange,
 }: {
   readonly selected: readonly string[];
   readonly onChange: (ids: string[]) => void;
+  readonly onErrorStateChange?: (failed: boolean) => void;
+  readonly onLoadingStateChange?: (loading: boolean) => void;
 }) {
   const [search, setSearch] = useState("");
   const deferredSearch = useDeferredValue(search.trim());
@@ -50,6 +54,12 @@ export function UserPicker({
       : users;
   }, [search, users]);
   const loading = peopleQuery.isFetching || organizationsQuery.isFetching;
+  const failed = Boolean(peopleQuery.error || organizationsQuery.error);
+  useEffect(() => onErrorStateChange?.(failed), [failed, onErrorStateChange]);
+  useEffect(
+    () => onLoadingStateChange?.(loading),
+    [loading, onLoadingStateChange],
+  );
 
   return (
     <div className="flex min-h-0 flex-col overflow-hidden rounded-lg border border-border">
@@ -91,7 +101,22 @@ export function UserPicker({
             </label>
           );
         })}
-        {filtered.length === 0 && !loading ? (
+        {failed ? (
+          <div className="space-y-2 px-3 py-6 text-center text-[12px] text-destructive">
+            <p>Owners could not be loaded. No broad issuance will be sent.</p>
+            <button
+              type="button"
+              className="underline underline-offset-2"
+              onClick={() => {
+                void peopleQuery.refetch();
+                void organizationsQuery.refetch();
+              }}
+            >
+              Retry
+            </button>
+          </div>
+        ) : null}
+        {filtered.length === 0 && !loading && !failed ? (
           <p className="px-3 py-6 text-center text-[12px] text-muted-foreground">
             No owners found.
           </p>
@@ -114,11 +139,19 @@ export function ServicePicker({
   selected,
   onChange,
   multiple = false,
+  showMetric = true,
+  loading = false,
+  error = false,
+  onRetry,
 }: {
   readonly services: readonly DownstreamService[];
   readonly selected: readonly string[];
   readonly onChange: (ids: string[]) => void;
   readonly multiple?: boolean;
+  readonly showMetric?: boolean;
+  readonly loading?: boolean;
+  readonly error?: boolean;
+  readonly onRetry?: () => void;
 }) {
   const [search, setSearch] = useState("");
   const filtered = useMemo(() => {
@@ -171,13 +204,30 @@ export function ServicePicker({
                   {service.slug}
                 </span>
               </span>
-              <Badge variant="secondary" className="shrink-0">
-                {metric}
-              </Badge>
+              {showMetric ? <Badge variant="secondary" className="shrink-0">{metric}</Badge> : null}
             </label>
           );
         })}
-        {filtered.length === 0 ? (
+        {error ? (
+          <div className="space-y-2 px-3 py-6 text-center text-[12px] text-destructive">
+            <p>Services could not be loaded. Scoped issuance is blocked.</p>
+            {onRetry ? (
+              <button
+                type="button"
+                className="underline underline-offset-2"
+                onClick={onRetry}
+              >
+                Retry
+              </button>
+            ) : null}
+          </div>
+        ) : null}
+        {loading ? (
+          <p className="px-3 py-3 text-center text-[11px] text-muted-foreground">
+            Loading services...
+          </p>
+        ) : null}
+        {filtered.length === 0 && !loading && !error ? (
           <p className="px-3 py-6 text-center text-[12px] text-muted-foreground">
             No services found.
           </p>

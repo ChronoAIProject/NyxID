@@ -21,6 +21,8 @@ pub struct CreditGrantSettlementLock {
     pub usage_row_id: String,
     pub reserved_micros: i64,
     pub consume_micros: i64,
+    #[serde(default)]
+    pub service_limit_key: Option<String>,
     pub applied: bool,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub updated_at: DateTime<Utc>,
@@ -50,6 +52,8 @@ pub struct CreditGrant {
     #[serde(default)]
     pub reserved_micros: i64,
     pub scope: BillingServiceScope,
+    #[serde(default)]
+    pub service_limits: Vec<super::credit_service_limit::CreditServiceLimit>,
     #[serde(default, with = "crate::models::bson_datetime::optional")]
     pub expires_at: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -82,4 +86,8 @@ pub struct CreditGrant {
     pub expired_at: Option<DateTime<Utc>>,
     #[serde(default, with = "crate::models::bson_datetime::optional")]
     pub revoked_at: Option<DateTime<Utc>>,
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
+    pub revoke_requested_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub revoke_requested_by: Option<String>,
 }

@@ -30,7 +30,7 @@ pub const MAX_RECIPIENTS_PER_TICK: usize = 5_000;
 pub const PERIOD_LEASE_SECS: i64 = 300;
 const MAX_SCHEDULES_PER_TICK: i64 = 500;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize)]
 pub struct CreateScheduleInput {
     pub amount_credits: i64,
     pub recurrence: ScheduleRecurrence,
@@ -41,6 +41,8 @@ pub struct CreateScheduleInput {
     pub service_refs: Vec<String>,
     pub reason: Option<String>,
     pub created_by: String,
+    pub service_limits: Vec<crate::models::credit_service_limit::CreditServiceLimitInput>,
+    pub request_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -53,6 +55,7 @@ pub struct UpdateScheduleInput {
     pub service_refs: Option<Vec<String>>,
     pub reason: Option<Option<String>>,
     pub is_active: Option<bool>,
+    pub service_limits: Option<Vec<crate::models::credit_service_limit::CreditServiceLimitInput>>,
 }
 
 #[derive(Clone, Debug)]
@@ -78,14 +81,30 @@ pub async fn create_schedule(
     db: &mongodb::Database,
     input: CreateScheduleInput,
 ) -> AppResult<CreditSchedule> {
+    let payload = serde_json::to_string(&input).map_err(|e| AppError::Internal(e.to_string()))?;
+    if let Some(row) =
+        super::submissions::existing(db, &input.created_by, input.request_id.as_deref(), &payload)
+            .await?
+    {
+        let schedule: CreditSchedule =
+            bson::from_document(row.snapshot).map_err(|e| AppError::Internal(e.to_string()))?;
+        return insert_schedule_if_absent(db, schedule).await;
+    }
     let amount_micros = validate_amount(input.amount_credits)?;
     validate_expiry(&input.expiry)?;
     let target_user_ids = validate_targets(db, input.target_kind, &input.target_user_ids).await?;
     let scope =
         super::grants::resolve_service_scope(db, input.all_services, &input.service_refs).await?;
+    let service_limits =
+        super::service_limits::resolve(db, &scope, amount_micros, &input.service_limits).await?;
     let now = Utc::now();
     let schedule = CreditSchedule {
-        id: Uuid::new_v4().to_string(),
+        id: input
+            .request_id
+            .as_deref()
+            .map(|key| super::submissions::identity(&input.created_by, key))
+            .transpose()?
+            .unwrap_or_else(|| Uuid::new_v4().to_string()),
         amount_credits: input.amount_credits,
         amount_micros,
         recurrence: input.recurrence,
@@ -93,19 +112,51 @@ pub async fn create_schedule(
         target_kind: input.target_kind,
         target_user_ids,
         scope,
+        service_limits,
         reason: normalize_reason(input.reason)?,
         is_active: true,
-        created_by: input.created_by,
+        created_by: input.created_by.clone(),
         created_at: now,
         updated_at: now,
         last_period_start: None,
         last_disbursed_at: None,
         skipped_periods: 0,
     };
+    if let Some(key) = input.request_id.as_deref() {
+        let snapshot =
+            bson::to_document(&schedule).map_err(|e| AppError::Internal(e.to_string()))?;
+        let frozen =
+            super::submissions::freeze(db, &input.created_by, key, &payload, snapshot).await?;
+        let schedule =
+            bson::from_document(frozen.snapshot).map_err(|e| AppError::Internal(e.to_string()))?;
+        insert_schedule_if_absent(db, schedule).await
+    } else {
+        insert_schedule_if_absent(db, schedule).await
+    }
+}
+
+async fn insert_schedule_if_absent(
+    db: &mongodb::Database,
+    schedule: CreditSchedule,
+) -> AppResult<CreditSchedule> {
+    let encoded = bson::to_document(&schedule).map_err(|e| AppError::Internal(e.to_string()))?;
+    let result = db
+        .collection::<CreditSchedule>(CREDIT_SCHEDULES)
+        .update_one(
+            doc! { "_id": &schedule.id },
+            doc! { "$setOnInsert": encoded },
+        )
+        .upsert(true)
+        .await;
+    match result {
+        Ok(_) => {}
+        Err(error) if is_duplicate_key_error(&error) => {}
+        Err(error) => return Err(error.into()),
+    }
     db.collection::<CreditSchedule>(CREDIT_SCHEDULES)
-        .insert_one(&schedule)
-        .await?;
-    Ok(schedule)
+        .find_one(doc! { "_id": &schedule.id })
+        .await?
+        .ok_or_else(|| AppError::Internal("Recurring allocation disappeared".into()))
 }
 
 pub async fn update_schedule(
@@ -150,6 +201,24 @@ async fn update_schedule_with_current(
     } else {
         current.scope.clone()
     };
+    let service_limits = match input.service_limits {
+        Some(inputs) => super::service_limits::resolve(db, &scope, amount_micros, &inputs).await?,
+        None => {
+            if current.service_limits.iter().any(|rule| {
+                rule.limit_micros > amount_micros
+                    || (!scope.all_services
+                        && rule
+                            .service_ids
+                            .iter()
+                            .any(|id| !scope.service_ids.contains(id)))
+            }) {
+                return Err(AppError::ValidationError(
+                    "Update service limits to match the new total and eligible services".into(),
+                ));
+            }
+            current.service_limits.clone()
+        }
+    };
     let reason = match input.reason {
         Some(reason) => normalize_reason(reason)?,
         None => current.reason.clone(),
@@ -174,6 +243,7 @@ async fn update_schedule_with_current(
                 "target_kind": encode(&target_kind, "schedule target kind")?,
                 "target_user_ids": encode(&target_user_ids, "schedule targets")?,
                 "scope": encode(&scope, "schedule scope")?,
+                "service_limits": encode(&service_limits, "schedule service limits")?,
                 "reason": reason.as_ref().map_or(Bson::Null, |value| value.clone().into()),
                 "is_active": input.is_active.unwrap_or(current.is_active),
                 "updated_at": bson::DateTime::from_chrono(updated_at),
@@ -401,6 +471,7 @@ async fn claim_period(
             "target_kind": encode(&schedule.target_kind, "period target kind")?,
             "target_user_ids": encode(&schedule.target_user_ids, "period targets")?,
             "scope": encode(&schedule.scope, "period scope")?,
+            "service_limits": encode(&schedule.service_limits, "period service limits")?,
             "reason": schedule.reason.as_ref().map_or(Bson::Null, |value| value.clone().into()),
             "cursor_user_id": Bson::Null,
             "disbursed_count": 0_i64,
@@ -515,6 +586,7 @@ fn grants_for_recipients(
             remaining_micros: period.amount_micros,
             reserved_micros: 0,
             scope: period.scope.clone(),
+            service_limits: period.service_limits.clone(),
             expires_at: period.expires_at,
             reason: period.reason.clone(),
             granted_by: schedule.created_by.clone(),
@@ -528,17 +600,19 @@ fn grants_for_recipients(
             consumed_at: None,
             expired_at: None,
             revoked_at: None,
+            revoke_requested_at: None,
+            revoke_requested_by: None,
         })
         .collect()
 }
 
-struct InsertChunkOutcome {
+pub(super) struct InsertChunkOutcome {
     inserted_indices: Vec<usize>,
     inserted_count: usize,
     duplicate_count: usize,
 }
 
-async fn insert_grant_chunk(
+pub(super) async fn insert_grant_chunk(
     db: &mongodb::Database,
     grants: &[CreditGrant],
 ) -> AppResult<InsertChunkOutcome> {
@@ -783,7 +857,7 @@ fn encode<T: serde::Serialize>(value: &T, label: &str) -> AppResult<Bson> {
         .map_err(|error| AppError::Internal(format!("failed to encode {label}: {error}")))
 }
 
-fn is_duplicate_key_error(error: &mongodb::error::Error) -> bool {
+pub(super) fn is_duplicate_key_error(error: &mongodb::error::Error) -> bool {
     match error.kind.as_ref() {
         mongodb::error::ErrorKind::Command(command) => command.code == 11000,
         mongodb::error::ErrorKind::Write(mongodb::error::WriteFailure::WriteError(write_error)) => {

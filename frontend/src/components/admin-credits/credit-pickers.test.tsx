@@ -53,4 +53,24 @@ describe("ServicePicker", () => {
     fireEvent.click(screen.getByText("Service one"));
     expect(onChange).toHaveBeenCalledWith(["service-one"]);
   });
+
+  it("does not present a failed service lookup as an empty successful list", () => {
+    const onRetry = vi.fn();
+    render(
+      <ServicePicker
+        services={[]}
+        selected={[]}
+        onChange={vi.fn()}
+        error
+        onRetry={onRetry}
+      />,
+    );
+    expect(
+      screen.getByText(
+        "Services could not be loaded. Scoped issuance is blocked.",
+      ),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    expect(onRetry).toHaveBeenCalledTimes(1);
+  });
 });

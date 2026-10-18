@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
 use futures::TryStreamExt;
 use mongodb::bson::{self, Bson, doc};
-use mongodb::options::{FindOneAndUpdateOptions, ReturnDocument};
+use mongodb::options::ReturnDocument;
 use uuid::Uuid;
 
 use crate::errors::{AppError, AppResult};
@@ -26,9 +26,34 @@ const LEDGER_RECOVERY_BATCH: i64 = 500;
 pub const INLINE_ISSUANCE_LEDGER_LIMIT: usize = 50;
 
 pub fn available_grant_micros(grant: &CreditGrant) -> i64 {
+    if grant.revoke_requested_at.is_some() {
+        return 0;
+    }
     grant
         .remaining_micros
-        .saturating_sub(grant.reserved_micros)
+        .saturating_sub(super::service_limits::held_micros(grant))
+        .max(0)
+}
+
+pub fn eligible_available_micros(grant: &CreditGrant, now: DateTime<Utc>) -> i64 {
+    if grant.status != CreditGrantStatus::Active
+        || grant.issued_ledgered_at.is_none()
+        || grant.expires_at.is_some_and(|expiry| expiry <= now)
+    {
+        return 0;
+    }
+    super::service_limits::realizable_micros(grant)
+}
+
+pub fn has_restrictions(grant: &CreditGrant) -> bool {
+    !grant.scope.all_services || !grant.service_limits.is_empty()
+}
+
+pub fn used_micros(grant: &CreditGrant) -> i64 {
+    grant
+        .amount_micros
+        .saturating_sub(grant.remaining_micros)
+        .saturating_sub(grant.terminal_amount_micros)
         .max(0)
 }
 
@@ -37,12 +62,18 @@ pub fn service_scope_applies(
     service_id: Option<&str>,
     service_slug: Option<&str>,
 ) -> bool {
-    scope.all_services
-        || service_id.is_some_and(|id| scope.service_ids.iter().any(|item| item == id))
-        || service_slug.is_some_and(|slug| scope.service_slugs.iter().any(|item| item == slug))
+    if scope.all_services {
+        return true;
+    }
+    // New scopes freeze canonical IDs. Legacy slug-only scopes still work when
+    // there is no canonical identity to compare.
+    match service_id {
+        Some(id) if !scope.service_ids.is_empty() => scope.service_ids.iter().any(|v| v == id),
+        _ => service_slug.is_some_and(|slug| scope.service_slugs.iter().any(|v| v == slug)),
+    }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize)]
 pub struct IssueCreditGrantInput {
     pub amount_credits: i64,
     pub target_kind: BillingTargetKind,
@@ -52,37 +83,67 @@ pub struct IssueCreditGrantInput {
     pub expires_at: Option<DateTime<Utc>>,
     pub reason: Option<String>,
     pub granted_by: String,
+    pub service_limits: Vec<crate::models::credit_service_limit::CreditServiceLimitInput>,
+    pub request_id: Option<String>,
 }
 
 pub async fn issue_grants(
     db: &mongodb::Database,
     input: IssueCreditGrantInput,
 ) -> AppResult<Vec<CreditGrant>> {
-    validate_issue_input(&input)?;
-    let recipients = resolve_recipients(db, input.target_kind, &input.target_user_ids).await?;
-    if recipients.is_empty() {
-        return Err(AppError::ValidationError(
-            "credit grant has no eligible user recipients".to_string(),
-        ));
-    }
-    let scope = resolve_service_scope(db, input.all_services, &input.service_refs).await?;
-    let now = Utc::now();
-    let batch_id = Uuid::new_v4().to_string();
+    let payload = serde_json::to_string(&input).map_err(|e| AppError::Internal(e.to_string()))?;
+    let previous =
+        super::submissions::existing(db, &input.granted_by, input.request_id.as_deref(), &payload)
+            .await?;
+    let (recipients, scope, service_limits, now, batch_id) = if let Some(row) = previous {
+        decode_issue_snapshot(row)?
+    } else {
+        validate_issue_input(&input)?;
+        let recipients = resolve_recipients(db, input.target_kind, &input.target_user_ids).await?;
+        if recipients.is_empty() {
+            return Err(AppError::ValidationError(
+                "Credit allocation has no eligible recipients".into(),
+            ));
+        }
+        let scope = resolve_service_scope(db, input.all_services, &input.service_refs).await?;
+        let rules = super::service_limits::resolve(
+            db,
+            &scope,
+            input.amount_credits * CREDIT_MICROS,
+            &input.service_limits,
+        )
+        .await?;
+        let now = Utc::now();
+        if let Some(key) = input.request_id.as_deref() {
+            let snapshot = doc! { "recipients": &recipients,
+            "scope": bson::to_bson(&scope).map_err(|e| AppError::Internal(e.to_string()))?,
+            "service_limits": bson::to_bson(&rules).map_err(|e| AppError::Internal(e.to_string()))? };
+            decode_issue_snapshot(
+                super::submissions::freeze(db, &input.granted_by, key, &payload, snapshot).await?,
+            )?
+        } else {
+            (recipients, scope, rules, now, Uuid::new_v4().to_string())
+        }
+    };
     let amount_micros = input
         .amount_credits
         .checked_mul(CREDIT_MICROS)
-        .ok_or_else(|| AppError::ValidationError("credit grant amount is too large".to_string()))?;
+        .ok_or_else(|| AppError::ValidationError("Credit allocation amount is too large".into()))?;
     let reason = input
         .reason
         .as_deref()
         .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToString::to_string);
+        .filter(|v| !v.is_empty())
+        .map(str::to_owned);
 
     let mut grants: Vec<CreditGrant> = recipients
         .into_iter()
         .map(|recipient_user_id| CreditGrant {
-            id: Uuid::new_v4().to_string(),
+            id: Uuid::new_v5(
+                &Uuid::NAMESPACE_OID,
+                format!("{batch_id}:{recipient_user_id}").as_bytes(),
+            )
+            .to_string(),
             batch_id: batch_id.clone(),
             schedule_origin: None,
             recipient_user_id,
@@ -92,6 +153,7 @@ pub async fn issue_grants(
             remaining_micros: amount_micros,
             reserved_micros: 0,
             scope: scope.clone(),
+            service_limits: service_limits.clone(),
             expires_at: input.expires_at,
             reason: reason.clone(),
             granted_by: input.granted_by.clone(),
@@ -105,12 +167,16 @@ pub async fn issue_grants(
             consumed_at: None,
             expired_at: None,
             revoked_at: None,
+            revoke_requested_at: None,
+            revoke_requested_by: None,
         })
         .collect();
 
-    db.collection::<CreditGrant>(CREDIT_GRANTS)
-        .insert_many(&grants)
-        .await?;
+    // Deterministic per-recipient insert-if-absent recovers a partial batch;
+    // replay never resets counters, status, activation, or reclaimed money.
+    for chunk in grants.chunks(super::schedules::DISBURSEMENT_CHUNK) {
+        super::schedules::insert_grant_chunk(db, chunk).await?;
+    }
     // Hash-chain appends serialize on the ledger head. Keep the admin request
     // bounded for platform-wide batches; remaining grants stay deliberately
     // unspendable until recover_unledgered_events journals them.
@@ -134,7 +200,41 @@ pub async fn issue_grants(
             }
         }
     }
-    Ok(grants)
+    let ids: Vec<&str> = grants.iter().map(|g| g.id.as_str()).collect();
+    db.collection::<CreditGrant>(CREDIT_GRANTS)
+        .find(doc! { "_id": { "$in": ids } })
+        .sort(doc! { "recipient_user_id": 1 })
+        .await?
+        .try_collect()
+        .await
+        .map_err(Into::into)
+}
+
+type IssueSnapshot = (
+    Vec<String>,
+    BillingServiceScope,
+    Vec<crate::models::credit_service_limit::CreditServiceLimit>,
+    DateTime<Utc>,
+    String,
+);
+fn decode_issue_snapshot(
+    row: crate::models::credit_allocation_request::CreditAllocationRequest,
+) -> AppResult<IssueSnapshot> {
+    #[derive(serde::Deserialize)]
+    struct Snapshot {
+        recipients: Vec<String>,
+        scope: BillingServiceScope,
+        service_limits: Vec<crate::models::credit_service_limit::CreditServiceLimit>,
+    }
+    let snapshot: Snapshot = bson::from_document(row.snapshot)
+        .map_err(|e| AppError::Internal(format!("Allocation snapshot is invalid: {e}")))?;
+    Ok((
+        snapshot.recipients,
+        snapshot.scope,
+        snapshot.service_limits,
+        row.created_at,
+        row.id,
+    ))
 }
 
 pub async fn list_grants(
@@ -173,6 +273,7 @@ pub async fn list_active_for_user(
         .find(doc! {
             "recipient_user_id": user_id,
             "status": "active",
+            "revoke_requested_at": Bson::Null,
             "issued_ledgered_at": { "$type": "date" },
             "remaining_micros": { "$gt": 0_i64 },
             "$or": [
@@ -188,64 +289,84 @@ pub async fn list_active_for_user(
         .map_err(Into::into)
 }
 
+/// Request reclaim immediately; previously admitted holds remain durable until
+/// settlement/release. Repeated requests return the same pending/final result.
 pub async fn revoke_grant(db: &mongodb::Database, grant_id: &str) -> AppResult<CreditGrant> {
+    request_revoke_grant(db, grant_id, None).await
+}
+
+pub async fn request_revoke_grant(
+    db: &mongodb::Database,
+    grant_id: &str,
+    actor: Option<&str>,
+) -> AppResult<CreditGrant> {
+    let now = Utc::now();
+    db.collection::<CreditGrant>(CREDIT_GRANTS)
+        .update_one(
+            doc! { "_id": grant_id, "status": "active", "revoke_requested_at": Bson::Null },
+            doc! { "$set": { "revoke_requested_at": bson::DateTime::from_chrono(now),
+            "revoke_requested_by": actor, "updated_at": bson::DateTime::from_chrono(now) } },
+        )
+        .await?;
+    finalize_reclaim(db, grant_id).await?;
+    db.collection::<CreditGrant>(CREDIT_GRANTS)
+        .find_one(doc! { "_id": grant_id })
+        .await?
+        .ok_or_else(|| AppError::NotFound("Credit allocation not found".into()))
+}
+
+pub async fn finalize_reclaim(db: &mongodb::Database, grant_id: &str) -> AppResult<()> {
     let now = Utc::now();
     let previous = db
         .collection::<CreditGrant>(CREDIT_GRANTS)
         .find_one_and_update(
-            doc! {
-                "_id": grant_id,
-                "status": "active",
-                "reserved_micros": 0_i64,
-                "$or": [
-                    { "active_settlement": Bson::Null },
-                    { "active_settlement": { "$exists": false } },
-                ],
-            },
-            vec![doc! {
-                "$set": {
-                    "status": "revoked",
-                    "terminal_amount_micros": "$remaining_micros",
-                    "remaining_micros": 0_i64,
-                    "reserved_micros": 0_i64,
-                    "revoked_at": bson::DateTime::from_chrono(now),
-                    "updated_at": bson::DateTime::from_chrono(now),
-                }
-            }],
+            doc! { "_id": grant_id, "status": "active", "revoke_requested_at": { "$type": "date" },
+            "reserved_micros": 0_i64, "active_settlement": Bson::Null },
+            vec![
+                doc! { "$set": { "status": "revoked", "terminal_amount_micros": "$remaining_micros",
+                "remaining_micros": 0_i64, "revoked_at": bson::DateTime::from_chrono(now),
+                "updated_at": bson::DateTime::from_chrono(now) } },
+            ],
         )
-        .with_options(
-            FindOneAndUpdateOptions::builder()
-                .return_document(ReturnDocument::Before)
-                .build(),
+        .return_document(ReturnDocument::Before)
+        .await?;
+    if let Some(grant) = previous {
+        if super::ledger::record_grant_event(
+            db,
+            BillingLedgerEventType::GrantRevoked,
+            &grant.recipient_user_id,
+            &grant.id,
+            grant.remaining_micros.max(0),
+            None,
+            format!("grant-revoked:{}", grant.id),
         )
-        .await?
-        .ok_or_else(|| {
-            AppError::BadRequest(
-                "credit grant is not active or has an in-flight settlement".to_string(),
-            )
-        })?;
-    let revoked_micros = previous.remaining_micros.max(0);
-    if super::ledger::record_grant_event(
-        db,
-        BillingLedgerEventType::GrantRevoked,
-        &previous.recipient_user_id,
-        &previous.id,
-        revoked_micros,
-        None,
-        format!("grant-revoked:{}", previous.id),
-    )
-    .await
-        && let Err(error) = mark_terminal_ledgered(db, &previous.id, Utc::now()).await
-    {
-        tracing::warn!(grant_id = %previous.id, %error, "grant revocation ledger marker will retry");
+        .await
+        {
+            mark_terminal_ledgered(db, grant_id, now).await?;
+        }
     }
-    db.collection::<CreditGrant>(CREDIT_GRANTS)
-        .find_one(doc! { "_id": grant_id })
-        .await?
-        .ok_or_else(|| AppError::Internal("revoked credit grant disappeared".to_string()))
+    Ok(())
+}
+
+pub async fn finalize_pending_reclaims(db: &mongodb::Database) -> AppResult<u64> {
+    let mut cursor = db
+        .collection::<CreditGrant>(CREDIT_GRANTS)
+        .find(doc! {
+            "status": "active", "revoke_requested_at": { "$type": "date" },
+            "reserved_micros": 0_i64, "active_settlement": Bson::Null,
+        })
+        .limit(500)
+        .await?;
+    let mut count = 0;
+    while let Some(grant) = cursor.try_next().await? {
+        finalize_reclaim(db, &grant.id).await?;
+        count += 1;
+    }
+    Ok(count)
 }
 
 pub async fn expire_due_grants(db: &mongodb::Database, now: DateTime<Utc>) -> AppResult<u64> {
+    finalize_pending_reclaims(db).await?;
     let mut expired = 0;
     let mut examined = 0;
     while examined < MAX_EXPIRATIONS_PER_TICK {
@@ -255,6 +376,7 @@ pub async fn expire_due_grants(db: &mongodb::Database, now: DateTime<Utc>) -> Ap
             .find(doc! {
                 "status": "active",
                 "reserved_micros": 0_i64,
+                "revoke_requested_at": Bson::Null,
                 "expires_at": { "$lte": bson::DateTime::from_chrono(now) },
                 "$or": [
                     { "active_settlement": Bson::Null },
@@ -274,17 +396,18 @@ pub async fn expire_due_grants(db: &mongodb::Database, now: DateTime<Utc>) -> Ap
         for grant in due {
             let result = db
                 .collection::<CreditGrant>(CREDIT_GRANTS)
-                .update_one(
+                .find_one_and_update(
                     doc! {
-                        "_id": &grant.id,
-                        "status": "active",
-                        "reserved_micros": 0_i64,
-                        "expires_at": { "$lte": bson::DateTime::from_chrono(now) },
-                        "$or": [
-                            { "active_settlement": Bson::Null },
-                            { "active_settlement": { "$exists": false } },
-                        ],
-                    },
+                            "_id": &grant.id,
+                            "status": "active",
+                            "reserved_micros": 0_i64,
+                            "revoke_requested_at": Bson::Null,
+                    "expires_at": { "$lte": bson::DateTime::from_chrono(now) },
+                            "$or": [
+                                { "active_settlement": Bson::Null },
+                                { "active_settlement": { "$exists": false } },
+                            ],
+                        },
                     vec![doc! { "$set": {
                         "status": "expired",
                         "terminal_amount_micros": "$remaining_micros",
@@ -294,10 +417,11 @@ pub async fn expire_due_grants(db: &mongodb::Database, now: DateTime<Utc>) -> Ap
                         "updated_at": bson::DateTime::from_chrono(now),
                     } }],
                 )
+                .return_document(ReturnDocument::Before)
                 .await?;
-            if result.modified_count == 0 {
+            let Some(grant) = result else {
                 continue;
-            }
+            };
             expired += 1;
             if super::ledger::record_grant_event(
                 db,
@@ -529,6 +653,11 @@ pub(super) async fn resolve_service_scope(
     references: &[String],
 ) -> AppResult<BillingServiceScope> {
     if all_services {
+        if !references.is_empty() {
+            return Err(AppError::ValidationError(
+                "All-services scope must not include service_refs".into(),
+            ));
+        }
         return Ok(BillingServiceScope {
             all_services: true,
             service_ids: Vec::new(),
@@ -611,6 +740,9 @@ mod tests {
     #[test]
     fn issue_validation_enforces_bounds_and_target_shape() {
         let base = IssueCreditGrantInput {
+            service_limits: Vec::new(),
+            request_id: None,
+
             amount_credits: 10,
             target_kind: BillingTargetKind::SelectedUsers,
             target_user_ids: vec!["user-1".to_string()],
@@ -657,6 +789,9 @@ mod tests {
         let grants = issue_grants(
             &db,
             IssueCreditGrantInput {
+                service_limits: Vec::new(),
+                request_id: None,
+
                 amount_credits: 25,
                 target_kind: BillingTargetKind::AllUsers,
                 target_user_ids: Vec::new(),
@@ -706,6 +841,9 @@ mod tests {
         let grants = issue_grants(
             &db,
             IssueCreditGrantInput {
+                service_limits: Vec::new(),
+                request_id: None,
+
                 amount_credits: 10,
                 target_kind: BillingTargetKind::AllUsers,
                 target_user_ids: Vec::new(),
@@ -766,6 +904,10 @@ mod tests {
         ));
         let now = Utc::now();
         let due = CreditGrant {
+            service_limits: Vec::new(),
+            revoke_requested_at: None,
+            revoke_requested_by: None,
+
             id: "grant-due".to_string(),
             batch_id: "batch-1".to_string(),
             schedule_origin: None,
@@ -804,7 +946,12 @@ mod tests {
             .expect("insert grants");
 
         assert_eq!(expire_due_grants(&db, now).await.expect("expire grants"), 1);
-        assert!(revoke_grant(&db, "grant-reserved").await.is_err());
+        let pending = revoke_grant(&db, "grant-reserved")
+            .await
+            .expect("accept pending reclaim");
+        assert!(pending.revoke_requested_at.is_some());
+        assert_eq!(pending.reserved_micros, CREDIT_MICROS);
+        assert_eq!(available_grant_micros(&pending), 0);
         let due = db
             .collection::<CreditGrant>(CREDIT_GRANTS)
             .find_one(doc! { "_id": "grant-due" })
@@ -837,6 +984,10 @@ mod tests {
         let grant_count = EXPIRY_SWEEP_BATCH as usize + 1;
         let grants: Vec<CreditGrant> = (0..grant_count)
             .map(|index| CreditGrant {
+                service_limits: Vec::new(),
+                revoke_requested_at: None,
+                revoke_requested_by: None,
+
                 id: format!("grant-expiry-budget-{index:04}"),
                 batch_id: "batch-expiry-budget".to_string(),
                 schedule_origin: None,
@@ -897,6 +1048,10 @@ mod tests {
         let now = Utc::now();
         db.collection::<CreditGrant>(CREDIT_GRANTS)
             .insert_one(CreditGrant {
+                service_limits: Vec::new(),
+                revoke_requested_at: None,
+                revoke_requested_by: None,
+
                 id: "grant-ledger-recovery".to_string(),
                 batch_id: "batch-ledger-recovery".to_string(),
                 schedule_origin: None,

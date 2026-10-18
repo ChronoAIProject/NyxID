@@ -1,6 +1,6 @@
-import { render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AdminCreditGrant } from "@/schemas/billing-credits";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { CreditGrantsTable } from "./credit-grants-table";
@@ -29,7 +29,67 @@ function grant(overrides: Partial<AdminCreditGrant> = {}): AdminCreditGrant {
   };
 }
 
+afterEach(() => vi.useRealTimers());
+
 describe("CreditGrantsTable", () => {
+  it("changes active to expired on the open page and reevaluates refreshed props", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-10-17T00:00:00Z"));
+    const props = {
+      canWrite: false,
+      revokePending: false,
+      page: 1,
+      perPage: 50,
+      total: 1,
+      fetching: false,
+      onPageChange: vi.fn(),
+      onRevoke: vi.fn(),
+    };
+    const view = render(
+      <TooltipProvider>
+        <CreditGrantsTable
+          {...props}
+          grants={[grant({ expires_at: "2026-10-17T00:00:05Z" })]}
+        />
+      </TooltipProvider>,
+    );
+    expect(screen.getAllByText("Active")).toHaveLength(2);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5_000);
+    });
+    expect(screen.queryByText("Active")).not.toBeInTheDocument();
+    expect(screen.getAllByText("Expired")).toHaveLength(2);
+    view.rerender(
+      <TooltipProvider>
+        <CreditGrantsTable
+          {...props}
+          grants={[grant({ expires_at: "2026-10-17T00:00:10Z" })]}
+        />
+      </TooltipProvider>,
+    );
+    expect(screen.getAllByText("Active")).toHaveLength(2);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5_000);
+    });
+    expect(screen.getAllByText("Expired")).toHaveLength(2);
+    view.rerender(
+      <TooltipProvider>
+        <CreditGrantsTable
+          {...props}
+          grants={[
+            grant({
+              status: "revoked",
+              activation_state: "pending_activation",
+              expires_at: "2026-10-17T00:00:01Z",
+            }),
+          ]}
+        />
+      </TooltipProvider>,
+    );
+    expect(screen.getAllByText("Reclaimed", { selector: "div" })).toHaveLength(2);
+    expect(screen.queryByText("Pending activation")).not.toBeInTheDocument();
+  });
+
   it("distinguishes pending activation and explains rollout-hidden grants", async () => {
     const user = userEvent.setup();
     render(
@@ -53,8 +113,10 @@ describe("CreditGrantsTable", () => {
       </TooltipProvider>,
     );
 
-    expect(screen.getByText("Pending activation")).toBeInTheDocument();
-    const rolloutBadge = screen.getByText("Billing rollout off");
+    expect(screen.getAllByText("Pending activation")).not.toHaveLength(0);
+    const rolloutBadge = screen.getAllByText("Billing rollout off")[0];
+    expect(rolloutBadge).toBeTruthy();
+    if (!rolloutBadge) throw new Error("Expected rollout badge");
     await user.hover(rolloutBadge);
     expect(
       await screen.findAllByText(
@@ -90,4 +152,23 @@ describe("CreditGrantsTable", () => {
       "2 recipients are not in the billing rollout - users cannot see billing yet.",
     );
   });
+  it("allows reclaim during holds and shows pending state in both layouts", () => {
+    const onRevoke = vi.fn();
+    const issued = grant({ reserved_micros: 5_000_000, reserved_micros_exact: "5000000", remaining_micros_exact: "25250001", schedule_id: "recurring-1", period_start: "2026-10-01T00:00:00Z" });
+    const props = { grants: [issued], canWrite: true, revokePending: false, page: 1, perPage: 50, total: 1, fetching: false, onPageChange: vi.fn(), onRevoke };
+    const view = render(<TooltipProvider><CreditGrantsTable {...props} /></TooltipProvider>);
+    const reclaim = screen.getAllByRole("button", { name: "Reclaim remaining credits" });
+    expect(reclaim).toHaveLength(2);
+    expect(reclaim[0]).toBeEnabled();
+    fireEvent.click(reclaim[0]!);
+    expect(onRevoke).toHaveBeenCalledWith(issued);
+    expect(screen.queryByText("Allocation breakdown")).not.toBeInTheDocument();
+    expect(screen.getAllByText(/5 credits held; reclaim can be requested now/)).toHaveLength(2);
+    view.rerender(<TooltipProvider><CreditGrantsTable {...props} grants={[{ ...issued, revoke_requested_at: "2026-10-17T00:00:00Z", available_micros: "0" }]} /></TooltipProvider>);
+    expect(screen.getAllByText("Reclaim pending")).toHaveLength(2);
+    expect(screen.getAllByRole("button", { name: "Reclaim remaining credits" }).every(button => button.hasAttribute("disabled"))).toBe(true);
+    view.rerender(<TooltipProvider><CreditGrantsTable {...props} canWrite={false} /></TooltipProvider>);
+    expect(screen.queryByRole("button", { name: "Reclaim remaining credits" })).not.toBeInTheDocument();
+  });
+
 });

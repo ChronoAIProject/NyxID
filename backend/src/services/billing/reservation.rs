@@ -67,13 +67,40 @@ impl BillingReservation {
     }
 }
 
+#[cfg(test)]
 pub async fn gate_and_reserve(
+    db: &mongodb::Database,
+    lago: Option<&dyn LagoApi>,
+    ctx: &BillingRouteContext,
+    fail_closed: bool,
+    ttl: u64,
+) -> AppResult<Option<BillingReservation>> {
+    let prepared = prepare_admission(db, lago, ctx, fail_closed, ttl).await?;
+    let mut session = db.client().start_session().await?;
+    let tx_db = db.clone();
+    let tx_ctx = ctx.clone();
+    let result = session
+        .start_transaction()
+        .and_run2(async move |session| {
+            super::admission::transaction_result(
+                gate_and_reserve_in_session(&tx_db, &tx_ctx, prepared.as_ref(), session).await,
+            )
+        })
+        .await
+        .map_err(super::admission::map_transaction_error);
+    if matches!(result, Err(AppError::WalletSuspended)) {
+        suspend_wallet(db, &ctx.billing_owner_id).await?;
+    }
+    result
+}
+
+pub(crate) async fn prepare_admission(
     db: &mongodb::Database,
     lago: Option<&dyn LagoApi>,
     ctx: &BillingRouteContext,
     billing_fail_closed: bool,
     rate_cache_ttl_secs: u64,
-) -> AppResult<Option<BillingReservation>> {
+) -> AppResult<Option<PreparedAdmission>> {
     if !ctx.has_billable_layers() {
         return Ok(None);
     }
@@ -128,8 +155,44 @@ pub async fn gate_and_reserve(
         ));
     }
 
-    let mut layers = estimate_layer_reservations(db, ctx, rate_cache_ttl_secs).await?;
-    super::funding::reserve_estimated_funding(db, ctx, &mut layers).await?;
+    let layers = estimate_layer_reservations(db, ctx, rate_cache_ttl_secs).await?;
+    Ok(Some(PreparedAdmission {
+        wallet_id: wallet.id,
+        subscription_id: subscription_id.to_owned(),
+        layers,
+    }))
+}
+
+#[derive(Clone)]
+pub(crate) struct PreparedAdmission {
+    pub wallet_id: String,
+    pub subscription_id: String,
+    pub layers: Vec<LayerReservation>,
+}
+
+pub(crate) async fn gate_and_reserve_in_session(
+    db: &mongodb::Database,
+    ctx: &BillingRouteContext,
+    prepared: Option<&PreparedAdmission>,
+    session: &mut mongodb::ClientSession,
+) -> AppResult<Option<BillingReservation>> {
+    let Some(prepared) = prepared else {
+        return Ok(None);
+    };
+    let wallet = db
+        .collection::<BillingWallet>(BILLING_WALLET)
+        .find_one(doc! {
+            "_id": &prepared.wallet_id, "owner_id": &ctx.billing_owner_id,
+            "lago_subscription_id": &prepared.subscription_id,
+        })
+        .session(&mut *session)
+        .await?
+        .ok_or_else(|| AppError::Conflict("Billing setup changed; retry the request".into()))?;
+    if wallet.is_suspended() {
+        return Err(AppError::WalletSuspended);
+    }
+    let mut layers = prepared.layers.clone();
+    super::funding::reserve_estimated_funding_in_session(db, ctx, &mut layers, session).await?;
     let total_reserved_credits = layers
         .iter()
         .map(|reservation| reservation.reserved_credits)
@@ -145,16 +208,13 @@ pub async fn gate_and_reserve(
     }
 
     if wallet.available_with_overdraft_credits() <= 0 && wallet.plan_kind != PlanKind::Prepaid {
-        super::funding::release_layer_reservations(db, &layers).await?;
-        suspend_wallet(db, &wallet.owner_id).await?;
         return Err(AppError::WalletSuspended);
     }
     if wallet.available_credits() <= 0 && wallet.plan_kind == PlanKind::Prepaid {
-        super::funding::release_layer_reservations(db, &layers).await?;
         return Err(AppError::InsufficientCredits);
     }
 
-    if try_reserve_prepaid(db, &wallet.owner_id, total_reserved_credits)
+    if try_reserve_prepaid_in_session(db, &wallet.owner_id, total_reserved_credits, session)
         .await?
         .is_some()
     {
@@ -167,12 +227,11 @@ pub async fn gate_and_reserve(
     }
 
     if wallet.plan_kind == PlanKind::Prepaid {
-        super::funding::release_layer_reservations(db, &layers).await?;
         return Err(AppError::InsufficientCredits);
     }
 
     if wallet.has_payment_instrument
-        && try_reserve_overdraft(db, &wallet.owner_id, total_reserved_credits)
+        && try_reserve_overdraft_in_session(db, &wallet.owner_id, total_reserved_credits, session)
             .await?
             .is_some()
     {
@@ -185,15 +244,13 @@ pub async fn gate_and_reserve(
     }
 
     if wallet.has_payment_instrument {
-        super::funding::release_layer_reservations(db, &layers).await?;
-        suspend_wallet(db, &wallet.owner_id).await?;
         return Err(AppError::WalletSuspended);
     }
 
-    super::funding::release_layer_reservations(db, &layers).await?;
     Err(AppError::InsufficientCredits)
 }
 
+#[cfg(test)]
 pub async fn try_reserve_prepaid(
     db: &mongodb::Database,
     owner_id: &str,
@@ -249,13 +306,72 @@ pub async fn try_reserve_prepaid(
         .map_err(Into::into)
 }
 
-pub async fn try_reserve_overdraft(
+async fn try_reserve_prepaid_in_session(
     db: &mongodb::Database,
     owner_id: &str,
     credits: i64,
+    session: &mut mongodb::ClientSession,
 ) -> AppResult<Option<BillingWallet>> {
     if credits <= 0 {
-        return try_reserve_prepaid(db, owner_id, credits).await;
+        return db
+            .collection::<BillingWallet>(BILLING_WALLET)
+            .find_one(doc! { "owner_id": owner_id, "suspended": false })
+            .session(session)
+            .await
+            .map_err(Into::into);
+    }
+
+    let now = Utc::now();
+    db.collection::<BillingWallet>(BILLING_WALLET)
+        .find_one_and_update(
+            doc! {
+                "owner_id": owner_id,
+                "suspended": false,
+                "$expr": {
+                    "$gte": [
+                        {
+                            "$subtract": [
+                                {
+                                    "$subtract": [
+                                        "$balance_credits",
+                                        "$reserved_credits"
+                                    ]
+                                },
+                                {
+                                    "$add": [
+                                        "$pending_lago_debits",
+                                        { "$ifNull": ["$pending_topup_expiry_credits", 0_i64] }
+                                    ]
+                                }
+                            ]
+                        },
+                        credits
+                    ]
+                },
+            },
+            doc! {
+                "$inc": { "reserved_credits": credits },
+                "$set": { "updated_at": bson::DateTime::from_chrono(now) },
+            },
+        )
+        .with_options(
+            FindOneAndUpdateOptions::builder()
+                .return_document(ReturnDocument::After)
+                .build(),
+        )
+        .session(session)
+        .await
+        .map_err(Into::into)
+}
+
+async fn try_reserve_overdraft_in_session(
+    db: &mongodb::Database,
+    owner_id: &str,
+    credits: i64,
+    session: &mut mongodb::ClientSession,
+) -> AppResult<Option<BillingWallet>> {
+    if credits <= 0 {
+        return try_reserve_prepaid_in_session(db, owner_id, credits, session).await;
     }
 
     let now = Utc::now();
@@ -302,7 +418,7 @@ pub async fn try_reserve_overdraft(
                 .return_document(ReturnDocument::After)
                 .build(),
         )
-        .await
+        .session(session).await
         .map_err(Into::into)
 }
 
@@ -328,19 +444,6 @@ pub async fn release_wallet_hold(
         )
         .await?;
     Ok(())
-}
-
-pub async fn release_billing_reservation(
-    db: &mongodb::Database,
-    reservation: &BillingReservation,
-) -> AppResult<()> {
-    release_wallet_hold(
-        db,
-        &reservation.owner_id,
-        reservation.total_reserved_credits,
-    )
-    .await?;
-    super::funding::release_layer_reservations(db, &reservation.layers).await
 }
 
 pub async fn actual_credits_for_row(
@@ -1297,7 +1400,7 @@ async fn release_one_unforwarded_row(
     Ok(true)
 }
 
-async fn suspend_wallet(db: &mongodb::Database, owner_id: &str) -> AppResult<()> {
+pub(crate) async fn suspend_wallet(db: &mongodb::Database, owner_id: &str) -> AppResult<()> {
     db.collection::<BillingWallet>(BILLING_WALLET)
         .update_one(
             doc! { "owner_id": owner_id },
@@ -1335,7 +1438,7 @@ fn entitlement_candidates(ctx: &BillingRouteContext) -> BTreeSet<String> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::sync::Arc;
 
     use async_trait::async_trait;
@@ -1358,8 +1461,8 @@ mod tests {
     use super::{LagoApi, gate_and_reserve, try_reserve_prepaid};
 
     #[derive(Clone)]
-    struct EntitledLago {
-        entitlements: Vec<Entitlement>,
+    pub(crate) struct EntitledLago {
+        pub(crate) entitlements: Vec<Entitlement>,
     }
 
     #[async_trait]
@@ -1421,7 +1524,7 @@ mod tests {
         }
     }
 
-    fn wallet(owner_id: &str, balance_credits: i64) -> BillingWallet {
+    pub(crate) fn wallet(owner_id: &str, balance_credits: i64) -> BillingWallet {
         let now = Utc::now();
         BillingWallet {
             id: Uuid::new_v4().to_string(),
@@ -1446,7 +1549,7 @@ mod tests {
         }
     }
 
-    async fn insert_platform_rate(db: &mongodb::Database, credits: i64) {
+    pub(crate) async fn insert_platform_rate(db: &mongodb::Database, credits: i64) {
         db.collection::<BillingRateCache>(crate::models::billing_rate_cache::COLLECTION_NAME)
             .insert_one(BillingRateCache {
                 id: BillingRateCache::cache_id("platform_requests", None),
@@ -1459,7 +1562,7 @@ mod tests {
             .expect("insert platform rate");
     }
 
-    fn route_context(owner_id: &str) -> BillingRouteContext {
+    pub(crate) fn route_context(owner_id: &str) -> BillingRouteContext {
         BillingRouteContext::new(
             BillingIngress::Proxy,
             Uuid::new_v4().to_string(),

@@ -1,3 +1,4 @@
+mod admission;
 pub mod allowances;
 pub mod funding;
 pub mod grants;
@@ -14,6 +15,9 @@ pub mod reservation;
 pub mod route_context;
 pub mod route_inventory;
 pub mod schedules;
+pub mod service_limits;
+mod submissions;
+pub mod summaries;
 pub mod topup_expiry;
 pub mod webhook;
 
@@ -227,33 +231,17 @@ impl BillingService {
             return Ok(MeteredProxyContext::from_route(&ctx));
         }
 
-        let reservation = if self.config.billing_enabled {
-            reservation::gate_and_reserve(
+        if self.config.billing_enabled {
+            admission::open(
                 &self.db,
                 self.lago.as_deref(),
                 &ctx,
                 self.config.billing_fail_closed,
                 self.config.billing_rate_cache_ttl_secs,
             )
-            .await?
+            .await
         } else {
-            None
-        };
-        match meter::open(&self.db, &ctx, reservation.as_ref()).await {
-            Ok(metered) => Ok(metered),
-            Err(error) => {
-                if let Some(reservation) = reservation.as_ref()
-                    && let Err(release_error) =
-                        reservation::release_billing_reservation(&self.db, reservation).await
-                {
-                    tracing::error!(
-                        billing_request_id = %ctx.billing_request_id,
-                        error = %release_error,
-                        "failed to release billing reservation after meter setup failed"
-                    );
-                }
-                Err(error)
-            }
+            meter::open(&self.db, &ctx, None).await
         }
     }
 
@@ -911,3 +899,6 @@ mod tests {
             .expect("insert wallet");
     }
 }
+
+#[cfg(test)]
+mod expanded_tests;

@@ -54,6 +54,8 @@ pub struct AllowanceReservationAllocation {
 pub struct GrantReservationAllocation {
     pub grant_id: String,
     pub amount_micros: i64,
+    #[serde(default)]
+    pub service_limit_key: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
@@ -69,6 +71,8 @@ pub struct GrantConsumptionAllocation {
     pub operation_id: String,
     pub grant_id: String,
     pub amount_micros: i64,
+    #[serde(default)]
+    pub service_limit_key: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
