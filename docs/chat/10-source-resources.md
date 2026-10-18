@@ -121,8 +121,11 @@ A resource records only its pending card ID and requested output. The same live
 turn may retry with that exact `acknowledgement_id`. After the owner approves
 and a new turn starts, the old ref is accepted only for the matching
 server-validated confirmation message, live allowed card, unchanged key/agent/
-audience and output. The source execution gate consumes that card exactly once,
-even if the owner changed to Full access in the meantime. Successful source and
+audience and output. The source execution gate consumes that card exactly once
+under its unchanged service-authority binding. Changing the access mode,
+including switching to Full access, invalidates that saved binding. The owner
+must start a fresh turn and reread the source; Full access can then retrieve and
+attach the fresh image without a new confirmation. Successful source and
 revision validation issues a fresh current-turn resource and attachment identity.
 Unrelated turns, changed intent, expired/denied/used cards and key changes cannot
 adopt the old ref. Concurrent pending intents cannot overwrite a live intent.

@@ -216,8 +216,8 @@ pub fn check<'a>(
 }
 
 /// Source replay is a new action, so it never borrows the initial read's
-/// implicit continuation. An explicit resource card is consumed even if the
-/// owner's mode changed to automatic after the card was issued.
+/// implicit continuation. An explicit resource card still requires exact
+/// consumption and live authority, including the current access mode.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn check_source_resource<'a>(
     db: &'a Database,

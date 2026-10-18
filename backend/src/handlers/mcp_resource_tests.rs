@@ -373,14 +373,20 @@ async fn next_resource_turn(
     f: &crate::services::assistant_authority_tests::Fixture,
     acknowledgement_id: Option<&str>,
 ) -> McpAuthContext {
+    try_next_resource_turn(f, acknowledgement_id).await.unwrap()
+}
+
+async fn try_next_resource_turn(
+    f: &crate::services::assistant_authority_tests::Fixture,
+    acknowledgement_id: Option<&str>,
+) -> crate::errors::AppResult<McpAuthContext> {
     // Simulate completed settlement, then use real owner admission to validate
     // the card and write the continuation message for the next turn.
     f.state
         .db
         .collection::<bson::Document>(CONVERSATIONS)
         .update_one(doc! {"_id":&f.row.id}, doc! {"$unset":{"active_turn":""}})
-        .await
-        .unwrap();
+        .await?;
     engine::begin_turn(
         &f.state.db,
         &f.owner,
@@ -396,9 +402,8 @@ async fn next_resource_turn(
         },
         &f.state.encryption_keys,
     )
-    .await
-    .unwrap();
-    super::machine_mcp_tests::authenticated_machine_chat(f).await
+    .await?;
+    Ok(super::machine_mcp_tests::authenticated_machine_chat(f).await)
 }
 
 #[tokio::test]
@@ -418,11 +423,11 @@ async fn resource_org_ask_confirmation_preserves_policy_and_resumes_only_its_exa
     .await;
 }
 #[tokio::test]
-async fn resource_org_auto_confirmation_consumes_exact_card_after_switch_to_full() {
+async fn resource_org_auto_confirmation_rejects_mode_drift_and_recovers_in_full() {
     org_resource_journey(crate::models::assistant_settings::AccessMode::Nyxmode, true).await;
 }
 #[tokio::test]
-async fn resource_org_ask_confirmation_consumes_exact_card_after_switch_to_full() {
+async fn resource_org_ask_confirmation_rejects_mode_drift_and_recovers_in_full() {
     org_resource_journey(
         crate::models::assistant_settings::AccessMode::AskEveryTime,
         true,
@@ -446,7 +451,12 @@ async fn org_resource_journey(
         endpoint_id,
         key,
         ..
-    } = source_fixture(&format!("resource_org_confirmation_{mode:?}"), 3, 2).await;
+    } = source_fixture(
+        &format!("resource_org_confirmation_{mode:?}"),
+        if switch_to_full { 4 } else { 3 },
+        2,
+    )
+    .await;
     let org = Uuid::new_v4().to_string();
     f.state
         .db
@@ -625,6 +635,100 @@ async fn org_resource_journey(
         )
         .await
         .unwrap();
+        let error = match try_next_resource_turn(&f, Some(next_ack)).await {
+            Err(error) => error,
+            Ok(_) => panic!("A changed access mode must invalidate the saved service binding"),
+        };
+        assert!(
+            matches!(error, crate::errors::AppError::Conflict(ref message)
+            if message == "Confirmed service changed; request a new confirmation")
+        );
+        let current = engine::get(&f.state.db, &f.owner, &f.row.id).await.unwrap();
+        assert!(current.active_turn.is_none());
+        assert_eq!(server.received_requests().await.unwrap().len(), 3);
+        let cards = f
+            .state
+            .db
+            .collection::<bson::Document>("assistant_acknowledgements");
+        let card_count = cards
+            .count_documents(doc! {"conversation_id":&f.row.id,"decided_by":{"$ne":"access_mode"}})
+            .await
+            .unwrap();
+        assert_eq!(
+            cards
+                .find_one(doc! {"_id":next_ack})
+                .await
+                .unwrap()
+                .unwrap()
+                .get_str("status")
+                .unwrap(),
+            "allowed"
+        );
+
+        let fresh = next_resource_turn(&f, None).await;
+        let denied = call(
+            &f.state,
+            &fresh,
+            "nyx__resource_get",
+            json!({"ref":row.id,"output":"attach"}),
+        )
+        .await;
+        assert_eq!(denied["result"]["isError"], true, "{denied}");
+        let source = call(
+            &f.state,
+            &fresh,
+            "my-notion-2__notion_list_block_children",
+            json!({"block_id":block_id}),
+        )
+        .await;
+        assert_eq!(source["result"]["isError"], false, "{source}");
+        let fresh_row = f
+            .state
+            .db
+            .collection::<AssistantResource>(RESOURCES)
+            .find_one(
+                doc! {"conversation_id":&f.row.id,"turn_id":&fresh.chat.as_ref().unwrap().turn_id},
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_ne!(fresh_row.id, row.id);
+        assert_ne!(fresh_row.attachment_id, row.attachment_id);
+        let attached = call(
+            &f.state,
+            &fresh,
+            "nyx__call_tool",
+            json!({"tool_name":"nyx__resource_get","arguments":{"ref":fresh_row.id,"output":"attach"}}),
+        )
+        .await;
+        assert_eq!(attached["result"]["isError"], false, "{attached}");
+        let current = engine::get(&f.state.db, &f.owner, &f.row.id).await.unwrap();
+        let images = &current.active_turn.as_ref().unwrap().attachments;
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].id, fresh_row.attachment_id);
+        assert_eq!(images[0].chat_delivery, Some(true));
+        assert_eq!(
+            cards
+                .count_documents(
+                    doc! {"conversation_id":&f.row.id,"decided_by":{"$ne":"access_mode"}}
+                )
+                .await
+                .unwrap(),
+            card_count
+        );
+        assert_eq!(
+            cards
+                .find_one(doc! {"_id":next_ack})
+                .await
+                .unwrap()
+                .unwrap()
+                .get_str("status")
+                .unwrap(),
+            "allowed"
+        );
+        server.verify().await;
+        f.state.db.drop().await.unwrap();
+        return;
     }
     let continued = next_resource_turn(&f, Some(next_ack)).await;
     let wrong_intent = call(
@@ -667,4 +771,164 @@ async fn org_resource_journey(
     assert_eq!(used["result"]["isError"], true, "{used}");
     server.verify().await;
     f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn resource_explicit_org_card_remains_authority_bound_in_full_access() {
+    use crate::{
+        models::assistant_settings::AccessMode,
+        services::{
+            assistant_acknowledgement_service as acks, assistant_settings_service as settings,
+        },
+    };
+
+    for (mode, wrapped) in [
+        (AccessMode::Nyxmode, false),
+        (AccessMode::AskEveryTime, true),
+    ] {
+        let SourceFixture {
+            f,
+            server,
+            _origin,
+            block_id,
+            catalog,
+            instance_id,
+            endpoint_id,
+            key,
+            ..
+        } = source_fixture(&format!("resource_same_turn_mode_drift_{mode:?}"), 1, 0).await;
+        let org = Uuid::new_v4().to_string();
+        f.state
+            .db
+            .collection("users")
+            .insert_one(crate::test_utils::test_user(
+                &org,
+                crate::models::user::UserType::Org,
+            ))
+            .await
+            .unwrap();
+        f.state
+            .db
+            .collection("org_memberships")
+            .insert_one(crate::test_utils::test_membership(
+                &org,
+                &f.owner,
+                crate::models::org_membership::OrgRole::Admin,
+                None,
+            ))
+            .await
+            .unwrap();
+        for (collection, id) in [
+            ("user_services", &instance_id),
+            ("user_endpoints", &endpoint_id),
+            ("user_api_keys", &key.id),
+        ] {
+            f.state
+                .db
+                .collection::<bson::Document>(collection)
+                .update_one(doc! {"_id":id}, doc! {"$set":{"user_id":&org}})
+                .await
+                .unwrap();
+        }
+        settings::update(
+            &f.state.db,
+            &f.owner,
+            settings::Update {
+                access_mode: Some(AccessMode::Autopilot),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let auth = super::machine_mcp_tests::authenticated_machine_chat(&f).await;
+        select_source(&f, &auth, &instance_id, &org, &catalog.id).await;
+        let source = call(
+            &f.state,
+            &auth,
+            "my-notion-2__notion_list_block_children",
+            json!({"block_id":block_id}),
+        )
+        .await;
+        assert_eq!(source["result"]["isError"], false, "{source}");
+        let row = f
+            .state
+            .db
+            .collection::<AssistantResource>(RESOURCES)
+            .find_one(doc! {"conversation_id":&f.row.id})
+            .await
+            .unwrap()
+            .unwrap();
+        settings::update(
+            &f.state.db,
+            &f.owner,
+            settings::Update {
+                access_mode: Some(mode),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let refused = call(
+            &f.state,
+            &auth,
+            "nyx__resource_get",
+            json!({"ref":row.id,"output":"attach"}),
+        )
+        .await;
+        let refusal = policy(&refused);
+        assert_eq!(refusal["error"], "acknowledgement_required", "{refusal}");
+        let ack = refusal["acknowledgement_id"].as_str().unwrap();
+        acks::decide(&f.state.db, &f.owner, &f.row.id, ack, true)
+            .await
+            .unwrap();
+        settings::update(
+            &f.state.db,
+            &f.owner,
+            settings::Update {
+                access_mode: Some(AccessMode::Autopilot),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        let arguments = json!({"ref":row.id,"output":"attach","acknowledgement_id":ack});
+        let (name, arguments) = if wrapped {
+            (
+                "nyx__call_tool",
+                json!({"tool_name":"nyx__resource_get","arguments":arguments}),
+            )
+        } else {
+            ("nyx__resource_get", arguments)
+        };
+        let refused = call(&f.state, &auth, name, arguments).await;
+        assert_eq!(
+            policy(&refused)["error"],
+            "acknowledgement_invalid",
+            "{mode:?}: {refused}"
+        );
+        let card = f
+            .state
+            .db
+            .collection::<bson::Document>("assistant_acknowledgements")
+            .find_one(doc! {"_id":ack})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(card.get_str("status").unwrap(), "allowed");
+        let current = engine::get(&f.state.db, &f.owner, &f.row.id).await.unwrap();
+        assert!(current.active_turn.as_ref().unwrap().attachments.is_empty());
+        assert_eq!(
+            f.state
+                .db
+                .collection::<bson::Document>(crate::models::assistant_attachment::COLLECTION_NAME)
+                .count_documents(doc! {"conversation_id":&f.row.id})
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
+        server.verify().await;
+        f.state.db.drop().await.unwrap();
+    }
 }
