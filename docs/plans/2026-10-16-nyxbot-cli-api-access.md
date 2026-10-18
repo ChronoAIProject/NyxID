@@ -1,9 +1,9 @@
 # NyxBot owner CLI and API control
 
-Status: initial implementation, personal review, and validation completed on
-2026-10-17. All findings identified in that review were resolved. Integration
-with current `main` and pull-request validation are in progress as of
-2026-10-19 on `nyxbot-safe-cli-api-access`.
+Status: implementation and personal review completed, including integration
+with `main` on 2026-10-19. The validation history below distinguishes source
+revisions. Current check results, required review, and merge status are tracked
+in [PR #1941](https://github.com/ChronoAIProject/NyxID/pull/1941).
 
 ## Delivered behavior
 
@@ -151,8 +151,9 @@ admission and job publication fence the root in their transaction, and service
 egress checks the job's original invocation after its issuing turn settles.
 The newer expired/cancelled channel-setup path settles its watch and queues
 its event atomically. The primary reviewed these changes and the new regression
-tests. Current-source runtime and lint validation are in progress; the PR
-remains a draft until those checks pass.
+tests. The focused integration runtime gates passed on `09869814c`; the
+first full CI run exposed one scheduler test stack overflow, described below.
+The PR records subsequent verification of its correction.
 
 The public CLI reference is now included in the docs navigation and linked
 from the README, API reference, and MCP reference. It explains local client
@@ -165,6 +166,78 @@ Documentation validation passed: 18 existing tests across docs navigation,
 Markdown rendering, and search; ESLint on the two changed frontend files;
 local guide link and whitespace checks. New validation logs are stored in
 task-specific Git worktree metadata rather than temporary storage.
+
+## Integration validation and security review
+
+The local integration checks used MongoDB 8.0.34 on a dedicated replica set.
+Durable records include commands, exits, executable hashes, and a manifest of
+1,294 Rust inputs. All selected backend cases ran without ignored tests.
+
+| Check | Result |
+| --- | --- |
+| Invocation admission, cancellation, and authority regressions | 35 passed |
+| Authentication and route boundaries | 124 passed |
+| Shared service execution compatibility | 63 passed |
+| Ordinary async operation and policy compatibility | 24 passed |
+| Focused CLI regressions | 7 passed; CLI executable build passed |
+| Independent CLI executable smoke | 20 loopback scenarios passed |
+| Documentation navigation, rendering, and search | 18 passed |
+| Feature-flag registry fixture correction | 6 passed; scoped ESLint passed |
+
+Backend runtime results above apply to `09869814c`. Subsequent local Clippy
+found two equivalent predicate simplifications in inherited platform reply
+code: `!A && !(B && C)` to `!(A || B && C)`, and `!Option.is_some()` to
+`Option.is_none()`. The primary reviewed the exact changes and their
+short-circuit behavior. The original runtime manifest and the two-file delta
+are retained separately; earlier runtime hashes are not claimed for changed
+source. Formatting and whitespace checks pass after those changes. A clean
+combined all-target Clippy retry ended without a recorded result and was not
+counted as passing. The PR records the replacement run and final source checks.
+
+The first full GitHub backend run passed 9,391 tests and failed one with a
+stack overflow in
+`schedule_specialist_authority_threads_and_guest_refusal`; 10 tests were
+skipped by the existing suite configuration. Backend coverage aborted at the
+same test. The frontend and frontend coverage each passed 6,144 tests and
+failed the expected feature-flag registry literal, now corrected and verified
+locally. CLI CI passed 1,887 tests with 9 existing skips. Workspace Clippy,
+formatting, CLI coverage, all three KMS feature combinations, billing smoke,
+image-input checks, bundle freshness, release integrity, and all CodeQL
+languages passed on that first PR revision. These results do not constitute a
+passing final CI run.
+
+The integration review found and fixed concrete authorization gaps:
+
+- Shared authority reload could lose the invocation identity. Reload now
+  preserves and rechecks the original invocation and delivery binding.
+- Async continuation and machine-job paths needed live root checks before
+  execution, including after root deletion but before background cleanup.
+  Those checks now cover service egress, job gateway access, transactional
+  operation admission, and job publication.
+- Cancellation cleanup needed a narrow exception for one leased cancellation
+  attempt and its declared status operation. Result retrieval remains denied;
+  ordinary watches retain their original deadlines.
+- Owner channel-adapter conversations required rejection even when addressed
+  directly by ID. Persisted channel provenance enforces that boundary.
+
+The new regression cases exercise real database transactions and loopback
+requests, including cancellation before background cleanup, changed lineage,
+stale credentials, and a legitimate successor turn. These findings were
+resolved in the reviewed implementation. Passing review and tests cannot prove
+the absence of every vulnerability. Rollout prerequisites and the inability to
+undo an already sent external effect remain part of the supported contract.
+
+The scheduler test crash reproduced from the preserved runtime binary with
+`RUST_MIN_STACK` unset. The symbol trace identified the large test future above
+`run_job_once`, turn admission, and BSON serialization. Both production
+scheduler call sites already heap-allocate `run_job_once`; the failing test
+directly awaited it twice. The reviewed correction adds `Box::pin` at those
+two test call sites to match production. No production path, stack setting,
+assertion, or test selection changes. This reproduction establishes a test
+stack allocation defect; it does not establish an exploitable production
+crash. Default-stack runtime verification, scheduler compatibility, and a
+fresh full CI run are required for the corrected revision; their results
+are retained in the PR and durable validation records.
 
 ## Source references
 

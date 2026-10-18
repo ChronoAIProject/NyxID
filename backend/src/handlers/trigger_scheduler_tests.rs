@@ -604,7 +604,7 @@ async fn schedule_specialist_authority_threads_and_guest_refusal() {
         .await
         .unwrap()
         .unwrap();
-    run_job_once(&state, &job).await.unwrap();
+    Box::pin(run_job_once(&state, &job)).await.unwrap();
     assert_eq!(
         completed(&state, &trigger).await.outcome,
         RunOutcome::Completed
@@ -700,7 +700,7 @@ async fn schedule_specialist_authority_threads_and_guest_refusal() {
         .await
         .unwrap()
         .unwrap();
-    run_job_once(&state, &job).await.unwrap();
+    Box::pin(run_job_once(&state, &job)).await.unwrap();
     let paused = state
         .db
         .collection::<Trigger>(TRIGGERS)
