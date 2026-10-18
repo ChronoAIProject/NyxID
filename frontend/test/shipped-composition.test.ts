@@ -9,7 +9,7 @@ import { createHash } from "node:crypto"
 import { moduleIdentity, shippedComposition } from "../vite-plugins/shipped-composition"
 import { htmlContents } from "../scripts/html-composition.mjs"
 // @ts-expect-error Node build utility deliberately has no runtime TS dependency.
-import { seal } from "../scripts/seal-shipped-composition.mjs"
+import { moduleSourcePath, seal } from "../scripts/seal-shipped-composition.mjs"
 
 const root = path.resolve(import.meta.dirname, "..")
 const hash = (bytes: string | Buffer) => createHash("sha256").update(bytes).digest("hex")
@@ -73,6 +73,20 @@ function fixture() {
   return { directory, output, graph, options: { root: directory, component: "credential-accept", output } }
 }
 describe("post-transform final-byte seal", () => {
+  it("parses canonical module boundaries when the repository root is /build", () => {
+    expect(moduleSourcePath({ id: "repo:frontend/src/lib/build-version.ts" }, "/build"))
+      .toBe("/build/frontend/src/lib/build-version.ts")
+    const pkg = { purl: "pkg:npm/%40tanstack/query-core@5.96.2", lock_path: "node_modules/@tanstack/query-core" }
+    expect(moduleSourcePath({ id: pkg.purl + "/build/modern/index.js", package: pkg }, "/build"))
+      .toBe("/build/frontend/node_modules/@tanstack/query-core/build/modern/index.js")
+    for (const id of ["/build/frontend/src/index.ts", "repo:/build/frontend/src/index.ts", "repo:../build/index.ts",
+      "repo:frontend/../../build/index.ts", "repo:C:/build/index.ts", "repo:frontend\\index.ts", "repo:frontend//index.ts",
+      "repo:frontend/node_modules/react/index.js", pkg.purl + "//build/index.js", pkg.purl + "/../index.js"]) {
+      expect(() => moduleSourcePath({ id, ...(id.startsWith("pkg:") ? { package: pkg } : {}) }, "/build")).toThrow()
+    }
+    expect(() => moduleSourcePath({ id: "generated:/build/runtime.js", generated_by: { name: "vite" } }, "/build"))
+      .toThrow("Unknown generated module identity")
+  })
   it("verifies an unchanged tree and rejects changed final code", () => {
     const { directory, options } = fixture()
     seal(options)

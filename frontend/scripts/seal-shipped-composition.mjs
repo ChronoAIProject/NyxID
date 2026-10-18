@@ -8,6 +8,35 @@ import { htmlContents } from './html-composition.mjs';
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 export const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
 const relative = (root, file) => path.relative(root, file).split(path.sep).join('/');
+// Parse the identity boundary before resolving its relative suffix. Directory
+// names such as build are valid in both repository and package module paths.
+export function moduleSourcePath(module, repositoryRoot) {
+  const suffix = value => {
+    if (typeof value !== 'string' || /[\\\x00-\x1f\x7f:?#]/.test(value) ||
+        value.split('/').some(part => !part || part === '.' || part === '..' || part === 'node_modules')) {
+      throw new Error('Invalid normalized module path');
+    }
+    return value;
+  };
+  if (typeof module.id !== 'string') throw new Error('Unknown module identity');
+  if (module.id.startsWith('repo:') && !module.package && !module.generated_by) {
+    return path.resolve(repositoryRoot, suffix(module.id.slice(5)));
+  }
+  if (module.id.startsWith('pkg:npm/') && module.package && !module.generated_by) {
+    const prefix = module.package.purl + '/';
+    if (!module.id.startsWith(prefix)) throw new Error('Module package identity mismatch');
+    return path.resolve(repositoryRoot, 'frontend', module.package.lock_path, suffix(module.id.slice(prefix.length)));
+  }
+  if (module.id.startsWith('generated:') && !module.package) {
+    const helper = module.id.slice('generated:'.length);
+    if (!/^(?:vite\/(?:modulepreload-polyfill|preload-helper)(?:\.js)?|commonjsHelpers\.js|rolldown\/runtime\.js)$/.test(helper) ||
+        module.generated_by?.name !== (helper.startsWith('rolldown/') ? 'rolldown' : 'vite')) {
+      throw new Error('Unknown generated module identity');
+    }
+    return null;
+  }
+  throw new Error('Unknown module identity');
+}
 export function files(root) {
   return fs.readdirSync(root, { withFileTypes: true }).sort((a, b) => a.name < b.name ? -1 : 1)
     .flatMap(entry => {
@@ -40,24 +69,12 @@ function graph(root, filename, graphPrefix, outputPrefix = '') {
   }
   if (!value.styles?.outputs || !value.styles.sources || !value.styles.generators) throw new Error('Missing style composition');
   for (const module of value.chunks.flatMap(chunk => chunk.modules).concat(value.styles.sources)) {
-      if (!module.id.startsWith('repo:') && !module.id.startsWith('pkg:npm/') && !module.id.startsWith('generated:')) throw new Error('Unknown module identity');
-      if (module.id.includes(ROOT) || module.id.includes('node_modules/')) throw new Error('Host path in rendered identity');
-      if (module.id.startsWith('pkg:npm/') && (!module.package?.integrity || !module.package?.purl)) throw new Error('Unmapped third-party module');
-      let source;
       if (module.package) {
         validatePackage(module.package);
-        const prefix = module.package.purl + '/';
-        if (!module.id.startsWith(prefix)) throw new Error('Module package identity mismatch');
-        source = path.resolve(ROOT, 'frontend', module.package.lock_path, module.id.slice(prefix.length));
-        const packageRoot = path.resolve(ROOT, 'frontend', module.package.lock_path) + path.sep;
-        if (!source.startsWith(packageRoot)) throw new Error('Invalid package module path');
-      } else if (module.id.startsWith('repo:')) {
-        source = path.resolve(ROOT, module.id.slice(5));
-        if (!source.startsWith(ROOT + path.sep)) throw new Error('Invalid repository module path');
-      } else {
-        const generated = module.generated_by;
-        validatePackage(generated);
+      } else if (module.generated_by) {
+        validatePackage(module.generated_by);
       }
+      const source = moduleSourcePath(module, ROOT);
       if (source && sha256(fs.readFileSync(source)) !== module.source_sha256) throw new Error('Stale rendered module source');
   }
   for (const generator of value.styles.generators) {

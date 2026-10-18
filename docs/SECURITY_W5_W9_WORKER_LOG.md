@@ -453,6 +453,25 @@ All21 warning files are blob-identical to baseline; there is no new composition
 or selector warning. The existing chunk advisory is also preserved separately
 from this batch's acceptance evidence.
 
+## W7-R1-12 module identity boundary correction
+
+PM's exact73886f25 container build failed because the sealer searched every
+normalized module identifier for the checkout-root string `/build`. That
+incorrectly rejected first-party `build-version.ts` and legitimate package
+`build/modern` directories. The sealer now parses repository/package/generated
+identity boundaries and validates relative path components before resolution.
+Absolute, drive, empty, traversal, control, backslash and raw node_modules
+identities fail; generated helpers retain their explicit tool mapping. Errors
+do not print local source paths.
+
+Focused composition tests pass12/12, including synthetic root `/build`, both
+valid module forms and invalid absolute/traversal forms. All3 existing final
+seal verify commands pass without changing their bytes. Regenerated wizard
+freshness passes1/1 with0 ignored. Evidence is
+`w7-composition-r1-12-{tests,freshness}.log` in the validation root. This is a
+host correction; the failed738 image log remains preserved, and PM owns the
+exact descendant container rerun. No functional-image pass is claimed here.
+
 ## Remaining authorized batches
 
 W5 final container review/integration; W7 pinned,
