@@ -10,6 +10,11 @@ Scheduler jobs, shared owner admission, and terminal audit transactions box
 their large futures at call boundaries to keep nested polling within the
 worker's normal stack, including confirmation continuations.
 
+Connected-source image references use the shared [`nyx__resource_get` contract](10-source-resources.md).
+The first adapter recognizes published Notion page and block reads. Display-only
+resource images set `image_inspection=false`, so they do not trigger an extra
+model image round; legacy tool images preserve automatic inspection.
+
 ## Turn diagnostics and context continuity
 
 Failed replies retain a normalized NyxID `error_code` and, only when the
@@ -771,6 +776,32 @@ never the browser's MIME guess. The picker has no restrictive `accept` filter, s
 and drop. Markdown accepts both `.md` and `.markdown`; JSON and CSV are validated
 before their verbatim text is retained. Empty MIME, `application/octet-stream`
 and Windows' `application/vnd.ms-excel` CSV MIME do not change classification.
+
+## Task completion and knowledge retrieval
+
+Both NyxBot and specialist base instructions favor the shortest sufficient
+authorized path to a completed answer. Reuse available tool schemas and current
+skill guidance; discover missing operations and read only relevant skill files.
+Known resource/source IDs bypass another search. Follow needed pagination and
+stop when the evidence answers the request. Changeable facts require current
+evidence, and missing or conflicting evidence must be reported. Provider-specific
+retrieval procedures belong in connector/tool guidance and relevant skills.
+NyxBot's role describes its effective permission mode rather than assuming
+every turn has Full access.
+
+These are model instructions, not a retrieval cache, index or new operation.
+They do not extend grants, guest access or approval authority. The stable
+instruction fingerprint includes this guidance; an existing session resets on
+its next turn when its stored fingerprint differs and receives the normal recap.
+Legacy sessions follow the reset-or-adopt migration rules below; this change
+does not force every legacy session to reset at deployment.
+
+For media requests, the instructions distinguish a verified attachment from a
+link. An authorized operation must materialize the requested attachment;
+without one, the agent supplies a verified usable source link and explains the
+limitation. Tool-result notes describe the actual delivery behavior. The agent
+must not claim attachment, delivery or image viewing without evidence, resend
+automatically attached media, or send private file URLs to public scrapers.
 
 ## Tool images
 

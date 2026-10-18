@@ -428,13 +428,30 @@ async fn service_tool_content(
             None,
         );
     }
+    let resource_note = if let (Some(chat), Some(read)) =
+        (auth.chat.as_ref(), response.resources.as_ref())
+    {
+        match crate::services::assistant_resource_service::annotations(&state.db, chat, read).await
+        {
+            Ok(note) => note,
+            Err(error) => {
+                tracing::debug!(
+                    code = error.error_code(),
+                    "Optional image resource references unavailable"
+                );
+                String::new()
+            }
+        }
+    } else {
+        String::new()
+    };
     let status = response.status;
     let is_error = !(200..300).contains(&status);
     let Some(media) = response.media.filter(|_| !is_error) else {
         let text = if is_error {
             format!("Error ({status}): {}", response.text)
         } else {
-            response.text
+            format!("{resource_note}{}", response.text)
         };
         return (
             vec![serde_json::json!({ "type": "text", "text": text })],
@@ -2127,6 +2144,14 @@ async fn handle_tools_list(
         tool_defs.extend(tools);
     }
 
+    if auth
+        .chat
+        .as_ref()
+        .is_some_and(|chat| !chat.guest || !chat.is_orchestrator())
+    {
+        tool_defs.push(crate::services::assistant_resource_service::definition());
+    }
+
     let tools_json: Vec<serde_json::Value> = tool_defs
         .iter()
         .map(|t| {
@@ -2162,6 +2187,7 @@ fn native_activity_names() -> &'static std::collections::HashSet<String> {
         std::sync::LazyLock::new(|| {
             let mut definitions = mcp_service::generate_tool_definitions(&[], None);
             definitions.extend(crate::services::machine_tools::definitions());
+            definitions.push(crate::services::assistant_resource_service::definition());
             definitions.push(crate::services::assistant_upload_service::definition());
             definitions.push(crate::services::assistant_upload_service::list_definition());
             definitions
@@ -2501,6 +2527,7 @@ async fn dispatch_tools_call(
                 | "nyx__oracle_attach"
                 | "nyx__oracle_extract"
                 | "nyx__oracle_session"
+                | "nyx__resource_get"
         );
         let known_account_tool = tool_name.strip_prefix("nyxid__").is_some_and(|name| {
             crate::services::assistant_account_tools::TOOL_NAMES.contains(&name)
@@ -2560,6 +2587,7 @@ async fn dispatch_tools_call(
                 | "nyx__oracle_result"
                 | "nyx__oracle_session"
                 | "nyx__ssh_exec" | "nyx__oracle_ask" | "nyx__oracle_attach" | "nyx__oracle_extract"
+                | "nyx__resource_get"
                 | "nyx__attachment_read" | "nyx__attachment_list" | "nyx__conversation_history"
                 | "nyx__machine_list"
                 | "nyx__saved_logins"
@@ -2622,6 +2650,17 @@ async fn dispatch_tools_call(
     }
     if crate::services::machine_tools::is_tool(tool_name) {
         return handle_machine_tool(state, auth, tool_name, arguments, request.id.clone()).await;
+    }
+    if tool_name == crate::services::assistant_resource_service::TOOL_NAME {
+        return Box::pin(handle_resource_get(
+            state,
+            auth,
+            session_id,
+            &arguments,
+            request.id.clone(),
+            billing_egress_permit,
+        ))
+        .await;
     }
     if tool_name == "nyx__attachment_read" {
         return Box::pin(handle_attachment_read(
@@ -2693,6 +2732,7 @@ async fn dispatch_tools_call(
         tool_name,
         arguments,
         billing_egress_permit,
+        None,
     ))
     .await
 }
@@ -2823,6 +2863,108 @@ fn dispatch_meta_tool<'a>(
     })
 }
 
+async fn handle_resource_get(
+    state: &AppState,
+    auth: &McpAuthContext,
+    session_id: Option<&str>,
+    arguments: &serde_json::Value,
+    request_id: Option<serde_json::Value>,
+    billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
+) -> Response {
+    use crate::services::assistant_resource_service as resources;
+    if let Some(refused) = guest_tool_refusal(auth, resources::TOOL_NAME, request_id.clone()) {
+        return refused;
+    }
+    let Some(chat) = &auth.chat else {
+        return tool_result(
+            request_id,
+            "Resource retrieval requires an assistant turn.",
+            true,
+        );
+    };
+    let parsed = match serde_json::from_value::<resources::GetRequest>(arguments.clone()) {
+        Ok(parsed) => parsed,
+        Err(_) => return tool_result(request_id, "Use ref and output=attach or inspect.", true),
+    };
+    let row = match resources::load(&state.db, chat, &parsed.resource_ref).await {
+        Ok(row) => row,
+        Err(error) => return tool_result(request_id, &error.to_string(), true),
+    };
+    let tool_name = row.source.tool_name.clone();
+    let source_arguments = row.arguments.clone();
+    let request = JsonRpcRequest {
+        jsonrpc: JSONRPC_VERSION.into(),
+        id: request_id,
+        method: "tools/call".into(),
+        params: None,
+    };
+    Box::pin(dispatch_service_tool(
+        state,
+        auth,
+        session_id,
+        &request,
+        &tool_name,
+        source_arguments,
+        billing_egress_permit,
+        Some((row, parsed.output)),
+    ))
+    .await
+}
+
+async fn materialize_resource_content(
+    state: &AppState,
+    auth: &McpAuthContext,
+    row: &crate::models::assistant_resource::AssistantResource,
+    output: crate::services::assistant_resource_service::Output,
+    response: mcp_service::ToolResponse,
+) -> crate::errors::AppResult<Vec<serde_json::Value>> {
+    use crate::services::assistant_resource_service as resources;
+    if !(200..300).contains(&response.status) {
+        return Err(crate::errors::AppError::BadRequest(format!(
+            "Source read failed ({}); image was not attached.",
+            response.status
+        )));
+    }
+    let chat = auth
+        .chat
+        .as_ref()
+        .ok_or(crate::errors::AppError::AssistantTurnRequired)?;
+    resources::require_live(&state.db, chat).await?;
+    let read = response.resources.as_ref().ok_or_else(resources::stale)?;
+    let candidate = resources::select(row, read)?;
+    let media = if row.completed {
+        None
+    } else {
+        Some(resources::fetch(candidate).await?)
+    };
+    let attached = crate::services::assistant_nyxagent::attach_resource_image(
+        &state.db,
+        &state.encryption_keys,
+        chat,
+        row,
+        media.as_ref(),
+        output,
+    )
+    .await?;
+    let mut note = format!(
+        "Image retained in this turn as attachment {} ({}, {} bytes).",
+        attached.attachment.id, attached.attachment.content_type, attached.attachment.size
+    );
+    if output == resources::Output::Attach {
+        let (destination, supported) =
+            resolved_image_destination(state, &chat.user_id, &attached.routing).await;
+        note.push_str(&image_note(
+            &destination,
+            attached.guest,
+            supported,
+            attached.routing.also.len(),
+        ));
+    } else {
+        note.push_str(" Requested model inspection; pixels are supplied if this model supports images. This request does not enable channel delivery.");
+    }
+    Ok(vec![serde_json::json!({"type":"text","text":note})])
+}
+
 async fn dispatch_service_tool(
     state: &AppState,
     auth: &McpAuthContext,
@@ -2831,6 +2973,10 @@ async fn dispatch_service_tool(
     tool_name: &str,
     arguments: serde_json::Value,
     billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
+    resource: Option<(
+        crate::models::assistant_resource::AssistantResource,
+        crate::services::assistant_resource_service::Output,
+    )>,
 ) -> Response {
     // -- Service tool: verify activation (when stateful), load, resolve, execute --
     let activated = match session_id {
@@ -2895,6 +3041,16 @@ async fn dispatch_service_tool(
         }
     };
 
+    if let Some((row, _)) = &resource {
+        if !crate::services::assistant_resource_service::matches_endpoint(row, service, endpoint) {
+            return tool_result(
+                request.id.clone(),
+                &crate::services::assistant_resource_service::stale().to_string(),
+                true,
+            );
+        }
+    }
+
     if let Some(response) = chat_service_gate(state, auth, service, request.id.clone()).await {
         return response;
     }
@@ -2921,7 +3077,7 @@ async fn dispatch_service_tool(
     }
 
     let execution_arguments = webhook_execution_arguments(auth, &arguments);
-    let prepared =
+    let mut prepared =
         match mcp_service::prepare_proxy_tool_call(service, endpoint, &execution_arguments) {
             Ok(prepared) => prepared.with_acknowledgement(
                 auth.chat
@@ -3000,6 +3156,17 @@ async fn dispatch_service_tool(
     } else {
         None
     };
+    if let Some((row, _)) = &resource {
+        let Some(chat) = &auth.chat else {
+            return tool_result(request.id.clone(), "Assistant turn required", true);
+        };
+        if let Err(error) =
+            crate::services::assistant_resource_service::require_live(&state.db, chat).await
+        {
+            return tool_result(request.id.clone(), &error.to_string(), true);
+        }
+        prepared.bind_resource(row.source.clone());
+    }
     let prepared = if matches!(
         service.source,
         mcp_service::McpToolSource::UserManaged { .. }
@@ -3018,7 +3185,10 @@ async fn dispatch_service_tool(
     } else {
         prepared
     };
-    let exec_ctx = mcp_exec_context(auth);
+    let mut exec_ctx = mcp_exec_context(auth);
+    if resource.is_some() {
+        exec_ctx.response_body_limit = Some(crate::services::resource_adapter::MAX_SOURCE_BYTES);
+    }
     update_activity_label(
         state,
         auth,
@@ -3098,7 +3268,22 @@ async fn dispatch_service_tool(
     );
 
     let concurrency = response.concurrency.take();
-    let (content, is_error, failure) = service_tool_content(state, auth, tool_name, response).await;
+    let (content, is_error, failure) = if let Some((row, output)) = &resource {
+        let result = materialize_resource_content(state, auth, row, *output, response).await;
+        match result {
+            Ok(content) => (content, false, None),
+            Err(error) => (
+                vec![serde_json::json!({"type":"text","text":error.to_string()})],
+                true,
+                Some(crate::models::assistant_conversation::ToolFailure {
+                    kind: "resource_unavailable".into(),
+                    status: None,
+                }),
+            ),
+        }
+    } else {
+        service_tool_content(state, auth, tool_name, response).await
+    };
     if !is_error
         && !matches!(
             service.source,
@@ -3664,6 +3849,7 @@ fn guest_tool_allowed(tool_name: &str) -> bool {
                 | "nyx__discover_services"
                 | "nyx__list_connected_services"
                 | "nyx__call_tool"
+                | "nyx__resource_get"
         )
 }
 
@@ -3990,6 +4176,17 @@ async fn handle_meta_call_tool(
         return handle_machine_tool(state, auth, tool_name, inner_args, request_id).await;
     }
 
+    if tool_name == crate::services::assistant_resource_service::TOOL_NAME {
+        return Box::pin(handle_resource_get(
+            state,
+            auth,
+            session_id,
+            &inner_args,
+            request_id,
+            billing_egress_permit,
+        ))
+        .await;
+    }
     if tool_name == "nyx__attachment_read" {
         return Box::pin(handle_attachment_read(state, auth, &inner_args, request_id)).await;
     }
@@ -4423,6 +4620,13 @@ async fn handle_meta_search(
         .await
     {
         candidates.extend(tools);
+    }
+    if auth
+        .chat
+        .as_ref()
+        .is_some_and(|chat| !chat.guest || !chat.is_orchestrator())
+    {
+        candidates.push(crate::services::assistant_resource_service::definition());
     }
     let results: Vec<_> = mcp_service::rank_search_candidates(candidates, query)
         .into_iter()
@@ -9028,3 +9232,7 @@ mod image_handler_tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "mcp_resource_tests.rs"]
+mod resource_tests;

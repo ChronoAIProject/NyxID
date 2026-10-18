@@ -689,6 +689,7 @@ async fn nyxbot_followed_thread_images_use_native_components_before_direct_or_ga
                 pages: None,
                 chat_delivery: None,
                 image_input: None,
+                image_inspection: None,
             });
         }
         Mock::given(path("/open-apis/im/v1/images"))
