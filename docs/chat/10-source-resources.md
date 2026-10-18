@@ -44,7 +44,8 @@ own resource references.
 
    To request model viewing, it uses `output: "inspect"`. Both direct invocation
    and `nyx__call_tool` wrapping use the same handler. The tool accepts no URL,
-   headers, source identifier or credential supplied by the model.
+   headers, source identifier or credential supplied by the model. An optional
+   `acknowledgement_id` can present the exact pending source-operation card.
 4. NyxID loads the handle in the exact owner, conversation, agent, key, turn and
    audience scope. It then repeats the saved source GET through the normal
    service dispatcher. Only bounded `page_id`, `block_id`, `start_cursor` and
@@ -104,7 +105,37 @@ metadata preserve their automatic inspection behavior.
 Equivalent source reads in the same key and turn reuse one resource and one
 UUID-v4 attachment ID. Concurrent requests consume one attachment slot. A later
 independent turn receives a fresh attachment identity so the same image can be
-delivered again. This does not cache authorization across turns or requests.
+delivered again. This does not cache authorization across turns or requests. The narrowly bound
+confirmation continuation described below is the sole old-ref exception.
+
+## Confirmation continuations
+
+Organization source reads retain the existing confirmation rules in Auto and
+Ask modes. The initial authorized read and the image replay are separate GETs;
+each consumes its own exact card when confirmation is required. Resource replay
+requests a fresh card instead of implicitly presenting the initial read's used
+card. Trusted service-policy refusals retain their structured JSON and recovery
+instructions; provider errors cannot create a continuation.
+
+A resource records only its pending card ID and requested output. The same live
+turn may retry with that exact `acknowledgement_id`. After the owner approves
+and a new turn starts, the old ref is accepted only for the matching
+server-validated confirmation message, live allowed card, unchanged key/agent/
+audience and output. The source execution gate consumes that card exactly once,
+even if the owner changed to Full access in the meantime. Successful source and
+revision validation issues a fresh current-turn resource and attachment identity.
+Unrelated turns, changed intent, expired/denied/used cards and key changes cannot
+adopt the old ref. Concurrent pending intents cannot overwrite a live intent.
+A binding failure returns `resource_confirmation_unavailable` with the original
+trusted refusal under `source_policy`; it does not instruct approval of an
+unsaved image intent. Fresh-row issuance rechecks the original scoped ref,
+expiry and pending card/output inside its transaction, including when reusing
+an existing current-turn row.
+
+A source or download failure after card consumption remains a failure; this
+flow does not reset consumed cards or promise automatic retry. The shared
+source client preserves the application's 10-second connection timeout and
+90-second idle-pool timeout while disabling redirects.
 
 ## Persistence and limits
 

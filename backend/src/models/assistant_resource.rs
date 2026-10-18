@@ -4,6 +4,19 @@ use serde::{Deserialize, Serialize};
 
 pub const COLLECTION_NAME: &str = "assistant_resources";
 
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ResourceOutput {
+    Attach,
+    Inspect,
+}
+
+#[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ResourceConfirmation {
+    pub acknowledgement_id: String,
+    pub output: ResourceOutput,
+}
+
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResourceSource {
     pub adapter: String,
@@ -32,6 +45,8 @@ pub struct AssistantResource {
     pub revision: String,
     pub attachment_id: String,
     pub completed: bool,
+    #[serde(default)]
+    pub pending_confirmation: Option<ResourceConfirmation>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]

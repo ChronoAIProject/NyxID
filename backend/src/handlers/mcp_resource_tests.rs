@@ -30,16 +30,44 @@ async fn call(state: &AppState, auth: &McpAuthContext, name: &str, arguments: Va
         crate::services::billing::route_inventory::internal_node_dispatch_permit(),
     ))
     .await;
+    let classified_failure = response
+        .extensions()
+        .get::<crate::models::assistant_conversation::ToolFailure>()
+        .is_some();
     let bytes = axum::body::to_bytes(response.into_body(), 3 * 1024 * 1024)
         .await
         .unwrap();
-    serde_json::from_slice(&bytes).unwrap()
+    let result: Value = serde_json::from_slice(&bytes).unwrap();
+    if let Some(text) = result["result"]["content"][0]["text"].as_str()
+        && let Ok(policy) = serde_json::from_str::<Value>(text)
+        && matches!(
+            policy["error"].as_str(),
+            Some("acknowledgement_required" | "resource_confirmation_unavailable")
+        )
+    {
+        assert!(
+            !classified_failure,
+            "Policy refusal must not count as a tool failure: {result}"
+        );
+    }
+    result
 }
 
-#[tokio::test]
-async fn resource_source_hook_direct_and_wrapped_calls_retain_one_image_and_recheck_source() {
-    let f = crate::services::assistant_authority_tests::orchestrator_fixture("resource_transport")
-        .await;
+struct SourceFixture {
+    f: crate::services::assistant_authority_tests::Fixture,
+    server: MockServer,
+    _origin: resource_adapter::TestOrigin,
+    block_id: String,
+    pixels: Vec<u8>,
+    catalog: crate::models::downstream_service::DownstreamService,
+    endpoint: crate::models::service_endpoint::ServiceEndpoint,
+    key: crate::models::user_api_key::UserApiKey,
+    instance_id: String,
+    endpoint_id: String,
+}
+
+async fn source_fixture(prefix: &str, source_reads: u64, media_reads: u64) -> SourceFixture {
+    let f = crate::services::assistant_authority_tests::orchestrator_fixture(prefix).await;
     let server = MockServer::start().await;
     let _origin = resource_adapter::register_test_origin(&server.uri());
     let block_id = Uuid::new_v4().to_string();
@@ -47,7 +75,7 @@ async fn resource_source_hook_direct_and_wrapped_calls_retain_one_image_and_rech
     Mock::given(path(format!("/v1/blocks/{block_id}/children")))
         .and(header("authorization", "Bearer fixture-token"))
         .respond_with(ResponseTemplate::new(200).set_body_json(&payload))
-        .expect(3)
+        .expect(source_reads)
         .mount(&server)
         .await;
     let mut png = std::io::Cursor::new(Vec::new());
@@ -61,7 +89,7 @@ async fn resource_source_hook_direct_and_wrapped_calls_retain_one_image_and_rech
                 .insert_header("content-type", "image/png")
                 .set_body_bytes(pixels.clone()),
         )
-        .expect(1)
+        .expect(media_reads)
         .mount(&server)
         .await;
     let mut catalog = crate::test_utils::test_auto_connected_catalog_service();
@@ -152,6 +180,32 @@ async fn resource_source_hook_direct_and_wrapped_calls_retain_one_image_and_rech
         .insert_one(&instance)
         .await
         .unwrap();
+    SourceFixture {
+        f,
+        server,
+        _origin,
+        block_id,
+        pixels,
+        catalog,
+        endpoint,
+        key,
+        instance_id,
+        endpoint_id,
+    }
+}
+
+#[tokio::test]
+async fn resource_source_hook_direct_and_wrapped_calls_retain_one_image_and_recheck_source() {
+    let SourceFixture {
+        f,
+        server,
+        _origin,
+        block_id,
+        pixels,
+        endpoint,
+        key,
+        ..
+    } = source_fixture("resource_transport", 3, 1).await;
     let auth = super::machine_mcp_tests::authenticated_machine_chat(&f).await;
     let source = call(
         &f.state,
@@ -293,6 +347,320 @@ async fn resource_source_hook_direct_and_wrapped_calls_retain_one_image_and_rech
         let refused = call(&f.state, &guest, name, args).await;
         assert_eq!(refused["result"]["isError"], true, "{refused}");
     }
+    server.verify().await;
+    f.state.db.drop().await.unwrap();
+}
+
+fn policy(result: &Value) -> Value {
+    assert_eq!(result["result"]["isError"], true, "{result}");
+    serde_json::from_str(result["result"]["content"][0]["text"].as_str().unwrap()).unwrap()
+}
+
+async fn select_source(
+    f: &crate::services::assistant_authority_tests::Fixture,
+    auth: &McpAuthContext,
+    instance: &str,
+    owner: &str,
+    catalog: &str,
+) {
+    let chat = auth.chat.as_ref().unwrap();
+    f.state.db.collection::<bson::Document>("assistant_service_execution").insert_one(doc! {
+        "_id":Uuid::new_v4().to_string(),"kind":"selection","user_id":&f.owner,
+        "conversation_id":&f.row.id,"api_key_id":&chat.api_key_id,"turn_id":&chat.turn_id,
+        "connection_id":instance,"selection_source":"owner","owner_id":owner,
+        "catalog_service_id":catalog,"expires_at":bson::DateTime::from_chrono(chrono::Utc::now()+chrono::Duration::minutes(10)),
+    }).await.unwrap();
+}
+
+async fn next_resource_turn(
+    f: &crate::services::assistant_authority_tests::Fixture,
+    acknowledgement_id: Option<&str>,
+) -> McpAuthContext {
+    // Simulate completed settlement, then use real owner admission to validate
+    // the card and write the continuation message for the next turn.
+    f.state
+        .db
+        .collection::<bson::Document>(CONVERSATIONS)
+        .update_one(doc! {"_id":&f.row.id}, doc! {"$unset":{"active_turn":""}})
+        .await
+        .unwrap();
+    engine::begin_turn(
+        &f.state.db,
+        &f.owner,
+        &engine::TurnRequest {
+            acknowledgement_id: acknowledgement_id.map(str::to_owned),
+            retry_of: None,
+            attachment_ids: Vec::new(),
+            agent_id: None,
+            conversation_id: Some(f.row.id.clone()),
+            text: "Continue the image request".into(),
+            model: None,
+            access_mode: None,
+        },
+        &f.state.encryption_keys,
+    )
+    .await
+    .unwrap();
+    super::machine_mcp_tests::authenticated_machine_chat(f).await
+}
+
+#[tokio::test]
+async fn resource_org_auto_confirmation_preserves_policy_and_resumes_only_its_exact_intent() {
+    org_resource_journey(
+        crate::models::assistant_settings::AccessMode::Nyxmode,
+        false,
+    )
+    .await;
+}
+#[tokio::test]
+async fn resource_org_ask_confirmation_preserves_policy_and_resumes_only_its_exact_intent() {
+    org_resource_journey(
+        crate::models::assistant_settings::AccessMode::AskEveryTime,
+        false,
+    )
+    .await;
+}
+#[tokio::test]
+async fn resource_org_auto_confirmation_consumes_exact_card_after_switch_to_full() {
+    org_resource_journey(crate::models::assistant_settings::AccessMode::Nyxmode, true).await;
+}
+#[tokio::test]
+async fn resource_org_ask_confirmation_consumes_exact_card_after_switch_to_full() {
+    org_resource_journey(
+        crate::models::assistant_settings::AccessMode::AskEveryTime,
+        true,
+    )
+    .await;
+}
+async fn org_resource_journey(
+    mode: crate::models::assistant_settings::AccessMode,
+    switch_to_full: bool,
+) {
+    use crate::services::{
+        assistant_acknowledgement_service as acks, assistant_settings_service as settings,
+    };
+    let SourceFixture {
+        f,
+        server,
+        _origin,
+        block_id,
+        catalog,
+        instance_id,
+        endpoint_id,
+        key,
+        ..
+    } = source_fixture(&format!("resource_org_confirmation_{mode:?}"), 3, 2).await;
+    let org = Uuid::new_v4().to_string();
+    f.state
+        .db
+        .collection("users")
+        .insert_one(crate::test_utils::test_user(
+            &org,
+            crate::models::user::UserType::Org,
+        ))
+        .await
+        .unwrap();
+    f.state
+        .db
+        .collection("org_memberships")
+        .insert_one(crate::test_utils::test_membership(
+            &org,
+            &f.owner,
+            crate::models::org_membership::OrgRole::Admin,
+            None,
+        ))
+        .await
+        .unwrap();
+    for (collection, id) in [
+        ("user_services", &instance_id),
+        ("user_endpoints", &endpoint_id),
+        ("user_api_keys", &key.id),
+    ] {
+        f.state
+            .db
+            .collection::<bson::Document>(collection)
+            .update_one(doc! {"_id":id}, doc! {"$set":{"user_id":&org}})
+            .await
+            .unwrap();
+    }
+    settings::update(
+        &f.state.db,
+        &f.owner,
+        settings::Update {
+            access_mode: Some(mode),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let auth = super::machine_mcp_tests::authenticated_machine_chat(&f).await;
+    select_source(&f, &auth, &instance_id, &org, &catalog.id).await;
+    let source = call(
+        &f.state,
+        &auth,
+        "my-notion-2__notion_list_block_children",
+        json!({"block_id":block_id}),
+    )
+    .await;
+    let initial = policy(&source);
+    assert_eq!(initial["error"], "acknowledgement_required", "{initial}");
+    let initial_ack = initial["acknowledgement_id"].as_str().unwrap();
+    acks::decide(&f.state.db, &f.owner, &f.row.id, initial_ack, true)
+        .await
+        .unwrap();
+    let auth = next_resource_turn(&f, Some(initial_ack)).await;
+    select_source(&f, &auth, &instance_id, &org, &catalog.id).await;
+    let source = call(
+        &f.state,
+        &auth,
+        "my-notion-2__notion_list_block_children",
+        json!({"block_id":block_id}),
+    )
+    .await;
+    assert_eq!(source["result"]["isError"], false, "{source}");
+    let row = f
+        .state
+        .db
+        .collection::<AssistantResource>(RESOURCES)
+        .find_one(doc! {"conversation_id":&f.row.id})
+        .await
+        .unwrap()
+        .unwrap();
+    let refused = call(
+        &f.state,
+        &auth,
+        "nyx__resource_get",
+        json!({"ref":row.id,"output":"attach"}),
+    )
+    .await;
+    let refusal = policy(&refused);
+    assert_eq!(refusal["error"], "acknowledgement_required", "{refusal}");
+    assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    let ack = refusal["acknowledgement_id"].as_str().unwrap();
+    let conflicting = call(
+        &f.state,
+        &auth,
+        "nyx__resource_get",
+        json!({"ref":row.id,"output":"inspect"}),
+    )
+    .await;
+    let conflict = policy(&conflicting);
+    assert_eq!(
+        conflict["error"], "resource_confirmation_unavailable",
+        "{conflict}"
+    );
+    assert_eq!(
+        conflict["source_policy"]["error"],
+        "acknowledgement_required"
+    );
+    assert_eq!(conflict["source_policy"]["acknowledgement_id"], ack);
+    let pending = f
+        .state
+        .db
+        .collection::<AssistantResource>(RESOURCES)
+        .find_one(doc! {"_id":&row.id})
+        .await
+        .unwrap()
+        .unwrap()
+        .pending_confirmation
+        .unwrap();
+    assert_eq!(
+        pending.output,
+        crate::models::assistant_resource::ResourceOutput::Attach
+    );
+    assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    acks::decide(&f.state.db, &f.owner, &f.row.id, ack, true)
+        .await
+        .unwrap();
+    let wrong_intent = call(
+        &f.state,
+        &auth,
+        "nyx__resource_get",
+        json!({"ref":row.id,"output":"inspect","acknowledgement_id":ack}),
+    )
+    .await;
+    assert_eq!(wrong_intent["result"]["isError"], true);
+    let attached = call(
+        &f.state,
+        &auth,
+        "nyx__resource_get",
+        json!({"ref":row.id,"output":"attach","acknowledgement_id":ack}),
+    )
+    .await;
+    assert_eq!(attached["result"]["isError"], false, "{attached}");
+    let used = call(
+        &f.state,
+        &auth,
+        "nyx__resource_get",
+        json!({"ref":row.id,"output":"attach","acknowledgement_id":ack}),
+    )
+    .await;
+    assert_eq!(policy(&used)["error"], "acknowledgement_invalid");
+    let refused = call(
+        &f.state,
+        &auth,
+        "nyx__resource_get",
+        json!({"ref":row.id,"output":"attach"}),
+    )
+    .await;
+    let refusal = policy(&refused);
+    assert_eq!(refusal["error"], "acknowledgement_required", "{refusal}");
+    let next_ack = refusal["acknowledgement_id"].as_str().unwrap();
+    acks::decide(&f.state.db, &f.owner, &f.row.id, next_ack, true)
+        .await
+        .unwrap();
+    let unrelated = next_resource_turn(&f, None).await;
+    let denied = call(
+        &f.state,
+        &unrelated,
+        "nyx__resource_get",
+        json!({"ref":row.id,"output":"attach"}),
+    )
+    .await;
+    assert_eq!(denied["result"]["isError"], true, "{denied}");
+    if switch_to_full {
+        settings::update(
+            &f.state.db,
+            &f.owner,
+            settings::Update {
+                access_mode: Some(crate::models::assistant_settings::AccessMode::Autopilot),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    }
+    let continued = next_resource_turn(&f, Some(next_ack)).await;
+    select_source(&f, &continued, &instance_id, &org, &catalog.id).await;
+    let wrong_intent = call(
+        &f.state,
+        &continued,
+        "nyx__resource_get",
+        json!({"ref":row.id,"output":"inspect"}),
+    )
+    .await;
+    assert_eq!(wrong_intent["result"]["isError"], true);
+    let attached = call(
+        &f.state,
+        &continued,
+        "nyx__call_tool",
+        json!({"tool_name":"nyx__resource_get","arguments":{"ref":row.id,"output":"attach"}}),
+    )
+    .await;
+    assert_eq!(attached["result"]["isError"], false, "{attached}");
+    let current = engine::get(&f.state.db, &f.owner, &f.row.id).await.unwrap();
+    let images = &current.active_turn.as_ref().unwrap().attachments;
+    assert_eq!(images.len(), 1);
+    assert_ne!(images[0].id, row.attachment_id);
+    assert_eq!(images[0].chat_delivery, Some(true));
+    let used = call(
+        &f.state,
+        &continued,
+        "nyx__resource_get",
+        json!({"ref":row.id,"output":"attach"}),
+    )
+    .await;
+    assert_eq!(used["result"]["isError"], true, "{used}");
     server.verify().await;
     f.state.db.drop().await.unwrap();
 }

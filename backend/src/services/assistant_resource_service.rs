@@ -19,18 +19,13 @@ use mongodb::{
     bson::{self, doc},
     options::IndexOptions,
 };
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::json;
 use uuid::Uuid;
 
 pub const TOOL_NAME: &str = "nyx__resource_get";
 
-#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum Output {
-    Attach,
-    Inspect,
-}
+pub use crate::models::assistant_resource::ResourceOutput as Output;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -38,13 +33,15 @@ pub struct GetRequest {
     #[serde(rename = "ref")]
     pub resource_ref: String,
     pub output: Output,
+    #[serde(default)]
+    pub acknowledgement_id: Option<String>,
 }
 
 pub fn definition() -> mcp::McpToolDefinition {
     mcp::McpToolDefinition {
         name: TOOL_NAME.into(),
         description: "Retrieve an image using a resource ref returned by a source tool. output=attach displays it in this chat and schedules supported channel delivery; output=inspect lets you view it without channel delivery. Both intents can be requested on the same ref. Source permissions are checked again. No URL or setup skill is needed. If stale, reread the source and use its new ref.".into(),
-        input_schema: json!({"type":"object","properties":{"ref":{"type":"string"},"output":{"type":"string","enum":["attach","inspect"]}},"required":["ref","output"],"additionalProperties":false}),
+        input_schema: json!({"type":"object","properties":{"ref":{"type":"string"},"output":{"type":"string","enum":["attach","inspect"]},"acknowledgement_id":{"type":"string"}},"required":["ref","output"],"additionalProperties":false}),
     }
 }
 
@@ -132,7 +129,7 @@ pub async fn annotations(
     chat: &ChatAuthority,
     read: &ResourceRead,
 ) -> AppResult<String> {
-    let rows = issue_many(db, chat, read, &read.candidates).await?;
+    let rows = issue_many(db, chat, read, &read.candidates, None).await?;
     let entries: Vec<_> = rows
         .iter()
         .map(|row| {
@@ -161,6 +158,7 @@ async fn issue_many(
     chat: &ChatAuthority,
     read: &ResourceRead,
     candidates: &[ResourceCandidate],
+    continuation: Option<&AssistantResource>,
 ) -> AppResult<Vec<AssistantResource>> {
     if candidates.is_empty() {
         return Ok(Vec::new());
@@ -192,6 +190,7 @@ async fn issue_many(
                 revision: candidate.revision.clone(),
                 attachment_id: Uuid::new_v4().to_string(),
                 completed: false,
+                pending_confirmation: None,
                 created_at: now,
                 expires_at: now + Duration::hours(1),
             })
@@ -203,22 +202,47 @@ async fn issue_many(
     session
         .start_transaction()
         .and_run2(async move |session| {
-            let operation: AppResult<_> = async {
-                let parents = db.collection::<bson::Document>(CONVERSATIONS);
-                let parent = parents
-                    .find_one(live_filter(&chat)?)
-                    .projection(doc! {"active_turn.resource_refs": 1})
-                    .session(&mut *session)
-                    .await?
+            let operation: AppResult<_> =
+                async {
+                    let parents = db.collection::<bson::Document>(CONVERSATIONS);
+                    let parent = if continuation.is_some() {
+                        // Serialize adoption, including reuse, with pending intent writes and Stop.
+                        parents
+                            .find_one_and_update(
+                                live_filter(&chat)?,
+                                doc! {"$currentDate":{"updated_at":true}},
+                            )
+                            .projection(doc! {"active_turn.resource_refs":1})
+                            .session(&mut *session)
+                            .await?
+                    } else {
+                        parents
+                            .find_one(live_filter(&chat)?)
+                            .projection(doc! {"active_turn.resource_refs":1})
+                            .session(&mut *session)
+                            .await?
+                    }
                     .ok_or(AppError::AssistantTurnRequired)?;
-                let used = parent
-                    .get_document("active_turn")
-                    .ok()
-                    .and_then(|turn| turn.get_array("resource_refs").ok())
-                    .map_or(0, Vec::len);
-                let mut remaining = resource_adapter::MAX_RESOURCES.saturating_sub(used);
-                let records = db.collection::<AssistantResource>(COLLECTION_NAME);
-                let mut cursor = records
+                    let used = parent
+                        .get_document("active_turn")
+                        .ok()
+                        .and_then(|turn| turn.get_array("resource_refs").ok())
+                        .map_or(0, Vec::len);
+                    let mut remaining = resource_adapter::MAX_RESOURCES.saturating_sub(used);
+                    let records = db.collection::<AssistantResource>(COLLECTION_NAME);
+                    if let Some(original) = continuation {
+                        // Recheck after the source GET, before allocating a fresh lifetime.
+                        let current = records.find_one(doc! {
+                        "_id":&original.id,"user_id":&chat.user_id,
+                        "conversation_id":&chat.conversation_id,"api_key_id":&chat.api_key_id,
+                        "agent_id":&chat.agent_id,"guest":chat.guest,
+                        "expires_at":{"$gt":bson::DateTime::now()},
+                    }).session(&mut *session).await?.ok_or_else(missing)?;
+                        if current.pending_confirmation != original.pending_confirmation {
+                            return Err(missing());
+                        }
+                    }
+                    let mut cursor = records
                     .find(doc! {
                         "user_id": &chat.user_id,
                         "conversation_id": &chat.conversation_id,
@@ -229,41 +253,41 @@ async fn issue_many(
                     .limit(resource_adapter::MAX_RESOURCES as i64)
                     .session(&mut *session)
                     .await?;
-                let existing: Vec<_> = cursor.stream(&mut *session).try_collect().await?;
-                let mut out = Vec::new();
-                let mut created = Vec::new();
-                for proposed in &pending {
-                    if let Some(row) = existing
-                        .iter()
-                        .chain(created.iter())
-                        .find(|row| row.identity == proposed.identity)
-                    {
-                        out.push(row.clone());
-                    } else if remaining > 0 {
-                        remaining -= 1;
-                        created.push(proposed.clone());
-                        out.push(proposed.clone());
+                    let existing: Vec<_> = cursor.stream(&mut *session).try_collect().await?;
+                    let mut out = Vec::new();
+                    let mut created = Vec::new();
+                    for proposed in &pending {
+                        if let Some(row) = existing
+                            .iter()
+                            .chain(created.iter())
+                            .find(|row| row.identity == proposed.identity)
+                        {
+                            out.push(row.clone());
+                        } else if remaining > 0 {
+                            remaining -= 1;
+                            created.push(proposed.clone());
+                            out.push(proposed.clone());
+                        }
                     }
-                }
-                if !created.is_empty() {
-                    let ids: Vec<_> = created.iter().map(|row| row.id.clone()).collect();
-                    if parents
-                        .update_one(
-                            live_filter(&chat)?,
-                            doc! {"$push": {"active_turn.resource_refs": {"$each": ids}}},
-                        )
-                        .session(&mut *session)
-                        .await?
-                        .matched_count
-                        != 1
-                    {
-                        return Err(AppError::AssistantTurnRequired);
+                    if !created.is_empty() {
+                        let ids: Vec<_> = created.iter().map(|row| row.id.clone()).collect();
+                        if parents
+                            .update_one(
+                                live_filter(&chat)?,
+                                doc! {"$push": {"active_turn.resource_refs": {"$each": ids}}},
+                            )
+                            .session(&mut *session)
+                            .await?
+                            .matched_count
+                            != 1
+                        {
+                            return Err(AppError::AssistantTurnRequired);
+                        }
+                        records.insert_many(&created).session(&mut *session).await?;
                     }
-                    records.insert_many(&created).session(&mut *session).await?;
+                    Ok(out)
                 }
-                Ok(out)
-            }
-            .await;
+                .await;
             transactions::transaction_result(operation)
         })
         .await
@@ -277,25 +301,143 @@ async fn issue(
     read: &ResourceRead,
     candidate: &ResourceCandidate,
 ) -> AppResult<Option<AssistantResource>> {
-    Ok(issue_many(db, chat, read, std::slice::from_ref(candidate))
-        .await?
-        .into_iter()
-        .next())
+    Ok(
+        issue_many(db, chat, read, std::slice::from_ref(candidate), None)
+            .await?
+            .into_iter()
+            .next(),
+    )
 }
 
-pub async fn load(db: &Database, chat: &ChatAuthority, id: &str) -> AppResult<AssistantResource> {
+pub async fn load(
+    db: &Database,
+    chat: &ChatAuthority,
+    id: &str,
+    output: Output,
+    acknowledgement_id: Option<&str>,
+) -> AppResult<AssistantResource> {
     if Uuid::parse_str(id).is_err() {
         return Err(missing());
     }
     require_live(db, chat).await?;
-    db.collection::<AssistantResource>(COLLECTION_NAME)
+    let row = db
+        .collection::<AssistantResource>(COLLECTION_NAME)
         .find_one(doc! {
             "_id":id,"user_id":&chat.user_id,"conversation_id":&chat.conversation_id,
-            "turn_id":chat.turn_id.as_deref().ok_or(AppError::AssistantTurnRequired)?,
             "api_key_id":&chat.api_key_id,"agent_id":&chat.agent_id,"guest":chat.guest,
             "expires_at":{"$gt":bson::DateTime::from_chrono(Utc::now())},
         })
         .await?
+        .ok_or_else(missing)?;
+    if let Some(id) = acknowledgement_id
+        && !row
+            .pending_confirmation
+            .as_ref()
+            .is_some_and(|pending| pending.acknowledgement_id == id && pending.output == output)
+    {
+        return Err(missing());
+    }
+    if chat.turn_id.as_deref() != Some(row.turn_id.as_str()) {
+        let pending = row
+            .pending_confirmation
+            .as_ref()
+            .filter(|pending| pending.output == output)
+            .ok_or_else(missing)?;
+        if db
+            .collection::<bson::Document>("assistant_acknowledgements")
+            .find_one(doc! {
+                "_id":&pending.acknowledgement_id,"user_id":&chat.user_id,
+                "conversation_id":&chat.conversation_id,"api_key_id":&chat.api_key_id,
+                "status":"allowed","expires_at":{"$gt":bson::DateTime::now()},
+            })
+            .projection(doc! {"_id":1})
+            .await?
+            .is_none()
+        {
+            return Err(missing());
+        }
+        // Only begin_owner_turn's server-validated confirmation message can bridge turns.
+        if db
+            .collection::<bson::Document>("assistant_messages")
+            .find_one(doc! {
+                "user_id":&chat.user_id,"conversation_id":&chat.conversation_id,
+                "turn_id":chat.turn_id.as_deref().ok_or(AppError::AssistantTurnRequired)?,
+                "role":"user","continuation_of":&pending.acknowledgement_id,
+            })
+            .projection(doc! {"_id":1})
+            .await?
+            .is_none()
+        {
+            return Err(missing());
+        }
+    }
+    Ok(row)
+}
+
+/// Called only for a trusted server policy response, never provider JSON.
+pub async fn bind_confirmation(
+    db: &Database,
+    chat: &ChatAuthority,
+    row: &AssistantResource,
+    output: Output,
+    acknowledgement_id: &str,
+) -> AppResult<()> {
+    use crate::models::assistant_resource::ResourceConfirmation;
+    require_live(db, chat).await?;
+    let pending = bson::to_bson(&ResourceConfirmation {
+        acknowledgement_id: acknowledgement_id.into(),
+        output,
+    })
+    .map_err(|_| AppError::Internal("Failed to encode resource continuation".into()))?;
+    let mut session = db.client().start_session().await?;
+    let db = db.clone();
+    let chat = chat.clone();
+    let row = row.clone();
+    session.start_transaction().and_run2(async move |session| {
+        let operation: AppResult<_> = async {
+            // Taking the parent write lock serializes this intent with Stop/settlement.
+            db.collection::<bson::Document>(CONVERSATIONS)
+                .find_one_and_update(live_filter(&chat)?,doc!{"$currentDate":{"updated_at":true}})
+                .session(&mut *session).await?.ok_or(AppError::AssistantTurnRequired)?;
+            let records = db.collection::<AssistantResource>(COLLECTION_NAME);
+            let current = records.find_one(doc! {
+                "_id":&row.id,"user_id":&chat.user_id,"conversation_id":&chat.conversation_id,
+                "api_key_id":&chat.api_key_id,"agent_id":&chat.agent_id,"guest":chat.guest,
+                "expires_at":{"$gt":bson::DateTime::now()},
+            }).session(&mut *session).await?.ok_or_else(missing)?;
+            if let Some(existing) = current.pending_confirmation.as_ref()
+                && (existing.acknowledgement_id != acknowledgement_id || existing.output != output)
+                && db.collection::<bson::Document>("assistant_acknowledgements").find_one(doc! {
+                    "_id":&existing.acknowledgement_id,"status":{"$in":["pending","allowed"]},
+                    "expires_at":{"$gt":bson::DateTime::now()},
+                }).session(&mut *session).await?.is_some()
+            {
+                return Err(AppError::Conflict("Another image intent is awaiting confirmation.".into()));
+            }
+            records.update_one(doc!{"_id":&current.id},doc!{"$set":{"pending_confirmation":&pending}})
+                .session(&mut *session).await?;
+            Ok(())
+        }.await;
+        transactions::transaction_result(operation)
+    }).await.map_err(transactions::map_transaction_error)
+}
+
+/// A confirmation continuation receives a fresh turn-bound handle after the
+/// existing service gate has consumed its exact card and the source is rechecked.
+pub async fn in_current_turn(
+    db: &Database,
+    chat: &ChatAuthority,
+    row: &AssistantResource,
+    read: &ResourceRead,
+) -> AppResult<AssistantResource> {
+    let candidate = select(row, read)?;
+    if chat.turn_id.as_deref() == Some(row.turn_id.as_str()) {
+        return Ok(row.clone());
+    }
+    issue_many(db, chat, read, std::slice::from_ref(candidate), Some(row))
+        .await?
+        .into_iter()
+        .next()
         .ok_or_else(missing)
 }
 
@@ -423,10 +565,18 @@ mod tests {
         assert!(!serialized.contains("https://"));
         let mut other = chat.clone();
         other.user_id = "other".into();
-        assert!(load(&state.db, &other, &a.id).await.is_err());
+        assert!(
+            load(&state.db, &other, &a.id, Output::Attach, None)
+                .await
+                .is_err()
+        );
         other = chat.clone();
         other.api_key_id = "rotated".into();
-        assert!(load(&state.db, &other, &a.id).await.is_err());
+        assert!(
+            load(&state.db, &other, &a.id, Output::Attach, None)
+                .await
+                .is_err()
+        );
         for i in 1..resource_adapter::MAX_RESOURCES {
             let mut extra = read.candidates[0].revision.clone();
             extra.push_str(&i.to_string());
@@ -459,6 +609,193 @@ mod tests {
         );
         state.db.drop().await.unwrap();
     }
+    #[tokio::test]
+    async fn resource_confirmation_is_scoped_one_intent_and_requires_a_live_allowed_card() {
+        let (state, chat) = setup("resource_confirmation_scope").await;
+        let read = read("2026-10-17T00:00:00Z");
+        let row = issue(&state.db, &chat, &read, &read.candidates[0])
+            .await
+            .unwrap()
+            .unwrap();
+        let ack = Uuid::new_v4().to_string();
+        let cards = state
+            .db
+            .collection::<bson::Document>("assistant_acknowledgements");
+        cards
+            .insert_one(
+                doc! {"_id":&ack,"user_id":&chat.user_id,"conversation_id":&chat.conversation_id,
+                "api_key_id":&chat.api_key_id,"status":"pending",
+                "expires_at":bson::DateTime::from_chrono(Utc::now()+Duration::minutes(10))},
+            )
+            .await
+            .unwrap();
+        bind_confirmation(&state.db, &chat, &row, Output::Attach, &ack)
+            .await
+            .unwrap();
+        bind_confirmation(&state.db, &chat, &row, Output::Attach, &ack)
+            .await
+            .unwrap();
+        assert!(
+            bind_confirmation(&state.db, &chat, &row, Output::Inspect, &ack)
+                .await
+                .is_err()
+        );
+        let mut next = chat.clone();
+        next.turn_id = Some(Uuid::new_v4().to_string());
+        state
+            .db
+            .collection::<bson::Document>(CONVERSATIONS)
+            .update_one(
+                doc! {"_id":&chat.conversation_id},
+                doc! {"$set":{"active_turn.turn_id":&next.turn_id,"active_turn.resource_refs":[]}},
+            )
+            .await
+            .unwrap();
+        // Pending or allowed cards alone cannot bridge an unrelated turn.
+        assert!(
+            load(&state.db, &next, &row.id, Output::Attach, None)
+                .await
+                .is_err()
+        );
+        state.db.collection::<bson::Document>("assistant_messages").insert_one(doc! {
+            "_id":Uuid::new_v4().to_string(),"user_id":&chat.user_id,"conversation_id":&chat.conversation_id,
+            "turn_id":&next.turn_id,"role":"user","continuation_of":&ack,
+        }).await.unwrap();
+        for status in ["pending", "denied", "used", "expired"] {
+            cards
+                .update_one(doc! {"_id":&ack}, doc! {"$set":{"status":status}})
+                .await
+                .unwrap();
+            assert!(
+                load(&state.db, &next, &row.id, Output::Attach, None)
+                    .await
+                    .is_err(),
+                "{status}"
+            );
+        }
+        cards
+            .update_one(doc! {"_id":&ack}, doc! {"$set":{"status":"allowed"}})
+            .await
+            .unwrap();
+        assert!(
+            load(&state.db, &next, &row.id, Output::Inspect, None)
+                .await
+                .is_err()
+        );
+        assert!(
+            load(
+                &state.db,
+                &next,
+                &row.id,
+                Output::Attach,
+                Some("different-card")
+            )
+            .await
+            .is_err()
+        );
+        assert!(
+            load(&state.db, &next, &row.id, Output::Attach, Some(&ack))
+                .await
+                .is_ok()
+        );
+        cards.update_one(doc!{"_id":&ack},doc!{"$set":{"expires_at":bson::DateTime::from_chrono(Utc::now()-Duration::seconds(1))}}).await.unwrap();
+        assert!(
+            load(&state.db, &next, &row.id, Output::Attach, None)
+                .await
+                .is_err()
+        );
+        state.db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn resource_continuation_rechecks_original_before_fresh_issuance_or_reuse() {
+        use crate::models::assistant_resource::ResourceConfirmation;
+        let (state, chat) = setup("resource_continuation_recheck").await;
+        let read = read("2026-10-17T00:00:00Z");
+        let mut row = issue(&state.db, &chat, &read, &read.candidates[0])
+            .await
+            .unwrap()
+            .unwrap();
+        row.pending_confirmation = Some(ResourceConfirmation {
+            acknowledgement_id: Uuid::new_v4().to_string(),
+            output: Output::Attach,
+        });
+        let records = state.db.collection::<AssistantResource>(COLLECTION_NAME);
+        records
+            .replace_one(doc! {"_id":&row.id}, &row)
+            .await
+            .unwrap();
+        let mut next = chat.clone();
+        next.turn_id = Some(Uuid::new_v4().to_string());
+        state
+            .db
+            .collection::<bson::Document>(CONVERSATIONS)
+            .update_one(
+                doc! {"_id":&chat.conversation_id},
+                doc! {"$set":{"active_turn.turn_id":&next.turn_id,"active_turn.resource_refs":[]}},
+            )
+            .await
+            .unwrap();
+        // The source GET has finished; a changed pending intent must not be adopted.
+        state
+            .db
+            .collection::<bson::Document>(COLLECTION_NAME)
+            .update_one(
+                doc! {"_id":&row.id},
+                doc! {"$set":{"pending_confirmation.output":"inspect"}},
+            )
+            .await
+            .unwrap();
+        assert!(
+            in_current_turn(&state.db, &next, &row, &read)
+                .await
+                .is_err()
+        );
+        records
+            .replace_one(doc! {"_id":&row.id}, &row)
+            .await
+            .unwrap();
+        state.db.collection::<bson::Document>(COLLECTION_NAME).update_one(
+            doc!{"_id":&row.id}, doc!{"$set":{"expires_at":bson::DateTime::from_chrono(Utc::now()-Duration::seconds(1))}},
+        ).await.unwrap();
+        assert!(
+            in_current_turn(&state.db, &next, &row, &read)
+                .await
+                .is_err()
+        );
+        assert_eq!(records.count_documents(doc! {}).await.unwrap(), 1);
+        records
+            .replace_one(doc! {"_id":&row.id}, &row)
+            .await
+            .unwrap();
+        let fresh = in_current_turn(&state.db, &next, &row, &read)
+            .await
+            .unwrap();
+        let reused = in_current_turn(&state.db, &next, &row, &read)
+            .await
+            .unwrap();
+        assert_eq!(fresh.id, reused.id);
+        assert_ne!(fresh.id, row.id);
+        assert_ne!(fresh.attachment_id, row.attachment_id);
+        // Even an existing fresh row cannot renew a source ref expired during its GET.
+        state.db.collection::<bson::Document>(COLLECTION_NAME).update_one(
+            doc!{"_id":&row.id}, doc!{"$set":{"expires_at":bson::DateTime::from_chrono(Utc::now()-Duration::seconds(1))}},
+        ).await.unwrap();
+        assert!(
+            in_current_turn(&state.db, &next, &row, &read)
+                .await
+                .is_err()
+        );
+        assert_eq!(records.count_documents(doc! {}).await.unwrap(), 2);
+        records.delete_one(doc! {"_id":&row.id}).await.unwrap();
+        assert!(
+            in_current_turn(&state.db, &next, &row, &read)
+                .await
+                .is_err()
+        );
+        state.db.drop().await.unwrap();
+    }
+
     #[tokio::test]
     async fn resource_commit_is_atomic_idempotent_and_upgrades_both_intents() {
         let (state, chat) = setup("resource_commit").await;
@@ -522,7 +859,12 @@ mod tests {
                 .unwrap(),
             1
         );
-        assert!(load(&state.db, &chat, &row.id).await.unwrap().completed);
+        assert!(
+            load(&state.db, &chat, &row.id, Output::Attach, None)
+                .await
+                .unwrap()
+                .completed
+        );
         // Repeated attach preserves requested inspection and the attachment UUID.
         let repeated = engine::attach_resource_image(
             &state.db,
@@ -628,7 +970,11 @@ mod tests {
             .is_err()
         );
         state.db.collection::<AssistantResource>(COLLECTION_NAME).update_one(doc!{"_id":&row.id},doc!{"$set":{"expires_at":bson::DateTime::from_chrono(Utc::now()-Duration::seconds(1))}}).await.unwrap();
-        assert!(load(&state.db, &chat, &row.id).await.is_err());
+        assert!(
+            load(&state.db, &chat, &row.id, Output::Attach, None)
+                .await
+                .is_err()
+        );
         state.db.drop().await.unwrap();
     }
     #[test]
@@ -650,6 +996,7 @@ mod tests {
             revision: candidate.revision.clone(),
             attachment_id: Uuid::new_v4().to_string(),
             completed: false,
+            pending_confirmation: None,
             created_at: Utc::now(),
             expires_at: Utc::now() + Duration::hours(1),
         };

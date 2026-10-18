@@ -2886,12 +2886,32 @@ async fn handle_resource_get(
         Ok(parsed) => parsed,
         Err(_) => return tool_result(request_id, "Use ref and output=attach or inspect.", true),
     };
-    let row = match resources::load(&state.db, chat, &parsed.resource_ref).await {
+    let row = match resources::load(
+        &state.db,
+        chat,
+        &parsed.resource_ref,
+        parsed.output,
+        parsed.acknowledgement_id.as_deref(),
+    )
+    .await
+    {
         Ok(row) => row,
         Err(error) => return tool_result(request_id, &error.to_string(), true),
     };
     let tool_name = row.source.tool_name.clone();
-    let source_arguments = row.arguments.clone();
+    let mut source_arguments = row.arguments.clone();
+    let acknowledgement_id = parsed.acknowledgement_id.as_deref().or_else(|| {
+        (chat.turn_id.as_deref() != Some(row.turn_id.as_str()))
+            .then(|| {
+                row.pending_confirmation
+                    .as_ref()
+                    .map(|pending| pending.acknowledgement_id.as_str())
+            })
+            .flatten()
+    });
+    if let Some(id) = acknowledgement_id {
+        source_arguments["acknowledgement_id"] = serde_json::json!(id);
+    }
     let request = JsonRpcRequest {
         jsonrpc: JSONRPC_VERSION.into(),
         id: request_id,
@@ -2932,6 +2952,8 @@ async fn materialize_resource_content(
     resources::require_live(&state.db, chat).await?;
     let read = response.resources.as_ref().ok_or_else(resources::stale)?;
     let candidate = resources::select(row, read)?;
+    let current = resources::in_current_turn(&state.db, chat, row, read).await?;
+    let row = &current;
     let media = if row.completed {
         None
     } else {
@@ -2965,6 +2987,7 @@ async fn materialize_resource_content(
     Ok(vec![serde_json::json!({"type":"text","text":note})])
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn dispatch_service_tool(
     state: &AppState,
     auth: &McpAuthContext,
@@ -3041,14 +3064,14 @@ async fn dispatch_service_tool(
         }
     };
 
-    if let Some((row, _)) = &resource {
-        if !crate::services::assistant_resource_service::matches_endpoint(row, service, endpoint) {
-            return tool_result(
-                request.id.clone(),
-                &crate::services::assistant_resource_service::stale().to_string(),
-                true,
-            );
-        }
+    if let Some((row, _)) = &resource
+        && !crate::services::assistant_resource_service::matches_endpoint(row, service, endpoint)
+    {
+        return tool_result(
+            request.id.clone(),
+            &crate::services::assistant_resource_service::stale().to_string(),
+            true,
+        );
     }
 
     if let Some(response) = chat_service_gate(state, auth, service, request.id.clone()).await {
@@ -3268,7 +3291,29 @@ async fn dispatch_service_tool(
     );
 
     let concurrency = response.concurrency.take();
-    let (content, is_error, failure) = if let Some((row, output)) = &resource {
+    let (content, is_error, failure) = if response.is_policy_refusal() {
+        if let (Some((row, output)), Some(chat)) = (&resource, auth.chat.as_ref())
+            && let Ok(refusal) = serde_json::from_str::<serde_json::Value>(&response.text)
+            && refusal["error"] == "acknowledgement_required"
+            && let Some(id) = refusal["acknowledgement_id"].as_str()
+            && let Err(error) = crate::services::assistant_resource_service::bind_confirmation(
+                &state.db, chat, row, *output, id,
+            )
+            .await
+        {
+            tracing::warn!(
+                code = error.error_code(),
+                "Resource confirmation could not be retained"
+            );
+            response.text = serde_json::json!({
+                "error": "resource_confirmation_unavailable",
+                "message": "The image intent could not be saved for confirmation.",
+                "instructions": "Do not use the source card to retry this image intent. Resolve any existing image confirmation, or reread the source in a new turn.",
+                "source_policy": refusal,
+            }).to_string();
+        }
+        service_tool_content(state, auth, tool_name, response).await
+    } else if let Some((row, output)) = &resource {
         let result = materialize_resource_content(state, auth, row, *output, response).await;
         match result {
             Ok(content) => (content, false, None),

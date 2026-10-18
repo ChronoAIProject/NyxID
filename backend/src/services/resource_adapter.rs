@@ -7,6 +7,20 @@ use sha2::{Digest, Sha256};
 pub const MAX_SOURCE_BYTES: usize = 2 * 1024 * 1024;
 pub const MAX_RESOURCES: usize = 32;
 
+/// Keep the application's connection bounds when disabling redirects for a source read.
+pub(crate) fn http_client() -> &'static reqwest::Client {
+    static CLIENT: std::sync::LazyLock<reqwest::Client> = std::sync::LazyLock::new(|| {
+        let builder = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .pool_idle_timeout(std::time::Duration::from_secs(90));
+        #[cfg(test)]
+        let builder = builder.pool_max_idle_per_host(0);
+        builder.build().expect("source HTTP client")
+    });
+    &CLIENT
+}
+
 pub struct ResourceCandidate {
     pub selector: String,
     pub revision: String,
@@ -253,39 +267,40 @@ pub fn candidates(arguments: &Value, text: &str) -> Vec<ResourceCandidate> {
                 }
             }
         }
-    } else if arguments.get("block_id").is_some() && root["object"] == "list" {
-        if let Some(blocks) = root["results"].as_array() {
-            if blocks.len() > 100 {
-                return out;
+    } else if arguments.get("block_id").is_some()
+        && root["object"] == "list"
+        && let Some(blocks) = root["results"].as_array()
+    {
+        if blocks.len() > 100 {
+            return out;
+        }
+        for block in blocks.iter().take(100) {
+            if block["object"] != "block" {
+                continue;
             }
-            for block in blocks.iter().take(100) {
-                if block["object"] != "block" {
-                    continue;
-                }
-                let Some(id) = block["id"].as_str().and_then(uuid) else {
-                    continue;
-                };
-                // Duplicate object IDs are ambiguous and must not create a selectable resource.
-                if blocks
-                    .iter()
-                    .filter(|b| b["id"].as_str().and_then(uuid).as_ref() == Some(&id))
-                    .count()
-                    != 1
-                {
-                    continue;
-                }
-                let Some(rev) = revision(block) else {
-                    continue;
-                };
-                if block["type"] == "image" {
-                    add_file(
-                        &mut out,
-                        &block["image"],
-                        format!("block:{id}:image"),
-                        rev,
-                        "Notion image",
-                    );
-                }
+            let Some(id) = block["id"].as_str().and_then(uuid) else {
+                continue;
+            };
+            // Duplicate object IDs are ambiguous and must not create a selectable resource.
+            if blocks
+                .iter()
+                .filter(|b| b["id"].as_str().and_then(uuid).as_ref() == Some(&id))
+                .count()
+                != 1
+            {
+                continue;
+            }
+            let Some(rev) = revision(block) else {
+                continue;
+            };
+            if block["type"] == "image" {
+                add_file(
+                    &mut out,
+                    &block["image"],
+                    format!("block:{id}:image"),
+                    rev,
+                    "Notion image",
+                );
             }
         }
     }
@@ -325,6 +340,20 @@ pub(crate) fn test_media_origin(url: &str) -> Option<String> {
 mod tests {
     use super::*;
     const ID: &str = "fe63677d-5d00-4da4-8a43-908c0175b440";
+
+    #[tokio::test]
+    async fn resource_source_client_bounds_a_stalled_tls_connection() {
+        // The kernel accepts TCP while no server answers the TLS handshake.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let request =
+            http_client().get(format!("https://{}/source", listener.local_addr().unwrap()));
+        let error = tokio::time::timeout(std::time::Duration::from_secs(15), request.send())
+            .await
+            .expect("source connect timeout must bound the handshake")
+            .unwrap_err();
+        assert!(error.is_timeout() && error.is_connect(), "{error}");
+    }
+
     #[test]
     fn only_canonical_source_and_allowlisted_reads() {
         assert!(trusted_notion_base("https://api.notion.com"));
