@@ -113,7 +113,13 @@ WORKDIR /app
 COPY --from=builder /build/target/release/nyxid-server /usr/local/bin/nyxid-server
 
 # Create directory for JWT keys (mounted at runtime)
-RUN mkdir -p /app/keys && chown nyxid:nyxid /app/keys
+RUN mkdir -p /app/keys /var/lib/nyxid/tuf \
+    && chown nyxid:nyxid /app/keys /var/lib/nyxid/tuf \
+    && chmod 0700 /var/lib/nyxid/tuf
+
+# Retain authenticated TUF rollback floors independently of the image/HOME.
+ENV NYXID_SERVER_TUF_STATE_DIR=/var/lib/nyxid/tuf
+VOLUME ["/var/lib/nyxid/tuf"]
 
 USER nyxid
 

@@ -1266,8 +1266,14 @@ controller lock. They require no writable system temporary directory. The
 rendered migration and companion commands nevertheless include
 `--tmpfs /tmp:rw,noexec,nosuid,size=16m` for compatibility with the published
 0.41.0 helper while the 0.41.1 image is being published. Native `nyxid update`
-keeps its normal temporary datastore: it installs into a writable native host,
-and container image updates use the companion instead.
+retains authenticated TUF state in `$HOME/.nyxid/tuf-public` (override with
+`NYXID_TUF_STATE_DIR`). The backend also verifies the suggested companion image
+using its own private durable `NYXID_SERVER_TUF_STATE_DIR`, defaulting to
+`$HOME/.nyxid/server-tuf` natively and `/var/lib/nyxid/tuf` in the backend image.
+Compose retains that directory in `backend_tuf`; custom read-only deployments
+must mount a private writable durable volume there, owned by the backend UID.
+Missing permissions, corrupt state and rollback fail closed; no consumer resets
+to an ephemeral datastore. See [release trust state](RELEASING.md#accepted-provenance-and-authenticated-time).
 
 Preflight failures print only a fixed stage and reason, for example
 `machine_update failed at verify_updater_image: trust_root_unavailable`.

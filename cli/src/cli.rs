@@ -779,12 +779,9 @@ pub struct UpdateArgs {
     /// Print installed prebuilt versions without downloading anything
     #[arg(long, conflicts_with_all = ["version", "check", "from_source", "rollback", "skills_only"])]
     pub list_versions: bool,
-    /// Compile and install from source with cargo install
+    /// Build the requested release from its resolved immutable commit (--locked)
     #[arg(long)]
     pub from_source: bool,
-    /// Continue after release attestation verification fails
-    #[arg(long)]
-    pub insecure_skip_verify: bool,
     /// NyxID base URL for skill content (uses saved URL by default)
     #[arg(long, env = "NYXID_URL")]
     pub base_url: Option<String>,
@@ -3200,6 +3197,15 @@ pub enum NodeDaemonCommands {
 mod tests {
     use super::*;
     use clap::Parser;
+
+    #[test]
+    fn updates_require_explicit_source_and_have_no_verification_bypass() {
+        assert!(
+            Cli::try_parse_from(["nyxid", "update", "--from-source", "--version", "1.2.3"]).is_ok()
+        );
+        assert!(Cli::try_parse_from(["nyxid", "update", "--insecure-skip-verify"]).is_err());
+        assert!(Cli::try_parse_from(["nyxid", "update", "auto", "run", "--from-source"]).is_err());
+    }
 
     #[test]
     fn ifttt_generated_node_setup_command_parses() {

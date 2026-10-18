@@ -627,8 +627,22 @@ cutover. See [Exact accounting](BILLING_EXACT_ACCOUNTING.md#d5-cutover-and-opera
 
 ### Machine node process environments
 
-Machine support adds no backend deployment environment variables. The machine
-container reads `NYXID_NODE_TOKEN` only during first registration (omit it for
+The backend's official updater-image verifier retains authenticated TUF rollback
+floors separately from node credentials. `NYXID_SERVER_TUF_STATE_DIR` selects an
+absolute private durable directory; native default is `$HOME/.nyxid/server-tuf`
+(`%USERPROFILE%` on Windows). The backend image sets `/var/lib/nyxid/tuf` and
+production Compose mounts the named `backend_tuf` volume there. Provision the
+directory mode0700 owned by the backend UID, under trusted parent directories.
+With a read-only root filesystem mount only that private durable directory
+writable. Keep it across restarts/upgrades; do not restore an older copy or use
+ephemeral storage. Permission, configuration and authenticated-state failures
+disable verified updater guidance without accepting an unverified image tag.
+The native CLI's distinct override is `NYXID_TUF_STATE_DIR`; the Docker companion
+uses the private update volume's `tuf/` directory. See [RELEASING.md](RELEASING.md#accepted-provenance-and-authenticated-time).
+
+Machine execution itself adds no backend credential environment variables;
+the updater-image verifier uses the trust-storage setting described above.
+The machine container reads `NYXID_NODE_TOKEN` only during first registration (omit it for
 pairing), and `NYXID_NODE_URL` selects the existing node WebSocket endpoint.
 The entrypoint removes the registration token before starting the daemon.
 `NYXID_PROFILE` keeps the existing CLI profile convention.
