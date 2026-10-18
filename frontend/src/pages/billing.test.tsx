@@ -550,8 +550,11 @@ describe.each(PAGE_ROUTES)("BillingPage at %s", (route) => {
       within(spend).getByText("0.72", { selector: "strong", exact: false }),
     ).toBeVisible();
     await userEvent.click(screen.getByText("All metrics & funding"));
+    const quantities = screen.getByRole("heading", {
+      name: "Requests & other units",
+    }).parentElement!;
     expect(
-      screen.getByText("voice seconds", { selector: "dt" }).parentElement,
+      within(quantities).getByText("voice seconds").parentElement,
     ).toHaveTextContent("72");
   });
   it("does not turn missing costs into zero or count free records as pending", async () => {

@@ -58,7 +58,7 @@ function quote(option?: VoiceOption) {
           )
           .join(" + ") || "Tariff unavailable"
       } · paid by you`
-    : "Start a conversation to view its transcription rates";
+    : "Transcription rates are not available yet";
 }
 function discoveryMessage(error: unknown) {
   return error instanceof ApiError && error.status === 404
@@ -663,7 +663,7 @@ export function useComposerDictation({
         </details>
         <details className="mt-2 text-11 text-text-tertiary">
           <summary className="cursor-pointer">Credit usage</summary>
-          <p className="mt-1">{optionsError || quote(option)}.</p>
+          <p className="mt-1">{optionsError || `${quote(option)}.`}</p>
           <p className="mt-1">
             View recorded charges in your account menu under Usage.
           </p>
