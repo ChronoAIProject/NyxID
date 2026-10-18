@@ -7,6 +7,11 @@
 # the frontend at build time, which a frontend/-only context cannot provide.
 FROM node:22.23.2-alpine@sha256:b6f26b36c8ff49624cfdac716b8ea1138d606df02586a77d364bb5536a634f85 AS builder
 
+COPY security/npm-tools/package.json security/npm-tools/package-lock.json /opt/nyxid-build-tools/
+RUN npm ci --ignore-scripts --prefix /opt/nyxid-build-tools
+ENV PATH=/opt/nyxid-build-tools/node_modules/.bin:$PATH
+RUN test "$(npm --version)" = "11.21.1"
+
 WORKDIR /build/frontend
 
 COPY frontend/package.json frontend/package-lock.json ./
@@ -32,16 +37,20 @@ ENV SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH}
 RUN npm run build
 
 # ── Stage 2: Runtime ─────────────────────────────────────────────────────────
-FROM nginxinc/nginx-unprivileged:1.27-alpine@sha256:65e3e85dbaed8ba248841d9d58a899b6197106c23cb0ff1a132b7bfe0547e4c0
+FROM nginxinc/nginx-unprivileged:1.30-alpine@sha256:782bb89768cc87b7f95c18b95baa1af250e5d451f26794f59363540161147c01
 
 # Copy the built SPA
+# Remove the base image's stock index/50x pages before copying shipped assets.
+USER root
+RUN rm -rf /usr/share/nginx/html/*
 COPY --from=builder /build/frontend/dist /usr/share/nginx/html
 COPY --from=builder /build/frontend/dist/legal-cache.conf /etc/nginx/legal-cache.conf
 
-# The renderer validates origin-only inputs and emits complete nginx 1.27
+# The renderer validates origin-only inputs and emits complete nginx
 # policies. No environment value is substituted as an nginx/header fragment.
 USER root
-RUN apk add --no-cache python3 \
+RUN apk upgrade --no-cache \
+    && apk add --no-cache python3 \
     && mkdir -p /etc/nginx/nyxid/generated \
     && chown 101:101 /etc/nginx/nyxid/generated
 COPY frontend/nginx.conf.template /etc/nginx/nyxid/default.conf.template

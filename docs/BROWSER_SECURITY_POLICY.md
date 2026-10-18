@@ -3,7 +3,7 @@
 The frontend image renders an enforcing Content Security Policy at startup.
 `frontend/scripts/render-nginx.py` validates deployment origins before writing
 configuration; environment values cannot contain nginx or CSP fragments.
-Every nginx location includes a complete header policy because nginx 1.27
+Every nginx location includes a complete header policy because default nginx
 stops inheriting `add_header` when a child defines one.
 
 ## Deployment inputs and response boundaries
@@ -110,7 +110,7 @@ Meta flow, packaged credential page and legal theme all run under enforcement.
 The font transport serves the authenticated real TTF fixture, with its actual
 content type and CORS response; it does not claim to be a WOFF2 file.
 
-For the **actual production nginx 1.27 image** on Linux, build with exactly the
+For the **actual production nginx 1.30 image** on Linux, build with exactly the
 same commit/epoch and replace the native server command:
 
 ```sh
@@ -124,14 +124,54 @@ python3 frontend/scripts/production-policy-server.py \
 ```
 
 Container mode copies the actual image dist out and compares every file's
-SHA-256 against the tested dist before serving. It records image inspection,
-dist hashes, nginx version and actual access log. The image runs with its
+SHA-256 against the independent local build before serving. `--dist-dir` selects
+a different local comparison build. A mismatch fails by default and writes
+`dist-comparison.json`, including missing, extra and differing files.
+
+To validate the policy of actual shipped bytes while investigating a build
+comparison failure, explicitly add `--use-image-dist`. This selects the
+extracted `nginx/image-dist` for both the fixture transport and native renderer.
+Run the browser tests with `NYXID_PRODUCTION_DIST` set to that absolute path,
+as printed by the server. The comparison is still recorded and a mismatch
+remains a reproducibility failure. Policy acceptance of extracted image bytes
+does not establish an independent build match. Native mode can also serve these
+files by passing `--dist-dir` and the matching browser environment variable.
+
+The harness records image inspection, dist hashes, nginx version and actual
+access log. The image runs with its
 unprivileged user, read-only root, two writable tmpfs paths, default Docker
 AppArmor/seccomp and Linux host networking to the local fixture upstream; no
-bind mounts are needed. It requires nginx 1.27 and uses the image's installed
+bind mounts are needed. It requires nginx 1.30 and uses the image's installed
 renderer/template. Stop with Ctrl-C; the harness stops its own container and
 transport. Native nginx evidence is recorded separately and cannot substitute
 for this matrix.
+
+The frontend keeps one npm lockfile. Both Docker builders install npm 11.21.1
+from the integrity-locked `security/npm-tools` root, assert the selected version,
+and use it for the frontend install. The Node image's bundled npm verifies that
+bootstrap lock; `packageManager` alone does not select the executable. Native
+validation uses the same npm version from the reviewed bootstrap catalog.
+The patched Vite 8 dependency retains the
+baseline Rolldown build path. JavaScript preload hints use a canonical order;
+Vite handles CSS dependencies separately, preserving stylesheet order. To check
+repeatability of the complete SPA, prerendered legal pages and credential page,
+install the lockfile with the reviewed npm tool and run from the repository root:
+
+```sh
+python3 frontend/scripts/verify-reproducible-build.py \
+  --npm /path/to/reviewed/npm --evidence-dir /tmp/nyxid-frontend-repeatability
+```
+
+The output directory must be new. This performs two real builds with thread
+pools of 1 and 8 and identical commit/epoch, retains the first output and both
+file inventories, and fails on any missing, extra or differing byte. The receipt
+records the source diff and tool versions. It checks frontend bytes for those
+inputs; it does not establish cross-platform or whole-image reproducibility.
+The runtime starts from a pinned nginx 1.30/Alpine index and refreshes supported
+Alpine packages during construction. Package repositories remain external
+mutable inputs; scan and retain the final image digest, package SBOM and build
+receipt. Earlier nginx 1.27 acceptance remains historical evidence and does not
+substitute for testing the refreshed image.
 
 The managed WhatsApp tests read the actual runtime-config consumer and complete
 the cross-origin SSE POST to the explicitly admitted `api.nyxid.example`.

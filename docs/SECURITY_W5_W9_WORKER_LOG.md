@@ -292,6 +292,51 @@ W6 real Docker execution remains its prior evidence; final-source Docker
 harness execution after these fixture changes is an integration check to run
 with the final W9 machine source, rather than being claimed from syntax checks.
 
+## W7 frontend dependency, repeatability and runtime refresh
+
+The final frontend lock resolves Vite8.3.4 (retaining the baseline Vite8/Rolldown
+path), Vitest/coverage4.1.12 and PostHog1.438.12, with patched transitive inputs.
+The baseline31 npm advisories are now0 in the raw final npm audit. An explored
+Vite7 downgrade was rejected after checking the actual baseline; its logs and
+362-file output are exploratory and do not establish final acceptance.
+
+JavaScript preload hints and docs traversal have deterministic ordering; the
+actual Vite8 implementation separates CSS before the callback and appends its
+original CSS order. The committed repeatability harness performed two complete
+SPA/legal/credential builds at identical commit/epoch, thread pools1/8: all398
+files match. Actual production-browser transport tests22/22 pass under host
+nginx1.31.6 with the final dependency set. The complete frontend suite passes
+581files/6170tests. Lint, renderer4cases, build-input guard and regenerated
+wizard checks are recorded separately. The unused frontend pnpm lock is removed.
+
+Both frontend and backend credential builders install and assert npm11.21.1
+from the integrity-locked Node tools root; the pinned Node image's bundled npm
+verifies that bootstrap. Host npm10.9.8 successfully installed that same root,
+which reports npm11.21.1 and pnpm10.34.7. packageManager alone is not enforcement.
+
+The runtime pins official nginx1.30.6/Alpine3.24.2 by raw-index SHA256
+782bb89768cc87b7f95c18b95baa1af250e5d451f26794f59363540161147c01,
+refreshes supported Alpine packages, and removes stock HTML before asset copy.
+The unchanged base scans8 advisory occurrences; the real refreshed runtime
+probe with python3 scans0 against the current prepared Trivy database. This is
+runtime-probe evidence, not a scan of the complete final frontend image.
+Repositories remain mutable inputs, so no whole-image reproducibility claim.
+The exact final image must pass extraction parity, browser/header/entrypoint
+matrices and scanning. The harness now requires nginx1.30, records comparison
+failures and offers explicit image-dist acceptance without calling it parity.
+
+Evidence under the validation root: w7-frontend-v8-final-{ci,audit,tests,lint,
+wizard}.log/json as applicable; w7-frontend-v8-reproducibility/comparison.json
+and both inventories/logs; w7-frontend-v8-browser.{log,json};
+w7-frontend-policy-renderer.log; w7-frontend-input-guard.log;
+w7-frontend-wizard-freshness.log; w7-node-tools-{resolve,ci}.log;
+w7-nginx-refresh-build.log. Guest probe JSON is
+/tmp/nyxid-w7-nginx-refreshed-trivy.json, with base/raw reports retained beside it.
+
+Mobile R1-05/R1-06 remain OPEN. Candidate uncommitted patches and prior evidence
+are preserved separately. Provider-rejected/interrupted verification is not a
+pass; no implicated probe is retried or routed through another agent/model.
+
 ## Remaining authorized batches
 
 W5 final container review/integration; W7 pinned,

@@ -148,7 +148,8 @@ function docsSync(): Plugin {
     const index: DocSearchEntry[] = []
     const docs: DocFile[] = []
     const walk = (dir: string) => {
-      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      for (const entry of fs.readdirSync(dir, { withFileTypes: true })
+        .sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0)) {
         const abs = path.join(dir, entry.name)
         if (entry.isDirectory()) {
           walk(abs)
@@ -260,6 +261,13 @@ export default defineConfig({
     ],
   },
   build: {
+    // Module graph discovery can complete in a different order across build
+    // hosts. JavaScript preloads are independent hints; canonicalize their
+    // ordering before Vite emits HTML and __vite__mapDeps arrays. Vite handles
+    // CSS dependencies separately, preserving the stylesheet cascade order.
+    modulePreload: {
+      resolveDependencies: (_filename, dependencies) => [...dependencies].sort(),
+    },
     rollupOptions: {
       output: {
         manualChunks(id) {

@@ -1357,6 +1357,128 @@
         }
       ],
       "observed_utc": "2026-10-18T22:14:52.390390+00:00"
+    },
+    {
+      "image": "nginxinc/nginx-unprivileged:1.30-alpine",
+      "digest": "sha256:782bb89768cc87b7f95c18b95baa1af250e5d451f26794f59363540161147c01",
+      "registry_url": "https://registry-1.docker.io/v2/nginxinc/nginx-unprivileged/manifests/1.30-alpine",
+      "platforms": [
+        {
+          "digest": "sha256:906927b10cea77d8cd01cad4dc0bf8f872874ca9ff5ddbf49a0b0b0f3fc436f7",
+          "platform": {
+            "architecture": "amd64",
+            "os": "linux"
+          }
+        },
+        {
+          "digest": "sha256:57e8a60b2f9e28fafd9afee3609bd3a93eb8cd0a7510182b51d08b750b7e4d30",
+          "platform": {
+            "architecture": "arm",
+            "os": "linux",
+            "variant": "v6"
+          }
+        },
+        {
+          "digest": "sha256:ecd6d0abd107af503b9b9bb47386fc5d2fc59ff9a304cd228f3da77f6db75356",
+          "platform": {
+            "architecture": "arm",
+            "os": "linux",
+            "variant": "v7"
+          }
+        },
+        {
+          "digest": "sha256:bddea1cf015a9de684de0b4b4e1f15f700f8cf2c579db0433f01cadb01ac1afa",
+          "platform": {
+            "architecture": "arm64",
+            "os": "linux"
+          }
+        },
+        {
+          "digest": "sha256:b615b29dfa5343bbe8d4c72c8a3481e1e1ea3f79f60f4a2e6a4b9bba9dbca728",
+          "platform": {
+            "architecture": "386",
+            "os": "linux"
+          }
+        },
+        {
+          "digest": "sha256:3d5875616c7a2d3d7421c3cba5ac4c0fb5b6bc95fe52252f424d79a02e19c289",
+          "platform": {
+            "architecture": "ppc64le",
+            "os": "linux"
+          }
+        },
+        {
+          "digest": "sha256:932f0b3623ab399e468367c63053deed80d72831887af02132f7156e9962e393",
+          "platform": {
+            "architecture": "riscv64",
+            "os": "linux"
+          }
+        },
+        {
+          "digest": "sha256:974fcb365141132d47f0a0ef65e179d2b0a2ed10be6331f6618cb69d4df39538",
+          "platform": {
+            "architecture": "s390x",
+            "os": "linux"
+          }
+        },
+        {
+          "digest": "sha256:2919fbb75a1a1a412aea66c85cfdd25ec5e5516179b8fdf5a5943690177eb029",
+          "platform": {
+            "architecture": "unknown",
+            "os": "unknown"
+          }
+        },
+        {
+          "digest": "sha256:32ca99e22b90684ffe6bcb9d248cc5a68fce36fba9f663f3cf6b6d639df0a1f2",
+          "platform": {
+            "architecture": "unknown",
+            "os": "unknown"
+          }
+        },
+        {
+          "digest": "sha256:42021c31c4a5ae799e367ae5ca0023ea48e9ce2222a539d3a8b950c44585117b",
+          "platform": {
+            "architecture": "unknown",
+            "os": "unknown"
+          }
+        },
+        {
+          "digest": "sha256:ad237b622c55ce394507e13433608ea0df5416eb283120d29b9f937e6b02dc17",
+          "platform": {
+            "architecture": "unknown",
+            "os": "unknown"
+          }
+        },
+        {
+          "digest": "sha256:252f5d3fef73c040aee9b328aab4b924f55f86329f1acbcdc693336b9f918377",
+          "platform": {
+            "architecture": "unknown",
+            "os": "unknown"
+          }
+        },
+        {
+          "digest": "sha256:de13cb9288670b3f705d4fa92d490ab85801b14d9e30c1628d08d54251e0f19d",
+          "platform": {
+            "architecture": "unknown",
+            "os": "unknown"
+          }
+        },
+        {
+          "digest": "sha256:def394f081093a47a7bc6c2c9ad211fef3034100d89a6d7bfc697c8082bca150",
+          "platform": {
+            "architecture": "unknown",
+            "os": "unknown"
+          }
+        },
+        {
+          "digest": "sha256:bd9757f7b8024f64a04a0d0391547b2ac1ee9a75d78c484ab3654e1577143d71",
+          "platform": {
+            "architecture": "unknown",
+            "os": "unknown"
+          }
+        }
+      ],
+      "observed_utc": "2026-10-18T22:29:20.477951+00:00"
     }
   ]
 }

@@ -3,7 +3,7 @@ import { test } from "../e2e/production-policy-fixture";
 import fs from "node:fs";
 import path from "node:path";
 
-const dist = path.resolve("dist");
+const dist = path.resolve(process.env.NYXID_PRODUCTION_DIST ?? "dist");
 const manifest = JSON.parse(fs.readFileSync(path.join(dist, "release-integrity/releases.json"), "utf8")) as {
   git_commit: string; artifacts: { role: string; path: string }[];
 };
