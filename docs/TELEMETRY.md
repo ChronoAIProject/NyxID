@@ -1,6 +1,6 @@
 # Product analytics
 
-NyxID's optional product analytics uses authenticated account UUIDs. It is separate from security audit, billing, essential operational records and push delivery. Those records do not depend on product-analytics consent. The implementation checkpoint and outstanding erasure work are tracked in [the W1–W4 checklist](SECURITY_REMEDIATION_W1_W4.md); this document describes the current source contract.
+NyxID's optional product analytics uses authenticated account UUIDs. It is separate from security audit, billing, essential operational records and push delivery. Those records do not depend on product-analytics consent. Implemented controls and outstanding erasure work are described in [the implemented controls document](SECURITY_REMEDIATION_W1_W4.md); this document describes the current source contract.
 
 ## Permission and dispatch
 
@@ -11,6 +11,8 @@ Account permission is necessary on every surface. A device's account-bound local
 `TelemetryClient::track` performs bounded admission: at most 1,024 concurrent reads, a 250ms overall timeout, and a 1,024-event in-memory queue. The gate reads the indexed person record from the primary with linearizable read concern and bounded `maxTimeMS`. Consent changes use majority writes. There is no positive consent cache. Unknown, disabled, missing, deleted, unavailable or mismatched accounts fail closed. Admission captures the authorized revision; the drain checks that same revision afresh immediately before vendor dispatch. Queued work cannot inherit a later opt-in after withdrawal or regrant. A request already sent to a vendor cannot be recalled; the final check precedes that network request.
 
 The asynchronous `emit_event` and `track` APIs await admission, which may take up to 250ms. Product handlers do not wait for vendor delivery. Queue overflow and read failures drop optional events; they do not block the product operation or create a persistent analytics backlog.
+
+Private API CORS permits `X-NyxID-Client`, `X-NyxID-Client-Version`, `X-NyxID-Analytics`, `X-NyxID-Analytics-Account` and `DNT` from configured origins. This support is implemented; these headers classify or narrow requests and never grant account permission. Earlier telemetry rollout observations belong to the [dated planning record](TELEMETRY_CONSENT_FIX.md), not current deployment instructions.
 
 ## Client controls and account isolation
 

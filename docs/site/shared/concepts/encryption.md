@@ -3,7 +3,7 @@ title: Encryption & key management
 description: How NyxID encrypts the third-party credentials it holds — AES-256 envelope encryption with pluggable local or cloud-KMS key providers.
 ---
 
-NyxID is a credential broker: it holds your third-party API keys and OAuth tokens so your agents and apps never see them. That only works if those secrets are protected at rest. Dedicated credential fields use **AES-256 envelope encryption**. Converted default-header writers encrypt every configured value, including unfamiliar header names and values whose `sensitive` flag is omitted. That flag controls management masking, not encryption. Reader rollout still permits legacy plaintext until migration and strict cutover; W4 remains incomplete across other field families.
+NyxID is a credential broker: it holds your third-party API keys and OAuth tokens so your agents and apps never see them. That only works if those secrets are protected at rest. Dedicated credential fields use **AES-256 envelope encryption**. Converted default-header writers encrypt every configured value, including unfamiliar header names and values whose `sensitive` flag is omitted. That flag controls management masking, not encryption. Reader rollout still permits legacy plaintext until migration and strict cutover; conversion of other field families remains incomplete under #1934.
 
 ## Envelope encryption
 
@@ -30,11 +30,13 @@ Cloud KMS keeps the wrapping KEK out of the application process. NyxID still hol
 Keys can be rotated without downtime:
 
 - **Same backend:** prepare every replica to read both keys before enabling new-key writes, then retain the old key as previous (`ENCRYPTION_KEY_PREVIOUS`, or the provider-specific previous-key setting). Follow the ordered operator runbook in `docs/SECURITY.md` → Key Rotation; changing a writer first is unsafe. NyxID can decrypt with either key and writes new ciphertext with the active key. A bounded, leased migration and verification registry is implemented for converted families. It still reports unfinished adapters, so it is not yet evidence for complete production migration or key retirement. Repeating a pass authenticates current records without rewriting them.
-- **Across backends:** a **fallback provider** lets NyxID read secrets wrapped by the old provider while writing new ones with the new provider, so you can migrate from `local` to a cloud KMS (or between clouds) with zero downtime.
+- **From local to KMS:** the shipped configuration supports a KMS primary with an optional local fallback. Stage readers that can decrypt both ciphertext sets before changing writers. There is no arbitrary cloud-to-cloud or KMS-as-fallback configuration; those transitions require a separately reviewed migration. See the repository runbook `docs/KMS_MIGRATION_GUIDE.md`.
+
+Before changing AES or JWT sources, preserve the existing final HMAC domain keys using `HMAC_KEYSET_PATH`. This adoption keeps historical verification stable; it is not arbitrary HMAC-key rotation. Contextual writes default off; activating them requires compatible readers plus the explicit `CONTEXTUAL_RECORD_WRITERS_DRAINED` acknowledgement. Disable legacy reads only after authenticated migration readiness.
 
 ## Defense in depth
 
-- Key-provider DEKs use **`Zeroizing`** wrappers. Plaintext returned by the current decrypt API and copies in proxy/transport code are not universally zeroized; W4 tracks propagation.
+- Key-provider DEKs and converted record-field reads use **`Zeroizing`** wrappers. Raw decrypt entry points still return ordinary buffers and remain callable outside crypto; restricting that interface and propagating guarded buffers remain unfinished under #1933 and #1934. Zeroization does not erase library copies or protect a live process from memory access.
 - Identified AWS credential, signed-header and exchange-cache Debug implementations redact sensitive values. This is not proof that every secret-bearing type or error in the repository is safe to log.
 - Encryption coverage must be checked by field and transport. Dedicated credential fields and new configured default-header values are encrypted. Historical plaintext headers require the staged migration path, and remaining families must be converted before strict global readiness.
 - Keep previous providers/keys until a complete ciphertext inventory and retained backups permit retirement. Zero old-key decrypt traffic does not prove migration completed.

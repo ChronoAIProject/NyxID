@@ -58,9 +58,9 @@ Servers receive technical metadata with HTTPS requests for security and audit. O
 
 ## 4. Data Storage & Security
 
-NyxID stores account data in MongoDB. Dedicated OAuth-token, MFA-secret and API-credential fields use application-layer AES-256 encryption. Passwords use Argon2id with per-user salts; session tokens are hashed rather than reversibly encrypted. Sensitive default request headers are currently a known plaintext exception. Database/storage encryption and backup protections depend on the deployment.
+NyxID stores account data in MongoDB. Dedicated OAuth-token, MFA-secret and API-credential fields use application-layer AES-256 encryption. Passwords use Argon2id with per-user salts; session tokens are hashed rather than reversibly encrypted. Newly saved configured default request-header values are encrypted at rest. Values saved before this protection was enabled are protected when the operator migrates them. Database/storage encryption and backup protections depend on the deployment.
 
-Production deployments should use HTTPS; transport termination is operator-configured. JWTs use RS256 signatures. Signing-key rotation is managed by the deployment operator. Ask the deployment operator about its key-rotation schedule.
+Production deployments should use HTTPS; the deployment operator configures this protection. Tokens are digitally signed. NyxID supports changing signing keys while continuing to verify tokens signed with retained keys. The keys used to check existing audit and billing records must be preserved when signing or encryption keys change. The deployment operator manages key rotation and retirement. Ask the deployment operator about its actual key-rotation schedule.
 
 On mobile, authentication tokens use the OS-provided secure storage (iOS Keychain via Expo SecureStore, Android EncryptedSharedPreferences).
 
@@ -88,11 +88,11 @@ The providers used depend on your deployment and enabled features. User-connecte
 
 ## 6. Data Retention
 
-Account data is retained while the account is active. Account deletion disables access and starts removal of associated data. Some credentials, endpoint and node records may currently remain after account deletion. Contact us for deletion status; removal of all copies and external records within 30 days is not guaranteed.
+Account data is retained while the account is active. When an account-deletion request is accepted, access ends immediately and removal continues in the background. If something must be resolved before deletion can begin, the request is not accepted and access continues. The deletion status shows what is pending and which steps need help from the service operator. Some records and connected-service authorizations may remain until that work is finished; deletion does not yet cover every stored record or confirm that every connected service has revoked its authorization. Contact us for deletion status; removal of all copies and external records within 30 days is not guaranteed.
 
-Audit and billing evidence, and some Machine lifecycle/fencing records, are retained for integrity and safety. Audit evidence is not automatically purged after 90 days. Retained evidence remains subject to access controls and the applicable retention arrangements. Organization-owned resources remain owned by the organization when a person's account is deleted.
+Audit and billing records, and some records of Machine actions and access restrictions, are retained for integrity and safety. Audit records are not automatically deleted, including after 90 days. These records remain subject to access controls and the applicable retention arrangements. Organization-owned resources remain owned by the organization when a person's account is deleted.
 
-Analytics deletion is enqueued for provider-side processing and retry; enqueueing does not prove provider completion. Backup retention, legally required evidence retention, other external-provider deletion and actual fulfillment timelines require operator confirmation. Contact us for the status and applicable retention details of a deletion request.
+NyxID tracks analytics deletion requests and any further steps needed from the provider or service operator. Accepting a request does not prove that the provider has completed deletion. Backup retention, legally required evidence retention, other external-provider deletion and actual fulfillment timelines require operator confirmation. Contact us for the status and applicable retention details of a deletion request.
 
 ## 7. Your Rights
 

@@ -73,7 +73,7 @@ POST /api/v1/delegation/refresh
 Authorization: Bearer <delegation_token>
 ```
 
-NyxID re-verifies that the user is still active and issues a new 5-minute token with the same scope and `act.sub`. The old token remains valid until its original expiry.
+NyxID re-verifies the active user and the applicable live delegation authority, then issues a new 5-minute token preserving its scope and actor identity. OAuth-origin tokens require their signed origin, durable JTI authority and original live consent revisions. An older token remains subject to its expiry and live authority; revocation is not bypassed by refresh.
 
 ## Token exchange for OIDC-connected services
 
@@ -112,7 +112,7 @@ NyxID matches the `claude-` prefix, resolves the user's Anthropic API key, and p
 - **No credential exposure.** User API keys are injected server-side and never sent to the downstream service.
 - **No chained delegation.** A delegation token cannot be exchanged for another delegation token.
 - **Active user check.** Every request with a delegation token re-verifies the user is active.
-- **Route access control.** Delegation tokens can access only `llm/*`, `proxy/*`, and `delegation/*`. They cannot access auth flows, user profiles, admin panels, or session management.
+- **Route access control.** Native delegated routes include the LLM, proxy, delegation and channel-relay paths. An eligible service-issued token with the exact `account:read` scope also permits management GET reads under the shared route exclusions and owner/organization ACLs. That scope never permits writes or WebSocket upgrades; auth/session protocols, admin and secret-delivery routes remain denied. The repository runbook `docs/SECURITY.md`, under Account Read Parity, defines the full contract.
 - **Consent verification.** Token exchange and refresh both verify user consent before issuing a new token.
 
 ## Related guides
