@@ -1259,6 +1259,26 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
                 .put(handlers::admin_billing::update_service_billing),
         )
         .route(
+            "/credits/allocations/summary",
+            get(handlers::billing_credits::allocation_summary),
+        )
+        .route(
+            "/credits/allocations",
+            post(handlers::billing_credits::allocate),
+        )
+        .route(
+            "/credits/allocations/{grant_id}",
+            delete(handlers::billing_credits::reclaim),
+        )
+        .route(
+            "/credits/allocations/schedules",
+            post(handlers::billing_credit_schedules::allocate_recurring),
+        )
+        .route(
+            "/credits/allocations/schedules/{schedule_id}",
+            patch(handlers::billing_credit_schedules::edit_allocation_recurring),
+        )
+        .route(
             "/credits/grants",
             get(handlers::billing_credits::admin_list_grants)
                 .post(handlers::billing_credits::issue_grant),

@@ -1886,6 +1886,7 @@ pub(crate) fn test_app_config() -> AppConfig {
         cloud_response_cache_max_entry_bytes: 1024 * 1024,
         cloud_response_cache_max_entries: 256,
         billing_enabled: false,
+        billing_allocations_enabled: false,
         lago_api_url: None,
         lago_api_key: None,
         lago_plan_code: "starter".to_string(),

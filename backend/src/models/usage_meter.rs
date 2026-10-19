@@ -74,6 +74,8 @@ crate::exact_credit_model! {
     #[derive(Clone, Debug, Serialize, ToSchema, PartialEq, Eq)]
     pub struct GrantReservationAllocation {
         pub grant_id: String,
+        #[serde(default)]
+        pub service_limit_key: Option<String>,
         #[serde(with = "crate::models::credits::whole")]
         pub amount: Credits,
     }
@@ -95,6 +97,8 @@ crate::exact_credit_model! {
     pub struct GrantConsumptionAllocation {
         pub operation_id: String,
         pub grant_id: String,
+        #[serde(default)]
+        pub service_limit_key: Option<String>,
         #[serde(with = "crate::models::credits::whole")]
         pub amount: Credits,
     }

@@ -1034,6 +1034,9 @@ async fn mixed_account_lifecycle_balances_after_issue_hold_release_expire_revoke
         .unwrap();
     exact_migration::run(&db).await.unwrap();
     let input = grants::IssueCreditGrantInput {
+        amount: None,
+        service_limits: Vec::new(),
+        request_id: None,
         amount_credits: 1,
         target_kind: BillingTargetKind::SelectedUsers,
         target_user_ids: vec![owner.clone()],

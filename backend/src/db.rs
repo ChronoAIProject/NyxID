@@ -3180,6 +3180,19 @@ async fn ensure_service_indexes(db: &Database) -> Result<(), mongodb::error::Err
     credit_grants
         .create_index(
             IndexModel::builder()
+                .keys(doc! { "active_settlement.usage_row_id": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .name("credit_grants_settlement_usage".to_string())
+                        .sparse(true)
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+    credit_grants
+        .create_index(
+            IndexModel::builder()
                 .keys(doc! {
                     "recipient_user_id": 1,
                     "status": 1,
@@ -3309,6 +3322,19 @@ async fn ensure_service_indexes(db: &Database) -> Result<(), mongodb::error::Err
         )
         .await?;
     let allowance_periods = db.collection::<Document>(USAGE_ALLOWANCE_PERIODS);
+    allowance_periods
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "active_settlement.usage_row_id": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .name("usage_allowance_periods_settlement_usage".to_string())
+                        .sparse(true)
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
     allowance_periods
         .create_index(
             IndexModel::builder()

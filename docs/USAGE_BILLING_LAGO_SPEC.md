@@ -475,7 +475,7 @@ fail-closed.
 (== the owner's overdraft-cap slice), flush + true-up periodically, and kill the stream when
 cumulative flushed bytes exceed `available`.
 
-### 5.1 Atomic reserve + idempotent settle (no DB transactions — R3.2)
+### 5.1 Atomic reserve + idempotent settle (current transaction contract)
 
 The repo has **no** `start_session`/`with_transaction` (only a TODO at `services.rs:2127`), so
 multi-doc atomicity is achieved with idempotent guards, mirroring `oracle_task_service.rs:959`.
@@ -518,6 +518,14 @@ A recovery sweep handles `status=Finalized && released=false` (crash between ste
 re-applying the wallet move. The `pending_lago_debits` is cleared by the balance sync once Lago
 confirms the burn (so the cap bounds total exposure across one full `BILLING_RECONCILE_INTERVAL_SECS`
 window of inflated balance, not just one request).
+
+### 5.2 Credit allocation policies (current exact implementation)
+
+The current transaction and claim-fencing contract is specified in [BILLING_EXACT_ACCOUNTING.md](BILLING_EXACT_ACCOUNTING.md#allocation-local-service-ceilings-and-reclaim); earlier no-transaction rollout notes in this spec describe the original design, not current admission. All financial holds and meter creation now commit together, with caller-owned transactions retained for Machine lifecycle admission. Allocation ceilings use exact decimal credits, share one grant total, and never create earmarked pots or account-wide spending policies.
+
+Admin allocation API adds `GET /api/v1/admin/credits/allocations/summary`, `POST /api/v1/admin/credits/allocations`, `DELETE /api/v1/admin/credits/allocations/{grant_id}`, and `POST`/`PATCH /api/v1/admin/credits/allocations/schedules[/{schedule_id}]`. Existing grants/schedules/allowances endpoints and response identities remain supported. Authoring requests add optional canonical decimal `amount`, disjoint `service_limits` (`service_refs`, decimal `amount`, optional `label`) and stable UUID `request_id`. Read responses add rules and exact `held`, `reclaimed`, `terminal_amount` and `revoke_requested_at`; raw reservation and numeric legacy projections retain their contracts. Summary strings are exact and exclude future schedules and usage-unit allowances. Admin/Operator reads and one-time Credits Manager writes retain their existing ACLs; recurring and allowance writes are admin-only.
+
+New policy mutations require the explicit backend capability. See [ENV.md](ENV.md#billing) for the all-writer upgrade requirement. User billing routes, top-up and navigation are unchanged by this admin feature.
 
 ## 6. `BillingOwnerResolver` (consumes `OwnerAccess`) (§6)
 
