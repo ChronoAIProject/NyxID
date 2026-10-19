@@ -1482,3 +1482,43 @@ CLI94/0/1ignored source graph remain attributed to their original storage bytes.
 No runtime is repeated or newly credited for this wrap. Broader working W9
 storage remains excluded; CLI test fixture changes remain a separate handoff.
 Evidence: w9-storage-sticky-format-handoff-v1.json.
+
+## Generated229 CLI fixture custody regressions — bounded correction
+
+Actual generated229 (ad233 + 6acab) hosted CLI run reported1,995 passed,
+one failure and one timeout, plus10 startup skips. JUnit encodes timeout as a
+second failure and omits those skips; raw job118015299274 remains authoritative.
+The managed mutation test used a new unobserved config to replace an existing
+profile; strict CAS correctly refused it. The pending positive had no keyfile;
+strict open refused, then its still-held sender left an unbounded receive waiting.
+
+Isolated actual229 diagnosis reproduced the unchanged managed1340 CAS failure
+and executed a bounded actual-handler missing-key control: HTTP poll reached,
+selected store NotFound, handler returned with no key/config/directory-entry or
+pubkey-frame effect. Original hosted timeout and copied diagnosticfd4ae44c remain.
+
+The exact two test-source correction gives empty/self-hosted/managed/pending
+states independent profiles, explicitly initializes the positive disposable key,
+and bounds its expected frame receive. Original mutation guards and pubkey/key
+persistence assertions remain. The actual-handler missing-key negative is kept.
+Production custody, CAS, handler behavior and timeout policy are unchanged.
+
+Final isolated229+reviewed sticky expression+fixture delta build passed34.790s,
+actual BuildFinished/copied6d73ce. Six complete disjoint groups pass94/0 with
+one declared publication-process child ignored; parent-invoked child activity is
+nonadditive. Both original names and the new negative map to actual final passes.
+All4,293 recorded source path entries plus immutable copied binary match final
+build/runtime maps and current isolated inputs; names/cardinality/ignored and
+skip-message audits pass. Earlier diagnostic results are not added to94.
+
+Locked CLI all-target Clippy -D warnings passes20.674s; unchanged node-proxy-test
+feature library check passes3.604s; two corrected test files pass rustfmt0.102s.
+The three-source format1 result is retained. Its storage-only wrap was corrected
+in a separate commit with successful rustfmt; consumed CLI storage remains
+c3c12244, branch storage df367f9f differs only in assignment whitespace.
+
+Evidence w9-cli229-final-handoff-v1.json binds14 command/log pairs and archive.
+The eventual local commit contains only these two test blobs plus this log on
+the formatting parent. The4,293-entry graph belongs to isolated generated229;
+it is not asserted equal the branch tip. Full hosted Linux CLI/workspace,
+modern reader/writers, W9 runtime/migration/OS and release gates remain open.

@@ -1325,23 +1325,30 @@ mod tests {
 
     #[test]
     fn ordinary_identity_mutations_refuse_managed_or_pending_profiles_only() {
-        let directory = tempfile::tempdir().unwrap();
-        assert!(require_self_hosted_mutation(directory.path()).is_ok());
+        let empty = tempfile::tempdir().unwrap();
+        assert!(require_self_hosted_mutation(empty.path()).is_ok());
+
+        let self_hosted = tempfile::tempdir().unwrap();
         let config = NodeConfig::new(
             "wss://example.test/api/v1/nodes/ws".into(),
             uuid::Uuid::new_v4().to_string(),
             "file".into(),
         );
-        config.save(&directory.path().join("config.toml")).unwrap();
-        assert!(require_self_hosted_mutation(directory.path()).is_ok());
-        let binding = binding();
-        managed_config(&binding)
-            .save(&directory.path().join("config.toml"))
+        config
+            .save(&self_hosted.path().join("config.toml"))
             .unwrap();
-        assert!(require_self_hosted_mutation(directory.path()).is_err());
-        std::fs::remove_file(directory.path().join("config.toml")).unwrap();
-        prepare_delivery(directory.path(), &binding).unwrap();
-        assert!(require_self_hosted_mutation(directory.path()).is_err());
+        assert!(require_self_hosted_mutation(self_hosted.path()).is_ok());
+
+        let binding = binding();
+        let managed = tempfile::tempdir().unwrap();
+        managed_config(&binding)
+            .save(&managed.path().join("config.toml"))
+            .unwrap();
+        assert!(require_self_hosted_mutation(managed.path()).is_err());
+
+        let pending = tempfile::tempdir().unwrap();
+        prepare_delivery(pending.path(), &binding).unwrap();
+        assert!(require_self_hosted_mutation(pending.path()).is_err());
     }
 
     #[tokio::test]

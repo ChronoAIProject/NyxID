@@ -5884,9 +5884,11 @@ mod tests {
                     "crypto": { "version": "v1" }
                 }]
             })))
+            .expect(1)
             .mount(&server)
             .await;
         let dir = tempfile::tempdir().unwrap();
+        LocalEncryption::initialize(dir.path()).unwrap();
         let config_path = dir.path().join("config.toml");
         let config = rci_test_config(format!("ws://{}/api/v1/nodes/ws", server.address()));
         config.save(&config_path).unwrap();
@@ -5902,9 +5904,13 @@ mod tests {
         )
         .await;
 
-        let payload: serde_json::Value =
-            serde_json::from_str(&unwrap_text(rx.recv().await.expect("pubkey frame")))
-                .expect("pubkey json");
+        let payload: serde_json::Value = serde_json::from_str(&unwrap_text(
+            tokio::time::timeout(Duration::from_secs(5), rx.recv())
+                .await
+                .expect("pubkey frame must arrive promptly")
+                .expect("pubkey frame"),
+        ))
+        .expect("pubkey json");
         assert_eq!(payload["type"], "pending_credential_pubkey");
         assert_eq!(payload["pending_id"], "pending-1");
         assert_eq!(payload["version"], "v1");
@@ -5915,6 +5921,79 @@ mod tests {
         assert_eq!(pending.version, nyxid_crypto::VERSION_V1);
         assert_eq!(pending.service_slug, "openai");
         assert_eq!(pending.public_key, payload["node_pubkey"].as_str().unwrap());
+    }
+
+    #[tokio::test]
+    async fn pending_credentials_available_missing_key_refuses_without_effects() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/node-agent/pending-credentials"))
+            .and(header("authorization", "Bearer node-token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "pending_credentials": [{
+                    "id": "pending-1",
+                    "service_slug": "openai",
+                    "injection_method": "header",
+                    "field_name": "Authorization",
+                    "target_url": "https://api.openai.com/v1",
+                    "expires_at": "2099-01-01T00:00:00Z",
+                    "crypto": { "version": "v1" }
+                }]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        let config = rci_test_config(format!("ws://{}/api/v1/nodes/ws", server.address()));
+        config.save(&config_path).unwrap();
+        assert!(matches!(
+            SecretBackend::from_storage_backend_str("file", dir.path()),
+            Err(crate::node::error::Error::Io(error))
+                if error.kind() == std::io::ErrorKind::NotFound
+        ));
+        let before = std::fs::read(&config_path).unwrap();
+        let entries = || {
+            let mut names = std::fs::read_dir(dir.path())
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name())
+                .collect::<Vec<_>>();
+            names.sort();
+            names
+        };
+        let entries_before = entries();
+        let (tx, mut rx) = mpsc::channel(4);
+
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            handle_pending_credentials_available(
+                &tx,
+                &config.server.url,
+                "node-token",
+                &config_path,
+                dir.path(),
+                "file",
+            ),
+        )
+        .await
+        .expect("missing-key handler must return promptly");
+
+        assert!(matches!(
+            rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+        assert!(!dir.path().join(".keyfile").exists());
+        assert_eq!(std::fs::read(&config_path).unwrap(), before);
+        assert_eq!(entries(), entries_before);
+        assert!(
+            NodeConfig::load(&config_path)
+                .unwrap()
+                .pending_crypto_keys
+                .is_empty()
+        );
+        eprintln!(
+            "actual handler returned after strict missing-key refusal; no config/key/pubkey effects"
+        );
     }
 
     #[tokio::test]
