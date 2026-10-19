@@ -1557,6 +1557,7 @@ async fn channel_media_gateway_closed_shape_compatibility_forged_sources_and_mis
             .unwrap();
         assert!(saved.media.is_none());
     }
+    let provider = ingestion_provider(&state, &row, native_png()).await;
     let mut source = media_source(&state, &row, "forged", "native", "receipt").await;
     source.sender_platform_id = Some("victim".into());
     state
@@ -1573,7 +1574,11 @@ async fn channel_media_gateway_closed_shape_compatibility_forged_sources_and_mis
         "forged",
     )
     .await;
-    assert!(!response.status().is_success());
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let refusal: Value = serde_json::from_str(&body_text(response).await).unwrap();
+    assert_eq!(refusal["code"], "media_source_refused");
+    assert_eq!(refusal["error"]["code"], "media_source_refused");
+    assert!(provider.received_requests().await.unwrap().is_empty());
     assert_eq!(calls.lock().await.len(), before);
     server.abort();
 }

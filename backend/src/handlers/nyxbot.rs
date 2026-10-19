@@ -4083,6 +4083,10 @@ async fn responses_with_producers_impl(
         .await
         {
             Ok(media) => media,
+            // A forged stored source is terminal; CMA must not retry it as an outage.
+            Err(AppError::Forbidden(_)) => {
+                return problem(StatusCode::FORBIDDEN, "media_source_refused");
+            }
             Err(_) => return problem(StatusCode::SERVICE_UNAVAILABLE, "provider_unavailable"),
         }
     } else {

@@ -4,7 +4,7 @@ use super::{
     feature_flag_service as flags,
 };
 use crate::{
-    errors::AppResult,
+    errors::{AppError, AppResult},
     models::{
         assistant_conversation::ChannelOrigin,
         channel_message::{COLLECTION_NAME as MESSAGES, ChannelMessage},
@@ -82,7 +82,8 @@ pub fn gateway_text<'a>(activity: &'a serde_json::Value, platform: &str) -> Opti
 }
 
 /// Missing rows produce an explicit failed-media turn; an existing foreign row
-/// is refused rather than laundering an attacker-selected event identifier.
+/// is a deterministic Forbidden refusal rather than laundering an attacker-selected
+/// event identifier. Database failures retain their retryable error class.
 pub async fn presence(
     db: &Database,
     request: &MediaRequest,
@@ -111,18 +112,21 @@ pub async fn presence(
                 + source.embedded_attachments.len()
                 + source.embedded_attachments_omitted)
         }
-        Err(error) => {
+        Err(AppError::NotFound(_)) => {
             if db
                 .collection::<ChannelMessage>(MESSAGES)
                 .find_one(doc! {"_id":&request.source_message_id})
                 .await?
                 .is_some()
             {
-                Err(error)
+                Err(AppError::Forbidden(
+                    "Channel media source is not authorized".into(),
+                ))
             } else {
                 Ok(usize::from(missing_media))
             }
         }
+        Err(error) => Err(error),
     }
 }
 

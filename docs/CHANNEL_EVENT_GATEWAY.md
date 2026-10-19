@@ -503,6 +503,13 @@ existing assistant history owns answer content; additive `nyxbot_events.delivery
 metadata arbitrates streamed versus delayed answers. The implementation contract
 is in [NyxBot channel delivery](chat/09-nyxbot-orchestrator.md#channel-turn-delivery-after-the-provider-stream-closes).
 
+With `assistant:channel-media` enabled, a Lark/Feishu media activity whose source
+ID names an existing row outside its authorized owner/chat/sender/route returns
+HTTP **403** with problem code `media_source_refused`. This refusal is terminal
+and must not be retried. Database failures still return **503**
+`provider_unavailable`; a missing source row produces the fixed unavailable-media
+note in the turn. Source presence does not authorize a provider download.
+
 Verified against CMA `develop`, `docs/CMAEG_Protocol.md` §§8–10 and
 `api/crates/cmaeg/src/{turns,tools/reply_targets}`:
 
