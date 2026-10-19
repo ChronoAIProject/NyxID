@@ -18,10 +18,11 @@ impl SecretBackend {
     pub fn preflight(backend: &str, config_dir: &Path) -> Result<()> {
         match backend {
             "keychain" => KeychainBackend::new("__preflight__").preflight(),
-            _ => {
-                LocalEncryption::load_or_generate(config_dir)?;
+            "file" => {
+                LocalEncryption::initialize(config_dir)?;
                 Ok(())
             }
+            _ => Err(unknown_backend()),
         }
     }
 
@@ -33,7 +34,8 @@ impl SecretBackend {
                 &config.node.id,
                 config,
             )?)),
-            _ => Ok(Self::File(LocalEncryption::load_or_generate(config_dir)?)),
+            "file" => Ok(Self::File(LocalEncryption::open_existing(config_dir)?)),
+            _ => Err(unknown_backend()),
         }
     }
 
@@ -41,7 +43,8 @@ impl SecretBackend {
     pub fn new(backend: &str, node_id: &str, config_dir: &Path) -> Result<Self> {
         match backend {
             "keychain" => Ok(Self::Keychain(KeychainVault::new(node_id))),
-            _ => Ok(Self::File(LocalEncryption::load_or_generate(config_dir)?)),
+            "file" => Ok(Self::File(LocalEncryption::initialize(config_dir)?)),
+            _ => Err(unknown_backend()),
         }
     }
 
@@ -57,7 +60,8 @@ impl SecretBackend {
                     &config,
                 )?))
             }
-            _ => Ok(Self::File(LocalEncryption::load_or_generate(config_dir)?)),
+            "file" => Ok(Self::File(LocalEncryption::open_existing(config_dir)?)),
+            _ => Err(unknown_backend()),
         }
     }
 
@@ -231,5 +235,36 @@ impl SecretBackend {
             Self::File(_) => Ok(()),
             Self::Keychain(vault) => vault.refresh(),
         }
+    }
+}
+
+fn unknown_backend() -> Error {
+    Error::Validation("Unknown node storage backend; expected file or keychain".into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn existing_file_lookup_never_initializes_a_missing_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = NodeConfig::new(String::new(), "test-node".into(), "file".into());
+        assert!(SecretBackend::from_config(&config, dir.path()).is_err());
+        assert!(SecretBackend::from_storage_backend_str("file", dir.path()).is_err());
+        assert!(std::fs::read_dir(dir.path()).unwrap().next().is_none());
+    }
+
+    #[test]
+    fn all_unknown_backend_entry_points_refuse_without_side_effects() {
+        let dir = tempfile::tempdir().unwrap();
+        for backend in ["", "FILE", "keychian", "file "] {
+            let config = NodeConfig::new(String::new(), "test-node".into(), backend.into());
+            assert!(SecretBackend::preflight(backend, dir.path()).is_err());
+            assert!(SecretBackend::from_config(&config, dir.path()).is_err());
+            assert!(SecretBackend::new(backend, "test-node", dir.path()).is_err());
+            assert!(SecretBackend::from_storage_backend_str(backend, dir.path()).is_err());
+        }
+        assert!(std::fs::read_dir(dir.path()).unwrap().next().is_none());
     }
 }

@@ -19,5 +19,6 @@ pub mod signing;
 pub mod ssh_algos;
 pub mod ssh_host_key_store;
 pub mod ssh_node_exec;
+pub mod storage;
 pub mod ws_client;
 pub mod ws_frame_injector;

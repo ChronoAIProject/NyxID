@@ -10,6 +10,13 @@ pub enum Error {
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 
+    /// The destination has already changed. Never rollback-delete credentials
+    /// on this error: reconcile the authoritative configuration first.
+    #[error(
+        "Node storage was installed but durability could not be confirmed; retain credentials and reconcile before retrying"
+    )]
+    StorageDurabilityUncertain(#[source] std::io::Error),
+
     #[error("Config error: {0}")]
     Config(String),
 

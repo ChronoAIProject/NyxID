@@ -1256,3 +1256,59 @@ the original basename negative remain distinct. Node foundation WIP, unrelated
 Docker/package/mobile edits and PM-owned ledgers are excluded from this batch.
 Coordinator owns normal draft-PR publication and subsequent hosted attribution;
 no worker push, merge, deployment, release publication or remote alert mutation.
+
+## Node filesystem publication foundation — preparatory Unix scope
+
+Strict local reads now require bounded private regular single-link files owned
+by the supervisor identity and refuse symlinks. A validated ancestor walk pins
+one directory inode; read, lock, exclusive temporary creation, rename, unlink
+and directory sync all use that fd. Root/current-identity ancestors must reject
+other writers except trusted-owned sticky ancestors. This does not isolate
+same-identity or privileged processes. Missing/insecure/corrupt existing keyfiles
+refuse without generation or repair; explicit initialization alone creates a
+new zeroizing key. Read allocation remains zeroizing on partial/error paths.
+Unknown backend strings refuse without falling back to file storage.
+
+Config publication checks the observed content under a persistent writer-lock
+inode, refuses stale writers/resurrection, enforces the4MiB bound before lock or
+temporary effects, and uses attempt-private0600 files with file/directory sync.
+Atomic no-clobber rename uses macOS RENAME_EXCL/Linux RENAME_NOREPLACE, without
+link/unlink emulation; unsupported systems/filesystems refuse. Post-install
+sync failure is typed StorageDurabilityUncertain and updates the instance's
+observation. Future credential transactions must retain/reconcile references
+on that result; config CAS alone does not fence earlier legacy keychain effects.
+
+Final locked CLI no-run32.015s produces copied1c290a7d7f20e34bbd3c8896e1fa3a45abd879501c21db927c692f7e27e1243e.
+Four tempdir-only filters pass29/0: storage10, encryption8, backend2, config9.
+One ignored child entrypoint is explicitly invoked five times by three passing
+parents. Controls cover competing processes, stale CAS and process exit after
+replacement/new config/new key installation before directory sync. They prove
+process-exit behavior, not hardware power-loss durability. Scoped locked CLI
+bin/tests Clippy with warnings denied passes19.783s, log13eb7655c30008aad3ea31303c412de24eff02105c0d0d9be1add0d5f06f7cf0.
+Feature node-proxy-test library check passes2.976s. Seven command/log pairs
+retain1297 unchanged selected input maps; these are not the exhaustive compiler
+or build-hook identity tree, nor final release embedding evidence.
+
+Frozen w9-node-foundation-subset-v3.json
+(731e2bb9640d5bbb87190e1c603aaaf96a3197914876f337d00b8b03d5a8472b)
+and archiveaf7f228c6ec5a8d86f3c1fa9d1dc68e9605e04e91378727038aa3763959e669b
+bind seven changed sources and four unchanged manifest/lock/toolchain references.
+PM completed-v3-review.json d6b45f4b5af7bc943065995b1a83c9783c0dfaa2930def3f1e2257ad28647f82
+independently binds the maps/build and copied parents2/0, overlapping29. Exact
+source interposition exits immediately after real exclusive rename: nlink1,
+no temp, strict reopen and fresh publication pass. ENOTSUP refuses before
+installation/cleans its own temp; actual directory-sync EIO yields typed
+installed/uncertain with readable destination. These run on disposable macOS
+filesystem paths only; no Linux-native or OS-key-service custody claim.
+
+Original v1 oversized-write/mutable-ancestor/post-install findings, failed
+fsync-only PM harness, macOS variadic-mode build failure, intermediate26-pass
+build, v2 link/unlink interruption defect and original28-pass evidence remain.
+V3 replaces only storage.rs relative to v2. PM accepts this preparatory foundation;
+immutable refs/journals, complete secret mapping, legacy read-only/invalidation,
+all writers/OAuth recovery, migration/runtime leases, separate OS identities,
+Linux/real service and integrated artifacts/scans remain open. Non-Unix custody
+currently explicitly refuses; supported-platform documentation is unfinished.
+Only these seven sources plus this log belong to the foundation batch; unrelated
+Docker/mobile/dependency/PM-ledger paths remain excluded. Coordinator owns PR
+publication; no worker push/merge/deploy or remote mutation occurred.

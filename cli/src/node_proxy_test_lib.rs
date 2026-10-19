@@ -27,6 +27,8 @@ pub mod proxy_upload;
 mod secret_backend;
 #[path = "node/signing.rs"]
 mod signing;
+#[path = "node/storage.rs"]
+pub mod storage;
 pub mod tls;
 
 pub mod ws_client {
@@ -66,7 +68,7 @@ fn test_credentials(
             Some(token) => config::CredentialConfig::new_header(
                 "Authorization".into(),
                 Some(
-                    encryption::LocalEncryption::load_or_generate(config_dir.path())?
+                    encryption::LocalEncryption::open_existing(config_dir.path())?
                         .encrypt(&format!("Bearer {token}"))?,
                 ),
                 Some(target_url.into()),
@@ -75,6 +77,7 @@ fn test_credentials(
         },
     );
     let config = config::NodeConfig {
+        publication: Default::default(),
         server: config::ServerConfig {
             url: String::new(),
             proxy_max_body_size: config::DEFAULT_NODE_PROXY_MAX_BODY_SIZE,

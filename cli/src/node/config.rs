@@ -11,6 +11,10 @@ use super::secret_backend::SecretBackend;
 /// Top-level configuration structure, serialized as TOML.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodeConfig {
+    /// Local optimistic publication state; clones retain independent snapshots.
+    /// This is process state, never a Mongo model or serialized configuration.
+    #[serde(skip)]
+    pub publication: super::storage::Publication,
     pub server: ServerConfig,
     pub node: NodeSection,
     /// Only controlled managed bootstrap may set this. Self-hosted nodes leave
@@ -429,6 +433,7 @@ impl NodeConfig {
     /// Create a new config after registration (no credentials yet).
     pub fn new(server_url: String, node_id: String, storage_backend: String) -> Self {
         Self {
+            publication: Default::default(),
             server: ServerConfig {
                 url: server_url,
                 proxy_max_body_size: DEFAULT_NODE_PROXY_MAX_BODY_SIZE,
@@ -451,10 +456,12 @@ impl NodeConfig {
 
     /// Load config from a TOML file.
     pub fn load(path: &Path) -> Result<Self> {
-        let content = std::fs::read_to_string(path).map_err(|e| {
-            Error::Config(format!("Failed to read config at {}: {e}", path.display()))
-        })?;
-        let config: Self = toml::from_str(&content)?;
+        let bytes = super::storage::read(path, super::storage::MAX_CONFIG_BYTES)?;
+        let content = std::str::from_utf8(&bytes)
+            .map_err(|_| Error::Config("Node configuration is not valid UTF-8".into()))?;
+        let mut config: Self = toml::from_str(content)
+            .map_err(|_| Error::Config("Node configuration is invalid TOML".into()))?;
+        config.publication = super::storage::Publication::observed(&bytes);
         if let Some(binding) = &config.managed_runtime {
             super::managed_config::validate_existing_config(&config, binding).map_err(|_| {
                 Error::Config(
@@ -466,31 +473,11 @@ impl NodeConfig {
     }
 
     /// Save config to a TOML file.
-    /// M1: Write to a temp file with correct permissions, then rename atomically
-    /// to avoid a window where the file has default permissions.
+    /// Serialize cross-process writers and refuse a stale loaded snapshot.
+    /// Secret-backend transactions must also fence their effects before here.
     pub fn save(&self, path: &Path) -> Result<()> {
         let content = toml::to_string_pretty(self)?;
-        #[cfg(unix)]
-        {
-            use std::io::Write;
-            use std::os::unix::fs::OpenOptionsExt;
-            let dir = path.parent().unwrap_or(Path::new("."));
-            let tmp_path = dir.join(".config.toml.tmp");
-            let mut file = std::fs::OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .mode(0o600)
-                .open(&tmp_path)?;
-            file.write_all(content.as_bytes())?;
-            file.sync_all()?;
-            std::fs::rename(&tmp_path, path)?;
-        }
-        #[cfg(not(unix))]
-        {
-            std::fs::write(path, content)?;
-        }
-        Ok(())
+        self.publication.save(path, content.as_bytes())
     }
 
     /// Encrypt and store the auth token.

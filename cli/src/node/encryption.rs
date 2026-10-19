@@ -1,11 +1,10 @@
-use std::io::Write;
 use std::path::Path;
 
 use aes_gcm::aead::{Aead, KeyInit, OsRng};
 use aes_gcm::{Aes256Gcm, Nonce};
 use base64::Engine;
 use rand::RngCore;
-use zeroize::{Zeroize, Zeroizing};
+use zeroize::Zeroizing;
 
 use super::error::{Error, Result};
 
@@ -16,48 +15,45 @@ pub struct LocalEncryption {
 }
 
 impl LocalEncryption {
-    /// Load or generate the local encryption key.
-    /// Creates `<config_dir>/.keyfile` with mode 0600 if it does not exist.
+    /// Open an existing key without creation, repair, or backend fallback.
+    pub fn open_existing(config_dir: &Path) -> Result<Self> {
+        let directory = super::storage::Directory::open(config_dir)?;
+        Self::open_in(&directory)
+    }
+
+    fn open_in(directory: &super::storage::Directory) -> Result<Self> {
+        let bytes = Zeroizing::new(directory.read(std::ffi::OsStr::new(".keyfile"), 32)?);
+        if bytes.len() != 32 {
+            return Err(Error::Encryption(
+                "Node keyfile must contain exactly 32 bytes".into(),
+            ));
+        }
+        let mut key = Zeroizing::new([0u8; 32]);
+        key.copy_from_slice(&bytes);
+        Ok(Self { key })
+    }
+
+    /// Deliberate registration/migration initialization only. Never replaces
+    /// an existing key, even if corrupt, unprotected, or concurrently created.
+    pub fn initialize(config_dir: &Path) -> Result<Self> {
+        let directory = super::storage::Directory::open(config_dir)?;
+        let _writer = directory.writer_lock()?;
+        match Self::open_in(&directory) {
+            Ok(existing) => Ok(existing),
+            Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                let mut key = Zeroizing::new([0u8; 32]);
+                OsRng.fill_bytes(key.as_mut());
+                directory.publish(std::ffi::OsStr::new(".keyfile"), key.as_ref(), false)?;
+                Ok(Self { key })
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Test fixtures explicitly create their own disposable local store.
+    #[cfg(test)]
     pub fn load_or_generate(config_dir: &Path) -> Result<Self> {
-        let keyfile = config_dir.join(".keyfile");
-
-        let key_bytes = if keyfile.exists() {
-            let mut data = std::fs::read(&keyfile)?;
-            if data.len() != 32 {
-                data.zeroize();
-                return Err(Error::Encryption(format!(
-                    "Keyfile has invalid length: expected 32 bytes, got {}",
-                    data.len()
-                )));
-            }
-            let mut key = [0u8; 32];
-            key.copy_from_slice(&data);
-            data.zeroize(); // M7: Zeroize source Vec after copy
-            key
-        } else {
-            let mut key = [0u8; 32];
-            OsRng.fill_bytes(&mut key);
-            // C1: Create keyfile atomically with mode 0600 to avoid race condition
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt;
-                let mut file = std::fs::OpenOptions::new()
-                    .write(true)
-                    .create_new(true)
-                    .mode(0o600)
-                    .open(&keyfile)?;
-                file.write_all(&key)?;
-            }
-            #[cfg(not(unix))]
-            {
-                std::fs::write(&keyfile, &key)?;
-            }
-            key
-        };
-
-        Ok(Self {
-            key: Zeroizing::new(key_bytes),
-        })
+        Self::initialize(config_dir)
     }
 
     /// Encrypt a plaintext string. Returns base64-encoded `nonce || ciphertext`.
@@ -111,6 +107,47 @@ impl LocalEncryption {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn strict_missing_read_has_no_filesystem_side_effects() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(LocalEncryption::open_existing(dir.path()).is_err());
+        assert!(std::fs::read_dir(dir.path()).unwrap().next().is_none());
+    }
+
+    #[test]
+    fn initialization_preserves_existing_key_and_refuses_corrupt_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = LocalEncryption::initialize(dir.path()).unwrap();
+        let ciphertext = first.encrypt("disposable-test-value").unwrap();
+        let before = std::fs::read(dir.path().join(".keyfile")).unwrap();
+        let second = LocalEncryption::initialize(dir.path()).unwrap();
+        assert!(second.decrypt(&ciphertext).is_ok());
+        assert!(before == std::fs::read(dir.path().join(".keyfile")).unwrap());
+        std::fs::write(dir.path().join(".keyfile"), b"corrupt").unwrap();
+        assert!(LocalEncryption::initialize(dir.path()).is_err());
+        assert!(LocalEncryption::open_existing(dir.path()).is_err());
+        assert_eq!(
+            std::fs::read(dir.path().join(".keyfile")).unwrap(),
+            b"corrupt"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn strict_lookup_refuses_unprotected_key_without_changing_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        LocalEncryption::initialize(dir.path()).unwrap();
+        let path = dir.path().join(".keyfile");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
+        assert!(LocalEncryption::open_existing(dir.path()).is_err());
+        assert!(LocalEncryption::initialize(dir.path()).is_err());
+        assert_eq!(
+            std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
+            0o640
+        );
+    }
 
     #[test]
     fn encrypt_decrypt_roundtrip() {
