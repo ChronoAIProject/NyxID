@@ -1418,3 +1418,33 @@ hosted failures, compile failure and4c natural failure remain retained. Node
 transaction/runtime/OS/Linux, W8, full new hosted CI, final artifacts/scans and
 publication gates remain open. Coordinator owns normal draft-PR publication;
 no worker push, merge/rebase, deploy, key-service or guest action occurred.
+
+## W7 Focal cargo-auditable host-tool compatibility correction
+
+Actual generated229 (parents ad233 + 6acab) ARM bootstrap passed source export,
+rustup/toolchain installation and verified cargo-dist, then the pinned GNU
+cargo-auditable failed loading GLIBC_2.32/2.33/2.34 in the pinned Focal image.
+Original raw log118014928748 and its authentication/catalog inputs are retained.
+
+The bounded two-script correction selects the existing pinned same-architecture
+MUSL cargo-auditable asset for Linux GNU hosts. Host detection, Rust build target,
+other tools, catalog pins, HTTPS/download bounds and checksum verification remain.
+Tests exercise both Linux architectures and retain other-tool target selection.
+
+Executed native ARM64 offline Focal controls through the actual verifier/main:
+original authenticated GNU loader refusal; authenticated static MUSL dispatch
+success; tampered static archive rejected before execution with empty destination.
+The MUSL ELF has no PT_INTERP or GLIBC version references. The mounted authenticated
+cargo remains read-only. Its printed1.98.1 version is cargo passthrough; the
+cargo-auditable0.7.7 identity comes from the pinned verified archive.
+
+Final Focal runner exit0/0.766s and complete build-input unit suite18/0,
+runner18.779s, are bound in w7-auditable-static-handoff-v1.json. All3,087 recorded
+unit input entries match before/after and current before this log-only append.
+Earlier harness failures remain: v1 omitted cargo; v2 wrongly expected auditable
+version text from cargo passthrough. The first unit pass used only a limited
+three-entry input list; the final18-test command uses the full3,087-entry map.
+
+This establishes native ARM64 Focal loader/verification/dispatch compatibility.
+Application cargo build, embedded metadata, amd64 execution, final release
+artifacts and hosted integration remain separate open gates. Node WIP excluded.

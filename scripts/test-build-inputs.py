@@ -111,6 +111,23 @@ class BuildPolicy(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unsupported syft host target"):
             bootstrap.target_input("syft", catalog["syft"], "aarch64-unknown-linux-musl")
 
+    def test_auditable_uses_pinned_static_linux_tool_without_changing_build_target(self):
+        catalog = json.loads((ROOT / "security/build-tools.json").read_text())
+        for arch in ("aarch64", "x86_64"):
+            gnu = arch + "-unknown-linux-gnu"
+            musl = arch + "-unknown-linux-musl"
+            self.assertEqual(bootstrap.target_for_host(arch, "Linux", "gnu"), gnu)
+            for target in (gnu, musl):
+                self.assertEqual(bootstrap.target_input("cargo-auditable", catalog["cargo-auditable"], target),
+                                 catalog["cargo-auditable"]["targets"][musl])
+            for tool in ("rustup", "cargo-dist"):
+                self.assertEqual(bootstrap.target_input(tool, catalog[tool], gnu), catalog[tool]["targets"][gnu])
+        for target in ("aarch64-apple-darwin", "x86_64-apple-darwin"):
+            self.assertEqual(bootstrap.target_input("cargo-auditable", catalog["cargo-auditable"], target),
+                             catalog["cargo-auditable"]["targets"][target])
+        with self.assertRaisesRegex(ValueError, "unsupported cargo-auditable host target"):
+            bootstrap.target_input("cargo-auditable", catalog["cargo-auditable"], "mips-unknown-linux-gnu")
+
     def test_unlocked_rust_build_rejected(self):
         self.mutate("backend/Dockerfile", "cargo auditable build --locked", "cargo auditable build", "does not enforce lockfile")
 

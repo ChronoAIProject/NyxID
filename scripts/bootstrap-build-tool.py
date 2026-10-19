@@ -49,6 +49,11 @@ def host_target():
 
 
 def target_input(tool, item, target):
+    # cargo-auditable is a host tool, independent of the Rust build target.
+    # Its pinned GNU binaries require newer glibc than the reviewed Focal
+    # container; use the same-architecture pinned static MUSL host binary.
+    if tool == "cargo-auditable" and target in ("aarch64-unknown-linux-gnu", "x86_64-unknown-linux-gnu"):
+        target = target[:-3] + "musl"
     if "targets" not in item:
         return item
     if target not in item["targets"]:
