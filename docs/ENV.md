@@ -264,6 +264,14 @@ nyxid billing verify-topup-flow --amount-credits 1 --open
 
 Complete the Stripe sandbox checkout opened by the command. The verifier passes only when the reconciled wallet balance increases by exactly the paid amount and the checkout response is Stripe-backed.
 
+Human operators can inspect defaults with `nyxid admin billing config show`,
+prices with `nyxid admin billing service show <slug>` and
+`nyxid admin billing rates --service <slug>`, and integrity with
+`nyxid admin billing ledger verify --all`. Funding through
+`nyxid admin credits grant issue` and managed execution reads through
+`nyxid billing executions list|show` are covered in the
+[native billing reference](../skills/nyxid/references/billing.md).
+
 ## JWT
 
 | Variable | Default | Description |

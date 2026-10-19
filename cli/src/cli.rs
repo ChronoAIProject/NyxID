@@ -1,3 +1,6 @@
+mod billing;
+pub use billing::*;
+
 use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
@@ -320,6 +323,18 @@ pub struct RepoArgs {
 
 #[derive(Subcommand)]
 pub enum AdminCommands {
+    /// Configure billing, exact rates and ledger integrity
+    Billing {
+        #[command(subcommand)]
+        command: AdminBillingCommands,
+    },
+    /// Inspect platform usage in a bounded time window
+    Usage(AdminUsageArgs),
+    /// Manage credit benefits
+    Credits {
+        #[command(subcommand)]
+        command: AdminCreditsCommands,
+    },
     /// Manage NyxID-owned messaging platform credentials
     PlatformCredentials {
         #[command(subcommand)]
@@ -441,7 +456,7 @@ pub struct ManifestArgs {
     #[arg(long)]
     pub file: std::path::PathBuf,
     /// Value for a manifest `${name}` variable, as name=value (repeatable)
-    #[arg(long = "set", value_name = "NAME=VALUE")]
+    #[arg(long = "set", alias = "var", value_name = "NAME=VALUE")]
     pub vars: Vec<String>,
 }
 
@@ -459,14 +474,17 @@ pub enum AdminCatalogCommands {
     },
     /// Interactive wizard: create a provider and service, set the OAuth client, then validate
     Add {
+        /// Print the proposed changes without writing or reading credentials
+        #[arg(long)]
+        dry_run: bool,
         /// Start from a manifest instead of answering every question
         #[arg(long, conflicts_with = "template")]
         file: Option<std::path::PathBuf>,
-        /// Start from a built-in manifest (zoho-mail)
+        /// Start from a built-in manifest (zoho-mail or telnyx-platform)
         #[arg(long)]
         template: Option<String>,
         /// Value for a manifest `${name}` variable, as name=value (repeatable)
-        #[arg(long = "set", value_name = "NAME=VALUE")]
+        #[arg(long = "set", alias = "var", value_name = "NAME=VALUE")]
         vars: Vec<String>,
         /// Write the manifest built by the wizard to this path
         #[arg(long)]
@@ -529,7 +547,7 @@ pub enum AdminToolsCommands {
         skip_credentials: bool,
         #[arg(long)]
         credential_env: Option<String>,
-        #[arg(long = "set", value_name = "NAME=VALUE")]
+        #[arg(long = "set", alias = "var", value_name = "NAME=VALUE")]
         vars: Vec<String>,
         #[command(flatten)]
         auth: AuthArgs,
@@ -540,7 +558,7 @@ pub enum AdminToolsCommands {
         file: std::path::PathBuf,
         #[arg(long)]
         dry_run: bool,
-        #[arg(long = "set", value_name = "NAME=VALUE")]
+        #[arg(long = "set", alias = "var", value_name = "NAME=VALUE")]
         vars: Vec<String>,
         #[command(flatten)]
         auth: AuthArgs,
@@ -549,7 +567,7 @@ pub enum AdminToolsCommands {
     Validate {
         #[arg(long)]
         file: std::path::PathBuf,
-        #[arg(long = "set", value_name = "NAME=VALUE")]
+        #[arg(long = "set", alias = "var", value_name = "NAME=VALUE")]
         vars: Vec<String>,
         #[command(flatten)]
         auth: AuthArgs,
@@ -2111,6 +2129,11 @@ impl BillingUsagePeriodArg {
 
 #[derive(Subcommand)]
 pub enum BillingCommands {
+    /// Inspect self-scoped managed execution metadata
+    Executions {
+        #[command(subcommand)]
+        command: BillingExecutionCommands,
+    },
     /// Show or provision the billing wallet
     Wallet {
         /// Provision the wallet if it does not exist
@@ -4704,6 +4727,9 @@ pub enum ProxyCommands {
         /// Stream the response (for SSE, video, audio, large files)
         #[arg(long)]
         stream: bool,
+        /// Wrap the nonstreaming response in JSON (requires --output json)
+        #[arg(long, conflicts_with = "stream")]
+        envelope: bool,
         /// Use service ID instead of slug
         #[arg(long)]
         by_id: bool,
@@ -4825,6 +4851,23 @@ pub enum OpenClawCommands {
 
 #[derive(Subcommand)]
 pub enum McpCommands {
+    /// List MCP tools and input schemas through Streamable HTTP
+    Tools {
+        #[arg(long)]
+        service: Option<String>,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Invoke an MCP tool once using a saved human session
+    Call {
+        tool: String,
+        #[arg(long)]
+        args: String,
+        #[arg(long)]
+        envelope: bool,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
     /// Discover services and operations visible to the current credential, including input schemas
     Discover {
         #[command(flatten)]
@@ -6508,4 +6551,71 @@ pub enum CatalogEndpointCommands {
         #[command(flatten)]
         auth: AuthArgs,
     },
+}
+
+impl AdminPlatformCredentialsCommands {
+    pub(crate) fn auth(&self) -> &AuthArgs {
+        match self {
+            Self::Show { auth, .. } | Self::Set { auth, .. } | Self::Clear { auth, .. } => auth,
+        }
+    }
+}
+
+impl InviteCodeCommands {
+    pub(crate) fn auth(&self) -> &AuthArgs {
+        match self {
+            Self::Create { auth, .. } | Self::List { auth, .. } | Self::Deactivate { auth, .. } => {
+                auth
+            }
+        }
+    }
+}
+
+impl AdminUserCommands {
+    pub(crate) fn auth(&self) -> &AuthArgs {
+        match self {
+            Self::List { auth, .. }
+            | Self::Show { auth, .. }
+            | Self::SetRole { auth, .. }
+            | Self::Roles { auth, .. }
+            | Self::GrantRole { auth, .. }
+            | Self::RevokeRole { auth, .. } => auth,
+        }
+    }
+}
+
+impl AdminProviderCommands {
+    pub(crate) fn auth(&self) -> &AuthArgs {
+        match self {
+            Self::List { auth, .. }
+            | Self::Show { auth, .. }
+            | Self::Create { auth, .. }
+            | Self::Update { auth, .. }
+            | Self::SetCredentials { auth, .. }
+            | Self::Link { auth, .. }
+            | Self::Delete { auth, .. } => auth,
+        }
+    }
+}
+
+impl AdminToolsCommands {
+    pub(crate) fn auth(&self) -> &AuthArgs {
+        match self {
+            Self::Icon { auth, .. }
+            | Self::Add { auth, .. }
+            | Self::Apply { auth, .. }
+            | Self::Validate { auth, .. } => auth,
+        }
+    }
+}
+
+impl AdminCatalogCommands {
+    pub(crate) fn auth(&self) -> &AuthArgs {
+        match self {
+            Self::Icon { auth, .. }
+            | Self::Add { auth, .. }
+            | Self::Apply { auth, .. }
+            | Self::Validate { auth, .. } => auth,
+        }
+    }
 }

@@ -18,10 +18,16 @@ use crate::api::ApiClient;
 use crate::cli::{AdminCatalogCommands, AdminProviderCommands, AuthArgs, OutputFormat};
 
 /// Built-in manifests for `nyxid admin catalog add --template`.
-const TEMPLATES: &[(&str, &str)] = &[(
-    "zoho-mail",
-    include_str!("../../templates/catalog/zoho-mail.yaml"),
-)];
+const TEMPLATES: &[(&str, &str)] = &[
+    (
+        "zoho-mail",
+        include_str!("../../templates/catalog/zoho-mail.yaml"),
+    ),
+    (
+        "telnyx-platform",
+        include_str!("../../templates/catalog/telnyx-platform.yaml"),
+    ),
+];
 
 /// Fields that would put an OAuth client secret into a file.
 const PROVIDER_SECRET_FIELDS: &[&str] = &["client_id", "client_secret", "clear_client_credentials"];
@@ -313,7 +319,7 @@ pub async fn run_catalog(command: AdminCatalogCommands) -> Result<()> {
             let mut api = if dry_run {
                 ApiClient::from_auth(&auth)?.without_token_refresh()
             } else {
-                ApiClient::from_auth_with_credential_transport(&auth)?
+                ApiClient::from_auth_with_credential_transport(&auth)?.without_token_refresh()
             };
             let rows = apply(&mut api, &manifest, dry_run, &clients).await?;
             print_apply(&rows, dry_run, auth.output)?;
@@ -338,6 +344,7 @@ pub async fn run_catalog(command: AdminCatalogCommands) -> Result<()> {
             client_secret_env,
             skip_credentials,
             yes,
+            dry_run,
             auth,
         } => {
             let interactive = std::io::stdin().is_terminal();
@@ -359,6 +366,14 @@ pub async fn run_catalog(command: AdminCatalogCommands) -> Result<()> {
                 )
                 .with_context(|| format!("Failed to write {}", path.display()))?;
                 eprintln!("Saved manifest to {}", path.display());
+            }
+            if dry_run {
+                let mut api = ApiClient::from_auth_checked(&auth)
+                    .await?
+                    .without_token_refresh();
+                let rows = apply(&mut api, &manifest, true, &BTreeMap::new()).await?;
+                print_apply(&rows, true, auth.output)?;
+                return fail_on_errors(&rows);
             }
             if (client_id_env.is_some() || client_secret_env.is_some())
                 && manifest.providers.len() != 1
@@ -562,58 +577,114 @@ fn resolve_variables(
     declared: &Value,
     provided: &BTreeMap<String, String>,
     interactive: bool,
-) -> Result<BTreeMap<String, String>> {
+) -> Result<BTreeMap<String, Value>> {
     let declared = match declared {
         Value::Null => Map::new(),
         Value::Object(map) => map.clone(),
-        _ => bail!("`variables` must be a map of name to {{ prompt, default, allowed }}"),
+        _ => bail!("variables must be a map of variable specifications"),
     };
     if let Some(unknown) = provided.keys().find(|name| !declared.contains_key(*name)) {
         bail!("--set {unknown}: the manifest declares no such variable");
     }
     let mut values = BTreeMap::new();
     for (name, spec) in &declared {
-        let default = spec.get("default").and_then(Value::as_str);
-        let allowed: Vec<&str> = spec
+        let kind = spec.get("type").and_then(Value::as_str).unwrap_or("string");
+        if !["string", "model_id", "int"].contains(&kind) {
+            bail!("Unknown variable type for {name}");
+        }
+        let default = spec.get("default").filter(|v| !v.is_null()).map(|v| {
+            v.as_str()
+                .map(str::to_owned)
+                .unwrap_or_else(|| v.to_string())
+        });
+        let allowed: Vec<String> = spec
             .get("allowed")
             .and_then(Value::as_array)
-            .map(|items| items.iter().filter_map(Value::as_str).collect())
-            .unwrap_or_default();
+            .into_iter()
+            .flatten()
+            .map(|v| {
+                v.as_str()
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| v.to_string())
+            })
+            .collect();
         let value = match provided.get(name) {
             Some(value) => value.clone(),
             None if interactive => {
                 let label = spec.get("prompt").and_then(Value::as_str).unwrap_or(name);
-                let label = if allowed.is_empty() {
-                    label.to_string()
-                } else {
-                    format!("{label} ({})", allowed.join(", "))
-                };
-                ask(&label, default)?
+                ask(
+                    &if allowed.is_empty() {
+                        label.into()
+                    } else {
+                        format!("{label} ({})", allowed.join(", "))
+                    },
+                    default.as_deref(),
+                )?
             }
             None => default
-                .map(str::to_string)
                 .ok_or_else(|| anyhow!("Set the manifest variable with --set {name}=<value>"))?,
         };
-        if !allowed.is_empty() && !allowed.contains(&value.as_str()) {
+        if !allowed.is_empty() && !allowed.contains(&value) {
             bail!("{name} must be one of: {}", allowed.join(", "));
         }
-        if value.is_empty()
-            || !value
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
-        {
-            bail!("{name} may contain only letters, digits, '.', '-' and '_'");
-        }
-        values.insert(name.clone(), value);
+        let resolved = match kind {
+            "int" => {
+                if value.is_empty() || !value.bytes().all(|b| b.is_ascii_digit()) {
+                    bail!("{name} must be a nonnegative integer");
+                }
+                let number = value
+                    .parse::<u64>()
+                    .with_context(|| format!("{name} is out of integer range"))?;
+                if spec
+                    .get("minimum")
+                    .and_then(Value::as_u64)
+                    .is_some_and(|min| number < min)
+                    || spec
+                        .get("maximum")
+                        .and_then(Value::as_u64)
+                        .is_some_and(|max| number > max)
+                {
+                    bail!("{name} is outside the declared integer bounds");
+                }
+                json!(number)
+            }
+            _ => {
+                if value.is_empty()
+                    || (kind == "model_id" && value.len() > 200)
+                    || !value.bytes().all(|b| {
+                        b.is_ascii_alphanumeric()
+                            || b"._-".contains(&b)
+                            || (kind == "model_id" && b"/:".contains(&b))
+                    })
+                {
+                    bail!("{name} contains characters outside its declared {kind} type");
+                }
+                json!(value)
+            }
+        };
+        values.insert(name.clone(), resolved);
     }
     Ok(values)
 }
 
-fn substitute(value: &mut Value, values: &BTreeMap<String, String>) -> Result<()> {
+fn substitute(value: &mut Value, values: &BTreeMap<String, Value>) -> Result<()> {
     match value {
         Value::String(text) => {
+            if let Some((_, replacement)) = values
+                .iter()
+                .find(|(name, _)| text == &format!("${{{name}}}"))
+            {
+                *value = replacement.clone();
+                return Ok(());
+            }
             for (name, replacement) in values {
-                *text = text.replace(&format!("${{{name}}}"), replacement);
+                *text = text.replace(
+                    &format!("${{{name}}}"),
+                    &replacement
+                        .as_str()
+                        .map(str::to_owned)
+                        .unwrap_or_else(|| replacement.to_string()),
+                );
             }
             if let Some(start) = text.find("${") {
                 bail!(
@@ -1065,6 +1136,9 @@ async fn apply_service_update(
             ..ApplyRow::new("service", slug, "unchanged")
         };
     }
+    if let Some(warning) = platform_access_warning(body, current) {
+        eprintln!("Warning: {warning}");
+    }
     if !dry_run {
         if !changed.is_empty()
             && let Err(error) = api
@@ -1094,6 +1168,34 @@ async fn apply_service_update(
     }
 }
 
+fn platform_access_warning(desired: &Value, current: &Value) -> Option<String> {
+    if current["is_active"] != true {
+        return None;
+    }
+    let next = desired.get("platform_key")?;
+    let disabled = next.get("enabled") == Some(&Value::Bool(false))
+        && current["platform_key"]["enabled"] != false;
+    let clears = next
+        .get("allowed_owner_ids")
+        .is_some_and(|v| v.as_array().is_some_and(Vec::is_empty))
+        && current["platform_key"]["allowed_owner_ids"]
+            .as_array()
+            .is_some_and(|v| !v.is_empty());
+    if disabled || clears {
+        Some(format!(
+            "Applying this manifest to {} {}. Review pilot access before applying.",
+            text(current, "slug"),
+            match (disabled, clears) {
+                (true, true) => "disables the platform key and clears its allowlist",
+                (true, false) => "disables the platform key",
+                _ => "clears the platform-key allowlist",
+            }
+        ))
+    } else {
+        None
+    }
+}
+
 fn changed_fields(desired: &Value, current: &Value, skip: &[&str]) -> Vec<String> {
     desired
         .as_object()
@@ -1102,6 +1204,12 @@ fn changed_fields(desired: &Value, current: &Value, skip: &[&str]) -> Vec<String
                 .iter()
                 .filter(|(key, _)| !skip.contains(&key.as_str()))
                 .filter(|(key, value)| match current.get(key.as_str()) {
+                    Some(existing) if key.as_str() == "billing" && !value.is_null() => {
+                        super::admin_billing::normalize_billing(existing)
+                            != super::admin_billing::normalize_billing(
+                                &super::admin_billing::merged_billing(existing, value),
+                            )
+                    }
                     Some(existing) => existing != *value,
                     None if key.as_str() == "authorization_nonce_required"
                         && *value == &Value::Bool(false) =>
@@ -3209,6 +3317,129 @@ mod tests {
                 .unwrap()
                 .iter()
                 .all(|request| request.method == wiremock::http::Method::GET)
+        );
+    }
+    #[test]
+    fn catalog_billing_sync_and_bson_dates_do_not_create_drift() {
+        let raw: Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/billing/managed-service.json"
+        ))
+        .unwrap();
+        let desired: Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/billing/set-managed.golden.json"
+        ))
+        .unwrap();
+        assert!(changed_fields(&desired, &raw, &[]).is_empty());
+    }
+
+    #[test]
+    fn catalog_billing_normalization_preserves_explicit_clear() {
+        assert_eq!(
+            changed_fields(
+                &json!({"billing":null}),
+                &json!({"billing":{"platform_billable":true}}),
+                &[]
+            ),
+            vec!["billing"]
+        );
+    }
+
+    #[test]
+    fn catalog_billing_normalization_keeps_authored_strings_exact() {
+        let before = json!({"managed_execution":{"tariff_version":"2026-10-20T00:00:00Z"}});
+        let after = json!({"managed_execution":{"tariff_version":"2026-10-19T19:00:00-05:00"}});
+        assert_ne!(
+            super::super::admin_billing::normalize_billing(&before),
+            super::super::admin_billing::normalize_billing(&after)
+        );
+    }
+    #[test]
+    fn telnyx_template_pins_one_disabled_restricted_operation_with_typed_variables() {
+        let manifest = Manifest::from_document(
+            template_document("telnyx-platform").unwrap(),
+            &["model=org/model:1".into(), "max_output_tokens=1024".into()],
+            false,
+        )
+        .unwrap();
+        assert!(manifest.providers.is_empty());
+        assert_eq!(manifest.services.len(), 1);
+        let service = &manifest.services[0];
+        assert_eq!(service["service_category"], "internal");
+        assert_eq!(service["requires_user_credential"], false);
+        assert_eq!(
+            service["platform_key"],
+            json!({"enabled":false,"audience":"restricted","allowed_owner_ids":[]})
+        );
+        assert!(service.get("billing").is_none());
+        let operations = service["operations"].as_array().unwrap();
+        assert_eq!(operations.len(), 1);
+        assert_eq!(operations[0]["method"], "POST");
+        assert_eq!(operations[0]["path"], "/ai/openai/chat/completions");
+        assert_eq!(
+            operations[0]["request_body_schema"]["properties"]["model"]["enum"],
+            json!(["org/model:1"])
+        );
+        assert_eq!(
+            operations[0]["request_body_schema"]["properties"]["max_tokens"]["maximum"],
+            1024
+        );
+        for bad in ["-1", "0", "32769", "1.5", "1e3"] {
+            assert!(
+                Manifest::from_document(
+                    template_document("telnyx-platform").unwrap(),
+                    &[
+                        "model=org/model:1".into(),
+                        format!("max_output_tokens={bad}")
+                    ],
+                    false
+                )
+                .is_err()
+            );
+        }
+    }
+    #[test]
+    fn typed_variables_preserve_default_charset_and_reject_unknown_types() {
+        for spec in [
+            json!({}),
+            json!({"type":"string"}),
+            json!({"type":"unknown"}),
+        ] {
+            assert!(
+                resolve_variables(
+                    &json!({"model":spec}),
+                    &BTreeMap::from([("model".into(), "org/model:1".into())]),
+                    false
+                )
+                .is_err()
+            );
+        }
+        assert!(
+            resolve_variables(
+                &json!({"model":{"type":"model_id"}}),
+                &BTreeMap::from([("model".into(), "org/model:1".into())]),
+                false
+            )
+            .is_ok()
+        );
+    }
+    #[test]
+    fn catalog_apply_warns_before_disabling_or_clearing_live_platform_access() {
+        let live = json!({"slug":"telnyx-platform","is_active":true,"platform_key":{"enabled":true,"allowed_owner_ids":["person"]}});
+        for patch in [
+            json!({"platform_key":{"enabled":false}}),
+            json!({"platform_key":{"allowed_owner_ids":[]}}),
+        ] {
+            assert!(platform_access_warning(&patch, &live).is_some());
+        }
+        assert!(
+            platform_access_warning(&json!({"platform_key":{"enabled":true}}), &live).is_none()
+        );
+        assert!(
+            platform_access_warning(
+                &json!({"platform_key":{"enabled":false}}),
+                &json!({"is_active":false})
+            )
+            .is_none()
         );
     }
 }

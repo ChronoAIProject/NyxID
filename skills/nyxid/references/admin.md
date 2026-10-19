@@ -8,6 +8,7 @@
   - [Platform roles](#platform-roles)
   - [User Management](#user-management)
   - [Invite Codes](#invite-codes)
+- [Billing, usage and credit grants](#billing-usage-and-credit-grants)
 - [MCP Configuration](#mcp-configuration)
 - [Approval and Errors](#approval-and-errors)
 
@@ -113,6 +114,34 @@ Notes for admins helping new users:
 - Create and deactivate are audited (`admin_invite_code_create`, `admin_invite_code_deactivate`) and visible in `nyxid` audit tooling.
 - **Turning the gate off entirely:** disable the global `auth:invitation-code` flag in Admin > Feature Flags. Public registration then works without a code and first-time social sign-ups succeed normally. Enable the flag again to require codes. The change takes effect without a server restart.
 
+## Billing, usage and credit grants
+
+Use [billing.md](billing.md) for complete command flags, exact-decimal prices,
+managed Telnyx setup, grant confirmation, pending execution handling and exit
+codes. All admin and billing commands refuse Agent Key profiles/credentials
+locally; authorize a separate human profile with `nyxid login`.
+
+```sh
+nyxid admin billing config show
+nyxid admin billing config set --default-overdraft-cap-credits default
+nyxid admin billing overview
+nyxid admin billing rates --service telnyx-platform --include-retired
+nyxid admin billing service show telnyx-platform
+nyxid admin billing service update telnyx-platform --file billing.json --dry-run
+nyxid admin billing service resync telnyx-platform
+nyxid admin billing service verify telnyx-platform --managed
+nyxid admin billing ledger verify --all
+nyxid admin usage --period 24h --service telnyx-platform
+nyxid admin credits grant list --user "$PILOT_UUID"
+nyxid billing executions list --since "$T0"
+nyxid billing executions show "$EXECUTION_UUID" --wait --timeout-secs 120
+```
+
+`set-managed` provides typed contract and three-price flags; see the billing
+reference before using it. `credits grant issue` requires a reason and explicit
+confirmation or `--yes`; each invocation creates a new batch. Ready, pending,
+and broken results use exits 0/2; server HTTP errors preserve status and body.
+
 ## MCP Configuration
 
 ```bash
@@ -120,6 +149,11 @@ nyxid mcp config --tool cursor                         # generate MCP config for
 nyxid mcp config --tool claude-code                    # generate MCP config for Claude Code
 nyxid mcp config --tool vscode                         # generate MCP config for VS Code
 ```
+
+The native Streamable HTTP client also supports `nyxid mcp tools --service
+<slug>` and `nyxid mcp call <tool> --args @file --envelope --output json` with a
+human session. Calls may spend funds. An `isError` result exits 1; managed pending
+usage exits 2 with its execution ID. See [billing.md](billing.md#execute-and-correlate).
 
 ## Approval and Errors
 

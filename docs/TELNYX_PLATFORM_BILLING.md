@@ -190,65 +190,117 @@ these additions determine how NyxID safely attributes that spending to users.
 
 ## CLI walkthrough after verification
 
-Use an admin session against the upgraded environment. Copy the two templates
-to local working files, fill in the verified model, bounds, timestamp and exact
-prices, and set the OpenAPI `max_tokens.maximum` to the contract output cap.
-Keep the platform key disabled and the allowlist empty during configuration.
-The service template is an API payload; wrap it in a catalog manifest and add
-its operation before using `admin catalog apply`:
+Use separate saved human profiles for the admin and pilot. Every command below
+uses the native `nyxid` binary. Set nonsecret shell variables to the verified
+model, bounds, tariff evidence and exact **credits per token**. Load
+`TELNYX_PLATFORM_KEY` securely into the environment; never put its value in argv
+or a manifest. The write and paid steps below require the operator's approval
+for the target environment.
 
-```python
-import json
-from pathlib import Path
-
-service = json.loads(Path("telnyx-platform-service.json").read_text())
-spec = json.loads(Path("telnyx-platform.openapi.json").read_text())
-path = "/ai/openai/chat/completions"
-operation = spec["paths"][path]["post"]
-service["operations"] = [{
-    "name": operation["operationId"],
-    "method": "POST",
-    "path": path,
-    "description": operation["summary"],
-    "request_body_schema": operation["requestBody"]["content"]["application/json"]["schema"],
-    "request_content_type": "application/json",
-}]
-Path("telnyx-platform.catalog.json").write_text(
-    json.dumps({"services": [service]}, indent=2) + "\n"
-)
-```
-
-Review the plan and apply it while access is disabled:
+Read the deployment configuration first:
 
 ```sh
-nyxid admin catalog apply --file telnyx-platform.catalog.json --dry-run --base-url https://nyx-api.chrono-ai.fun --output json
-nyxid admin catalog apply --file telnyx-platform.catalog.json --base-url https://nyx-api.chrono-ai.fun --output json
-nyxid service update telnyx-platform --catalog-admin --credential-env TELNYX_PLATFORM_KEY --base-url https://nyx-api.chrono-ai.fun --output json
+nyxid whoami --profile billing-admin --output json
+nyxid admin billing config show --profile billing-admin --output json
+nyxid admin billing overview --profile billing-admin
 ```
 
-Set `TELNYX_PLATFORM_KEY` securely in the shell before the credential command;
-the nonsecret manifest must never contain it. The CLI uses the saved admin
-session and submits the credential through the write-only update. A dry run
-checks the proposed catalog changes; runtime tariff, synchronization and funding
-checks still apply. Confirm all three prices are synced before granting access.
-
-After the activation checklist passes, set `PILOT_PERSON_UUID` to the verified
-pilot person's NyxID UUID and enable the restricted platform audience:
+Use a separately authorized BYOK connection for the upstream probe. The models
+GET is read-only; the completion POST spends vendor funds. `probe-request.json`
+uses the verified model and a bounded text-only request. `probe-response.json`
+must be the raw provider response, including explicit cached-token usage.
 
 ```sh
-nyxid service update telnyx-platform --catalog-admin --platform-key-audience restricted --platform-key-allow "$PILOT_PERSON_UUID" --platform-key-enabled true --base-url https://nyx-api.chrono-ai.fun --output json
+nyxid service add api-telnyx --slug telnyx-verification --credential-env TELNYX_PLATFORM_KEY --terminal --profile billing-admin
+nyxid proxy request telnyx-verification ai/openai/models --profile billing-admin
+nyxid proxy request telnyx-verification ai/openai/chat/completions --method POST --header 'Content-Type: application/json' --data @probe-request.json --profile billing-admin --output json > probe-response.json
 ```
 
-A pilot user with a saved NyxID session can then connect and invoke the operation:
+Generate a nonsecret catalog manifest with platform access disabled and an empty
+restricted allowlist. The template creates one internal service and one
+`chat_completions` operation, pins the model enum and renders the output cap as
+an integer. It contains no billing block. Review the dry run before applying:
 
 ```sh
-nyxid service add telnyx-platform --platform-key --base-url https://nyx-api.chrono-ai.fun
-nyxid proxy request telnyx-platform ai/openai/chat/completions --method POST --data @chat-request.json --base-url https://nyx-api.chrono-ai.fun
+nyxid admin catalog add --template telnyx-platform --var model="$MODEL" --var max_output_tokens="$MAX_OUTPUT_TOKENS" --save telnyx-platform.catalog.json --dry-run --profile billing-admin --output json
+nyxid admin catalog apply --file telnyx-platform.catalog.json --dry-run --profile billing-admin --output json
+nyxid admin catalog apply --file telnyx-platform.catalog.json --profile billing-admin --output json
 ```
 
-`chat-request.json` uses the request shape above and the verified model. This
-POST spends real Telnyx funds and NyxID credits. MCP discovers the same published
-operation for authorized callers and uses the same managed billing runner.
+Author the managed contract and the three exact prices. Review its request body,
+field diff and conservative full reservation ceiling before running the same
+command without `--dry-run`:
+
+```sh
+nyxid admin billing service set-managed telnyx-platform \
+  --model "$MODEL" --max-input-tokens "$MAX_INPUT_TOKENS" \
+  --max-output-tokens "$MAX_OUTPUT_TOKENS" --max-request-bytes "$MAX_REQUEST_BYTES" \
+  --max-response-bytes "$MAX_RESPONSE_BYTES" --tariff-version "$TARIFF_VERSION" \
+  --tariff-source "$TARIFF_SOURCE" --tariff-verified-at "$TARIFF_VERIFIED_AT" \
+  --input-price "$INPUT_PRICE" --output-price "$OUTPUT_PRICE" \
+  --cache-read-price "$CACHE_READ_PRICE" --probe-response probe-response.json \
+  --dry-run --profile billing-admin --output json
+nyxid service update telnyx-platform --catalog-admin --credential-env TELNYX_PLATFORM_KEY --profile billing-admin --output json
+nyxid admin billing service show telnyx-platform --profile billing-admin
+nyxid admin billing rates --service telnyx-platform --profile billing-admin
+nyxid admin billing service verify telnyx-platform --managed --profile billing-admin --output json
+```
+
+Readiness must exit 0 before enabling access. It checks configuration and fresh
+exact rates; it does not prove replica versions, payer funding, tariff provenance
+or upstream behavior. If synchronization failed, inspect its row errors, correct
+the cause, then explicitly run `nyxid admin billing service resync telnyx-platform
+--profile billing-admin`. Resync is a write, runs once, and exits 2 if any row
+remains unsynced. The response's `synced` flag means a change occurred.
+
+The pilot provisions their own wallet/subscription. An admin credit grant funds
+the person but does not provision their wallet or enable their billing rollout.
+Confirm the pilot's rollout separately and review every recipient's returned
+`activation_state`; a pending activation grant cannot be spent.
+
+```sh
+nyxid billing wallet --provision --profile pilot --output json
+nyxid admin credits grant issue --user "$PILOT_PERSON_UUID" --amount 5 --service telnyx-platform --reason "Attended Telnyx pilot" --profile billing-admin --output json
+nyxid admin credits grant list --user "$PILOT_PERSON_UUID" --profile billing-admin --output json
+nyxid service update telnyx-platform --catalog-admin --platform-key-audience restricted --platform-key-allow "$PILOT_PERSON_UUID" --platform-key-enabled true --profile billing-admin --output json
+nyxid service add telnyx-platform --platform-key --profile pilot
+```
+
+The next HTTP POST and MCP call each spend real Telnyx funds and NyxID credits.
+Record nonsecret RFC3339 timestamps `T0` and `T1` around one attended call at a
+time. `chat-request.json` uses the same flat text-chat shape for HTTP and MCP.
+
+```sh
+nyxid proxy request telnyx-platform ai/openai/chat/completions --method POST --header 'Content-Type: application/json' --data @chat-request.json --profile pilot --output json --envelope > http.json
+nyxid billing executions show "$(jq -r .execution_id http.json)" --wait --timeout-secs 120 --profile pilot --output json
+nyxid mcp tools --service telnyx-platform --profile pilot --output json
+nyxid mcp call telnyx-platform__chat_completions --args @chat-request.json --envelope --profile pilot --output json
+nyxid billing executions list --since "$T0" --profile pilot --output json
+nyxid billing executions show "$MCP_EXECUTION_UUID" --wait --timeout-secs 120 --profile pilot --output json
+nyxid admin usage --from "$T0" --to "$T1" --service telnyx-platform --user "$PILOT_PERSON_UUID" --profile billing-admin --output json
+nyxid admin billing ledger verify --all --profile billing-admin --output json
+```
+
+A successful HTTP call carries an execution ID; unchanged proxy invocations keep
+the provider body on stdout and print the ID on stderr. The envelope includes
+it in JSON. A pending HTTP or MCP outcome exits 2 with the ID: inspect execution
+state and do not automatically repeat the paid request. MCP success currently
+omits the ID, so identify `MCP_EXECUTION_UUID` from the self-scoped latest-50 list
+in the attended window. The MCP client searches lazily exposed service tools and
+uses the server's universal dispatcher to activate and execute them.
+
+Execution reads expose state and reservation ceilings. Compare admin usage in
+the tight attended window with provider usage: input = prompt minus cached,
+output = completion, cache-read = cached. Compare the exact gross cost with
+those quantities multiplied by the three configured rates. Vendor invoice parity
+still requires Telnyx's records. To stop access, run:
+
+```sh
+nyxid service update telnyx-platform --catalog-admin --platform-key-enabled false --profile billing-admin --output json
+```
+
+See [the CLI billing reference](../skills/nyxid/references/billing.md) for file
+updates, overdraft defaults, grants and output/exit contracts.
 
 ## Local validation
 
@@ -264,3 +316,21 @@ CARGO_PROFILE_TEST_DEBUG=line-tables-only cargo +1.98.1 test --locked -j 1 -p ny
 
 The managed lifecycle tests require transaction support and fail if MongoDB is
 unavailable. They make no Telnyx requests and do not spend vendor funds.
+
+### Local backend without Lago
+
+CLI unit and binary tests use wiremock and need neither MongoDB nor Lago. For
+manual write-path checks, use the repository's local development setup from
+[ENV.md](ENV.md) with the Docker Compose MongoDB replica set, development RSA
+keys and a disposable database. Copy `.env.example` to an ignored local env
+file, select a loopback `BASE_URL`, set `BILLING_ENABLED=true`, and leave
+`LAGO_API_URL` and `LAGO_API_KEY` unset. Start the backend with that environment
+and log in to a separate human admin profile against its loopback URL.
+
+Use `--base-url http://localhost:3001 --profile local-billing` on the catalog,
+set-managed, service-show, resync and readiness commands above. Use only
+synthetic tariff evidence and no upstream credential. This exercises failed
+price synchronization and row error rendering without a vendor request; resync
+and readiness should exit 2. A successful Lago sync and paid execution require
+the separately authorized live acceptance run. Do not point this setup at a
+shared database or production API.

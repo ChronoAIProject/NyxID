@@ -1,10 +1,143 @@
-use anyhow::Result;
+mod client;
+
+use anyhow::{Context, Result, bail};
+use serde_json::{Value, json};
 
 use crate::api::ApiClient;
 use crate::cli::{McpCommands, OutputFormat};
 
 pub async fn run(command: McpCommands) -> Result<()> {
     match command {
+        McpCommands::Tools { service, auth } => {
+            let api = super::billing_support::human_api(&auth)
+                .await?
+                .without_token_refresh();
+            let mut client = client::Client::new(api);
+            let mut tools = vec![];
+            let mut cursor = None;
+            let mut seen = std::collections::BTreeSet::new();
+            loop {
+                let params = cursor
+                    .as_ref()
+                    .map_or_else(|| json!({}), |cursor| json!({"cursor":cursor}));
+                let result = client.request("tools/list", params).await?;
+                tools.extend(
+                    result["tools"]
+                        .as_array()
+                        .context("MCP tools/list has no tools array")?
+                        .iter()
+                        .cloned(),
+                );
+                cursor = result["nextCursor"].as_str().map(str::to_owned);
+                let Some(next) = &cursor else {
+                    break;
+                };
+                if !seen.insert(next.clone()) {
+                    bail!("MCP tools/list returned a repeated cursor");
+                }
+            }
+            if let Some(service) = service {
+                // Human sessions expose service tools lazily. Search discovers
+                // schemas without activating or executing the service.
+                if tools.iter().any(|tool| tool["name"] == "nyx__search_tools") {
+                    let result = client
+                        .request(
+                            "tools/call",
+                            json!({"name":"nyx__search_tools","arguments":{"query":service}}),
+                        )
+                        .await?;
+                    if result["isError"] == true {
+                        bail!("MCP service tool discovery failed");
+                    }
+                    let discovered = result["content"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|content| content["text"].as_str())
+                        .filter_map(|text| serde_json::from_str::<Value>(text).ok())
+                        .find(|value| value["matches"].is_array())
+                        .context("MCP tool discovery has no matches array")?;
+                    for tool in discovered["matches"].as_array().unwrap() {
+                        if !tools
+                            .iter()
+                            .any(|existing| existing["name"] == tool["name"])
+                        {
+                            tools.push(tool.clone());
+                        }
+                    }
+                }
+                tools.retain(|tool| {
+                    tool["name"]
+                        .as_str()
+                        .is_some_and(|name| name.starts_with(&format!("{service}__")))
+                });
+            }
+            let result = json!({"tools":tools});
+            super::billing_support::print(&result, auth.output, || {
+                super::billing_support::table(
+                    &["Tool", "Description", "Input schema"],
+                    tools.iter().map(|tool| {
+                        ["name", "description", "inputSchema"]
+                            .iter()
+                            .map(|key| super::billing_support::text(&tool[*key]))
+                            .collect()
+                    }),
+                )
+            })
+        }
+        McpCommands::Call {
+            tool,
+            args,
+            envelope,
+            auth,
+        } => {
+            super::billing_support::require_human(&auth)?;
+            let raw = if let Some(path) = args.strip_prefix('@') {
+                std::fs::read_to_string(path).context("Failed to read MCP arguments file")?
+            } else {
+                args
+            };
+            let args: Value =
+                serde_json::from_str(&raw).context("MCP --args must be a JSON object or @file")?;
+            if !args.is_object() {
+                bail!("MCP --args must be a JSON object");
+            }
+            let api = super::billing_support::human_api(&auth)
+                .await?
+                .without_token_refresh();
+            let mut client = client::Client::new(api);
+            let params = if tool.starts_with("nyx__") || tool.starts_with("nyxid__") {
+                json!({"name":tool,"arguments":args})
+            } else {
+                // The universal dispatcher activates the service in this fresh
+                // session and applies the same execution authorization gates.
+                json!({"name":"nyx__call_tool","arguments":{"tool_name":tool,"arguments_json":serde_json::to_string(&args)?}})
+            };
+            let result = client.request("tools/call", params).await?;
+            let is_error = result["isError"] == true;
+            if is_error
+                && let Some(id) = result["content"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|content| content["text"].as_str())
+                    .find_map(super::billing_support::pending_id)
+            {
+                return super::billing_support::pending(id, auth.output);
+            }
+            let value = if envelope {
+                json!({"tool":tool,"execution_id":null,"result":result})
+            } else {
+                result
+            };
+            super::billing_support::print(&value, auth.output, || {
+                super::billing_support::fields(&value)
+            })?;
+            if is_error {
+                return Err(super::admin_tools::PendingReadiness { exit_code: 1 }.into());
+            }
+            Ok(())
+        }
         McpCommands::Discover { auth } => {
             let mut api = ApiClient::from_auth_checked(&auth).await?;
             let catalog: serde_json::Value = api.get("/mcp/config").await?;
@@ -144,3 +277,7 @@ mod tests {
         assert_eq!(v["base_url"], "https://auth.nyxid.dev");
     }
 }
+
+#[cfg(test)]
+#[path = "mcp/tests.rs"]
+mod transport_tests;

@@ -597,6 +597,15 @@ nyxid admin catalog apply --file m.yaml [--dry-run] | validate --file m.yaml
 nyxid admin provider create | update <SLUG>            # wizard without --file; then offers the OAuth client
 nyxid admin provider list | show | set-credentials <SLUG>
 
+# Billing administration (human sessions; reads admin/operator, writes admin)
+nyxid admin billing config show|set | overview | rates [--service <SLUG|UUID>]
+nyxid admin billing service show|update|set-managed|resync|verify <SLUG|UUID>
+nyxid admin billing ledger verify [--all]
+nyxid admin usage [--period 24h|7d|30d | --from RFC3339 --to RFC3339]
+nyxid admin credits grant issue|list|revoke
+nyxid billing wallet [--provision] [--owner-id <UUID>] | executions list|show
+nyxid mcp tools [--service <SLUG>] | call <TOOL> --args @file [--envelope]
+
 # Agent isolation
 nyxid api-key create --name "coding-agent" --platform claude-code
 nyxid api-key list | show <ID_OR_NAME> | rotate <ID_OR_NAME> | delete <ID_OR_NAME>

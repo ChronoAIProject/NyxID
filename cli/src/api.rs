@@ -161,6 +161,7 @@ fn cli_http_client_builder(profile: Option<&str>) -> Result<reqwest::ClientBuild
 
     let mut builder = crate::tls::client_builder()?
         .user_agent(CLI_USER_AGENT)
+        .retry(reqwest::retry::never())
         .connect_timeout(std::time::Duration::from_secs(10));
 
     if telemetry_configured && user_consented {
@@ -748,6 +749,30 @@ impl ApiClient {
             let body = resp.text().await.unwrap_or_default();
             Err(ApiError::new(format!("POST {path}"), status, body).into())
         }
+    }
+
+    /// Streamable HTTP MCP uses the root /mcp route. Never replay an uncertain call.
+    pub(crate) async fn mcp_request(
+        &self,
+        session: Option<&str>,
+        version: &str,
+        body: &serde_json::Value,
+    ) -> Result<reqwest::Response> {
+        let mut request = self
+            .client
+            .post(format!("{}/mcp", self.base_url_root()))
+            .bearer_auth(&self.access_token)
+            .header("Accept", "application/json, text/event-stream")
+            .header("MCP-Protocol-Version", version)
+            .timeout(std::time::Duration::from_secs(120))
+            .json(body);
+        if let Some(session) = session {
+            request = request.header("Mcp-Session-Id", session);
+        }
+        request
+            .send()
+            .await
+            .context("MCP request failed; inspect execution state before retrying a call")
     }
 
     pub async fn proxy_request(

@@ -133,6 +133,7 @@ Load the matching `references/<file>.md` when the user asks for one of these top
 | "channel bot", "register a bot", conversation routing, proactive / unprompted messages, `/channel-relay/send`, `/channel-relay/conversations`, `/channel-relay/reply`, callback / reply tokens, ADR-013 passthrough semantics, device events / HTTP Event Gateway, `/channel-events/{id}` | `references/channels.md` |
 | "inbound trigger", "webhook trigger", provider event relay, bearer/query/HMAC trigger verification, durable webhook delivery, delivery history/replay, signing-key rotation, Lark Base automation to Aevatar | `references/triggers.md` |
 | OpenClaw setup, `llm-openclaw` transport selection, `x-openclaw-scopes` default header | `references/openclaw.md` |
+| Billing configuration, exact prices, Telnyx managed offerings, credit grants, wallet funding, execution IDs, pending usage verification, `nyxid admin billing`, `nyxid admin credits`, `nyxid admin usage`, `nyxid billing executions`, `nyxid mcp tools/call` | `references/billing.md` |
 | `nyxid whoami / status / profile / mfa / session`, `nyxid admin user list/show/set-role`, platform roles (admin / operator / user), `nyxid admin invite-code`, `nyxid mcp config`, error codes (1001/1002/7000/7001/8003, downstream 403 / WAF / User-Agent override) | `references/admin.md` |
 | "list / revoke broker authorizations", "what apps hold credentials for me", `/settings/authorizations`, `nyxid oauth bindings`, OAuth `binding_id` / token vault, distinction from "Authorized Apps" (consents) | `references/oauth-broker.md` |
 
