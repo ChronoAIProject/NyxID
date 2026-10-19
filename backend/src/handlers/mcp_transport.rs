@@ -79,6 +79,7 @@ struct JsonRpcError {
 enum ToolOutcome {
     Completed,
     Error,
+    PolicyRefusal,
 }
 
 #[derive(Clone)]
@@ -103,7 +104,13 @@ struct RpcFailureCode(i32);
 
 fn tool_failure(response: &Response) -> Option<crate::models::assistant_conversation::ToolFailure> {
     use crate::models::assistant_conversation::ToolFailure;
-    if tool_succeeded(response) {
+    if tool_succeeded(response)
+        || (response.status().is_success()
+            && matches!(
+                response.extensions().get::<ToolOutcome>(),
+                Some(ToolOutcome::PolicyRefusal)
+            ))
+    {
         return None;
     }
     if let Some(failure) = response.extensions().get::<ToolFailure>() {
@@ -273,6 +280,21 @@ fn content_result(
     )
 }
 
+fn classify_service_tool_response(
+    response: &mut Response,
+    is_policy_refusal: bool,
+    failure: Option<crate::models::assistant_conversation::ToolFailure>,
+) {
+    if is_policy_refusal {
+        response
+            .extensions_mut()
+            .remove::<crate::models::assistant_conversation::ToolFailure>();
+        response.extensions_mut().insert(ToolOutcome::PolicyRefusal);
+    } else if let Some(failure) = failure {
+        response.extensions_mut().insert(failure);
+    }
+}
+
 /// Largest image embedded in an MCP result. NyxAgent caps a whole MCP
 /// response at 2 MiB and base64 adds a third; larger images get a note only.
 const MAX_INLINE_TOOL_IMAGE_BYTES: usize = 1024 * 1024;
@@ -428,13 +450,30 @@ async fn service_tool_content(
             None,
         );
     }
+    let resource_note = if let (Some(chat), Some(read)) =
+        (auth.chat.as_ref(), response.resources.as_ref())
+    {
+        match crate::services::assistant_resource_service::annotations(&state.db, chat, read).await
+        {
+            Ok(note) => note,
+            Err(error) => {
+                tracing::debug!(
+                    code = error.error_code(),
+                    "Optional image resource references unavailable"
+                );
+                String::new()
+            }
+        }
+    } else {
+        String::new()
+    };
     let status = response.status;
     let is_error = !(200..300).contains(&status);
     let Some(media) = response.media.filter(|_| !is_error) else {
         let text = if is_error {
             format!("Error ({status}): {}", response.text)
         } else {
-            response.text
+            format!("{resource_note}{}", response.text)
         };
         return (
             vec![serde_json::json!({ "type": "text", "text": text })],
@@ -2127,6 +2166,14 @@ async fn handle_tools_list(
         tool_defs.extend(tools);
     }
 
+    if auth
+        .chat
+        .as_ref()
+        .is_some_and(|chat| !chat.guest || !chat.is_orchestrator())
+    {
+        tool_defs.push(crate::services::assistant_resource_service::definition());
+    }
+
     let tools_json: Vec<serde_json::Value> = tool_defs
         .iter()
         .map(|t| {
@@ -2162,6 +2209,7 @@ fn native_activity_names() -> &'static std::collections::HashSet<String> {
         std::sync::LazyLock::new(|| {
             let mut definitions = mcp_service::generate_tool_definitions(&[], None);
             definitions.extend(crate::services::machine_tools::definitions());
+            definitions.push(crate::services::assistant_resource_service::definition());
             definitions.push(crate::services::assistant_upload_service::definition());
             definitions.push(crate::services::assistant_upload_service::list_definition());
             definitions
@@ -2501,6 +2549,7 @@ async fn dispatch_tools_call(
                 | "nyx__oracle_attach"
                 | "nyx__oracle_extract"
                 | "nyx__oracle_session"
+                | "nyx__resource_get"
         );
         let known_account_tool = tool_name.strip_prefix("nyxid__").is_some_and(|name| {
             crate::services::assistant_account_tools::TOOL_NAMES.contains(&name)
@@ -2560,6 +2609,7 @@ async fn dispatch_tools_call(
                 | "nyx__oracle_result"
                 | "nyx__oracle_session"
                 | "nyx__ssh_exec" | "nyx__oracle_ask" | "nyx__oracle_attach" | "nyx__oracle_extract"
+                | "nyx__resource_get"
                 | "nyx__attachment_read" | "nyx__attachment_list" | "nyx__conversation_history"
                 | "nyx__machine_list"
                 | "nyx__saved_logins"
@@ -2622,6 +2672,17 @@ async fn dispatch_tools_call(
     }
     if crate::services::machine_tools::is_tool(tool_name) {
         return handle_machine_tool(state, auth, tool_name, arguments, request.id.clone()).await;
+    }
+    if tool_name == crate::services::assistant_resource_service::TOOL_NAME {
+        return Box::pin(handle_resource_get(
+            state,
+            auth,
+            session_id,
+            &arguments,
+            request.id.clone(),
+            billing_egress_permit,
+        ))
+        .await;
     }
     if tool_name == "nyx__attachment_read" {
         return Box::pin(handle_attachment_read(
@@ -2693,6 +2754,7 @@ async fn dispatch_tools_call(
         tool_name,
         arguments,
         billing_egress_permit,
+        None,
     ))
     .await
 }
@@ -2823,302 +2885,498 @@ fn dispatch_meta_tool<'a>(
     })
 }
 
-async fn dispatch_service_tool(
+async fn handle_resource_get(
     state: &AppState,
     auth: &McpAuthContext,
     session_id: Option<&str>,
-    request: &JsonRpcRequest,
-    tool_name: &str,
-    arguments: serde_json::Value,
+    arguments: &serde_json::Value,
+    request_id: Option<serde_json::Value>,
     billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
 ) -> Response {
-    // -- Service tool: verify activation (when stateful), load, resolve, execute --
-    let activated = match session_id {
-        Some(sid) => match state.mcp_sessions.get_activated_service_ids(sid).await {
-            Ok(activated) => Some(activated),
-            Err(error) => {
-                tracing::error!(%error, "Failed to load activated MCP services");
-                return rpc_error(request.id.clone(), -32603, "Internal error");
-            }
-        },
-        None => None,
+    use crate::services::assistant_resource_service as resources;
+    if let Some(refused) = guest_tool_refusal(auth, resources::TOOL_NAME, request_id.clone()) {
+        return refused;
+    }
+    let Some(chat) = &auth.chat else {
+        return tool_result(
+            request_id,
+            "Resource retrieval requires an assistant turn.",
+            true,
+        );
     };
-
-    // Scoped discovery so resolve_tool_call can't match tools whose
-    // only dispatchable routes fall outside the caller's API-key node scope
-    // (twentieth-round Codex P2).
-    let catalog = match mcp_service::load_operation_catalog(
+    let parsed = match serde_json::from_value::<resources::GetRequest>(arguments.clone()) {
+        Ok(parsed) => parsed,
+        Err(_) => return tool_result(request_id, "Use ref and output=attach or inspect.", true),
+    };
+    let row = match resources::load(
         &state.db,
-        state.node_ws_manager.as_ref(),
-        &auth.user_id,
-        mcp_node_scope(auth),
-        mcp_service_scope(auth),
+        chat,
+        &parsed.resource_ref,
+        parsed.output,
+        parsed.acknowledgement_id.as_deref(),
     )
     .await
     {
-        Ok(catalog) => catalog,
-        Err(e) => {
-            tracing::error!("Failed to load tools for execution: {e}");
-            return tool_result(request.id.clone(), "Failed to load tools", true);
-        }
+        Ok(row) => row,
+        Err(error) => return tool_result(request_id, &error.to_string(), true),
     };
-
-    let services = catalog.services;
-    let (service, endpoint) = match mcp_service::resolve_tool_call(tool_name, &services) {
-        Some(pair) => pair,
-        None => {
-            if mcp_service::unpublished_tool(
-                &state.db,
-                tool_name,
-                &services,
-                &catalog.unpublished_services,
-            )
-            .await
-            .unwrap_or(false)
-            {
-                return tool_result(request.id.clone(), &serde_json::json!({"error":"tool_operation_not_published","error_code":12700,"message":crate::errors::AppError::ToolOperationNotPublished.to_string()}).to_string(), true);
-            }
-            if mcp_service::inactive_workspace_tool(tool_name, &services) {
-                return tool_result(
-                    request.id.clone(),
-                    &crate::errors::AppError::WorkspaceDestinationsNotActivated.to_string(),
-                    true,
-                );
-            }
-            return tool_result(
-                request.id.clone(),
-                &format!(
-                    "Unknown tool: {tool_name}. Use nyx__search_tools to find and activate tools."
-                ),
-                true,
-            );
-        }
-    };
-
-    if let Some(response) = chat_service_gate(state, auth, service, request.id.clone()).await {
-        return response;
-    }
-    // Enforce API-key service scope before activation/execute -- scoped keys
-    // must not reach execute_tool for services outside their allow-list.
-    if let Err(resp) = ensure_service_in_scope(auth, service, request.id.clone()) {
-        return resp;
-    }
-
-    // Guard: only allow execution if the service is activated (stateful mode).
-    // Stateless API-key requests bypass the activation gate.
-    if let Some(ref activated_set) = activated
-        && !activated_set.contains(&service.service_id)
-    {
-        return tool_result(
-            request.id.clone(),
-            &format!(
-                "Tool '{}' belongs to service '{}' which is not activated. \
-                 Use nyx__search_tools to activate it first.",
-                tool_name, service.service_name,
-            ),
-            true,
-        );
-    }
-
-    let execution_arguments = webhook_execution_arguments(auth, &arguments);
-    let prepared =
-        match mcp_service::prepare_proxy_tool_call(service, endpoint, &execution_arguments) {
-            Ok(prepared) => prepared.with_acknowledgement(
-                auth.chat
+    let tool_name = row.source.tool_name.clone();
+    let mut source_arguments = row.arguments.clone();
+    let acknowledgement_id = parsed.acknowledgement_id.as_deref().or_else(|| {
+        (chat.turn_id.as_deref() != Some(row.turn_id.as_str()))
+            .then(|| {
+                row.pending_confirmation
                     .as_ref()
-                    .and_then(|_| arguments["acknowledgement_id"].as_str()),
-            ),
+                    .map(|pending| pending.acknowledgement_id.as_str())
+            })
+            .flatten()
+    });
+    if let Some(id) = acknowledgement_id {
+        source_arguments["acknowledgement_id"] = serde_json::json!(id);
+    }
+    let request = JsonRpcRequest {
+        jsonrpc: JSONRPC_VERSION.into(),
+        id: request_id,
+        method: "tools/call".into(),
+        params: None,
+    };
+    Box::pin(dispatch_service_tool(
+        state,
+        auth,
+        session_id,
+        &request,
+        &tool_name,
+        source_arguments,
+        billing_egress_permit,
+        Some((row, parsed.output)),
+    ))
+    .await
+}
+
+async fn materialize_resource_content(
+    state: &AppState,
+    auth: &McpAuthContext,
+    row: &crate::models::assistant_resource::AssistantResource,
+    output: crate::services::assistant_resource_service::Output,
+    response: mcp_service::ToolResponse,
+) -> crate::errors::AppResult<Vec<serde_json::Value>> {
+    use crate::services::assistant_resource_service as resources;
+    if !(200..300).contains(&response.status) {
+        return Err(crate::errors::AppError::BadRequest(format!(
+            "Source read failed ({}); image was not attached.",
+            response.status
+        )));
+    }
+    let chat = auth
+        .chat
+        .as_ref()
+        .ok_or(crate::errors::AppError::AssistantTurnRequired)?;
+    resources::require_live(&state.db, chat).await?;
+    let read = response.resources.as_ref().ok_or_else(resources::stale)?;
+    let candidate = resources::select(row, read)?;
+    let current = resources::in_current_turn(&state.db, chat, row, read).await?;
+    let row = &current;
+    let media = if row.completed {
+        None
+    } else {
+        Some(resources::fetch(candidate).await?)
+    };
+    let attached = crate::services::assistant_nyxagent::attach_resource_image(
+        &state.db,
+        &state.encryption_keys,
+        chat,
+        row,
+        media.as_ref(),
+        output,
+    )
+    .await?;
+    let mut note = format!(
+        "Image retained in this turn as attachment {} ({}, {} bytes).",
+        attached.attachment.id, attached.attachment.content_type, attached.attachment.size
+    );
+    if output == resources::Output::Attach {
+        let (destination, supported) =
+            resolved_image_destination(state, &chat.user_id, &attached.routing).await;
+        note.push_str(&image_note(
+            &destination,
+            attached.guest,
+            supported,
+            attached.routing.also.len(),
+        ));
+    } else {
+        note.push_str(" Requested model inspection; pixels are supplied if this model supports images. This request does not enable channel delivery.");
+    }
+    Ok(vec![serde_json::json!({"type":"text","text":note})])
+}
+
+#[allow(clippy::too_many_arguments)]
+fn dispatch_service_tool<'a>(
+    state: &'a AppState,
+    auth: &'a McpAuthContext,
+    session_id: Option<&'a str>,
+    request: &'a JsonRpcRequest,
+    tool_name: &'a str,
+    arguments: serde_json::Value,
+    billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
+    resource: Option<(
+        crate::models::assistant_resource::AssistantResource,
+        crate::services::assistant_resource_service::Output,
+    )>,
+) -> futures::future::BoxFuture<'a, Response> {
+    Box::pin(async move {
+        // -- Service tool: verify activation (when stateful), load, resolve, execute --
+        let activated = match session_id {
+            Some(sid) => match state.mcp_sessions.get_activated_service_ids(sid).await {
+                Ok(activated) => Some(activated),
+                Err(error) => {
+                    tracing::error!(%error, "Failed to load activated MCP services");
+                    return rpc_error(request.id.clone(), -32603, "Internal error");
+                }
+            },
+            None => None,
+        };
+
+        // Scoped discovery so resolve_tool_call can't match tools whose
+        // only dispatchable routes fall outside the caller's API-key node scope
+        // (twentieth-round Codex P2).
+        let catalog = match mcp_service::load_operation_catalog(
+            &state.db,
+            state.node_ws_manager.as_ref(),
+            &auth.user_id,
+            mcp_node_scope(auth),
+            mcp_service_scope(auth),
+        )
+        .await
+        {
+            Ok(catalog) => catalog,
             Err(e) => {
+                tracing::error!("Failed to load tools for execution: {e}");
+                return tool_result(request.id.clone(), "Failed to load tools", true);
+            }
+        };
+
+        let services = catalog.services;
+        let (service, endpoint) = match mcp_service::resolve_tool_call(tool_name, &services) {
+            Some(pair) => pair,
+            None => {
+                if mcp_service::unpublished_tool(
+                    &state.db,
+                    tool_name,
+                    &services,
+                    &catalog.unpublished_services,
+                )
+                .await
+                .unwrap_or(false)
+                {
+                    return tool_result(request.id.clone(), &serde_json::json!({"error":"tool_operation_not_published","error_code":12700,"message":crate::errors::AppError::ToolOperationNotPublished.to_string()}).to_string(), true);
+                }
+                if mcp_service::inactive_workspace_tool(tool_name, &services) {
+                    return tool_result(
+                        request.id.clone(),
+                        &crate::errors::AppError::WorkspaceDestinationsNotActivated.to_string(),
+                        true,
+                    );
+                }
                 return tool_result(
                     request.id.clone(),
-                    &format!("Invalid tool arguments: {e}"),
+                    &format!(
+                        "Unknown tool: {tool_name}. Use nyx__search_tools to find and activate tools."
+                    ),
                     true,
                 );
             }
         };
-    if let Err(error) =
-        prepared.authorize_agent_operations(&auth.assistant_operation_scopes, service, endpoint)
-    {
-        return tool_result(request.id.clone(), &error.to_string(), true);
-    }
-    if let Some(refused) = guest_service_refusal(
-        state,
-        auth,
-        service,
-        endpoint,
-        &prepared,
-        request.id.clone(),
-    )
-    .await
-    {
-        return refused;
-    }
-    let mut auto_allowed = match webhook_service_gate(
-        state,
-        auth,
-        service,
-        endpoint,
-        &prepared,
-        tool_name,
-        &arguments,
-        request.id.clone(),
-    )
-    .await
-    {
-        Ok(auto) => auto,
-        Err(refused) => return refused,
-    };
-    let operation = prepared.operation_descriptor();
-    match authorize_mcp_tool_operation(state, auth, service, &operation, request.id.clone()).await {
-        Ok(Some(auto)) => {
-            auto_allowed = Some((
-                auto,
-                format!(
-                    "{} on {}",
-                    operation.operation_summary(),
-                    service.service_name
-                ),
-            ));
-        }
-        Ok(None) => {}
-        Err(resp) => return resp,
-    }
 
-    let async_watch = if endpoint.async_operation.is_some() {
-        if let Some(chat) = auth.chat.as_ref() {
-            match crate::services::async_service_operation::reserve(
-                &state.db, chat, service, endpoint,
+        if let Some((row, _)) = &resource
+            && !crate::services::assistant_resource_service::matches_endpoint(
+                row, service, endpoint,
             )
-            .await
-            {
-                Ok(watch) => Some(watch),
-                Err(error) => return tool_result(request.id.clone(), &error.to_string(), true),
-            }
-        } else {
-            None
-        }
-    } else {
-        None
-    };
-    let prepared = if matches!(
-        service.source,
-        mcp_service::McpToolSource::UserManaged { .. }
-    ) {
-        prepared
-            .with_automatic_receipt(
-                auto_allowed.as_ref().map(|(choice, _)| *choice),
-                tool_name,
-                &arguments,
-                auto_allowed
-                    .as_ref()
-                    .map(|(_, summary)| summary.as_str())
-                    .unwrap_or_default(),
-            )
-            .with_async_submission(async_watch.as_ref())
-    } else {
-        prepared
-    };
-    let exec_ctx = mcp_exec_context(auth);
-    update_activity_label(
-        state,
-        auth,
-        &format!("{}__{}", service.service_slug, endpoint.name),
-    )
-    .await;
-
-    let execution = mcp_service::execute_tool_response(
-        &state.http_client,
-        &state.db,
-        &state.encryption_keys,
-        &state.node_ws_manager,
-        &state.billing,
-        &auth.user_id,
-        auth.billing_principal_user_id(),
-        service,
-        endpoint,
-        prepared,
-        &state.jwt_keys,
-        &state.config,
-        &state.connection_expiry_notifier,
-        &state.token_exchange_cache,
-        &state.cloud_response_cache,
-        &exec_ctx,
-        billing_egress_permit,
-    )
-    .await;
-    if let Some(watch) = &async_watch
-        && let Err(error) = crate::services::async_service_operation::submitted(
-            &state.db,
-            watch,
-            execution.as_ref().ok(),
-        )
-        .await
-    {
-        tracing::warn!(watch_id = %watch.id, code = error.error_code(), "Async submission tracking deferred");
-    }
-    let mut response = match execution {
-        Ok(r) => r,
-        Err(crate::errors::AppError::ApiKeyScopeForbidden(msg)) => {
-            return tool_result(request.id.clone(), &msg, true);
-        }
-        Err(error @ crate::errors::AppError::RequestBodyTooLarge { .. }) => {
-            return request_body_too_large_tool_result(request.id.clone(), &error);
-        }
-        Err(crate::errors::AppError::ServiceConcurrencyLimited) => {
-            return concurrency_limited_response(request.id.clone());
-        }
-        Err(e) => {
-            tracing::warn!("Tool execution failed for {tool_name}: {e}");
+        {
             return tool_result(
                 request.id.clone(),
-                &format!("Tool execution failed: {e}"),
+                &crate::services::assistant_resource_service::stale().to_string(),
                 true,
             );
         }
-    };
 
-    if async_watch.is_some() && (200..300).contains(&response.status) {
-        response.text.push_str("\nNyxID will wake this originating thread with the asynchronous result and deliver to its original place. End this turn or do other work; do not poll this operation yourself.");
-    }
-    // Audit log -- attribute the API key when the caller is an agent.
-    audit_service::log_async(
-        state.db.clone(),
-        Some(auth.user_id.clone()),
-        "mcp_tool_call".to_string(),
-        Some(serde_json::json!({
-            "tool": tool_name,
-            "service_id": service.service_id,
-            "response_status": response.status,
-            "agent_role": auth.chat.as_ref().map(|chat| chat.role),
-        })),
-        auth.ip_address.clone(),
-        auth.user_agent.clone(),
-        auth.api_key_id.clone(),
-        auth.api_key_name.clone(),
-    );
+        if let Some(response) = chat_service_gate(state, auth, service, request.id.clone()).await {
+            return response;
+        }
+        // Enforce API-key service scope before activation/execute -- scoped keys
+        // must not reach execute_tool for services outside their allow-list.
+        if let Err(resp) = ensure_service_in_scope(auth, service, request.id.clone()) {
+            return resp;
+        }
 
-    let concurrency = response.concurrency.take();
-    let (content, is_error, failure) = service_tool_content(state, auth, tool_name, response).await;
-    if !is_error
-        && !matches!(
+        // Guard: only allow execution if the service is activated (stateful mode).
+        // Stateless API-key requests bypass the activation gate.
+        if let Some(ref activated_set) = activated
+            && !activated_set.contains(&service.service_id)
+        {
+            return tool_result(
+                request.id.clone(),
+                &format!(
+                    "Tool '{}' belongs to service '{}' which is not activated. \
+                 Use nyx__search_tools to activate it first.",
+                    tool_name, service.service_name,
+                ),
+                true,
+            );
+        }
+
+        let execution_arguments = webhook_execution_arguments(auth, &arguments);
+        let mut prepared =
+            match mcp_service::prepare_proxy_tool_call(service, endpoint, &execution_arguments) {
+                Ok(prepared) => prepared.with_acknowledgement(
+                    auth.chat
+                        .as_ref()
+                        .and_then(|_| arguments["acknowledgement_id"].as_str()),
+                ),
+                Err(e) => {
+                    return tool_result(
+                        request.id.clone(),
+                        &format!("Invalid tool arguments: {e}"),
+                        true,
+                    );
+                }
+            };
+        if let Err(error) =
+            prepared.authorize_agent_operations(&auth.assistant_operation_scopes, service, endpoint)
+        {
+            return tool_result(request.id.clone(), &error.to_string(), true);
+        }
+        if let Some(refused) = guest_service_refusal(
+            state,
+            auth,
+            service,
+            endpoint,
+            &prepared,
+            request.id.clone(),
+        )
+        .await
+        {
+            return refused;
+        }
+        let mut auto_allowed = match webhook_service_gate(
+            state,
+            auth,
+            service,
+            endpoint,
+            &prepared,
+            tool_name,
+            &arguments,
+            request.id.clone(),
+        )
+        .await
+        {
+            Ok(auto) => auto,
+            Err(refused) => return refused,
+        };
+        let operation = prepared.operation_descriptor();
+        match authorize_mcp_tool_operation(state, auth, service, &operation, request.id.clone())
+            .await
+        {
+            Ok(Some(auto)) => {
+                auto_allowed = Some((
+                    auto,
+                    format!(
+                        "{} on {}",
+                        operation.operation_summary(),
+                        service.service_name
+                    ),
+                ));
+            }
+            Ok(None) => {}
+            Err(resp) => return resp,
+        }
+
+        let async_watch = if endpoint.async_operation.is_some() {
+            if let Some(chat) = auth.chat.as_ref() {
+                match crate::services::async_service_operation::reserve(
+                    &state.db, chat, service, endpoint,
+                )
+                .await
+                {
+                    Ok(watch) => Some(watch),
+                    Err(error) => return tool_result(request.id.clone(), &error.to_string(), true),
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        if let Some((row, _)) = &resource {
+            let Some(chat) = &auth.chat else {
+                return tool_result(request.id.clone(), "Assistant turn required", true);
+            };
+            if let Err(error) =
+                crate::services::assistant_resource_service::require_live(&state.db, chat).await
+            {
+                return tool_result(request.id.clone(), &error.to_string(), true);
+            }
+            prepared.bind_resource(row.source.clone());
+        }
+        let prepared = if matches!(
             service.source,
             mcp_service::McpToolSource::UserManaged { .. }
-        )
-        && let (Some((auto, summary)), Some(chat)) = (auto_allowed, auth.chat.as_ref())
-    {
-        crate::services::assistant_acknowledgement_service::record_auto_allowed(
-            &state.db, chat, tool_name, &arguments, &auto, &summary,
+        ) {
+            prepared
+                .with_automatic_receipt(
+                    auto_allowed.as_ref().map(|(choice, _)| *choice),
+                    tool_name,
+                    &arguments,
+                    auto_allowed
+                        .as_ref()
+                        .map(|(_, summary)| summary.as_str())
+                        .unwrap_or_default(),
+                )
+                .with_async_submission(async_watch.as_ref())
+        } else {
+            prepared
+        };
+        let mut exec_ctx = mcp_exec_context(auth);
+        if resource.is_some() {
+            exec_ctx.response_body_limit =
+                Some(crate::services::resource_adapter::MAX_SOURCE_BYTES);
+        }
+        update_activity_label(
+            state,
+            auth,
+            &format!("{}__{}", service.service_slug, endpoint.name),
         )
         .await;
-    }
-    let mut result = content_result(request.id.clone(), content, is_error);
-    if let Some(failure) = failure {
-        result.extensions_mut().insert(failure);
-    }
-    match concurrency {
-        Some(lease) => lease.hold_response(result),
-        None => result,
-    }
+
+        let execution = mcp_service::execute_tool_response(
+            &state.http_client,
+            &state.db,
+            &state.encryption_keys,
+            &state.node_ws_manager,
+            &state.billing,
+            &auth.user_id,
+            auth.billing_principal_user_id(),
+            service,
+            endpoint,
+            prepared,
+            &state.jwt_keys,
+            &state.config,
+            &state.connection_expiry_notifier,
+            &state.token_exchange_cache,
+            &state.cloud_response_cache,
+            &exec_ctx,
+            billing_egress_permit,
+        )
+        .await;
+        if let Some(watch) = &async_watch
+            && let Err(error) = crate::services::async_service_operation::submitted(
+                &state.db,
+                watch,
+                execution.as_ref().ok(),
+            )
+            .await
+        {
+            tracing::warn!(watch_id = %watch.id, code = error.error_code(), "Async submission tracking deferred");
+        }
+        let mut response = match execution {
+            Ok(r) => r,
+            Err(crate::errors::AppError::ApiKeyScopeForbidden(msg)) => {
+                return tool_result(request.id.clone(), &msg, true);
+            }
+            Err(error @ crate::errors::AppError::RequestBodyTooLarge { .. }) => {
+                return request_body_too_large_tool_result(request.id.clone(), &error);
+            }
+            Err(crate::errors::AppError::ServiceConcurrencyLimited) => {
+                return concurrency_limited_response(request.id.clone());
+            }
+            Err(e) => {
+                tracing::warn!("Tool execution failed for {tool_name}: {e}");
+                return tool_result(
+                    request.id.clone(),
+                    &format!("Tool execution failed: {e}"),
+                    true,
+                );
+            }
+        };
+
+        if async_watch.is_some() && (200..300).contains(&response.status) {
+            response.text.push_str("\nNyxID will wake this originating thread with the asynchronous result and deliver to its original place. End this turn or do other work; do not poll this operation yourself.");
+        }
+        // Audit log -- attribute the API key when the caller is an agent.
+        audit_service::log_async(
+            state.db.clone(),
+            Some(auth.user_id.clone()),
+            "mcp_tool_call".to_string(),
+            Some(serde_json::json!({
+                "tool": tool_name,
+                "service_id": service.service_id,
+                "response_status": response.status,
+                "agent_role": auth.chat.as_ref().map(|chat| chat.role),
+            })),
+            auth.ip_address.clone(),
+            auth.user_agent.clone(),
+            auth.api_key_id.clone(),
+            auth.api_key_name.clone(),
+        );
+
+        let concurrency = response.concurrency.take();
+        let is_policy_refusal = response.is_policy_refusal();
+        let (content, is_error, failure) = if is_policy_refusal {
+            if let (Some((row, output)), Some(chat)) = (&resource, auth.chat.as_ref())
+                && let Ok(refusal) = serde_json::from_str::<serde_json::Value>(&response.text)
+                && refusal["error"] == "acknowledgement_required"
+                && let Some(id) = refusal["acknowledgement_id"].as_str()
+                && let Err(error) = crate::services::assistant_resource_service::bind_confirmation(
+                    &state.db, chat, row, *output, id,
+                )
+                .await
+            {
+                tracing::warn!(
+                    code = error.error_code(),
+                    "Resource confirmation could not be retained"
+                );
+                response.text = serde_json::json!({
+                "error": "resource_confirmation_unavailable",
+                "message": "The image intent could not be saved for confirmation.",
+                "instructions": "Do not use the source card to retry this image intent. Resolve any existing image confirmation, or reread the source in a new turn.",
+                "source_policy": refusal,
+            }).to_string();
+            }
+            service_tool_content(state, auth, tool_name, response).await
+        } else if let Some((row, output)) = &resource {
+            let result = materialize_resource_content(state, auth, row, *output, response).await;
+            match result {
+                Ok(content) => (content, false, None),
+                Err(error) => (
+                    vec![serde_json::json!({"type":"text","text":error.to_string()})],
+                    true,
+                    Some(crate::models::assistant_conversation::ToolFailure {
+                        kind: "resource_unavailable".into(),
+                        status: None,
+                    }),
+                ),
+            }
+        } else {
+            service_tool_content(state, auth, tool_name, response).await
+        };
+        if !is_error
+            && !matches!(
+                service.source,
+                mcp_service::McpToolSource::UserManaged { .. }
+            )
+            && let (Some((auto, summary)), Some(chat)) = (auto_allowed, auth.chat.as_ref())
+        {
+            crate::services::assistant_acknowledgement_service::record_auto_allowed(
+                &state.db, chat, tool_name, &arguments, &auto, &summary,
+            )
+            .await;
+        }
+        let mut result = content_result(request.id.clone(), content, is_error);
+        classify_service_tool_response(&mut result, is_policy_refusal, failure);
+        match concurrency {
+            Some(lease) => lease.hold_response(result),
+            None => result,
+        }
+    })
 }
 
 /// Build the execution context passed to `mcp_service::execute_tool` from
@@ -3674,6 +3932,7 @@ fn guest_tool_allowed(tool_name: &str) -> bool {
                 | "nyx__discover_services"
                 | "nyx__list_connected_services"
                 | "nyx__call_tool"
+                | "nyx__resource_get"
         )
 }
 
@@ -4000,6 +4259,17 @@ async fn handle_meta_call_tool(
         return handle_machine_tool(state, auth, tool_name, inner_args, request_id).await;
     }
 
+    if tool_name == crate::services::assistant_resource_service::TOOL_NAME {
+        return Box::pin(handle_resource_get(
+            state,
+            auth,
+            session_id,
+            &inner_args,
+            request_id,
+            billing_egress_permit,
+        ))
+        .await;
+    }
     if tool_name == "nyx__attachment_read" {
         return Box::pin(handle_attachment_read(state, auth, &inner_args, request_id)).await;
     }
@@ -4277,6 +4547,7 @@ async fn handle_meta_call_tool(
     );
 
     let concurrency = response.concurrency.take();
+    let is_policy_refusal = response.is_policy_refusal();
     let (content, is_error, failure) = service_tool_content(state, auth, tool_name, response).await;
     if !is_error
         && !matches!(
@@ -4310,9 +4581,7 @@ async fn handle_meta_call_tool(
     } else {
         content_result(request_id, content, is_error)
     };
-    if let Some(failure) = failure {
-        result.extensions_mut().insert(failure);
-    }
+    classify_service_tool_response(&mut result, is_policy_refusal, failure);
     match concurrency {
         Some(lease) => lease.hold_response(result),
         None => result,
@@ -4433,6 +4702,13 @@ async fn handle_meta_search(
         .await
     {
         candidates.extend(tools);
+    }
+    if auth
+        .chat
+        .as_ref()
+        .is_some_and(|chat| !chat.guest || !chat.is_orchestrator())
+    {
+        candidates.push(crate::services::assistant_resource_service::definition());
     }
     let results: Vec<_> = mcp_service::rank_search_candidates(candidates, query)
         .into_iter()
@@ -6525,10 +6801,7 @@ mod tests {
 
     #[tokio::test]
     async fn downstream_http_failure_survives_mcp_success_envelope() {
-        let db =
-            crate::test_utils::connect_transaction_test_database("mcp_downstream_activity_shape")
-                .await;
-        let state = test_app_state(db.clone());
+        let state = crate::test_utils::test_app_state_no_db().await;
         let auth = api_key_auth(Vec::new());
         for status in [404, 409, 429, 500] {
             let downstream = if status == 409 {
@@ -6536,26 +6809,29 @@ mod tests {
             } else {
                 "Downstream error"
             };
-            let (content, is_error, failure) = service_tool_content(
-                &state,
-                &auth,
-                "catalog__operation",
-                mcp_service::tool_response(status, Some("application/json"), downstream.as_bytes()),
-            )
-            .await;
+            let provider_response =
+                mcp_service::tool_response(status, Some("application/json"), downstream.as_bytes());
+            let is_policy_refusal = provider_response.is_policy_refusal();
+            assert!(!is_policy_refusal);
+            let (content, is_error, failure) =
+                service_tool_content(&state, &auth, "catalog__operation", provider_response).await;
             assert!(is_error);
             assert_eq!(
                 content[0]["text"],
                 format!("Error ({status}): {downstream}")
             );
-            let mut response = content_result(None, content, is_error);
-            response.extensions_mut().insert(failure.unwrap());
-            assert_eq!(response.status(), StatusCode::OK);
-            let failure = tool_failure(&response).unwrap();
-            assert_eq!(failure.kind, "service_status");
-            assert_eq!(failure.status, Some(status));
+            for mut response in [
+                content_result(None, content.clone(), is_error),
+                content_result_with_notifications(None, content.clone(), is_error, Vec::new()),
+            ] {
+                classify_service_tool_response(&mut response, is_policy_refusal, failure.clone());
+                assert_eq!(response.status(), StatusCode::OK);
+                assert!(!tool_succeeded(&response));
+                let failure = tool_failure(&response).unwrap();
+                assert_eq!(failure.kind, "service_status");
+                assert_eq!(failure.status, Some(status));
+            }
         }
-        db.drop().await.unwrap();
     }
 
     #[test]
@@ -8486,6 +8762,65 @@ mod typed_outcome_tests {
     use super::*;
     use serde_json::json;
 
+    #[tokio::test]
+    async fn trusted_policy_refusal_preserves_error_result_without_activity_failure() {
+        let refusal = json!({
+            "error": "acknowledgement_required",
+            "acknowledgement_id": "fixture",
+        })
+        .to_string();
+        let content = vec![json!({"type":"text","text":refusal})];
+        let result = json!({"content":content,"isError":true});
+        let digest = result_digest(&result).0;
+
+        for is_policy_refusal in [false, true] {
+            for (is_sse, mut response) in [
+                (false, content_result(Some(json!(1)), content.clone(), true)),
+                (
+                    true,
+                    content_result_with_notifications(
+                        Some(json!(1)),
+                        content.clone(),
+                        true,
+                        vec![json!({"method":"notifications/tools/list_changed"})],
+                    ),
+                ),
+            ] {
+                classify_service_tool_response(&mut response, is_policy_refusal, None);
+                assert!(!tool_succeeded(&response));
+                assert_eq!(tool_failure(&response).is_none(), is_policy_refusal);
+                if is_policy_refusal {
+                    assert!(
+                        response
+                            .extensions()
+                            .get::<crate::models::assistant_conversation::ToolFailure>()
+                            .is_none()
+                    );
+                } else {
+                    assert_eq!(tool_failure(&response).unwrap().kind, "tool_error");
+                }
+                assert_eq!(
+                    response.extensions().get::<ToolResultDigest>().unwrap().0,
+                    digest
+                );
+
+                let body = axum::body::to_bytes(response.into_body(), 4096)
+                    .await
+                    .unwrap();
+                let wire = std::str::from_utf8(&body).unwrap();
+                let payload = if is_sse {
+                    wire.lines()
+                        .find_map(|line| line.strip_prefix("data: "))
+                        .unwrap()
+                } else {
+                    wire
+                };
+                let rpc: serde_json::Value = serde_json::from_str(payload).unwrap();
+                assert_eq!(rpc["result"], result);
+            }
+        }
+    }
+
     #[test]
     fn missing_live_activity_only_exempts_discovery_operations() {
         for name in [
@@ -9040,3 +9375,7 @@ mod image_handler_tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "mcp_resource_tests.rs"]
+mod resource_tests;

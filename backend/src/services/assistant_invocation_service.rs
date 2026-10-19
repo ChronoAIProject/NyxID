@@ -968,39 +968,29 @@ pub async fn push_events(
         .start_transaction()
         .and_run2(async move |session| {
             let result: AppResult<_> = Box::pin(async {
-                let mut entries = Vec::new();
+                let mut eligible = Vec::new();
                 for event in &events {
                     if fence_in_session(&db, session, &owner, event.invocation_id.as_deref())
                         .await?
                     {
-                        entries.push(
-                            bson::to_bson(event)
-                                .map_err(|_| AppError::Internal("Invalid event".into()))?,
-                        );
+                        eligible.push(event.clone());
                     }
                 }
-                if entries.is_empty() {
+                if eligible.is_empty() {
                     return Ok(None);
                 }
-                let filter = protect_queue(
-                    doc! {"_id": &conversation, "user_id": &owner},
-                    entries.len(),
-                    true,
-                );
-                let row = db
-                    .collection::<AssistantConversation>(CONVERSATIONS)
-                    .find_one_and_update(
-                        filter,
-                        doc! {"$push": {"pending_events": {"$each": entries}}},
-                    )
-                    .return_document(mongodb::options::ReturnDocument::After)
-                    .session(&mut *session)
-                    .await?;
-                if row.is_none() {
+                if !engine::append_events_in_session(&db, &owner, &conversation, &eligible, session)
+                    .await?
+                {
                     return Err(AppError::Conflict(
-                        "Invocation continuation queue is full or unavailable".into(),
+                        "Invocation continuation queue is unavailable".into(),
                     ));
                 }
+                let row = db
+                    .collection::<AssistantConversation>(CONVERSATIONS)
+                    .find_one(doc! {"_id": &conversation, "user_id": &owner})
+                    .session(&mut *session)
+                    .await?;
                 Ok(row)
             })
             .await;

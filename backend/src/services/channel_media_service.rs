@@ -12,6 +12,8 @@ use super::channel_platform::{
 };
 use crate::errors::{AppError, AppResult};
 
+pub const MAX_MEDIA_URL_BYTES: usize = 8192;
+
 const TIMEOUT: Duration = Duration::from_secs(30);
 /// Returned when the provider outcome cannot be determined (for example a
 /// request timeout after bytes may have been accepted). Callers must never
@@ -60,6 +62,9 @@ pub async fn media_client(
     trusted_base: Option<&str>,
 ) -> AppResult<reqwest::Client> {
     tokio::time::timeout(TIMEOUT, async {
+        if target.len() > MAX_MEDIA_URL_BYTES {
+            return Err(fetch_failed());
+        }
         let parsed = url::Url::parse(target).map_err(|_| fetch_failed())?;
         if is_test_origin(&parsed, trusted_base) {
             return reqwest::Client::builder()
@@ -70,14 +75,19 @@ pub async fn media_client(
                 .map_err(|_| fetch_failed());
         }
         if parsed.scheme() != "https"
+            || parsed.fragment().is_some()
             || (hosts.is_some() && parsed.port_or_known_default() != Some(443))
             || hosts.is_some_and(|hosts| !allowed_host(&parsed, hosts))
         {
             return Err(fetch_failed());
         }
-        super::webhook_delivery_service::validate_webhook_url(target, "Media URL")
-            .await
-            .map_err(|_| fetch_failed())?;
+        super::url_validation::validate_public_http_url_with_limit(
+            target,
+            "Media URL",
+            MAX_MEDIA_URL_BYTES,
+        )
+        .await
+        .map_err(|_| fetch_failed())?;
         let host = parsed.host_str().ok_or_else(fetch_failed)?;
         // Pin the addresses used for this request and re-check after resolution;
         // no DNS rebinding or redirect may bypass the public-host boundary.

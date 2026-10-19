@@ -14,12 +14,12 @@ pub(crate) fn installation_filter(bot_id: &str, platform: &str, platform_bot_id:
     }
 }
 
-/// Remote-ID fallback applies only to the original Telegram namespace.
-fn profile_filter(bot_id: &str, platform: &str, remote_id: &str) -> Document {
+/// Preserve exact provider/remote reservations across local channel replacement.
+pub(crate) fn profile_filter(bot_id: &str, platform: &str, remote_id: &str) -> Document {
     if matches!(platform, "telegram" | "telegram-new") {
         doc! {"$or":[{"channel_bot_id":bot_id},{"manager_bot_id":remote_id,"native_entry":bson::Bson::Null}]}
     } else {
-        doc! {"channel_bot_id":bot_id}
+        doc! {"$or":[{"channel_bot_id":bot_id},{"native_entry.identity.platform":platform,"native_entry.identity.platform_bot_id":remote_id}]}
     }
 }
 
@@ -166,6 +166,30 @@ mod tests {
                 .await
                 .unwrap()
         );
+        for (id, platform, allowed) in
+            [("replaced-x", "x", false), ("same-id-slack", "slack", true)]
+        {
+            bots.insert_one(doc!{"_id":id,"user_id":"owner","platform":platform,"platform_bot_id":"123","is_active":true}).await.unwrap();
+            assert_eq!(permits_personal_routes(&db, id).await.unwrap(), allowed);
+            let mut session = db.client().start_session().await.unwrap();
+            session.start_transaction().await.unwrap();
+            assert_eq!(
+                fence_personal_routes(&db, id, "owner", &mut session)
+                    .await
+                    .is_ok(),
+                allowed
+            );
+            session.abort_transaction().await.unwrap();
+        }
+        // Retirement does not free the remote identity for a new local UUID.
+        profiles
+            .update_one(
+                doc! {"_id":"native-profile"},
+                doc! {"$set":{"deleted_at":bson::DateTime::now()}},
+            )
+            .await
+            .unwrap();
+        assert!(!permits_personal_routes(&db, "replaced-x").await.unwrap());
         let mut session = db.client().start_session().await.unwrap();
         session.start_transaction().await.unwrap();
         fence_personal_routes(&db, "ordinary-telegram", "owner", &mut session)

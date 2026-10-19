@@ -30,8 +30,7 @@ pub async fn settle_watch(
     error: Option<&str>,
 ) -> AppResult<bool> {
     use super::api_key_mutation_service as transactions;
-    let event = bson::to_bson(&super::nyxbot_watch_service::watch_event(watch, kind, text))
-        .map_err(|_| AppError::Internal("Could not encode machine event".into()))?;
+    let event = super::nyxbot_watch_service::watch_event(watch, kind, text);
     let mut session = db.client().start_session().await?;
     let db = db.clone();
     let watch = watch.clone();
@@ -72,31 +71,11 @@ pub async fn settle_watch(
                 if update.modified_count == 0 {
                     return Ok(false);
                 }
-                let queued = db
-                    .collection::<bson::Document>(
-                        crate::models::assistant_conversation::COLLECTION_NAME,
-                    )
-                    .update_one(
-                        super::assistant_invocation_service::protect_queue(
-                            doc! {"_id":&watch.conversation_id,"user_id":&watch.user_id},
-                            1,
-                            watch.invocation_id.is_some(),
-                        ),
-                        doc! {
-                            "$push":{
-                                "pending_events":{
-                                    "$each":[event.clone()],
-                                    "$slice":-(super::assistant_nyxagent::MAX_PENDING_EVENTS as i64)
-                                }
-                            }
-                        },
-                    )
-                    .session(&mut *session)
-                    .await?;
-                if queued.matched_count != 1 {
-                    return Err(AppError::Conflict(
-                        "Assistant event queue is unavailable".into(),
-                    ));
+                if !super::assistant_nyxagent::append_events_in_session(
+                    db, &watch.user_id, &watch.conversation_id,
+                    std::slice::from_ref(event), session,
+                ).await? {
+                    return Err(AppError::Conflict("Assistant event queue is unavailable".into()));
                 }
                 Ok(true)
             }

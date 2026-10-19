@@ -108,6 +108,11 @@ The local timeout covers response reads and polling sleeps. It does not stop
 server work. `show` and `cancel` have a bounded HTTP timeout as well. Explicit
 cancellation requests a stop for this invocation family only. It does not stop
 a later ordinary turn or an unrelated invocation on the same conversation.
+Source-image handles and attachment commits also recheck this invocation, so a
+download that finishes after cancellation cannot attach its image. Queued
+invocation continuations and accepted channel questions retain their separate
+delivery identities and cannot evict one another. A repeated channel question
+queues separately instead of joining an invocation's reply destinations.
 
 ## JSON and process outcomes
 

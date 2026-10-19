@@ -2688,6 +2688,7 @@ pub fn tool_annotations(name: &str, services: &[McpToolService]) -> Option<serde
         | "nyx__oracle_ask"
         | "nyx__oracle_attach"
         | "nyx__oracle_extract" => (false, false, true),
+        "nyx__resource_get" => (false, false, true),
         "nyx__call_tool" | "nyx__ssh_exec" => (false, true, true),
         _ => {
             let (service, endpoint) = resolve_tool_call(name, services)?;
@@ -2719,6 +2720,7 @@ pub fn tool_annotations(name: &str, services: &[McpToolService]) -> Option<serde
 /// Unknown names return `None`.
 pub fn tool_title(name: &str, services: &[McpToolService]) -> Option<String> {
     let fixed = match name {
+        "nyx__resource_get" => "Retrieve a source image",
         "nyx__search_tools" => "Search service tools",
         "nyx__call_tool" => "Call a service tool",
         "nyx__connect_service" => "Connect a service",
@@ -3559,6 +3561,7 @@ impl AutomaticReceipt {
 }
 
 pub struct PreparedProxyCall {
+    resource_source: Option<crate::models::assistant_resource::ResourceSource>,
     automatic_receipt: Option<AutomaticReceipt>,
     async_submission: Option<String>,
     async_continuation: Option<super::assistant_service_execution::AsyncContinuation>,
@@ -3576,6 +3579,13 @@ pub struct PreparedProxyCall {
 }
 
 impl PreparedProxyCall {
+    pub(crate) fn bind_resource(
+        &mut self,
+        source: crate::models::assistant_resource::ResourceSource,
+    ) {
+        self.resource_source = Some(source);
+    }
+
     pub(crate) fn with_automatic_receipt(
         mut self,
         choice: Option<super::assistant_acknowledgement_service::AutoAllowed>,
@@ -3834,6 +3844,7 @@ pub(crate) fn http_carries_method_override(
         return true;
     };
     PreparedProxyCall {
+        resource_source: None,
         automatic_receipt: None,
         async_submission: None,
         async_continuation: None,
@@ -3925,6 +3936,7 @@ pub fn prepare_proxy_tool_call(
     };
 
     Ok(PreparedProxyCall {
+        resource_source: None,
         automatic_receipt: None,
         async_submission: None,
         async_continuation: None,
@@ -4785,6 +4797,7 @@ impl std::fmt::Debug for ToolMedia {
 /// are unchanged; `media` is set only for verified images.
 #[derive(Debug)]
 pub struct ToolResponse {
+    pub resources: Option<Box<super::resource_adapter::ResourceRead>>,
     pub concurrency: Option<super::service_concurrency_service::Lease>,
     pub status: u16,
     pub text: String,
@@ -4803,6 +4816,7 @@ impl ToolResponse {
     /// Provider bodies are always downstream content, even if they resemble it.
     fn policy_refusal(refusal: serde_json::Value) -> Self {
         Self {
+            resources: None,
             concurrency: None,
             status: 409,
             text: refusal.to_string(),
@@ -4859,6 +4873,7 @@ fn header_value<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a s
 
 pub(crate) fn tool_response(status: u16, content_type: Option<&str>, body: &[u8]) -> ToolResponse {
     ToolResponse {
+        resources: None,
         concurrency: None,
         status,
         text: String::from_utf8_lossy(body).to_string(),
@@ -4958,6 +4973,35 @@ pub fn execute_tool_resolved<'a>(
     catalog_service_slug: Option<&'a str>,
 ) -> futures::future::BoxFuture<'a, AppResult<McpToolExecutionOutcome>> {
     Box::pin(async move {
+        let resource_source = super::resource_adapter::source(
+            service,
+            endpoint,
+            &target,
+            node_route.is_some(),
+            catalog_service_slug,
+        );
+        if let Some(expected) = &prepared.resource_source
+            && resource_source.as_ref() != Some(expected)
+        {
+            return Err(super::assistant_resource_service::stale());
+        }
+        let resource_arguments = (prepared.method == reqwest::Method::GET
+            && prepared.body.is_none()
+            && prepared.parameter_headers.is_empty()
+            && prepared.server_owned_headers.is_empty())
+        .then(|| {
+            super::resource_adapter::read_arguments(
+                &endpoint.path,
+                &prepared.path,
+                prepared.query.as_deref(),
+            )
+        })
+        .flatten();
+        let http_client = if resource_source.is_some() {
+            super::resource_adapter::http_client()
+        } else {
+            http_client
+        };
         let managed = super::telnyx_platform_service::contract(&target.service).is_some();
         let lease = super::service_concurrency_service::acquire(
             db,
@@ -4995,16 +5039,28 @@ pub fn execute_tool_resolved<'a>(
         if managed {
             return execution.await;
         }
-        match lease {
+        let mut outcome = match lease {
             Some(lease) => {
                 let mut outcome = lease.run(execution).await?;
                 if let McpToolExecutionOutcome::Response(response) = &mut outcome {
                     response.concurrency = Some(lease);
                 }
-                Ok(outcome)
+                outcome
             }
-            None => execution.await,
+            None => execution.await?,
+        };
+        if let (Some(source), Some(arguments), McpToolExecutionOutcome::Response(response)) =
+            (resource_source, resource_arguments, &mut outcome)
+            && (200..300).contains(&response.status)
+        {
+            let candidates = super::resource_adapter::candidates(&arguments, &response.text);
+            response.resources = Some(Box::new(super::resource_adapter::ResourceRead {
+                source,
+                arguments,
+                candidates,
+            }));
         }
+        Ok(outcome)
     })
 }
 
@@ -5119,7 +5175,16 @@ async fn execute_tool_resolved_inner(
             )?;
         }
     }
-    let http_client = if scoped_execution(exec_ctx, service) {
+    let http_client = if scoped_execution(exec_ctx, service)
+        && super::resource_adapter::source(
+            service,
+            endpoint,
+            &target,
+            node_route.is_some(),
+            catalog_service_slug,
+        )
+        .is_none()
+    {
         proxy_service::no_redirect_http_client()
     } else {
         http_client
@@ -5196,6 +5261,34 @@ async fn execute_tool_resolved_inner(
             authority
                 .admit(db, chat, user_service_id, &target, &operation)
                 .await?
+        } else if prepared.resource_source.is_some() {
+            super::assistant_service_execution::check_source_resource(
+                db,
+                node_ws_manager,
+                chat,
+                user_service_id,
+                effective_owner_id,
+                &operation,
+                super::assistant_acknowledgement_service::ActionFacts::of(
+                    super::assistant_acknowledgement_service::service_action_class(
+                        read,
+                        destructive,
+                    ),
+                ),
+                prepared.acknowledgement_id.as_deref(),
+                &format!(
+                    "{} {} on {}",
+                    prepared.method(),
+                    endpoint.name,
+                    service.service_slug
+                ),
+                &target,
+                Some((
+                    prepared.body.as_deref().unwrap_or_default(),
+                    Some("application/json"),
+                )),
+            )
+            .await?
         } else {
             super::assistant_service_execution::check(
                 db,
@@ -5246,6 +5339,7 @@ async fn execute_tool_resolved_inner(
 
     box_mcp_forwarding(move || async move {
         let PreparedProxyCall {
+            resource_source: _,
             automatic_receipt,
             async_submission: _,
             async_continuation: _,
@@ -5539,6 +5633,7 @@ async fn execute_tool_resolved_inner(
                 }
             }
             return Ok(McpToolExecutionOutcome::Response(ToolResponse {
+                resources: None,
                 concurrency: None,
                 status: managed.status,
                 text: String::from_utf8(managed.body.to_vec())
@@ -5952,6 +6047,7 @@ async fn execute_tool_resolved_inner(
             }
         }
         Ok(McpToolExecutionOutcome::Response(ToolResponse {
+            resources: None,
             concurrency: None,
             status,
             text: body_text,

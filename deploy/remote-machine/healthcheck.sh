@@ -12,7 +12,12 @@ done
 kubectl auth can-i --as="$manager" create sandboxes.agents.x-k8s.io -n "$namespace" >/dev/null
 kubectl auth can-i --as="$manager" patch sandboxes.agents.x-k8s.io -n "$namespace" >/dev/null
 kubectl auth can-i --as="$manager" delete sandboxes.agents.x-k8s.io -n "$namespace" >/dev/null
-for action in 'create pods' 'create persistentvolumeclaims' 'delete pods' 'create pods/exec'; do
+# Recovery may delete exact residual children in this namespace. The API uses
+# original UID/resourceVersion guards; child creation/patch/exec stay forbidden.
+for resource in pods persistentvolumeclaims; do
+  kubectl auth can-i --as="$manager" delete "$resource" -n "$namespace" >/dev/null
+done
+for action in 'create pods' 'create persistentvolumeclaims' 'patch pods' 'patch persistentvolumeclaims' 'create pods/exec'; do
   if kubectl auth can-i --as="$manager" $action -n "$namespace" >/dev/null; then
     echo manager_has_forbidden_workload_permissions >&2
     exit 2
@@ -21,6 +26,12 @@ done
 kubectl auth can-i --as="$manager" create tokenreviews.authentication.k8s.io >/dev/null
 kubectl auth can-i --as="$manager" get nodes >/dev/null
 kubectl auth can-i --as="$manager" get persistentvolumes >/dev/null
+kubectl auth can-i --as="$manager" list persistentvolumes >/dev/null
+kubectl auth can-i --as="$manager" list pods --all-namespaces >/dev/null
+kubectl auth can-i --as="$manager" get leases.coordination.k8s.io -n kube-node-lease >/dev/null
+for verb in get list; do
+  kubectl auth can-i --as="$manager" "$verb" volumeattachments.storage.k8s.io >/dev/null
+done
 for verb in get list; do
   kubectl auth can-i --as="$manager" "$verb" storageclasses.storage.k8s.io >/dev/null || {
     echo storageclass_read_permission_unverified >&2; exit 2;

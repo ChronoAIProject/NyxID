@@ -21,6 +21,7 @@ import { UploadComposer } from "@/components/assistant/upload-composer";
 import { ToolImage } from "@/components/assistant/blocks/tool-image";
 import { TextBlock } from "@/components/assistant/blocks/text-block";
 import { AgentAvatar } from "@/components/assistant/nyxbot-agent-avatar";
+import { MessageCopyAction } from "./message-copy-action";
 import { MessageTime } from "@/components/assistant/message-time";
 import { AgentDetailsSheet } from "@/components/assistant/nyxbot-agent-details";
 import { GroupSettingsDialog } from "@/components/assistant/nyxbot-group-forms";
@@ -103,7 +104,7 @@ function UserText({
 }
 
 /** "to Luna, researcher": the agents a sent message was addressed to. */
-export function recipientLine(
+function recipientLine(
   ids: readonly string[],
   members: readonly AssistantGroupMember[],
 ): string {
@@ -179,7 +180,7 @@ export function GroupMessageRow({
             />
           ))}
         </div>
-        <MessageTime value={message.created_at} reveal />
+        <div className="flex items-center gap-1"><MessageCopyAction text={message.text} /><MessageTime value={message.created_at} reveal /></div>
       </div>
     );
   }
@@ -237,6 +238,7 @@ export function GroupMessageRow({
           ))}
           <TextBlock text={sanitizeAssistantMessageContent(message.text)} />
           <div className="mt-2 flex gap-1">
+            <MessageCopyAction text={sanitizeAssistantMessageContent(message.text)} />
             {(["up", "down"] as const).map((next) => (
               <button
                 key={next}

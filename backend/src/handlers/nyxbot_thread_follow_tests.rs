@@ -218,7 +218,6 @@ async fn direct_follow_uses_separate_native_children_and_owner_stop_without_mode
     let (mut row, _) = channel(&state, "direct").await;
     row.platform = "telegram".into();
     row.owner_sender_ids = vec!["human".into()];
-    row.route_id = Some(Uuid::new_v4().to_string());
     state
         .db
         .collection::<NyxbotChannel>(CHANNELS)
@@ -253,9 +252,12 @@ async fn direct_follow_uses_separate_native_children_and_owner_stop_without_mode
         )
         .await
         .unwrap();
-    state.db.collection::<bson::Document>("channel_conversations").insert_one(doc! {"_id":&row.route_id,"user_id":OWNER,"channel_bot_id":&row.channel_bot_id,
+    assert_eq!(state.db.collection::<bson::Document>("channel_conversations").replace_one(
+        doc! {"_id": &row.route_id},
+        doc! {"_id":&row.route_id,"user_id":OWNER,"channel_bot_id":&row.channel_bot_id,
         "platform":"telegram","platform_conversation_id":"*","platform_conversation_type":"group","agent_api_key_id":&row.route_api_key_id,
-        "default_agent":true,"is_active":true,"created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now()}).await.unwrap();
+        "default_agent":true,"is_active":true,"created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now()}
+    ).await.unwrap().matched_count, 1);
     state.db.collection::<bson::Document>("feature_flag_overrides").insert_one(doc! {"_id":"follow-flag","org_user_id":bson::Bson::Null,
         "flag_key":crate::services::feature_flag_service::NYXBOT_THREAD_FOLLOW_FLAG_KEY,"target_kind":"user","target_key":OWNER,
         "enabled":true,"updated_by":"admin","created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now()}).await.unwrap();
@@ -433,9 +435,46 @@ async fn direct_follow_uses_separate_native_children_and_owner_stop_without_mode
         "Queued owner request".into(),
         None,
     );
-    event.reply_to = vec![owner_origin];
+    event.reply_to = vec![owner_origin.clone()];
+    let source_id = Uuid::new_v4().to_string();
+    event.source_event_ids = vec![source_id.clone()];
+    let mut source_event = admission(&row.id, "queued-native-source");
+    source_event.status = "running".into();
+    source_event.partition = owner_origin.partition.clone();
+    source_event.id = source_id.clone();
+    source_event.relay_message_id = Some(
+        owner_origin
+            .thread
+            .as_ref()
+            .unwrap()
+            .source_message_id
+            .clone(),
+    );
+    source_event.delivery = Some(crate::models::nyxbot_channel::ChannelTurnDelivery {
+        version: 1,
+        state: "pending".into(),
+        origin: owner_origin,
+        sender_id: "human".into(),
+        sender_kind: Some(ThreadSenderKind::Human),
+        guest: false,
+        addressed: true,
+        transport: "direct".into(),
+        source_route_id: None,
+        source_route_api_key_id: None,
+        stream_deadline: Utc::now(),
+        checked_at: Utc::now(),
+        claim_id: None,
+        target_ciphertext: None,
+        target_expires_at: None,
+    });
+    state
+        .db
+        .collection::<NyxbotEvent>(EVENTS)
+        .insert_one(&source_event)
+        .await
+        .unwrap();
     assert!(
-        crate::services::channel_thread_follow_service::enqueue(&state.db, OWNER, id, event)
+        crate::services::channel_turn_delivery::enqueue(&state.db, OWNER, id, event)
             .await
             .unwrap()
     );
@@ -477,6 +516,45 @@ async fn direct_follow_uses_separate_native_children_and_owner_stop_without_mode
     .await
     .unwrap();
     assert!(!claimed.guest_turn);
+    let turn = claimed.active_turn.as_ref().unwrap();
+    assert_eq!(turn.channel_event_id.as_deref(), Some(source_id.as_str()));
+    let saved = state
+        .db
+        .collection::<NyxbotEvent>(EVENTS)
+        .find_one(doc! {"_id":&source_id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(saved.turn_id.as_deref(), Some(turn.turn_id.as_str()));
+    engine::finish_turn(
+        &state.db,
+        &claimed,
+        &claimed.credential_api_key_id,
+        "native-queued-response",
+        &engine::TurnResult {
+            text: "Native queued answer".into(),
+            session_id: None,
+            response_id: None,
+            error: None,
+        },
+    )
+    .await
+    .unwrap();
+    late_delivery::process(&state, &source_id).await;
+    late_delivery::process(&state, &source_id).await;
+    let requests = provider.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 7, "one source-bound native answer attempt");
+    let last = requests.last().unwrap().body_json::<Value>().unwrap();
+    assert_eq!(last["text"], "Native queued answer");
+    assert_eq!(last["message_thread_id"], 7);
+    let saved = state
+        .db
+        .collection::<NyxbotEvent>(EVENTS)
+        .find_one(doc! {"_id":&source_id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(saved.delivery.unwrap().state, "sent");
     assert_eq!(claimed.active_turn.as_ref().unwrap().events.len(), 1);
     assert!(
         !claimed

@@ -642,54 +642,7 @@ pub(super) async fn inbound_reply_to(
         }))
 }
 
-/// Who an inbound chat message is from, as far as the agent is concerned.
-pub(super) enum Admission {
-    /// The verified owner.
-    Owner,
-    /// Someone else the chat lets talk to the agent.
-    Guest,
-    /// A private chat with someone the bot does not answer.
-    Refuse,
-    /// Not for the agent (not addressed, or members may not talk).
-    Silent,
-    /// A member addressed the agent in a group the owner has not talked in
-    /// yet (and has not set who may talk).
-    Waiting,
-}
-
-pub(super) fn admission(
-    row: &NyxbotChannel,
-    chat: &NyxbotThread,
-    sender_id: &str,
-    addressed: Option<bool>,
-) -> Admission {
-    let owner = row.owner_sender_ids.iter().any(|id| id == sender_id);
-    // When the platform cannot tell, the owner's messages count as addressed
-    // and nobody else's do.
-    let addressed = addressed.unwrap_or(owner);
-    if chat.kind.as_deref() == Some("private") {
-        return if owner {
-            Admission::Owner
-        } else if row.private_chats.as_deref() == Some("everyone") {
-            Admission::Guest
-        } else {
-            Admission::Refuse
-        };
-    }
-    if !addressed && !answers_everything(chat) {
-        Admission::Silent
-    } else if owner {
-        Admission::Owner
-    } else if members_may_talk(chat) {
-        Admission::Guest
-    } else if chat.members.is_none() && addressed && chat.kind.as_deref() == Some("group") {
-        // A broadcast channel's posts come from the channel, never the owner:
-        // no promise that cannot come true.
-        Admission::Waiting
-    } else {
-        Admission::Silent
-    }
-}
+pub(super) use crate::services::channel_turn_delivery::{Admission, admission};
 
 /// Tell a group, at most daily, why the agent is not answering its members
 /// yet. Returns the reply when it is due.
@@ -804,6 +757,7 @@ pub(super) async fn sync_gateway_groups(
         && threads == row.gateway_threads
         && bots == row.gateway_bot_mentions.enabled
         && !identity_changed
+        && row.gateway_no_progress
     {
         return Ok(None);
     }
@@ -858,6 +812,21 @@ async fn push_gateway_groups(
         reply.remove("thread_contract");
     }
     update["expected_version"] = json!(expected_version);
+    // Proof belongs to the acknowledged binding and policy. Invalidate it
+    // before a replacement write, including errors or an uncertain response.
+    let Some(filter) = gateway_local_cas_filter(row, expected_version) else {
+        return Ok(Some("gateway_reconcile_conflict"));
+    };
+    if state
+        .db
+        .collection::<NyxbotChannel>(CHANNELS)
+        .update_one(filter, doc! {"$set": {"gateway_no_progress": false}})
+        .await?
+        .matched_count
+        != 1
+    {
+        return Ok(Some("gateway_reconcile_conflict"));
+    }
     let response = gateway_call(
         state,
         reqwest::Method::PUT,
@@ -951,6 +920,10 @@ fn gateway_policy_acknowledged(body: &Value, requested: &Value) -> bool {
     ]
     .iter()
     .all(|pointer| actual.pointer(pointer) == expected.pointer(pointer))
+        && definition
+            .pointer("/reply/ack_after_ms")
+            .and_then(Value::as_u64)
+            == Some(0)
         && definition.pointer("/reply/thread_contract")
             == requested.pointer("/reply/thread_contract")
 }
@@ -972,7 +945,7 @@ async fn persist_gateway_groups(
         .collection::<NyxbotChannel>(CHANNELS)
         .update_one(
             filter,
-            doc! {"$set": {"gateway_version": version, "gateway_groups": wanted,
+            doc! {"$set": {"gateway_version": version, "gateway_groups": wanted, "gateway_no_progress": true,
             "gateway_bot_mentions.enabled": bots,
             "gateway_bot_id": &row.gateway_bot_id,
             "gateway_threads": bson::to_bson(threads).map_err(|_| crate::services::channel_thread_follow_service::not_found())?,
@@ -1003,6 +976,8 @@ pub(super) fn gateway_local_cas_filter(
             "gateway_channel_id": channel_id,
             "route_id": route_id,
             "route_api_key_id": &row.route_api_key_id,
+            "agent_api_key_id": &row.agent_api_key_id,
+            "binding_id": &row.binding_id,
         }
     })
 }
@@ -1060,7 +1035,7 @@ async fn reconcile_gateway_groups(
         .collection::<NyxbotChannel>(CHANNELS)
         .update_one(
             filter,
-            doc! {"$set": {"gateway_version": version, "updated_at": bson::DateTime::now()}},
+            doc! {"$set": {"gateway_version": version, "gateway_no_progress": false, "updated_at": bson::DateTime::now()}},
         )
         .await?;
     if updated.matched_count != 1 {
@@ -1109,6 +1084,9 @@ pub struct ChannelChatResponse {
     allow_posts: bool,
     conversation_id: Option<String>,
     last_message_at: Option<chrono::DateTime<Utc>>,
+    /// An authenticated platform message registered this chat, independently of a reply.
+    registration_evidence: &'static str,
+    registered_at: chrono::DateTime<Utc>,
     has_thread_history: bool,
     threads: &'static str,
     threads_setting: Option<String>,
@@ -1153,6 +1131,12 @@ fn chat_response(row: &NyxbotChannel, chat: &NyxbotThread) -> ChannelChatRespons
         allow_posts: chat.allow_posts,
         conversation_id: chat.conversation_id.clone(),
         last_message_at: chat.last_message_at,
+        registration_evidence: if chat.last_message_at.is_some() {
+            "authenticated_inbound"
+        } else {
+            "legacy_unknown"
+        },
+        registered_at: chat.created_at,
     }
 }
 
@@ -2485,7 +2469,7 @@ mod gateway_policy_tests {
                 "bot_id": "ou_receiver",
                 "admission": {"type": "scoped", "groups": "mention_or_reply_to_bot"}
             }],
-            "reply": {"thread_contract": null}
+            "reply": {"ack_after_ms": 0, "thread_contract": null}
         })
     }
 
@@ -2495,6 +2479,22 @@ mod gateway_policy_tests {
         assert!(gateway_policy_acknowledged(
             &json!({"version": 2, "definition": requested}),
             &requested,
+        ));
+
+        let mut progress = requested.clone();
+        progress["reply"]["ack_after_ms"] = json!(1500);
+        assert!(!gateway_policy_acknowledged(
+            &json!({"version":2,"definition":progress}),
+            &requested
+        ));
+        let mut unknown = requested.clone();
+        unknown["reply"]
+            .as_object_mut()
+            .unwrap()
+            .remove("ack_after_ms");
+        assert!(!gateway_policy_acknowledged(
+            &json!({"version":2,"definition":unknown}),
+            &requested
         ));
 
         let mut normalized = requested.clone();

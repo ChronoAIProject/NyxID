@@ -58,7 +58,7 @@ function quote(option?: VoiceOption) {
           )
           .join(" + ") || "Tariff unavailable"
       } · paid by you`
-    : "Platform transcription · price loads before connection";
+    : "Transcription rates are not available yet";
 }
 function discoveryMessage(error: unknown) {
   return error instanceof ApiError && error.status === 404
@@ -112,7 +112,6 @@ export function useComposerDictation({
   const [optionsError, setOptionsError] = useState("");
   const [choices, setChoices] = useState<VoiceOption[]>([]);
   const [selection, setSelection] = useState("");
-  const [loading, setLoading] = useState(false);
   const client = useRef<AssistantDictationClient | null>(null);
   const preview = useRef<PreparedMicrophone | null>(null);
   const generation = useRef(0);
@@ -136,7 +135,6 @@ export function useComposerDictation({
     setOptionsError("");
     setChoices([]);
     setSelection("");
-    setLoading(false);
   }
   const option = selection
     ? choices.find((item) => item.service_id + item.model === selection)
@@ -320,7 +318,6 @@ export function useComposerDictation({
             busy.current = false;
             reviewClosed?.();
             setStage("idle");
-            setLoading(false);
             setActivity(silentActivity());
           } else setStage(value);
         }
@@ -333,17 +330,21 @@ export function useComposerDictation({
       },
     });
     client.current = next;
+    const discover = (id: string) =>
+      api.get(
+        `/assistant/nyxagent/dictation/options?conversation_id=${encodeURIComponent(id)}`,
+      );
+    let discovery: Promise<unknown> | undefined;
     // start constructs capture and encoding context synchronously in this gesture;
     // source preparation happens after permission, without forwarding any audio.
     void next.start(
       async () => {
-        setLoading(true);
         try {
+          if (generation.current !== ticket)
+            throw new DOMException("Cancelled", "AbortError");
           const id = await getThread();
           const data = voiceOptionsSchema.parse(
-            await api.get(
-              `/assistant/nyxagent/dictation/options?conversation_id=${encodeURIComponent(id)}`,
-            ),
+            await (id === threadId && discovery ? discovery : discover(id)),
           );
           if (generation.current !== ticket)
             throw new DOMException("Cancelled", "AbortError");
@@ -356,15 +357,8 @@ export function useComposerDictation({
               ) ?? data.options.find((item) => item.available));
           setOptionsError("");
           setChoices(data.options);
-          setLoading(false);
           if (!selected?.available)
             throw new Error("Dictation source unavailable");
-          // Commit concise source/rate/payer disclosure before opening a metered socket.
-          await new Promise<void>((resolve) =>
-            requestAnimationFrame(() => resolve()),
-          );
-          if (generation.current !== ticket)
-            throw new DOMException("Cancelled", "AbortError");
           const preferences: VoicePreferences = {
             service_id: selected.service_id,
             connection_id: null,
@@ -380,13 +374,19 @@ export function useComposerDictation({
           preparationNotice = discoveryMessage(error);
           if (generation.current === ticket) setOptionsError(preparationNotice);
           throw error;
-        } finally {
-          if (generation.current === ticket) setLoading(false);
         }
       },
       undefined,
       device,
     );
+    // Capture above requests permission synchronously. For an existing thread,
+    // overlap read-only discovery with browser/device startup. Draft creation
+    // and the metered socket still wait for microphone permission.
+    if (threadId) {
+      discovery = discover(threadId);
+      // Denial/cancellation may prevent the preparation callback from awaiting it.
+      void discovery.catch(() => {});
+    }
   }
   function stop() {
     held.current = false;
@@ -400,7 +400,6 @@ export function useComposerDictation({
     held.current = false;
     gesture.current = null;
     setStage("idle");
-    setLoading(false);
     setText({ final: "", interim: "" });
     setActivity(silentActivity());
     setNotice("");
@@ -637,11 +636,11 @@ export function useComposerDictation({
         </div>
         <details className="mt-2 text-11 text-text-tertiary">
           <summary className="cursor-pointer">
-            Transcription · source and price
+            Transcription source
           </summary>
           <p className="mt-1">
-            {optionsError || quote(option)}. Review before inserting; never
-            auto-sends. Maximum 2 minutes.
+            {option?.model_label ?? "Platform transcription"}. Review before
+            inserting; never auto-sends. Maximum 2 minutes.
           </p>
           {choices.length > 1 && (
             <select
@@ -661,6 +660,13 @@ export function useComposerDictation({
               ))}
             </select>
           )}
+        </details>
+        <details className="mt-2 text-11 text-text-tertiary">
+          <summary className="cursor-pointer">Credit usage</summary>
+          <p className="mt-1">{optionsError || `${quote(option)}.`}</p>
+          <p className="mt-1">
+            View recorded charges in your account menu under Usage.
+          </p>
         </details>
         {configureVoice && (
           <Button
@@ -683,9 +689,6 @@ export function useComposerDictation({
   ) : null;
   const review = active ? (
     <div className="space-y-3 py-2" aria-label="Dictation review">
-      <p className="text-11 text-text-tertiary">
-        {loading ? "Preparing source and price…" : quote(option)}
-      </p>
       <div className="min-h-10 whitespace-pre-wrap text-13">
         {text.parts?.length ? (
           text.parts.map((part, index) => (

@@ -1150,3 +1150,32 @@ it.each(["/assistant", "/assistant/automations", "/replay"])("opens billing over
   await vi.waitFor(() => expect(router.state.location.search).toEqual({ c: "current-chat", panel: "billing" }));
   expect(router.state.location.pathname).toBe(path);
 });
+
+
+describe("message body copy integration", () => {
+  it("copies sanitized assistant Markdown without thinking, activities or controls", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+    const markdown = "**回答**\n\n```rust\n    let n = 1;\n```";
+    render(<ChatMessageBubble message={{ ...BASE, content: `${markdown}\n<function_calls><invoke>private-tool-input</invoke></function_calls>`, thinking: "private-thought" }} />);
+    await act(async () => fireEvent.click(screen.getByRole("button", { name: "Copy message" })));
+    expect(writeText).toHaveBeenCalledExactlyOnceWith(markdown);
+    expect(await screen.findByRole("button", { name: "Copied" })).toBeVisible();
+  });
+  it("copies the user's original body including literal markup and whitespace", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+    const original = "  <function_calls>example</function_calls>\n```js\n  x()\n```  ";
+    render(<ChatMessageBubble message={{ ...BASE, role: "user", content: original }} />);
+    await act(async () => fireEvent.click(screen.getByRole("button", { name: "Copy message" })));
+    expect(writeText).toHaveBeenCalledExactlyOnceWith(original);
+  });
+  it.each([
+    { content: "", status: "complete" as const },
+    { content: "Streaming text", status: "streaming" as const },
+    { content: "<function_calls>hidden</function_calls>", status: "complete" as const },
+  ])("has no body copy control for $status / $content", (message) => {
+    render(<ChatMessageBubble message={{ ...BASE, ...message }} />);
+    expect(screen.queryByRole("button", { name: "Copy message" })).not.toBeInTheDocument();
+  });
+});

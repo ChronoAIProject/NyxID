@@ -1168,46 +1168,18 @@ async fn push_publication_event(
     {
         return Ok(());
     }
-    let conversations =
-        db.collection::<bson::Document>(crate::models::assistant_conversation::COLLECTION_NAME);
-    let queued = conversations
-        .update_one(
-            super::assistant_invocation_service::protect_queue(
-                doc! {
-                    "_id": conversation_id,
-                    "user_id": owner_id,
-                    "pending_events": {"$not": {"$elemMatch": {"id": &event.id}}},
-                },
-                1,
-                event.invocation_id.is_some(),
-            ),
-            doc! {"$push": {"pending_events": {
-                "$each": [bson::to_bson(event).map_err(|_| conflict())?],
-                "$slice": -(super::assistant_nyxagent::MAX_PENDING_EVENTS as i64),
-            }}},
-        )
-        .session(&mut *session)
-        .await?;
-    if event.invocation_id.is_some() && queued.matched_count == 0 {
-        // A retry may find the deterministic event already queued. Any other
-        // refusal must abort the enclosing settlement and retain its producer.
-        let already_queued = conversations
-            .find_one(doc! {
-                "_id": conversation_id,
-                "user_id": owner_id,
-                "pending_events": {"$elemMatch": {
-                    "id": &event.id, "invocation_id": &event.invocation_id,
-                }},
-            })
-            .projection(doc! {"_id": 1})
-            .session(&mut *session)
-            .await?
-            .is_some();
-        if !already_queued {
-            return Err(AppError::Conflict(
-                "Invocation publication continuation queue is full or unavailable".into(),
-            ));
-        }
+    let queued = super::assistant_nyxagent::append_events_in_session(
+        db,
+        owner_id,
+        conversation_id,
+        std::slice::from_ref(event),
+        session,
+    )
+    .await?;
+    if event.invocation_id.is_some() && !queued {
+        return Err(AppError::Conflict(
+            "Invocation publication continuation queue is unavailable".into(),
+        ));
     }
     Ok(())
 }

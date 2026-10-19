@@ -525,6 +525,38 @@ describe.each(PAGE_ROUTES)("BillingPage at %s", (route) => {
     );
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
+  it("includes voice and dictation charges and audio quantities in Usage settings", async () => {
+    mocks.usage.mockReturnValue(query(usage([
+      row({
+        metric: "voice_seconds",
+        model: "gpt-live-1",
+        quantity: 60,
+        estimated_credits_micros: 600_000,
+        wallet_credits_micros: 600_000,
+        grant_credits_micros: 0,
+      }),
+      row({
+        metric: "voice_seconds",
+        model: "gpt-live-transcribe",
+        quantity: 12,
+        estimated_credits_micros: 120_000,
+        wallet_credits_micros: 120_000,
+        grant_credits_micros: 0,
+      }),
+    ])));
+    await renderPage();
+    const spend = screen.getByRole("heading", { name: "Spend" }).parentElement!;
+    expect(
+      within(spend).getByText("0.72", { selector: "strong", exact: false }),
+    ).toBeVisible();
+    await userEvent.click(screen.getByText("All metrics & funding"));
+    const quantities = screen.getByRole("heading", {
+      name: "Requests & other units",
+    }).parentElement!;
+    expect(
+      within(quantities).getByText("voice seconds").parentElement,
+    ).toHaveTextContent("72");
+  });
   it("does not turn missing costs into zero or count free records as pending", async () => {
     mocks.usage.mockReturnValue(
       query(

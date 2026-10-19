@@ -267,7 +267,7 @@ async fn dispatch_verified_impl(
     let kind = super::platform_manager_management::parse(text, username)
         .map(commands::PersonalCommandKind::Management)
         .or_else(|| commands::personal_command(text, username));
-    if let Some(kind) = kind {
+    if let Some(kind) = kind.filter(|_| !(runtime.public_enabled && dispatch::explicit_faq(text))) {
         if let Some(command) =
             OriginalManagerCommand::from_verified(verified.clone(), TurnInput { text: text.into() })
         {
@@ -307,7 +307,8 @@ async fn dispatch_verified_impl(
     }
     // An upgrade must still finish an already-issued onboarding-only proof.
     // This explicit handoff never selects a personal account or ordinary route.
-    if matches!(verified.entry, EntryIdentity::TelegramV1 { .. })
+    if !runtime.emergency_stopped
+        && matches!(verified.entry, EntryIdentity::TelegramV1 { .. })
         && legacy_confirmation(text, username)
         && OriginalManagerCommand::from_verified(verified.clone(), TurnInput { text: text.into() })
             .is_some()
@@ -328,16 +329,20 @@ async fn dispatch_verified_impl(
             | "/setup"
             | "/bots"
             | "/bot"
-    ) || text.contains("nyx_pli_")
+    ) && !(runtime.public_enabled && dispatch::explicit_faq(text))
+        || text.contains("nyx_pli_")
         || text.contains("#intent_token=")
     {
         refuse_control(state, &producers, &verified).await?;
         return Ok(ManagerDispatch::Handled);
     }
-    let admission = producers
-        .transport
-        .admit_manager_update(&state.db, &verified)
-        .await?;
+    let admission = dispatch::admit_text_update(
+        &state.db,
+        producers.identity.as_ref(),
+        &verified,
+        Some(text),
+    )
+    .await?;
     let (ingress, audience) = match admission {
         IngressAdmission::Claimed { ingress, audience } => (ingress, audience),
         IngressAdmission::Duplicate { receipt_id } => {
@@ -395,7 +400,7 @@ async fn dispatch_verified_impl(
                         &state.db,
                         &destination,
                         &DeliveryRef::Fixed { ingress },
-                        ReplyContent::Fixed(UnavailableReason::EngineUnavailable),
+                        ReplyContent::Fixed(UnavailableReason::UnsupportedInput),
                     )
                     .await?;
                 return Ok(ManagerDispatch::Handled);
@@ -565,6 +570,9 @@ async fn dispatch_verified_impl(
                 .await?;
         }
         ManagerAudience::Public(admitted) => {
+            if delivery::deliver_faq(state, producers.identity.clone(), &ingress, api).await? {
+                return Ok(ManagerDispatch::Handled);
+            }
             let context = match producers
                 .public
                 .prepare_public_context(&state.db, &admitted)

@@ -258,6 +258,8 @@ pub(crate) async fn discord_fixture(base: &str) -> (AppState, ChannelBot, Native
             personal_enabled: true,
             public_enabled: false,
             emergency_stopped: false,
+            remembered_personal_enabled: None,
+            remembered_public_enabled: None,
             retired: false,
             public_policy: None,
             effect_revision: 0,

@@ -29,8 +29,11 @@ Verify SHA-256 over the raw ZIP before reading files. Bound compressed and
 expanded bytes, entry count and paths; reject traversal, symlinks, duplicate
 paths and malformed packages. Never extract to disk or execute scripts.
 
-Turn instructions contain only bounded names, one-line descriptions and exact
-versions, with an explicit untrusted-guidance notice. Guest turns omit skills.
+Turn instructions contain exact root skill IDs in a tool-ready `skill` field,
+bounded names, one-line descriptions and exact versions, with an explicit
+untrusted-guidance notice. The reader defaults to `SKILL.md`; `path: "/"`
+lists package files. Reuse already-read guidance within a session while current
+and fetch only the references needed for the task. Guest turns omit skills.
 `nyxid__skill_read` reads only the live calling agent's attached root or pinned
 dependency, defaults to `SKILL.md`, and supports byte-offset paging at UTF-8
 boundaries. Serialized results remain below 10,000 characters. A file listing

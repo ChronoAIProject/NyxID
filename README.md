@@ -87,6 +87,8 @@ Admin → Feature Flags. See [feature flag management](docs/API.md#feature-flag-
 
 - **Speak to NyxBot and specialists** — voice calls show live captions and audio activity in the composer. Dictation offers click-to-toggle or hold-to-talk capture, microphone selection, and transcript review before insertion into a draft. Platform audio requires enabled voice features, a configured provider and tariff, and sufficient funding; microphone access is requested when capture is activated. See [voice and dictation](docs/chat/11-voice.md#19-implemented-composer-voice-and-dictation).
 
+- **Display source images in NyxBot** — supported Notion reads return image references that NyxBot can retain as encrypted chat attachments and deliver through supported channels. The shared retrieval tool rechecks source access; see [source resources and image display](docs/chat/10-source-resources.md).
+
 - **Control NyxBot service use** — NyxBot enforces saved connection order, prefers suitable working personal connections, and asks before organization use in Auto and Ask every time. Choose an exact connection for the next message without changing permission modes. See [NyxBot service execution](docs/NYXBOT_SERVICE_EXECUTION.md).
 
 - **Spend NyxID credits on Telnyx tools** — the [Telnyx platform offering](docs/TELNYX_PLATFORM_BILLING.md) supports a restricted pilot of one model's nonstreaming text chat through HTTP or MCP, including NyxBot tool calls. Administrators must configure and enable the shared credential, verified model bounds, prices, billing, and pilot access before use; users do not connect Telnyx OAuth.

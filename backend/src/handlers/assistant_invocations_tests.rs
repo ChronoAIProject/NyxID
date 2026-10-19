@@ -219,6 +219,98 @@ async fn invocation_late_events_are_fenced_and_async_results_are_individual() {
 }
 
 #[tokio::test]
+async fn invocation_and_source_queues_preserve_work_and_rollback_overflow() {
+    use crate::models::assistant_conversation::{COLLECTION_NAME as CONVERSATIONS, TurnOrigin};
+    use crate::services::{assistant_team_service as team, async_service_operation as operations};
+    use mongodb::bson::{self, Document, doc};
+    let (state, owner, admission) = admitted("invocation_source_queue").await;
+    let conversation = admission.claim.unwrap().conversation.id;
+    let tracked = team::event("notice", "invocation continuation".into(), None)
+        .for_invocation(Some(&admission.invocation.id));
+    let mut source = team::event("message", "channel question".into(), None);
+    source.source_event_ids = vec![Uuid::new_v4().to_string()];
+    let mut events = vec![tracked.clone(), source.clone()];
+    events.extend(
+        (2..engine::MAX_PENDING_EVENTS).map(|_| team::event("notice", "update".into(), None)),
+    );
+    let rows = state.db.collection::<Document>(CONVERSATIONS);
+    rows.update_one(
+        doc! {"_id": &conversation},
+        doc! {"$set": {"pending_events": bson::to_bson(&events).unwrap()}},
+    )
+    .await
+    .unwrap();
+    for incoming in [
+        team::event("notice", "ordinary".into(), None),
+        team::event("notice", "tracked".into(), None)
+            .for_invocation(Some(&admission.invocation.id)),
+    ] {
+        assert!(matches!(
+            engine::push_events(&state.db, &owner, &conversation, vec![incoming]).await,
+            Err(AppError::Conflict(_))
+        ));
+        let current = engine::get(&state.db, &owner, &conversation).await.unwrap();
+        assert_eq!(
+            bson::to_bson(&current.pending_events).unwrap(),
+            bson::to_bson(&events).unwrap()
+        );
+    }
+    // Exact duplicate delivery is harmless even at capacity; changed lineage is refused.
+    engine::push_events(&state.db, &owner, &conversation, vec![tracked.clone()])
+        .await
+        .unwrap();
+    let mut changed = tracked.clone();
+    changed.invocation_id = None;
+    assert!(
+        engine::push_events(&state.db, &owner, &conversation, vec![changed])
+            .await
+            .is_err()
+    );
+    events.pop();
+    rows.update_one(
+        doc! {"_id": &conversation},
+        doc! {"$set": {"pending_events": bson::to_bson(&events).unwrap()}},
+    )
+    .await
+    .unwrap();
+    assert!(
+        engine::push_events(
+            &state.db,
+            &owner,
+            &conversation,
+            vec![
+                team::event("notice", "first".into(), None),
+                team::event("notice", "overflow".into(), None)
+            ]
+        )
+        .await
+        .is_err()
+    );
+    let mut current = engine::get(&state.db, &owner, &conversation).await.unwrap();
+    assert_eq!(
+        bson::to_bson(&current.pending_events).unwrap(),
+        bson::to_bson(&events).unwrap()
+    );
+    let ordinary = operations::select_events(&mut current, TurnOrigin::User);
+    assert!(
+        ordinary
+            .iter()
+            .all(|e| e.invocation_id.is_none() && e.source_event_ids.is_empty())
+    );
+    assert_eq!(current.pending_events.len(), 2);
+    assert_eq!(
+        operations::select_events(&mut current, TurnOrigin::Event)[0].id,
+        tracked.id
+    );
+    assert_eq!(
+        operations::select_events(&mut current, TurnOrigin::Event)[0].id,
+        source.id
+    );
+    assert!(current.pending_events.is_empty());
+    state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
 async fn invocation_deleted_root_recovers_post_commit_cancellation_and_keeps_tombstone() {
     let (state, owner, admission) = admitted("invocation_delete_recovery").await;
     let receipt = admission.invocation;

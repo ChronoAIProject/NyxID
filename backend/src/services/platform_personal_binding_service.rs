@@ -585,6 +585,36 @@ pub async fn list_owned(
         .await?)
 }
 
+/// Project saved consent against current manager authority without changing the
+/// historical row. A repaired epoch requires a fresh independent proof.
+pub(crate) async fn inventory_state(
+    db: &Database,
+    binding: &PlatformPersonalBinding,
+) -> AppResult<PersonalBindingState> {
+    if binding.state != PersonalBindingState::Active {
+        return Ok(binding.state);
+    }
+    let mut session = db.client().start_session().await?;
+    let current = super::platform_bot_runtime_control_service::validate_manager_in_session(
+        db,
+        &mut session,
+        &binding.platform_config_id,
+        &binding.manager_bot_id,
+        &binding.entry,
+        None,
+    )
+    .await?;
+    Ok(
+        if current.is_some_and(|row| {
+            !row.retired && row.manager_authority_epoch == binding.manager_authority_epoch
+        }) {
+            PersonalBindingState::Active
+        } else {
+            PersonalBindingState::Revoked
+        },
+    )
+}
+
 pub async fn revoke_owned(
     db: &Database,
     actor: &super::audit_service::AuditActor,
@@ -859,6 +889,8 @@ pub(crate) mod tests {
             personal_enabled: true,
             public_enabled: false,
             emergency_stopped: false,
+            remembered_personal_enabled: None,
+            remembered_public_enabled: None,
             retired: false,
             public_policy: None,
             effect_revision: 0,

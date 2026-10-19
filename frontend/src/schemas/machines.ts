@@ -142,6 +142,9 @@ export const remoteMachineOperationSchema = z.object({
     "unknown",
   ]),
   retry_count: z.number().int().nonnegative(),
+  delete_retry_attempts: z.number().int().nonnegative().nullable().optional(),
+  delete_retry_limit: z.number().int().positive().nullable().optional(),
+  delete_retry_stopped: z.boolean().optional(),
   error_code: z.string().nullable(),
   error_message: z.string().nullable(),
   evidence_digest: z.string().nullable(),
@@ -151,6 +154,12 @@ export const remoteMachineOperationSchema = z.object({
   updated_at: machineTimeSchema,
   terminal_at: machineTimeSchema.nullable(),
 });
+export const remoteMachineDeleteRetryRequestSchema = z
+  .object({
+    expected_revision: z.number().int().nonnegative(),
+    expected_retry_count: z.number().int().nonnegative(),
+  })
+  .strict();
 export const remoteMachineEventSchema = z.object({
   id: machineIdSchema,
   machine_id: machineIdSchema.nullable(),

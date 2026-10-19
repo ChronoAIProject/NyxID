@@ -105,6 +105,9 @@ fn refused() -> AppError {
 
 pub(crate) fn fixed_text(reason: UnavailableReason) -> &'static str {
     match reason {
+        UnavailableReason::UnsupportedInput => {
+            "This chat supports text questions. Use /help for the available controls, or open NyxID for attachments and actions."
+        }
         UnavailableReason::PersonalDisabled => {
             "Personal NyxBot is paused for this manager. Your saved thread remains in NyxID."
         }
@@ -147,7 +150,9 @@ fn fixed_text_for(reason: UnavailableReason, entry: &EntryIdentity) -> AppResult
     Ok(if chat == ChatPresentation::Telegram {
         fixed_text(reason).to_owned()
     } else {
-        fixed_text(reason).replace("/link", chat.login())
+        fixed_text(reason)
+            .replace("/link", chat.login())
+            .replace("/help", chat.help())
     })
 }
 
@@ -570,6 +575,67 @@ async fn enqueue(
     Ok(stored)
 }
 
+/// Admission and its recoverable metadata commit together; raw questions never enter storage.
+pub(crate) async fn queue_faq_in_session(
+    db: &mongodb::Database,
+    session: &mut mongodb::ClientSession,
+    update: &VerifiedManagerUpdate,
+    claim: &IngressClaim,
+    controls: &PlatformBotRuntimeControls,
+    text: &str,
+) -> AppResult<()> {
+    let now = Utc::now();
+    let row = Delivery {
+        id: uuid::Uuid::new_v4().to_string(),
+        dedupe_key: format!("faq:{}", claim.receipt_id),
+        profile_id: update.profile_id.clone(),
+        manager_bot_id: update.manager_bot_id.clone(),
+        entry: update.entry.clone(),
+        manager_authority_epoch: controls.manager_authority_epoch,
+        sender: update.sender.clone(),
+        ingress_id: Some(claim.receipt_id.clone()),
+        ingress_claim_id: Some(claim.claim_id.clone()),
+        origin: None,
+        origin_turn_id: None,
+        reference: DeliveryReference::Faq {
+            article_ids: super::platform_faq_service::select(text)?,
+            linking_enabled: controls.personal_enabled,
+            public_policy_revision: controls.public_policy_revision,
+        },
+        state: DeliveryState::Pending,
+        claim_id: None,
+        telegram_message_ids: vec![],
+        platform_message_ids: vec![],
+        expires_at: now + chrono::Duration::minutes(2),
+        retry_at: now,
+        updated_at: now,
+    };
+    db.collection::<Delivery>(COLLECTION_NAME)
+        .insert_one(row)
+        .session(&mut *session)
+        .await?;
+    if db.collection::<PlatformManagerIngress>(INGRESS).update_one(
+        doc! {"_id":&claim.receipt_id,"claim_id":&claim.claim_id,"phase":"admitted"},
+        doc! {"$set":{"phase":"settled","settled_at":bson::DateTime::from_chrono(now),"delivery_recovery_queued":true}}
+    ).session(session).await?.matched_count!=1 {return Err(refused());}
+    Ok(())
+}
+
+pub(crate) async fn deliver_faq(
+    state: &AppState,
+    identity: Arc<dyn ManagerIdentityProducer>,
+    claim: &IngressClaim,
+    api: &super::telegram_new_api::TelegramApi<'_>,
+) -> AppResult<bool> {
+    let row=state.db.collection::<Delivery>(COLLECTION_NAME).find_one(doc! {"dedupe_key":format!("faq:{}",claim.receipt_id),"ingress_claim_id":&claim.claim_id}).await?;
+    let Some(row) = row else {
+        return Ok(false);
+    };
+    let body = super::platform_faq_service::render_for(&row.reference, &row.entry)?;
+    send(state, identity, None, row, Zeroizing::new(body), api).await?;
+    Ok(true)
+}
+
 async fn fence_transport_in_session(
     state: &AppState,
     session: &mut mongodb::ClientSession,
@@ -786,6 +852,26 @@ async fn validate_in_session(
         return Ok(None);
     };
     match &row.reference {
+        DeliveryReference::Faq {
+            public_policy_revision,
+            linking_enabled,
+            ..
+        } => {
+            let receipt = receipt.as_ref().ok_or_else(refused)?;
+            if controls.emergency_stopped
+                || !controls.public_enabled
+                || controls.public_policy_revision != *public_policy_revision
+                || controls.personal_enabled != *linking_enabled
+                || receipt.phase != IngressPhase::Settled
+                || receipt.audience
+                    != (IngressAudience::Public {
+                        public_policy_revision: *public_policy_revision,
+                    })
+                || body != super::platform_faq_service::render_for(&row.reference, &row.entry)?
+            {
+                return Err(refused());
+            }
+        }
         DeliveryReference::Reply {
             conversation_id,
             turn_id,
@@ -1298,7 +1384,10 @@ async fn send_impl(
     }
     let personal = matches!(row.reference, DeliveryReference::Reply { .. });
     let control = matches!(row.reference, DeliveryReference::Command { .. });
-    let public_lane = matches!(row.reference, DeliveryReference::PublicReply { .. });
+    let public_lane = matches!(
+        row.reference,
+        DeliveryReference::PublicReply { .. } | DeliveryReference::Faq { .. }
+    );
     #[cfg(test)]
     let test_control_capacity = TEST_CONTROL_CAPACITY.try_with(Arc::clone).ok();
     let permits = if control {
@@ -2245,6 +2334,9 @@ pub async fn sweep(
                     .map(|reason| fixed_text_for(reason, &row.entry))
                     .transpose()?,
                 DeliveryReference::Handoff => Some(handoff_text().to_owned()),
+                DeliveryReference::Faq { .. } => {
+                    super::platform_faq_service::render_for(&row.reference, &row.entry).ok()
+                }
                 DeliveryReference::Command { .. } | DeliveryReference::PublicSignup { .. } => None,
             };
             if let Some(body) = body {
@@ -2315,6 +2407,7 @@ fn fixed_reason(reason: &str) -> Option<UnavailableReason> {
         SponsorUnavailable,
         RuntimeUninitialized,
         EngineUnavailable,
+        UnsupportedInput,
         ModeDisabled,
     ]
     .into_iter()

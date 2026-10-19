@@ -257,3 +257,37 @@ it("an existing native profile remains selectable for a second review after succ
     screen.getByRole("button", { name: "Review current native entry" }),
   ).toBeEnabled();
 });
+
+it("recovers the authoritative saved profile when the successor has an empty target picker", () => {
+  const savedBots = [...fixture.bots];
+  fixture.bots.length = 0;
+  try {
+    const profile = {
+      id: "profile",
+      generation: 4,
+      channel_bot_id: "saved-channel",
+      manager_bot_id: "remote-bot",
+      display_name: "Saved help bot",
+      platform: "discord",
+      transport: "direct",
+      supported_transports: ["direct", "gateway"],
+    } as import("@/schemas/platform-onboarding").PlatformProfile;
+    render(<NativePlatformEntrySetup profile={profile} />);
+    expect(screen.getByLabelText("Native chat channel")).toHaveDisplayValue(
+      "Saved help bot · Discord",
+    );
+    expect(screen.getByLabelText("Native chat channel")).toBeDisabled();
+    expect(screen.getByLabelText("Native delivery transport")).toHaveValue(
+      "direct",
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: "Review current native entry" }),
+    );
+    expect(fixture.lifecycle).toHaveBeenCalledWith(
+      "saved-channel",
+      expect.any(Object),
+    );
+  } finally {
+    fixture.bots.push(...savedBots);
+  }
+});

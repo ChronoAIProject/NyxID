@@ -74,6 +74,19 @@ impl CleanupState {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct DeleteRetryState {
+    pub attempts: i64,
+    #[serde(default)]
+    pub claim_id: Option<String>,
+    #[serde(default, with = "bson_datetime::optional")]
+    pub claim_until: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub last_request_key_hash: Option<String>,
+    #[serde(default)]
+    pub last_request_digest: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct MachineOperation {
     #[serde(rename = "_id")]
     pub id: String,
@@ -98,6 +111,8 @@ pub struct MachineOperation {
     pub evidence_digest: Option<String>,
     #[serde(default)]
     pub retry_count: i64,
+    #[serde(default)]
+    pub delete_retry: Option<DeleteRetryState>,
     #[serde(default, with = "bson_datetime::optional")]
     pub next_attempt_at: Option<DateTime<Utc>>,
     #[serde(default, with = "bson_datetime::optional")]
@@ -118,6 +133,9 @@ pub struct SafeMachineOperationView {
     pub state: OperationState,
     pub cleanup_state: CleanupState,
     pub retry_count: i64,
+    pub delete_retry_attempts: Option<i64>,
+    pub delete_retry_limit: Option<i64>,
+    pub delete_retry_stopped: bool,
     pub error_code: Option<String>,
     pub error_message: Option<String>,
     pub evidence_digest: Option<String>,

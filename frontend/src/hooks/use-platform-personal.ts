@@ -14,17 +14,17 @@ import { readPersonalLink } from "@/lib/platform-personal-handoff";
 import type { PersonalBinding } from "@/schemas/platform-personal";
 
 export function usePersonalLinkPreview() {
-  const handoff = readPersonalLink();
+  const handoffId = readPersonalLink()?.id;
   return useQuery({
-    queryKey: ["personal-link-preview", handoff?.id],
-    enabled: !!handoff,
+    queryKey: ["personal-link-preview", handoffId],
+    enabled: !!handoffId,
     retry: false,
     gcTime: 0,
     staleTime: 0,
     refetchOnWindowFocus: false,
     queryFn: () => {
       const current = readPersonalLink();
-      if (!current || current.id !== handoff?.id)
+      if (!current || current.id !== handoffId)
         throw new Error("Reopen the original linking request.");
       return personalLinkApi.preview(current.token);
     },

@@ -355,6 +355,12 @@ fn text_controls(text: &str) -> String {
     };
     // Only opted-in DM controls are adapted. Ordinary prose, including text
     // beginning with a similar word, retains its exact substantive bytes.
+    if first == "faq" && text.len() <= 4096 {
+        return format!(
+            "/faq{}",
+            text.trim_start().strip_prefix(first).unwrap_or("")
+        );
+    }
     match (first, tokens.next(), tokens.next()) {
         ("login" | "link" | "status" | "logout" | "unlink" | "help", None, None) => {
             format!("/{first}")
@@ -374,7 +380,9 @@ fn classify(
     now_seconds: i64,
 ) -> AppResult<VerifiedNativeEvent> {
     let raw = &message.raw_data;
-    if !message.attachments.is_empty() || message.content_type != "text" {
+    if configuration.identity.platform != EntryPlatform::Slack
+        && (!message.attachments.is_empty() || message.content_type != "text")
+    {
         return Err(refused());
     }
     match (
@@ -406,10 +414,15 @@ fn classify(
             let native = &raw["event"];
             if native["type"] != "message"
                 || native["channel_type"] != "im"
-                || native.get("subtype").is_some()
+                || native
+                    .get("subtype")
+                    .is_some_and(|value| value != "file_share")
                 || native.get("bot_id").is_some()
-                || native.get("attachments").is_some()
-                || native.get("files").is_some()
+                || native["attachments"].as_array().is_some_and(|attachments| {
+                    attachments
+                        .iter()
+                        .any(|attachment| attachment["is_msg_unfurl"] == true)
+                })
                 || !no_forwarding(native)
             {
                 return Err(refused());
@@ -419,8 +432,8 @@ fn classify(
                 return Err(refused());
             }
             let channel = string(native, "channel")?;
-            let text = native["text"].as_str().ok_or_else(refused)?;
-            if message.text.as_deref() != Some(text)
+            let text = native["text"].as_str().unwrap_or("");
+            if message.text.as_deref().unwrap_or("") != text
                 || message.platform_message_id != string(native, "ts")?
             {
                 return Err(refused());
@@ -430,7 +443,16 @@ fn classify(
                 string(raw, "event_id")?,
                 sender,
                 channel,
-                text_controls(text),
+                if native.get("files").is_some()
+                    || native.get("attachments").is_some()
+                    || native["subtype"] == "file_share"
+                    || !message.attachments.is_empty()
+                    || message.content_type != "text"
+                {
+                    "/unsupported".into()
+                } else {
+                    text_controls(text)
+                },
             )
         }
         (
@@ -687,7 +709,18 @@ fn discord_command_text(data: &Value) -> AppResult<String> {
                 }
                 Ok(format!("/confirm {value}"))
             } else {
-                Ok(value.into())
+                if value.trim_start().starts_with('/')
+                    || value.contains("nyx_pli_")
+                    || value.contains("#intent_token=")
+                    || value
+                        .split_whitespace()
+                        .next()
+                        .is_some_and(|verb| verb.eq_ignore_ascii_case("confirm"))
+                {
+                    Ok("/unsupported".into())
+                } else {
+                    Ok(value.into())
+                }
             }
         }
         _ => Err(refused()),
@@ -696,4 +729,4 @@ fn discord_command_text(data: &Value) -> AppResult<String> {
 
 #[cfg(test)]
 #[path = "platform_entry_native_tests.rs"]
-pub(super) mod tests;
+pub(crate) mod tests;

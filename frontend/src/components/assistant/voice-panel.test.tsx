@@ -180,7 +180,7 @@ it("shows human task states and links settled results", () => {
   ).toBeInTheDocument();
 });
 
-it("starts with a catalog-added model and voice and discloses the payer and tariff", async () => {
+it("starts with a catalog-added model and voice and keeps payer and tariff in Credit usage", async () => {
   mock.connected = false;
   mock.options = [
     {
@@ -218,12 +218,20 @@ it("starts with a catalog-added model and voice and discloses the payer and tari
   expect(
     screen.getByRole("option", { name: "Catalog voice" }),
   ).toBeInTheDocument();
+  expect(screen.getByText(/Paid by the organization/)).not.toBeVisible();
+  fireEvent.click(screen.getByText("Credit usage"));
   expect(screen.getByText(/Paid by the organization/)).toHaveTextContent(
     "0.01 credits per second",
   );
   expect(screen.getByText(/Paid by the organization/)).toHaveTextContent(
     "0.00002",
   );
+  expect(screen.getByText(/Charges are recorded/)).toHaveTextContent(
+    "the organization's credits",
+  );
+  expect(
+    screen.queryByText(/your account menu under Usage/),
+  ).not.toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: "Start voice" }));
   await waitFor(() =>
     expect(mock.start).toHaveBeenCalledWith(
@@ -261,6 +269,7 @@ it("allows lane-less own-key voice and discloses metering-only pricing", async (
     },
   ];
   render(<VoicePanel threadId="thread" onClose={vi.fn()} />);
+  fireEvent.click(screen.getByText("Credit usage"));
   expect(screen.getByText(/No NyxID voice charge/)).toHaveTextContent(
     "your provider's charges still apply",
   );
@@ -314,6 +323,7 @@ it("labels Grok PTT, gates automatic mode, and discloses tokens when seconds are
   );
   expect(screen.getByRole("option", { name: /Automatic/ })).toBeDisabled();
   expect(screen.getByLabelText("Microphone mode")).toHaveValue("push_to_talk");
+  fireEvent.click(screen.getByText("Credit usage"));
   expect(screen.getByText(/No NyxID duration charge/)).toHaveTextContent(
     "0.0001 credits per reported",
   );
@@ -370,6 +380,7 @@ it("discloses configured Grok token prices even when catalog summary omits token
 });
 
 it("integrated active call is compact with accessible details and all media controls", () => {
+  mock.options = [voiceOption];
   const close = vi.fn();
   render(
     <VoicePanel
@@ -383,8 +394,16 @@ it("integrated active call is compact with accessible details and all media cont
     screen.queryByRole("button", { name: "Minimize voice call" }),
   ).not.toBeInTheDocument();
   expect(screen.queryByLabelText("Voice source")).not.toBeInTheDocument();
+  expect(screen.queryByText(/credits per second/)).not.toBeInTheDocument();
+  expect(screen.queryByText(/billed separately/)).not.toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: "Voice settings" }));
   expect(screen.getByLabelText("Voice source")).toBeInTheDocument();
+  fireEvent.click(screen.getByText("Credit usage"));
+  expect(screen.getByText(/credits per second/)).toHaveTextContent(
+    "Paid by you",
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Voice settings" }));
+  expect(screen.queryByText(/credits per second/)).not.toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: "Mute speaker" }));
   expect(mock.speaker).toHaveBeenCalledWith(true);
   fireEvent.click(screen.getByRole("button", { name: "End call" }));
@@ -401,7 +420,7 @@ function preparation() {
   };
   return value as unknown as PreparedMicrophone;
 }
-it("intentional waveform preparation starts OpenAI automatic once after source/price disclosure", async () => {
+it("intentional waveform preparation starts OpenAI automatic once without inline prices", async () => {
   mock.connected = false;
   mock.options = [voiceOption];
   const prepared = preparation();
@@ -413,9 +432,7 @@ it("intentional waveform preparation starts OpenAI automatic once after source/p
       onViewChange={vi.fn()}
     />,
   );
-  expect(screen.getByText(/credits per second/)).toHaveTextContent(
-    "Paid by you",
-  );
+  expect(screen.queryByText(/credits per second/)).not.toBeInTheDocument();
   await waitFor(() =>
     expect(mock.start).toHaveBeenCalledWith(
       expect.objectContaining({ input_mode: "automatic" }),
@@ -499,6 +516,63 @@ it("configuration does not capture/start; End retains next-call input choice in 
       next,
     ),
   );
+});
+
+it("starts with unchanged saved preferences without waiting for a redundant settings write", async () => {
+  useAuthStore.setState({
+    user: { id: "same-settings-owner" } as NonNullable<
+      ReturnType<typeof useAuthStore.getState>["user"]
+    >,
+  });
+  mock.connected = false;
+  mock.options = [voiceOption];
+  const saved = { ...voicePreferences, voice: "marin" };
+  const provider = vi.fn();
+  mock.start.mockImplementationOnce(
+    async (_prefs, _protocol, before: () => Promise<void>) => {
+      await before();
+      provider();
+    },
+  );
+  render(
+    <VoicePanel threadId="thread" savedPreferences={saved} onClose={vi.fn()} />,
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Start voice" }));
+  await waitFor(() => expect(provider).toHaveBeenCalledOnce());
+  expect(mock.save).not.toHaveBeenCalled();
+});
+
+it("the unchanged-preferences path still refuses a switched account", async () => {
+  useAuthStore.setState({
+    user: { id: "original-owner" } as NonNullable<
+      ReturnType<typeof useAuthStore.getState>["user"]
+    >,
+  });
+  mock.connected = false;
+  mock.options = [voiceOption];
+  let authorize!: () => Promise<void>;
+  mock.start.mockImplementationOnce(
+    async (_prefs, _protocol, before: () => Promise<void>) => {
+      authorize = before;
+    },
+  );
+  render(
+    <VoicePanel
+      threadId="thread"
+      savedPreferences={{ ...voicePreferences, voice: "marin" }}
+      onClose={vi.fn()}
+    />,
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Start voice" }));
+  act(() =>
+    useAuthStore.setState({
+      user: { id: "other-owner" } as NonNullable<
+        ReturnType<typeof useAuthStore.getState>["user"]
+      >,
+    }),
+  );
+  await expect(authorize()).rejects.toThrow("Your account changed");
+  expect(mock.save).not.toHaveBeenCalled();
 });
 
 it("confirmed preference save updates the actor cache so Close/reopen retains source and input mode", async () => {

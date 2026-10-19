@@ -28,7 +28,7 @@ fn private_headers() -> HeaderMap {
 #[serde(deny_unknown_fields)]
 pub struct ConvertRequest {
     pub channel_bot_id: uuid::Uuid,
-    pub funding_owner_user_id: uuid::Uuid,
+    pub funding_owner_user_id: Option<uuid::Uuid>,
 }
 
 #[derive(Deserialize)]
@@ -39,6 +39,7 @@ pub struct GenerationRequest {
 
 #[derive(Serialize)]
 pub struct ConfigResponse {
+    pub display_name: String,
     pub id: String,
     pub channel_bot_id: String,
     pub manager_bot_id: String,
@@ -83,6 +84,7 @@ impl From<PlatformBotConfig> for ConfigResponse {
             "platform_onboarding"
         };
         Self {
+            display_name: format!("{} bot {}", platform, row.manager_bot_id),
             platform,
             supported_transports,
             transport,
@@ -124,13 +126,38 @@ pub async fn list(
     } else {
         None
     };
+    let labels = configs::display_names(&state.db, &rows).await?;
     Ok((
         private_headers(),
         Json(ConfigListResponse {
-            profiles: rows.into_iter().map(Into::into).collect(),
+            profiles: rows
+                .into_iter()
+                .map(|row| {
+                    let label = labels.get(&row.channel_bot_id).cloned();
+                    let mut response: ConfigResponse = row.into();
+                    if let Some(label) = label {
+                        response.display_name = label;
+                    }
+                    response
+                })
+                .collect(),
             next_before_id,
         }),
     ))
+}
+
+async fn config_response(
+    db: &mongodb::Database,
+    row: PlatformBotConfig,
+) -> AppResult<ConfigResponse> {
+    let label = configs::display_names(db, std::slice::from_ref(&row))
+        .await?
+        .remove(&row.channel_bot_id);
+    let mut response: ConfigResponse = row.into();
+    if let Some(label) = label {
+        response.display_name = label;
+    }
+    Ok(response)
 }
 
 pub async fn convert(
@@ -143,7 +170,10 @@ pub async fn convert(
         &state.db,
         &auth.user_id.to_string(),
         &body.channel_bot_id.to_string(),
-        &body.funding_owner_user_id.to_string(),
+        &body
+            .funding_owner_user_id
+            .unwrap_or(auth.user_id)
+            .to_string(),
     )
     .await?;
     audit_service::log_for_user(
@@ -152,7 +182,10 @@ pub async fn convert(
         "platform_bot_converted",
         Some(serde_json::json!({"platform_config_id": row.id, "generation": row.generation})),
     );
-    Ok((private_headers(), Json(row.into())))
+    Ok((
+        private_headers(),
+        Json(config_response(&state.db, row).await?),
+    ))
 }
 
 pub async fn get(
@@ -163,7 +196,7 @@ pub async fn get(
     admin(&state, &auth).await?;
     Ok((
         private_headers(),
-        Json(configs::get(&state.db, &id.to_string()).await?.into()),
+        Json(config_response(&state.db, configs::get(&state.db, &id.to_string()).await?).await?),
     ))
 }
 
@@ -193,7 +226,10 @@ async fn disable(
         },
         Some(serde_json::json!({"platform_config_id": row.id, "generation": row.generation})),
     );
-    Ok((private_headers(), Json(row.into())))
+    Ok((
+        private_headers(),
+        Json(config_response(&state.db, row).await?),
+    ))
 }
 
 pub async fn pause(
@@ -228,7 +264,10 @@ pub async fn verify(
         &auth.user_id.to_string(),
     )
     .await?;
-    Ok((private_headers(), Json(row.into())))
+    Ok((
+        private_headers(),
+        Json(config_response(&state.db, row).await?),
+    ))
 }
 
 pub async fn repair(
@@ -289,7 +328,10 @@ async fn repair_with_service(
         "platform_bot_repaired",
         Some(serde_json::json!({"platform_config_id": row.id, "generation": row.generation})),
     );
-    Ok((private_headers(), Json(row.into())))
+    Ok((
+        private_headers(),
+        Json(config_response(&state.db, row).await?),
+    ))
 }
 
 pub(crate) async fn sweep_cleanup(state: &AppState) -> AppResult<()> {
@@ -350,6 +392,146 @@ mod tests {
     };
     use mongodb::bson::doc;
     tokio::task_local! { pub(super) static REPAIR_API_BASE: String; }
+
+    #[tokio::test]
+    async fn admin_targets_require_live_admin_and_page_eligible_transports_without_losing_tombstones()
+     {
+        let state =
+            test_app_state(connect_transaction_test_database("platform_admin_targets").await);
+        crate::services::role_service::seed_system_roles(&state.db)
+            .await
+            .unwrap();
+        let actor = uuid::Uuid::new_v4().to_string();
+        let mut user = test_user(&actor, UserType::Person);
+        state
+            .db
+            .collection::<User>(crate::models::user::COLLECTION_NAME)
+            .insert_one(&user)
+            .await
+            .unwrap();
+        assert!(
+            conversion_targets(
+                State(state.clone()),
+                test_auth_user(&actor),
+                Query(ListQuery { before_id: None })
+            )
+            .await
+            .is_err()
+        );
+        user.role_ids = vec![
+            crate::services::role_service::get_platform_role_ids(&state.db)
+                .await
+                .unwrap()
+                .admin,
+        ];
+        state
+            .db
+            .collection::<User>(crate::models::user::COLLECTION_NAME)
+            .replace_one(doc! {"_id":&actor}, &user)
+            .await
+            .unwrap();
+        configs::ensure_indexes(&state.db).await.unwrap();
+        let bots = state
+            .db
+            .collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME);
+        let mut expected = std::collections::BTreeSet::new();
+        for number in 0..56 {
+            let mut bot = crate::services::platform_entry_native::tests::bot();
+            bot.platform_bot_id = format!("remote-{number}");
+            if number == 0 {
+                bot.platform = "telegram".into();
+                bot.credential_source = "telegram_manager".into();
+            } else if number == 1 {
+                bot.platform = "x".into();
+                bot.webhook_registered = true;
+            }
+            expected.insert(bot.id.clone());
+            bots.insert_one(bson::to_document(&bot).unwrap())
+                .await
+                .unwrap();
+        }
+        for case in [
+            "converted",
+            "inactive",
+            "unsupported",
+            "child",
+            "reserved",
+            "pending",
+            "polling-only-x",
+        ] {
+            let mut bot = crate::services::platform_entry_native::tests::bot();
+            bot.platform_bot_id = case.into();
+            let mut row = bson::to_document(&bot).unwrap();
+            match case {
+                "converted" => {
+                    row.insert("platform_profile_id", "existing");
+                }
+                "inactive" => {
+                    row.insert("is_active", false);
+                }
+                "unsupported" => {
+                    row.insert("platform", "aurinko");
+                }
+                "child" => {
+                    row.insert("platform", "telegram-new");
+                }
+                "polling-only-x" => {
+                    row.insert("platform", "x");
+                    row.insert("webhook_registered", false);
+                }
+                "reserved" => {
+                    state.db.collection::<bson::Document>(crate::models::platform_bot_config::COLLECTION_NAME).insert_one(doc!{"_id":"retired-profile","channel_bot_id":"old-channel","manager_bot_id":case,"native_entry":{"identity":{"platform":"slack","platform_bot_id":case}},"deleted_at":bson::DateTime::now()}).await.unwrap();
+                }
+                "pending" => {
+                    row.insert("platform_entry_pending", doc! {"actor":&actor});
+                    expected.insert(bot.id.clone());
+                }
+                _ => unreachable!(),
+            }
+            bots.insert_one(row).await.unwrap();
+        }
+        let mut found = std::collections::BTreeSet::new();
+        let mut before = None;
+        let mut pages = 0;
+        loop {
+            let (_, Json(page)) = conversion_targets(
+                State(state.clone()),
+                test_auth_user(&actor),
+                Query(ListQuery { before_id: before }),
+            )
+            .await
+            .unwrap();
+            pages += 1;
+            assert!(page.bots.len() <= 50);
+            for bot in page.bots {
+                found.insert(bot.id);
+            }
+            before = page
+                .next_before_id
+                .map(|id| uuid::Uuid::parse_str(&id).unwrap());
+            if before.is_none() {
+                break;
+            }
+        }
+        assert!(pages >= 2);
+        assert_eq!(found, expected);
+        state
+            .db
+            .collection::<bson::Document>(crate::models::user::COLLECTION_NAME)
+            .update_one(doc! {"_id":&actor}, doc! {"$set":{"role_ids":[]}})
+            .await
+            .unwrap();
+        assert!(
+            conversion_targets(
+                State(state.clone()),
+                test_auth_user(&actor),
+                Query(ListQuery { before_id: None })
+            )
+            .await
+            .is_err()
+        );
+        state.db.drop().await.unwrap();
+    }
 
     #[tokio::test]
     async fn native_repair_http_refuses_before_telegram_effects_and_legacy_repair_still_works() {
@@ -669,7 +851,10 @@ pub async fn configure_guide(
             serde_json::json!({"platform_config_id": row.id, "generation": row.generation, "enabled": row.enabled}),
         ),
     );
-    Ok((private_headers(), Json(row.into())))
+    Ok((
+        private_headers(),
+        Json(config_response(&state.db, row).await?),
+    ))
 }
 
 #[derive(Serialize)]
@@ -1044,6 +1229,8 @@ pub struct RuntimeResponse {
     personal_enabled: bool,
     public_enabled: bool,
     emergency_stopped: bool,
+    remembered_personal_enabled: Option<bool>,
+    remembered_public_enabled: Option<bool>,
     public_policy: Option<PublicPolicyResponse>,
 }
 impl From<crate::models::platform_bot_runtime_controls::PlatformBotRuntimeControls>
@@ -1058,6 +1245,8 @@ impl From<crate::models::platform_bot_runtime_controls::PlatformBotRuntimeContro
             personal_enabled: r.personal_enabled,
             public_enabled: r.public_enabled,
             emergency_stopped: r.emergency_stopped,
+            remembered_personal_enabled: r.remembered_personal_enabled,
+            remembered_public_enabled: r.remembered_public_enabled,
             public_policy: r.public_policy.map(|p| PublicPolicyResponse {
                 source: "nyxagent",
                 profile: p.nyxagent_profile,
@@ -1090,6 +1279,7 @@ impl PublicReadinessResponse {
             TransportUnavailable => "transport_unavailable",
             OriginRevoked => "origin_revoked",
             EngineUnavailable => "engine_unavailable",
+            UnsupportedInput => "unsupported_input",
             InsufficientFunds => "insufficient_funds",
             CapacityLimited => "capacity_limited",
             PublicNotReady => "public_not_ready",
@@ -1127,6 +1317,7 @@ impl PublicReadinessResponse {
 }
 #[derive(Serialize)]
 pub struct ManagerRuntimeResponse {
+    state: &'static str,
     contract_version: u32,
     supported: bool,
     runtime: Option<RuntimeResponse>,
@@ -1143,6 +1334,7 @@ fn runtime_response(
         _ => UnavailableReason::PublicNotReady,
     };
     ManagerRuntimeResponse {
+        state: "setup_incomplete",
         contract_version: manager_contract::CONTRACT_VERSION,
         supported: true,
         runtime: row.map(Into::into),
@@ -1154,8 +1346,14 @@ async fn runtime_status(
     db: &mongodb::Database,
     row: Option<crate::models::platform_bot_runtime_controls::PlatformBotRuntimeControls>,
 ) -> AppResult<ManagerRuntimeResponse> {
+    let status = crate::services::platform_bot_status_service::view(db, row.as_ref()).await?;
     let readiness = if let Some(r) = &row {
-        if !r.retired && !r.emergency_stopped && r.public_enabled && r.public_policy.is_some() {
+        if status.state != "connection_repair_required"
+            && !r.retired
+            && !r.emergency_stopped
+            && r.public_enabled
+            && r.public_policy.is_some()
+        {
             Some(
                 crate::services::platform_public_policy::assess_enabled(
                     db,
@@ -1184,6 +1382,15 @@ async fn runtime_status(
     }
     if let Some(readiness) = readiness {
         response.public_readiness = PublicReadinessResponse::from_readiness(readiness);
+    }
+    response.state = status.state;
+    if status.state == "connection_repair_required" {
+        response.public_readiness = PublicReadinessResponse::unavailable(
+            manager_contract::UnavailableReason::TransportUnavailable,
+        );
+    } else if status.faq_ready {
+        response.public_readiness.status = "faq_ready";
+        response.public_readiness.reason = None;
     }
     Ok(response)
 }
@@ -1420,7 +1627,7 @@ pub enum NativeTransportInput {
 #[serde(deny_unknown_fields)]
 pub struct NativeConversionRequest {
     pub channel_bot_id: uuid::Uuid,
-    pub funding_owner_user_id: uuid::Uuid,
+    pub funding_owner_user_id: Option<uuid::Uuid>,
     pub transport: NativeTransportInput,
     pub recovery: Option<NativeSetupRecovery>,
     pub lifecycle_review: Option<NativeLifecycleReview>,
@@ -1579,7 +1786,10 @@ pub async fn convert_native(
         crate::services::platform_entry_admin_service::reserve_reviewed_update(
             &state,
             &auth.user_id.to_string(),
-            &body.funding_owner_user_id.to_string(),
+            &body
+                .funding_owner_user_id
+                .unwrap_or(auth.user_id)
+                .to_string(),
             match body.transport {
                 NativeTransportInput::Direct => {
                     crate::services::platform_entry_admin_service::NativeTransportChoice::Direct
@@ -1671,7 +1881,10 @@ pub async fn convert_native(
         &state,
         &auth.user_id.to_string(),
         &body.channel_bot_id.to_string(),
-        &body.funding_owner_user_id.to_string(),
+        &body
+            .funding_owner_user_id
+            .unwrap_or(auth.user_id)
+            .to_string(),
         transport,
         discord.as_ref(),
         gateway.as_ref(),
@@ -1687,7 +1900,7 @@ pub async fn convert_native(
                 Some(serde_json::json!({"platform_config_id":row.id,"generation":row.generation})),
             );
             NativeConversionResponse::Converted {
-                profile: (*row).into(),
+                profile: config_response(&state.db, *row).await?,
             }
         }
         NativeConversionOutcome::DiscordRecovery(review) => NativeConversionResponse::Recovery {
@@ -1716,5 +1929,47 @@ pub async fn inspect_native_gateway(
             .await?
             .into(),
         ),
+    ))
+}
+
+#[derive(Serialize)]
+pub struct ConversionTargetResponse {
+    id: String,
+    platform: String,
+    label: String,
+    platform_bot_username: String,
+    credential_source: String,
+}
+#[derive(Serialize)]
+pub struct ConversionTargetsResponse {
+    bots: Vec<ConversionTargetResponse>,
+    next_before_id: Option<String>,
+}
+pub async fn conversion_targets(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Query(query): Query<ListQuery>,
+) -> AppResult<(HeaderMap, Json<ConversionTargetsResponse>)> {
+    admin(&state, &auth).await?;
+    let (bots, next_before_id) = configs::conversion_targets(
+        &state.db,
+        query.before_id.map(|id| id.to_string()).as_deref(),
+    )
+    .await?;
+    Ok((
+        private_headers(),
+        Json(ConversionTargetsResponse {
+            next_before_id,
+            bots: bots
+                .into_iter()
+                .map(|bot| ConversionTargetResponse {
+                    id: bot.id,
+                    platform: bot.platform,
+                    label: bot.label,
+                    platform_bot_username: bot.platform_bot_username,
+                    credential_source: bot.credential_source,
+                })
+                .collect(),
+        }),
     ))
 }

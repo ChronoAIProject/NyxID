@@ -506,9 +506,20 @@ is in [NyxBot channel delivery](chat/09-nyxbot-orchestrator.md#channel-turn-deli
 Verified against CMA `develop`, `docs/CMAEG_Protocol.md` §§8–10 and
 `api/crates/cmaeg/src/{turns,tools/reply_targets}`:
 
-- Committed `response.output_item.done` messages and a terminal
-  `response.completed` can express both a continuing-work notice and an
-  incomplete answer as text. No CMA change is necessary for those messages.
+- Committed `response.output_item.done` messages can express partial/failure
+  output. Output-free `response.completed` finishes without text. NyxID uses
+  that terminal form for successful silence and detaching long-running work.
+- CMA `develop` pinned at `37547e73aebfc8335b38f914f3ff1db4fcbf950d` was
+  checked locally on 2026-10-19 (`delivery/step.rs` and the channel protocol).
+  `reply.ack_after_ms = 0` disables the Accepted working acknowledgement;
+  heartbeat output requires that acknowledgement to have been sent. NyxID
+  provisions and reconciles this policy through versioned channel updates,
+  verifying the returned policy before marking it supported. Missing or refused
+  policy evidence is a blocked capability, not confirmed quiet support. Proof is
+  invalidated before a policy replacement, on unconfirmed accepted write/readback,
+  and on transport/binding teardown or replacement. Only an authenticated complete
+  echo for the same fenced binding restores it; rebinding cannot inherit proof.
+  An empty global acknowledgement string is not a supported substitute.
 - `createReplyTarget` and `replyToTarget` already support the original relay
   destination, current channel/binding/key checks, a 24-hour sealed target, and
   durable payload-bound idempotency. They deliberately return `unknown` for an
@@ -528,9 +539,28 @@ reconcilable without a second send. This would close the crash/timeout window
 between claiming the stream and the platform delivering it. Without it, NyxID
 can guarantee one chosen delivery attempt across replicas, **not exactly-once
 external delivery**. Platform sends with ambiguous outcomes may still be lost.
-The earlier 570-second notice is best effort: CMA starts its 600-second clock at
-ingress, so a long admission delay or a shorter operator timeout can close the
-stream first; the durable late-answer path still runs.
+NyxID emits neither a queue acknowledgement nor a 570-second continuing-work
+notice. At the local deadline it detaches silently and retains the durable
+original-source answer path. CMA starts its own clock at ingress, so an earlier
+provider timeout can still close the stream first. Source and fixture checks
+establish protocol behavior; they do not claim a deployed gateway or live
+provider delivery test.
+
+NyxBot accepted work is stored in its existing assistant event queue, bounded at
+twenty; it is not a generic gateway body queue. Accepted destinations bind to
+original source records transactionally, one message question per Event turn.
+Generic sources capture their original managed route and API key. Admission
+revalidates and write-fences the exact active route, owner, bot, platform and key;
+a deleted, inactive, transferred or rebound route cannot start queued tool work.
+Each coalesced destination is checked independently. Legacy generic queue records
+without captured route/key authority are refused rather than adopting a new route.
+The sweep mints original reply targets within the event window even before a
+turn starts, and independently expires/refuses ineligible destinations. Silent
+completion is atomically fenced without reclaiming `sending`, `streamed` or
+`unknown`. Drain and upgrade every old queue writer before promising retention:
+old `$slice: -20` writers can still evict accepted sources. Unanchored generic
+legacy questions are unavailable; native legacy questions retain their exact
+thread origin. Neither path guesses the latest message.
 
 ## Agent gateway group-thread parity
 

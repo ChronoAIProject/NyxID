@@ -895,6 +895,121 @@ async fn funded_never_submitted_delete_closes_zero_usage_before_cleanup() {
     assert_eq!(wallet(&f).await.reserved_credits, Credits::ZERO);
     f.db.drop().await.unwrap();
 }
+
+async fn unresolved_legacy_submission_cannot_settle_as_never_submitted(allocate: bool) {
+    let f = fixture(if allocate {
+        "runtime_unknown_submission_allocated"
+    } else {
+        "runtime_unknown_submission_unallocated"
+    })
+    .await;
+    let created = lifecycle::create_machine_with_billing(&f.db, input(&f).await, f.billing.clone())
+        .await
+        .unwrap()
+        .machine;
+    let machine = if allocate {
+        lifecycle::advance_runtime_generation(
+            &f.db,
+            &created.node_id,
+            created.revision,
+            0,
+            None,
+            None,
+        )
+        .await
+        .unwrap()
+    } else {
+        created
+    };
+    // Legacy workers may have dispatched before recording a submission
+    // marker. Lease expiry does not close that original request.
+    let changed =
+        f.db.collection::<Document>(crate::models::remote_machine_outbox::COLLECTION_NAME)
+            .update_one(
+                doc! {"machine_id":&machine.node_id,"kind":"create_sandbox"},
+                doc! {"$set":{"state":"claimed","attempts":1_i64,
+                "claimed_until":bson::DateTime::from_chrono(Utc::now()-Duration::minutes(5)),
+                "submission":bson::Bson::Null}},
+            )
+            .await
+            .unwrap();
+    assert_eq!(changed.matched_count, 1);
+    let deleting = action(
+        &f,
+        &machine,
+        LifecycleAction::Delete,
+        json!({"action":"delete"}),
+    )
+    .await
+    .unwrap()
+    .machine;
+    assert!(deleting.runtime_submission_started_at.is_none());
+    assert!(deleting.pod_uid.is_none());
+    let runs = f.db.collection::<Document>(RUN_COLLECTION);
+    let intervals = f.db.collection::<Document>(INTERVAL_COLLECTION);
+    let before_run = runs
+        .find_one(doc! {"_id":&deleting.runtime_run_id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        before_run.get_i64("runtime_generation").unwrap(),
+        deleting.runtime_generation + if allocate { 0 } else { 1 }
+    );
+    let before_interval = intervals
+        .find_one(doc! {"run_id":&deleting.runtime_run_id})
+        .await
+        .unwrap()
+        .unwrap();
+    let before_wallet = bson::to_document(&wallet(&f).await).unwrap();
+    let ledger = f.db.collection::<Document>("billing_ledger");
+    let before_ledger = ledger.count_documents(doc! {}).await.unwrap();
+    let outcome = finalize_never_submitted(&f.db, Some(f.billing.clone()), &deleting).await;
+    assert_eq!(
+        runs.find_one(doc! {"_id":&deleting.runtime_run_id})
+            .await
+            .unwrap()
+            .unwrap(),
+        before_run,
+        "an unresolved original create must not gain a fabricated zero stop"
+    );
+    assert_eq!(
+        intervals
+            .find_one(doc! {"run_id":&deleting.runtime_run_id})
+            .await
+            .unwrap()
+            .unwrap(),
+        before_interval
+    );
+    assert_eq!(bson::to_document(&wallet(&f).await).unwrap(), before_wallet);
+    assert_eq!(
+        ledger.count_documents(doc! {}).await.unwrap(),
+        before_ledger
+    );
+    assert!(outcome.is_err() || !outcome.unwrap());
+    let after = current(&f, &deleting.node_id).await;
+    assert_eq!(after.resource_state, ResourceState::Deleting);
+    assert!(after.last_runtime_evidence.is_none());
+    let op =
+        f.db.collection::<Document>(OPERATIONS)
+            .find_one(doc! {"_id":&after.active_operation_id})
+            .await
+            .unwrap()
+            .unwrap();
+    assert!(op.get("terminal_at").is_none_or(|v| v == &bson::Bson::Null));
+    f.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn paid_unallocated_delete_rejects_unknown_legacy_submission() {
+    unresolved_legacy_submission_cannot_settle_as_never_submitted(false).await;
+}
+
+#[tokio::test]
+async fn paid_allocated_delete_rejects_unknown_legacy_submission() {
+    unresolved_legacy_submission_cannot_settle_as_never_submitted(true).await;
+}
+
 #[tokio::test]
 async fn submission_marker_prevents_false_local_stop_and_deadline_keeps_workspace() {
     let f = fixture("runtime_submission_fence").await;
@@ -1776,5 +1891,159 @@ async fn remote_flag_off_manager_still_protects_insufficient_funds() {
     assert_eq!(paused.resource_state, ResourceState::Paused);
     require_accounting_final(&f.db, &paused).await.unwrap();
     assert_eq!(wallet(&f).await.reserved_credits, Credits::ZERO);
+    f.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn persisted_control_plane_delete_stop_settles_charged_quarantine_once_and_preserves_upper_bound()
+ {
+    use crate::models::remote_machine::{
+        DeleteRecoveryProgress, DeleteStopEvidence, DeleteStopKind, DeleteStorageDisposition,
+    };
+    let f = fixture("delete_recovery_charged_quarantine").await;
+    let ready = start_ready(&f).await;
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    let (observed, running) = native_fixture(&f, &ready, true, false).await;
+    native_observe_and_settle(&f.db, f.billing.clone(), &observed, &running)
+        .await
+        .unwrap();
+    let deleting = action(
+        &f,
+        &current(&f, &ready.node_id).await,
+        LifecycleAction::Delete,
+        json!({"action":"delete"}),
+    )
+    .await
+    .unwrap()
+    .machine;
+    f.db.collection::<Document>(MACHINES).update_one(doc!{"_id":&deleting.node_id,"revision":deleting.revision},
+        doc!{"$set":{"native_uncertainty":"predecessor_node_unhealthy_or_stale","native_node_uid":"original-node-uid"},"$inc":{"revision":1_i64}}).await.unwrap();
+    let deleting = current(&f, &ready.node_id).await;
+    let stop_at = DateTime::from_timestamp_millis(Utc::now().timestamp_millis()).unwrap();
+    let progress = DeleteRecoveryProgress {
+        evidence_version: super::super::remote_machine_delete_recovery::EVIDENCE_VERSION,
+        evidence_id: Uuid::new_v4().to_string(),
+        operation_id: deleting.active_operation_id.clone().unwrap(),
+        owner_id: deleting.owner_id.clone(),
+        runtime_generation: deleting.runtime_generation,
+        credential_epoch: deleting.credential_epoch,
+        writer_fence: deleting.writer_fence.clone(),
+        deletion_basis_digest: super::super::remote_machine_delete_recovery::basis_digest(
+            &deleting,
+        )
+        .unwrap(),
+        evaluated_revision: deleting.revision,
+        original_uncertainty: deleting.native_uncertainty.clone(),
+        sandbox_uid: deleting.sandbox_uid.clone(),
+        pod_uid: deleting.pod_uid.clone(),
+        node_uid: deleting.native_node_uid.clone(),
+        pvc_uid: deleting.pvc_uid.clone(),
+        provisioning_request_id: deleting.pvc_uid.as_ref().map(|uid| format!("pvc-{uid}")),
+        provisioning_terminal: None,
+        volume: None,
+        stop: Some(DeleteStopEvidence {
+            kind: DeleteStopKind::ControlPlaneSuspended,
+            source_operation_id: deleting.active_operation_id.clone(),
+            source: "sandbox-kubernetes-control-plane".into(),
+            evidence_ref: Uuid::new_v4().to_string(),
+            observed_at: stop_at,
+            sandbox_generation: 3,
+            sandbox_resource_version: "original-rv".into(),
+        }),
+        storage: DeleteStorageDisposition::ProvisioningUnknown,
+        creation_terminal: false,
+        resources_complete: false,
+        blocker: None,
+        observed_at: stop_at,
+    };
+    f.db.collection::<Document>(MACHINES).update_one(doc!{"_id":&deleting.node_id,"revision":deleting.revision},
+        doc!{"$set":{"delete_recovery":bson::to_bson(&progress).unwrap()},"$inc":{"revision":1_i64}}).await.unwrap();
+    let deleting = current(&f, &ready.node_id).await;
+    assert!(require_accounting_final(&f.db, &deleting).await.is_err());
+    assert!(!remote_machine_native::predecessor_stopped(&deleting));
+    assert!(!remote_machine_native::current_running(
+        &deleting,
+        &running,
+        Utc::now()
+    ));
+    assert!(
+        native_observe_and_settle(&f.db, f.billing.clone(), &deleting, &running)
+            .await
+            .is_err()
+    );
+    // Legacy external-fact rows deserialize, but cannot be consumed without
+    // the production control-plane producer refreshing their authority.
+    let mut legacy = deleting.clone();
+    legacy.delete_recovery.as_mut().unwrap().evidence_version = 0;
+    legacy
+        .delete_recovery
+        .as_mut()
+        .unwrap()
+        .stop
+        .as_mut()
+        .unwrap()
+        .kind = DeleteStopKind::TrustedRuntime;
+    assert!(
+        settle_persisted_delete(&f.db, f.billing.clone(), &legacy)
+            .await
+            .is_err()
+    );
+    assert!(require_accounting_final(&f.db, &deleting).await.is_err());
+    settle_persisted_delete(&f.db, f.billing.clone(), &deleting)
+        .await
+        .unwrap();
+    require_accounting_final(&f.db, &deleting).await.unwrap();
+    let first: MachineRuntimeRun =
+        f.db.collection(RUN_COLLECTION)
+            .find_one(doc! {"_id":&deleting.runtime_run_id})
+            .await
+            .unwrap()
+            .unwrap();
+    assert_eq!(first.state, MachineRuntimeRunState::Closed);
+    assert_eq!(first.stop_ns, stop_at.timestamp_nanos_opt());
+    assert!(first.stop_is_upper_bound);
+    assert!(first.cumulative_seconds >= 1);
+    let wallet_first = bson::to_document(&wallet(&f).await).unwrap();
+    let ledger_first =
+        f.db.collection::<Document>("billing_ledger")
+            .count_documents(doc! {})
+            .await
+            .unwrap();
+    let usage_first =
+        f.db.collection::<Document>("usage_records")
+            .count_documents(doc! {})
+            .await
+            .unwrap();
+    settle_persisted_delete(&f.db, f.billing.clone(), &deleting)
+        .await
+        .unwrap();
+    let second: MachineRuntimeRun =
+        f.db.collection(RUN_COLLECTION)
+            .find_one(doc! {"_id":&deleting.runtime_run_id})
+            .await
+            .unwrap()
+            .unwrap();
+    assert_eq!(second.stop_ns, first.stop_ns);
+    assert_eq!(second.stop_evidence_id, first.stop_evidence_id);
+    assert_eq!(second.cumulative_seconds, first.cumulative_seconds);
+    assert_eq!(bson::to_document(&wallet(&f).await).unwrap(), wallet_first);
+    assert_eq!(
+        f.db.collection::<Document>("billing_ledger")
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        ledger_first
+    );
+    assert_eq!(
+        f.db.collection::<Document>("usage_records")
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        usage_first
+    );
+    assert_eq!(
+        current(&f, &ready.node_id).await.native_uncertainty,
+        deleting.native_uncertainty
+    );
     f.db.drop().await.unwrap();
 }

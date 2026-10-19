@@ -733,3 +733,346 @@ fn discord_browser_consent_saved_personal_reply_history_continuation_and_logout_
         },
     );
 }
+
+#[test]
+fn same_owner_links_each_native_and_telegram_bot_independently_and_logout_is_local() {
+    crate::test_utils::run_native_journey_test("same_owner_independent_entries", || async {
+        let mut native = NativeJourney::new().await;
+        let mut telegram = Journey::new().await;
+        let old_db = telegram.state.db.clone();
+        // Both production paths must resolve one person's existing NyxBot in the same database.
+        for collection in [
+            PROFILES,
+            crate::models::channel_bot::COLLECTION_NAME,
+            crate::models::platform_credential::COLLECTION_NAME,
+            crate::models::platform_bot_runtime_controls::COLLECTION_NAME,
+        ] {
+            let rows = old_db
+                .collection::<Document>(collection)
+                .find(doc! {})
+                .await
+                .unwrap()
+                .try_collect::<Vec<_>>()
+                .await
+                .unwrap();
+            if !rows.is_empty() {
+                native
+                    .state
+                    .db
+                    .collection::<Document>(collection)
+                    .insert_many(rows)
+                    .await
+                    .unwrap();
+            }
+        }
+        telegram.state = native.state.clone();
+        telegram.owner = native.personal.clone();
+        let egress = telegram.egress.clone();
+        let execution = crate::services::assistant_nyxagent_runtime::producer(
+            telegram.state.clone(),
+            egress.clone(),
+            crate::services::platform_public_credential_service::producer(telegram.state.clone()),
+        );
+        let mut producers = assemble(
+            telegram.state.clone(),
+            execution,
+            egress,
+            Arc::new(TestSettledHook),
+        );
+        let identity = producers.identity.clone();
+        Arc::get_mut(&mut producers).unwrap().transport = Arc::new(LocalTransport {
+            state: telegram.state.clone(),
+            identity,
+            base: telegram.server.uri(),
+            personal_gate: None,
+        });
+        telegram.producers = producers;
+        telegram.link().await;
+        let binding_rows = native.state.db.collection::<PlatformPersonalBinding>(
+            crate::models::platform_personal_binding::COLLECTION_NAME,
+        );
+        let count =
+            || binding_rows.count_documents(doc! {"user_id":&native.personal,"state":"active"});
+        assert_eq!(
+            count().await.unwrap(),
+            1,
+            "Telegram proof must not claim Discord"
+        );
+        native
+            .dispatch(native.admission(101, "login", None).await)
+            .await;
+        let requests = native.server.received_requests().await.unwrap();
+        let body: Value = serde_json::from_slice(&requests.last().unwrap().body).unwrap();
+        let url = reqwest::Url::parse(
+            body["content"]
+                .as_str()
+                .unwrap()
+                .split_whitespace()
+                .find(|word| word.starts_with("https://") || word.starts_with("http://"))
+                .unwrap(),
+        )
+        .unwrap();
+        let token = Zeroizing::new(
+            url.fragment()
+                .unwrap()
+                .strip_prefix("intent_token=")
+                .unwrap()
+                .to_owned(),
+        );
+        let review = native
+            .browser(
+                "POST",
+                "/api/v1/platform-personal/review",
+                Some(json!({"intent_token":token.as_str()})),
+            )
+            .await;
+        assert_eq!(
+            count().await.unwrap(),
+            1,
+            "Browser sign-in and review alone cannot link Discord"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+        let proof=native.browser("POST","/api/v1/platform-personal/approve",Some(json!({"challenge_id":review["challenge_id"],"review_digest":review["review_digest"],"replace_existing":false}))).await;
+        let confirmation =
+            Zeroizing::new(proof["confirmation_command"].as_str().unwrap().to_owned());
+        let code = confirmation.strip_prefix("/nyx confirm code:").unwrap();
+        telegram
+            .webhook(&telegram.update(102, &format!("/confirm {code}"), false))
+            .await;
+        assert_eq!(
+            count().await.unwrap(),
+            1,
+            "Proof from a different platform/bot cannot confirm"
+        );
+        native
+            .dispatch(native.admission(103, "confirm", Some(("code", code))).await)
+            .await;
+        assert_eq!(count().await.unwrap(), 2);
+        telegram
+            .webhook(&telegram.update(104, "Remember the Telegram channel", false))
+            .await;
+        native
+            .dispatch(
+                native
+                    .admission(
+                        105,
+                        "ask",
+                        Some(("question", "Remember the Discord channel")),
+                    )
+                    .await,
+            )
+            .await;
+        let (_, outcome) =
+            tokio::time::timeout(std::time::Duration::from_secs(30), native.finished.recv())
+                .await
+                .unwrap()
+                .unwrap();
+        assert!(matches!(outcome, DeliveryOutcome::NativeSent { .. }));
+        let rows = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            loop {
+                let rows = native
+                    .state
+                    .db
+                    .collection::<PlatformPersonalBinding>(
+                        crate::models::platform_personal_binding::COLLECTION_NAME,
+                    )
+                    .find(doc! {"user_id":&native.personal,"state":"active"})
+                    .await
+                    .unwrap()
+                    .try_collect::<Vec<_>>()
+                    .await
+                    .unwrap();
+                if rows.len() == 2 && rows.iter().all(|row| row.conversation_id.is_some()) {
+                    break rows;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            rows[0].nyxbot_agent_id, rows[1].nyxbot_agent_id,
+            "Reuse the existing personal NyxBot"
+        );
+        assert_ne!(
+            rows[0].conversation_id, rows[1].conversation_id,
+            "Each proved channel has its own saved thread"
+        );
+        telegram
+            .webhook(&telegram.update(106, "/logout", false))
+            .await;
+        assert_eq!(count().await.unwrap(), 1);
+        let remaining = native
+            .state
+            .db
+            .collection::<PlatformPersonalBinding>(
+                crate::models::platform_personal_binding::COLLECTION_NAME,
+            )
+            .find_one(doc! {"user_id":&native.personal,"state":"active"})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(remaining.platform_config_id, native.profile.id);
+        native
+            .dispatch(native.admission(107, "status", None).await)
+            .await;
+        let requests = native.server.received_requests().await.unwrap();
+        assert!(String::from_utf8_lossy(&requests.last().unwrap().body).contains("logged in"));
+        old_db.drop().await.unwrap();
+        native.state.db.drop().await.unwrap();
+    });
+}
+
+#[test]
+fn confirmed_native_proof_rechecks_disable_logout_and_repair_and_new_proof_is_independent() {
+    crate::test_utils::run_native_journey_test("native_proof_live_replay", || async {
+        let j = NativeJourney::new().await;
+        async fn prove(j: &NativeJourney, sequence: u64) -> Zeroizing<String> {
+            j.dispatch(j.admission(sequence, "login", None).await).await;
+            let requests = j.server.received_requests().await.unwrap();
+            let body: Value = serde_json::from_slice(&requests.last().unwrap().body).unwrap();
+            let url = reqwest::Url::parse(
+                body["content"]
+                    .as_str()
+                    .unwrap()
+                    .split_whitespace()
+                    .find(|word| word.starts_with("https://") || word.starts_with("http://"))
+                    .unwrap(),
+            )
+            .unwrap();
+            let token = Zeroizing::new(
+                url.fragment()
+                    .unwrap()
+                    .strip_prefix("intent_token=")
+                    .unwrap()
+                    .to_owned(),
+            );
+            let review = j
+                .browser(
+                    "POST",
+                    "/api/v1/platform-personal/review",
+                    Some(json!({"intent_token":token.as_str()})),
+                )
+                .await;
+            tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+            let approved=j.browser("POST","/api/v1/platform-personal/approve",Some(json!({"challenge_id":review["challenge_id"],"review_digest":review["review_digest"],"replace_existing":false}))).await;
+            let code = Zeroizing::new(
+                approved["confirmation_command"]
+                    .as_str()
+                    .unwrap()
+                    .strip_prefix("/nyx confirm code:")
+                    .unwrap()
+                    .to_owned(),
+            );
+            j.dispatch(
+                j.admission(sequence + 1, "confirm", Some(("code", code.as_str())))
+                    .await,
+            )
+            .await;
+            code
+        }
+        async fn reconfirm(j: &NativeJourney, code: &str, sequence: u64) -> bool {
+            // Keep the production 750ms per-sender decision fence, including
+            // unsuccessful replays, rather than confusing rate refusal with revocation.
+            tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+            let admission = j.admission(sequence, "confirm", Some(("code", code))).await;
+            let lifecycle = bindings::LifecycleProducer {
+                personal: j.producers.personal.clone(),
+                public: j.producers.public.clone(),
+            };
+            let mut session = j.state.db.client().start_session().await.unwrap();
+            session.start_transaction().await.unwrap();
+            let result = crate::services::platform_link_intent_service::confirm_in_session(
+                &j.state.db,
+                &mut session,
+                j.state.auth_device_hmac_key.as_slice(),
+                j.state.audit_chain_hmac_key.as_slice(),
+                &admission.verified_update(),
+                false,
+                code,
+                &lifecycle,
+            )
+            .await;
+            session.abort_transaction().await.unwrap();
+            match result {
+                Ok(_) => true,
+                Err(AppError::NotFound(message)) => {
+                    assert_eq!(message, "Personal linking request unavailable");
+                    false
+                }
+                Err(error) => panic!("Unexpected proof result: {error:?}"),
+            }
+        }
+        let code = prove(&j, 201).await;
+        assert!(reconfirm(&j, &code, 203).await);
+        let rows = j.state.db.collection::<PlatformPersonalBinding>(
+            crate::models::platform_personal_binding::COLLECTION_NAME,
+        );
+        let old = rows
+            .find_one(doc! {"platform_config_id":&j.profile.id,"state":"active"})
+            .await
+            .unwrap()
+            .unwrap();
+        let controls = j
+            .state
+            .db
+            .collection::<Document>(crate::models::platform_bot_runtime_controls::COLLECTION_NAME);
+        controls
+            .update_one(
+                doc! {"platform_config_id":&j.profile.id},
+                doc! {"$set":{"personal_enabled":false}},
+            )
+            .await
+            .unwrap();
+        assert!(!reconfirm(&j, &code, 204).await);
+        controls
+            .update_one(
+                doc! {"platform_config_id":&j.profile.id},
+                doc! {"$set":{"personal_enabled":true}},
+            )
+            .await
+            .unwrap();
+        j.dispatch(j.admission(205, "logout", None).await).await;
+        assert!(!reconfirm(&j, &code, 206).await);
+        let second_code = prove(&j, 207).await;
+        let before_repair = rows
+            .find_one(doc! {"platform_config_id":&j.profile.id,"state":"active"})
+            .await
+            .unwrap()
+            .unwrap();
+        // Same durable epoch invalidation used by reviewed repair. Old active
+        // inventory cannot say Linked; a later separately proved row can.
+        controls
+            .update_one(
+                doc! {"platform_config_id":&j.profile.id},
+                doc! {"$inc":{"manager_authority_epoch":1_i64}},
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            bindings::inventory_state(&j.state.db, &before_repair)
+                .await
+                .unwrap(),
+            PersonalBindingState::Revoked
+        );
+        assert!(!reconfirm(&j, &second_code, 209).await);
+        let third_code = prove(&j, 210).await;
+        assert!(reconfirm(&j, &third_code, 212).await);
+        let current=rows.find_one(doc!{"platform_config_id":&j.profile.id,"manager_authority_epoch":2,"state":"active"}).await.unwrap().unwrap();
+        assert_ne!(current.id, old.id);
+        assert_ne!(current.id, before_repair.id);
+        assert_eq!(
+            bindings::inventory_state(&j.state.db, &current)
+                .await
+                .unwrap(),
+            PersonalBindingState::Active
+        );
+        assert_eq!(
+            bindings::inventory_state(&j.state.db, &before_repair)
+                .await
+                .unwrap(),
+            PersonalBindingState::Revoked
+        );
+        j.state.db.drop().await.unwrap();
+    });
+}

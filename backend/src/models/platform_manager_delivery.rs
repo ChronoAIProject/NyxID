@@ -46,6 +46,11 @@ pub struct PlatformManagerDelivery, RawPlatformManagerDelivery {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum DeliveryReference {
+    Faq {
+        article_ids: Vec<String>,
+        linking_enabled: bool,
+        public_policy_revision: i64,
+    },
     Reply {
         conversation_id: String,
         turn_id: String,

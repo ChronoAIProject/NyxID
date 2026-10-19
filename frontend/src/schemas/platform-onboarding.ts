@@ -140,6 +140,7 @@ export const guideConfigurationSchema = z.object({
   platform_concurrent_turns: z.number().int().min(1).max(32),
 });
 export const platformProfileSchema = z.object({
+  display_name: z.string().optional(),
   guide: guideConfigurationSchema.nullish(),
   id: z.uuid(),
   channel_bot_id: z.uuid(),

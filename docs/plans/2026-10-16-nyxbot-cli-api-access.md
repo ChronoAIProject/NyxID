@@ -239,6 +239,30 @@ crash. Default-stack runtime verification, scheduler compatibility, and a
 fresh full CI run are required for the corrected revision; their results
 are retained in the PR and durable validation records.
 
+## Integration with channel queues and source images
+
+Main revision `618c627b9` adds durable channel source questions and authorized
+source-image retrieval. Integration preserves those paths alongside invocation
+authority. Shared event writers reject invocation identity changes, preserve
+accepted source questions and invocation continuations at capacity, and roll
+back producer state on refusal. Event selection keeps those delivery contexts
+out of unrelated owner turns.
+Channel repeat coalescing cannot add destinations to an invocation or its
+queued continuations. A repeated channel question survives invocation
+cancellation and starts a separate turn under its own authority.
+
+Source-image reads match the original invocation identity. Handle issuance,
+confirmation binding, and the final attachment transaction also fence the live
+invocation root. A delayed image cannot attach after cancellation, root deletion,
+or terminal settlement while background cleanup is still pending. Ordinary
+resource use does not query invocation storage.
+
+Regressions cover mixed queue capacity and atomic rollback, duplicate delivery,
+changed event lineage, isolated event selection, all inactive root states,
+changed resource lineage, absence of stored bytes after refusal, and a live
+invocation's successful attachment. Final results for the integrated revision
+are recorded on PR #1941 and in durable task validation records.
+
 ## Source references
 
 - [Assistant architecture](../chat/README.md),

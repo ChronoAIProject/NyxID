@@ -217,6 +217,10 @@ export function BillingPage({
           <BillingTopUpHistory />
         </TabsContent>
         <TabsContent value="usage" className="mt-6 space-y-6">
+          <p className="text-12 text-text-tertiary">
+            Credit usage includes voice calls, dictation, and assistant tasks.
+            Explore a service below for its recorded usage and charges.
+          </p>
           <UsageFilters
             services={services}
             values={selected}

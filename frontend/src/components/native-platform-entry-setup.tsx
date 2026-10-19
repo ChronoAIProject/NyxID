@@ -1,3 +1,4 @@
+import { channelPlatformName } from "@/lib/assistant/nyxbot-labels";
 import { useState } from "react";
 import { useAdminPlatformTargets } from "@/hooks/use-platform-onboarding";
 import {
@@ -21,11 +22,14 @@ import { ErrorBanner } from "@/components/shared/error-banner";
 
 export function NativePlatformEntrySetup({
   profile,
+  onPrepared,
 }: {
   profile?: PlatformProfile;
+  onPrepared?: (profile: PlatformProfile) => void;
 }) {
   const actor = useAuthStore((s) => s.user?.id);
-  const targets = useAdminPlatformTargets();
+  const [showFunding, setShowFunding] = useState(false);
+  const targets = useAdminPlatformTargets(showFunding);
   const capabilities = useNativeEntryTransports();
   const conversion = useNativeEntryConversion();
   const inspection = useNativeGatewayInspection();
@@ -38,10 +42,10 @@ export function NativePlatformEntrySetup({
   const [connectionId, setConnectionId] = useState("");
   const [publicKey, setPublicKey] = useState("");
   const [botId, setBotId] = useState(profile?.channel_bot_id ?? "");
-  const [fundingId, setFundingId] = useState(
-    profile?.funding_owner_user_id ?? "",
+  const [fundingId, setFundingId] = useState("");
+  const [transport, setTransport] = useState<NativeTransport | "">(
+    profile?.transport ?? "",
   );
-  const [transport, setTransport] = useState<NativeTransport | "">("");
   const [review, setReview] = useState<{
     selection: string;
     value: NativeSetupRecovery;
@@ -50,10 +54,18 @@ export function NativePlatformEntrySetup({
   const bots = targets.data?.bots.filter((bot) =>
     capabilities.data?.some((item) => item.platform === bot.platform),
   );
-  const bot = bots?.find((item) => item.id === botId);
+  const bot = profile
+    ? {
+        id: profile.channel_bot_id,
+        platform: profile.platform ?? "telegram",
+        label: profile.display_name ?? profile.manager_bot_id,
+      }
+    : bots?.find((item) => item.id === botId);
   const transports =
     capabilities.data?.find((item) => item.platform === bot?.platform)
-      ?.transports ?? [];
+      ?.transports ??
+    profile?.supported_transports ??
+    [];
   const selection = JSON.stringify([
     actor,
     botId,
@@ -75,11 +87,7 @@ export function NativePlatformEntrySetup({
     ? `${selection}:${JSON.stringify(current)}`
     : undefined;
   const available =
-    !!actor &&
-    !!bot &&
-    !!fundingId &&
-    !!transport &&
-    transports.includes(transport);
+    !!actor && !!bot && !!transport && transports.includes(transport);
   const busy =
     conversion.isPending || inspection.isPending || lifecycle.isPending;
   const keepReview = (value: NativeSetupRecovery) => {
@@ -91,7 +99,7 @@ export function NativePlatformEntrySetup({
     conversion.mutate(
       {
         channel_bot_id: botId,
-        funding_owner_user_id: fundingId,
+        ...(fundingId ? { funding_owner_user_id: fundingId } : {}),
         transport,
         ...(recovery ? { recovery } : {}),
         ...(update && reviewedLifecycle
@@ -106,6 +114,8 @@ export function NativePlatformEntrySetup({
       },
       {
         onSettled: () => {
+          setConnectionId("");
+          setPublicKey("");
           setLifecycleReview(undefined);
           setLifecycleConfirmed(undefined);
         },
@@ -114,6 +124,7 @@ export function NativePlatformEntrySetup({
           else {
             setReview(undefined);
             setConfirmed(undefined);
+            onPrepared?.(result.profile);
             if (!profile) {
               setBotId("");
               setTransport("");
@@ -150,25 +161,9 @@ export function NativePlatformEntrySetup({
             }}
           >
             <option value="">Choose a channel</option>
-            {bots?.map((item) => (
+            {(profile && bot ? [bot] : bots)?.map((item) => (
               <option key={item.id} value={item.id}>
-                {item.label} · {item.platform}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label className="block space-y-1">
-          Dedicated funding organization
-          <select
-            aria-label="Native funding organization"
-            className="h-8 w-full rounded-lg border border-input bg-background px-3"
-            value={fundingId}
-            onChange={(event) => setFundingId(event.target.value)}
-          >
-            <option value="">Choose an organization</option>
-            {targets.data?.orgs.map((org) => (
-              <option key={org.id} value={org.id}>
-                {org.display_name ?? org.slug}
+                {item.label} · {channelPlatformName(item.platform)}
               </option>
             ))}
           </select>
@@ -231,8 +226,26 @@ export function NativePlatformEntrySetup({
             </Button>
           )}
         </div>
-        <details>
-          <summary>Replace reviewed credentials</summary>
+        <details onToggle={(event) => setShowFunding(event.currentTarget.open)}>
+          <summary>Replace reviewed credentials or setup funding</summary>
+          <label className="block space-y-1">
+            Optional funding organization
+            <select
+              aria-label="Native funding organization"
+              value={fundingId}
+              onChange={(event) => setFundingId(event.target.value)}
+              className="h-8 w-full rounded-lg border border-input bg-background px-3"
+            >
+              <option value="">
+                No organization required for FAQ and personal access
+              </option>
+              {targets.data?.orgs.map((org) => (
+                <option key={org.id} value={org.id}>
+                  {org.display_name ?? org.slug}
+                </option>
+              ))}
+            </select>
+          </label>
           <p>
             Use a connected credential owned by this channel’s existing owner.
             Leaving these fields empty retains its current credential selection.

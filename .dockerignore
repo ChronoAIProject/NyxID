@@ -8,12 +8,14 @@ frontend/dist/
 keys/
 docs/
 !docs/AI_AGENT_PLAYBOOK.md
+!docs/assistant
+!docs/assistant/CHANNEL_SETUP_GUIDE.md
 # The public docs site (docs/site/**) is the build-time source for the
 # frontend image's docs pages: the vite `nyxid-docs-sync` plugin reads it
 # via ../docs/site and its publish-gate fails the build if absent. The
 # frontend image uses the repo root as its context (see publish-images.yml),
-# so re-include the docs tree here. Backend/node-agent images only COPY
-# docs/AI_AGENT_PLAYBOOK.md, so this does not change those images.
+# so re-include the docs tree here. Backend/node-agent images COPY only
+# their explicitly embedded guides, so this does not add site content to them.
 !docs/site
 !docs/site/**
 k8s/

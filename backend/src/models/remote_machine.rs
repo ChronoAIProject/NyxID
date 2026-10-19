@@ -173,6 +173,138 @@ pub enum MachineDeletionSource {
     MachineOwner,
 }
 
+/// Durable facts for one owner-authorized delete. This grants no ordinary
+/// running, bootstrap, replacement, resume or rekey authority.
+#[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct DeleteRecoveryProgress {
+    /// Version 1 is Agent Sandbox/Kubernetes control-plane authority only.
+    /// Unversioned legacy external-fact evidence must be observed again.
+    #[serde(default)]
+    pub evidence_version: i64,
+    pub evidence_id: String,
+    pub operation_id: String,
+    pub owner_id: String,
+    pub runtime_generation: i64,
+    pub credential_epoch: i64,
+    pub writer_fence: String,
+    pub deletion_basis_digest: String,
+    pub evaluated_revision: i64,
+    pub original_uncertainty: Option<String>,
+    pub sandbox_uid: Option<String>,
+    pub pod_uid: Option<String>,
+    pub node_uid: Option<String>,
+    pub pvc_uid: Option<String>,
+    pub provisioning_request_id: Option<String>,
+    pub provisioning_terminal: Option<DeleteProvisioningEvidence>,
+    pub volume: Option<DeleteVolumeIdentity>,
+    pub stop: Option<DeleteStopEvidence>,
+    pub storage: DeleteStorageDisposition,
+    pub creation_terminal: bool,
+    pub resources_complete: bool,
+    pub blocker: Option<String>,
+    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+    pub observed_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct DeleteProvisioningEvidence {
+    pub source: String,
+    pub evidence_ref: String,
+    pub never_provisioned: bool,
+    pub disk_handles: Vec<String>,
+    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+    pub observed_at: DateTime<Utc>,
+}
+
+impl std::fmt::Debug for DeleteProvisioningEvidence {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DeleteProvisioningEvidence")
+            .field("source", &self.source)
+            .field("never_provisioned", &self.never_provisioned)
+            .finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Debug for DeleteRecoveryProgress {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DeleteRecoveryProgress")
+            .field("binding", &"[REDACTED]")
+            .field("storage", &self.storage)
+            .field("creation_terminal", &self.creation_terminal)
+            .field("resources_complete", &self.resources_complete)
+            .field("blocker", &self.blocker)
+            .finish()
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DeleteStorageDisposition {
+    NeverRequested,
+    ProvisioningUnknown,
+    NeverProvisioned,
+    Provisioned,
+    Reclaimed,
+    Retained,
+    /// Complete Kubernetes inventories show the original resources released.
+    /// This makes no claim about provisioning history or physical disk erasure.
+    ControlPlaneReleased,
+}
+
+#[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct DeleteVolumeIdentity {
+    pub pv_name: String,
+    pub pv_uid: String,
+    pub reclaim_policy: String,
+    pub csi_driver: Option<String>,
+    pub csi_handle: Option<String>,
+    pub immutable_disk_id: Option<String>,
+}
+
+impl std::fmt::Debug for DeleteVolumeIdentity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("DeleteVolumeIdentity([REDACTED])")
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DeleteStopKind {
+    OrdinaryNative,
+    /// Legacy on-disk value; not accepted as current delete authority.
+    TrustedRuntime,
+    ControlPlaneSuspended,
+    /// Complete original-scope workload absence, not a Suspended observation.
+    ControlPlaneWorkloadAbsent,
+}
+
+#[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct DeleteStopEvidence {
+    pub kind: DeleteStopKind,
+    /// Retain the real native source operation when an existing valid stop
+    /// precedes owner delete. It is never relabelled as a new controller fact.
+    #[serde(default)]
+    pub source_operation_id: Option<String>,
+    pub evidence_ref: String,
+    pub source: String,
+    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+    pub observed_at: DateTime<Utc>,
+    /// Zero/empty only for ControlPlaneWorkloadAbsent: no Sandbox observation
+    /// is invented for an object the exact Kubernetes API no longer returns.
+    pub sandbox_generation: i64,
+    pub sandbox_resource_version: String,
+}
+
+impl std::fmt::Debug for DeleteStopEvidence {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DeleteStopEvidence")
+            .field("kind", &self.kind)
+            .field("source", &self.source)
+            .field("observed_at", &self.observed_at)
+            .finish_non_exhaustive()
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ManagedMachine {
     /// Stable public Machine identity. This is also the existing Node `_id`.
@@ -254,6 +386,13 @@ pub struct ManagedMachine {
     /// Set before the first external Running intent for this generation.
     #[serde(default, with = "bson_datetime::optional")]
     pub runtime_submission_started_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub delete_recovery: Option<DeleteRecoveryProgress>,
+    /// A delete's actual spec-changing suspension, distinct from metadata relabels.
+    #[serde(default)]
+    pub delete_suspension_generation: Option<i64>,
+    #[serde(default)]
+    pub delete_suspension_operation_id: Option<String>,
     pub cleanup_state: String,
     #[serde(default)]
     pub stop_reason: Option<String>,
