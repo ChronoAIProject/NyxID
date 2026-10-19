@@ -3,8 +3,8 @@
 Platform BotFather is an explicitly opted-in public entry to NyxID and a person's
 NyxBot. Visitors can ask NyxID FAQs or request a signup/sign-in link. A browser
 account review followed by confirmation in the original private chat links that
-sender to their own NyxBot. Telegram also provides native bot creation and
-management for the linked account.
+sender to their own NyxBot. Telegram additionally provides native bot creation
+and onboarding commands for the linked account.
 
 The separate legacy onboarding guide collects a static assistant or restaurant
 draft and provisions only the client-reviewed specialist and exact Telegram child.
@@ -126,6 +126,33 @@ and `/bots` use the linked account and existing reviewed setup/provisioning
 contracts. The legacy guide and public child inference retain their own funding,
 model, owner review and independent-customer activation requirements. Those are
 not prerequisites for a shared FAQ entry.
+
+## Work with specialists from a linked private chat
+
+After confirmation, use ordinary requests to your NyxBot in that same private
+conversation. On Discord, put the request in **/nyx ask → question**. These owner
+tools work across supported shared entries; Telegram's legacy `/bots`, `/bot`
+and `/onboarding` controls are a separate Telegram-only workflow.
+
+1. Ask, for example, “Create a specialist called Notes helper to summarize my
+   notes,” then describe its instructions or changes. Grant only the selected
+   services you own and want it to use. Review any action card required by your
+   account's access mode; a specialist cannot receive access you do not hold.
+2. Assign work, for example, “Ask Notes helper to summarize these notes.” Its
+   work uses the specialist's scoped grants and reports back to the originating
+   saved conversation under the normal account permissions and billing rules.
+3. To configure a new channel connection, ask for a setup link for that
+   specialist. Open the owner-reviewed browser handoff and enter provider
+   credentials there. Keep credentials out of chat; the link and its status
+   watch are bound to the requesting owner and conversation.
+4. Ask NyxBot to attach an existing bot you own, link it to the intended
+   specialist, or update its label. Another owner's bot cannot be attached or
+   changed. Each bot still needs its own required owner verification; this
+   request does not copy the shared entry's personal proof to it.
+5. Use the provider's logout control (`/logout` on Telegram, `logout` on Slack,
+   or **/nyx logout** on Discord). Personal authority ends for this conversation.
+   With built-in Public FAQ enabled, subsequent questions return to FAQ access;
+   independently linked conversations keep their own authority.
 
 ## Native chat entries and operator recovery
 
