@@ -1468,7 +1468,7 @@ pub(crate) async fn adopt_anonymous(
             || captured.platform_config_id.as_deref() != Some(profile.id.as_str())
             || captured.profile_generation != Some(profile.generation)
             || captured.state != SetupState::AwaitingIdentity
-            || captured.expires_at <= Utc::now()
+            || captured.expires_at.is_none_or(|e| e <= Utc::now())
         {
             return Err(AppError::Conflict(
                 "Anonymous draft expired or changed".into(),

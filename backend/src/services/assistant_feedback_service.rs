@@ -608,7 +608,9 @@ mod lifecycle_tests {
                 }
             }
             loop {
-                if erasure::status(&db, &owner).await.unwrap().unwrap().status == "complete" {
+                if erasure::status(&db, &owner).await.unwrap().unwrap().status
+                    == crate::models::personal_erasure::ErasureStatus::Complete
+                {
                     break;
                 }
                 erasure::process_one(&state).await.unwrap();
