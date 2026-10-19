@@ -1217,7 +1217,10 @@ async fn new_client_consent_rejects_broadened_existing_and_new_connection_grants
             None,
         )
         .await;
-        assert!(matches!(result, Err(AppError::Conflict(_))), "{result:?}");
+        assert!(
+            matches!(result, Err(AppError::Conflict(_))),
+            "stale connection consent must conflict"
+        );
         assert_eq!(
             db.collection::<ApiKeyCredential>(CREDENTIALS)
                 .count_documents(doc! {})

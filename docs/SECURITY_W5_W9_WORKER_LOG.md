@@ -1167,3 +1167,55 @@ P/w93-backend-review/final-selected-v4/completed-review.json
 (ab18ffb85c064667d7a11da56aadd32487ba529c05dc2c63217030ce05d437db)
 and final-handoff-v1-review.json bind the accepted bounded source/caller batch.
 PM returned Mongo idle before this stable commit. These3 overlap final401.
+
+## Hosted tagged-digest source version and bounded Rust diagnostic followup
+
+The actual hosted machine production harness at head574/mergeadf passed its
+signed migration and companion parents and real TUF/two image attestations,
+then failed rendered bootstrap with source_version_unknown. Docker retained
+the official release tag plus digest in Config.Image; source_version passed
+the entire tag@sha256 suffix to the strict version parser. The correction
+validates the complete lowercase sha256/64hex suffix before using the release
+tag. Tag-only references remain strict; digest-only references require a valid
+explicit version label. Invalid tags, malformed/repeated pins, wrong repository
+and floating versions cannot fall back to a label. Downgrade refusal and explicit
+rollback remain. The exact tagged-digest production fixture/pin is unchanged.
+
+The reviewed9d0c patch applies byte-for-byte. Locked updater test BuildFinished
+completes in26.336s, producing copied debug executable
+589efbda0d47a65ca60e695522ba0dfafd999946630c781feb3f88c292803299.
+Selected docker-module3 and mocked-controller12 pass with0failed/0ignored.
+New bootstrap/replace cases reach deliberately refused verification for valid
+references and refuse malformed/downgrade inputs before Docker mutation or a
+replacement journal; existing local progress-file writes are allowed. These
+tests use local mock HTTP, not a successful signed container migration.
+Scoped locked updater bins/tests Clippy with warnings denied exits0 in13.593s,
+log19065f58c6d04940eabb200530444fcb8aa9d7600fe19c416e6761f77cf5e515.
+
+Frozen w7-updater-tagged-subset-v2.json
+(306317d7e63b31206b26496d19c9456bc79846472e7af310364012716f447964)
+and archive ddef9af7111178a07ad46717a4577f2c46684bbee0f00a636e18813e584dcc74
+bind50 unique selected/transitive inputs, six command/log pairs and the copied
+executable. Original build/runtime/Clippy maps contain45; five additional
+shared TLS/root/machine resource references match stable0b35. Final locked
+no-run6.857s binds all50 before/after and produces the byte-identical executable.
+Cargo reports fresh=false after Clippy; cache reuse is not claimed. Two failed
+evidence-auditor assumptions (fresh=true and52 unique paths when two were
+duplicates) are retained/corrected in the linked preflight receipt. Original
+v1 archive/receipts remain separate. PM independently copied589e and passes
+the exact new parser/controller2/0/0, overlapping the worker15, with original
+PM relative/absolute-path preflight failure retained before its corrected run.
+
+Rust CodeQL528's test-only diagnostic drops whole Result Debug formatting in
+favor of fixed failure text. approve returns AppResult<()>; this is bounded
+error-detail hardening, not evidence of a raw-key leak. The Conflict predicate,
+credential/key counts and Pending rollback assertions remain unchanged. Exact
+reviewed652b patch and rustfmt/diff checks bind the static change; no redundant
+backend rebuild is attributed to it. Timestamp-only device expiry UX remains.
+
+The original hosted bootstrap failure and its preceding successful checks are
+retained separately. Real rendered production bootstrap, upstream3fc integrated
+source, final images/artifacts/scans and the remaining W7/W8/W9 gates stay open.
+Coordinator owns normal PR publication and exact-alert disposition. This batch
+contains only the two updater paths, one test diagnostic and this worker log;
+unrelated Docker/package/mobile/PM-ledger work is excluded.
