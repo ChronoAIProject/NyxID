@@ -1,5 +1,5 @@
 import { orgListResponseSchema } from "@/schemas/orgs";
-import type { ChannelBotListResponse } from "@/types/channels";
+
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { z } from "zod";
 import { apiClient } from "@/lib/api-client";
@@ -104,6 +104,7 @@ export function useSetupMutation(id?: string) {
   const actor = useAuthStore((s) => s.user?.id);
   const client = useQueryClient();
   return useMutation({
+    gcTime: 0,
     mutationFn: async (
       input:
         | {
@@ -235,16 +236,32 @@ export function useAdminPlatformProfiles(before?: string) {
       ),
   });
 }
+export function useAdminPlatformProfile(profile?: PlatformProfile) {
+  const user = useAuthStore((s) => s.user);
+  return useQuery({
+    queryKey: ["admin-platform-profile", user?.id, profile?.id],
+    enabled: !!profile && canAdminWrite(user),
+    gcTime: 0,
+    initialData: profile,
+    queryFn: async () =>
+      platformProfileSchema.parse(
+        await apiClient(`/admin/platform-bots/${profile!.id}`, {
+          authorityGuard: actorGuard(user?.id, true),
+        }),
+      ),
+  });
+}
 export function useAdminPlatformAction() {
   const actor = useAuthStore((s) => s.user?.id);
   const client = useQueryClient();
   return useMutation({
+    gcTime: 0,
     mutationFn: async (
       input:
         | {
             action: "convert";
             channel_bot_id: string;
-            funding_owner_user_id: string;
+            funding_owner_user_id?: string;
           }
         | {
             action: "pause" | "verify" | "repair" | "retire";
@@ -270,37 +287,55 @@ export function useAdminPlatformAction() {
         }),
       );
     },
-    onSuccess: () =>
-      client.invalidateQueries({ queryKey: ["admin-platform-profiles"] }),
+    onSuccess: () => {
+      for (const queryKey of [
+        ["admin-platform-profiles"],
+        ["admin-platform-profile"],
+        ["admin-platform-targets"],
+        ["platform-runtime"],
+      ])
+        void client.invalidateQueries({ queryKey });
+    },
   });
 }
 
-export function useAdminPlatformTargets() {
+export function useAdminPlatformTargets(includeOrganizations = false) {
   const user = useAuthStore((s) => s.user);
   return useQuery({
-    queryKey: ["admin-platform-targets", user?.id],
+    queryKey: ["admin-platform-targets", user?.id, includeOrganizations],
     enabled: canAdminWrite(user),
     gcTime: 0,
     queryFn: async () => {
       const guard = actorGuard(user?.id, true);
       const [bots, orgs] = await Promise.all([
-        apiClient<ChannelBotListResponse>("/channel-bots?scope=all", {
-          authorityGuard: guard,
-        }),
-        apiClient("/orgs", { authorityGuard: guard }),
+        (async () => {
+          const bots: {
+            id: string;
+            platform: string;
+            label: string;
+            platform_bot_username: string;
+            credential_source: string;
+          }[] = [];
+          let before: string | undefined;
+          do {
+            const page = await apiClient<{
+              bots: typeof bots;
+              next_before_id: string | null;
+            }>(
+              `/admin/platform-bots/targets${before ? `?before_id=${before}` : ""}`,
+              { authorityGuard: guard },
+            );
+            bots.push(...page.bots);
+            before = page.next_before_id ?? undefined;
+          } while (before);
+          return { bots };
+        })(),
+        includeOrganizations
+          ? apiClient("/orgs", { authorityGuard: guard })
+          : Promise.resolve({ orgs: [] }),
       ]);
       return {
-        bots: bots.bots.filter(
-          (bot) =>
-            bot.is_active &&
-            (bot.credential_source === "telegram_manager" ||
-              (["discord", "slack", "whatsapp", "lark", "feishu", "x"].includes(
-                bot.platform,
-              ) &&
-                ["active", "failed", "invalid", "pending_webhook"].includes(
-                  bot.status,
-                ))),
-        ),
+        bots: bots.bots,
         orgs: orgListResponseSchema
           .parse(orgs)
           .orgs.filter(

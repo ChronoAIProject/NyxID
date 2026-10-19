@@ -192,6 +192,7 @@ fn reason_code(reason: UnavailableReason) -> &'static str {
         UnavailableReason::TransportUnavailable => "transport_unavailable",
         UnavailableReason::OriginRevoked => "origin_revoked",
         UnavailableReason::EngineUnavailable => "engine_unavailable",
+        UnavailableReason::UnsupportedInput => "unsupported_input",
         UnavailableReason::InsufficientFunds => "insufficient_funds",
         UnavailableReason::CapacityLimited => "capacity_limited",
         UnavailableReason::PublicNotReady => "public_not_ready",

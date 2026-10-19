@@ -1,6 +1,8 @@
 //! Local Mongo transactions and a local Telegram HTTP server; never live accounts.
 #[path = "platform_manager_journey_tests/account_parity.rs"]
 mod account_parity;
+#[path = "platform_manager_journey_tests/faq.rs"]
+mod faq;
 #[path = "platform_manager_journey_tests/legacy_compatibility.rs"]
 mod legacy_compatibility;
 #[path = "platform_manager_journey_tests/management.rs"]
@@ -223,6 +225,8 @@ impl Journey {
                 personal_enabled: true,
                 public_enabled: false,
                 emergency_stopped: false,
+                remembered_personal_enabled: None,
+                remembered_public_enabled: None,
                 retired: false,
                 public_policy: None,
                 effect_revision: 0,
@@ -441,7 +445,7 @@ impl Journey {
         let text = sends.last().unwrap()["text"].as_str().unwrap();
         let url = text
             .split_whitespace()
-            .find(|word| word.starts_with("https://"))
+            .find(|word| word.starts_with("https://") || word.starts_with("http://"))
             .unwrap();
         let url = reqwest::Url::parse(url).unwrap();
         let token = url

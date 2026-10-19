@@ -36,6 +36,9 @@ pub(crate) async fn fence_funding_admin(
     funding: &str,
     session: &mut mongodb::ClientSession,
 ) -> AppResult<()> {
+    if actor == funding {
+        return fence_admin(db, actor, session).await;
+    }
     if db
         .collection::<Document>(crate::models::user::COLLECTION_NAME)
         .update_one(
@@ -174,6 +177,11 @@ pub(crate) async fn fence_admin(
 
 pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> {
     super::platform_entry_migration::ensure_indexes(db).await?;
+    // Reservations survive retirement and deletion. The ordinary-route and
+    // admin-target lookups must also find those tombstones efficiently.
+    db.collection::<Document>(COLLECTION_NAME).create_index(
+        IndexModel::builder().keys(doc! {"native_entry.identity.platform":1,"native_entry.identity.platform_bot_id":1}).build()
+    ).await?;
     db.collection::<Document>(crate::models::platform_bot_config::CLEANUP_COLLECTION)
         .create_index(
             IndexModel::builder()
@@ -953,6 +961,20 @@ mod tests {
 
     #[tokio::test]
     async fn platform_onboarding_conversion_rejects_foreign_funding_and_pending_transport() {
+        let (basic, admin, _, basic_bot) = fixture("platform_convert_basic_admin").await;
+        basic
+            .db
+            .collection::<Document>(crate::models::org_membership::COLLECTION_NAME)
+            .delete_many(doc! {"member_user_id":&admin})
+            .await
+            .unwrap();
+        let basic_profile = convert(&basic.db, &admin, &basic_bot, &admin)
+            .await
+            .unwrap();
+        assert!(!basic_profile.enabled);
+        assert_eq!(basic_profile.funding_owner_user_id, admin);
+        basic.db.drop().await.unwrap();
+
         let (state, actor, funding, bot) = fixture("platform_convert_authority").await;
         let foreign =
             super::super::org_service::create_org_user(&state.db, "Foreign funding", None, None)
@@ -963,9 +985,19 @@ mod tests {
             convert(&state.db, &actor, &bot, &foreign).await,
             Err(AppError::Forbidden(_))
         ));
+        let foreign_person = uuid::Uuid::new_v4().to_string();
+        state
+            .db
+            .collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+            .insert_one(crate::test_utils::test_user(
+                &foreign_person,
+                crate::models::user::UserType::Person,
+            ))
+            .await
+            .unwrap();
         assert!(matches!(
-            convert(&state.db, &actor, &bot, &actor).await,
-            Err(AppError::ValidationError(_))
+            convert(&state.db, &actor, &bot, &foreign_person).await,
+            Err(AppError::Forbidden(_))
         ));
         let channels = state
             .db
@@ -1456,4 +1488,73 @@ pub(crate) async fn configure_guide(
                 .return_document(ReturnDocument::After).session(&mut *session).await?.ok_or_else(|| AppError::Conflict("Platform configuration changed".into()))
         }.await; super::api_key_mutation_service::transaction_result(result)
     }).await.map_err(super::api_key_mutation_service::map_transaction_error)
+}
+
+/// Admin setup sees eligible unconverted transports, independently of the
+/// ordinary owner's list. Persisted reservations (including tombstones) win.
+pub(crate) async fn conversion_targets(
+    db: &Database,
+    before: Option<&str>,
+) -> AppResult<(Vec<crate::models::channel_bot::ChannelBot>, Option<String>)> {
+    use futures::TryStreamExt;
+    let mut filter = doc! {"is_active":true,"platform_profile_id":{"$exists":false},"$or":[
+        {"platform":"telegram","credential_source":"telegram_manager"},
+        {"platform":{"$in":["slack","discord","whatsapp","lark","feishu"]},"status":"active"},
+        {"platform":"x","status":"active","$or":[{"webhook_registered":true},{"platform_entry_pending":{"$exists":true}}]}
+    ]};
+    if let Some(id) = before {
+        filter.insert("_id", doc! {"$lt":id});
+    }
+    let mut rows = db
+        .collection::<crate::models::channel_bot::ChannelBot>(
+            crate::models::channel_bot::COLLECTION_NAME,
+        )
+        .find(filter)
+        .sort(doc! {"_id":-1})
+        .limit(51)
+        .await?
+        .try_collect::<Vec<_>>()
+        .await?;
+    let next = if rows.len() > 50 {
+        rows.truncate(50);
+        rows.last().map(|bot| bot.id.clone())
+    } else {
+        None
+    };
+    let mut eligible = Vec::new();
+    for bot in rows {
+        let filter = if bot.platform == "telegram" {
+            doc! {"manager_bot_id":&bot.platform_bot_id,"native_entry":bson::Bson::Null}
+        } else {
+            doc! {"native_entry.identity.platform":&bot.platform,"native_entry.identity.platform_bot_id":&bot.platform_bot_id}
+        };
+        if db
+            .collection::<Document>(COLLECTION_NAME)
+            .find_one(filter)
+            .projection(doc! {"_id":1})
+            .await?
+            .is_none()
+        {
+            eligible.push(bot);
+        }
+    }
+    Ok((eligible, next))
+}
+
+pub(crate) async fn display_names(
+    db: &Database,
+    profiles: &[PlatformBotConfig],
+) -> AppResult<std::collections::HashMap<String, String>> {
+    use futures::TryStreamExt;
+    let bots=db.collection::<Document>(crate::models::channel_bot::COLLECTION_NAME).find(doc!{"_id":{"$in":profiles.iter().map(|profile|profile.channel_bot_id.clone()).collect::<Vec<_>>()}}).projection(doc!{"_id":1,"label":1}).await?.try_collect::<Vec<_>>().await?;
+    Ok(bots
+        .into_iter()
+        .filter_map(|row| {
+            let label = row.get_str("label").ok()?;
+            if label.trim().is_empty() || label.len() > 256 || label.chars().any(char::is_control) {
+                return None;
+            }
+            Some((row.get_str("_id").ok()?.to_owned(), label.to_owned()))
+        })
+        .collect())
 }

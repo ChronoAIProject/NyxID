@@ -1122,6 +1122,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             get(handlers::platform_bots::list).post(handlers::platform_bots::convert),
         )
         .route(
+            "/platform-bots/targets",
+            get(handlers::platform_bots::conversion_targets),
+        )
+        .route(
             "/platform-bots/native/transports",
             get(handlers::platform_bots::native_transports),
         )

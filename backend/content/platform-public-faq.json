@@ -12,7 +12,7 @@
   {
     "id": "public-guide",
     "title": "What the public guide can do",
-    "body": "The public guide answers questions from this approved help collection and can offer a link to review or create your own NyxID account. It cannot inspect accounts, connected services, files, messages, secrets or personal memory. Public guide costs use the configured sponsor budget; personal work uses your own account billing after you confirm linking."
+    "body": "The public guide answers questions from this approved help collection and can offer a link to review or create your own NyxID account. It cannot inspect accounts, connected services, files, messages, secrets or personal memory. Built-in FAQ answers use no inference credits. An optional AI guide uses its configured sponsor; personal work follows your account billing after you confirm linking."
   },
   {
     "id": "connect-services",

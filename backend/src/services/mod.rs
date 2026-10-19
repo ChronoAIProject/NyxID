@@ -450,6 +450,8 @@ pub(crate) mod platform_entry_native;
 
 pub(crate) mod platform_entry_receipts;
 
+pub(crate) mod platform_bot_status_service;
 pub(crate) mod platform_entry_scope;
+pub(crate) mod platform_faq_service;
 
 pub(crate) mod platform_native_reply_service;

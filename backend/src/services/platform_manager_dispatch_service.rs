@@ -68,6 +68,7 @@ pub(crate) async fn admit_in_session(
     identity: &dyn ManagerIdentityProducer,
     update: &VerifiedManagerUpdate,
     claim: &IngressClaim,
+    text: Option<&str>,
 ) -> AppResult<IngressAdmission> {
     // Deliberately precedes current authority resolution: retries keep history.
     if let Some(receipt) = ingress::find_in_session(db, session, update).await? {
@@ -92,6 +93,17 @@ pub(crate) async fn admit_in_session(
         ManagerAudience::Fixed(UnavailableReason::EmergencyStopped)
     } else if update.chat_kind != ManagerChatKind::Private {
         ManagerAudience::PrivateChatHandoff
+    } else if text == Some("/unsupported") {
+        ManagerAudience::Fixed(UnavailableReason::UnsupportedInput)
+    } else if !policy.public_enabled && text.is_some_and(explicit_faq) {
+        ManagerAudience::Fixed(UnavailableReason::PublicDisabled)
+    } else if policy.public_enabled && text.is_some_and(explicit_faq) {
+        ManagerAudience::Public(PublicIngress {
+            ingress: claim.clone(),
+            manager: policy.manager.clone(),
+            sender: update.sender.clone(),
+            public_policy_revision: policy.public_policy_revision,
+        })
     } else {
         match identity.resolve_sender(db, session, update).await? {
             SenderResolution::Personal { authority, .. } => {
@@ -115,14 +127,87 @@ pub(crate) async fn admit_in_session(
             SenderResolution::Unavailable(reason) => ManagerAudience::Fixed(reason),
         }
     };
-    ingress::record_admission_in_session(db, session, update, &policy.manager, claim, &audience)
-        .await
+    let faq = matches!(&audience, ManagerAudience::Public(_))
+        && (row.public_policy.is_none() || text.is_some_and(explicit_faq));
+    if faq {
+        let sender_key = super::mcp_service::canonical_sha256(serde_json::json!([
+            update.profile_id,
+            update.entry,
+            update.sender
+        ]));
+        for (namespace, key, limit) in [
+            ("manager_faq_profile", update.profile_id.as_str(), 200),
+            ("manager_faq_sender", sender_key.as_str(), 20),
+        ] {
+            if !super::coordination_service::RateWindowStore::admit_in_session(
+                db,
+                namespace,
+                key,
+                limit,
+                std::time::Duration::from_secs(60),
+                session,
+            )
+            .await?
+            {
+                return Err(AppError::RateLimited);
+            }
+        }
+    }
+    let result = ingress::record_admission_in_session(
+        db,
+        session,
+        update,
+        &policy.manager,
+        claim,
+        &audience,
+    )
+    .await?;
+    if matches!(
+        &result,
+        IngressAdmission::Claimed {
+            audience: ManagerAudience::Public(_),
+            ..
+        }
+    ) && (row.public_policy.is_none() || text.is_some_and(explicit_faq))
+    {
+        super::platform_manager_delivery::queue_faq_in_session(
+            db,
+            session,
+            update,
+            claim,
+            &row,
+            text.unwrap_or(""),
+        )
+        .await?;
+    }
+    Ok(result)
+}
+
+pub(crate) fn explicit_faq(text: &str) -> bool {
+    matches!(
+        text.split_whitespace()
+            .next()
+            .unwrap_or("")
+            .split('@')
+            .next()
+            .unwrap_or(""),
+        "/faq" | "/help" | "/start"
+    )
 }
 
 pub async fn admit_manager_update(
     db: &Database,
     identity: &dyn ManagerIdentityProducer,
     update: &VerifiedManagerUpdate,
+) -> AppResult<IngressAdmission> {
+    admit_text_update(db, identity, update, None).await
+}
+
+pub(crate) async fn admit_text_update(
+    db: &Database,
+    identity: &dyn ManagerIdentityProducer,
+    update: &VerifiedManagerUpdate,
+    text: Option<&str>,
 ) -> AppResult<IngressAdmission> {
     let claim = IngressClaim {
         receipt_id: uuid::Uuid::new_v4().to_string(),
@@ -132,11 +217,11 @@ pub async fn admit_manager_update(
     let result = session
         .start_transaction()
         .and_run(
-            (db, identity, update, claim),
-            |session, (db, identity, update, claim)| {
+            (db, identity, update, claim, text),
+            |session, (db, identity, update, claim, text)| {
                 Box::pin(async move {
                     transaction_result(
-                        admit_in_session(db, session, *identity, update, claim).await,
+                        admit_in_session(db, session, *identity, update, claim, *text).await,
                     )
                 })
             },
