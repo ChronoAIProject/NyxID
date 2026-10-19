@@ -103,6 +103,9 @@ async fn setup_with_reply(
             }
         }),
     );
+    let upstream=upstream.route("/v1/capabilities",axum::routing::get(||async {
+        Json(json!({"protocol":"nyxagent-input-image-v1","input_image":{"version":1,"sources":["nyxid_attachment_url"],"max_images":10,"max_image_bytes":20971520,"max_total_bytes":20971520,"content_types":["image/png","image/jpeg"]}}))
+    }));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let server = tokio::spawn(async move {
@@ -1249,6 +1252,7 @@ async fn inbound_of(
 fn admission(channel_id: &str, event_id: &str) -> NyxbotEvent {
     NyxbotEvent {
         media: None,
+        source_media_declared: None,
         native_bot_budget_claimed: false,
         retry_request_sha256: None,
         delivery: None,
@@ -1399,6 +1403,7 @@ async fn lost_chat_app_messages_are_reported_to_the_agent_once() {
     let arrived = inbound(&state, &route_id, "7", "delivered", None, 0).await;
     let admitted = NyxbotEvent {
         media: None,
+        source_media_declared: None,
         native_bot_budget_claimed: false,
         retry_request_sha256: None,
         delivery: None,
@@ -2471,6 +2476,7 @@ async fn group_chats_share_one_thread_and_members_talk_as_guests() {
         &state,
         OWNER,
         TurnStart {
+            media_event_ids: Vec::new(),
             acknowledgement_id: None,
             retry_of: None,
             channel_event_id: None,
@@ -3513,6 +3519,7 @@ async fn the_owners_private_chats_share_the_agents_own_thread() {
         &state,
         OWNER,
         TurnStart {
+            media_event_ids: Vec::new(),
             acknowledgement_id: None,
             retry_of: None,
             channel_event_id: None,

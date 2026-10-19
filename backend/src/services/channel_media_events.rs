@@ -25,6 +25,107 @@ use sha2::{Digest, Sha256};
 pub const INTERRUPTED_NOTE: &str = "A previous photo or file in this chat was interrupted before the assistant could process it. It was not processed; please resend it if it is still needed.";
 const BATCH: i64 = 50;
 
+/// Presence is independent of owner eligibility. Existing accepted media keeps
+/// draining after flag disable; guests only get presence, never a claim.
+pub async fn for_turn(
+    db: &Database,
+    channel: &crate::models::nyxbot_channel::NyxbotChannel,
+    event_key: &str,
+    chat: &str,
+    sender: &str,
+) -> AppResult<(usize, Vec<String>, Option<chrono::DateTime<Utc>>)> {
+    let Some(event) = db
+        .collection::<NyxbotEvent>(EVENTS)
+        .find_one(doc! {
+            "_id":event_key,"channel_id":&channel.id,"user_id":&channel.user_id
+        })
+        .await?
+    else {
+        return Ok((0, Vec::new(), None));
+    };
+    let declared = event
+        .source_media_declared
+        .unwrap_or_else(|| event.media.as_ref().map_or(0, |m| m.declared));
+    let ids = event
+        .media
+        .as_ref()
+        .map(|_| vec![event.id])
+        .unwrap_or_default();
+    let _ = (chat, sender);
+    Ok((declared, ids, Some(event.created_at)))
+}
+
+/// Only the closed CMA Lark media shape may replace rendered input_text.
+/// Locators here are never used to fetch; selectors come from the stored row.
+pub fn gateway_text<'a>(activity: &'a serde_json::Value, platform: &str) -> Option<&'a str> {
+    if !matches!(platform, "lark" | "feishu")
+        || activity["source"]["type"] != "nyxid_relay"
+        || activity["source"]["platform"] != platform
+        || activity["kind"]["type"] != "message"
+    {
+        return None;
+    }
+    let items = activity["kind"]["attachments"]
+        .as_array()
+        .filter(|a| !a.is_empty() && a.len() <= 16)?;
+    if !items.iter().all(|item| {
+        matches!(item["kind"].as_str(), Some("image" | "file"))
+            && ((item["variant"] == "embedded" && item["source"].is_null())
+                || (item["source"]["type"] == "nyxid_relay"
+                    && item["source"]["index"].as_u64().is_some_and(|i| i < 32)))
+    }) {
+        return None;
+    }
+    activity["kind"]["text"]
+        .as_str()
+        .filter(|t| t.len() <= 64 * 1024)
+}
+
+/// Missing rows produce an explicit failed-media turn; an existing foreign row
+/// is refused rather than laundering an attacker-selected event identifier.
+pub async fn presence(
+    db: &Database,
+    request: &MediaRequest,
+    missing_media: bool,
+) -> AppResult<usize> {
+    if !matches!(request.channel.platform.as_str(), "lark" | "feishu")
+        || !flags::personal_flag_enabled(
+            db,
+            &request.channel.user_id,
+            flags::ASSISTANT_CHANNEL_MEDIA_FLAG_KEY,
+        )
+        .await?
+    {
+        return Ok(0);
+    }
+    match authority::source(db, request).await {
+        Ok(source) => {
+            if source
+                .attachments
+                .iter()
+                .any(|a| !matches!(a.content_type.as_str(), "image" | "file"))
+            {
+                return Ok(0);
+            }
+            Ok(source.attachments.len()
+                + source.embedded_attachments.len()
+                + source.embedded_attachments_omitted)
+        }
+        Err(error) => {
+            if db
+                .collection::<ChannelMessage>(MESSAGES)
+                .find_one(doc! {"_id":&request.source_message_id})
+                .await?
+                .is_some()
+            {
+                Err(error)
+            } else {
+                Ok(usize::from(missing_media))
+            }
+        }
+    }
+}
+
 /// Source presence is computed for every sender. Only a verified owner with
 /// live authority can acquire a media claim. No gateway handles enter this API.
 pub async fn admission(db: &Database, request: &MediaRequest) -> AppResult<Option<EventMedia>> {

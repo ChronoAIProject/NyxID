@@ -150,7 +150,18 @@ async fn inbound_impl(
     {
         return Ok(Some(Inbound::Silent));
     }
-    if text.trim().is_empty() {
+
+    if text.trim().is_empty()
+        && crate::services::channel_media_events::for_turn(
+            &state.db,
+            row,
+            event_key,
+            &facts.chat_id,
+            sender_id,
+        )
+        .await?
+        .0 == 0
+    {
         return Ok(Some(Inbound::Silent));
     }
     let sender = Sender {

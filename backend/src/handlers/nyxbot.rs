@@ -2985,6 +2985,19 @@ async fn start_chat_turn(
         &row.channel_bot_id,
     )
     .await?;
+    let (declared, media_event_ids, media_sent_at) =
+        crate::services::channel_media_events::for_turn(
+            &state.db,
+            row,
+            event_key,
+            chat.platform_chat_id.as_deref().unwrap_or_default(),
+            sender.id,
+        )
+        .await?;
+    let had_media = declared > 0;
+    if text.trim().is_empty() && !had_media {
+        return Ok(Inbound::Silent);
+    }
     let private = chat.kind.as_deref() == Some("private");
     // An organization's bot never carries the owner's personal thread.
     let shared = private && !guest && row.bot_owner_id.is_none();
@@ -3029,12 +3042,16 @@ async fn start_chat_turn(
         )
         .await?;
     }
-    let question_key = engine::question_key(text);
+    let question_key = if had_media {
+        None
+    } else {
+        engine::question_key(text)
+    };
     // A chat app cannot show NyxID's confirmation cards: the verified owner
     // answers one in words (see `decide_reply` for which card it decides).
     // Nobody else can.
     let mut answered = None;
-    if exists && !guest {
+    if exists && !guest && !had_media {
         match reply_decision(state, row, &conversation_id, text).await {
             Ok(Some((_, true))) => {
                 return Ok(Inbound::Reply(
@@ -3068,6 +3085,14 @@ async fn start_chat_turn(
             identifier(&row.bot_label),
         )
     };
+    if had_media && guest {
+        note.push(' ');
+        note.push_str(crate::services::assistant_channel_media::GUEST_NOTE);
+    }
+    if had_media && !guest && media_event_ids.is_empty() {
+        note.push(' ');
+        note.push_str(crate::services::assistant_channel_media::FAILED_NOTE);
+    }
     if shared {
         note.push_str(
             " This is your own thread with the owner, which they also reach from the NyxID app \
@@ -3087,7 +3112,7 @@ async fn start_chat_turn(
             " With this message the owner declined the pending action; do not retry it."
         });
     }
-    let message = if private {
+    let mut message = if private {
         excerpt(text, engine::MAX_MESSAGE_CHARS - 16)
     } else {
         // Some platforms send no names: guests are still told apart.
@@ -3098,6 +3123,9 @@ async fn start_chat_turn(
             engine::MAX_MESSAGE_CHARS - 16,
         )
     };
+    if text.contains("[post truncated]") && !message.contains("[post truncated]") {
+        message.push_str("\n[post truncated]");
+    }
     let title = if shared {
         None
     } else if crate::services::channel_thread_follow_service::is_child(chat) {
@@ -3124,7 +3152,11 @@ async fn start_chat_turn(
     };
     late_delivery::prepare(state, event_key, row, &origin, sender, guest, addressed).await?;
     let start = TurnStart {
-        media_event_ids: Vec::new(),
+        media_event_ids: if guest {
+            Vec::new()
+        } else {
+            media_event_ids.clone()
+        },
         acknowledgement_id: None,
         retry_of: None,
         channel_event_id: Some(event_key.to_owned()),
@@ -3224,6 +3256,9 @@ async fn start_chat_turn(
             event.question_key = question_key;
             event.reply_to = vec![origin.clone()];
             event.source_event_ids = vec![event_key.to_owned()];
+            event.media_event_ids = media_event_ids;
+            event.media_declared = had_media.then_some(declared);
+            event.media_sent_at = had_media.then_some(media_sent_at.unwrap_or_else(Utc::now));
             let queued = crate::services::channel_turn_delivery::enqueue(
                 &state.db,
                 &row.user_id,
@@ -3847,21 +3882,25 @@ async fn media_admission(
     chat: &str,
     sender: &str,
     native_thread: Option<&str>,
-) -> AppResult<Option<crate::models::nyxbot_channel::EventMedia>> {
-    Box::pin(crate::services::channel_media_events::admission(
-        &state.db,
-        &crate::services::channel_media_authority::MediaRequest {
-            channel: row.clone(),
-            source_message_id: source.to_owned(),
-            chat_id: chat.to_owned(),
-            sender_id: sender.to_owned(),
-            native_thread_id: native_thread.map(str::to_owned),
-            origin: None,
-            conversation_id: None,
-            agent_id: row.agent_id.clone(),
-        },
+    missing_media: bool,
+) -> AppResult<(usize, Option<crate::models::nyxbot_channel::EventMedia>)> {
+    let request = crate::services::channel_media_authority::MediaRequest {
+        channel: row.clone(),
+        source_message_id: source.to_owned(),
+        chat_id: chat.to_owned(),
+        sender_id: sender.to_owned(),
+        native_thread_id: native_thread.map(str::to_owned),
+        origin: None,
+        conversation_id: None,
+        agent_id: row.agent_id.clone(),
+    };
+    let presence =
+        crate::services::channel_media_events::presence(&state.db, &request, missing_media).await?;
+    let media = Box::pin(crate::services::channel_media_events::admission(
+        &state.db, &request,
     ))
-    .await
+    .await?;
+    Ok((presence, media))
 }
 
 async fn responses_with_producers_impl(
@@ -4009,7 +4048,21 @@ async fn responses_with_producers_impl(
     };
     let mut now = Utc::now();
     let retry_digest = sha256_hex(request.to_string());
-    let media = if activity["source"]["type"] == "nyxid_relay"
+    let media_text = crate::services::channel_media_events::gateway_text(activity, &row.platform);
+    let text = if feature_flag_service::personal_flag_enabled(
+        &state.db,
+        &row.user_id,
+        feature_flag_service::ASSISTANT_CHANNEL_MEDIA_FLAG_KEY,
+    )
+    .await
+    .unwrap_or(false)
+    {
+        media_text.unwrap_or(&text).to_owned()
+    } else {
+        text
+    };
+    let (source_media_declared, media) = if media_text.is_some()
+        && activity["source"]["type"] == "nyxid_relay"
         && activity["source"]["platform"].as_str() == Some(row.platform.as_str())
         && activity["actor"]["kind"] == "human"
     {
@@ -4020,6 +4073,7 @@ async fn responses_with_producers_impl(
             activity["conversation"]["id"].as_str().unwrap_or_default(),
             activity["actor"]["id"].as_str().unwrap_or_default(),
             activity["conversation"]["thread_id"].as_str(),
+            true,
         )
         .await
         {
@@ -4027,7 +4081,7 @@ async fn responses_with_producers_impl(
             Err(_) => return problem(StatusCode::SERVICE_UNAVAILABLE, "provider_unavailable"),
         }
     } else {
-        None
+        (0, None)
     };
     let retention = if media.is_some() {
         ChronoDuration::days(7)
@@ -4035,8 +4089,8 @@ async fn responses_with_producers_impl(
         ChronoDuration::hours(EVENT_RETENTION_HOURS)
     };
     let admitted = NyxbotEvent {
-        source_media_declared: None,
         media,
+        source_media_declared: Some(source_media_declared),
         native_bot_budget_claimed: false,
         retry_request_sha256: Some(retry_digest.clone()),
         delivery: None,
@@ -4777,7 +4831,8 @@ pub async fn relay_callback(
     } else {
         partition
     };
-    let media = if sender_kind == crate::models::channel_thread::ThreadSenderKind::Human
+    let (source_media_declared, media) = if sender_kind
+        == crate::models::channel_thread::ThreadSenderKind::Human
         && chats::native_owner_eligible(&row.platform, &payload["raw_platform_data"])
     {
         match media_admission(
@@ -4789,6 +4844,7 @@ pub async fn relay_callback(
                 .as_str()
                 .unwrap_or_default(),
             thread_id.as_deref(),
+            false,
         )
         .await
         {
@@ -4796,7 +4852,7 @@ pub async fn relay_callback(
             Err(_) => return problem(StatusCode::SERVICE_UNAVAILABLE, "provider_unavailable"),
         }
     } else {
-        None
+        (0, None)
     };
     let retention = if media.is_some() {
         ChronoDuration::days(7)
@@ -4804,8 +4860,8 @@ pub async fn relay_callback(
         ChronoDuration::hours(EVENT_RETENTION_HOURS)
     };
     let admitted = NyxbotEvent {
-        source_media_declared: None,
         media,
+        source_media_declared: Some(source_media_declared),
         native_bot_budget_claimed: false,
         retry_request_sha256: None,
         delivery: None,
@@ -4951,7 +5007,9 @@ pub async fn relay_callback(
             if sender_kind == ThreadSenderKind::Human {
                 chats::spawn_title_lookup(&state, &row, &chat);
             }
-            if text.trim().is_empty() || sender_id.is_empty() {
+            if sender_id.is_empty()
+                || (text.trim().is_empty() && admitted.source_media_declared.unwrap_or(0) == 0)
+            {
                 return Ok(());
             }
             let addressed = if sender_kind == ThreadSenderKind::Bot {
