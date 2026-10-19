@@ -15,9 +15,9 @@ were discarded during integration. Deterministic approved FAQ is the no-policy
 default; saved public AI policies remain explicit and functional with their real
 sponsor, limits, readiness and deployment contract.
 
-Current acceptance and evidence are recorded in the integration handoff section
-below when final local checks complete. The old counts and screenshots later in
-this document are historical and are not evidence for the merged executable.
+Current acceptance and final local evidence are recorded in the integration
+handoff below. Evidence from the original repair is historical and does not
+verify the merged executable.
 
 
 ## Required behavior
@@ -134,18 +134,19 @@ limits and rollout cautions.
 
 ## Fresh integration verification
 
-The checkpoint compiles the integrated backend test target without warnings
-(8m 06s). Its first nine priority regressions passed six and exposed three new
-fixture defects: OAuth status omitted runtime initialization, a local HTTP link
-was parsed as HTTPS-only, and immediate confirmation replay hit the preserved
-750ms decision limiter. Those fixtures are corrected; the final source build
-and complete transactional rerun remain in progress. The following completed
-integrated frontend results are acceptance evidence; the original repair's 335-test result
-at `0d9b3171e` is historical and does not verify this merged executable.
+The final integrated backend test target at
+`bce616754cd1190fc93364a8acab915e55cb0f6f` compiled without warnings in
+**7m 48s**. Formatting passed. The **13 priority tests passed**, with 0 failures
+and 0 ignores, in **33.94s** against the isolated MongoDB 8 replica set. The
+complete **554-test** selected suite passed on that same binary: **552 passed,
+0 failed, 2 ignored**, with 8,892 unrelated tests filtered out, in **845.71s**.
+The runner exited 0. Earlier failed fixture/readiness runs remain diagnostics
+in the evidence cache. The original repair's 335-test result at `0d9b3171e` is
+historical and does not verify this merged executable.
 
 - Six targeted Vitest files: **44 passed**, 0 failed.
 - App TypeScript and ESLint over all 14 frontend TypeScript files changed from
-  `origin/main`: passed.
+  main baseline `3fc6386a2`: passed.
 - Production frontend build: passed, including TypeScript, both Vite builds,
   legal prerender and mock-footprint assertion.
 - Existing main `platform-personal` Playwright suite: **7 passed**; the primary
@@ -180,5 +181,57 @@ activation. No deployment, production write or real-user message was made.
 Backend verification uses the task-owned target
 `/tmp/nyxid-botfather-target` and isolated MongoDB **8.0.34** replica set:
 `mongodb://127.0.0.1:29744/?replicaSet=botfather8`. No unrelated target, Mongo
-process or worktree is modified. Final source build, selected inventory and
-transactional results will be recorded here before handoff.
+process or worktree is modified. The final source build, selected inventory,
+priority run and complete transactional results are recorded in the durable
+evidence cache.
+
+The final build source is `bce616754cd1190fc93364a8acab915e55cb0f6f`.
+The runtime regression includes disabled credential-owner status, expired
+unrefreshable status/inventory, actual Pause and atomic Resume with an expired
+refreshable connection, removal of refresh access after snapshot capture, and
+continued refusal of expired credentials for message admission and delivery.
+Status, inventory and mode changes make no provider request. The existing
+authenticated same-epoch refresh and repair journeys passed in the complete run.
+
+Backend commands, from the repository root:
+
+```sh
+cargo fmt --all --check
+CARGO_TARGET_DIR=/tmp/nyxid-botfather-target CARGO_BUILD_JOBS=2 \
+  cargo test -p nyxid --bin nyxid-server --offline --no-run \
+  --config profile.test.package.nyxid.debug=0 \
+  --config profile.test.package.nyxid.incremental=false
+# Both runners set NYXID_TEST_DATABASE_URL to the isolated MongoDB URI above.
+python3 /tmp/nyxid-botfather-integration-run-priority.py
+BOTFATHER_REQUIRE_FINAL=1 \
+  python3 /tmp/nyxid-botfather-integration-run-tests.py \
+  /tmp/nyxid-botfather-integration-test-build-final.log
+```
+
+The two upstream paired optional public-AI tests were the only ignores:
+
+- `services::platform_public_contract_service::tests::handshake::actual_upstream_discovery_readiness_and_four_call_default_budget_settlement`
+- `services::platform_public_contract_service::tests::native_paired::real_codex_native_v2_discovery_readiness_faq_search_read_signup_answer_use_actual_mcp_funding_and_durable_native_delivery`
+
+They require `NYXAGENT_PUBLIC_TEST_BINARY`, `NYXAGENT_PUBLIC_TEST_POLICY` and
+`CODEX_APP_SERVER_BINARY`, including a verified Codex 0.160.1 wrapper. All three
+variables are unset locally. The upstream clone's `config/policy.public.json`
+exists at `/Users/chronoai/Desktop/aelf-frontend-work/NxyAgent-botfather/`, but
+no `nyxagent` executable is on PATH or in that clone's debug/release target.
+The former `/tmp/nyxagent-botfather-target` and pinned
+`/tmp/nyxagent-botfather-codex-0.160.1` wrapper are absent. The ordinary installed
+Codex executable does not establish the required pinned fixture. These were
+read-only availability checks; no upstream repository work was started and no
+paired-runtime pass is claimed. The selected local public-runtime contract,
+funding, readiness, deadline and settlement tests use loopback providers.
+
+Durable local evidence is under
+`/Users/chronoai/Library/Caches/nyxid-botfather-implementation/2026-10-19-main-integration/`,
+including exact runner scripts, selected test inventory, command logs, fixture
+availability manifest and all 47 changed paths relative to main baseline
+`3fc6386a271f77b53323a4cf3a37beae262d7cae` (31 backend, 14 frontend, 2 docs).
+The tested binary's SHA-256 is
+`c2bfb70c18f61508b7f653fd282c95b2618da51eb2050b6e00474b7ac758d59f`.
+Only documentation changed after this source build. Primary owns the remaining
+PR #1945 CI, final review, push and authorized squash merge; no remote operation
+or deployment is implied by these local results.

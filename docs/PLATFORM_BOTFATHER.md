@@ -95,6 +95,15 @@ modes; there is no separate clear-stop step. If both are off, select at least on
 A status refresh can show a connection blocker while the remembered choices stay
 intact. Repair that blocker first, refresh, then Resume.
 
+An expired native OAuth connection without a refresh credential shows **Repair
+required** and its saved personal binding is shown as disconnected. Reconnect
+that account through the reviewed repair flow. A refreshable connection retains
+its entry identity. Atomic Resume validates the saved owner, connection and
+refresh authority without contacting the provider. Authenticated ingress or
+reviewed repair uses the existing OAuth refresh producer before admitting work.
+Reading status or Linked channels does not refresh tokens or contact the
+provider. Message admission and delivery still require a live token.
+
 A public request commits metadata-only article IDs, live mode guidance and its
 settled receipt in one transaction. No raw FAQ question/body is retained in that
 queue. Sender (20/minute) and profile (200/minute) server-clock windows bound FAQ
@@ -171,10 +180,10 @@ requires an authorized organization sponsor. Review does not transfer the channe
 owner or its transport payer. Reservation pauses the entry and revokes old chat
 receipts, confirmations and turns before provider work. A failed verification
 retains a recoverable reservation. A successful update also stays paused until
-explicit Resume, and prior authority remains invalid afterward. Linked channels
-projects old epochs as disconnected/reconnect required. A fresh proof creates
-current authority; deferred cleanup is bound to old revisions and cannot stop a
-new turn admitted after Resume.
+explicit Resume, and prior authority remains invalid afterward. The Linked
+channels view shows old bindings as disconnected and requiring reconnection.
+A fresh proof creates current authority; deferred cleanup is bound to old
+revisions and cannot stop a new turn admitted after Resume.
 
 The corresponding authenticated API is `POST /api/v1/admin/platform-bots/native`
 for conversion or a reviewed update, with the server-returned review from
