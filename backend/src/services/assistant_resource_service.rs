@@ -85,8 +85,9 @@ pub(crate) fn live_filter(chat: &ChatAuthority) -> AppResult<bson::Document> {
 
 pub async fn require_live(db: &Database, chat: &ChatAuthority) -> AppResult<()> {
     if chat.invocation_id.is_some() {
-        chat.ensure_live_turn(db, None, None, "assistant.resource")
-            .await?;
+        // Keep the shared authority gate out of every source-resource caller's
+        // future; it also contains platform admission and audit paths.
+        Box::pin(chat.ensure_live_turn(db, None, None, "assistant.resource")).await?;
     }
     if db
         .collection::<bson::Document>(CONVERSATIONS)

@@ -408,30 +408,34 @@ async fn try_next_resource_turn(
 
 #[tokio::test]
 async fn resource_org_auto_confirmation_preserves_policy_and_resumes_only_its_exact_intent() {
-    org_resource_journey(
+    Box::pin(org_resource_journey(
         crate::models::assistant_settings::AccessMode::Nyxmode,
         false,
-    )
+    ))
     .await;
 }
 #[tokio::test]
 async fn resource_org_ask_confirmation_preserves_policy_and_resumes_only_its_exact_intent() {
-    org_resource_journey(
+    Box::pin(org_resource_journey(
         crate::models::assistant_settings::AccessMode::AskEveryTime,
         false,
-    )
+    ))
     .await;
 }
 #[tokio::test]
 async fn resource_org_auto_confirmation_rejects_mode_drift_and_recovers_in_full() {
-    org_resource_journey(crate::models::assistant_settings::AccessMode::Nyxmode, true).await;
+    Box::pin(org_resource_journey(
+        crate::models::assistant_settings::AccessMode::Nyxmode,
+        true,
+    ))
+    .await;
 }
 #[tokio::test]
 async fn resource_org_ask_confirmation_rejects_mode_drift_and_recovers_in_full() {
-    org_resource_journey(
+    Box::pin(org_resource_journey(
         crate::models::assistant_settings::AccessMode::AskEveryTime,
         true,
-    )
+    ))
     .await;
 }
 async fn org_resource_journey(
