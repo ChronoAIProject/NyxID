@@ -2059,49 +2059,16 @@ async fn fetch_resolved_attachment(
         .get(index)
         .filter(|_| context.original.direction == "inbound")
         .ok_or(AppError::ChannelAttachmentNotFound)?;
-    let inbound = crate::services::channel_platform::InboundAttachment {
-        content_type: attachment.content_type.clone(),
-        url: attachment.provider_ref.clone(),
-        platform_message_id: attachment.platform_message_id.clone(),
-        file_key: attachment.file_key.clone(),
-        image_key: attachment.image_key.clone(),
-        filename: attachment.filename.clone(),
-        mime_type: attachment.mime_type.clone(),
-        size_bytes: attachment.size_bytes,
-    };
-    let token = crate::services::channel_credentials::resolve_bot_token(
+    let fetched = crate::services::channel_media_fetch::fetch(
         &state.db,
         &state.encryption_keys,
-        adapter,
+        &state.http_client,
         &bot,
+        attachment,
+        adapter,
+        state.config.channel_media_max_bytes,
     )
     .await?;
-    let secrets = if bot.credential_source == "platform" {
-        Some(
-            crate::services::channel_managed::build_verify_secrets(
-                &state.db,
-                &state.encryption_keys,
-                adapter,
-                &bot,
-            )
-            .await?,
-        )
-    } else {
-        None
-    };
-    let fetched = adapter
-        .fetch_attachment(
-            &state.http_client,
-            &crate::services::channel_platform::BotCredentials {
-                billing: None,
-                token: &token,
-                platform_bot_id: Some(&bot.platform_bot_id),
-                platform_secrets: secrets.as_ref(),
-            },
-            &inbound,
-            state.config.channel_media_max_bytes,
-        )
-        .await?;
     tracing::debug!(message_id = %context.original.id, index, byte_count = fetched.bytes.len(), "Channel attachment fetched");
     let content_type = fetched
         .mime_type

@@ -5880,3 +5880,6 @@ async fn authenticated_telegram_directed_start_registers_group_without_a_welcome
     assert_eq!(source.delivery.unwrap().state, "silent");
     server.abort();
 }
+
+#[path = "nyxbot_media_tests.rs"]
+mod media_tests;
