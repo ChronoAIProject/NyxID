@@ -385,7 +385,7 @@ async fn judge(state: &AppState, row: &NyxbotChannel, message: &ChannelMessage) 
     // redelivery inherits the winner and can never trigger Lost/resend advice.
     let alias = message.duplicate_of_media_key.as_deref();
     let filter = match alias {
-        Some(key) => doc! {"channel_id":&row.id,"user_id":&row.user_id,"media.key":key},
+        Some(key) => doc! {"user_id":&row.user_id,"media.key":key},
         None => {
             doc! {"channel_id":&row.id,"user_id":&row.user_id,"event_id":&message.id,"media.key":{"$type":"string"}}
         }

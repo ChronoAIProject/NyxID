@@ -644,9 +644,22 @@ async fn channel_media_flag_off_text_and_guests_do_not_write_claims() {
 
 #[tokio::test]
 async fn channel_media_interrupted_is_reported_for_duplicate_and_noted_once_atomically() {
+    interrupted_media_case(false).await;
+    interrupted_media_case(true).await;
+}
+
+async fn interrupted_media_case(rebuilt: bool) {
     use crate::models::assistant_conversation::TurnOrigin;
     use crate::services::channel_media_events as media_events;
-    let (state, row, _, _, server) = media_fixture("media_interrupted", "direct").await;
+    let (state, row, _, _, server) = media_fixture(
+        if rebuilt {
+            "media_interrupted_rebuilt"
+        } else {
+            "media_interrupted"
+        },
+        "direct",
+    )
+    .await;
     enable_media(&state).await;
     let source = media_source(&state, &row, "crashed", "om_crashed", "receipt").await;
     let mut event = admission(&row.id, &source.id);
@@ -657,6 +670,18 @@ async fn channel_media_interrupted_is_reported_for_duplicate_and_noted_once_atom
         .unwrap();
     event.created_at = Utc::now() - ChronoDuration::minutes(6);
     event.expires_at = event.created_at + ChronoDuration::days(7);
+    if rebuilt {
+        let mut retired = row.clone();
+        retired.id = Uuid::new_v4().to_string();
+        retired.status = "disconnected".into();
+        event.channel_id = retired.id.clone();
+        state
+            .db
+            .collection::<NyxbotChannel>(CHANNELS)
+            .insert_one(retired)
+            .await
+            .unwrap();
+    }
     state
         .db
         .collection::<NyxbotEvent>(EVENTS)
@@ -684,8 +709,18 @@ async fn channel_media_interrupted_is_reported_for_duplicate_and_noted_once_atom
     let source2 = media_source(&state, &row, "redelivery", "om_crashed", "receipt").await;
     let mut duplicate = event.clone();
     duplicate.id = Uuid::new_v4().to_string();
+    duplicate.channel_id = row.id.clone();
     duplicate.event_id = source2.id.clone();
     duplicate.relay_message_id = Some(source2.id.clone());
+    assert!(
+        state
+            .db
+            .collection::<NyxbotEvent>(EVENTS)
+            .insert_one(&duplicate)
+            .await
+            .is_err(),
+        "the native identity remains claimed across channel rebuilds"
+    );
     assert!(
         media_events::record_duplicate(&state.db, &duplicate)
             .await

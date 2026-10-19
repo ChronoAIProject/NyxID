@@ -290,6 +290,10 @@ pub struct EventMedia {
     pub key: String,
     pub declared: usize,
     pub items: Vec<EventMediaItem>,
+    #[serde(default)]
+    pub channel_bot_id: String,
+    #[serde(default)]
+    pub platform: String,
     pub platform_chat_id: String,
     #[serde(default)]
     pub interrupted: bool,

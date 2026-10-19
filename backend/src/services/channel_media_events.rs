@@ -114,6 +114,8 @@ pub async fn admission(db: &Database, request: &MediaRequest) -> AppResult<Optio
         key,
         declared,
         items,
+        channel_bot_id: authorized.bot.id,
+        platform: request.channel.platform.clone(),
         platform_chat_id: request.chat_id.clone(),
         interrupted: false,
         noted: false,
@@ -160,9 +162,7 @@ pub async fn record_duplicate(db: &Database, event: &NyxbotEvent) -> AppResult<b
     };
     let winner = db
         .collection::<NyxbotEvent>(EVENTS)
-        .find_one(
-            doc! {"media.key":&media.key, "channel_id":&event.channel_id,"user_id":&event.user_id},
-        )
+        .find_one(doc! {"media.key":&media.key})
         .await?;
     let Some(winner) = winner else {
         return Ok(false);
@@ -230,11 +230,25 @@ pub async fn note_in_session(
         let Some(chat_id) = chat.platform_chat_id else {
             continue;
         };
-        let filter = doc! {"channel_id":&origin.nyxbot_channel_id,"user_id":owner,
+        let Some(channel) = db
+            .collection::<crate::models::nyxbot_channel::NyxbotChannel>(
+                crate::models::nyxbot_channel::COLLECTION_NAME,
+            )
+            .find_one(doc! {"_id":&origin.nyxbot_channel_id,"user_id":owner})
+            .session(&mut *session)
+            .await?
+        else {
+            continue;
+        };
+        // Native identity survives rebuilding a bot's channel. Keep the owner
+        // fence while consuming interruptions from that same bot/platform/chat.
+        let filter = doc! {"user_id":owner,
         "media.key":{"$type":"string"},"media.platform_chat_id":chat_id,"media.noted":{"$ne":true},
-        "$or":[{"media.interrupted":true},
+        "$and":[{"$or":[{"channel_id":&origin.nyxbot_channel_id},
+            {"media.channel_bot_id":&channel.channel_bot_id,"media.platform":&channel.platform}]},
+        {"$or":[{"media.interrupted":true},
             {"status":{"$in":["running","resuming","retryable"]},"conversation_id":bson::Bson::Null,
-                "turn_id":bson::Bson::Null,"created_at":{"$lte":bson::DateTime::from_chrono(Utc::now()-Duration::minutes(5))}}]};
+                "turn_id":bson::Bson::Null,"created_at":{"$lte":bson::DateTime::from_chrono(Utc::now()-Duration::minutes(5))}}]}]};
         let rows = db.collection::<bson::Document>(EVENTS);
         let mut cursor = rows
             .find(filter.clone())
