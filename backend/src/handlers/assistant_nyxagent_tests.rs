@@ -4331,6 +4331,41 @@ async fn stop_during_capacity_wait_releases_owner_permit_without_replay() {
 
 #[tokio::test]
 async fn capacity_wait_beyond_31_seconds_keeps_heartbeat_and_owner_slot() {
+    async fn snapshot(
+        state: &AppState,
+        calls: &Captures,
+        conversation_id: &str,
+        turn_id: &str,
+    ) -> Value {
+        let calls = calls.lock().await.len();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let row = engine::get(&state.db, OWNER, conversation_id).await;
+            let active = row.as_ref().ok().and_then(|row| row.active_turn.as_ref());
+            let settled = state
+                .db
+                .collection::<AssistantMessage>(crate::models::assistant_message::COLLECTION_NAME)
+                .find_one(
+                    doc! {"conversation_id": conversation_id, "turn_id": turn_id,
+                    "role": "assistant"},
+                )
+                .await;
+            json!({
+                "provider_calls": calls,
+                "conversation_read_failed": row.is_err(),
+                "same_active_turn": active.is_some_and(|turn| turn.turn_id == turn_id),
+                "waiting_for_capacity": active.map(|turn| turn.waiting_for_capacity),
+                "engine_attempts": active.map(|turn| turn.engine_attempts),
+                "engine_accepted": active.map(|turn| turn.capacity_accepted_at.is_some()),
+                "heartbeat_age_ms": active.and_then(|turn| turn.heartbeat_at)
+                    .map(|at| (Utc::now() - at).num_milliseconds()),
+                "settled_read_failed": settled.is_err(),
+                "settled_status": settled.ok().flatten().map(|message| message.status),
+            })
+        })
+        .await
+        .unwrap_or_else(|_| json!({"provider_calls": calls, "diagnostic_read_timed_out": true}))
+    }
+
     // Leave observation time between the heartbeat checks and provider retry.
     // Other capacity tests keep their existing short/33-second fixture delays.
     let (state, calls, server) =
@@ -4405,9 +4440,59 @@ async fn capacity_wait_beyond_31_seconds_keeps_heartbeat_and_owner_slot() {
         Err(AppError::RateLimited)
     ));
     drop(other);
-    let events = tokio::time::timeout(Duration::from_secs(40), drain(response))
-        .await
-        .expect("provider retry eventually completes");
+    // The durable wait is visible before the worker starts sleeping. Observe
+    // retry arrival within its original admission deadline, then bound settlement
+    // separately so that residual backoff does not consume the stream's budget.
+    let remaining = (turn.capacity_wait_deadline.unwrap() - Utc::now())
+        .to_std()
+        .unwrap_or_default()
+        .min(engine_policy::INTERACTIVE_CAPACITY_BUDGET);
+    if tokio::time::timeout(remaining, async {
+        loop {
+            let count = calls.lock().await.len();
+            assert!(count <= 2, "only one provider retry is allowed");
+            if count == 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .is_err()
+    {
+        panic!(
+            "provider retry not observed within admission deadline: {}",
+            snapshot(&state, &calls, &waiting.id, &turn_id).await
+        );
+    }
+    let completion = tokio::time::timeout(Duration::from_secs(40), async {
+        let events = drain(response).await;
+        loop {
+            let row = engine::get(&state.db, OWNER, &waiting.id).await.unwrap();
+            let message = state
+                .db
+                .collection::<AssistantMessage>(crate::models::assistant_message::COLLECTION_NAME)
+                .find_one(doc! {"conversation_id": &waiting.id, "turn_id": &turn_id,
+                "role": "assistant"})
+                .await
+                .unwrap();
+            if row.active_turn.is_none()
+                && let Some(message) = message
+            {
+                assert_eq!(message.status, "completed");
+                break events;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await;
+    let events = match completion {
+        Ok(events) => events,
+        Err(_) => panic!(
+            "observed provider retry did not stream and settle: {}",
+            snapshot(&state, &calls, &waiting.id, &turn_id).await
+        ),
+    };
     assert!(events.contains("waiting_for_capacity"));
     assert!(events.contains("\"status\":\"completed\""));
     assert!(started.elapsed() >= Duration::from_secs(60));

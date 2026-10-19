@@ -4,6 +4,7 @@ use super::*;
 use crate::{
     models::{
         assistant_agent::COLLECTION_NAME as AGENTS,
+        assistant_conversation::TurnOrigin,
         assistant_settings::{AccessMode, AssistantSettings},
         channel_conversation::ChannelConversation,
         nyxbot_channel::NyxbotChannel,
@@ -522,7 +523,8 @@ async fn assert_managed(inspected: &ManagementEgress, provider: &MockServer) {
     let messages = engine::messages(&state.db, &inspected.owner, &home.id, 100, None)
         .await
         .unwrap();
-    assert!(messages.iter().any(|m| m.role == "user"
+    assert!(messages.iter().any(|m| m.role == "orchestrator"
+        && m.origin == Some(TurnOrigin::Orchestrator)
         && m.turn_id == assigned_turn
         && m.text == "Summarize the notes for this channel owner"));
     assert!(messages.iter().any(|m| m.role == "assistant"

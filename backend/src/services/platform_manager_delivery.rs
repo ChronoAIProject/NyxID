@@ -2476,19 +2476,17 @@ mod native_render_tests {
                 assert_eq!(fixed_reason(&format!("{reason:?}")), Some(reason));
                 let body = fixed_text_for(reason, &entry).unwrap();
                 assert!(!body.contains("/link") && !body.contains("P-AAAA-BBBB"));
-                assert!(body.contains(if platform == EntryPlatform::Discord {
-                    "/nyx"
-                } else {
-                    "help"
-                }));
-                if reason == UnavailableReason::ConfirmationRejected {
-                    assert!(
-                        body.contains(if platform == EntryPlatform::Discord {
-                            "/nyx login"
-                        } else {
-                            "send login"
-                        }) || body.contains("Send login")
-                    );
+                let guidance = match (platform, reason) {
+                    (EntryPlatform::Discord, UnavailableReason::ConfirmationRejected) => {
+                        "/nyx login"
+                    }
+                    (EntryPlatform::Slack, UnavailableReason::ConfirmationRejected) => "Send login",
+                    (EntryPlatform::Discord, _) => "/nyx help",
+                    _ => "help",
+                };
+                assert!(body.contains(guidance));
+                if reason == UnavailableReason::ControlRateLimited {
+                    assert!(body.contains("Wait a moment, then retry here"));
                 }
             }
         }
