@@ -1219,3 +1219,40 @@ source, final images/artifacts/scans and the remaining W7/W8/W9 gates stay open.
 Coordinator owns normal PR publication and exact-alert disposition. This batch
 contains only the two updater paths, one test diagnostic and this worker log;
 unrelated Docker/package/mobile/PM-ledger work is excluded.
+
+## Authenticated rustup installer mode dispatch
+
+The actual hosted ARM release-cache job117929205830 at merge076735af passes
+the corrected exact-source export, then fails invoking the authenticated
+rustup1.28.2 installer as a file named download: unknown proxy name 'download'.
+The original loge3702ad5550c7e1c8acdb28336b54e7f81d983a3aa033be44b47ccd9d21996f0
+is retained. The correction selects basename rustup-init only for that tool.
+Other archives retain download. The committed catalog, URL/digest, host target,
+HTTPS/download bounds, integrity verification and install arguments are unchanged.
+
+Two durable regressions verify successful verification before execution, the
+installer basename/mode/bytes and exact intended install arguments, and refusal
+without execution plus staging cleanup on verification failure. Full build-input
+policy/unit tests pass17/0 under CARGO_TERM_COLOR=always/RUSTUP_TOOLCHAIN=1.98.1.
+The initial17-pass run has nine selected maps; the final run separately binds
+all3087 selected copied policy-corpus/manifest/helper/native inputs unchanged.
+Neither includes a mobile dependency probe or an actual toolchain installation.
+
+The exact pinned native aarch64-apple-darwin installer20ef5516c31b1ac2290084199ba77dbbcaa1406c45c1d978ca68558ef5964ef5
+independently reproduces the old download --help failure(exit1), while identical
+bytes named rustup-init --help succeed(exit0). A separate actual production-main
+harness runs the real integrity verifier over those authenticated bytes, asserts
+the unchanged intended install argv, and substitutes only --help for native mode
+dispatch. It checks absent scratch Cargo/Rustup homes and cleaned staging. This
+is native macOS help-mode execution and captured intended installation arguments,
+not Linux/ARM execution, toolchain installation or completed release-cache proof.
+
+Frozen w7-rustup-basename-subset-v1.json
+(7806f2e4b4a5e892115c97489ccc23c2f39b27169d655b14c3c8a5bcb6882207)
+and archivef7519bbee57191e2a8757c3a2178688f5701ea3dd758416ec4f8a1954984e5cb
+bind exactly two changed scripts and seven unchanged references, four command/log
+pairs, the native source record and helper hashes. Original hosted failure and
+the original basename negative remain distinct. Node foundation WIP, unrelated
+Docker/package/mobile edits and PM-owned ledgers are excluded from this batch.
+Coordinator owns normal draft-PR publication and subsequent hosted attribution;
+no worker push, merge, deployment, release publication or remote alert mutation.

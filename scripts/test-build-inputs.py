@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tarfile
 import tempfile
 import unittest
@@ -133,6 +134,44 @@ class BuildPolicy(unittest.TestCase):
         with patch.object(bootstrap.urllib.request, "urlopen", return_value=response):
             with self.assertRaisesRegex(ValueError, "checksum mismatch"):
                 bootstrap.download_verified({"url": response.url, "sha256": hashlib.sha256(b"reviewed bytes").hexdigest()}, self.root / "download")
+
+    def test_verified_rustup_uses_installer_basename_and_preserves_install_arguments(self):
+        tools = self.root / "tools with spaces"
+        verified = []
+
+        def download(item, path):
+            self.assertEqual(item, json.loads((ROOT / "security/build-tools.json").read_text())
+                             ["rustup"]["targets"]["aarch64-unknown-linux-gnu"])
+            path.write_bytes(b"verified installer fixture")
+            verified.append(path)
+
+        def execute(argv, **kwargs):
+            self.assertEqual(Path(argv[0]), verified[0])
+            self.assertEqual(Path(argv[0]).name, "rustup-init")
+            self.assertEqual(Path(argv[0]).read_bytes(), b"verified installer fixture")
+            self.assertEqual(Path(argv[0]).stat().st_mode & 0o777, 0o755)
+            self.assertEqual(argv[1:], ["-y", "--no-modify-path", "--profile", "minimal",
+                                       "--default-toolchain", json.loads((ROOT / "security/build-tools.json").read_text())["rust_toolchain"]])
+            self.assertEqual(kwargs, {"check": True})
+
+        with patch.object(sys, "argv", ["bootstrap-build-tool.py", "rustup", "--bin-dir", str(tools)]), \
+                patch.object(bootstrap, "host_target", return_value="aarch64-unknown-linux-gnu"), \
+                patch.object(bootstrap, "download_verified", side_effect=download), \
+                patch.object(bootstrap.subprocess, "run", side_effect=execute) as run:
+            bootstrap.main()
+        run.assert_called_once()
+        self.assertEqual(list(tools.iterdir()), [])
+
+    def test_rustup_verification_failure_prevents_execution_and_cleans_staging(self):
+        tools = self.root / "unverified tools"
+        with patch.object(sys, "argv", ["bootstrap-build-tool.py", "rustup", "--bin-dir", str(tools)]), \
+                patch.object(bootstrap, "host_target", return_value="aarch64-unknown-linux-gnu"), \
+                patch.object(bootstrap, "download_verified", side_effect=ValueError("build tool checksum mismatch")), \
+                patch.object(bootstrap.subprocess, "run") as run:
+            with self.assertRaisesRegex(ValueError, "checksum mismatch"):
+                bootstrap.main()
+        run.assert_not_called()
+        self.assertEqual(list(tools.iterdir()), [])
 
     def test_unsafe_npm_archive_rejected(self):
         path = self.root / "npm.tar.gz"

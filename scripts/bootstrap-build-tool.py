@@ -115,7 +115,9 @@ def main():
     item = target_input(args.tool, catalog[args.tool], target)
     with tempfile.TemporaryDirectory(prefix="nyxid-build-tool-", dir=destination) as temporary:
         stage = Path(temporary)
-        archive = stage / "download"
+        # rustup dispatches by argv[0]. Verified installer bytes must retain
+        # the installer basename instead of entering an unsupported proxy mode.
+        archive = stage / ("rustup-init" if args.tool == "rustup" else "download")
         download_verified(item, archive)
         if args.tool in ("cargo-dist", "cargo-auditable", "syft"):
             executable = "dist" if args.tool == "cargo-dist" else args.tool
