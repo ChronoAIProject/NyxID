@@ -5692,7 +5692,7 @@ async fn execute_tool_resolved_inner(
                 method: method_str,
                 path: prepared.path,
                 query: prepared.query,
-                headers: prepared.headers,
+                headers: (prepared.headers),
                 body: body.as_ref().map(|b| b.to_vec()),
             };
 
@@ -7919,6 +7919,7 @@ mod tests {
             .unwrap();
         db.collection::<UserServiceConnection>(CONNECTIONS)
             .insert_one(UserServiceConnection {
+                secret_context_versions: Default::default(),
                 id: uuid::Uuid::new_v4().to_string(),
                 user_id: owner.clone(),
                 service_id: catalog.id.clone(),
@@ -9275,6 +9276,7 @@ mod tests {
 
         db.collection::<UserServiceConnection>(CONNECTIONS)
             .insert_one(UserServiceConnection {
+                secret_context_versions: Default::default(),
                 id: uuid::Uuid::new_v4().to_string(),
                 user_id: user_id.clone(),
                 service_id: connected_id.clone(),
@@ -9940,6 +9942,7 @@ mod tests {
 
         db.collection::<UserServiceConnection>(CONNECTIONS)
             .insert_one(UserServiceConnection {
+                secret_context_versions: Default::default(),
                 id: uuid::Uuid::new_v4().to_string(),
                 user_id: user_id.clone(),
                 service_id: auto_disconnected_id.clone(),
@@ -10628,10 +10631,15 @@ mod tests {
             .unwrap();
         assert_eq!(saved.status, "active");
         assert_eq!(
-            encryption
-                .decrypt(saved.access_token_encrypted.as_ref().unwrap())
+            crate::services::credential_record_service::CredentialRecord::key(&saved)
+                .decrypt(
+                    &encryption,
+                    "access_token_encrypted",
+                    saved.access_token_encrypted.as_deref().unwrap()
+                )
                 .await
-                .unwrap(),
+                .unwrap()
+                .as_slice(),
             b"ifttt-access"
         );
         assert_eq!(saved.token_scopes.as_deref(), Some("mcp"));
@@ -10640,10 +10648,15 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(
-            encryption
-                .decrypt(refreshed.refresh_token_encrypted.as_ref().unwrap())
+            crate::services::credential_record_service::CredentialRecord::key(&refreshed)
+                .decrypt(
+                    &encryption,
+                    "refresh_token_encrypted",
+                    refreshed.refresh_token_encrypted.as_deref().unwrap()
+                )
                 .await
-                .unwrap(),
+                .unwrap()
+                .as_slice(),
             b"rotated-refresh"
         );
         assert_eq!(refreshed.credential_epoch, saved.credential_epoch);
@@ -10685,7 +10698,7 @@ mod tests {
         .await
         .unwrap()
         .unwrap();
-        assert_eq!(resolved.target.credential, "rotated-access");
+        assert_eq!(resolved.target.credential.as_str(), "rotated-access");
         assert_eq!(resolved.target.base_url, ifttt_mcp::BASE_URL);
         assert_eq!(resolved.target.auth_method, ifttt_mcp::AUTH_METHOD);
         for (auth_method, endpoint_url) in [
@@ -10934,7 +10947,11 @@ mod tests {
         let encrypted = stored.credential_encrypted.as_ref().unwrap();
         assert!(!encrypted.windows(key.len()).any(|b| b == key.as_bytes()));
         assert_eq!(
-            encryption.decrypt(encrypted).await.unwrap().as_slice(),
+            crate::services::credential_record_service::CredentialRecord::key(&stored)
+                .decrypt(&encryption, "credential_encrypted", encrypted)
+                .await
+                .unwrap()
+                .as_slice(),
             key.as_bytes()
         );
         for invalid in [
@@ -13156,7 +13173,7 @@ mod tests {
                 base_url: service.base_url.clone(),
                 auth_method: service.auth_method.clone(),
                 auth_key_name: service.auth_key_name.clone(),
-                credential: String::new(),
+                credential: Default::default(),
                 service,
                 catalog_default_headers: Vec::new(),
                 user_service_default_headers: Vec::new(),
@@ -13199,7 +13216,7 @@ mod tests {
             let mut resolution = mcp_billing_resolution("actor", None);
             resolution.credential_source = source.map(str::to_string);
             resolution.target.auth_method = "bearer".into();
-            resolution.target.credential = "test-token".into();
+            resolution.target.credential = "test-token".to_owned().into();
             resolution.target.service.billing =
                 Some(crate::models::service_billing::ServiceBilling {
                     platform_billable: true,
@@ -13522,6 +13539,7 @@ mod tests {
         /// supplied by the caller.
         fn safe_service(slug: &str, rules: Vec<AnonymousEndpointRule>) -> DownstreamService {
             DownstreamService {
+                secret_context_versions: Default::default(),
                 offering_kind: Default::default(),
                 topics: Vec::new(),
                 supplier: None,

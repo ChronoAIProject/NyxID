@@ -177,7 +177,7 @@ fn conflict() -> AppError {
     AppError::Conflict("saved login changed; fetch the current profile before retrying".into())
 }
 
-fn aad(profile: &OracleLoginProfile) -> String {
+pub(crate) fn aad(profile: &OracleLoginProfile) -> String {
     format!(
         "oracle-login-profile:{}:{}:{}:{}:v{}",
         profile.pool_id, profile.id, profile.generation, profile.revision, profile.format_version
@@ -745,10 +745,13 @@ pub async fn decrypt(
     keys: &EncryptionKeys,
     profile: &OracleLoginProfile,
 ) -> AppResult<Zeroizing<Vec<u8>>> {
-    Ok(Zeroizing::new(
-        keys.decrypt_with_aad(&profile.encrypted_envelope, aad(profile).as_bytes())
-            .await?,
-    ))
+    super::oracle_login_record_service::decrypt(
+        keys,
+        COLLECTION_NAME,
+        &bson::to_document(profile)
+            .map_err(|_| AppError::Internal("Invalid Oracle login envelope".into()))?,
+    )
+    .await
 }
 
 #[derive(Clone)]

@@ -1,4 +1,4 @@
-# M1 draft: agent-scoped machine workspaces, authority, and visibility
+# M1.3 review status: agent-scoped machine workspaces, authority, and visibility
 
 Status: design approved on 2026-10-03; revised M1.3 backend/runtime slice ready for review. Owner rollout is incomplete; see §8.7. Started incrementally at `/tmp/m1-design.md`, moved here with owner authorization after #1747 merged.
 Date: 2026-10-03.

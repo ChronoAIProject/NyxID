@@ -74,16 +74,18 @@ async fn fixture(label: &str, backup: ResponseTemplate) -> Fixture {
         catalog.default_request_headers = Some(vec![
             crate::models::default_request_header::DefaultRequestHeader {
                 name: "x-review-trace".into(),
-                value: "catalog-trace".into(),
+                value: "catalog-trace".to_owned().into(),
                 overridable: true,
                 sensitive: false,
-            },
+            }
+            .into(),
             crate::models::default_request_header::DefaultRequestHeader {
                 name: "x-review-default".into(),
-                value: "catalog-default".into(),
+                value: "catalog-default".to_owned().into(),
                 overridable: false,
                 sensitive: false,
-            },
+            }
+            .into(),
         ]);
         catalog.inference = Some(ServiceInference {
             wire_protocol: protocol,

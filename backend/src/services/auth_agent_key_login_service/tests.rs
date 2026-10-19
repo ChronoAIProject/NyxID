@@ -565,9 +565,8 @@ async fn poll_preview_and_sweep_expiry_revoke_undelivered_credentials() {
         let request = start(&db).await;
         accept(&db, &actor, &key, &request).await;
         let row = expire_request(&db, &request.user_code).await;
-        let encrypted = row.delivery_credential_encrypted.as_ref().unwrap();
-        let raw = encryption.decrypt(encrypted).await.unwrap();
-        let secret = std::str::from_utf8(&raw).unwrap();
+        let raw = crate::services::agent_login_record_service::decrypt(&encryption,&row).await.unwrap();
+        let secret = raw.as_str();
         match path {
             "poll" => assert!(matches!(
                 poll(&db, &encryption, HMAC_KEY, &request.device_code).await,
@@ -637,10 +636,7 @@ async fn failed_delivery_preparation_remains_sweepable() {
         .await
         .unwrap();
     let encryption = test_encryption_keys();
-    let secret = encryption
-        .decrypt(row.delivery_credential_encrypted.as_deref().unwrap())
-        .await
-        .unwrap();
+    let secret = crate::services::agent_login_record_service::decrypt(&encryption,&row).await.unwrap();
     db.collection::<AgentKeyLoginRequest>(COLLECTION_NAME)
         .update_one(
             doc! {"_id": &row.id},
@@ -665,7 +661,7 @@ async fn failed_delivery_preparation_remains_sweepable() {
     expire_request(&db, &request.user_code).await;
     sweep_expired(&db).await.unwrap();
     assert!(
-        key_service::validate_api_key(&db, std::str::from_utf8(&secret).unwrap())
+        key_service::validate_api_key(&db, secret.as_str())
             .await
             .is_err()
     );

@@ -1823,8 +1823,9 @@ async fn org_agent_machine_gateway_checks_member_and_node_owner_live() {
     let row = team::home_thread_for(&f.state.db, &f.state.encryption_keys, &f.member, &agent)
         .await
         .unwrap();
-    let (_, token, _) = super::node_service::create_registration_token(
+    let (_, token, _) = super::node_service::create_registration_token_for_actor(
         &f.state.db,
+        &f.admin,
         &f.org,
         "org-machine",
         100,

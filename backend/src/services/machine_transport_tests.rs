@@ -93,8 +93,10 @@ impl Peer {
             while let Some(msg) = server_rx.recv().await {
                 let msg = match msg {
                     NodeOutboundMessage::Close { .. } => break,
-                    NodeOutboundMessage::Text(s) => {
-                        tokio_tungstenite::tungstenite::Message::Text(s.into())
+                    NodeOutboundMessage::Text(mut s) => {
+                        tokio_tungstenite::tungstenite::Message::Text(
+                            std::mem::take(&mut *s).into(),
+                        )
                     }
                     NodeOutboundMessage::Binary(b) => {
                         tokio_tungstenite::tungstenite::Message::Binary(b.into())

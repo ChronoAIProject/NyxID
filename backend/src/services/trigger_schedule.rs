@@ -43,6 +43,12 @@ pub async fn indexes(db: &Database) -> mongodb::error::Result<()> {
     for (collection, keys, name, ttl) in [
         (WORK, doc! { "at": 1, "_id": 1 }, "trigger_work_due", false),
         (
+            WORK,
+            doc! { "trigger_id": 1, "_id": 1 },
+            "trigger_work_parent",
+            false,
+        ),
+        (
             RUNS,
             doc! { "trigger_id": 1, "scheduled_at": -1, "_id": -1 },
             "trigger_run_history",
@@ -141,6 +147,7 @@ pub async fn set_schedule_job(
         && trigger.status == TriggerStatus::Active
         && let Some(at) = trigger.schedule_state.next_due_at
     {
+        super::erasure_admission::fence_in_session(db, &trigger.user_id, session).await?;
         db.collection::<Document>(WORK)
             .replace_one(
                 doc! { "_id": &id },
@@ -148,6 +155,7 @@ pub async fn set_schedule_job(
                     "_id": &id,
                     "kind": "schedule",
                     "trigger_id": &trigger.id,
+                    "user_id": &trigger.user_id,
                     "at": date(at),
                     "fence": "",
                 },
@@ -203,6 +211,7 @@ pub(crate) async fn insert_run(
     run: &TriggerRun,
     session: &mut ClientSession,
 ) -> AppResult<()> {
+    super::erasure_admission::fence_in_session(db, &run.user_id, session).await?;
     let stored = db
         .collection::<Document>(TRIGGERS)
         .find_one_and_update(
@@ -258,6 +267,7 @@ pub(crate) async fn insert_run(
             "_id": &run.id,
             "kind": "run",
             "trigger_id": &run.trigger_id,
+            "user_id": &run.user_id,
             "at": date(run.dispatch_at.unwrap_or_else(Utc::now)),
             "fence": "",
         })
@@ -1261,6 +1271,7 @@ async fn record_terminal_in_session(
     result: Option<&str>,
     frontend: &str,
 ) -> AppResult<()> {
+    super::erasure_admission::fence_in_session(db, &run.user_id, session).await?;
     let Some(run) = db
         .collection::<TriggerRun>(RUNS)
         .find_one_and_update(

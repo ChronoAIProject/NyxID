@@ -4671,7 +4671,7 @@ Token revocation endpoint per [RFC 7009](https://tools.ietf.org/html/rfc7009). R
 
 **Response:** Always returns `200 OK` with an empty body, per RFC 7009. This applies even if the token is invalid, already revoked, or client authentication fails.
 
-Refresh tokens are revoked in the database (marked `revoked = true`). Access tokens are stateless JWTs and cannot be explicitly revoked; they expire naturally (default: 15 minutes).
+Refresh tokens are revoked in the database. Access JWT authentication also checks the live active user, with additional session and token-class fences. First-party session revocation applies immediately to NyxID requests. Ordinary OAuth client access tokens currently have a consent-revocation window until expiry (default 15 minutes plus configured verification leeway); external relying parties validating offline cannot observe immediate database revocation. Token expiry and supported remote-provider revocation are separate lifecycle effects.
 
 **Example:**
 

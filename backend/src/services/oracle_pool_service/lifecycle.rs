@@ -201,6 +201,16 @@ async fn delete_in_session(
     actor: &AuditActor,
     id_or_slug: &str,
 ) -> AppResult<Option<DeletePoolOutcome>> {
+    delete_in_session_with_owner(db, session, actor, id_or_slug, None).await
+}
+
+async fn delete_in_session_with_owner(
+    db: &Database,
+    session: &mut ClientSession,
+    actor: &AuditActor,
+    id_or_slug: &str,
+    erasure_owner: Option<&str>,
+) -> AppResult<Option<DeletePoolOutcome>> {
     let pool = mutation::lookup_pool(db, session, id_or_slug, true).await?;
     // The same write fence is retained on tombstones for duplicate deletion.
     db.collection::<Document>(ORACLE_POOLS)
@@ -210,7 +220,26 @@ async fn delete_in_session(
         )
         .session(&mut *session)
         .await?;
-    mutation::lock_manager(db, session, &actor.user_id, &pool.user_id).await?;
+    if let Some(owner) = erasure_owner {
+        if pool.user_id != owner {
+            return Err(AppError::Forbidden(
+                "Personal erasure cannot retire another owner's Oracle pool".into(),
+            ));
+        }
+        let changed = db
+            .collection::<Document>(USERS)
+            .update_one(
+                doc! {"_id":owner,"user_type":{"$ne":"org"}},
+                doc! {"$inc":{"oracle_enrollment_epoch":1_i64}},
+            )
+            .session(&mut *session)
+            .await?;
+        if changed.matched_count != 1 {
+            return Err(AppError::Conflict("Personal Oracle owner changed".into()));
+        }
+    } else {
+        mutation::lock_manager(db, session, &actor.user_id, &pool.user_id).await?;
+    }
     if let Some(deleted_at) = pool.deleted_at {
         return Ok(Some(DeletePoolOutcome {
             id: pool.id,
@@ -287,6 +316,54 @@ async fn delete_in_session(
     }))
 }
 
+/// Personal-erasure acceptance reuses the pool's exact tombstone/audit/work
+/// guards while the owner is still active. All effects roll back if ANY later
+/// account prerequisite rejects; creator attribution is never an owner filter.
+pub(crate) async fn accept_personal_erasure_in_session(
+    db: &Database,
+    session: &mut ClientSession,
+    owner: &str,
+    requested_by: &str,
+) -> AppResult<()> {
+    let pools: Vec<Document> = db
+        .collection::<Document>(ORACLE_POOLS)
+        .find(doc! {"user_id":owner,"deleted_at":null})
+        .projection(doc! {"_id":1})
+        .sort(doc! {"_id":1})
+        .limit(MAX_POOLS_PER_OWNER as i64 + 1)
+        .session(&mut *session)
+        .await?
+        .stream(&mut *session)
+        .try_collect()
+        .await?;
+    if pools.len() > MAX_POOLS_PER_OWNER as usize {
+        return Err(AppError::Conflict(
+            "Retire excess legacy Oracle pools before deleting this account".into(),
+        ));
+    }
+    let actor = AuditActor {
+        user_id: requested_by.to_owned(),
+        ip_address: None,
+        user_agent: None,
+        api_key_id: None,
+        api_key_name: None,
+    };
+    for pool in pools {
+        let id = pool
+            .get_str("_id")
+            .map_err(|_| AppError::Internal("Invalid Oracle pool identity".into()))?;
+        // None means overdue command settlement needs the ordinary pool API.
+        // Do not commit partial acceptance or silently abandon active work.
+        if delete_in_session_with_owner(db, session, &actor, id, Some(owner))
+            .await?
+            .is_none()
+        {
+            return Err(AppError::OraclePoolActiveWork);
+        }
+    }
+    Ok(())
+}
+
 async fn transfer_outcome(
     db: &Database,
     session: &mut ClientSession,
@@ -327,6 +404,8 @@ async fn cleanup_chunk(db: &Database, pool_id: &str) -> AppResult<bool> {
     let mut session = db.client().start_session().await?;
     session
         .start_transaction()
+        .read_concern(mongodb::options::ReadConcern::snapshot())
+        .write_concern(mongodb::options::WriteConcern::majority())
         .and_run(
             (transaction_db, transaction_pool_id),
             |session, (db, pool_id)| {
@@ -413,6 +492,69 @@ async fn cleanup_pool(db: &Database, pool_id: &str, chunks: usize) -> AppResult<
         }
     }
     Ok(())
+}
+
+/// One bounded personal-erasure pass. Owned pool tombstones/history retain
+/// their lifecycle contract. A contributor owns its installation credential,
+/// never the organization pool or other contributors' workers.
+pub(crate) async fn personal_erasure_pass(
+    db: &Database,
+    owner: &str,
+    actor: &str,
+) -> AppResult<bool> {
+    let durable = crate::services::transaction_service::durable_database(db);
+    let db = &durable;
+    if let Some(pool) = db
+        .collection::<Document>(ORACLE_POOLS)
+        .find_one(doc! {"user_id":owner,"deleted_at":{"$ne":null},"deletion_cleanup_pending":true})
+        .projection(doc! {"_id":1})
+        .sort(doc! {"_id":1})
+        .await?
+    {
+        let id = pool
+            .get_str("_id")
+            .map_err(|_| AppError::Internal("Invalid Oracle pool identity".into()))?;
+        cleanup_chunk(db, id).await?;
+        return Ok(false);
+    }
+    let workers = db.collection::<Document>(crate::models::oracle_worker::COLLECTION_NAME);
+    if let Some(worker) = workers
+        .find_one(doc! {
+            "enrollment.owner_user_id":owner,"enrollment.retired_for_owner_erasure":{"$ne":true}
+        })
+        .projection(doc! {"_id":1,"pool_id":1,"enrollment.credential_hash":1})
+        .sort(doc! {"_id":1})
+        .await?
+    {
+        let id = worker
+            .get_str("_id")
+            .map_err(|_| AppError::Internal("Invalid Oracle worker identity".into()))?;
+        let pool = worker
+            .get_str("pool_id")
+            .map_err(|_| AppError::Internal("Invalid Oracle worker pool".into()))?;
+        let mut tx = db.client().start_session().await?;
+        tx.start_transaction()
+            .read_concern(mongodb::options::ReadConcern::snapshot())
+            .write_concern(mongodb::options::WriteConcern::majority())
+            .await?;
+        let operation: AppResult<()> = async {
+            // Contend with enrollment/transfer and every live worker mutation.
+            db.collection::<Document>(ORACLE_POOLS).update_one(doc! {"_id":pool},doc! {"$inc":{"worker_enrollment_epoch":1_i64}}).session(&mut tx).await?;
+            let changed = workers.update_one(doc! {
+                "_id":id,"pool_id":pool,"enrollment.owner_user_id":owner,
+                "enrollment.credential_hash":worker.get_document("enrollment").ok().and_then(|e|e.get("credential_hash")).cloned().unwrap_or(bson::Bson::Null),
+                "enrollment.retired_for_owner_erasure":{"$ne":true}
+            },doc! {"$set":{"enrollment.credential_hash":format!("erased:{}",uuid::Uuid::new_v4()),"enrollment.retired_for_owner_erasure":true,"desired_state":"draining"}}).session(&mut tx).await?;
+            if changed.matched_count == 1 {
+                let key = super::super::audit_service::audit_chain_hmac_key().ok_or_else(||AppError::Internal("Audit key unavailable".into()))?;
+                super::super::audit_service::log_actor_event_in_session(db,&mut tx,key,&AuditActor {user_id:actor.to_owned(),ip_address:None,user_agent:None,api_key_id:None,api_key_name:None},"oracle_worker_owner_erasure",serde_json::json!({"owner_id":owner,"pool_id":pool,"worker_id":id})).await?;
+            }
+            Ok(())
+        }.await;
+        crate::services::org_membership_authority::finish(tx, operation).await?;
+        return Ok(false);
+    }
+    Ok(true)
 }
 
 /// One bounded fair pass; pending state survives failures and server restarts.

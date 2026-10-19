@@ -243,9 +243,7 @@ pub async fn create(
         expires_at: now + Duration::seconds(ttl),
     };
 
-    db.collection::<CliPairing>(COLLECTION_NAME)
-        .insert_one(&record)
-        .await?;
+    super::erasure_admission::insert_owned(db, COLLECTION_NAME, params.user_id, &record).await?;
 
     Ok(CreatedPairing {
         id: record.id,

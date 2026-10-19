@@ -356,7 +356,7 @@ The `nyxid` CLI's wizard-style commands (e.g. `nyxid service add`, `nyxid api-ke
 
 ### Key selection rules
 
-The backend picks the key at startup using the first match:
+When `HMAC_KEYSET_PATH` is configured, its pinned CLI-pairing value is authoritative. Without that file, legacy preparation picks the key using the first match:
 
 1. `CLI_PAIRING_HMAC_KEY` if set (must be 64 hex chars).
 2. Derived from `ENCRYPTION_KEY` via HMAC-SHA256 with domain-separated label `nyxid:cli-pairing-code-hmac-v1`. Stable across restarts and workers that share `ENCRYPTION_KEY`. This is the expected path for the local AES provider.
@@ -369,7 +369,14 @@ If all three sources are missing, the backend refuses to start with a clear erro
 - You want to rotate the pairing-code HMAC independently of both `ENCRYPTION_KEY` and the JWT signing key (e.g. to rotate it without rotating JWTs).
 - Any deployment policy that forbids reusing key material across purposes.
 
-Otherwise the automatic derivation chain is safe: local deployments derive from `ENCRYPTION_KEY`, KMS deployments derive from the JWT signing key.
+Legacy derivation couples pairing and other domains to encryption/JWT sources. Adopt the unchanged independent keyset before rotating those sources; the durable consistency pin rejects accidental domain changes. See [key lifecycle preparation](security/KEY_LIFECYCLE.md).
+
+## Independent HMAC keyset and JWT overlap
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `HMAC_KEYSET_PATH` | unset; unchanged legacy derivation with consistency check | Restricted local JSON file holding the six existing final domain keys. Authoritative when configured; no fallback on error. A majority-durable commitment pin rejects replacement. Adopt before JWT/AES source rotation using [the ordered preparation runbook](security/KEY_LIFECYCLE.md). This preserves keys; it is not arbitrary HMAC-key rotation. |
+| `JWT_RETAINED_PUBLIC_KEY_PATHS` | empty | Comma-separated list of at most sixteen retained RSA public PEM paths for strict RS256/known-kid verification and JWKS overlap. Stage all readers before activating a new signer; preserve old verifiers for required token lifetimes. External Machine-provider trust roots stay separate. |
 
 ## Audit Log Hash Chain (Optional)
 
@@ -377,11 +384,11 @@ NyxID audit-log rows created after this feature is enabled are tamper-evident. E
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `AUDIT_CHAIN_HMAC_KEY` | *(derived from `ENCRYPTION_KEY`, then JWT private key)* | Explicit 32-byte HMAC key (64 hex chars) for audit-log hash chaining. Generate with `openssl rand -hex 32`. Set this when you need to rotate the audit-chain key independently of both `ENCRYPTION_KEY` and the JWT signing key, or when deployment policy forbids deriving secondary HMAC keys from those sources. |
+| `AUDIT_CHAIN_HMAC_KEY` | *(derived from `ENCRYPTION_KEY`, then JWT private key)* | Explicit 32-byte HMAC key (64 hex chars) for audit-log hash chaining. Generate with `openssl rand -hex 32`. Existing explicit override for the audit domain. Preserve the exact existing key; replacing it invalidates retained chains and persisted fingerprints. Use independent keyset adoption before JWT/encryption source rotation. |
 
 ### Key selection rules
 
-The backend picks the audit-chain key at startup using the first match:
+When `HMAC_KEYSET_PATH` is configured, its pinned audit value is authoritative. Without that file, legacy preparation picks the audit key using the first match:
 
 1. `AUDIT_CHAIN_HMAC_KEY` if set (must be 64 hex chars).
 2. Derived from `ENCRYPTION_KEY` via HMAC-SHA256 with the domain-separated `audit-chain` label.
@@ -649,3 +656,44 @@ Git receives gateway URL rewrites and headers through process-only
 these settings to a global or repository config. No NyxID or provider
 credential is inherited or copied to the command environment. See
 [MACHINE_NODES.md](MACHINE_NODES.md).
+
+`ALLOW_LEGACY_RECORD_READS` (default `true`; accepts `true`/`false` or `1`/`0`)
+controls legacy decoding in converted contextual-encryption field adapters.
+Converted Node, MFA, saved-login and provider credential adapters consume it. Set `false` only after
+an authenticated migration/readiness pass and coordinated old-reader/writer
+drain. A mutable database version marker cannot re-enable legacy decoding when
+this trusted setting is false. This switch does not retire unconverted fields,
+old provider keys or backups. No production cutover has been performed by the
+remediation work.
+
+### Contextual encryption writer cutover (draft implementation)
+
+`CONTEXTUAL_RECORD_WRITES` defaults to `false`. Converted encrypted-field writers preserve the exact legacy encrypted format
+and omit contextual version markers during reader staging. Node registration,
+rotation, transfer and managed activation use that compatibility path. Sensitive
+header edits require writer cutover and never fall back to new plaintext storage.
+Existing legacy readers remain available through `ALLOW_LEGACY_RECORD_READS=true`.
+
+Startup validates both settings together. The supported modes are:
+
+| `ALLOW_LEGACY_RECORD_READS` | `CONTEXTUAL_RECORD_WRITES` | Mode |
+| --- | --- | --- |
+| `true` | `false` | Compatible reader staging (the default). |
+| `true` | `true` | Contextual writes and migration; drained acknowledgement required. |
+| `false` | `true` | Strict readers; drained acknowledgement and completed authenticated inventory readiness required. |
+| `false` | `false` | Rejected at startup: compatible writers would create ciphertext this process cannot read. |
+
+The startup mode check does not establish migration readiness or cloud key-version
+retirement evidence. Those require the authenticated final inventory checks.
+
+Activating `CONTEXTUAL_RECORD_WRITES=true` requires the explicit startup
+acknowledgement `CONTEXTUAL_RECORD_WRITERS_DRAINED=true`. Deploy compatible readers
+with writes off, stop and drain all old application/background/CLI writers, verify
+that no old binary will restart, then activate on the compatible fleet. This is an
+operator-controlled drained cutover, not automatic mixed-version enforcement or a
+zero-downtime guarantee. Once any v3 value exists, rollback to an old reader is
+unsupported. Roll back only to a v3-compatible binary while retaining its keys.
+After authenticated migration readiness across every field adapter, separately
+turn legacy reads off. Old backups and historical KMS key versions retain their
+own decryption requirements; the currently configured KMS resource can still
+serve historical versions. No production cutover or migration is authorized here.

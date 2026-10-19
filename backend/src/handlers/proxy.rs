@@ -94,33 +94,18 @@ fn proxy_error_telemetry_fields(err: &AppError) -> (u16, u32) {
     }
 }
 
-/// Fire-and-forget emission of `TelemetryEvent::ProxyError` from any proxy
-/// error branch. `resolved_slug` should be the slug of the resolved
-/// `UserService` / `DownstreamService`, or empty if resolution never
-/// succeeded — NEVER a UUID from the route path.
-fn emit_proxy_error_telemetry(
-    state: &AppState,
-    auth_user: &AuthUser,
-    tele: &TelemetryContext,
-    resolved_slug: &str,
-    err: &AppError,
-) {
-    // Expected, operator-controlled rollout state is not a proxy server fault.
+/// Build metadata for admission after all response borrows have ended.
+/// The resolved service slug must never be a route UUID.
+fn proxy_error_event(resolved_slug: &str, err: &AppError) -> Option<TelemetryEvent> {
     if matches!(err, AppError::WorkspaceDestinationsNotActivated) {
-        return;
+        return None;
     }
     let (status, error_code) = proxy_error_telemetry_fields(err);
-    emit_event(
-        state.telemetry.as_deref(),
-        &auth_user.user_id.to_string(),
-        auth_user.api_key_id.as_deref(),
-        tele,
-        TelemetryEvent::ProxyError {
-            service_slug: resolved_slug.to_string(),
-            error_code,
-            status,
-        },
-    );
+    Some(TelemetryEvent::ProxyError {
+        service_slug: resolved_slug.to_string(),
+        error_code,
+        status,
+    })
 }
 
 fn auth_kind_label(method: &crate::mw::auth::AuthMethod) -> &'static str {
@@ -135,41 +120,21 @@ fn auth_kind_label(method: &crate::mw::auth::AuthMethod) -> &'static str {
     }
 }
 
-/// Fire-and-forget emission of `TelemetryEvent::ProxySuccess` from the
-/// outer proxy wrappers when the upstream returned 2xx. Mirror of
-/// `emit_proxy_error_telemetry`: `resolved_slug` MUST be the slug of the
-/// resolved service (populated by `execute_proxy_inner`), not the route
-/// path parameter, so success and error events join cleanly on
-/// `service_slug` for success-rate computation.
-///
-/// `latency_ms` is the handler-to-response-start reach metric retained for
-/// product analytics compatibility. Operational phase diagnostics are emitted
-/// separately at body/stream termination so this event is not mistaken for a
-/// full streaming lifetime. Any non-2xx status is the caller's signal not to
-/// call this helper.
-fn emit_proxy_success_telemetry(
-    state: &AppState,
-    auth_user: &AuthUser,
-    tele: &TelemetryContext,
+/// Response-start latency; operational diagnostics separately cover streaming.
+fn proxy_success_event(
+    auth_method: &crate::mw::auth::AuthMethod,
     resolved_slug: &str,
     method: &Method,
     status: StatusCode,
     started_at: std::time::Instant,
-) {
-    let latency_ms = started_at.elapsed().as_millis().min(u64::MAX as u128) as u64;
-    emit_event(
-        state.telemetry.as_deref(),
-        &auth_user.user_id.to_string(),
-        auth_user.api_key_id.as_deref(),
-        tele,
-        TelemetryEvent::ProxySuccess {
-            service_slug: resolved_slug.to_string(),
-            method: method.as_str().to_string(),
-            status: status.as_u16(),
-            latency_ms,
-            auth_kind: auth_kind_label(&auth_user.auth_method),
-        },
-    );
+) -> TelemetryEvent {
+    TelemetryEvent::ProxySuccess {
+        service_slug: resolved_slug.to_string(),
+        method: method.as_str().to_string(),
+        status: status.as_u16(),
+        latency_ms: started_at.elapsed().as_millis().min(u64::MAX as u128) as u64,
+        auth_kind: auth_kind_label(auth_method),
+    }
 }
 
 /// Response headers that are safe to forward back to the client.
@@ -638,26 +603,30 @@ fn collect_ws_forward_headers(headers: &axum::http::HeaderMap) -> Vec<(String, S
         .collect()
 }
 
-fn effective_header_map(headers: Vec<(String, String)>) -> AppResult<axum::http::HeaderMap> {
+fn effective_header_map(
+    headers: crate::models::default_request_header::SecretHeaders,
+) -> AppResult<axum::http::HeaderMap> {
     let mut result = axum::http::HeaderMap::new();
-    for (name, value) in headers {
+    for (name, value) in &headers {
         let name = axum::http::HeaderName::from_bytes(name.as_bytes()).map_err(|_| {
             AppError::DurableGrantMismatch(
                 "effective downstream header name is invalid".to_string(),
             )
         })?;
-        let value = axum::http::HeaderValue::from_str(&value).map_err(|_| {
+        let value = axum::http::HeaderValue::from_str(value).map_err(|_| {
             AppError::DurableGrantMismatch(
                 "effective downstream header value is invalid".to_string(),
             )
         })?;
+        let mut value = value;
+        value.set_sensitive(true);
         result.append(name, value);
     }
     Ok(result)
 }
 
 fn strip_durable_idempotency_defaults(
-    headers: &mut Vec<crate::models::default_request_header::DefaultRequestHeader>,
+    headers: &mut Vec<crate::models::default_request_header::ResolvedDefaultRequestHeader>,
 ) {
     headers.retain(|header| !header.name.eq_ignore_ascii_case("idempotency-key"));
 }
@@ -813,27 +782,27 @@ pub async fn proxy_request(
     if let Ok(response) = &mut result {
         apply_proxy_request_id_header(response, &request_id);
     }
-    match &result {
-        Ok(response) if response.status().is_success() => {
-            emit_proxy_success_telemetry(
-                &state,
-                &auth_user,
-                &tele,
-                &resolved_slug,
-                &method,
-                response.status(),
-                started_at,
-            );
-        }
-        Ok(_) => {
-            // Non-2xx Ok responses come from upstream-error passthrough
-            // (e.g. 4xx from the target service). They are neither a
-            // NyxID-side `proxy.error` nor a `proxy.success`; the proxy
-            // layer behaved correctly while the downstream rejected.
-            // Skip telemetry — counting upstream 4xx as either side
-            // distorts both signals.
-        }
-        Err(err) => emit_proxy_error_telemetry(&state, &auth_user, &tele, &resolved_slug, err),
+    let event = match &result {
+        Ok(response) if response.status().is_success() => Some(proxy_success_event(
+            &auth_user.auth_method,
+            &resolved_slug,
+            &method,
+            response.status(),
+            started_at,
+        )),
+        // Upstream non-2xx passthrough is neither a NyxID success nor fault.
+        Ok(_) => None,
+        Err(err) => proxy_error_event(&resolved_slug, err),
+    };
+    if let Some(event) = event {
+        emit_event(
+            state.telemetry.as_deref(),
+            &auth_user.user_id.to_string(),
+            auth_user.api_key_id.as_deref(),
+            &tele,
+            event,
+        )
+        .await;
     }
     result
 }
@@ -1158,25 +1127,27 @@ pub async fn proxy_request_by_slug(
     if let Ok(response) = &mut result {
         apply_proxy_request_id_header(response, &request_id);
     }
-    match &result {
-        Ok(response) if response.status().is_success() => {
-            emit_proxy_success_telemetry(
-                &state,
-                &auth_user,
-                &tele,
-                &resolved_slug,
-                &method,
-                response.status(),
-                started_at,
-            );
-        }
-        Ok(_) => {
-            // See `proxy_request` for the upstream-error passthrough
-            // rationale: a 4xx echoed from the downstream is not a
-            // NyxID-side success or error, so it is intentionally not
-            // emitted on either side.
-        }
-        Err(err) => emit_proxy_error_telemetry(&state, &auth_user, &tele, &resolved_slug, err),
+    let event = match &result {
+        Ok(response) if response.status().is_success() => Some(proxy_success_event(
+            &auth_user.auth_method,
+            &resolved_slug,
+            &method,
+            response.status(),
+            started_at,
+        )),
+        // Upstream non-2xx passthrough is neither a NyxID success nor fault.
+        Ok(_) => None,
+        Err(err) => proxy_error_event(&resolved_slug, err),
+    };
+    if let Some(event) = event {
+        emit_event(
+            state.telemetry.as_deref(),
+            &auth_user.user_id.to_string(),
+            auth_user.api_key_id.as_deref(),
+            &tele,
+            event,
+        )
+        .await;
     }
     result
 }
@@ -5342,7 +5313,7 @@ async fn execute_resolved_proxy_inner<'a>(
                     method: method_str.clone(),
                     path: prepared.path,
                     query: prepared.query,
-                    headers: prepared.headers,
+                    headers: (prepared.headers),
                     body: body.as_ref().map(|b| b.to_vec()),
                 };
 
@@ -7232,6 +7203,8 @@ pub(crate) fn build_downstream_ws_request(
             let value = reqwest::header::HeaderValue::from_str(value_str).map_err(|e| {
                 AppError::Internal(format!("Invalid header value for WS credential: {e}"))
             })?;
+            let mut value = value;
+            value.set_sensitive(true);
             Ok((name, value))
         };
 
@@ -7289,10 +7262,11 @@ pub(crate) fn build_downstream_ws_request(
             Ok(n) => n,
             Err(_) => continue, // validated on write, but stay defensive
         };
-        let hv = match reqwest::header::HeaderValue::from_str(&h.value) {
+        let mut hv = match reqwest::header::HeaderValue::from_str(&h.value) {
             Ok(v) => v,
             Err(_) => continue,
         };
+        hv.set_sensitive(h.sensitive);
         if h.overridable {
             headers.entry(hn).or_insert(hv);
         } else {
@@ -7325,7 +7299,7 @@ pub(crate) fn build_downstream_ws_request(
             "bearer" => {
                 let (name, value) = make_header(
                     cred.injection_key.as_bytes(),
-                    &format!("Bearer {}", cred.credential),
+                    &format!("Bearer {}", cred.credential.as_str()),
                 )?;
                 headers.insert(name, value);
             }
@@ -7367,7 +7341,8 @@ pub(crate) fn build_downstream_ws_request(
         }
         "basic" => {
             use base64::Engine;
-            let encoded = base64::engine::general_purpose::STANDARD.encode(&target.credential);
+            let encoded =
+                base64::engine::general_purpose::STANDARD.encode(target.credential.as_bytes());
             let (_, value) = make_header(b"authorization", &format!("Basic {encoded}"))?;
             headers.insert(reqwest::header::AUTHORIZATION, value);
         }
@@ -7594,7 +7569,7 @@ async fn bridge_websockets(
     service_id: String,
     collect_realtime_llm_usage: bool,
     ws_frame_injections: Vec<crate::models::ws_frame_injection::WsFrameInjection>,
-    credential: String,
+    credential: zeroize::Zeroizing<String>,
     db: mongodb::Database,
     user_id: String,
     api_key_id: Option<String>,
@@ -7996,7 +7971,8 @@ async fn handle_ws_passthrough_via_node(
     } else {
         format!("/{}", prepared.path)
     };
-    let mut enriched_headers = forward_headers.to_vec();
+    let mut enriched_headers =
+        crate::models::default_request_header::SecretHeaders::from(forward_headers.to_vec());
     enriched_headers.extend(identity_headers.iter().cloned());
 
     // Override User-Agent if the service specifies a custom one.
@@ -8099,7 +8075,7 @@ async fn handle_ws_passthrough_via_node(
             base_url: target.base_url.clone(),
             path: node_path.clone(),
             query: prepared.query.clone(),
-            headers: enriched_headers.clone(),
+            headers: (enriched_headers.clone()),
             ws_frame_injections: target.ws_frame_injections.clone(),
         };
 
@@ -8648,15 +8624,15 @@ mod tests {
     #[test]
     fn scheduled_requests_strip_default_idempotency_headers() {
         let mut headers = vec![
-            crate::models::default_request_header::DefaultRequestHeader {
+            crate::models::default_request_header::ResolvedDefaultRequestHeader {
                 name: "Idempotency-Key".to_string(),
-                value: "catalog-default".to_string(),
+                value: "catalog-default".to_string().into(),
                 overridable: false,
                 sensitive: false,
             },
-            crate::models::default_request_header::DefaultRequestHeader {
+            crate::models::default_request_header::ResolvedDefaultRequestHeader {
                 name: "X-Amz-Target".to_string(),
-                value: "Service.Write".to_string(),
+                value: "Service.Write".to_string().into(),
                 overridable: false,
                 sensitive: false,
             },
@@ -9465,7 +9441,7 @@ mod tests {
                     consume_trigger: true,
                     direction: crate::models::ws_frame_injection::WsFrameDirection::Downstream,
                 }],
-                "TEST_CRED".to_string(),
+                "TEST_CRED".to_owned().into(),
                 state.db,
                 "user-1".to_string(),
                 None,
@@ -9576,7 +9552,7 @@ mod tests {
             base_url: base_url.to_string(),
             auth_method: "none".to_string(),
             auth_key_name: String::new(),
-            credential: String::new(),
+            credential: Default::default(),
             service: crate::models::downstream_service::test_helpers::dummy_service(),
             catalog_default_headers: Vec::new(),
             user_service_default_headers: Vec::new(),
@@ -9683,7 +9659,7 @@ mod tests {
     fn oauth_credential_source_classification_preserves_override_and_node_precedence() {
         let mut target = make_target("https://api.x.com/2");
         target.auth_method = "bearer".into();
-        target.credential = "test-token".into();
+        target.credential = "test-token".to_owned().into();
         for (source, expected) in [
             (Some("platform"), CredentialClass::NyxidPlatformOauthApp),
             (Some("byo"), CredentialClass::UserOwned),
@@ -9730,7 +9706,7 @@ mod tests {
     fn user_service_with_master_credential_classifies_as_master() {
         let mut target = make_target("http://localhost:8080");
         target.auth_method = "bearer".to_string();
-        target.credential = "master-key".to_string();
+        target.credential = "master-key".to_string().into();
 
         // Auto-provisioned UserService (no user key) injecting the catalog
         // master credential: the platform's key, not the user's.
@@ -9749,7 +9725,7 @@ mod tests {
     fn curation_connection_credential_keeps_byok_class_for_master_capable_catalog() {
         let mut target = make_target("http://localhost:8080");
         target.auth_method = "bearer".into();
-        target.credential = "dedicated-sa-key".into();
+        target.credential = "dedicated-sa-key".to_owned().into();
         target.service.requires_user_credential = false;
         assert_eq!(
             final_credential_class(None, false, false, true, false, Some("user"), &target),
@@ -9787,7 +9763,7 @@ mod tests {
         let mut target = make_target("https://api.example.com");
         target.auth_method = "query".to_string();
         target.auth_key_name = "api_key".to_string();
-        target.credential = "secret value".to_string();
+        target.credential = "secret value".to_string().into();
 
         let url = build_downstream_ws_url(&target, "socket", Some("stream=true"), &[]).unwrap();
         assert_eq!(
@@ -9830,7 +9806,7 @@ mod tests {
         let mut target = make_target(&format!("ws://{addr}"));
         target.auth_method = "header".to_string();
         target.auth_key_name = "xi-api-key".to_string();
-        target.credential = "elevenlabs-test-key".to_string();
+        target.credential = "elevenlabs-test-key".to_string().into();
         let permit =
             crate::services::billing::route_inventory::enforce_billing_egress_classification(
                 Some(
@@ -11636,6 +11612,7 @@ mod proxy_resolution_integration_tests {
             acting_client_id: None,
             oauth_client_id: None,
             token_jti: None,
+            oauth_lineage: None,
             approval_owner_user_id: Some(owner_user_id.to_string()),
             auth_method: AuthMethod::ServiceAccount,
             allow_all_services: true,
@@ -11668,6 +11645,7 @@ mod proxy_resolution_integration_tests {
             acting_client_id: None,
             oauth_client_id: None,
             token_jti: None,
+            oauth_lineage: None,
             approval_owner_user_id: None,
             auth_method: AuthMethod::AccessToken,
             allow_all_services: true,
@@ -11793,6 +11771,8 @@ mod proxy_resolution_integration_tests {
             .db
             .collection::<UserApiKey>(USER_API_KEYS)
             .insert_one(UserApiKey {
+                grant_lineage: None,
+                secret_context_versions: Default::default(),
                 oauth_app_observation: None,
                 credential_source: None,
                 id: api_key_id.clone(),
@@ -11995,7 +11975,7 @@ mod proxy_resolution_integration_tests {
         .await
         .unwrap();
         assert!(route.is_none());
-        assert_eq!(target.credential, "operator-secret");
+        assert_eq!(target.credential.as_str(), "operator-secret");
         assert!(rx.try_recv().is_err());
         db.drop().await.unwrap();
     }
@@ -12019,6 +11999,7 @@ mod proxy_resolution_integration_tests {
             name: name.to_string(),
             status: NodeStatus::Online,
             signing_secret_encrypted: Some(signing_secret_encrypted),
+            signing_secret_context_version: None,
             signing_secret_hash: hash_token(&raw_signing_secret),
             last_heartbeat_at: Some(now),
             connected_at: Some(now),
@@ -12218,7 +12199,7 @@ mod proxy_resolution_integration_tests {
                 .find(|header| header.name.eq_ignore_ascii_case(header_name))
                 .unwrap();
             assert!(default.overridable);
-            assert_eq!(default.value, default_version);
+            assert_eq!(default.value.as_str(), default_version);
             for via_node in [false, true] {
                 for explicit_version in [None, Some("2025-09-03")] {
                     let node = if via_node {
@@ -12749,7 +12730,15 @@ mod proxy_resolution_integration_tests {
         let (base_url, server) = start_downstream().await;
         let owner_id = Uuid::new_v4().to_string();
         let sa_id = insert_general_service_account(&db, &owner_id).await;
-        let catalog_service_id = Uuid::new_v4().to_string();
+        let mut catalog = crate::test_utils::test_auto_connected_catalog_service();
+        catalog.base_url = base_url.clone();
+        let catalog_service_id = catalog.id.clone();
+        db.collection::<crate::models::downstream_service::DownstreamService>(
+            crate::models::downstream_service::COLLECTION_NAME,
+        )
+        .insert_one(&catalog)
+        .await
+        .unwrap();
         db.collection::<crate::models::user::User>(USERS)
             .insert_one(test_user(&owner_id, UserType::Person))
             .await
@@ -12778,6 +12767,26 @@ mod proxy_resolution_integration_tests {
 
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(resolved_slug, service.slug);
+        db.collection::<crate::models::downstream_service::DownstreamService>(
+            crate::models::downstream_service::COLLECTION_NAME,
+        )
+        .delete_one(doc! {"_id": &catalog_service_id})
+        .await
+        .unwrap();
+        let error = proxy_request_inner(
+            &state,
+            &service_account_auth(&sa_id, &owner_id),
+            &catalog_service_id,
+            "status",
+            proxy_request("/proxy/catalog/status"),
+            &mut resolved_slug,
+        )
+        .await
+        .expect_err("configured missing catalog link must fail closed");
+        assert!(
+            matches!(error, AppError::Conflict(_)),
+            "unexpected missing-link error: {error}"
+        );
         server.abort();
     }
 
@@ -13243,6 +13252,7 @@ mod proxy_resolution_integration_tests {
         )
         .insert_one(
             crate::models::user_service_connection::UserServiceConnection {
+                secret_context_versions: Default::default(),
                 id: Uuid::new_v4().to_string(),
                 user_id: user_id.clone(),
                 service_id: service.id.clone(),

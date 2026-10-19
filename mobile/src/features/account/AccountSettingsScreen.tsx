@@ -10,6 +10,10 @@ import { OfflineBanner } from "../../components/OfflineBanner";
 import { TelegramLinkModal } from "../../components/TelegramLinkModal";
 import { ToastKind, ToastOverlay, ToastState } from "../../components/ToastOverlay";
 import { useAuthSession } from "../auth/AuthSessionContext";
+import { useMobileConsent } from "../../lib/consent";
+import { analyticsConsentState } from "../../lib/analyticsConsentState";
+import { saveAnalyticsPermission, type AnalyticsPermission } from "../../lib/analyticsRelay";
+import { requestJson } from "../../lib/api/http";
 import { capture } from "../../lib/telemetry";
 import { useNetworkStatus } from "../../hooks/useNetworkStatus";
 import { mobileApi } from "../../lib/api/mobileApi";
@@ -144,6 +148,23 @@ export function AccountSettingsScreen({ navigation }: Props) {
   const [toast, setToast] = useState<ToastState | null>(null);
   const queryClient = useQueryClient();
   const { signOut } = useAuthSession();
+  const deviceConsent = useMobileConsent();
+  const analyticsPermission = useQuery({
+    queryKey: ["analytics-consent", deviceConsent.accountId],
+    enabled: Boolean(deviceConsent.accountId), staleTime: 0,
+    queryFn: async () => {
+      const accountId = deviceConsent.accountId!;
+      const permission = await requestJson<AnalyticsPermission>("/users/me/preferences/analytics", { expectedAccountId: accountId });
+      if (permission.account_id !== accountId) throw new Error("analytics_account_changed");
+      return permission;
+    },
+  });
+  const saveAnalytics = useMutation({
+    mutationFn: (enabled: boolean) => saveAnalyticsPermission(deviceConsent.accountId!, enabled, requestJson,
+      analyticsConsentState.getSnapshot, deviceConsent.setConsent),
+    onSuccess: () => { void analyticsPermission.refetch(); },
+    onError: () => setToast({ message: "Could not save account analytics permission. This device remains off; retry to withdraw across devices.", kind: "error" }),
+  });
   const { isConnected, recheckConnection } = useNetworkStatus();
 
   const {
@@ -391,8 +412,8 @@ export function AccountSettingsScreen({ navigation }: Props) {
 
   const deleteAccountMutation = useMutation({
     mutationFn: () => mobileApi.deleteAccount(),
-    onSuccess: async () => {
-      showToast("Account deleted. You have been signed out.", "success");
+    onSuccess: async (result) => {
+      showToast(result.status === "complete" ? "Account erasure complete. You have been signed out." : "Account deletion accepted. Cleanup continues until verified. You have been signed out.", "success");
       try { await signOut(); } catch {}
       queryClient.clear();
     },
@@ -655,6 +676,30 @@ export function AccountSettingsScreen({ navigation }: Props) {
             />
           </View>
         </View>
+
+        <View style={styles.card}>
+          <Text style={styles.accountRowLabel}>Usage Analytics</Text>
+          <Text style={styles.accountRowValue}>Optional events require account permission and this device's choice. Security and billing records have separate retention rules.</Text>
+          <View style={styles.systemRow}>
+            <Text style={styles.accountRowLabel}>{analyticsPermission.isFetching ? "Loading permission…" : analyticsPermission.isError ? "Permission unavailable" : analyticsPermission.data?.enabled ? "Account permission enabled" : "Account permission disabled"}</Text>
+            <Switch accessibilityLabel="Allow account usage analytics"
+              value={analyticsPermission.data?.enabled === true}
+              disabled={saveAnalytics.isPending || analyticsPermission.isFetching || analyticsPermission.isError || !analyticsPermission.data}
+              onValueChange={(value) => saveAnalytics.mutate(value)} />
+          </View>
+          {analyticsPermission.isError && <PrimaryButton label="Retry" kind="ghost" onPress={() => { void analyticsPermission.refetch(); }} />}
+          <View style={styles.systemRow}>
+            <Text style={styles.accountRowLabel}>Allow on this device</Text>
+            <Switch accessibilityLabel="Allow usage analytics on this device" value={deviceConsent.enabled}
+              disabled={!deviceConsent.enabled && (analyticsPermission.data?.enabled !== true || analyticsPermission.isError || analyticsPermission.isFetching)}
+              onValueChange={deviceConsent.setConsent} />
+          </View>
+        </View>
+
+        {deviceConsent.persistenceError && <View style={styles.card}>
+          <Text style={styles.accountRowValue}>This device's choice could not be saved. Analytics is off in this session; retry to save it before closing the app.</Text>
+          <PrimaryButton label="Retry saving device choice" kind="ghost" onPress={deviceConsent.retryPersistence} />
+        </View>}
 
         {/* Actions */}
         <View style={styles.actionsWrap}>

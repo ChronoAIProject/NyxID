@@ -115,66 +115,19 @@ fn build_cli_http_client_with_redirect(
 }
 
 fn cli_http_client_builder(profile: Option<&str>) -> Result<reqwest::ClientBuilder> {
-    // Attach `X-NyxID-Client: cli` + `X-NyxID-Client-Version` ONLY when
-    // BOTH conditions are true:
-    //   (a) the operator has configured a telemetry DSN (or opted into
-    //       the community share-back), AND
-    //   (b) the user on this machine has actually consented (CLI
-    //       config / `NYXID_TELEMETRY=on` / `DO_NOT_TRACK` — see
-    //       `crate::telemetry::consent::resolve_consent`).
-    //
-    // Historically this function checked only (a), which meant that a
-    // user who had run `nyxid telemetry disable` — or set
-    // `DO_NOT_TRACK=1` — still produced surface-tagged headers on every
-    // request, and the backend emitted `surface="cli"` telemetry events
-    // for their traffic anyway. Local opt-out was partial theater.
-    // Tracked in `docs/TELEMETRY_CONSENT_FIX.md` §8.3.
-    //
-    // The `profile` argument is kept on the signature for future per-
-    // profile features, but consent is read against the DEFAULT profile
-    // regardless. Rationale: the only built-in consent editor today is
-    // `nyxid telemetry enable|disable`, which writes to
-    // `~/.nyxid/config.toml` (default profile). The main.rs first-run
-    // prompt also writes there. Reading profile-specific consent here
-    // would mean `nyxid --profile dev some-command` silently lost its
-    // headers until the user manually edited `~/.nyxid/profiles/dev/
-    // config.toml` — a footgun that treats consent as per-profile when
-    // no editor UI treats it that way. Consent is user-global in v1;
-    // making it per-profile is a separate feature that also needs a
-    // `nyxid telemetry --profile ...` editor path.
-    let telemetry_configured = std::env::var("NYXID_TELEMETRY_DSN")
-        .ok()
-        .is_some_and(|s| !s.is_empty())
-        || std::env::var("NYXID_SHARE_ANALYTICS")
-            .ok()
-            .is_some_and(|v| {
-                matches!(v.to_ascii_lowercase().as_str(), "true" | "1" | "yes" | "on")
-            });
-
-    // `resolve_consent_preferring_profile` honors the default profile
-    // (where v1 persists user choice) but also falls back to any
-    // explicit per-profile consent from older releases, so upgrading
-    // doesn't silently override a historical opt-out on a named
-    // profile.
-    let user_consented =
-        crate::telemetry::consent::resolve_consent_preferring_profile(profile).enabled;
-
-    let mut builder = crate::tls::client_builder()?
+    // Surface is metadata. Positive analytics narrowing is recomputed from
+    // the live account/profile choice on each authenticated API request.
+    let _ = profile;
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert("x-nyxid-client", "cli".parse().unwrap());
+    headers.insert(
+        "x-nyxid-client-version",
+        env!("CARGO_PKG_VERSION").parse().unwrap(),
+    );
+    let builder = crate::tls::client_builder()?
         .user_agent(CLI_USER_AGENT)
-        .connect_timeout(std::time::Duration::from_secs(10));
-
-    if telemetry_configured && user_consented {
-        let mut default_headers = reqwest::header::HeaderMap::new();
-        default_headers.insert(
-            reqwest::header::HeaderName::from_static("x-nyxid-client"),
-            reqwest::header::HeaderValue::from_static("cli"),
-        );
-        default_headers.insert(
-            reqwest::header::HeaderName::from_static("x-nyxid-client-version"),
-            reqwest::header::HeaderValue::from_static(env!("CARGO_PKG_VERSION")),
-        );
-        builder = builder.default_headers(default_headers);
-    }
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .default_headers(headers);
 
     Ok(builder)
 }
@@ -361,6 +314,15 @@ impl ApiClient {
             .unwrap_or(&self.base_url)
     }
 
+    pub fn clear_deleted_account_credentials(&self, generation: Option<&str>) -> Result<()> {
+        crate::auth::clear_deleted_account_credentials(
+            self.profile.as_deref(),
+            self.base_url_root(),
+            generation,
+            &self.access_token,
+        )
+    }
+
     pub fn is_agent_key_auth(&self) -> bool {
         self.agent_key_auth
     }
@@ -437,6 +399,11 @@ impl ApiClient {
             .client
             .get(&url)
             .bearer_auth(&self.access_token)
+            .headers(crate::telemetry::account_binding::device_headers(
+                self.profile.as_deref(),
+                self.base_url_root(),
+                &self.access_token,
+            ))
             .send()
             .await
             .with_context(|| format!("GET {path} failed"))?;
@@ -447,6 +414,11 @@ impl ApiClient {
                 .client
                 .get(&url)
                 .bearer_auth(&self.access_token)
+                .headers(crate::telemetry::account_binding::device_headers(
+                    self.profile.as_deref(),
+                    self.base_url_root(),
+                    &self.access_token,
+                ))
                 .send()
                 .await
                 .with_context(|| format!("GET {path} failed (retry)"))?;
@@ -467,6 +439,11 @@ impl ApiClient {
             .client
             .get(&url)
             .bearer_auth(&self.access_token)
+            .headers(crate::telemetry::account_binding::device_headers(
+                self.profile.as_deref(),
+                self.base_url_root(),
+                &self.access_token,
+            ))
             .send()
             .await
             .with_context(|| format!("GET {path} failed"))?;
@@ -477,6 +454,11 @@ impl ApiClient {
                 .client
                 .get(&url)
                 .bearer_auth(&self.access_token)
+                .headers(crate::telemetry::account_binding::device_headers(
+                    self.profile.as_deref(),
+                    self.base_url_root(),
+                    &self.access_token,
+                ))
                 .send()
                 .await
                 .with_context(|| format!("GET {path} failed (retry)"))?;
@@ -498,6 +480,11 @@ impl ApiClient {
             .client
             .post(&url)
             .bearer_auth(&self.access_token)
+            .headers(crate::telemetry::account_binding::device_headers(
+                self.profile.as_deref(),
+                self.base_url_root(),
+                &self.access_token,
+            ))
             .json(body)
             .send()
             .await
@@ -509,6 +496,11 @@ impl ApiClient {
                 .client
                 .post(&url)
                 .bearer_auth(&self.access_token)
+                .headers(crate::telemetry::account_binding::device_headers(
+                    self.profile.as_deref(),
+                    self.base_url_root(),
+                    &self.access_token,
+                ))
                 .json(body)
                 .send()
                 .await
@@ -529,6 +521,11 @@ impl ApiClient {
             .client
             .put(&url)
             .bearer_auth(&self.access_token)
+            .headers(crate::telemetry::account_binding::device_headers(
+                self.profile.as_deref(),
+                self.base_url_root(),
+                &self.access_token,
+            ))
             .json(body)
             .send()
             .await
@@ -540,6 +537,11 @@ impl ApiClient {
                 .client
                 .put(&url)
                 .bearer_auth(&self.access_token)
+                .headers(crate::telemetry::account_binding::device_headers(
+                    self.profile.as_deref(),
+                    self.base_url_root(),
+                    &self.access_token,
+                ))
                 .json(body)
                 .send()
                 .await
@@ -561,6 +563,11 @@ impl ApiClient {
             .client
             .patch(&url)
             .bearer_auth(&self.access_token)
+            .headers(crate::telemetry::account_binding::device_headers(
+                self.profile.as_deref(),
+                self.base_url_root(),
+                &self.access_token,
+            ))
             .json(body)
             .send()
             .await
@@ -572,6 +579,11 @@ impl ApiClient {
                 .client
                 .patch(&url)
                 .bearer_auth(&self.access_token)
+                .headers(crate::telemetry::account_binding::device_headers(
+                    self.profile.as_deref(),
+                    self.base_url_root(),
+                    &self.access_token,
+                ))
                 .json(body)
                 .send()
                 .await
@@ -597,6 +609,11 @@ impl ApiClient {
             .client
             .delete(&url)
             .bearer_auth(&self.access_token)
+            .headers(crate::telemetry::account_binding::device_headers(
+                self.profile.as_deref(),
+                self.base_url_root(),
+                &self.access_token,
+            ))
             .headers(headers.clone())
             .send()
             .await
@@ -608,6 +625,11 @@ impl ApiClient {
                 .client
                 .delete(&url)
                 .bearer_auth(&self.access_token)
+                .headers(crate::telemetry::account_binding::device_headers(
+                    self.profile.as_deref(),
+                    self.base_url_root(),
+                    &self.access_token,
+                ))
                 .headers(headers)
                 .send()
                 .await
@@ -629,12 +651,22 @@ impl ApiClient {
         }
     }
 
-    pub async fn delete<T: DeserializeOwned>(&mut self, path: &str) -> Result<T> {
+    pub async fn delete_with_headers<T: DeserializeOwned>(
+        &mut self,
+        path: &str,
+        headers: reqwest::header::HeaderMap,
+    ) -> Result<T> {
         let url = format!("{}{path}", self.base_url);
         let resp = self
             .client
             .delete(&url)
             .bearer_auth(&self.access_token)
+            .headers(crate::telemetry::account_binding::device_headers(
+                self.profile.as_deref(),
+                self.base_url_root(),
+                &self.access_token,
+            ))
+            .headers(headers.clone())
             .send()
             .await
             .with_context(|| format!("DELETE {path} failed"))?;
@@ -645,6 +677,46 @@ impl ApiClient {
                 .client
                 .delete(&url)
                 .bearer_auth(&self.access_token)
+                .headers(crate::telemetry::account_binding::device_headers(
+                    self.profile.as_deref(),
+                    self.base_url_root(),
+                    &self.access_token,
+                ))
+                .headers(headers)
+                .send()
+                .await
+                .with_context(|| format!("DELETE {path} failed (retry)"))?;
+            return Self::handle_response(resp, path).await;
+        }
+        Self::handle_response(resp, path).await
+    }
+
+    pub async fn delete<T: DeserializeOwned>(&mut self, path: &str) -> Result<T> {
+        let url = format!("{}{path}", self.base_url);
+        let resp = self
+            .client
+            .delete(&url)
+            .bearer_auth(&self.access_token)
+            .headers(crate::telemetry::account_binding::device_headers(
+                self.profile.as_deref(),
+                self.base_url_root(),
+                &self.access_token,
+            ))
+            .send()
+            .await
+            .with_context(|| format!("DELETE {path} failed"))?;
+
+        self.reject_agent_key_unauthorized(&resp)?;
+        if resp.status() == reqwest::StatusCode::UNAUTHORIZED && self.try_refresh_token().await {
+            let resp = self
+                .client
+                .delete(&url)
+                .bearer_auth(&self.access_token)
+                .headers(crate::telemetry::account_binding::device_headers(
+                    self.profile.as_deref(),
+                    self.base_url_root(),
+                    &self.access_token,
+                ))
                 .send()
                 .await
                 .with_context(|| format!("DELETE {path} failed (retry)"))?;
@@ -664,6 +736,11 @@ impl ApiClient {
         let resp = client
             .delete(url.clone())
             .bearer_auth(&self.access_token)
+            .headers(crate::telemetry::account_binding::device_headers(
+                self.profile.as_deref(),
+                self.base_url_root(),
+                &self.access_token,
+            ))
             .json(body)
             .send()
             .await
@@ -675,6 +752,11 @@ impl ApiClient {
             let resp = client
                 .delete(url)
                 .bearer_auth(&self.access_token)
+                .headers(crate::telemetry::account_binding::device_headers(
+                    self.profile.as_deref(),
+                    self.base_url_root(),
+                    &self.access_token,
+                ))
                 .json(body)
                 .send()
                 .await
@@ -691,6 +773,11 @@ impl ApiClient {
             .client
             .delete(&url)
             .bearer_auth(&self.access_token)
+            .headers(crate::telemetry::account_binding::device_headers(
+                self.profile.as_deref(),
+                self.base_url_root(),
+                &self.access_token,
+            ))
             .send()
             .await
             .with_context(|| format!("DELETE {path} failed"))?;
@@ -701,6 +788,11 @@ impl ApiClient {
                 .client
                 .delete(&url)
                 .bearer_auth(&self.access_token)
+                .headers(crate::telemetry::account_binding::device_headers(
+                    self.profile.as_deref(),
+                    self.base_url_root(),
+                    &self.access_token,
+                ))
                 .send()
                 .await
                 .with_context(|| format!("DELETE {path} failed (retry)"))?;
@@ -718,6 +810,11 @@ impl ApiClient {
             .client
             .post(&url)
             .bearer_auth(&self.access_token)
+            .headers(crate::telemetry::account_binding::device_headers(
+                self.profile.as_deref(),
+                self.base_url_root(),
+                &self.access_token,
+            ))
             .json(body)
             .send()
             .await
@@ -729,6 +826,11 @@ impl ApiClient {
                 .client
                 .post(&url)
                 .bearer_auth(&self.access_token)
+                .headers(crate::telemetry::account_binding::device_headers(
+                    self.profile.as_deref(),
+                    self.base_url_root(),
+                    &self.access_token,
+                ))
                 .json(body)
                 .send()
                 .await

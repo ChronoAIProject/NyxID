@@ -217,12 +217,13 @@ describe("admin user mutations", () => {
     expect(mockPost).toHaveBeenCalledWith("/admin/users/u1/reset-password");
   });
 
-  it("useDeleteUser DELETEs the user resource", async () => {
-    mockDelete.mockResolvedValue({ message: "deleted" });
+  it("useDeleteUser DELETEs the user resource and returns durable acceptance", async () => {
+    const accepted = { status: "accepted", accepted_at: "2026-10-19T00:00:00Z", completed_at: null, domains: [] };
+    mockDelete.mockResolvedValue(accepted);
     const { result } = renderHook(() => useDeleteUser(), {
       wrapper: wrapperFactory(),
     });
-    await result.current.mutateAsync("u1");
+    await expect(result.current.mutateAsync("u1")).resolves.toEqual(accepted);
     expect(mockDelete).toHaveBeenCalledWith("/admin/users/u1");
   });
 

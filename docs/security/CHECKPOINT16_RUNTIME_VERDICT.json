@@ -1,0 +1,55 @@
+{
+  "checkpoint": 16,
+  "commit": "3c927dd126b3a9d3d5b59c74f25531cd5e5a8c25",
+  "unique_backend_tests": 2810,
+  "passed": 2788,
+  "failed": 22,
+  "ignored_after_explicit_vendor_attempts": 0,
+  "failure_names": [
+    "services::unified_key_service::tests::disconnect_restart_after_atomic_source_claim_recovers_exact_remote_obligation",
+    "services::ownership_transfer_tests::x_channel_onboarding_transfer_moves_one_live_credential_and_rotates_callback_handle",
+    "handlers::assistant_action_effects_endpoints::tests::external_key_delete_with_cascade_grant_confirms",
+    "services::encrypted_record_migration::tests::finding_contract_rejects_a_different_adapter_for_the_same_collection",
+    "services::catalog_credential_record_service::tests::catalog_master_readiness_preserves_staging_and_current_noop",
+    "services::catalog_credential_record_service::tests::legacy_encrypted_empty_is_normalized_without_claiming_usable_material",
+    "services::ssh_ca_record_service::tests::actual_signing_survives_staged_migration_and_strict_cutover_but_rejects_context_swaps",
+    "services::token_copy_admission::tests::activation_serializes_held_absent_marker_writer_and_indexes_below_cursor_insert",
+    "handlers::mcp_transport::resource_tests::resource_explicit_org_card_remains_authority_bound_in_full_access",
+    "handlers::mcp_transport::resource_tests::resource_org_ask_confirmation_preserves_policy_and_resumes_only_its_exact_intent",
+    "handlers::mcp_transport::resource_tests::resource_org_ask_confirmation_rejects_mode_drift_and_recovers_in_full",
+    "handlers::mcp_transport::resource_tests::resource_org_auto_confirmation_preserves_policy_and_resumes_only_its_exact_intent",
+    "handlers::mcp_transport::resource_tests::resource_org_auto_confirmation_rejects_mode_drift_and_recovers_in_full",
+    "handlers::mcp_transport::resource_tests::resource_source_hook_direct_and_wrapped_calls_retain_one_image_and_recheck_source",
+    "handlers::mcp_transport::tests::catalog_backed_proxy_and_mcp_paths_enforce_the_same_approval_policy",
+    "services::oauth_service::tests::create_authorization_code_persists_hashed_code_and_metadata",
+    "services::oauth_service::tests::exchange_authorization_code_accepts_resource_within_consent_only_service_grant",
+    "services::oauth_service::tests::exchange_authorization_code_preserves_empty_service_grant",
+    "services::oauth_service::tests::exchange_authorization_code_rejects_resource_outside_consent_only_service_grant",
+    "handlers::tools_manager_tests::admin_twin_http_reencrypts_sensitive_headers_and_manager_never_inherits",
+    "handlers::tools_manager_tests::tools_manager_first_secret_races_and_freeze_survives_admin_clear",
+    "handlers::tools_manager_tests::catalog_e2e::catalog_manager_local_fake_oauth_e2e"
+  ],
+  "vendor_runs": [
+    {
+      "name": "tools",
+      "counts": [
+        1,
+        0,
+        0
+      ],
+      "log": "/tmp/nyxid-primary-build16-vendor-tools.log"
+    },
+    {
+      "name": "catalog",
+      "counts": [
+        0,
+        1,
+        0
+      ],
+      "log": "/tmp/nyxid-primary-build16-vendor-catalog.log"
+    }
+  ],
+  "source_entries_sha256": "64e7d60e487af8e57c7e34f5ab3fdb4c9adb60646a6c827b31986ad8f92beb73",
+  "binary_sha256": "cea761c8a9b9b5995ecdd2321087d94c5f66f6f661ace23b12510f9ee85b0f74",
+  "subsequent_repairs_are_separate": true
+}

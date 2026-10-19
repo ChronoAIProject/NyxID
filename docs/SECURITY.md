@@ -39,7 +39,7 @@ All sensitive data is encrypted using **AES-256-GCM** (Galois/Counter Mode):
 
 ### Ciphertext Formats
 
-NyxID supports three ciphertext formats. All new encryptions use v2 (envelope encryption). Decryption transparently handles all formats via a fallback chain.
+NyxID retains legacy v0/v1/v2 decoders and adds contextual v3 storage for converted field families. `CONTEXTUAL_RECORD_WRITES=false` preserves compatible legacy writes during reader rollout. After compatible readers and writers are deployed or drained, the explicit writer acknowledgement permits contextual writes. Binary adapters dispatch using stored field-version metadata: a current-format authentication failure is terminal, and a byte prefix alone cannot distinguish historical random nonces. Legacy reads remain gated by `ALLOW_LEGACY_RECORD_READS`. Conversion is still in progress; the registry and [field inventory](security/ENCRYPTED_FIELD_INVENTORY.md) identify unfinished adapters, so strict global cutover and key retirement are not yet approved.
 
 **v0 (legacy):**
 
@@ -60,13 +60,13 @@ nonce(12) || ciphertext || tag(16)
 **v2 (current -- envelope encryption):**
 
 ```
-0x02 || kek_id(1) || wrapped_dek_len(2 BE) || wrapped_dek(60) || data_nonce(12) || data_ciphertext || data_tag(16)
+0x02 || kek_id(1) || wrapped_dek_len(2 BE) || wrapped_dek(N) || data_nonce(12) || data_ciphertext || data_tag(16)
 ```
 
 - `0x02` -- version byte for envelope encryption
 - `kek_id` -- stable 1-byte identifier of the KEK that wrapped the DEK, derived from `SHA-256(kek)[0]`
-- `wrapped_dek_len` -- big-endian u16, length of the wrapped DEK blob (currently always 60)
-- `wrapped_dek` -- `dek_nonce(12) || encrypted_dek(32) || dek_tag(16)` -- the per-record DEK encrypted with the KEK
+- `wrapped_dek_len` -- big-endian u16, length of the provider-defined wrapped DEK blob (60 bytes for the local provider; bounded at 1024 bytes)
+- `wrapped_dek` -- provider-defined wrapped key; the local provider uses `dek_nonce(12) || encrypted_dek(32) || dek_tag(16)`
 - `data_nonce` -- random 12-byte nonce for data encryption (separate from the DEK-wrapping nonce)
 - `data_ciphertext || data_tag` -- the actual credential encrypted with the per-record DEK
 
@@ -76,7 +76,7 @@ Each v2 encryption generates a fresh random 32-byte DEK that is used once and im
 
 When decrypting, the system tries formats and keys in this order:
 
-1. If data looks like v2 (len >= 92 and byte 0 == `0x02`): unwrap DEK with current KEK, decrypt data with DEK
+1. If data looks like v2 (len >= 33 and byte 0 == `0x02`): unwrap DEK with current KEK, decrypt data with DEK
 2. If v2 and `kek_id` matches the previous KEK: unwrap DEK with previous KEK, decrypt data with DEK
 3. If data looks like v1 (len >= 30 and byte 0 == `0x01`) and `key_id` matches current key: try v1 payload with current key
 4. If v1 and `key_id` matches previous key: try v1 payload with previous key
@@ -93,10 +93,12 @@ The `rewrap()` method enables efficient KEK rotation for v2 ciphertexts without 
 
 1. Unwraps the per-record DEK with the previous KEK
 2. Re-wraps the DEK with the current KEK using a fresh random nonce
-3. Replaces only the header and wrapped DEK portion (first 64 bytes)
+3. Replaces the header and provider-defined wrapped DEK portion (64 bytes for the local provider)
 4. The data nonce, ciphertext, and authentication tag are byte-for-byte unchanged
 
 `rewrap()` is idempotent: if the ciphertext is already wrapped with the current KEK, it returns the input unchanged. It only operates on v2 envelopes; v0 and v1 data must be fully re-encrypted via `decrypt()` + `encrypt()`.
+
+The generic v2 parser minimum is 33 bytes; local-provider envelopes have 92 bytes of overhead. Wrapped-DEK sizes vary by provider. The `rewrap` primitive currently has no production migration runner or automatic writeback path.
 
 ### What Is Encrypted
 
@@ -109,7 +111,17 @@ The `rewrap()` method enables efficient KEK rotation for v2 ciphertexts without 
 | User provider OAuth tokens          | `user_provider_tokens`   | `access_token_encrypted`, `refresh_token_encrypted` |
 | User provider API keys              | `user_provider_tokens`   | `api_key_encrypted`                            |
 | User provider OAuth app credentials | `user_provider_credentials` | `client_id_encrypted`, `client_secret_encrypted` |
+| Unified user credentials and OAuth tokens | `user_api_keys` | `credential_encrypted`, `access_token_encrypted`, `refresh_token_encrypted`, `user_oauth_client_id_encrypted`, `user_oauth_client_secret_encrypted` |
+| Node request-signing secret | `nodes` | `signing_secret_encrypted` |
+| Assistant conversation Agent Key | `assistant_agent_credentials` | `key_ciphertext` |
+| Assistant attachments and uploads | `assistant_attachments` (both attachment and upload records) | `data_encrypted`, `text_encrypted` |
+| Saved-login credentials | `saved_logins` | `username_encrypted`, `password_encrypted`, `totp_secret_encrypted` |
+| Oracle login envelopes | `oracle_login_profiles`, `oracle_login_snapshots` | `encrypted_envelope` (existing context-bound format) |
+| Channel bot credentials | `channel_bots` | Bot tokens, webhook secrets, app secrets, registration PIN and Lark verification/encryption material |
+| OAuth broker refresh tokens | `oauth_broker_bindings` | `refresh_token_encrypted` (existing context-bound format) |
 | OAuth state secrets                 | `oauth_states`           | `code_verifier`, `device_code_encrypted`, `user_code_encrypted` |
+
+This table is a subsystem overview, not a complete migration inventory. Additional encrypted platform credentials, delivery payloads, transport credentials, trigger secrets, assistant learning fields, and SSH material must be inventoried before key retirement. Sensitive default request headers are currently plaintext, even when UI-masked.
 
 ### Key Management
 
@@ -132,14 +144,14 @@ NyxID supports zero-downtime key rotation via the `ENCRYPTION_KEY_PREVIOUS` envi
    ```bash
    openssl rand -hex 32
    ```
-2. Set `ENCRYPTION_KEY_PREVIOUS` to the current value of `ENCRYPTION_KEY`
-3. Set `ENCRYPTION_KEY` to the newly generated key
-4. Restart all NyxID instances
+2. Prepare dual-key readers: keep `ENCRYPTION_KEY` on the old key and set `ENCRYPTION_KEY_PREVIOUS` to the new key. Deploy that configuration to every replica, without enabling new-key writes.
+3. Confirm every reader has both keys and that the selected provider supports both IDs. Alternatively drain all writers while deploying the complete reader set. Do not proceed with old-only readers.
+4. Activate new writes: set `ENCRYPTION_KEY` to the new key and `ENCRYPTION_KEY_PREVIOUS` to the old key, then roll that configuration across the prepared replicas. Both configurations can read both keys. A one-by-one new-active rollout against old-only readers is unsafe.
 5. Verify the service is healthy: `curl /health`
-6. All new encryptions now use the new key (v2 envelope format). Existing data decrypts via the fallback chain.
-7. For v2 ciphertexts: run a background job calling `rewrap()` on each record (re-wraps only the 60-byte DEK blob, data untouched). For v0/v1 ciphertexts: re-encrypt via `decrypt()` + `encrypt()`.
-8. Watch `/health` and wait until `decrypt_stats.v2_previous`, `decrypt_stats.v1_current`, `decrypt_stats.v1_previous`, `decrypt_stats.v0_current`, and `decrypt_stats.v0_previous` remain at zero for your normal workload window.
-9. Remove `ENCRYPTION_KEY_PREVIOUS` and restart once you have confirmed the old key is no longer needed.
+6. New writes use the new key and the configured compatible/contextual format. Existing data requires its explicit legacy or current-field decoder and retained provider/key. A failed contextual authentication never retries an unbound legacy decoder.
+7. Retain the previous key. No production rewrap/migration runner currently ships; the `rewrap()` primitive alone does not migrate stored records.
+8. A reviewed migration must enumerate every encrypted field, use compare-and-swap updates against concurrent replacements, persist progress, and verify the complete inventory. Zero old-key traffic counters do not prove dormant records migrated.
+9. Remove the previous key only after inventory verification and a decision about retained backups and other old ciphertext. Until then, do not start a second rotation.
 
 **Important:** Only one previous key is supported, so you must finish re-wrapping/re-encrypting old-key data before rotating again.
 
@@ -148,15 +160,15 @@ NyxID supports zero-downtime key rotation via the `ENCRYPTION_KEY_PREVIOUS` envi
 If a key rotation causes issues, you can roll back:
 
 1. Set `ENCRYPTION_KEY` back to the old key value
-2. Set `ENCRYPTION_KEY_PREVIOUS` to the new key (so any v1 data encrypted with the new key during the rotation window still decrypts)
+2. Set `ENCRYPTION_KEY_PREVIOUS` to the new key (so v2 writes made during the rotation window still decrypt)
 3. Restart all NyxID instances
 4. Verify the service is healthy: `curl /health`
 
-Both old (v0 and v1) ciphertexts encrypted with the original key and new v1 ciphertexts encrypted during the rotation window will decrypt correctly, as long as the old key remains configured as `ENCRYPTION_KEY_PREVIOUS`.
+After rollback, the old key is active and the new key remains previous: both supported legacy records under the old key and v2 records written under the new key remain readable. Keep both across every replica and retained-backup dependency; rollback does not migrate either set.
 
 ### Memory Protection
 
-Decrypted secrets use the `zeroize` crate's `Zeroizing<Vec<u8>>` wrapper, which overwrites memory on drop. This prevents sensitive data from lingering in process memory after use.
+Key-provider DEKs and several caller buffers use `Zeroizing`, which overwrites their owned memory on drop. `EncryptionKeys::decrypt` currently returns an ordinary `Vec<u8>`; some callers copy plaintext into ordinary strings, including proxy credentials. End-to-end plaintext lifetime hardening is tracked under W4. Zeroizing an owned buffer does not erase copies made by transport libraries or protect a live process from memory access.
 
 ---
 
@@ -187,7 +199,7 @@ NyxID enforces PKCE on two distinct OAuth flows:
 ### Token Exchange Security
 
 - **No-redirect HTTP client (SEC-H2):** Token exchange requests use a dedicated `reqwest::Client` configured with `redirect::Policy::none()`. This prevents SSRF attacks where a malicious provider could redirect the token exchange request to an internal service.
-- **Error body truncation (SEC-M5):** Error responses from providers are truncated to 200 characters before storing in the database, preventing log injection or storage exhaustion.
+- **Provider error handling:** Provider paths apply their own bounded/sanitized error handling. Proxy diagnostics exclude upstream body content. A historical 200-character truncation claim is not a general guarantee that provider text is safe to store or log.
 
 ---
 
@@ -198,10 +210,10 @@ NyxID enforces PKCE on two distinct OAuth flows:
 | Property         | Value                          |
 |------------------|--------------------------------|
 | Algorithm        | RS256 (RSA SHA-256)            |
-| Key size         | 4096-bit RSA                   |
+| Key size         | Generated RSA: 4096 bits; imported signing pairs and retained verifiers: at least 3072 bits, with matching signing pair enforced |
 | Default TTL      | 15 minutes                     |
 | Storage          | Client-side only (not in DB)   |
-| Revocation       | Short TTL; no explicit revoke  |
+| Revocation       | Live user/session and token-class checks; ordinary OAuth client access tokens currently survive consent revocation until expiry |
 
 ### Refresh Tokens (NyxID-issued JWTs)
 
@@ -236,7 +248,7 @@ NyxID enforces PKCE on two distinct OAuth flows:
 
 | Property         | Value                          |
 |------------------|--------------------------------|
-| Generation       | Random with `nyx_k_` prefix    |
+| Generation       | Random with `nyx_` (general) or `nyxid_ag_` (agent) prefix    |
 | Storage          | SHA-256 hash in DB             |
 | Full key         | Shown only at creation         |
 | Revocation       | Soft deactivation              |
@@ -296,16 +308,17 @@ Proxy paths containing `..` or `//` are rejected to prevent path traversal attac
 ### Header Allowlists
 
 **Request headers forwarded to downstream:**
-`content-type`, `accept`, `accept-language`, `accept-encoding`, `content-length`, `user-agent`, `x-request-id`, `x-correlation-id`
+`git-protocol`, `content-type`, `accept`, `accept-language`, `accept-encoding`, `user-agent`, `x-request-id`, `x-correlation-id`, `idempotency-key`, `traceparent`, `tracestate`, `last-event-id`, `prefer`, `x-trace-id`, `range`, `accept-profile`, `content-profile`, `range-unit`, `if-range`, `if-none-match`, `if-modified-since`, `http-referer`, `x-title`, `linkedin-version`, `x-restli-protocol-version`; plus `x-openclaw-*`, `x-amz-*`, `x-goog-*`, `x-openrouter-*`. Trace headers are validated. Caller `content-length` is dropped so transport can recalculate it after transforms.
 
-All other headers (including `Authorization`, `Cookie`) are stripped.
+Caller `Authorization` and `Cookie` are stripped; credential injection builds downstream authentication separately. See `ALLOWED_FORWARD_HEADERS` and `ALLOWED_FORWARD_HEADER_PREFIXES` in `proxy_service.rs` for the authoritative request list and signer-managed exclusions.
 
 **Response headers returned to client:**
-`content-type`, `content-length`, `content-encoding`, `content-language`, `content-disposition`, `cache-control`, `etag`, `last-modified`, `x-request-id`, `x-correlation-id`, `vary`, `access-control-*`
+`ALLOWED_RESPONSE_HEADERS` and `forwardable_response_header` in `backend/src/services/proxy_http_response.rs` define response filtering. The list includes `content-type`, `content-length`, `content-encoding`, `content-language`, `content-disposition`, `cache-control`, `etag`, `last-modified`, `x-request-id`, `x-correlation-id`, `accept-ranges`, `content-range`, `content-profile`, `range-unit`, `retry-after`, `preference-applied`, `location`, `operation-location`, and `content-location`. Location values have additional async/URL handling. Downstream CORS headers are not forwarded; NyxID owns CORS. See the implementation for transport-specific filtering.
+
 
 ### Body Size Limit
 
-Proxy requests are limited to 10 MB request body. The global body size limit for other endpoints is 1 MB.
+Authenticated proxy and MCP raw bodies default to 100 MiB (`PROXY_MAX_BODY_SIZE=104857600`), LLM routes to 10 MiB, and public proxy/public MCP to 1 MiB. Other routes have their own bounded limits; these are not one global proxy limit.
 
 ### Slug-Based Proxy
 
@@ -371,14 +384,14 @@ Additionally, the `AuthUser` middleware extractor checks `is_active` on every re
 
 ### Known Limitation: JWT Access Token Survival
 
-JWT access tokens are stateless and not checked against the database. A disabled user's existing JWT access token remains valid until it expires (default: 15 minutes). This is a deliberate trade-off between performance (no DB lookup per request for JWT auth) and immediate revocation. For time-sensitive lockouts, admins should also revoke all sessions via the session revocation endpoint.
+Access JWT authentication checks the live active user. First-party access tokens also require a live session; Machine, relay, delegated and service-account tokens have additional class-specific checks. Ordinary OAuth client access tokens currently lack a live consent-generation check, so consent revocation leaves an access-token window until expiry (default access TTL: 15 minutes, subject to configured verification leeway). Disabling the user is checked live; it does not have the previously documented stateless survival behavior.
 
 ### Cascade User Deletion
 
 When deleting a user, a two-phase approach ensures consistency:
 
 1. **Phase 1:** Mark user as `is_active = false` (prevents authentication during cleanup)
-2. **Phase 2:** Delete related documents from 8 collections: `sessions`, `refresh_tokens`, `api_keys`, `user_service_connections`, `user_provider_tokens`, `mfa_factors`, `authorization_codes`, `oauth_states`
+2. **Phase 2:** Fence/reconcile Machine and channel/assistant lifecycles and remove the implemented dependent records. The current cascade is incomplete for unified credentials, endpoints and nodes; it must not be described as complete erasure.
 3. **Phase 3:** Delete the user document itself
 
 Audit log entries referencing the deleted user are preserved with an orphaned `user_id` reference for traceability.
@@ -451,7 +464,7 @@ Both the introspection (`POST /oauth/introspect`) and revocation (`POST /oauth/r
 ### Revocation Limitations
 
 - **Refresh tokens:** Revoked immediately in the database (`revoked = true`)
-- **Access tokens:** Cannot be explicitly revoked (stateless JWTs). They expire naturally within the configured TTL (default: 15 minutes). This is a deliberate trade-off consistent with the existing session revocation model.
+- **Access tokens:** First-party session revocation is checked live. Ordinary OAuth client access tokens currently remain usable after consent revocation until their expiry; stronger Machine/relay-specific fences remain applicable. External relying parties validating JWTs offline cannot observe immediate database revocation.
 
 ---
 
@@ -660,13 +673,13 @@ Unsafe private API requests that look browser-originated, or that carry browser 
 
 ### API Key Scope Population
 
-When authenticating via API key, the key's configured scopes are populated into the `AuthUser.scope` field. This makes scopes available for downstream enforcement (e.g., future per-service scope requirements). Currently, no handler enforces API key scopes -- any valid API key can access all API-key-permitted endpoints. Scope enforcement is planned as a future enhancement.
+When authenticating via API key, configured scopes populate `AuthUser.scope` and are enforced by middleware and management helpers such as `ensure_management_write_scope`, together with service/node restrictions. Scope presence alone does not grant every endpoint: actor class, delegated-read restrictions, ownership and live execution authority remain applicable.
 
 ---
 
 ## HTTP Security Headers
 
-Every response includes:
+Backend security-header middleware sets the following headers on its responses. The separately served SPA and deployment edge need their own configuration; this table does not establish their headers:
 
 | Header                       | Value                                              | Purpose                    |
 |------------------------------|----------------------------------------------------|----------------------------|
@@ -693,7 +706,7 @@ Dual-layer rate limiting protects against abuse:
 | Global sustained rate    | 10/sec  | `RATE_LIMIT_PER_SECOND`      |
 | Global burst capacity    | 30      | `RATE_LIMIT_BURST`           |
 
-Rate limit state is per-instance (in-memory). For distributed deployments, consider rate limiting at the reverse proxy level.
+Production global, per-IP and per-agent enforcement includes MongoDB-backed shared state. Some local guards and in-memory mechanisms remain; inspect each limiter rather than assuming all state is per-instance. Reverse-proxy limits can add another layer.
 
 ---
 
@@ -705,7 +718,7 @@ Rate limit state is per-instance (in-memory). For distributed deployments, consi
 |--------------------------------|-------------|--------------------------------------|
 | User passwords                 | Critical    | Argon2id hashing (never stored plain)|
 | Provider OAuth client secrets  | Critical    | AES-256-GCM encryption              |
-| User provider tokens           | Critical    | AES-256-GCM encryption + zeroize    |
+| User provider tokens           | Critical    | AES-256-GCM encryption; partial plaintext zeroization    |
 | Service master credentials     | Critical    | AES-256-GCM encryption              |
 | Per-user service credentials   | Critical    | AES-256-GCM encryption              |
 | MFA secrets                    | Critical    | AES-256-GCM encryption              |
@@ -733,15 +746,15 @@ Rate limit state is per-instance (in-memory). For distributed deployments, consi
 | Injection key manipulation      | Blocked injection keys list for sensitive headers    |
 | Token replay (identity JWT)     | 60-second TTL, per-service audience, unique JTI      |
 | Token replay (refresh token)    | Single-use rotation with `replaced_by` chain         |
-| Credential leakage in memory    | `zeroize` crate for secure memory cleanup            |
-| Credential leakage in logs      | Custom `Debug` impls redact secrets                  |
+| Credential leakage in memory | Owned key buffers use zeroization; ordinary plaintext copies remain (see Memory Protection) |
+| Credential leakage in logs | Identified secret-bearing types have redacted Debug; this is not a repository-wide logging guarantee |
 | Error message info leakage      | Internal errors never expose details in responses    |
-| Provider error leakage          | OAuth error bodies truncated to 200 chars            |
+| Provider error leakage | Provider paths use sanitization/metadata rules; proxy diagnostics exclude upstream bodies. Inspect each path; there is no universal 200-character guarantee |
 | Timing attacks on auth          | Constant-time comparison for token verification      |
 | Admin privilege escalation      | Self-protection checks on role/status/delete         |
 | Admin lockout                   | Cannot disable/delete own account                    |
-| Orphaned data after user delete | Cascade delete across 8 collections; audit preserved |
-| Disabled user continued access  | Session + refresh token + API key revocation on disable; JWT expires within 15 min |
+| Orphaned data after user delete | Existing cascade fences activity and removes many records; unified credentials/endpoints/nodes remain gaps. Audit/billing and required Machine evidence retained |
+| Disabled user continued access | Live active-user checks and revocation of sessions/refresh tokens/API keys; ordinary client consent revocation is a distinct access-token gap |
 | RBAC system role tampering      | System roles protected from deletion/rename; `is_system` not modifiable via API |
 | Unauthorized RBAC modification  | All RBAC endpoints require `is_admin = true` (database check, not JWT claim) |
 | Token introspection info leak   | Returns `{"active": false}` for unauthenticated callers |
@@ -759,13 +772,11 @@ Rate limit state is per-instance (in-memory). For distributed deployments, consi
 
 ### If ENCRYPTION_KEY Is Compromised
 
-1. Generate a new key: `openssl rand -hex 32`
-2. Set `ENCRYPTION_KEY_PREVIOUS` to the compromised key value
-3. Set `ENCRYPTION_KEY` to the new key
-4. Restart all NyxID instances (zero-downtime rotation -- existing data decrypts via the fallback chain)
-5. Run a re-encryption job to migrate all data to the new key (removes dependency on the compromised key)
-6. Once all data is re-encrypted, remove `ENCRYPTION_KEY_PREVIOUS` and restart
-7. Audit all access logs for the compromise window
+1. Contain the compromise and revoke/replace exposed upstream credentials. Rewrapping cannot protect a database copy already held by an attacker.
+2. Follow the ordered [key rotation procedure](#key-rotation), staging dual-key readers on every replica before activating new-key writes, or draining writers during reader preparation.
+3. Retain required old-key access while preparing a complete, reviewed migration. No production migration runner currently ships; `rewrap()` alone does not provide inventory, durable progress or concurrent-update protection.
+4. Retire old keys only after every required encrypted field and retained backup has an explicit disposition. Decrypt traffic counters alone are insufficient.
+5. Audit access during the compromise window and verify the recovery on the actual deployment.
 
 ### If RSA Private Key Is Compromised
 
@@ -802,8 +813,8 @@ Summary of security controls by identifier (from the architecture plan):
 |--------|--------------------------------------------|---------------------------------------------|
 | SEC-H2 | No-redirect HTTP client for token exchange | `reqwest::Client` with `redirect::Policy::none()` |
 | SEC-M1 | CRLF injection prevention                 | `sanitize_header_value()` in identity_service |
-| SEC-M3 | Zeroize decrypted credentials              | `Zeroizing<Vec<u8>>` wrapper in proxy_service |
-| SEC-M5 | Error body truncation                      | 200-char limit on provider error messages   |
+| SEC-M3 | Partial plaintext zeroization | Some proxy buffers use Zeroizing; later ordinary copies remain and are tracked in W4 |
+| SEC-M5 | Provider error containment | Path-specific sanitization; proxy diagnostics use metadata only |
 | CR-4/5/6 | N+1 query prevention                    | Batch `$in` queries for provider lookups    |
 | CR-15  | Required provider enforcement              | 400 error for missing required provider tokens |
 | DA-1   | Delegated token endpoint restriction       | Verified `AuthUser` policy plus fail-fast `reject_delegated_tokens` middleware |

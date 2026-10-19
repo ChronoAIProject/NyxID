@@ -1112,253 +1112,253 @@ async fn deliver_initiated_inner(
     adapter: &dyn crate::services::channel_platform::PlatformAdapter,
     prepared: Option<OutboundReply>,
 ) -> AppResult<AsyncReplyResponse> {
-    if !adapter.outbound_capabilities().initiated_send
-        || (bot.platform == "x"
-            && crate::services::channel_adapters::x::is_public_conversation(
-                &conversation.platform_conversation_id,
-            ))
-    {
-        return Err(AppError::ChannelPlatformSendUnsupported);
-    }
-    if let Some(outbound) = &prepared {
-        validate_prepared_reply(outbound, adapter)?;
-        if outbound
-            .attachments
-            .iter()
-            .any(|attachment| attachment.bytes.len() as u64 > state.config.channel_media_max_bytes)
+    // Keep this multi-stage delivery future on the heap. Its callers include
+    // Tokio workers and nested image/automation delivery on normal stacks.
+    Box::pin(async move {
+        if !adapter.outbound_capabilities().initiated_send
+            || (bot.platform == "x"
+                && crate::services::channel_adapters::x::is_public_conversation(
+                    &conversation.platform_conversation_id,
+                ))
         {
-            return Err(AppError::ChannelMediaTooLarge);
+            return Err(AppError::ChannelPlatformSendUnsupported);
         }
-    } else {
-        validate_reply_for_adapter(&body.message, adapter)?;
-    }
-    // These are relay-internal interaction credentials, not durable target/thread IDs.
-    if body
-        .message
-        .metadata
-        .as_ref()
-        .and_then(|m| m.get("interaction_thread_id"))
-        .is_some()
-    {
-        return Err(AppError::ValidationError(
-            "Initiated sends cannot use interaction follow-up tokens".to_string(),
-        ));
-    }
-    if body
-        .message
-        .metadata
-        .as_ref()
-        .is_some_and(|m| m.get("card").is_some() && !adapter.supports_reply_metadata(m))
-    {
-        return Err(AppError::ValidationError(
-            "This platform does not support metadata.card".to_string(),
-        ));
-    }
-    if body
-        .idempotency_key
-        .as_ref()
-        .is_some_and(|key| key.is_empty() || key.chars().count() > 128)
-    {
-        return Err(AppError::ValidationError(
-            "idempotency_key must contain 1 to 128 characters".to_string(),
-        ));
-    }
-    let attachment_kinds: Vec<_> = prepared.as_ref().map_or_else(
-        || body.message.attachments.iter().map(|a| a.kind).collect(),
-        |outbound| outbound.attachments.iter().map(|a| a.kind).collect(),
-    );
-    let claim = if let Some(key) = &body.idempotency_key {
-        let fingerprint = channel_send_service::delivery_fingerprint(
-            body.message.text.as_deref(),
-            body.message.metadata.as_ref(),
-            &body.message.attachments,
-            state.config.channel_media_max_bytes,
-        )?;
-        match channel_send_service::claim_send(&state.db, &conversation.id, key, &fingerprint)
-            .await?
+        if let Some(outbound) = &prepared {
+            validate_prepared_reply(outbound, adapter)?;
+            if outbound.attachments.iter().any(|attachment| {
+                attachment.bytes.len() as u64 > state.config.channel_media_max_bytes
+            }) {
+                return Err(AppError::ChannelMediaTooLarge);
+            }
+        } else {
+            validate_reply_for_adapter(&body.message, adapter)?;
+        }
+        // These are relay-internal interaction credentials, not durable target/thread IDs.
+        if body
+            .message
+            .metadata
+            .as_ref()
+            .and_then(|m| m.get("interaction_thread_id"))
+            .is_some()
         {
-            channel_send_service::ClaimResult::Claimed(claim) => Some(claim),
-            channel_send_service::ClaimResult::Sent {
-                message_id,
-                platform_message_id,
-            } => {
-                return Ok(AsyncReplyResponse {
+            return Err(AppError::ValidationError(
+                "Initiated sends cannot use interaction follow-up tokens".to_string(),
+            ));
+        }
+        if body
+            .message
+            .metadata
+            .as_ref()
+            .is_some_and(|m| m.get("card").is_some() && !adapter.supports_reply_metadata(m))
+        {
+            return Err(AppError::ValidationError(
+                "This platform does not support metadata.card".to_string(),
+            ));
+        }
+        if body
+            .idempotency_key
+            .as_ref()
+            .is_some_and(|key| key.is_empty() || key.chars().count() > 128)
+        {
+            return Err(AppError::ValidationError(
+                "idempotency_key must contain 1 to 128 characters".to_string(),
+            ));
+        }
+        let attachment_kinds: Vec<_> = prepared.as_ref().map_or_else(
+            || body.message.attachments.iter().map(|a| a.kind).collect(),
+            |outbound| outbound.attachments.iter().map(|a| a.kind).collect(),
+        );
+        let claim = if let Some(key) = &body.idempotency_key {
+            let fingerprint = channel_send_service::delivery_fingerprint(
+                body.message.text.as_deref(),
+                body.message.metadata.as_ref(),
+                &body.message.attachments,
+                state.config.channel_media_max_bytes,
+            )?;
+            match channel_send_service::claim_send(&state.db, &conversation.id, key, &fingerprint)
+                .await?
+            {
+                channel_send_service::ClaimResult::Claimed(claim) => Some(claim),
+                channel_send_service::ClaimResult::Sent {
                     message_id,
                     platform_message_id,
-                    delivered_as: None,
-                });
+                } => {
+                    return Ok(AsyncReplyResponse {
+                        message_id,
+                        platform_message_id,
+                        delivered_as: None,
+                    });
+                }
             }
-        }
-    } else {
-        None
-    };
-
-    let billing = crate::services::channel_billing_service::ChannelBilling::for_bot(
-        &state.db,
-        &state.billing,
-        bot,
-        auth_user.api_key_id.as_deref(),
-    );
-    let send_result = async {
-        crate::services::ownership_transfer_service::require_current_bot(&state.db, bot).await?;
-        let mut outbound = match prepared {
-            Some(outbound) => outbound,
-            None => OutboundReply {
-                attachments: channel_media_service::materialize(
-                    &body.message.attachments,
-                    state.config.channel_media_max_bytes,
-                )
-                .await?,
-                text: body.message.text,
-                metadata: body.message.metadata,
-                reply_to_platform_message_id: None,
-            },
-        };
-        outbound.reply_to_platform_message_id = None;
-        let token = crate::services::channel_credentials::resolve_bot_token(
-            &state.db,
-            &state.encryption_keys,
-            adapter,
-            bot,
-        )
-        .await?;
-        let platform_secrets = if bot.credential_source == "platform" {
-            Some(
-                crate::services::channel_managed::build_verify_secrets(
-                    &state.db,
-                    &state.encryption_keys,
-                    adapter,
-                    bot,
-                )
-                .await?,
-            )
         } else {
             None
         };
-        adapter
-            .send_reply_outcome(
-                &state.http_client,
-                &crate::services::channel_platform::BotCredentials {
-                    billing: billing.as_ref(),
-                    token: &token,
-                    platform_bot_id: Some(&bot.platform_bot_id),
-                    platform_secrets: platform_secrets.as_ref(),
+
+        let billing = crate::services::channel_billing_service::ChannelBilling::for_bot(
+            &state.db,
+            &state.billing,
+            bot,
+            auth_user.api_key_id.as_deref(),
+        );
+        let send_result = async {
+            crate::services::ownership_transfer_service::require_current_bot(&state.db, bot)
+                .await?;
+            let mut outbound = match prepared {
+                Some(outbound) => outbound,
+                None => OutboundReply {
+                    attachments: channel_media_service::materialize(
+                        &body.message.attachments,
+                        state.config.channel_media_max_bytes,
+                    )
+                    .await?,
+                    text: body.message.text,
+                    metadata: body.message.metadata,
+                    reply_to_platform_message_id: None,
                 },
-                &conversation.platform_conversation_id,
-                &outbound,
+            };
+            outbound.reply_to_platform_message_id = None;
+            let token = crate::services::channel_credentials::resolve_bot_token(
+                &state.db,
+                &state.encryption_keys,
+                adapter,
+                bot,
             )
-            .await
-    }
-    .await;
-    let mut outcome = match send_result {
-        Ok(outcome) => outcome,
-        Err(error) => {
-            if crate::services::channel_billing_service::blocks_channel(&error)
-                && crate::services::channel_billing_service::suspend(
-                    &crate::services::channel_inbound_service::InboundDeps::from(state),
-                    bot,
-                    adapter,
+            .await?;
+            let platform_secrets = if bot.credential_source == "platform" {
+                Some(
+                    crate::services::channel_managed::build_verify_secrets(
+                        &state.db,
+                        &state.encryption_keys,
+                        adapter,
+                        bot,
+                    )
+                    .await?,
+                )
+            } else {
+                None
+            };
+            adapter
+                .send_reply_outcome(
+                    &state.http_client,
+                    &crate::services::channel_platform::BotCredentials {
+                        billing: billing.as_ref(),
+                        token: &token,
+                        platform_bot_id: Some(&bot.platform_bot_id),
+                        platform_secrets: platform_secrets.as_ref(),
+                    },
+                    &conversation.platform_conversation_id,
+                    &outbound,
                 )
                 .await
-                .is_err()
-            {
-                tracing::warn!(bot_id = %bot.id, "X billing suspension cleanup will retry");
-            }
-            if let Some(claim) = &claim
-                && !billing
-                    .as_ref()
-                    .is_some_and(|context| context.has_forwarded())
-            {
-                channel_send_service::release_send(&state.db, claim).await?;
-            }
-            return Err(error);
         }
-    };
-    if let Some(observation) = &mut outcome.observation {
-        observation.waba_id = bot.app_id.clone();
-    }
-    let platform_message_id = outcome.final_id;
-    let delivered_as = outcome
-        .delivered_kinds
-        .as_ref()
-        .map(|kinds| kinds.iter().map(|kind| kind.as_str().to_owned()).collect());
-    let attachment_kinds = outcome.delivered_kinds.unwrap_or(attachment_kinds);
-    let content_type = attachment_kinds
-        .first()
-        .map_or("text", |kind| kind.as_str());
-    crate::services::channel_bot_service::record_outbound_outcome(
-        &state.db,
-        &bot.id,
-        outcome.error.as_ref(),
-    )
-    .await;
-    // After upstream acceptance, retain pending claims on persistence failure.
-    // An uncertain outcome must never automatically dispatch a second copy.
-    let stored = channel_relay_service::store_outbound_message(
-        &state.db,
-        &bot.id,
-        &conversation.id,
-        &bot.user_id,
-        &bot.platform,
-        &conversation.agent_api_key_id,
-        None,
-        platform_message_id.as_deref(),
-        Some(&conversation.platform_conversation_id),
-        content_type,
-        outcome.observation,
-    )
-    .await?;
-    if let Some(error) = outcome.error {
-        return Err(error);
-    }
-    if let Some(claim) = &claim {
-        channel_send_service::complete_send(
+        .await;
+        let mut outcome = match send_result {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                if crate::services::channel_billing_service::blocks_channel(&error)
+                    && crate::services::channel_billing_service::suspend(
+                        &crate::services::channel_inbound_service::InboundDeps::from(state),
+                        bot,
+                        adapter,
+                    )
+                    .await
+                    .is_err()
+                {
+                    tracing::warn!(bot_id = %bot.id, "X billing suspension cleanup will retry");
+                }
+                if let Some(claim) = &claim
+                    && !billing
+                        .as_ref()
+                        .is_some_and(|context| context.has_forwarded())
+                {
+                    channel_send_service::release_send(&state.db, claim).await?;
+                }
+                return Err(error);
+            }
+        };
+        if let Some(observation) = &mut outcome.observation {
+            observation.waba_id = bot.app_id.clone();
+        }
+        let platform_message_id = outcome.final_id;
+        let delivered_as = outcome
+            .delivered_kinds
+            .as_ref()
+            .map(|kinds| kinds.iter().map(|kind| kind.as_str().to_owned()).collect());
+        let attachment_kinds = outcome.delivered_kinds.unwrap_or(attachment_kinds);
+        let content_type = attachment_kinds
+            .first()
+            .map_or("text", |kind| kind.as_str());
+        crate::services::channel_bot_service::record_outbound_outcome(
             &state.db,
-            claim,
-            &stored.id,
+            &bot.id,
+            outcome.error.as_ref(),
+        )
+        .await;
+        // After upstream acceptance, retain pending claims on persistence failure.
+        // An uncertain outcome must never automatically dispatch a second copy.
+        let stored = channel_relay_service::store_outbound_message(
+            &state.db,
+            &bot.id,
+            &conversation.id,
+            &bot.user_id,
+            &bot.platform,
+            &conversation.agent_api_key_id,
+            None,
             platform_message_id.as_deref(),
+            Some(&conversation.platform_conversation_id),
+            content_type,
+            outcome.observation,
         )
         .await?;
-    }
-    audit_service::log_async(
-        state.db.clone(),
-        Some(auth_user.user_id.to_string()),
-        "channel_message_initiated".to_string(),
-        Some(serde_json::json!({
-            "conversation_id": conversation.id, "platform": bot.platform,
-            "channel_bot_id": bot.id, "agent_api_key_id": conversation.agent_api_key_id,
-            "attachment_kinds": attachment_kinds, "attachment_count": attachment_kinds.len(),
-        })),
-        None,
-        header_value(headers, "user-agent"),
-        auth_user.api_key_id.clone(),
-        auth_user.api_key_name.clone(),
-    );
-    let conversation_hash = hash_conversation_id(&conversation.platform_conversation_id);
-    if should_sample_event("channel.reply_sent", &conversation_hash, 10) {
-        let tele = TelemetryContext::from_headers(
-            headers.get("x-nyxid-client").and_then(|v| v.to_str().ok()),
-            headers
-                .get("x-nyxid-client-version")
-                .and_then(|v| v.to_str().ok()),
+        if let Some(error) = outcome.error {
+            return Err(error);
+        }
+        if let Some(claim) = &claim {
+            channel_send_service::complete_send(
+                &state.db,
+                claim,
+                &stored.id,
+                platform_message_id.as_deref(),
+            )
+            .await?;
+        }
+        audit_service::log_async(
+            state.db.clone(),
+            Some(auth_user.user_id.to_string()),
+            "channel_message_initiated".to_string(),
+            Some(serde_json::json!({
+                "conversation_id": conversation.id, "platform": bot.platform,
+                "channel_bot_id": bot.id, "agent_api_key_id": conversation.agent_api_key_id,
+                "attachment_kinds": attachment_kinds, "attachment_count": attachment_kinds.len(),
+            })),
+            None,
+            header_value(headers, "user-agent"),
+            auth_user.api_key_id.clone(),
+            auth_user.api_key_name.clone(),
         );
-        emit_event(
-            state.telemetry.as_deref(),
-            &bot.user_id,
-            auth_user.api_key_id.as_deref(),
-            &tele,
-            TelemetryEvent::ChannelReplySent {
-                platform: bot.platform.clone(),
-                reply_mode: "initiated".to_string(),
-                agent_api_key_id: Some(hash_short_id(&conversation.agent_api_key_id)),
-            },
-        );
-    }
-    Ok(AsyncReplyResponse {
-        message_id: stored.id,
-        platform_message_id,
-        delivered_as,
+        let conversation_hash = hash_conversation_id(&conversation.platform_conversation_id);
+        if should_sample_event("channel.reply_sent", &conversation_hash, 10) {
+            let tele = TelemetryContext::from_request_headers(headers);
+            emit_event(
+                state.telemetry.as_deref(),
+                &bot.user_id,
+                auth_user.api_key_id.as_deref(),
+                &tele,
+                TelemetryEvent::ChannelReplySent {
+                    platform: bot.platform.clone(),
+                    reply_mode: "initiated".to_string(),
+                    agent_api_key_id: Some(hash_short_id(&conversation.agent_api_key_id)),
+                },
+            )
+            .await;
+        }
+        Ok(AsyncReplyResponse {
+            message_id: stored.id,
+            platform_message_id,
+            delivered_as,
+        })
     })
+    .await
 }
 
 /// GET /api/v1/channel-relay/conversations: active assignments for this agent only.
@@ -1505,6 +1505,9 @@ async fn deliver_reply(
     adapter: &dyn crate::services::channel_platform::PlatformAdapter,
     prepared: Option<OutboundReply>,
 ) -> AppResult<Json<AsyncReplyResponse>> {
+    // Keep this multi-stage delivery future on the heap. Its callers include
+    // Tokio workers and nested image/automation delivery on normal stacks.
+    Box::pin(async move {
     let ReplyRequestContext {
         original,
         conversation,
@@ -1802,12 +1805,7 @@ async fn deliver_reply(
     let distinct_id = bot.user_id.clone();
     let conversation_hash = hash_conversation_id(&conversation.platform_conversation_id);
     if should_sample_event("channel.reply_sent", &conversation_hash, 10) {
-        let tele = TelemetryContext::from_headers(
-            headers.get("x-nyxid-client").and_then(|v| v.to_str().ok()),
-            headers
-                .get("x-nyxid-client-version")
-                .and_then(|v| v.to_str().ok()),
-        );
+        let tele = TelemetryContext::from_request_headers(headers);
         emit_event(
             state.telemetry.as_deref(),
             &distinct_id,
@@ -1822,7 +1820,8 @@ async fn deliver_reply(
                 // analytics possible without leaking the id.
                 agent_api_key_id: Some(hash_short_id(&attributed_api_key_id)),
             },
-        );
+        )
+        .await;
     }
 
     Ok(Json(AsyncReplyResponse {
@@ -1830,6 +1829,8 @@ async fn deliver_reply(
         platform_message_id: platform_msg_id,
         delivered_as,
     }))
+
+    }).await
 }
 
 #[cfg(test)]
@@ -3731,6 +3732,7 @@ mod tests {
         let now = Utc::now();
         db.collection::<Session>(crate::models::session::COLLECTION_NAME)
             .insert_one(Session {
+                purpose: Some(crate::models::session::SessionPurpose::Authenticated),
                 id: Uuid::new_v4().to_string(),
                 user_id: fixture.conversation.user_id.clone(),
                 token_hash: crate::crypto::token::hash_token("channel-test-session"),
@@ -3866,6 +3868,7 @@ mod tests {
             acting_client_id: None,
             oauth_client_id: None,
             token_jti: None,
+            oauth_lineage: None,
             approval_owner_user_id: None,
             auth_method: crate::mw::auth::AuthMethod::ApiKey,
             allow_all_services: api_key.allow_all_services,
@@ -3898,6 +3901,7 @@ mod tests {
             acting_client_id: None,
             oauth_client_id: None,
             token_jti: None,
+            oauth_lineage: None,
             approval_owner_user_id: None,
             auth_method: method,
             allow_all_services: true,

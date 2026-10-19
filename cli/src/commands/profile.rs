@@ -70,19 +70,44 @@ pub async fn run(command: ProfileCommands) -> Result<()> {
                 return Ok(());
             }
 
+            let deletion_generation = crate::auth::login_generation(auth.profile.as_deref());
             let mut api = ApiClient::from_auth_checked(&auth).await?;
             let mut headers = reqwest::header::HeaderMap::new();
             headers.insert(
                 "x-nyxid-account-deletion-policy",
                 reqwest::header::HeaderValue::from_static(ACCOUNT_DELETION_POLICY_VERSION),
             );
-            api.delete_empty_with_headers("/users/me", headers).await?;
+            let result: Value = api.delete_with_headers("/users/me", headers).await?;
+            let status = result["status"]
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("Account deletion returned no durable status"))?;
+            if !matches!(
+                status,
+                "accepted" | "pending" | "operator_action" | "complete"
+            ) {
+                anyhow::bail!("Account deletion returned an unsupported status");
+            }
+            if api
+                .clear_deleted_account_credentials(deletion_generation.as_deref())
+                .is_err()
+            {
+                // Remote acceptance is already durable. A local I/O failure
+                // cannot turn it into a failed DELETE or justify clearing a
+                // successor login. Keep the server result authoritative.
+                eprintln!(
+                    "Account deletion accepted; local credential cleanup could not be confirmed. Review this profile's saved login."
+                );
+            }
             match auth.output {
-                OutputFormat::Json => println!(
+                OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&result)?),
+                OutputFormat::Table => eprintln!(
                     "{}",
-                    serde_json::to_string_pretty(&serde_json::json!({ "ok": true }))?
+                    if status == "complete" {
+                        "Account erasure complete."
+                    } else {
+                        "Account deletion accepted. Cleanup continues until verified."
+                    }
                 ),
-                OutputFormat::Table => eprintln!("Account deleted."),
             }
             Ok(())
         }
@@ -153,7 +178,7 @@ pub async fn run(command: ProfileCommands) -> Result<()> {
             match auth.output {
                 OutputFormat::Json => println!(
                     "{}",
-                    serde_json::to_string_pretty(&serde_json::json!({ "ok": true }))?
+                    serde_json::to_string_pretty(&serde_json::json!({"ok":true}))?
                 ),
                 OutputFormat::Table => eprintln!("Consent revoked for client {client_id}."),
             }
@@ -254,7 +279,7 @@ mod tests {
         Mock::given(method("DELETE"))
             .and(path("/api/v1/users/me"))
             .and(header("x-nyxid-account-deletion-policy", "machine-data"))
-            .respond_with(ResponseTemplate::new(204))
+            .respond_with(ResponseTemplate::new(202).set_body_json(serde_json::json!({"status":"accepted","accepted_at":"2026-01-01T00:00:00Z","completed_at":null,"domains":[]})))
             .expect(1)
             .mount(&server)
             .await;

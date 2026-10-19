@@ -207,8 +207,10 @@ pub async fn save(
     let conflict = || {
         AppError::Conflict("This workspace changed in another tab. Reload it before saving.".into())
     };
+    let mut tx = super::erasure_admission::begin_write(db, user_id).await?;
+    let result: AppResult<WorkspaceResponse> = async {
     if request.revision == 0 {
-        if let Err(error) = collection.insert_one(&row).await {
+        if let Err(error) = collection.insert_one(&row).session(&mut tx).await {
             if matches!(error.kind.as_ref(), mongodb::error::ErrorKind::Write(mongodb::error::WriteFailure::WriteError(e)) if e.code == 11000)
             {
                 return Err(conflict());
@@ -218,7 +220,7 @@ pub async fn save(
     } else {
         let result = collection.update_one(doc! { "_id": user_id, "revision": request.revision }, doc! { "$set": {
             "revision": revision, "config": bson::to_bson(&row.config).map_err(|_| AppError::Internal("Invalid workspace serialization".into()))?, "updated_at": bson::DateTime::from_chrono(row.updated_at),
-        } }).await?;
+        } }).session(&mut tx).await?;
         if result.matched_count == 0 {
             return Err(conflict());
         }
@@ -227,6 +229,8 @@ pub async fn save(
         revision,
         config: Some(request.config),
     })
+    }.await;
+    super::org_membership_authority::finish(tx, result).await
 }
 
 #[cfg(test)]

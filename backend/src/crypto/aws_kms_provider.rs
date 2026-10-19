@@ -29,9 +29,7 @@ impl AwsKmsKeyMetadata {
             && current_key_id == prev_id
         {
             panic!(
-                "AWS_KMS_KEY_ARN and AWS_KMS_KEY_ARN_PREVIOUS produce the same key id \
-                 (0x{:02x}). This is a 1-in-256 hash collision. Use a different key.",
-                current_key_id
+                "AWS_KMS_KEY_ARN and AWS_KMS_KEY_ARN_PREVIOUS produce the same key id; configure distinct noncolliding keys"
             );
         }
 
@@ -74,7 +72,7 @@ impl std::fmt::Debug for AwsKmsKeyMetadata {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AwsKmsProvider")
             .field("current_key_arn", &"[REDACTED]")
-            .field("current_key_id", &format!("0x{:02x}", self.current_key_id))
+            .field("current_key_id", &"[REDACTED]")
             .field(
                 "previous_key_arn",
                 if self.previous_key_arn.is_some() {
@@ -112,7 +110,6 @@ impl AwsKmsProvider {
             AwsKmsKeyMetadata::new(key_arn.to_string(), config.aws_kms_key_arn_previous.clone());
 
         tracing::info!(
-            key_id = format!("0x{:02x}", keys.current_key_id()),
             has_previous = keys.has_previous_key(),
             "AWS KMS provider initialized"
         );
@@ -133,8 +130,11 @@ impl KeyProvider for AwsKmsProvider {
             .plaintext(Blob::new(plaintext_dek))
             .send()
             .await
-            .map_err(|e| {
-                tracing::error!("AWS KMS encrypt failed: {e}");
+            .map_err(|_| {
+                tracing::error!(
+                    category = "provider_encrypt_failed",
+                    "AWS KMS encrypt failed"
+                );
                 AppError::Internal("AWS KMS encrypt failed".to_string())
             })?;
 
@@ -158,16 +158,20 @@ impl KeyProvider for AwsKmsProvider {
             .ciphertext_blob(Blob::new((*wrapped.ciphertext).clone()))
             .send()
             .await
-            .map_err(|e| {
-                tracing::error!("AWS KMS decrypt failed: {e}");
+            .map_err(|_| {
+                tracing::error!(
+                    category = "provider_decrypt_failed",
+                    "AWS KMS decrypt failed"
+                );
                 AppError::Internal("AWS KMS decrypt failed".to_string())
             })?;
 
+        // Consume the SDK response's owned Blob directly. Borrow-and-copy
+        // would leave the original application-owned plaintext allocation live.
         let plaintext = resp
-            .plaintext()
+            .plaintext
             .ok_or_else(|| AppError::Internal("AWS KMS returned empty plaintext".into()))?;
-
-        Ok(Zeroizing::new(plaintext.as_ref().to_vec()))
+        Ok(Zeroizing::new(plaintext.into_inner()))
     }
 
     fn current_key_id(&self) -> u8 {
@@ -258,5 +262,6 @@ mod tests {
         assert!(debug.contains("[REDACTED]"));
         assert!(!debug.contains(TEST_ARN));
         assert!(!debug.contains(TEST_ARN_PREV));
+        assert!(!debug.contains(&format!("0x{:02x}", metadata.current_key_id)));
     }
 }

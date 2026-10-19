@@ -1,0 +1,21 @@
+{
+  "scopes": 49,
+  "additional_exact_tests": 18,
+  "passed": 1538,
+  "assertion_failures": 26,
+  "ignored": 0,
+  "aborted_tests": 2,
+  "abort_details": [
+    {
+      "scope": "services::gcp_sa_service::",
+      "completed_passes": 0,
+      "abort_code": -6
+    },
+    {
+      "scope": "services::channel_adapters::aurinko::tests::",
+      "completed_passes": 16,
+      "abort_code": -6
+    }
+  ],
+  "all_selected_tests_attempted": true
+}

@@ -453,7 +453,7 @@ function ApprovalRequest({ flow, query }: { flow: LoginFlow; query: string }) {
       <div
         className={`overflow-hidden rounded-xl border border-border bg-card ${terminal === "expired" ? "mx-auto w-full max-w-sm" : ""}`}
       >
-        <div className="space-y-5 p-5 sm:p-6">
+        <div className="space-y-5 p-3 min-[360px]:p-5 sm:p-6">
           {terminal !== "expired" && (
             <header className="space-y-3 text-center">
               <div className="mx-auto flex size-18 items-center justify-center overflow-hidden rounded-full border border-border bg-background">

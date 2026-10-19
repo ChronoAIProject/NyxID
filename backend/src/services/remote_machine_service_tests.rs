@@ -428,7 +428,7 @@ async fn administrative_or_missing_owner_never_authorizes_workspace_erasure() {
                 .await
                 .unwrap();
             if admin_delete {
-                crate::services::admin_user_service::delete_user_cascade(
+                crate::test_utils::accept_and_process_admin_erasure(
                     &db,
                     &uuid::Uuid::new_v4().to_string(),
                     &owner,
@@ -619,7 +619,7 @@ async fn account_deletion_cascade_queues_cleanup_for_an_already_paused_workspace
         .insert_one(doc! {"_id":&job_id,"user_id":&owner,"node_id":machine_id,"status":"running"})
         .await
         .unwrap();
-    crate::services::admin_user_service::delete_current_user_cascade(
+    crate::test_utils::accept_and_process_owner_erasure(
         &db,
         &owner,
         crate::services::admin_user_service::ACCOUNT_DELETION_POLICY_VERSION,

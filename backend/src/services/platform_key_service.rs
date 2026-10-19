@@ -24,11 +24,14 @@ pub async fn credential_configured(
     keys: &crate::crypto::aes::EncryptionKeys,
     service: &DownstreamService,
 ) -> Option<bool> {
+    if super::catalog_credential_record_service::validate(service).is_err() {
+        return None;
+    }
     if service.credential_encrypted.is_empty() {
         return Some(false);
     }
-    match keys.decrypt(&service.credential_encrypted).await {
-        Ok(material) => Some(!zeroize::Zeroizing::new(material).is_empty()),
+    match super::catalog_credential_record_service::bytes(keys, service).await {
+        Ok(material) => Some(!material.is_empty()),
         Err(_) => None,
     }
 }

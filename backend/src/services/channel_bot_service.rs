@@ -1111,7 +1111,29 @@ pub async fn repair_managed_bot(
     Ok(setup)
 }
 
-pub async fn update_bot(
+pub fn update_bot<'a>(
+    db: &'a mongodb::Database,
+    encryption_keys: &'a EncryptionKeys,
+    http_client: &'a reqwest::Client,
+    adapter: &'a dyn PlatformAdapter,
+    bot_id: &'a str,
+    user_id: &'a str,
+    params: UpdateBotParams<'a>,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = AppResult<ChannelBot>> + Send + 'a>> {
+    // Bound the caller's future size across nested lifecycle/ingress work.
+    // This preserves the normal executor stack and all existing effect fences.
+    Box::pin(update_bot_serialized(
+        db,
+        encryption_keys,
+        http_client,
+        adapter,
+        bot_id,
+        user_id,
+        params,
+    ))
+}
+
+async fn update_bot_serialized(
     db: &mongodb::Database,
     encryption_keys: &EncryptionKeys,
     http_client: &reqwest::Client,
@@ -1335,7 +1357,7 @@ pub async fn apply_manager_configuration_status(
     for bot in bots {
         if bot.credential_source == "telegram_manager"
             && bot.is_active
-            && !manager_channel_ready(bot, manager.as_ref())
+            && !manager_channel_ready(bot, manager.as_deref())
         {
             bot.status = "failed".into();
             bot.webhook_registered = false;
@@ -1496,7 +1518,7 @@ async fn register_telegram_webhook_locked(
                 &super::channel_adapters::telegram_new::credential_descriptor(),
             )
             .await?;
-            if !manager_channel_ready(bot, manager.as_ref()) {
+            if !manager_channel_ready(bot, manager.as_deref()) {
                 return Err(AppError::Conflict(
                     super::telegram_new_admin::MANAGER_WEBHOOK_ERROR.into(),
                 ));
@@ -2002,7 +2024,30 @@ pub async fn decrypt_bot_token(
 /// Webhook deregistration errors are logged but do not fail the operation,
 /// because the bot token may have already been revoked on the platform side.
 #[allow(clippy::too_many_arguments)]
-pub async fn delete_bot(
+pub fn delete_bot<'a>(
+    db: &'a mongodb::Database,
+    config: &'a AppConfig,
+    http_client: &'a reqwest::Client,
+    encryption_keys: &'a EncryptionKeys,
+    adapter: &'a dyn PlatformAdapter,
+    bot_id: &'a str,
+    user_id: &'a str,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = AppResult<Option<&'static str>>> + Send + 'a>>
+{
+    // Bound the caller's future size across nested lifecycle/ingress work.
+    // This preserves the normal executor stack and all existing effect fences.
+    Box::pin(delete_bot_dispatch(
+        db,
+        config,
+        http_client,
+        encryption_keys,
+        adapter,
+        bot_id,
+        user_id,
+    ))
+}
+
+async fn delete_bot_dispatch(
     db: &mongodb::Database,
     config: &AppConfig,
     http_client: &reqwest::Client,
@@ -2219,7 +2264,23 @@ async fn cleanup_managed_webhook(
 }
 
 /// Verify/repair under the same fence as credential rotation and deletion.
-pub async fn verify_serialized_bot(
+pub fn verify_serialized_bot<'a>(
+    db: &'a mongodb::Database,
+    keys: &'a EncryptionKeys,
+    http: &'a reqwest::Client,
+    adapter: &'a dyn PlatformAdapter,
+    bot_id: &'a str,
+    owner_id: &'a str,
+    url: &'a str,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = AppResult<ChannelBot>> + Send + 'a>> {
+    // Bound the caller's future size across nested lifecycle/ingress work.
+    // This preserves the normal executor stack and all existing effect fences.
+    Box::pin(verify_under_lifecycle(
+        db, keys, http, adapter, bot_id, owner_id, url,
+    ))
+}
+
+async fn verify_under_lifecycle(
     db: &mongodb::Database,
     keys: &EncryptionKeys,
     http: &reqwest::Client,
@@ -2256,33 +2317,9 @@ pub async fn verify_serialized_bot(
 /// A busy request leaves the owner able to authenticate and retry deletion.
 /// Hard deletion removes credentials locally; upstream subscriptions become inert.
 pub async fn delete_owner_aurinko_channels(db: &mongodb::Database, owner: &str) -> AppResult<()> {
-    use super::coordination_service::{EventDedupClaimResult, EventDedupStore};
-    let bots: Vec<ChannelBot> = db
-        .collection::<ChannelBot>(COLLECTION_NAME)
-        .find(doc! { "user_id": owner, "platform": "aurinko" })
-        .await?
-        .try_collect()
-        .await?;
-    let mut claims = Vec::new();
+    use super::coordination_service::EventDedupStore;
+    let claims = claim_owner_aurinko_lifecycle(db, owner).await?;
     let result = async {
-        for bot in &bots {
-            for namespace in ["channel-bot-lifecycle", "channel-bot-ingress"] {
-                match EventDedupStore::claim(
-                    db,
-                    namespace,
-                    &bot.id,
-                    "mutation",
-                    std::time::Duration::from_secs(120),
-                )
-                .await?
-                {
-                    EventDedupClaimResult::Claimed(claim) => claims.push(claim),
-                    EventDedupClaimResult::Duplicate => {
-                        return Err(super::channel_retry_ingress::retry_later());
-                    }
-                }
-            }
-        }
         db.collection::<ChannelBot>(COLLECTION_NAME)
             .delete_many(doc! { "user_id": owner, "platform": "aurinko" })
             .await?;
@@ -2301,6 +2338,134 @@ pub async fn delete_owner_aurinko_channels(db: &mongodb::Database, owner: &str) 
         EventDedupStore::release(db, &claim).await?;
     }
     result
+}
+
+/// Non-destructive admission claims held across personal-erasure acceptance.
+/// Failure releases every acquired claim; no bot, subscription or user changes.
+pub(crate) async fn claim_owner_aurinko_lifecycle(
+    db: &mongodb::Database,
+    owner: &str,
+) -> AppResult<Vec<super::coordination_service::EventDedupClaim>> {
+    use super::coordination_service::{EventDedupClaimResult, EventDedupStore};
+    let bots: Vec<ChannelBot> = db
+        .collection::<ChannelBot>(COLLECTION_NAME)
+        .find(doc! {"user_id":owner,"platform":"aurinko"})
+        .sort(doc! {"_id":1})
+        .limit(65)
+        .await?
+        .try_collect()
+        .await?;
+    if bots.len() > 64 {
+        return Err(AppError::Conflict(
+            "Remove excess email connections in batches before account deletion".into(),
+        ));
+    }
+    let mut claims = Vec::new();
+    let result: AppResult<()> = async {
+        for bot in &bots {
+            for namespace in ["channel-bot-lifecycle", "channel-bot-ingress"] {
+                match EventDedupStore::claim(
+                    db,
+                    namespace,
+                    &bot.id,
+                    "mutation",
+                    std::time::Duration::from_secs(120),
+                )
+                .await?
+                {
+                    EventDedupClaimResult::Claimed(claim) => claims.push(claim),
+                    EventDedupClaimResult::Duplicate => {
+                        return Err(super::channel_retry_ingress::retry_later());
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+    .await;
+    if let Err(error) = result {
+        for claim in claims {
+            let _ = EventDedupStore::release(db, &claim).await;
+        }
+        return Err(error);
+    }
+    Ok(claims)
+}
+
+/// Erasure uses confirmed cleanup, unlike the ordinary best-effort delete UX.
+/// The inactive bot retains its encrypted retry capability until this durable
+/// marker is written. A crash after the remote effect repeats an idempotent
+/// removal using the same bot/connection and never claims a wider grant.
+pub(crate) async fn erase_personal_bot(
+    db: &mongodb::Database,
+    config: &AppConfig,
+    http: &reqwest::Client,
+    keys: &EncryptionKeys,
+    adapter: &dyn PlatformAdapter,
+    owner: &str,
+    bot_id: &str,
+) -> AppResult<()> {
+    let durable = super::transaction_service::durable_database(db);
+    let db = &durable;
+    super::channel_retry_ingress::with_lifecycle(db, true, bot_id, async {
+        super::channel_retry_ingress::with_ingress(db, bot_id, async {
+            let mut tx=db.client().start_session().await?;
+            tx.start_transaction().read_concern(mongodb::options::ReadConcern::snapshot())
+                .write_concern(mongodb::options::WriteConcern::majority()).await?;
+            let result:AppResult<()> = async {
+                let owner_fence=db.collection::<bson::Document>(crate::models::user::COLLECTION_NAME).update_one(
+                    doc! {"_id":owner,"is_active":false,"platform_personal_deleting":true},
+                    doc! {"$inc":{"channel_erasure_fence":1_i64}}).session(&mut tx).await?;
+                if owner_fence.matched_count!=1 {return Err(AppError::Conflict("Personal erasure authority changed".into()));}
+                let changed=db.collection::<bson::Document>(COLLECTION_NAME).update_one(
+                    doc! {"_id":bot_id,"user_id":owner},vec![doc! {"$set":{"is_active":false,"status":"inactive","updated_at":"$$NOW"}}])
+                    .session(&mut tx).await?;
+                if changed.matched_count!=1 {return Err(AppError::Conflict("Channel owner changed".into()));}
+                Ok(())
+            }.await;
+            super::org_membership_authority::finish(tx,result).await?;
+            let bot=get_bot_for_user(db,bot_id,owner).await?;
+            let source=db.collection::<bson::Document>(COLLECTION_NAME).find_one(doc! {"_id":bot_id,"user_id":owner}).await?
+                .ok_or_else(||AppError::Conflict("Channel owner changed".into()))?;
+            if source.get_bool("personal_erasure_cleanup_complete").unwrap_or(false) {return Ok(());}
+            let removal=async {
+                if matches!(adapter.ingestion(), super::channel_platform::Ingestion::Poll{..}) {
+                    return Ok("poll_admission_closed");
+                }
+                if bot.credential_source=="connection" {
+                    if !super::channel_connection_webhook_service::supports(adapter) {
+                        return if bot.webhook_registered {Err(AppError::Conflict("Connection webhook cleanup requires supported provider reconciliation".into()))} else {Ok("no_connection_webhook")};
+                    }
+                    super::channel_connection_webhook_service::remove(db,keys,http,adapter,&bot).await?;
+                    return Ok("connection_webhook_removed");
+                }
+                if bot.platform=="telegram-new" {
+                    return super::telegram_new_service::TelegramNewService {db,config,keys,
+                        api:super::telegram_new_api::TelegramApi::new(http)}.remove_owned_webhook(&bot).await;
+                }
+                if bot.platform=="telegram" && (bot.credential_source=="telegram_manager"
+                    || is_telegram_manager_identity(db,&bot.platform_bot_id).await?) {
+                    // The manager webhook is shared, never a person's resource.
+                    return Ok("shared_manager_webhook_retained");
+                }
+                if bot.credential_source=="platform" {
+                    return cleanup_managed_webhook(db,http,keys,adapter,&bot).await;
+                }
+                let token=zeroize::Zeroizing::new(decrypt_bot_token(keys,&bot).await?);
+                if bot.platform=="telegram" {verify_telegram_token_identity(http,adapter,&bot,&token).await?;}
+                adapter.remove_bot_webhook(db,http,&bot,&token).await?;
+                Ok("personal_webhook_removed")
+            };
+            let basis=tokio::time::timeout(std::time::Duration::from_secs(30),removal).await
+                .map_err(|_|AppError::Conflict("Channel webhook cleanup is unconfirmed; retained capability will retry".into()))??;
+            let changed=db.collection::<bson::Document>(COLLECTION_NAME).update_one(
+                doc! {"_id":bot_id,"user_id":owner,"$expr":{"$eq":["$$ROOT",{"$literal":source}]}},
+                vec![doc! {"$set":{"personal_erasure_cleanup_complete":true,"personal_erasure_cleanup_basis":{"$literal":basis},
+                    "personal_erasure_cleanup_at":"$$NOW","webhook_registered":false}}]).await?;
+            if changed.matched_count!=1 {return Err(AppError::Conflict("Channel changed during cleanup; retry current capability".into()));}
+            Ok(())
+        }).await
+    }).await
 }
 
 #[cfg(test)]

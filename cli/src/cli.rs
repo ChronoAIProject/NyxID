@@ -199,6 +199,9 @@ pub enum Commands {
     },
     /// Manage telemetry consent on this machine (see `docs/TELEMETRY.md` §3)
     Telemetry {
+        /// Saved login profile whose account/device settings to manage
+        #[arg(long, env = "NYXID_PROFILE", global = true)]
+        profile: Option<String>,
         #[command(subcommand)]
         command: TelemetryCommands,
     },
@@ -1074,12 +1077,15 @@ pub enum SessionCommands {
 /// `docs/TELEMETRY.md` §3 for the full precedence ladder.
 #[derive(Subcommand)]
 pub enum TelemetryCommands {
-    /// Opt in: persist `{enabled=true, asked=true}` to config.
+    /// Opt this saved account/profile in on this device (account permission is separate).
     Enable,
-    /// Opt out: persist `{enabled=false, asked=true}` and clear the
-    /// local anon UUID so a future re-enable starts fresh.
+    /// Stop analytics from this CLI profile/device, including with env=on.
     Disable,
-    /// Print the resolved consent state and its source.
+    /// Enable global account analytics permission (does not opt in this device)
+    AccountEnable,
+    /// Withdraw global account permission across devices
+    AccountDisable,
+    /// Print this device choice and fresh account permission
     Status,
 }
 

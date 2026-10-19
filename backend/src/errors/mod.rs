@@ -37,8 +37,30 @@ pub struct GrantCascadePayload {
     pub token_scope_available: bool,
 }
 
+/// Diagnostics for secret-bearing DTOs expose only the type, never fields.
+macro_rules! redacted_debug {
+    ($($kind:ty),+ $(,)?) => {$(
+        impl std::fmt::Debug for $kind {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str(concat!(stringify!($kind), " { [REDACTED] }"))
+            }
+        }
+    )+};
+}
+pub(crate) use redacted_debug;
+
+impl std::fmt::Debug for AppError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AppError")
+            .field("kind", &self.error_key())
+            .field("code", &self.error_code())
+            .finish_non_exhaustive()
+    }
+}
+redacted_debug!(ErrorResponse);
+
 /// Structured JSON error response returned by all API error paths.
-#[derive(Debug, Serialize, ToSchema)]
+#[derive(Serialize, ToSchema)]
 pub struct ErrorResponse {
     /// Machine-readable error category (e.g. "unauthorized")
     pub error: String,
@@ -86,7 +108,7 @@ pub enum PoolAttemptTransportKind {
 
 /// Application-level error variants.
 /// Each variant maps to a specific HTTP status code and error payload.
-#[derive(Debug, thiserror::Error)]
+#[derive(thiserror::Error)]
 pub enum AppError {
     #[error("Bad request: {0}")]
     BadRequest(String),
@@ -3185,4 +3207,34 @@ mod tests {
         );
         assert_eq!(json["details"]["token_scope_available"], true);
     }
+}
+
+#[cfg(test)]
+#[test]
+fn error_debug_redacts_challenges_and_untrusted_message_details() {
+    let secret = "distinctive-error-secret-c731";
+    for error in [
+        AppError::MfaRequired {
+            session_token: secret.into(),
+        },
+        AppError::Internal(secret.into()),
+        AppError::AuthenticationFailed(secret.into()),
+    ] {
+        assert!(!format!("{error:?}").contains(secret));
+    }
+    let response = ErrorResponse {
+        error: "mfa_required".into(),
+        error_code: 2002,
+        message: secret.into(),
+        session_token: Some(secret.into()),
+        consent_url: None,
+        request_id: None,
+        approve_url: None,
+        details: None,
+    };
+    assert!(!format!("{response:?}").contains(secret));
+    assert_eq!(
+        serde_json::to_value(response).unwrap()["session_token"],
+        secret
+    );
 }

@@ -8,7 +8,7 @@ use uuid::Uuid;
 use crate::crypto::aes::EncryptionKeys;
 use crate::errors::{AppError, AppResult};
 use crate::models::agent_service_binding::COLLECTION_NAME as AGENT_SERVICE_BINDINGS;
-use crate::models::default_request_header::DefaultRequestHeader;
+use crate::models::default_request_header::StoredDefaultRequestHeader as DefaultRequestHeader;
 use crate::models::downstream_service::{
     COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService, ServiceCapabilities,
 };
@@ -480,6 +480,7 @@ pub async fn seed_default_providers(
     // IFTTT Webhooks (per-user raw key)
     if !slug_exists!("ifttt") {
         let provider = ProviderConfig {
+        secret_context_versions: Default::default(),
             id: Uuid::new_v4().to_string(),
             slug: "ifttt".to_string(),
             name: "IFTTT Webhooks".to_string(),
@@ -527,6 +528,7 @@ pub async fn seed_default_providers(
 
     if !slug_exists!("ifttt-mcp") {
         let provider = ProviderConfig {
+            secret_context_versions: Default::default(),
             id: Uuid::new_v4().to_string(),
             slug: "ifttt-mcp".into(),
             name: "IFTTT".into(),
@@ -538,6 +540,7 @@ pub async fn seed_default_providers(
             token_url: Some(super::ifttt_oauth_service::TOKEN_URL.into()),
             revocation_url: Some("https://ifttt.com/oauth/revoke".into()),
             revocation: Some(RevocationConfig {
+                effect_scope: None,
                 request_encoding: "form".into(),
                 style: "rfc7009".into(),
                 url: "https://ifttt.com/oauth/revoke".into(),
@@ -583,6 +586,7 @@ pub async fn seed_default_providers(
     // 1. OpenAI (API Key)
     if !slug_exists!("openai") {
         let provider = ProviderConfig {
+            secret_context_versions: Default::default(),
             id: Uuid::new_v4().to_string(),
             slug: "openai".to_string(),
             name: "OpenAI".to_string(),
@@ -674,12 +678,25 @@ pub async fn seed_default_providers(
 
     // 2. OpenAI Codex (Device Code - ChatGPT subscription)
     if !slug_exists!("openai-codex") {
-        let client_id_enc = encryption_keys
-            .encrypt(b"app_EMoamEEZ73f0CkXaXp7hrann")
-            .await?;
-
+        let id = Uuid::new_v4().to_string();
+        let client_id_enc = super::credential_record_service::encrypt(
+            encryption_keys,
+            COLLECTION_NAME,
+            &id,
+            super::credential_record_service::PLATFORM_OWNER,
+            "client_id_encrypted",
+            b"app_EMoamEEZ73f0CkXaXp7hrann",
+        )
+        .await?;
+        let mut versions = std::collections::BTreeMap::new();
+        super::credential_record_service::mark_version(
+            &mut versions,
+            encryption_keys,
+            "client_id_encrypted",
+        );
         let provider = ProviderConfig {
-            id: Uuid::new_v4().to_string(),
+            secret_context_versions: versions,
+            id,
             slug: "openai-codex".to_string(),
             name: "OpenAI Codex".to_string(),
             description: Some(
@@ -739,6 +756,7 @@ pub async fn seed_default_providers(
     // 3. xAI (API Key)
     if !slug_exists!("xai") {
         let provider = ProviderConfig {
+            secret_context_versions: Default::default(),
             id: Uuid::new_v4().to_string(),
             slug: "xai".to_string(),
             name: "xAI".to_string(),
@@ -785,6 +803,7 @@ pub async fn seed_default_providers(
     // 4. Anthropic (API Key)
     if !slug_exists!("anthropic") {
         let provider = ProviderConfig {
+            secret_context_versions: Default::default(),
             id: Uuid::new_v4().to_string(),
             slug: "anthropic".to_string(),
             name: "Anthropic".to_string(),
@@ -833,6 +852,7 @@ pub async fn seed_default_providers(
     // 5. Google AI Studio (API Key)
     if !slug_exists!("google-ai") {
         let provider = ProviderConfig {
+            secret_context_versions: Default::default(),
             id: Uuid::new_v4().to_string(),
             slug: "google-ai".to_string(),
             name: "Google AI Studio".to_string(),
@@ -884,6 +904,7 @@ pub async fn seed_default_providers(
     // 6. Mistral AI (API Key)
     if !slug_exists!("mistral") {
         let provider = ProviderConfig {
+            secret_context_versions: Default::default(),
             id: Uuid::new_v4().to_string(),
             slug: "mistral".to_string(),
             name: "Mistral AI".to_string(),
@@ -932,6 +953,7 @@ pub async fn seed_default_providers(
     // 7. Cohere (API Key)
     if !slug_exists!("cohere") {
         let provider = ProviderConfig {
+            secret_context_versions: Default::default(),
             id: Uuid::new_v4().to_string(),
             slug: "cohere".to_string(),
             name: "Cohere".to_string(),
@@ -980,6 +1002,7 @@ pub async fn seed_default_providers(
     // 8. DeepSeek (API Key)
     if !slug_exists!("deepseek") {
         let provider = ProviderConfig {
+            secret_context_versions: Default::default(),
             id: Uuid::new_v4().to_string(),
             slug: "deepseek".to_string(),
             name: "DeepSeek".to_string(),
@@ -1028,6 +1051,7 @@ pub async fn seed_default_providers(
     // 7b. Firecrawl (API Key)
     if !slug_exists!("firecrawl") {
         let provider = ProviderConfig {
+        secret_context_versions: Default::default(),
             id: Uuid::new_v4().to_string(),
             slug: "firecrawl".to_string(),
             name: "Firecrawl".to_string(),
@@ -1080,6 +1104,7 @@ pub async fn seed_default_providers(
     // Supabase Data API (per-project URL + API key)
     if !slug_exists!("supabase") {
         let provider = ProviderConfig {
+        secret_context_versions: Default::default(),
             id: Uuid::new_v4().to_string(),
             slug: "supabase".to_string(),
             name: "Supabase".to_string(),
@@ -1167,6 +1192,7 @@ pub async fn seed_default_providers(
         let revocation_url =
             (slug == "cloudflare").then(|| "https://dash.cloudflare.com/oauth2/revoke".to_string());
         let provider = ProviderConfig {
+            secret_context_versions: Default::default(),
             id: Uuid::new_v4().to_string(),
             slug: slug.to_string(),
             name: name.to_string(),
@@ -1175,6 +1201,7 @@ pub async fn seed_default_providers(
             authorization_url: Some(authorization_url.to_string()),
             token_url: Some(token_url.to_string()),
             revocation: revocation_url.as_ref().map(|url| RevocationConfig {
+                effect_scope: None,
                 request_encoding: "form".to_string(),
                 style: "rfc7009".to_string(),
                 url: url.clone(),
@@ -1236,6 +1263,7 @@ pub async fn seed_default_providers(
     // Telnyx (API Key)
     if !slug_exists!("telnyx") {
         let provider = ProviderConfig {
+        secret_context_versions: Default::default(),
             id: Uuid::new_v4().to_string(),
             slug: "telnyx".to_string(),
             name: "Telnyx".to_string(),
@@ -1288,6 +1316,7 @@ pub async fn seed_default_providers(
     // 7c. ElevenLabs (API Key)
     if !slug_exists!("elevenlabs") {
         let provider = ProviderConfig {
+        secret_context_versions: Default::default(),
             id: Uuid::new_v4().to_string(),
             slug: "elevenlabs".to_string(),
             name: "ElevenLabs".to_string(),
@@ -1342,6 +1371,7 @@ pub async fn seed_default_providers(
     // Aurinko account bearer tokens; managed OAuth requires documented PKCE support.
     if !slug_exists!("aurinko") {
         let provider = ProviderConfig {
+        secret_context_versions: Default::default(),
             id: Uuid::new_v4().to_string(),
             slug: "aurinko".to_string(),
             name: "Aurinko".to_string(),
@@ -1394,6 +1424,7 @@ pub async fn seed_default_providers(
     // 7d. Twilio (API Key / HTTP Basic)
     if !slug_exists!("twilio") {
         let provider = ProviderConfig {
+        secret_context_versions: Default::default(),
             id: Uuid::new_v4().to_string(),
             slug: "twilio".to_string(),
             name: "Twilio".to_string(),
@@ -1446,6 +1477,7 @@ pub async fn seed_default_providers(
     // 9. Twitter / X (OAuth 2.0 with PKCE)
     if !slug_exists!("twitter") {
         let provider = ProviderConfig {
+            secret_context_versions: Default::default(),
             id: Uuid::new_v4().to_string(),
             slug: "twitter".to_string(),
             name: "Twitter / X".to_string(),
@@ -1455,6 +1487,7 @@ pub async fn seed_default_providers(
             token_url: Some("https://api.x.com/2/oauth2/token".to_string()),
             revocation_url: Some("https://api.x.com/2/oauth2/revoke".to_string()),
             revocation: Some(RevocationConfig {
+                effect_scope: None,
                 request_encoding: "form".to_string(),
                 style: "rfc7009".to_string(),
                 url: "https://api.x.com/2/oauth2/revoke".to_string(),
@@ -1613,6 +1646,7 @@ pub async fn seed_default_providers(
     // 10. Google (OAuth2)
     if !slug_exists!("google") {
         let provider = ProviderConfig {
+            secret_context_versions: Default::default(),
             id: Uuid::new_v4().to_string(),
             slug: "google".to_string(),
             name: "Google".to_string(),
@@ -1622,6 +1656,9 @@ pub async fn seed_default_providers(
             token_url: Some("https://oauth2.googleapis.com/token".to_string()),
             revocation_url: Some("https://oauth2.googleapis.com/revoke".to_string()),
             revocation: Some(RevocationConfig {
+                effect_scope: Some(
+                    crate::models::provider_config::RevocationEffectScope::GrantWide,
+                ),
                 request_encoding: "form".to_string(),
                 style: "rfc7009".to_string(),
                 url: "https://oauth2.googleapis.com/revoke".to_string(),
@@ -1677,6 +1714,7 @@ pub async fn seed_default_providers(
     // 11. GitHub (OAuth2)
     if !slug_exists!("github") {
         let provider = ProviderConfig {
+            secret_context_versions: Default::default(),
             id: Uuid::new_v4().to_string(),
             slug: "github".to_string(),
             name: "GitHub".to_string(),
@@ -1686,6 +1724,9 @@ pub async fn seed_default_providers(
             token_url: Some("https://github.com/login/oauth/access_token".to_string()),
             revocation_url: None,
             revocation: Some(RevocationConfig {
+                effect_scope: Some(
+                    crate::models::provider_config::RevocationEffectScope::RequestScoped,
+                ),
                 request_encoding: "form".to_string(),
                 style: "github".to_string(),
                 url: "https://api.github.com/applications".to_string(),
@@ -1732,6 +1773,7 @@ pub async fn seed_default_providers(
     // 10b. GitHub (Personal Access Token)
     if !slug_exists!("github-pat") {
         let provider = ProviderConfig {
+        secret_context_versions: Default::default(),
             id: Uuid::new_v4().to_string(),
             slug: "github-pat".to_string(),
             name: "GitHub (API Key)".to_string(),
@@ -1791,6 +1833,7 @@ pub async fn seed_default_providers(
     // 12. Facebook (OAuth2)
     if !slug_exists!("facebook") {
         let provider = ProviderConfig {
+            secret_context_versions: Default::default(),
             id: Uuid::new_v4().to_string(),
             slug: "facebook".to_string(),
             name: "Facebook".to_string(),
@@ -1800,6 +1843,7 @@ pub async fn seed_default_providers(
             token_url: Some("https://graph.facebook.com/v21.0/oauth/access_token".to_string()),
             revocation_url: None,
             revocation: Some(RevocationConfig {
+                effect_scope: None,
                 request_encoding: "form".to_string(),
                 style: "facebook_deauth".to_string(),
                 url: "https://graph.facebook.com/v21.0/me/permissions".to_string(),
@@ -1845,6 +1889,7 @@ pub async fn seed_default_providers(
     // 13. Discord (OAuth2)
     if !slug_exists!("discord") {
         let provider = ProviderConfig {
+            secret_context_versions: Default::default(),
             id: Uuid::new_v4().to_string(),
             slug: "discord".to_string(),
             name: "Discord".to_string(),
@@ -1854,6 +1899,7 @@ pub async fn seed_default_providers(
             token_url: Some("https://discord.com/api/oauth2/token".to_string()),
             revocation_url: Some("https://discord.com/api/oauth2/token/revoke".to_string()),
             revocation: Some(RevocationConfig {
+                effect_scope: None,
                 request_encoding: "form".to_string(),
                 style: "rfc7009".to_string(),
                 url: "https://discord.com/api/oauth2/token/revoke".to_string(),
@@ -1899,6 +1945,7 @@ pub async fn seed_default_providers(
     // 14. Spotify (OAuth2)
     if !slug_exists!("spotify") {
         let provider = ProviderConfig {
+            secret_context_versions: Default::default(),
             id: Uuid::new_v4().to_string(),
             slug: "spotify".to_string(),
             name: "Spotify".to_string(),
@@ -1950,6 +1997,7 @@ pub async fn seed_default_providers(
     // 15. LinkedIn (OAuth2)
     if !slug_exists!("linkedin") {
         let provider = ProviderConfig {
+        secret_context_versions: Default::default(),
             id: Uuid::new_v4().to_string(),
             slug: "linkedin".to_string(),
             name: "LinkedIn".to_string(),
@@ -1961,6 +2009,7 @@ pub async fn seed_default_providers(
             token_url: Some("https://www.linkedin.com/oauth/v2/accessToken".to_string()),
             revocation_url: Some("https://www.linkedin.com/oauth/v2/revoke".to_string()),
             revocation: Some(RevocationConfig {
+                effect_scope: None,
                 request_encoding: "form".to_string(),
                 style: "rfc7009".to_string(),
                 url: "https://www.linkedin.com/oauth/v2/revoke".to_string(),
@@ -2013,6 +2062,7 @@ pub async fn seed_default_providers(
     // 16. Slack (OAuth2)
     if !slug_exists!("slack") {
         let provider = ProviderConfig {
+            secret_context_versions: Default::default(),
             id: Uuid::new_v4().to_string(),
             slug: "slack".to_string(),
             name: "Slack".to_string(),
@@ -2022,6 +2072,7 @@ pub async fn seed_default_providers(
             token_url: Some("https://slack.com/api/oauth.v2.access".to_string()),
             revocation_url: Some("https://slack.com/api/auth.revoke".to_string()),
             revocation: Some(RevocationConfig {
+                effect_scope: None,
                 request_encoding: "form".to_string(),
                 style: "self_bearer".to_string(),
                 url: "https://slack.com/api/auth.revoke".to_string(),
@@ -2068,6 +2119,7 @@ pub async fn seed_default_providers(
     // 17. Microsoft (OAuth2)
     if !slug_exists!("microsoft") {
         let provider = ProviderConfig {
+        secret_context_versions: Default::default(),
             id: Uuid::new_v4().to_string(),
             slug: "microsoft".to_string(),
             name: "Microsoft".to_string(),
@@ -2143,6 +2195,7 @@ pub async fn seed_default_providers(
     // 18. TikTok (OAuth2)
     if !slug_exists!("tiktok") {
         let provider = ProviderConfig {
+            secret_context_versions: Default::default(),
             id: Uuid::new_v4().to_string(),
             slug: "tiktok".to_string(),
             name: "TikTok".to_string(),
@@ -2152,6 +2205,7 @@ pub async fn seed_default_providers(
             token_url: Some("https://open.tiktokapis.com/v2/oauth/token/".to_string()),
             revocation_url: Some("https://open.tiktokapis.com/v2/oauth/revoke/".to_string()),
             revocation: Some(RevocationConfig {
+                effect_scope: None,
                 request_encoding: "form".to_string(),
                 style: "rfc7009".to_string(),
                 url: "https://open.tiktokapis.com/v2/oauth/revoke/".to_string(),
@@ -2197,6 +2251,7 @@ pub async fn seed_default_providers(
     // 19. Twitch (OAuth2)
     if !slug_exists!("twitch") {
         let provider = ProviderConfig {
+            secret_context_versions: Default::default(),
             id: Uuid::new_v4().to_string(),
             slug: "twitch".to_string(),
             name: "Twitch".to_string(),
@@ -2206,6 +2261,7 @@ pub async fn seed_default_providers(
             token_url: Some("https://id.twitch.tv/oauth2/token".to_string()),
             revocation_url: Some("https://id.twitch.tv/oauth2/revoke".to_string()),
             revocation: Some(RevocationConfig {
+                effect_scope: None,
                 request_encoding: "form".to_string(),
                 style: "rfc7009".to_string(),
                 url: "https://id.twitch.tv/oauth2/revoke".to_string(),
@@ -2249,6 +2305,7 @@ pub async fn seed_default_providers(
     // 20. Reddit (OAuth2)
     if !slug_exists!("reddit") {
         let provider = ProviderConfig {
+            secret_context_versions: Default::default(),
             id: Uuid::new_v4().to_string(),
             slug: "reddit".to_string(),
             name: "Reddit".to_string(),
@@ -2258,6 +2315,7 @@ pub async fn seed_default_providers(
             token_url: Some("https://www.reddit.com/api/v1/access_token".to_string()),
             revocation_url: Some("https://www.reddit.com/api/v1/revoke_token".to_string()),
             revocation: Some(RevocationConfig {
+                effect_scope: None,
                 request_encoding: "form".to_string(),
                 style: "rfc7009".to_string(),
                 url: "https://www.reddit.com/api/v1/revoke_token".to_string(),
@@ -2344,6 +2402,7 @@ pub async fn seed_default_providers(
     // 21. Lark / Larksuite (OAuth2)
     if !slug_exists!("lark") {
         let provider = ProviderConfig {
+            secret_context_versions: Default::default(),
             id: Uuid::new_v4().to_string(),
             slug: "lark".to_string(),
             name: "Lark".to_string(),
@@ -2400,6 +2459,7 @@ pub async fn seed_default_providers(
     // 20b. Feishu (China variant of Lark, OAuth2)
     if !slug_exists!("feishu") {
         let provider = ProviderConfig {
+            secret_context_versions: Default::default(),
             id: Uuid::new_v4().to_string(),
             slug: "feishu".to_string(),
             name: "Feishu".to_string(),
@@ -2454,6 +2514,7 @@ pub async fn seed_default_providers(
     // 22. Telegram Login Widget (telegram_widget)
     if !slug_exists!("telegram") {
         let provider = ProviderConfig {
+            secret_context_versions: Default::default(),
             id: Uuid::new_v4().to_string(),
             slug: "telegram".to_string(),
             name: "Telegram".to_string(),
@@ -2503,6 +2564,7 @@ pub async fn seed_default_providers(
     // 23. Telegram Bot API (API Key)
     if !slug_exists!("telegram-bot") {
         let provider = ProviderConfig {
+        secret_context_versions: Default::default(),
             id: Uuid::new_v4().to_string(),
             slug: "telegram-bot".to_string(),
             name: "Telegram Bot API".to_string(),
@@ -2557,6 +2619,7 @@ pub async fn seed_default_providers(
     // 22b. Lark Bot API (API Key — app credentials for tenant token exchange)
     if !slug_exists!("lark-bot") {
         let provider = ProviderConfig {
+        secret_context_versions: Default::default(),
             id: Uuid::new_v4().to_string(),
             slug: "lark-bot".to_string(),
             name: "Lark Bot API".to_string(),
@@ -2616,6 +2679,7 @@ pub async fn seed_default_providers(
     // 22c. Feishu Bot API (China region — same as Lark Bot)
     if !slug_exists!("feishu-bot") {
         let provider = ProviderConfig {
+        secret_context_versions: Default::default(),
             id: Uuid::new_v4().to_string(),
             slug: "feishu-bot".to_string(),
             name: "Feishu Bot API".to_string(),
@@ -2678,6 +2742,7 @@ pub async fn seed_default_providers(
     // 22d. Discord Bot API (API Key — persistent bot token)
     if !slug_exists!("discord-bot") {
         let provider = ProviderConfig {
+            secret_context_versions: Default::default(),
             id: Uuid::new_v4().to_string(),
             slug: "discord-bot".to_string(),
             name: "Discord Bot API".to_string(),
@@ -2739,6 +2804,7 @@ pub async fn seed_default_providers(
     // 22e. Slack Bot API (API Key — bot user OAuth token `xoxb-`)
     if !slug_exists!("slack-bot") {
         let provider = ProviderConfig {
+            secret_context_versions: Default::default(),
             id: Uuid::new_v4().to_string(),
             slug: "slack-bot".to_string(),
             name: "Slack Bot API".to_string(),
@@ -2798,6 +2864,7 @@ pub async fn seed_default_providers(
     // WhatsApp Business Platform (direct Meta Cloud API).
     if !slug_exists!("whatsapp-business") {
         let provider = ProviderConfig {
+        secret_context_versions: Default::default(),
             id: Uuid::new_v4().to_string(),
             slug: "whatsapp-business".to_string(),
             name: "WhatsApp Business Platform".to_string(),
@@ -2849,6 +2916,7 @@ pub async fn seed_default_providers(
     // 24. OpenClaw (API Key + self-hosted gateway URL)
     if !slug_exists!("openclaw") {
         let provider = ProviderConfig {
+            secret_context_versions: Default::default(),
             id: Uuid::new_v4().to_string(),
             slug: "openclaw".to_string(),
             name: "OpenClaw".to_string(),
@@ -2902,6 +2970,7 @@ pub async fn seed_default_providers(
     // 25. OpenRouter (API Key)
     if !slug_exists!("openrouter") {
         let provider = ProviderConfig {
+            secret_context_versions: Default::default(),
             id: Uuid::new_v4().to_string(),
             slug: "openrouter".to_string(),
             name: "OpenRouter".to_string(),
@@ -2960,6 +3029,7 @@ pub async fn seed_default_providers(
             continue;
         }
         let provider = ProviderConfig {
+            secret_context_versions: Default::default(),
             id: Uuid::new_v4().to_string(),
             slug: slug.to_string(),
             name: name.to_string(),
@@ -2969,6 +3039,7 @@ pub async fn seed_default_providers(
             token_url: Some(format!("{host}/oauth/token/")),
             revocation_url: Some(format!("{host}/oauth/revoke/")),
             revocation: Some(RevocationConfig {
+                effect_scope: None,
                 request_encoding: "form".to_string(),
                 style: "rfc7009".to_string(),
                 url: format!("{host}/oauth/revoke/"),
@@ -3019,6 +3090,7 @@ pub async fn seed_default_providers(
     // not document expires_in; persist it only when actually returned.
     if !slug_exists!("notion") {
         let provider = ProviderConfig {
+            secret_context_versions: Default::default(),
             id: Uuid::new_v4().to_string(),
             slug: "notion".to_string(),
             name: "Notion".to_string(),
@@ -3033,6 +3105,7 @@ pub async fn seed_default_providers(
             token_url: Some("https://api.notion.com/v1/oauth/token".to_string()),
             revocation_url: Some("https://api.notion.com/v1/oauth/revoke".to_string()),
             revocation: Some(RevocationConfig {
+                effect_scope: None,
                 request_encoding: "json".to_string(),
                 style: "rfc7009".to_string(),
                 url: "https://api.notion.com/v1/oauth/revoke".to_string(),
@@ -3117,6 +3190,7 @@ pub async fn seed_default_providers(
     // service (user supplies --endpoint-url per add).
     if !slug_exists!("aws-billing") {
         let provider = ProviderConfig {
+        secret_context_versions: Default::default(),
             id: Uuid::new_v4().to_string(),
             slug: "aws-billing".to_string(),
             name: "AWS Billing".to_string(),
@@ -3187,6 +3261,7 @@ pub async fn seed_default_providers(
     // Default scope is the read-only umbrella; --scope can add others.
     if !slug_exists!("google-cloud") {
         let provider = ProviderConfig {
+            secret_context_versions: Default::default(),
             id: Uuid::new_v4().to_string(),
             slug: "google-cloud".to_string(),
             name: "Google Cloud".to_string(),
@@ -3204,11 +3279,14 @@ pub async fn seed_default_providers(
             token_url: Some("https://oauth2.googleapis.com/token".to_string()),
             revocation_url: Some("https://oauth2.googleapis.com/revoke".to_string()),
             revocation: Some(RevocationConfig {
+                effect_scope: Some(
+                    crate::models::provider_config::RevocationEffectScope::GrantWide,
+                ),
                 request_encoding: "form".to_string(),
                 style: "rfc7009".to_string(),
                 url: "https://oauth2.googleapis.com/revoke".to_string(),
                 auth: "none".to_string(),
-                revokes_grant: false,
+                revokes_grant: true,
             }),
             default_scopes: Some(vec![
                 "https://www.googleapis.com/auth/cloud-platform.read-only".to_string(),
@@ -3288,6 +3366,7 @@ pub async fn seed_default_providers(
             continue;
         }
         let provider = ProviderConfig {
+            secret_context_versions: Default::default(),
             id: Uuid::new_v4().to_string(),
             slug: seed.slug.to_string(),
             name: seed.name.to_string(),
@@ -3445,7 +3524,7 @@ const REVOCATION_SEED_UPGRADES: &[RevocationSeedUpgrade] = &[
         style: "rfc7009",
         url: "https://oauth2.googleapis.com/revoke",
         auth: "none",
-        revokes_grant: false,
+        revokes_grant: true,
         revocation_url: Some("https://oauth2.googleapis.com/revoke"),
     },
     RevocationSeedUpgrade {
@@ -3502,6 +3581,20 @@ pub async fn validate_revocation_config(
     provider_type: &str,
     revocation: &RevocationConfig,
 ) -> AppResult<()> {
+    use crate::models::provider_config::RevocationEffectScope;
+    let consistent = match revocation.effect_scope {
+        None => true,
+        Some(RevocationEffectScope::TokenOnly) => {
+            !revocation.revokes_grant && revocation.style != "facebook_deauth"
+        }
+        Some(RevocationEffectScope::GrantWide) => revocation.revokes_grant,
+        Some(RevocationEffectScope::RequestScoped) => {
+            revocation.revokes_grant && revocation.style == "github"
+        }
+    };
+    if !consistent {
+        return Err(AppError::ValidationError("revocation.effect_scope must match the reviewed protocol style and revokes_grant policy".into()));
+    }
     validate_oauth_request_options(Some(&revocation.request_encoding), None)?;
     if matches!(provider_type, "api_key" | "telegram_widget") {
         return Err(AppError::ValidationError(
@@ -3675,6 +3768,40 @@ async fn backfill_provider_revocation(
             doc! { "$set": { "revocation.revokes_grant": true, "updated_at": &now } },
         )
         .await?;
+    // Reviewed contract metadata applies only to exact canonical system
+    // configuration, never an administrator's endpoint/style override.
+    // GitHub docs: REST Apps / OAuth applications, "Delete an app token"
+    // versus "Delete an app authorization". Google web-server OAuth docs:
+    // token revocation removes the application's grant, including related tokens.
+    for (slug, url, style, scope) in [
+        (
+            "github",
+            "https://api.github.com/applications",
+            "github",
+            "request_scoped",
+        ),
+        (
+            "google",
+            "https://oauth2.googleapis.com/revoke",
+            "rfc7009",
+            "grant_wide",
+        ),
+        (
+            "google-cloud",
+            "https://oauth2.googleapis.com/revoke",
+            "rfc7009",
+            "grant_wide",
+        ),
+    ] {
+        let seed = REVOCATION_SEED_UPGRADES
+            .iter()
+            .find(|seed| seed.slug == slug)
+            .expect("reviewed seed exists");
+        collection.update_many(doc!{"slug":slug,"created_by":"system","authorization_url":seed.authorization_url,
+            "token_url":seed.token_url,"revocation.url":url,"revocation.style":style,"revocation.auth":seed.auth,"revocation.revokes_grant":true,
+            "$or":[{"revocation.effect_scope":{"$exists":false}},{"revocation.effect_scope":bson::Bson::Null}]},
+            doc!{"$set":{"revocation.effect_scope":scope,"revocation.revokes_grant":true,"updated_at":&now}}).await?;
+    }
     Ok(())
 }
 
@@ -5551,11 +5678,17 @@ async fn backfill_missing_service_provider_requirements(
 }
 
 fn seeded_header_to_model(seed: &SeededHeader) -> DefaultRequestHeader {
+    assert!(
+        !seed.sensitive,
+        "Static catalog seeds cannot contain sensitive header values"
+    );
     DefaultRequestHeader {
         name: seed.name.to_string(),
-        value: seed.value.to_string(),
+        value: seed.value.to_string().into(),
         overridable: seed.overridable,
         sensitive: seed.sensitive,
+        value_encrypted: None,
+        value_context_version: None,
     }
 }
 
@@ -5637,39 +5770,7 @@ fn hosted_spec_url(path: &str) -> String {
     format!("{}{}", base_url.trim_end_matches('/'), path)
 }
 
-/// Pure merge step for the seeded-header reconciler. Returns `Some(new_list)`
-/// when the stored list must be updated, or `None` when no change is needed.
-///
-/// Missing / empty stored lists receive every seeded entry. Non-empty stored
-/// lists keep all existing entries (including admin-edited values) and only
-/// gain seeded entries whose names are absent (case-insensitive).
-fn reconcile_seeded_headers(
-    stored: Option<&[DefaultRequestHeader]>,
-    seeded: &[SeededHeader],
-) -> Option<Vec<DefaultRequestHeader>> {
-    if seeded.is_empty() {
-        return None;
-    }
-    let existing = stored.unwrap_or(&[]);
-
-    let mut merged: Vec<DefaultRequestHeader> = existing.to_vec();
-    let mut added = false;
-    for entry in seeded {
-        let already_present = merged
-            .iter()
-            .any(|h| h.name.eq_ignore_ascii_case(entry.name));
-        if !already_present {
-            merged.push(seeded_header_to_model(entry));
-            added = true;
-        }
-    }
-
-    if !added {
-        return None;
-    }
-    Some(merged)
-}
-
+/// Preserve admin permissions while adding newly seeded missing permissions.
 fn reconcile_seeded_permissions(stored: Option<&[String]>, seeded: &[&str]) -> Option<Vec<String>> {
     let mut merged = stored.unwrap_or_default().to_vec();
     let mut added = false;
@@ -5745,60 +5846,110 @@ async fn ensure_seeded_default_request_headers(
     service_col: &mongodb::Collection<DownstreamService>,
     now: chrono::DateTime<Utc>,
 ) -> AppResult<()> {
-    let mut updated: u32 = 0;
-
+    let raw = service_col.clone_with_type::<bson::Document>();
     for seed in DEFAULT_SERVICE_SEEDS {
         let Some(seeded) = seed.default_request_headers else {
             continue;
         };
-        let Some(service) = service_col
-            .find_one(doc! { "slug": seed.service_slug })
-            .await?
-        else {
-            continue;
-        };
-
-        let existing_len = service
-            .default_request_headers
-            .as_ref()
-            .map(|h| h.len())
-            .unwrap_or(0);
-        let Some(merged) =
-            reconcile_seeded_headers(service.default_request_headers.as_deref(), seeded)
-        else {
-            continue;
-        };
-
-        let headers_bson = bson::to_bson(&merged).map_err(|e| {
-            AppError::Internal(format!("Failed to serialize default_request_headers: {e}"))
-        })?;
-
-        service_col
-            .update_one(
-                doc! { "_id": &service.id },
-                doc! { "$set": {
-                    "default_request_headers": headers_bson,
-                    "updated_at": bson::DateTime::from_chrono(now),
-                }},
-            )
-            .await?;
-
-        tracing::info!(
-            slug = seed.service_slug,
-            added = merged.len().saturating_sub(existing_len),
-            had_existing = existing_len > 0,
-            "Reconciled seeded default_request_headers"
-        );
-        updated += 1;
+        let mut reconciled = false;
+        for _ in 0..4 {
+            let Some(source) = raw.find_one(doc! {"slug":seed.service_slug}).await? else {
+                reconciled = true;
+                break;
+            };
+            let Some((filter, update)) = seeded_header_update(&source, seeded, now)? else {
+                reconciled = true;
+                break;
+            };
+            if raw.update_one(filter, update).await?.matched_count == 1 {
+                reconciled = true;
+                break;
+            }
+            // An edit, migration or ownership transfer won. Reload the exact
+            // opaque source; never reinstall our stale ciphertext snapshot.
+        }
+        if !reconciled {
+            return Err(AppError::Conflict(
+                "Seeded headers changed repeatedly; retry reconciliation".into(),
+            ));
+        }
     }
+    Ok(())
+}
 
-    if updated > 0 {
-        tracing::info!(
-            count = updated,
-            "Seeded default_request_headers reconcile complete"
+/// Preserve opaque storage, including unknown additive fields. The predicate
+/// binds BOTH ownership representation and the exact BSON array (not a model
+/// reserialization, which can add absent fields).
+fn seeded_header_update(
+    source: &bson::Document,
+    seeded: &[SeededHeader],
+    now: chrono::DateTime<Utc>,
+) -> AppResult<Option<(bson::Document, bson::Document)>> {
+    use crate::models::default_request_header::MAX_DEFAULT_HEADERS;
+    let original = source
+        .get("default_request_headers")
+        .cloned()
+        .unwrap_or(bson::Bson::Null);
+    let mut values = match &original {
+        bson::Bson::Null => Vec::new(),
+        bson::Bson::Array(values) => values.clone(),
+        _ => return Err(AppError::Internal("Invalid seeded header storage".into())),
+    };
+    let original_len = values.len();
+    for entry in seeded {
+        if !values.iter().any(|value| {
+            value
+                .as_document()
+                .and_then(|h| h.get_str("name").ok())
+                .is_some_and(|name| name.eq_ignore_ascii_case(entry.name))
+        }) {
+            values.push(
+                bson::to_bson(&seeded_header_to_model(entry))
+                    .map_err(|_| AppError::Internal("Seeded header encoding failed".into()))?,
+            );
+        }
+    }
+    if values.len() > MAX_DEFAULT_HEADERS {
+        return Err(AppError::Conflict("Required seeded headers exceed the 16-header limit; remove custom headers before reconciliation".into()));
+    }
+    if values.len() == original_len {
+        return Ok(None);
+    }
+    let mut filter = doc! {"_id":source.get("_id").cloned().ok_or_else(|| AppError::Internal("Missing seeded service identity".into()))?,
+    "default_request_headers":original};
+    for field in ["owner_user_id", "created_by"] {
+        filter.insert(
+            field,
+            source.get(field).cloned().unwrap_or(bson::Bson::Null),
         );
     }
+    Ok(Some((
+        filter,
+        doc! {"$set":{"default_request_headers":values,"updated_at":bson::DateTime::from_chrono(now)}},
+    )))
+}
 
+/// Reserve capacity for system-required defaults during authoring too. No
+/// custom value is discarded to make room during restart reconciliation.
+pub(crate) fn validate_seeded_header_capacity<'a>(
+    slug: &str,
+    names: impl IntoIterator<Item = &'a str>,
+) -> AppResult<()> {
+    let mut names: std::collections::HashSet<String> =
+        names.into_iter().map(str::to_ascii_lowercase).collect();
+    if let Some(seed) = DEFAULT_SERVICE_SEEDS
+        .iter()
+        .find(|seed| seed.service_slug == slug)
+    {
+        for header in seed.default_request_headers.unwrap_or_default() {
+            names.insert(header.name.to_ascii_lowercase());
+        }
+    }
+    if names.len() > crate::models::default_request_header::MAX_DEFAULT_HEADERS {
+        return Err(AppError::ValidationError(
+            "Default headers including required seeded names must not exceed 16 entries".into(),
+        ));
+    }
     Ok(())
 }
 
@@ -6378,6 +6529,7 @@ pub async fn seed_default_services(
             .map(|entries| entries.iter().map(seeded_header_to_model).collect());
 
         let service = DownstreamService {
+            secret_context_versions: Default::default(),
             offering_kind: Default::default(),
             topics: Vec::new(),
             supplier: None,
@@ -7256,6 +7408,7 @@ pub async fn create_provider_with_revocation(
     let revocation = match (revocation, oauth_config.as_ref()) {
         (Some(revocation), _) => Some(revocation),
         (None, Some(oauth)) => oauth.revocation_url.as_ref().map(|url| RevocationConfig {
+            effect_scope: None,
             request_encoding: "form".to_string(),
             style: "rfc7009".to_string(),
             url: url.clone(),
@@ -7299,27 +7452,75 @@ pub async fn create_provider_with_revocation(
     // Encrypt OAuth credentials if provided
     let (client_id_enc, client_secret_enc) = if let Some(ref oauth) = oauth_config {
         let cid = match encrypt_nonempty_credential(oauth.client_id.as_ref())? {
-            Some(value) => Some(encryption_keys.encrypt(value.as_bytes()).await?),
+            Some(value) => Some(
+                super::credential_record_service::encrypt(
+                    encryption_keys,
+                    COLLECTION_NAME,
+                    &id,
+                    super::credential_record_service::PLATFORM_OWNER,
+                    "client_id_encrypted",
+                    value.as_bytes(),
+                )
+                .await?,
+            ),
             None => None,
         };
         let csec = match encrypt_nonempty_credential(oauth.client_secret.as_ref())? {
-            Some(value) => Some(encryption_keys.encrypt(value.as_bytes()).await?),
+            Some(value) => Some(
+                super::credential_record_service::encrypt(
+                    encryption_keys,
+                    COLLECTION_NAME,
+                    &id,
+                    super::credential_record_service::PLATFORM_OWNER,
+                    "client_secret_encrypted",
+                    value.as_bytes(),
+                )
+                .await?,
+            ),
             None => None,
         };
         (cid, csec)
     } else if let Some(ref dc) = device_code_config {
         let cid = match encrypt_nonempty_credential(dc.client_id.as_ref())? {
-            Some(value) => Some(encryption_keys.encrypt(value.as_bytes()).await?),
+            Some(value) => Some(
+                super::credential_record_service::encrypt(
+                    encryption_keys,
+                    COLLECTION_NAME,
+                    &id,
+                    super::credential_record_service::PLATFORM_OWNER,
+                    "client_id_encrypted",
+                    value.as_bytes(),
+                )
+                .await?,
+            ),
             None => None,
         };
         let csec = match encrypt_nonempty_credential(dc.client_secret.as_ref())? {
-            Some(value) => Some(encryption_keys.encrypt(value.as_bytes()).await?),
+            Some(value) => Some(
+                super::credential_record_service::encrypt(
+                    encryption_keys,
+                    COLLECTION_NAME,
+                    &id,
+                    super::credential_record_service::PLATFORM_OWNER,
+                    "client_secret_encrypted",
+                    value.as_bytes(),
+                )
+                .await?,
+            ),
             None => None,
         };
         (cid, csec)
     } else if let Some(ref tw) = telegram_widget_config {
         let bot_token = normalize_telegram_bot_token(&tw.bot_token)?;
-        let csec = encryption_keys.encrypt(bot_token.as_bytes()).await?;
+        let csec = super::credential_record_service::encrypt(
+            encryption_keys,
+            COLLECTION_NAME,
+            &id,
+            super::credential_record_service::PLATFORM_OWNER,
+            "client_secret_encrypted",
+            bot_token.as_bytes(),
+        )
+        .await?;
         (None, Some(csec))
     } else {
         (None, None)
@@ -7331,7 +7532,23 @@ pub async fn create_provider_with_revocation(
     };
 
     let has_admin_revocation = revocation.is_some();
+    let mut versions = std::collections::BTreeMap::new();
+    if client_id_enc.is_some() {
+        super::credential_record_service::mark_version(
+            &mut versions,
+            encryption_keys,
+            "client_id_encrypted",
+        );
+    }
+    if client_secret_enc.is_some() {
+        super::credential_record_service::mark_version(
+            &mut versions,
+            encryption_keys,
+            "client_secret_encrypted",
+        );
+    }
     let provider = ProviderConfig {
+        secret_context_versions: versions,
         id: id.clone(),
         slug: slug.to_string(),
         name: name.to_string(),
@@ -7519,11 +7736,13 @@ pub async fn update_provider_if_unchanged(
         Some(explicit) => Some(explicit),
         None => updates.revocation_url.as_ref().map(|url| {
             Some(RevocationConfig {
+                effect_scope: None,
                 url: url.clone(),
                 ..existing
                     .revocation
                     .clone()
                     .unwrap_or_else(|| RevocationConfig {
+                        effect_scope: None,
                         request_encoding: "form".to_string(),
                         style: "rfc7009".to_string(),
                         url: url.clone(),
@@ -7636,7 +7855,21 @@ pub async fn update_provider_if_unchanged(
         set_doc.insert("default_scopes", scopes);
     }
     if let Some(ref cid) = updates.client_id {
-        let enc = encryption_keys.encrypt(cid.trim().as_bytes()).await?;
+        super::credential_record_service::mark_classic_update(
+            &mut set_doc,
+            &mut unset_doc,
+            encryption_keys,
+            "client_id_encrypted",
+        );
+        let enc = super::credential_record_service::encrypt(
+            encryption_keys,
+            COLLECTION_NAME,
+            provider_id,
+            super::credential_record_service::PLATFORM_OWNER,
+            "client_id_encrypted",
+            cid.trim().as_bytes(),
+        )
+        .await?;
         set_doc.insert(
             "client_id_encrypted",
             bson::Binary {
@@ -7646,12 +7879,26 @@ pub async fn update_provider_if_unchanged(
         );
     }
     if let Some(ref csec) = updates.client_secret {
+        super::credential_record_service::mark_classic_update(
+            &mut set_doc,
+            &mut unset_doc,
+            encryption_keys,
+            "client_secret_encrypted",
+        );
         let secret_value = if existing.provider_type == "telegram_widget" {
             normalize_telegram_bot_token(csec)?
         } else {
             csec.trim().to_string()
         };
-        let enc = encryption_keys.encrypt(secret_value.as_bytes()).await?;
+        let enc = super::credential_record_service::encrypt(
+            encryption_keys,
+            COLLECTION_NAME,
+            provider_id,
+            super::credential_record_service::PLATFORM_OWNER,
+            "client_secret_encrypted",
+            secret_value.as_bytes(),
+        )
+        .await?;
         set_doc.insert(
             "client_secret_encrypted",
             bson::Binary {
@@ -7796,6 +8043,8 @@ pub async fn update_provider_if_unchanged(
     if clearing_credentials {
         unset_doc.insert("client_id_encrypted", "");
         unset_doc.insert("client_secret_encrypted", "");
+        unset_doc.insert("secret_context_versions.client_id_encrypted", "");
+        unset_doc.insert("secret_context_versions.client_secret_encrypted", "");
     }
     let mut update_doc = doc! { "$set": set_doc };
     if !unset_doc.is_empty() {
@@ -7951,21 +8200,48 @@ pub async fn delete_provider(db: &mongodb::Database, provider_id: &str) -> AppRe
 
 #[cfg(test)]
 mod tests {
+    fn reconcile_seeded_headers(
+        stored: Option<&[DefaultRequestHeader]>,
+        seeded: &[SeededHeader],
+    ) -> Option<Vec<DefaultRequestHeader>> {
+        if seeded.is_empty() {
+            return None;
+        }
+        let existing = stored.unwrap_or(&[]);
+
+        let mut merged: Vec<DefaultRequestHeader> = existing.to_vec();
+        let mut added = false;
+        for entry in seeded {
+            let already_present = merged
+                .iter()
+                .any(|h| h.name.eq_ignore_ascii_case(entry.name));
+            if !already_present {
+                merged.push(super::seeded_header_to_model(entry));
+                added = true;
+            }
+        }
+
+        if !added {
+            return None;
+        }
+        Some(merged)
+    }
     use super::{
         ANTHROPIC_DEFAULT_HEADERS, DEFAULT_SERVICE_SEEDS, MANAGED_OAUTH_PROVIDER_SEEDS,
         NOTION_DEFAULT_HEADERS, OPENROUTER_DEFAULT_HEADERS, SeededHeader,
-        normalize_telegram_bot_token, normalize_telegram_bot_username, reconcile_seeded_headers,
-        seed_capability_override,
+        normalize_telegram_bot_token, normalize_telegram_bot_username, seed_capability_override,
     };
     use crate::errors::AppError;
-    use crate::models::default_request_header::DefaultRequestHeader;
+    use crate::models::default_request_header::StoredDefaultRequestHeader as DefaultRequestHeader;
 
     fn hdr(name: &str, value: &str) -> DefaultRequestHeader {
         DefaultRequestHeader {
             name: name.to_string(),
-            value: value.to_string(),
+            value: value.to_string().into(),
             overridable: false,
             sensitive: false,
+            value_encrypted: None,
+            value_context_version: None,
         }
     }
 
@@ -8607,9 +8883,11 @@ mod tests {
         let stored = vec![
             DefaultRequestHeader {
                 name: "Anthropic-Version".to_string(),
-                value: "2024-10-22".to_string(),
+                value: "2024-10-22".to_string().into(),
                 overridable: true,
                 sensitive: false,
+                value_encrypted: None,
+                value_context_version: None,
             },
             hdr("x-admin-custom", "keep"),
         ];
@@ -8622,14 +8900,15 @@ mod tests {
             .find(|h| h.name.eq_ignore_ascii_case("anthropic-version"))
             .expect("admin's anthropic-version survives");
         assert_eq!(
-            version.value, "2024-10-22",
+            version.value.as_str(),
+            "2024-10-22",
             "admin-edited value must not be clobbered by the seed default"
         );
         assert_eq!(version.name, "Anthropic-Version", "admin casing preserved");
         assert!(
             merged
                 .iter()
-                .any(|h| h.name == "x-admin-custom" && h.value == "keep"),
+                .any(|h| h.name == "x-admin-custom" && h.value.as_str() == "keep"),
             "unrelated admin headers must be preserved"
         );
         assert!(
@@ -8669,7 +8948,7 @@ mod tests {
             1,
             "name match must be case-insensitive; no duplicate rows"
         );
-        assert_eq!(version_matches[0].value, "2025-01-01");
+        assert_eq!(version_matches[0].value.as_str(), "2025-01-01");
     }
 
     #[test]
@@ -8695,6 +8974,7 @@ mod tests {
     fn make_test_provider(slug: &str, provider_type: &str) -> ProviderConfig {
         let now = Utc::now();
         ProviderConfig {
+            secret_context_versions: Default::default(),
             id: Uuid::new_v4().to_string(),
             slug: slug.to_string(),
             name: format!("Test {slug}"),
@@ -9599,7 +9879,8 @@ mod tests {
     // ── seeded_header_to_model tests ────────────────────────────────
 
     #[test]
-    fn seeded_header_to_model_copies_all_fields() {
+    #[should_panic(expected = "Static catalog seeds cannot contain sensitive header values")]
+    fn sensitive_static_seed_is_rejected_before_plaintext_storage() {
         let seed = SeededHeader {
             name: "x-custom",
             value: "test-value",
@@ -9608,7 +9889,7 @@ mod tests {
         };
         let model = super::seeded_header_to_model(&seed);
         assert_eq!(model.name, "x-custom");
-        assert_eq!(model.value, "test-value");
+        assert_eq!(model.value.as_str(), "test-value");
         assert!(model.overridable);
         assert!(model.sensitive);
     }
@@ -9623,7 +9904,7 @@ mod tests {
         };
         let model = super::seeded_header_to_model(&seed);
         assert_eq!(model.name, "content-type");
-        assert_eq!(model.value, "application/json");
+        assert_eq!(model.value.as_str(), "application/json");
         assert!(!model.overridable);
         assert!(!model.sensitive);
     }
@@ -10969,6 +11250,7 @@ mod tests {
             &db,
             None,
             Some(RevocationConfig {
+                effect_scope: None,
                 request_encoding: "form".to_string(),
                 style: "rfc7009".to_string(),
                 url: "https://example.com/revoke-rfc7009".to_string(),
@@ -10988,6 +11270,9 @@ mod tests {
             &db,
             Some("https://example.com/deprecated-alias"),
             Some(RevocationConfig {
+                effect_scope: Some(
+                    crate::models::provider_config::RevocationEffectScope::RequestScoped,
+                ),
                 request_encoding: "form".to_string(),
                 style: "github".to_string(),
                 url: "https://api.github.com/applications".to_string(),
@@ -11025,6 +11310,7 @@ mod tests {
             make_test_provider(&format!("revocation-update-{}", Uuid::new_v4()), "oauth2");
         provider.revocation_url = Some("https://example.com/original".to_string());
         provider.revocation = Some(RevocationConfig {
+            effect_scope: None,
             request_encoding: "form".to_string(),
             style: "rfc7009".to_string(),
             url: "https://example.com/original".to_string(),
@@ -11057,6 +11343,7 @@ mod tests {
             &provider.id,
             super::ProviderUpdateInput {
                 revocation: Some(Some(RevocationConfig {
+                    effect_scope: None,
                     request_encoding: "form".to_string(),
                     style: "github".to_string(),
                     url: "https://api.github.com/applications".to_string(),
@@ -11078,6 +11365,7 @@ mod tests {
             &provider.id,
             super::ProviderUpdateInput {
                 revocation: Some(Some(RevocationConfig {
+                    effect_scope: None,
                     request_encoding: "form".to_string(),
                     style: "rfc7009".to_string(),
                     url: "https://example.com/new-rfc7009".to_string(),
@@ -11131,6 +11419,7 @@ mod tests {
     #[tokio::test]
     async fn validate_revocation_config_rejects_invalid_admin_input() {
         let valid = RevocationConfig {
+            effect_scope: None,
             request_encoding: "form".to_string(),
             style: "rfc7009".to_string(),
             url: "https://example.com/revoke".to_string(),
@@ -11157,6 +11446,7 @@ mod tests {
             ("rfc7009", "inherit", "https://127.0.0.1/revoke"),
         ] {
             let config = RevocationConfig {
+                effect_scope: None,
                 request_encoding: "form".to_string(),
                 style: style.to_string(),
                 url: url.to_string(),
@@ -11174,6 +11464,7 @@ mod tests {
     fn trusted_seed_revocation_validation_does_not_require_dns() {
         let mut provider = make_test_provider("offline-revocation-seed", "oauth2");
         provider.revocation = Some(RevocationConfig {
+            effect_scope: None,
             request_encoding: "form".to_string(),
             style: "rfc7009".to_string(),
             url: "https://does-not-resolve.invalid/revoke".to_string(),
@@ -11197,6 +11488,7 @@ mod tests {
         assert!(super::validate_seeded_provider_options(&provider).is_err());
         provider.oauth_request_headers.clear();
         provider.revocation = Some(RevocationConfig {
+            effect_scope: None,
             request_encoding: "xml".into(),
             style: "rfc7009".into(),
             url: "https://does-not-resolve.invalid/revoke".into(),
@@ -11604,7 +11896,7 @@ mod tests {
             ("tiktok", "rfc7009", "inherit", false),
             ("twitch", "rfc7009", "client_id", false),
             ("reddit", "rfc7009", "inherit", false),
-            ("google-cloud", "rfc7009", "none", false),
+            ("google-cloud", "rfc7009", "none", true),
         ];
 
         for (slug, style, auth, revokes_grant) in expected {
@@ -11864,7 +12156,7 @@ mod tests {
             .unwrap();
         let headers = service.default_request_headers.unwrap_or_default();
         assert!(headers.iter().any(|h| {
-            h.name.eq_ignore_ascii_case("x-restli-protocol-version") && h.value == "2.0.0"
+            h.name.eq_ignore_ascii_case("x-restli-protocol-version") && h.value.as_str() == "2.0.0"
         }));
     }
 
@@ -13528,5 +13820,93 @@ mod tests {
         assert!(!caps.supports_websocket);
         assert!(!caps.supports_streaming);
         assert!(!streaming);
+    }
+}
+
+#[cfg(test)]
+mod opaque_seeded_header_tests {
+    use super::*;
+    #[tokio::test]
+    async fn seed_reconciliation_cas_preserves_encrypted_edit_migration_and_transfer() {
+        let db = crate::test_utils::connect_transaction_test_database("seeded_header_cas").await;
+        let col = db.collection::<bson::Document>("downstream_services");
+        let original = doc! {"_id":"row", "owner_user_id":"owner", "created_by":"creator",
+        "default_request_headers":[{"name":"X-Secret","value":"", "sensitive":true,
+            "value_encrypted":bson::Binary {subtype:bson::spec::BinarySubtype::Generic,bytes:vec![7;40]},
+            "value_context_version":3,"additive_unknown":"preserved"}]};
+        col.insert_one(original.clone()).await.unwrap();
+        let (filter, update) =
+            seeded_header_update(&original, ANTHROPIC_DEFAULT_HEADERS, Utc::now())
+                .unwrap()
+                .unwrap();
+        for change in [
+            doc! {"owner_user_id":"next-owner"},
+            doc! {"default_request_headers":[{"name":"X-Replacement","value":"new"}]},
+            doc! {"default_request_headers.0.value_context_version":4},
+        ] {
+            col.replace_one(doc! {"_id":"row"}, original.clone())
+                .await
+                .unwrap();
+            col.update_one(doc! {"_id":"row"}, doc! {"$set":change})
+                .await
+                .unwrap();
+            assert_eq!(
+                col.update_one(filter.clone(), update.clone())
+                    .await
+                    .unwrap()
+                    .matched_count,
+                0
+            );
+        }
+        col.replace_one(doc! {"_id":"row"}, original.clone())
+            .await
+            .unwrap();
+        assert_eq!(
+            col.update_one(filter, update).await.unwrap().matched_count,
+            1
+        );
+        let actual = col.find_one(doc! {"_id":"row"}).await.unwrap().unwrap();
+        assert_eq!(
+            actual.get_array("default_request_headers").unwrap()[0],
+            original.get_array("default_request_headers").unwrap()[0]
+        );
+        assert!(
+            seeded_header_update(&actual, ANTHROPIC_DEFAULT_HEADERS, Utc::now())
+                .unwrap()
+                .is_none()
+        );
+        db.drop().await.unwrap();
+    }
+    #[test]
+    fn required_headers_reserve_capacity_and_never_install_seventeen() {
+        let names: Vec<String> = (0..16).map(|n| format!("X-Custom-{n}")).collect();
+        assert!(
+            validate_seeded_header_capacity("llm-anthropic", names.iter().map(String::as_str))
+                .is_err()
+        );
+        let mut row = doc! {"_id":"row","default_request_headers":names.iter().map(|name|doc! {"name":name,"value":"v"}).collect::<Vec<_>>()};
+        assert!(matches!(
+            seeded_header_update(&row, ANTHROPIC_DEFAULT_HEADERS, Utc::now()),
+            Err(AppError::Conflict(_))
+        ));
+        row.insert(
+            "default_request_headers",
+            names[..14]
+                .iter()
+                .map(|name| doc! {"name":name,"value":"v"})
+                .collect::<Vec<_>>(),
+        );
+        let (_, update) = seeded_header_update(&row, ANTHROPIC_DEFAULT_HEADERS, Utc::now())
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            update
+                .get_document("$set")
+                .unwrap()
+                .get_array("default_request_headers")
+                .unwrap()
+                .len(),
+            16
+        );
     }
 }

@@ -412,7 +412,7 @@ describe("three-step device approval", () => {
       expect(screen.queryByText("Change account")).not.toBeInTheDocument();
     },
   );
-  it("requires the second factor inside the same request before showing access choices", async () => {
+  it.each(["123456", "Ab_12-xy", "0123456789abcdef0123456789abcdef"])("requires second factor %s inside the same request before showing access choices", async (code) => {
     mocks.auth = false;
     const identity = {
       id: "22222222-2222-4222-8222-222222222222",
@@ -452,9 +452,9 @@ describe("three-step device approval", () => {
     expect(
       screen.queryByRole("button", { name: "Continue to approval" }),
     ).not.toBeInTheDocument();
-    expect(screen.getByLabelText("Authenticator code")).toBeVisible();
-    fireEvent.change(screen.getByLabelText("Authenticator code"), {
-      target: { value: "123456" },
+    expect(screen.getByLabelText("Authenticator or recovery code")).toBeVisible();
+    fireEvent.change(screen.getByLabelText("Authenticator or recovery code"), {
+      target: { value: code },
     });
     await click("Verify & continue");
     expect(
@@ -462,7 +462,7 @@ describe("three-step device approval", () => {
     ).toBeVisible();
     expect(mocks.preview).toHaveBeenCalledWith(
       `/auth/approval/${identity.id}/mfa`,
-      expect.objectContaining({ body: { code: "123456" } }),
+      expect.objectContaining({ body: { code } }),
     );
     expect(approvals()).toEqual([]);
   });

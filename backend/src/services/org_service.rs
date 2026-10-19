@@ -922,6 +922,14 @@ pub async fn create_membership(
         ));
     }
 
+    let mut transaction = db.client().start_session().await?;
+    transaction
+        .start_transaction()
+        .write_concern(mongodb::options::WriteConcern::majority())
+        .await?;
+    let result: AppResult<OrgMembership> = async {
+    super::org_membership_authority::fence_live_member(db, member_user_id, &mut transaction).await?;
+    super::org_membership_authority::fence_org(db, org_user_id, &mut transaction).await?;
     let collection = db.collection::<OrgMembership>(ORG_MEMBERSHIPS);
 
     // Look up any existing row (active or revoked) for this pair.
@@ -930,6 +938,7 @@ pub async fn create_membership(
             "org_user_id": org_user_id,
             "member_user_id": member_user_id,
         })
+        .session(&mut transaction)
         .await?;
 
     if let Some(row) = existing {
@@ -958,6 +967,7 @@ pub async fn create_membership(
                     "created_at": now_bson,
                 }},
             )
+            .session(&mut transaction)
             .await?;
         if changed.matched_count != 1 {
             return Err(AppError::Conflict(
@@ -988,13 +998,15 @@ pub async fn create_membership(
         revoked_at: None,
     };
 
-    match collection.insert_one(&membership).await {
+    match collection.insert_one(&membership).session(&mut transaction).await {
         Ok(_) => Ok(membership),
         Err(e) if is_duplicate_key_error(&e) => Err(AppError::Conflict(
             "User is already a member of this org".to_string(),
         )),
         Err(e) => Err(AppError::DatabaseError(e)),
     }
+    }.await;
+    super::org_membership_authority::finish(transaction, result).await
 }
 
 /// List the memberships of a given member user. Active by default;
@@ -1101,17 +1113,56 @@ pub async fn update_membership(
         return Err(AppError::BadRequest("No fields to update".to_string()));
     }
 
-    db.collection::<OrgMembership>(ORG_MEMBERSHIPS)
-        .update_one(
-            doc! { "_id": membership_id, "revoked_at": bson::Bson::Null },
-            doc! { "$set": update },
-        )
+    let mut transaction = db.client().start_session().await?;
+    transaction
+        .start_transaction()
+        .write_concern(mongodb::options::WriteConcern::majority())
         .await?;
-
-    db.collection::<OrgMembership>(ORG_MEMBERSHIPS)
-        .find_one(doc! { "_id": membership_id })
-        .await?
-        .ok_or_else(|| AppError::NotFound(format!("membership {membership_id}")))
+    let result: AppResult<OrgMembership> = async {
+        let current = db
+            .collection::<OrgMembership>(ORG_MEMBERSHIPS)
+            .find_one(doc! {"_id":membership_id,"revoked_at":null})
+            .session(&mut transaction)
+            .await?
+            .ok_or_else(|| AppError::NotFound("Active membership not found".into()))?;
+        super::org_membership_authority::fence_org(db, &current.org_user_id, &mut transaction)
+            .await?;
+        if role.is_some_and(|role| role != OrgRole::Admin) && current.role == OrgRole::Admin {
+            super::org_membership_authority::ensure_other_admin(
+                db,
+                &current.org_user_id,
+                &current.member_user_id,
+                &mut transaction,
+            )
+            .await?;
+            super::node_service::retire_org_registrations_in_session(
+                db,
+                &current.org_user_id,
+                &current.member_user_id,
+                &mut transaction,
+            )
+            .await?;
+        }
+        if role == Some(OrgRole::Admin) {
+            super::org_membership_authority::fence_live_member(
+                db,
+                &current.member_user_id,
+                &mut transaction,
+            )
+            .await?;
+        }
+        db.collection::<OrgMembership>(ORG_MEMBERSHIPS)
+            .find_one_and_update(
+                doc! {"_id": membership_id,"revoked_at":null},
+                doc! {"$set":update},
+            )
+            .return_document(mongodb::options::ReturnDocument::After)
+            .session(&mut transaction)
+            .await?
+            .ok_or_else(|| AppError::Conflict("Membership changed; reload before editing".into()))
+    }
+    .await;
+    super::org_membership_authority::finish(transaction, result).await
 }
 
 /// Soft-delete a membership by setting `revoked_at`.
@@ -1120,25 +1171,54 @@ pub async fn revoke_membership(
     org_user_id: &str,
     member_user_id: &str,
 ) -> AppResult<()> {
-    let now = bson::DateTime::from_chrono(Utc::now());
-    let result = db
-        .collection::<OrgMembership>(ORG_MEMBERSHIPS)
-        .update_one(
-            doc! {
-                "org_user_id": org_user_id,
-                "member_user_id": member_user_id,
-                "revoked_at": bson::Bson::Null,
-            },
-            doc! { "$set": { "revoked_at": now } },
-        )
+    let mut transaction = db.client().start_session().await?;
+    transaction
+        .start_transaction()
+        .write_concern(mongodb::options::WriteConcern::majority())
         .await?;
-
-    if result.matched_count == 0 {
-        return Err(AppError::NotFound(
-            "active membership not found".to_string(),
-        ));
+    let result: AppResult<()> = async {
+        super::org_membership_authority::fence_org(db, org_user_id, &mut transaction).await?;
+        let current = db
+            .collection::<OrgMembership>(ORG_MEMBERSHIPS)
+            .find_one(doc! {
+                "org_user_id":org_user_id,"member_user_id":member_user_id,"revoked_at":null
+            })
+            .session(&mut transaction)
+            .await?
+            .ok_or_else(|| AppError::NotFound("Active membership not found".into()))?;
+        if current.role == OrgRole::Admin {
+            super::org_membership_authority::ensure_other_admin(
+                db,
+                org_user_id,
+                member_user_id,
+                &mut transaction,
+            )
+            .await?;
+            super::node_service::retire_org_registrations_in_session(
+                db,
+                org_user_id,
+                member_user_id,
+                &mut transaction,
+            )
+            .await?;
+        }
+        let result = db
+            .collection::<OrgMembership>(ORG_MEMBERSHIPS)
+            .update_one(
+                doc! {"_id":&current.id,"revoked_at":null},
+                doc! {"$set":{"revoked_at":bson::DateTime::now()}},
+            )
+            .session(&mut transaction)
+            .await?;
+        if result.matched_count != 1 {
+            return Err(AppError::Conflict(
+                "Membership changed; reload before removal".into(),
+            ));
+        }
+        Ok(())
     }
-    Ok(())
+    .await;
+    super::org_membership_authority::finish(transaction, result).await
 }
 
 /// True when the actor is an active admin of the given org.

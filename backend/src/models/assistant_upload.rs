@@ -6,6 +6,8 @@ pub use super::assistant_attachment::COLLECTION_NAME;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct AssistantUpload {
+    #[serde(default)]
+    pub secret_context_versions: std::collections::BTreeMap<String, u8>,
     #[serde(rename = "_id")]
     pub id: String,
     pub origin: String,

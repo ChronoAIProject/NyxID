@@ -239,6 +239,7 @@ mod tests {
     fn test_provider(provider_id: &str, credential_mode: &str, is_active: bool) -> ProviderConfig {
         let now = chrono::Utc::now();
         ProviderConfig {
+            secret_context_versions: Default::default(),
             id: provider_id.to_string(),
             slug: format!("test-{}", &provider_id[..8]),
             name: "Test Provider".to_string(),

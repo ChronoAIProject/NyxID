@@ -1,11 +1,11 @@
 ---
 title: Privacy Policy
-effective_date: 2026-05-11
+effective_date: 2026-10-19
 ---
 
 # Privacy Policy
 
-**Effective date: 2026-05-11**
+**Effective date: 2026-10-19**
 
 ## 1. Introduction
 
@@ -25,7 +25,7 @@ We collect the minimum data necessary to provide secure authentication and appro
 
 **Authentication data**
 
-- Session tokens and refresh tokens (encrypted at rest server-side, stored in OS-protected secure storage on mobile clients — iOS Keychain via Expo SecureStore, Android EncryptedSharedPreferences)
+- Session token hashes and refresh-token JTI/revocation metadata on the server; authentication tokens in platform-protected Expo SecureStore on mobile. Some short-lived delivery protocols temporarily retain encrypted credentials for one-time delivery.
 - Multi-factor authentication (MFA) secrets (encrypted at rest)
 - OAuth provider tokens when you connect third-party accounts (Google, GitHub, Apple)
 
@@ -43,7 +43,7 @@ We collect the minimum data necessary to provide secure authentication and appro
 - User-agent string and device type
 - Timestamps of login events and API requests
 
-These are received by our servers as part of normal HTTPS requests. The applications do not collect, store, or share this technical metadata beyond what the server needs for security and audit.
+Servers receive technical metadata with HTTPS requests for security and audit. Optional product analytics is a separate data flow described in section 8.
 
 ## 3. How We Use Your Information
 
@@ -58,9 +58,9 @@ These are received by our servers as part of normal HTTPS requests. The applicat
 
 ## 4. Data Storage & Security
 
-All data is stored in encrypted MongoDB databases. Sensitive server-side fields (OAuth tokens, MFA secrets, API credentials) are encrypted with AES-256 at the application layer. Passwords use Argon2id with per-user salts.
+NyxID stores account data in MongoDB. Dedicated OAuth-token, MFA-secret and API-credential fields use application-layer AES-256 encryption. Passwords use Argon2id with per-user salts; session tokens are hashed rather than reversibly encrypted. Sensitive default request headers are currently a known plaintext exception. Database/storage encryption and backup protections depend on the deployment.
 
-All communications between clients and our servers use TLS 1.2+. JWT tokens are signed with RSA-256 keys rotated periodically.
+Production deployments should use HTTPS; transport termination is operator-configured. JWTs use RS256 signatures. Signing-key rotation is managed by the deployment operator. Ask the deployment operator about its key-rotation schedule.
 
 On mobile, authentication tokens use the OS-provided secure storage (iOS Keychain via Expo SecureStore, Android EncryptedSharedPreferences).
 
@@ -72,25 +72,27 @@ We do **not** sell, rent, or trade your personal information. We share data only
 - **Legal obligations:** when required by law, regulation, or valid legal process
 - **Security:** to prevent fraud or protect the rights and safety of our users
 
-**Sub-processors and service providers**
+**Service and recipient inventory**
 
-NyxID engages the following sub-processors to deliver parts of the Service. We have data processing agreements in place with each that require them to apply appropriate security measures and to process personal data only on our instructions:
+Depending on enabled features and operator configuration, data can reach:
 
-- **PostHog Inc.** (United States) — opt-in product analytics. Data category: anonymous usage events keyed to your NyxID account UUID. Processing region: US.
-- **Firebase Cloud Messaging** by Google LLC (United States) — Android push-notification delivery, where push is enabled. Data category: device push token.
-- **Apple Push Notification service** by Apple Inc. (United States) — iOS push-notification delivery, where push is enabled. Data category: device push token.
+- PostHog: product analytics events, pseudonymous account UUID and scrubbed event metadata. The built-in host is the US ingestion endpoint; self-hosters can override it.
+- Firebase Cloud Messaging and Apple Push Notification service: device push tokens and notification payloads when push is enabled.
+- Hosting, database, storage and transactional email services: stored account/application data, email addresses and transactional messages as configured.
+- Lago and payment integrations such as Stripe: billing identities, usage, checkout and payment references when billing is enabled. Lago may be self-hosted; the implementation alone does not establish an external processor.
+- NyxAgent (`llm-nyx`) or the configured Aevatar broker: conversation content and tool context for the selected assistant engine.
+- Configured model/voice services, including OpenAI and xAI platform-key paths: prompts, audio and related request content needed for the requested feature.
+- Connected OAuth providers, messaging platforms/channel bots, credential-proxy destinations and Oracle workers: the account identifiers, messages or request content needed for the connection or operation you initiate.
 
-NyxID also engages cloud infrastructure providers (for hosting and database services) and a transactional email service provider (for verification emails, password resets, and security notices). A current copy of our service-provider register and executed data processing agreements is available on request to [contact@chrono-ai.fun](mailto:contact@chrono-ai.fun). This list may be updated as the Service evolves; material changes will be reflected in this Privacy Policy with a revised effective date.
-
-> Note: third-party platforms you connect yourself — including messaging-platform integrations (Telegram, Lark / Feishu, Discord, OpenClaw), Channel Bots you register, OAuth providers you use for social login (Google, GitHub, Apple), and any third-party APIs you call via the Credential Proxy — are *not* sub-processors of NyxID. They are independent services governed by their own terms and privacy policies.
+The providers used depend on your deployment and enabled features. User-connected third parties have their own policies. For the applicable service-provider register, processing locations, retention and cross-border transfer arrangements, ask [contact@chrono-ai.fun](mailto:contact@chrono-ai.fun) for the applicable deployment information.
 
 ## 6. Data Retention
 
-Account data is retained while your account is active. When you delete your account (available in Account Settings or the mobile app), all personal data and server-side records are permanently removed within 30 days.
+Account data is retained while the account is active. Account deletion disables access and starts removal of associated data. Some credentials, endpoint and node records may currently remain after account deletion. Contact us for deletion status; removal of all copies and external records within 30 days is not guaranteed.
 
-Security audit logs may be retained for up to 90 days for security compliance before automatic purging. Push tokens are removed from our server when you sign out or delete your account.
+Audit and billing evidence, and some Machine lifecycle/fencing records, are retained for integrity and safety. Audit evidence is not automatically purged after 90 days. Retained evidence remains subject to access controls and the applicable retention arrangements. Organization-owned resources remain owned by the organization when a person's account is deleted.
 
-If you sign in again with the same provider (Apple, Google, GitHub) after deletion, a new account will be created; your previous data will not be restored.
+Analytics deletion is enqueued for provider-side processing and retry; enqueueing does not prove provider completion. Backup retention, legally required evidence retention, other external-provider deletion and actual fulfillment timelines require operator confirmation. Contact us for the status and applicable retention details of a deletion request.
 
 ## 7. Your Rights
 
@@ -98,14 +100,14 @@ You have the right to:
 
 - Access and export your personal data
 - Correct inaccurate information in your profile
-- Delete your account and all server-side data permanently
+- Request account deletion, subject to the retention and implementation limits in section 6
 - Revoke consent for third-party service connections at any time
 - Revoke any active approval grants
 - Disconnect third-party sign-in providers
 - Disable push notifications through your device settings
 - Opt out of non-essential communications
 
-These actions are available through the Settings page in your NyxID dashboard or the Account Settings screen in the mobile app, or by contacting us directly.
+Available settings cover profile changes, account deletion and connection/approval controls. For access/export and other requests, contact [contact@chrono-ai.fun](mailto:contact@chrono-ai.fun). Personal-data exports are requested through that contact channel; they are not currently available as a self-service download.
 
 ## 8. Cookies, Local Storage, and Telemetry
 
@@ -113,15 +115,11 @@ These actions are available through the Settings page in your NyxID dashboard or
 
 **Mobile:** The app stores authentication tokens and push token references using Expo SecureStore and platform-protected local storage. The app does not use tracking cookies, advertising identifiers, or cross-app tracking.
 
-**Telemetry (opt-in, both surfaces).** When you explicitly allow it via the consent banner on web or the Settings toggle on mobile, NyxID collects anonymous usage events (pageviews, clicks, screen visits, uncaught errors) through a third-party analytics provider (PostHog, US region). No credentials, form content, tokens, or the body of any request you make are ever captured. Sensitive URL segments (reset tokens, OAuth callback codes, approval IDs) are dropped at the egress layer before any event leaves your browser or device.
+**Optional product analytics.** Analytics requires account permission, which defaults off, and an account-bound choice on each device. Web and mobile Settings provide separate account and device controls. The CLI provides `nyxid telemetry enable|disable|status` for the selected account/device and `account-enable|account-disable` for account permission. Turning account permission off applies to future analytics dispatch across devices. Turning a device choice off stops that device's optional events and does not change another device's choice. Browser Do-Not-Track/Global Privacy Control and CLI `DO_NOT_TRACK` or `NYXID_TELEMETRY=off` further restrict collection.
 
-**EU→US transfer basis.** PostHog Inc. is established in the United States, which does not benefit from an EU Commission adequacy decision at the time of this Privacy Policy's effective date. Where you are located in the European Economic Area, the United Kingdom, or another jurisdiction subject to cross-border transfer restrictions, your opt-in telemetry data is transferred to PostHog Inc. under the Standard Contractual Clauses (Module 2: Controller-to-Processor) approved by the European Commission in Implementing Decision (EU) 2021/914 of 4 June 2021, supplemented by encryption in transit (TLS 1.2 or higher), encryption at rest, scoped access controls, and the egress-scrubbing safeguards described above. A copy of the executed Standard Contractual Clauses is available on request to [contact@chrono-ai.fun](mailto:contact@chrono-ai.fun).
+Client events pass through authenticated NyxID checks. Pending events lose permission after withdrawal, regrant or an account switch. Events already sent cannot be recalled. Pre-login analytics, session replay, automatic screen/DOM capture and raw exception collection are disabled. Security audit and essential operational records are separate from product analytics.
 
-Events are keyed to your NyxID account UUID after you sign in, allowing us to understand product usage in aggregate without requiring your name or email. Raw events are retained for 90 days; aggregated metrics may be retained longer. If you delete your NyxID account, the backend enqueues a matching delete request to the analytics provider so your event history is removed.
-
-You can change your telemetry choice at any time from the Settings page. We honor the browser Do-Not-Track signal.
-
-**Per-surface scope.** Your telemetry choice is stored on the surface you set it on and does not sync between web dashboard, mobile app, and CLI. Each surface manages its own telemetry setting. The CLI uses `nyxid telemetry enable|disable` or the `DO_NOT_TRACK=1` environment variable. The mobile app exposes a matching toggle in its Settings screen.
+Events can be keyed to the NyxID account UUID, which is a pseudonymous personal identifier. Explicit event categories and bounded metadata exclude raw credentials, request bodies, messages, form contents and URLs. Raw-event and aggregate retention depend on the analytics project settings; ask the deployment operator for the applicable period. Account deletion requests provider erasure; queue acceptance alone does not guarantee provider completion. Contact us for confirmed status.
 
 Self-hosters of NyxID can run with analytics disabled by default, or point at their own analytics project.
 

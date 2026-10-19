@@ -36,6 +36,7 @@ pub struct CatalogEntry {
     pub provider_config_id: Option<String>,
     pub provider_type: Option<String>,
     pub revokes_grant: Option<bool>,
+    pub revocation_effect_scope: Option<String>,
     pub requires_gateway_url: bool,
     pub api_key_instructions: Option<String>,
     pub api_key_url: Option<String>,
@@ -215,7 +216,11 @@ fn build_catalog_entry(
         provider_type: provider.map(|p| p.provider_type.clone()),
         revokes_grant: provider
             .and_then(crate::services::oauth_revocation::effective_revocation)
-            .map(|config| config.revokes_grant),
+            .map(|config| crate::services::oauth_revocation::grant_capable(&config)),
+        revocation_effect_scope: provider
+            .and_then(crate::services::oauth_revocation::effective_revocation)
+            .and_then(|config| crate::services::oauth_revocation::effect_scope_name(&config))
+            .map(str::to_owned),
         requires_gateway_url: provider.is_some_and(|p| p.requires_gateway_url),
         api_key_instructions: provider.and_then(|p| p.api_key_instructions.clone()),
         api_key_url: provider.and_then(|p| p.api_key_url.clone()),
@@ -289,7 +294,9 @@ fn build_catalog_entry(
         skills_revision: svc.skills_revision,
         skills_manifest_digest,
         token_exchange_credential_fields: svc.token_exchange_config.map(|c| c.credential_fields),
-        default_request_headers: svc.default_request_headers,
+        default_request_headers: crate::models::default_request_header::stored_list_for_response(
+            svc.default_request_headers,
+        ),
     }
 }
 
@@ -315,15 +322,17 @@ async fn decrypt_provider_client_id(
         return Ok(None);
     };
 
-    let decrypted = encryption_keys.decrypt(encrypted).await?;
-    let client_id = String::from_utf8(decrypted)
+    let decrypted = super::credential_record_service::CredentialRecord::provider(provider)
+        .decrypt(encryption_keys, "client_id_encrypted", encrypted)
+        .await?;
+    let client_id = std::str::from_utf8(&decrypted)
         .map_err(|_| AppError::Internal("Failed to decode provider client_id".to_string()))?;
     // Whitespace-only counts as absent so a malformed legacy row never
     // advertises a one-click app or builds a broken authorize URL.
     if client_id.trim().is_empty() {
         Ok(None)
     } else {
-        Ok(Some(client_id))
+        Ok(Some(client_id.to_owned()))
     }
 }
 
@@ -339,8 +348,10 @@ async fn provider_platform_secret_nonempty(
     let Some(encrypted) = provider.client_secret_encrypted.as_ref() else {
         return Ok(false);
     };
-    let decrypted = encryption_keys.decrypt(encrypted).await?;
-    let secret = String::from_utf8(decrypted)
+    let decrypted = super::credential_record_service::CredentialRecord::provider(provider)
+        .decrypt(encryption_keys, "client_secret_encrypted", encrypted)
+        .await?;
+    let secret = std::str::from_utf8(&decrypted)
         .map_err(|_| AppError::Internal("Failed to decode provider client_secret".to_string()))?;
     Ok(!secret.trim().is_empty())
 }
@@ -530,8 +541,17 @@ async fn list_catalog_filtered(
         }
         let inference =
             super::inference_service::view(&svc, provider.map(|p| p.slug.as_str()), available);
+        let headers = super::default_header_service::management(
+            Some(encryption_keys),
+            crate::models::downstream_service::COLLECTION_NAME,
+            &svc.id,
+            super::ownership_transfer_service::catalog_owner(&svc),
+            svc.default_request_headers.as_deref(),
+        )
+        .await?;
         let mut entry =
             build_catalog_entry(svc, provider, spr, oauth_client_id, platform_secret_present);
+        entry.default_request_headers = headers;
         entry.platform_key.available = available;
         entry.inference = inference;
         resolved_entries.push(entry);
@@ -733,6 +753,14 @@ pub async fn get_catalog_entry(
     let available = super::platform_key_service::available(db, &svc, user_id).await?;
     let inference =
         super::inference_service::view(&svc, provider.as_ref().map(|p| p.slug.as_str()), available);
+    let headers = super::default_header_service::management(
+        Some(encryption_keys),
+        crate::models::downstream_service::COLLECTION_NAME,
+        &svc.id,
+        super::ownership_transfer_service::catalog_owner(&svc),
+        svc.default_request_headers.as_deref(),
+    )
+    .await?;
     let mut entry = build_catalog_entry(
         svc,
         provider.as_ref(),
@@ -740,6 +768,7 @@ pub async fn get_catalog_entry(
         oauth_client_id,
         platform_secret_present,
     );
+    entry.default_request_headers = headers;
     entry.platform_key.available = available;
     entry.inference = inference;
     Ok(entry)

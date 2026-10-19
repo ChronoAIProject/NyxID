@@ -8,7 +8,6 @@ use sha2::Sha256;
 use tokio::sync::{Semaphore, SemaphorePermit, TryAcquireError};
 use zeroize::Zeroizing;
 
-use crate::crypto::aes::EncryptionKeys;
 use crate::models::provider_config::{ProviderConfig, RevocationConfig};
 use crate::services::oauth_flow;
 use crate::services::user_credentials_service::ResolvedOAuthCredentials;
@@ -28,7 +27,8 @@ static REVOCATION_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
 
 static REVOCATION_SEMAPHORE: Semaphore = Semaphore::const_new(32);
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum RevocationScope {
     Grant,
     Token,
@@ -73,12 +73,43 @@ pub fn effective_revocation(provider: &ProviderConfig) -> Option<RevocationConfi
             .revocation_url
             .as_ref()
             .map(|url| RevocationConfig {
+                effect_scope: None,
                 request_encoding: "form".to_string(),
                 style: "rfc7009".to_string(),
                 url: url.clone(),
                 auth: "inherit".to_string(),
                 revokes_grant: false,
             })
+    })
+}
+
+/// A historical false/default flag is not affirmative effect-scope evidence.
+pub(crate) fn verified_token_only(config: &RevocationConfig) -> bool {
+    use crate::models::provider_config::RevocationEffectScope;
+    match config.effect_scope {
+        Some(RevocationEffectScope::TokenOnly) => !config.revokes_grant,
+        Some(RevocationEffectScope::RequestScoped) => {
+            config.style == "github" && config.revokes_grant
+        }
+        _ => false,
+    }
+}
+
+pub(crate) fn grant_capable(config: &RevocationConfig) -> bool {
+    use crate::models::provider_config::RevocationEffectScope;
+    config.revokes_grant
+        || matches!(
+            config.effect_scope,
+            Some(RevocationEffectScope::GrantWide | RevocationEffectScope::RequestScoped)
+        )
+}
+
+pub(crate) fn effect_scope_name(config: &RevocationConfig) -> Option<&'static str> {
+    use crate::models::provider_config::RevocationEffectScope;
+    config.effect_scope.map(|scope| match scope {
+        RevocationEffectScope::TokenOnly => "token_only",
+        RevocationEffectScope::GrantWide => "grant_wide",
+        RevocationEffectScope::RequestScoped => "request_scoped",
     })
 }
 
@@ -103,6 +134,23 @@ pub async fn revoke_remote(req: RevocationRequest<'_>) -> RevocationOutcome {
         };
     };
 
+    if req.scope == RevocationScope::Token
+        && !verified_token_only(&config)
+        && config.style != "facebook_deauth"
+    {
+        return RevocationOutcome {
+            style: Some(config.style),
+            scope: req.scope,
+            access: req
+                .access_token
+                .as_ref()
+                .map(|_| TokenOutcome::Skipped("unverified_token_only_effect_scope")),
+            refresh: req
+                .refresh_token
+                .as_ref()
+                .map(|_| TokenOutcome::Skipped("unverified_token_only_effect_scope")),
+        };
+    }
     let style = config.style.clone();
     let access_token = req.access_token.as_ref().map(|token| token.as_str());
     let refresh_token = req.refresh_token.as_ref().map(|token| token.as_str());
@@ -171,15 +219,6 @@ pub async fn revoke_remote(req: RevocationRequest<'_>) -> RevocationOutcome {
     }
 }
 
-pub async fn decrypt_token(
-    encryption_keys: &EncryptionKeys,
-    encrypted: Option<&[u8]>,
-) -> Option<Zeroizing<String>> {
-    let mut plaintext = Zeroizing::new(encryption_keys.decrypt(encrypted?).await.ok()?);
-    let token = String::from_utf8(std::mem::take(&mut *plaintext)).ok()?;
-    Some(Zeroizing::new(token))
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Rfc7009Auth {
     None,
@@ -219,7 +258,7 @@ async fn revoke_rfc7009_token(
         return Some(TokenOutcome::Skipped("no_credentials"));
     }
 
-    let mut params = vec![("token".to_string(), token.to_string())];
+    let mut params = zeroize::Zeroizing::new(vec![("token".to_string(), token.to_string())]);
     if config.request_encoding == "form" {
         params.push(("token_type_hint".to_string(), token_type_hint.to_string()));
     }
@@ -227,20 +266,23 @@ async fn revoke_rfc7009_token(
 
     match (auth, creds) {
         (Rfc7009Auth::Basic, Some(creds)) => {
-            request = request.basic_auth(&creds.client_id, creds.client_secret.as_deref());
+            request = request.basic_auth(
+                creds.client_id.as_str(),
+                creds.client_secret.as_ref().map(|s| s.as_str()),
+            );
         }
         (Rfc7009Auth::Post, Some(creds)) => {
             params.push((
                 oauth_flow::client_id_param_name(provider).to_string(),
-                creds.client_id.clone(),
+                creds.client_id.to_string(),
             ));
             if let Some(secret) = &creds.client_secret {
-                params.push(("client_secret".to_string(), secret.clone()));
+                params.push(("client_secret".to_string(), secret.to_string()));
             }
         }
         (Rfc7009Auth::ClientId, Some(creds)) => params.push((
             oauth_flow::client_id_param_name(provider).to_string(),
-            creds.client_id.clone(),
+            creds.client_id.to_string(),
         )),
         _ => {}
     }
@@ -270,12 +312,21 @@ async fn revoke_github_token(
         return Some(TokenOutcome::SendFailed);
     };
 
+    #[derive(serde::Serialize)]
+    struct TokenBody<'a> {
+        access_token: &'a str,
+    }
     let request = REVOCATION_CLIENT
         .request(Method::DELETE, url)
-        .basic_auth(&creds.client_id, creds.client_secret.as_deref())
+        .basic_auth(
+            creds.client_id.as_str(),
+            creds.client_secret.as_ref().map(|s| s.as_str()),
+        )
         .header(USER_AGENT, GITHUB_USER_AGENT)
         .header(ACCEPT, GITHUB_ACCEPT)
-        .json(&serde_json::json!({ "access_token": token }));
+        .json(&TokenBody {
+            access_token: token,
+        });
 
     Some(match send_revocation_request(request).await {
         Ok(response) if response.status == StatusCode::NO_CONTENT => TokenOutcome::Delivered,
@@ -306,7 +357,7 @@ async fn revoke_self_bearer(
     let request = REVOCATION_CLIENT.post(&config.url).bearer_auth(token);
     Some(match send_revocation_request(request).await {
         Ok(response) if response.status.is_success() => {
-            match serde_json::from_slice::<serde_json::Value>(&response.body) {
+            match serde_json::from_slice::<crate::crypto::secret_json::SecretJson>(&response.body) {
                 Ok(body) if body.get("ok").and_then(serde_json::Value::as_bool) != Some(false) => {
                     TokenOutcome::Delivered
                 }
@@ -328,13 +379,13 @@ async fn revoke_facebook_grant(
         let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes())
             .expect("HMAC accepts keys of any size");
         mac.update(token.as_bytes());
-        let proof = hex::encode(mac.finalize().into_bytes());
-        request = request.form(&[("appsecret_proof", proof)]);
+        let proof = Zeroizing::new(hex::encode(mac.finalize().into_bytes()));
+        request = request.form(&[("appsecret_proof", proof.as_str())]);
     }
 
     Some(match send_revocation_request(request).await {
         Ok(response) if response.status.is_success() => {
-            match serde_json::from_slice::<serde_json::Value>(&response.body) {
+            match serde_json::from_slice::<crate::crypto::secret_json::SecretJson>(&response.body) {
                 Ok(body)
                     if body.get("success").and_then(serde_json::Value::as_bool) != Some(false) =>
                 {
@@ -349,7 +400,7 @@ async fn revoke_facebook_grant(
 
 struct RevocationHttpResponse {
     status: StatusCode,
-    body: Vec<u8>,
+    body: Zeroizing<Vec<u8>>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -401,7 +452,7 @@ async fn send_revocation_request(
         redacted
     })?;
     let status = response.status();
-    let mut body = Vec::new();
+    let mut body = Zeroizing::new(Vec::with_capacity(MAX_REVOCATION_RESPONSE_BODY_SIZE));
 
     loop {
         let chunk = response.chunk().await.map_err(|error| {
@@ -523,6 +574,7 @@ mod tests {
 
     fn provider(style: &str, url: String, auth: &str, revokes_grant: bool) -> ProviderConfig {
         ProviderConfig {
+            secret_context_versions: Default::default(),
             id: "provider-id".to_string(),
             slug: "test-provider".to_string(),
             name: "Test Provider".to_string(),
@@ -532,6 +584,13 @@ mod tests {
             token_url: Some("https://example.com/token".to_string()),
             revocation_url: None,
             revocation: Some(RevocationConfig {
+                effect_scope: if style == "github" && revokes_grant {
+                    Some(crate::models::provider_config::RevocationEffectScope::RequestScoped)
+                } else if !revokes_grant {
+                    Some(crate::models::provider_config::RevocationEffectScope::TokenOnly)
+                } else {
+                    None
+                },
                 request_encoding: "form".to_string(),
                 style: style.to_string(),
                 url,
@@ -571,8 +630,8 @@ mod tests {
     fn credentials() -> ResolvedOAuthCredentials {
         ResolvedOAuthCredentials {
             app_source: crate::services::oauth_app_source::OAuthAppSource::Platform,
-            client_id: "client-id".to_string(),
-            client_secret: Some("client-secret".to_string()),
+            client_id: "client-id".to_string().into(),
+            client_secret: Some("client-secret".to_string().into()),
             credential_user_id: None,
         }
     }
@@ -660,6 +719,40 @@ mod tests {
         assert_eq!(effective.auth, "inherit");
         assert!(!effective.revokes_grant);
         assert!(provider.revocation.is_none());
+    }
+
+    #[tokio::test]
+    async fn omitted_effect_scope_and_legacy_url_never_dispatch_token_revocation() {
+        let mut server = spawn_server(StatusCode::OK, Vec::new()).await;
+        for legacy in [false, true] {
+            let mut config = provider(
+                "rfc7009",
+                format!("{}/revoke", server.base_url),
+                "none",
+                false,
+            );
+            config.revocation.as_mut().unwrap().effect_scope = None;
+            if legacy {
+                config.revocation_url = Some(config.revocation.take().unwrap().url);
+            }
+            let result = revoke_remote(request(
+                &config,
+                RevocationScope::Token,
+                None,
+                Some("access-never-sent"),
+                Some("refresh-never-sent"),
+            ))
+            .await;
+            assert_eq!(
+                result.access,
+                Some(TokenOutcome::Skipped("unverified_token_only_effect_scope"))
+            );
+            assert_eq!(
+                result.refresh,
+                Some(TokenOutcome::Skipped("unverified_token_only_effect_scope"))
+            );
+            assert!(server.receiver.try_recv().is_err());
+        }
     }
 
     #[tokio::test]
@@ -934,6 +1027,34 @@ mod tests {
             "Bearer slack-secret"
         );
         assert!(captured.body.is_empty());
+    }
+
+    #[tokio::test]
+    async fn self_bearer_requires_a_parseable_success_body() {
+        for (body, expected) in [
+            (br#"{"ok":true}"#.as_slice(), TokenOutcome::Delivered),
+            (br#"{"ok":false}"#.as_slice(), TokenOutcome::SendFailed),
+            (b"".as_slice(), TokenOutcome::SendFailed),
+            (b"not-json".as_slice(), TokenOutcome::SendFailed),
+        ] {
+            let mut server = spawn_server(StatusCode::OK, body.to_vec()).await;
+            let provider = provider(
+                "self_bearer",
+                format!("{}/revoke", server.base_url),
+                "none",
+                false,
+            );
+            let outcome = revoke_remote(request(
+                &provider,
+                RevocationScope::Token,
+                None,
+                Some("self-bearer-secret"),
+                None,
+            ))
+            .await;
+            assert_eq!(outcome.access, Some(expected));
+            assert_eq!(server.receiver.recv().await.unwrap().uri, "/revoke");
+        }
     }
 
     #[tokio::test]

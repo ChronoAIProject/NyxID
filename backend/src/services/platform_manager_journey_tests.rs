@@ -1906,6 +1906,7 @@ async fn asynchronous_public_failure_sends_only_fixed_notice_and_live_revocation
             .db
             .collection::<PlatformPublicTurn>(TURNS)
             .insert_one(PlatformPublicTurn {
+                secret_context_versions: Default::default(),
                 proof_record_id: context.proof_record_id.clone(),
                 id: context.turn.turn_id.clone(),
                 public_session_id: session.id.clone(),
@@ -2498,8 +2499,8 @@ async fn default_and_configured_signup_login_mfa_review_and_same_chat_confirmati
                 peer,
                 HeaderMap::new(),
                 Json(crate::handlers::mfa::MfaLoginVerifyRequest {
-                    code: wrong,
-                    mfa_token: pending.to_string(),
+                    code: wrong.into(),
+                    mfa_token: pending.to_string().into(),
                     client: Some("token".into()),
                 }),
             )
@@ -2543,8 +2544,8 @@ async fn default_and_configured_signup_login_mfa_review_and_same_chat_confirmati
                 peer,
                 HeaderMap::new(),
                 Json(crate::handlers::mfa::MfaLoginVerifyRequest {
-                    code,
-                    mfa_token: pending.to_string(),
+                    code: code.into(),
+                    mfa_token: pending.to_string().into(),
                     client: Some("token".into()),
                 }),
             )

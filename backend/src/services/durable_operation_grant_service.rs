@@ -1082,13 +1082,11 @@ pub async fn authorize_and_reserve(
         created_at: now,
         updated_at: now,
     };
-    if let Err(error) = db
-        .collection::<DurableOperationExecution>(EXECUTIONS)
-        .insert_one(&execution)
-        .await
+    if let Err(error) =
+        super::erasure_admission::insert_owned(db, EXECUTIONS, owner_user_id, &execution).await
     {
-        if !is_duplicate_key_error(&error) {
-            return Err(error.into());
+        if !matches!(&error, AppError::DatabaseError(error) if is_duplicate_key_error(error)) {
+            return Err(error);
         }
         let existing = db
             .collection::<DurableOperationExecution>(EXECUTIONS)
@@ -1131,24 +1129,36 @@ pub async fn mark_dispatched(
     reservation: &DurableExecutionReservation,
     node_id: Option<&str>,
 ) -> AppResult<()> {
-    let now = Utc::now();
-    let result = db
+    let owner = db
         .collection::<DurableOperationExecution>(EXECUTIONS)
-        .update_one(
-            doc! { "_id": &reservation.execution_id, "status": "reserved" },
-            doc! { "$set": {
-                "status": "dispatched",
-                "downstream_attempts": 1_i64,
-                "node_id": node_id,
-                "dispatched_at": bson::DateTime::from_chrono(now),
-                "updated_at": bson::DateTime::from_chrono(now),
-            }},
-        )
-        .await?;
-    if result.modified_count != 1 {
-        return Err(AppError::DurableOperationOutcomeUncertain);
+        .find_one(doc! {"_id":&reservation.execution_id,"status":"reserved"})
+        .await?
+        .ok_or(AppError::DurableOperationOutcomeUncertain)?
+        .user_id;
+    let mut tx = super::erasure_admission::begin_write(db, &owner).await?;
+    let result: AppResult<()> = async {
+        let now = Utc::now();
+        let result = db
+            .collection::<DurableOperationExecution>(EXECUTIONS)
+            .update_one(
+                doc! { "_id": &reservation.execution_id, "status": "reserved" },
+                doc! { "$set": {
+                    "status": "dispatched",
+                    "downstream_attempts": 1_i64,
+                    "node_id": node_id,
+                    "dispatched_at": bson::DateTime::from_chrono(now),
+                    "updated_at": bson::DateTime::from_chrono(now),
+                }},
+            )
+            .session(&mut tx)
+            .await?;
+        if result.modified_count != 1 {
+            return Err(AppError::DurableOperationOutcomeUncertain);
+        }
+        Ok(())
     }
-    Ok(())
+    .await;
+    super::org_membership_authority::finish(tx, result).await
 }
 
 pub async fn mark_pre_dispatch_rejected(

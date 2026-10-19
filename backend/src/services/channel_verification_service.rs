@@ -5,11 +5,11 @@ use chrono::Utc;
 use sha2::{Digest, Sha256};
 
 use super::channel_platform::{BotCredentials, PlatformAdapter, PlatformVerifySecrets};
+use super::platform_credential_service::PlatformCredentialSnapshot;
 use crate::errors::{AppError, AppResult};
 use crate::models::channel_bot::{
     BotVerification, COLLECTION_NAME, ChannelBot, VerificationStatus,
 };
-use crate::models::platform_credential::PlatformCredential;
 
 pub const VERIFICATION_TIMEOUT_SECS: u64 = 30;
 
@@ -56,7 +56,7 @@ fn credential_filter(bot: &ChannelBot) -> AppResult<Document> {
 
 pub(crate) struct CredentialSnapshot {
     bot: ChannelBot,
-    platform: Option<PlatformCredential>,
+    platform: Option<PlatformCredentialSnapshot>,
 }
 
 impl CredentialSnapshot {

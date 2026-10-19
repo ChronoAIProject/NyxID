@@ -170,6 +170,10 @@ async fn claim_v2(
     attachment: &str,
     audience: &str,
 ) -> AppResult<ImageClaim> {
+    #[cfg(test)]
+    if let Some(pause) = CLAIM_ADMISSION_PAUSE.try_with(Clone::clone).ok() {
+        pause.entered.notify_one(); pause.release.notified().await;
+    }
     let id = image_delivery_id(owner, attachment, audience);
     let collection = db.collection::<NyxbotImageDelivery>(CLAIMS);
     let row = NyxbotImageDelivery {
@@ -183,10 +187,34 @@ async fn claim_v2(
         code: None,
         created_at: Utc::now(),
     };
-    match collection.insert_one(row).await {
-        Ok(_) => {}
-        Err(error) if duplicate(&error) => {}
+    let context = (db.clone(), row);
+    let admitted = super::transaction_service::run_db_only(db, &context, |tx, (db, row)| {
+        Box::pin(async move {
+            super::erasure_admission::fence_in_session(db, &row.user_id, tx).await?;
+            if db.collection::<Document>(crate::models::user::COLLECTION_NAME)
+                .find_one(doc! {"_id":&row.user_id,"is_active":true,"platform_personal_deleting":{"$ne":true}})
+                .session(&mut *tx).await?.is_none() {
+                return Err(AppError::Conflict("Image delivery owner is unavailable".into()));
+            }
+            let parent = db.collection::<Document>(crate::models::assistant_conversation::COLLECTION_NAME)
+                .update_one(doc! {"_id":&row.conversation_id,"user_id":&row.user_id},
+                    doc! {"$inc":{"image_delivery_admission_revision":1_i64}}).session(&mut *tx).await?;
+            if parent.matched_count != 1 { return Err(AppError::Conflict("Image conversation is unavailable".into())); }
+            let source = bson::to_document(row).map_err(|_|AppError::Internal("Image claim storage is invalid".into()))?;
+            db.collection::<NyxbotImageDelivery>(CLAIMS).update_one(doc! {"_id":&row.id},doc! {"$setOnInsert":source})
+                .upsert(true).session(&mut *tx).await?;
+            Ok(())
+        })
+    }).await;
+    match admitted {
+        Ok(()) => {},
+        Err(error @ AppError::Conflict(_)) => return Err(error),
+        // An indeterminate admission cannot authorize a provider send.
         Err(_) => return Ok(ImageClaim::Unknown),
+    }
+    #[cfg(test)]
+    if let Some(pause) = CLAIM_CAS_PAUSE.try_with(Clone::clone).ok() {
+        pause.entered.notify_one(); pause.release.notified().await;
     }
     let attempt = Uuid::new_v4().to_string();
     match collection
@@ -342,18 +370,23 @@ pub async fn sweep_orphans(db: &Database, cursor: &str, limit: i64) -> AppResult
     })
 }
 
-fn duplicate(error: &mongodb::error::Error) -> bool {
-    matches!(error.kind.as_ref(), mongodb::error::ErrorKind::Write(mongodb::error::WriteFailure::WriteError(w)) if w.code == 11000)
-}
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     async fn source(db: &Database, id: &str) {
+        parents(db).await;
         db.collection::<Document>(ATTACHMENTS).insert_one(doc! {
             "_id":id,"user_id":"owner","conversation_id":"conversation","turn_id":"turn","origin":"tool",
         }).await.unwrap();
+    }
+
+    async fn parents(db: &Database) {
+        db.collection::<Document>(crate::models::user::COLLECTION_NAME)
+            .update_one(doc! {"_id":"owner"},doc! {"$setOnInsert":bson::to_document(&crate::test_utils::test_user("owner",crate::models::user::UserType::Person)).unwrap()}).upsert(true).await.unwrap();
+        db.collection::<Document>(crate::models::assistant_conversation::COLLECTION_NAME)
+            .update_one(doc! {"_id":"conversation"},doc! {"$setOnInsert":{"user_id":"owner"}}).upsert(true).await.unwrap();
     }
 
     fn legacy_row(
@@ -376,6 +409,7 @@ mod tests {
     #[tokio::test]
     async fn legacy_image_claims_block_all_aliases_for_sent_and_uncertain_items() {
         let db = crate::test_utils::connect_transaction_test_database("image_v1_barriers").await;
+        parents(&db).await;
         for alias in ["inbound", "thread", "chat", "initiated"] {
             for (state, item_state, expected) in [
                 ("done", "sent", ImageDeliveryState::Sent),
@@ -427,6 +461,7 @@ mod tests {
     #[tokio::test]
     async fn legacy_image_claims_ignore_other_sources_and_allow_absent_images() {
         let db = crate::test_utils::connect_transaction_test_database("image_v1_sources").await;
+        parents(&db).await;
         for field in ["user_id", "conversation_id", "turn_id", "channel_id"] {
             let mut row = legacy_row("A", "inbound", "done", "sent", None);
             row.insert(field, "other");
@@ -468,6 +503,7 @@ mod tests {
     #[tokio::test]
     async fn legacy_image_claims_retry_only_proven_pre_dispatch_states() {
         let db = crate::test_utils::connect_transaction_test_database("image_v1_preflight").await;
+        parents(&db).await;
         for (index, (state, item_state, code, retry)) in [
             ("done", "skipped", Some("deadline"), true),
             ("done", "skipped", Some("after_unknown"), true),
@@ -529,6 +565,7 @@ mod tests {
     #[tokio::test]
     async fn legacy_image_ttl_and_v2_documents_stay_separate() {
         let db = crate::test_utils::connect_transaction_test_database("image_v1_v2_indexes").await;
+        parents(&db).await;
         ensure_indexes(&db).await.unwrap();
         source(&db, "A").await;
         let mut row = legacy_row("A", "chat", "done", "sent", None);
@@ -620,6 +657,7 @@ mod tests {
     #[tokio::test]
     async fn channel_image_claims_arbitrate_each_image_and_audience_and_report_durable_states() {
         let db = crate::test_utils::connect_transaction_test_database("channel_image_v2").await;
+        parents(&db).await;
         ensure_indexes(&db).await.unwrap();
         source(&db, "A").await;
         source(&db, "B").await;
@@ -728,6 +766,7 @@ mod tests {
     async fn channel_image_orphan_sweep_visits_every_claim_and_restarts_after_a_pass() {
         let db =
             crate::test_utils::connect_transaction_test_database("channel_image_orphans").await;
+        parents(&db).await;
         source(&db, "live").await;
         source(&db, "late-delete").await;
         for image in ["live", "gone", "late-delete"] {
@@ -810,6 +849,7 @@ mod tests {
     async fn channel_image_release_is_attempt_fenced_and_cannot_reset_terminal_effects() {
         let db =
             crate::test_utils::connect_transaction_test_database("channel_image_release").await;
+        parents(&db).await;
         let ImageClaim::Dispatch { id, attempt: first } =
             claim(&db, "owner", "conversation", "A", "audience")
                 .await
@@ -868,6 +908,7 @@ mod tests {
         let base =
             crate::test_utils::connect_transaction_test_database("channel_image_write_faults")
                 .await;
+        parents(&base).await;
         let app = format!("image-cas-{}", Uuid::new_v4());
         let mut options = mongodb::options::ClientOptions::parse(
             std::env::var("NYXID_TEST_DATABASE_URL").expect("MongoDB test URL"),
@@ -910,12 +951,15 @@ mod tests {
             }
             panic!("Failed to configure image write fault: {error}");
         }
-        assert!(matches!(
-            claim(&db, "owner", "conversation", "A", "rejected")
-                .await
-                .unwrap(),
-            ImageClaim::Unknown
-        ));
+        admin.run_command(doc! {"configureFailPoint":"failCommand","mode":"off"}).await.unwrap();
+        let pause = std::sync::Arc::new(ImageClaimPause::default());
+        let acquire = CLAIM_CAS_PAUSE.scope(pause.clone(),claim(&db,"owner","conversation","A","rejected"));
+        let inject = async {
+            tokio::time::timeout(std::time::Duration::from_secs(10),pause.entered.notified()).await.unwrap();
+            fail(false).await.unwrap(); pause.release.notify_one();
+        };
+        let (outcome,()) = tokio::time::timeout(std::time::Duration::from_secs(15),async {tokio::join!(acquire,inject)}).await.unwrap();
+        assert!(matches!(outcome.unwrap(),ImageClaim::Unknown));
         assert_eq!(
             read(&base, "owner", "A", "rejected")
                 .await
@@ -954,13 +998,14 @@ mod tests {
         assert!(
             matches!(claim(&base,"owner","conversation","A","rejected").await.unwrap(),ImageClaim::Existing(row) if row.state==ImageDeliveryState::Sent)
         );
-        fail(true).await.unwrap();
-        assert!(matches!(
-            claim(&db, "owner", "conversation", "B", "committed")
-                .await
-                .unwrap(),
-            ImageClaim::Unknown
-        ));
+        let pause = std::sync::Arc::new(ImageClaimPause::default());
+        let acquire = CLAIM_CAS_PAUSE.scope(pause.clone(),claim(&db,"owner","conversation","B","committed"));
+        let inject = async {
+            tokio::time::timeout(std::time::Duration::from_secs(10),pause.entered.notified()).await.unwrap();
+            fail(true).await.unwrap(); pause.release.notify_one();
+        };
+        let (outcome,()) = tokio::time::timeout(std::time::Duration::from_secs(15),async {tokio::join!(acquire,inject)}).await.unwrap();
+        assert!(matches!(outcome.unwrap(),ImageClaim::Unknown));
         assert!(
             matches!(claim(&base,"owner","conversation","B","committed").await.unwrap(),ImageClaim::Existing(row) if row.state==ImageDeliveryState::Sending)
         );
@@ -970,4 +1015,13 @@ mod tests {
             .unwrap();
         base.drop().await.unwrap();
     }
+}
+
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct ImageClaimPause {pub entered: tokio::sync::Notify, pub release: tokio::sync::Notify}
+#[cfg(test)]
+tokio::task_local! {
+    pub(crate) static CLAIM_ADMISSION_PAUSE: std::sync::Arc<ImageClaimPause>;
+    static CLAIM_CAS_PAUSE: std::sync::Arc<ImageClaimPause>;
 }

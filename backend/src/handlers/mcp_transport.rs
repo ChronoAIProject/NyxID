@@ -679,6 +679,7 @@ fn untracked_discovery_allowed(name: Option<&str>) -> bool {
 /// limits, and audit attribution.
 #[derive(Debug, Clone)]
 struct McpAuthContext {
+    oauth_lineage: Option<crate::models::oauth_delegation_authority::OauthAuthorityLineage>,
     /// Derived only from verified OAuth claims or a live authenticated key.
     /// No source lookup occurs for unrelated tools; Machine admission is live.
     machine_source: Option<crate::services::machine_external_grant_service::VerifiedExternalSource>,
@@ -721,6 +722,7 @@ struct McpAuthContext {
 impl McpAuthContext {
     fn user(user_id: String, auth_method: AuthMethod) -> Self {
         Self {
+            oauth_lineage: None,
             machine_source: None,
             caller_token: None,
             chat: None,
@@ -977,6 +979,7 @@ async fn authenticate_mcp_or_public(
                     .await
                     .map_err(axum::response::IntoResponse::into_response)?;
                 return Ok(McpAuthentication::Ordinary(Box::new(McpAuthContext {
+                    oauth_lineage: None,
                     machine_source: if chat.is_none()
                         && !auth::is_assistant_conversation_key_candidate(&api_key)
                     {
@@ -1063,6 +1066,9 @@ async fn authenticate_mcp_or_public(
     if let Some(token) = token {
         match jwt::verify_token(&state.jwt_keys, &state.config, token) {
             Ok(claims) if claims.token_type == "access" => {
+                crate::services::oauth_token_authority_service::validate_claims(&state.db, &claims)
+                    .await
+                    .map_err(|_| mcp_401(&state.config.base_url))?;
                 // Manual MCP authentication preserves the same sender-bound
                 // proof checks as the REST extractor. It never turns a bound
                 // token into an ordinary bearer for Machine execution.
@@ -1216,6 +1222,7 @@ async fn authenticate_mcp_or_public(
                         .map_err(|_| mcp_401(&state.config.base_url))?;
                     }
                 }
+                ctx.oauth_lineage = jwt::authority_lineage(&claims);
                 ctx.scope = claims.scope.clone();
                 // REST service-account authentication has no resource claims.
                 if ctx.auth_method != AuthMethod::ServiceAccount {
@@ -1578,12 +1585,7 @@ pub async fn mcp_post(
 
     match request.method.as_str() {
         "initialize" => {
-            let tele = TelemetryContext::from_headers(
-                headers.get("x-nyxid-client").and_then(|v| v.to_str().ok()),
-                headers
-                    .get("x-nyxid-client-version")
-                    .and_then(|v| v.to_str().ok()),
-            );
+            let tele = TelemetryContext::from_request_headers(&headers);
             handle_initialize(
                 &state,
                 &user_id,
@@ -1951,12 +1953,7 @@ pub async fn mcp_delete(State(state): State<AppState>, headers: HeaderMap) -> Re
     // since this handler only runs on explicit DELETE. Build context from
     // request headers so CLI/UI/SDK sessions keep the correct `surface`
     // instead of collapsing to `backend` via `TelemetryContext::default()`.
-    let tele = TelemetryContext::from_headers(
-        headers.get("x-nyxid-client").and_then(|v| v.to_str().ok()),
-        headers
-            .get("x-nyxid-client-version")
-            .and_then(|v| v.to_str().ok()),
-    );
+    let tele = TelemetryContext::from_request_headers(&headers);
     let duration_ms = persisted_created_at
         .map(|start| {
             let elapsed = chrono::Utc::now().signed_duration_since(start);
@@ -1973,7 +1970,8 @@ pub async fn mcp_delete(State(state): State<AppState>, headers: HeaderMap) -> Re
             duration_ms,
             reason: "client_close".to_string(),
         },
-    );
+    )
+    .await;
 
     StatusCode::NO_CONTENT.into_response()
 }
@@ -2048,7 +2046,8 @@ async fn handle_initialize(
         api_key_id,
         tele,
         TelemetryEvent::McpSessionStarted { client },
-    );
+    )
+    .await;
 
     let result = serde_json::json!({
         "protocolVersion": negotiated_protocol_version(request.params.as_ref()),
@@ -3382,19 +3381,21 @@ fn dispatch_service_tool<'a>(
 /// Build the execution context passed to `mcp_service::execute_tool` from
 /// the authenticated MCP caller -- API key identity + node scope.
 fn mcp_exec_context<'a>(auth: &'a McpAuthContext) -> mcp_service::McpExecContext<'a> {
+    let mut restrictions = jwt::TokenRestrictionClaims::from_authenticated_scope(
+        &auth.scope,
+        auth.resource_uris.as_deref(),
+        auth.allow_all_services,
+        &auth.allowed_service_ids,
+        auth.allow_all_nodes,
+        &auth.allowed_node_ids,
+    );
+    restrictions.oauth_lineage = auth.oauth_lineage.clone();
     mcp_service::McpExecContext {
         assistant_chat: auth.chat.as_ref(),
         response_body_limit: None,
         actor_user_id: Some(&auth.user_id),
         caller_token: auth.caller_token.as_deref(),
-        delegation_restrictions: Box::new(jwt::TokenRestrictionClaims::from_authenticated_scope(
-            &auth.scope,
-            auth.resource_uris.as_deref(),
-            auth.allow_all_services,
-            &auth.allowed_service_ids,
-            auth.allow_all_nodes,
-            &auth.allowed_node_ids,
-        )),
+        delegation_restrictions: Box::new(restrictions),
         attribution: Some(
             crate::services::service_insights_activity::RequestAttribution {
                 actor: crate::services::audit_service::AuditActor {
@@ -3950,6 +3951,7 @@ async fn handle_account_tool(
         acting_client_id: auth.acting_client_id.clone(),
         oauth_client_id: None,
         token_jti: None,
+        oauth_lineage: auth.oauth_lineage.clone(),
         approval_owner_user_id: auth.approval_owner_user_id.clone(),
         auth_method: auth.auth_method.clone(),
         allow_all_services: auth.allow_all_services,
@@ -6556,6 +6558,7 @@ mod tests {
 
     fn api_key_auth(allowed_service_ids: Vec<String>) -> McpAuthContext {
         McpAuthContext {
+            oauth_lineage: None,
             machine_source: None,
             caller_token: None,
             chat: None,
@@ -7135,6 +7138,20 @@ mod tests {
             .insert_one(test_membership(&org_id, &actor_id, OrgRole::Admin, None))
             .await
             .unwrap();
+        let mut catalog = crate::models::downstream_service::test_helpers::dummy_service();
+        catalog.id = catalog_service_id.clone();
+        catalog.slug = slug.into();
+        catalog.created_by = actor_id.clone();
+        catalog.base_url = downstream_url.clone();
+        catalog.auth_method = "none".into();
+        catalog.credential_encrypted.clear();
+        catalog.requires_user_credential = false;
+        db.collection::<crate::models::downstream_service::DownstreamService>(
+            crate::models::downstream_service::COLLECTION_NAME,
+        )
+        .insert_one(catalog)
+        .await
+        .unwrap();
         db.collection::<UserEndpoint>(USER_ENDPOINTS)
             .insert_one(test_user_endpoint(
                 &endpoint_id,
@@ -7182,6 +7199,7 @@ mod tests {
             acting_client_id: None,
             oauth_client_id: None,
             token_jti: None,
+            oauth_lineage: None,
             approval_owner_user_id: None,
             auth_method: AuthMethod::ApiKey,
             allow_all_services: true,
@@ -8095,6 +8113,7 @@ mod tests {
         let mut service = crate::test_utils::test_auto_connected_catalog_service();
         service.service_type = "ssh".into();
         service.ssh_config = Some(SshServiceConfig {
+            ca_context_version: None,
             host: "127.0.0.1".into(),
             port: 22,
             ssh_auth_mode: crate::models::ssh_auth_mode::SshAuthMode::Cert,

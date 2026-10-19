@@ -41,12 +41,12 @@ When the agent invokes a tool, NyxID:
 
 1. Resolves the tool to a target service and endpoint.
 2. Builds identity headers if the service has identity propagation enabled (`X-NyxID-User-Id`, `X-NyxID-User-Email`, etc.).
-3. Generates a short-lived delegation token (5-minute TTL, RS256 JWT) and injects it as `X-NyxID-Delegation-Token`.
+3. When the service enables `inject_delegation_token` (off by default), generates a short-lived delegation token (5-minute TTL, RS256 JWT) and injects it as `X-NyxID-Delegation-Token`.
 4. Resolves any provider credentials the service requires and injects them.
 5. Forwards the tool call as an HTTP request to the downstream service.
 6. Returns the response to the agent.
 
-The downstream service receives the request and can use the delegation token to make further calls to NyxID (for example, to call the LLM gateway on behalf of the user) without ever seeing the user's upstream API keys.
+When delegation-token injection is enabled, the downstream service can use that token to make further calls to NyxID (for example, to call the LLM gateway on behalf of the user) without ever seeing the user's upstream API keys.
 
 ## Delegation tokens
 

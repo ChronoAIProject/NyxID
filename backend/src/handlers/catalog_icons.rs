@@ -75,6 +75,7 @@ pub async fn upload_tool(
     let actor = crate::services::audit_service::AuditActor::from_auth_user(&auth);
     crate::services::catalog_mutation_service::commit_update(
         &state.db,
+        Some(&state.encryption_keys),
         &service,
         &crate::services::catalog_mutation_service::Authority {
             actor,

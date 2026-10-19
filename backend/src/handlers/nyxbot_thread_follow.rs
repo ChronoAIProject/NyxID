@@ -769,59 +769,64 @@ pub(super) async fn send_bound_reply(
     conversation: &str,
     outbound: &OutboundReply,
 ) -> AppResult<threads::delivery::ThreadDelivery> {
-    let bot = channel_bot_service::get_bot(&state.db, &channel.channel_bot_id).await?;
-    let adapter = adapter(state, &bot)?;
-    let token = crate::services::channel_credentials::resolve_bot_token(
-        &state.db,
-        &state.encryption_keys,
-        adapter.as_ref(),
-        &bot,
-    )
-    .await?;
-    let secrets = if bot.credential_source == "platform" {
-        Some(
-            crate::services::channel_managed::build_verify_secrets(
-                &state.db,
-                &state.encryption_keys,
-                adapter.as_ref(),
-                &bot,
-            )
-            .await?,
+    // Keep this multi-stage delivery future on the heap. Its callers include
+    // Tokio workers and nested image/automation delivery on normal stacks.
+    Box::pin(async move {
+        let bot = channel_bot_service::get_bot(&state.db, &channel.channel_bot_id).await?;
+        let adapter = adapter(state, &bot)?;
+        let token = crate::services::channel_credentials::resolve_bot_token(
+            &state.db,
+            &state.encryption_keys,
+            adapter.as_ref(),
+            &bot,
         )
-    } else {
-        None
-    };
-    let billing = crate::services::channel_billing_service::ChannelBilling::for_bot(
-        &state.db,
-        &state.billing,
-        &bot,
-        Some(&channel.route_api_key_id),
-    );
-    let credentials = BotCredentials {
-        token: &token,
-        platform_bot_id: Some(&bot.platform_bot_id),
-        platform_secrets: secrets.as_ref(),
-        billing: billing.as_ref(),
-    };
-    let target = threads::resolution::resolve_admitted(
-        &state.db,
-        adapter.as_ref(),
-        &bot,
-        &credentials,
-        owner,
-        origin,
-        conversation,
-    )
-    .await?
-    .ok_or_else(follow::not_found)?;
-    threads::delivery::send_reply(
-        &state.db,
-        adapter.as_ref(),
-        &bot,
-        &credentials,
-        &target,
-        outbound,
-    )
+        .await?;
+        let secrets = if bot.credential_source == "platform" {
+            Some(
+                crate::services::channel_managed::build_verify_secrets(
+                    &state.db,
+                    &state.encryption_keys,
+                    adapter.as_ref(),
+                    &bot,
+                )
+                .await?,
+            )
+        } else {
+            None
+        };
+        let billing = crate::services::channel_billing_service::ChannelBilling::for_bot(
+            &state.db,
+            &state.billing,
+            &bot,
+            Some(&channel.route_api_key_id),
+        );
+        let credentials = BotCredentials {
+            token: &token,
+            platform_bot_id: Some(&bot.platform_bot_id),
+            platform_secrets: secrets.as_ref(),
+            billing: billing.as_ref(),
+        };
+        let target = threads::resolution::resolve_admitted(
+            &state.db,
+            adapter.as_ref(),
+            &bot,
+            &credentials,
+            owner,
+            origin,
+            conversation,
+        )
+        .await?
+        .ok_or_else(follow::not_found)?;
+        threads::delivery::send_reply(
+            &state.db,
+            adapter.as_ref(),
+            &bot,
+            &credentials,
+            &target,
+            outbound,
+        )
+        .await
+    })
     .await
 }
 

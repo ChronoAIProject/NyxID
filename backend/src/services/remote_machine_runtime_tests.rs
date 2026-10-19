@@ -518,7 +518,7 @@ async fn deleted_owner_retains_paid_liability_until_native_stop_and_local_settle
     let machine = start_ready(&f).await;
     let held = wallet(&f).await.reserved_credits;
     assert!(held > Credits::ZERO);
-    crate::services::admin_user_service::delete_current_user_cascade(
+    crate::test_utils::accept_and_process_owner_erasure(
         &f.db,
         &f.owner,
         crate::services::admin_user_service::ACCOUNT_DELETION_POLICY_VERSION,

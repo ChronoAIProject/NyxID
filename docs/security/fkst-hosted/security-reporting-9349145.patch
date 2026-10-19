@@ -1,0 +1,559 @@
+diff --git a/backend/Cargo.lock b/backend/Cargo.lock
+--- a/backend/Cargo.lock
++++ b/backend/Cargo.lock
+@@ -127,18 +127,18 @@
+ dependencies = [
+  "proc-macro2",
+  "quote",
+- "syn",
++ "syn 2.0.117",
+ ]
+
+ [[package]]
+ name = "async-trait"
+-version = "0.1.89"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "9035ad2d096bed7955a320ee7e2230574d28fd3c3a0f186cbea1ff3c7eed5dbb"
++version = "0.1.92"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "82f6aeea286b8eb4dd3431a1be1b59d290ace00f5bfd8e2a159bc2a05e2c1667"
+ dependencies = [
+  "proc-macro2",
+  "quote",
+- "syn",
++ "syn 3.0.9",
+ ]
+
+ [[package]]
+@@ -464,7 +464,7 @@
+ dependencies = [
+  "proc-macro2",
+  "quote",
+- "syn",
++ "syn 2.0.117",
+ ]
+
+ [[package]]
+@@ -519,7 +519,7 @@
+ dependencies = [
+  "proc-macro2",
+  "quote",
+- "syn",
++ "syn 2.0.117",
+ ]
+
+ [[package]]
+@@ -542,7 +542,7 @@
+ dependencies = [
+  "proc-macro2",
+  "quote",
+- "syn",
++ "syn 2.0.117",
+ ]
+
+ [[package]]
+@@ -592,7 +592,7 @@
+  "enum-ordinalize",
+  "proc-macro2",
+  "quote",
+- "syn",
++ "syn 2.0.117",
+ ]
+
+ [[package]]
+@@ -639,7 +639,7 @@
+ dependencies = [
+  "proc-macro2",
+  "quote",
+- "syn",
++ "syn 2.0.117",
+ ]
+
+ [[package]]
+@@ -892,7 +892,7 @@
+ dependencies = [
+  "proc-macro2",
+  "quote",
+- "syn",
++ "syn 2.0.117",
+ ]
+
+ [[package]]
+@@ -1955,7 +1955,7 @@
+  "pest_meta",
+  "proc-macro2",
+  "quote",
+- "syn",
++ "syn 2.0.117",
+ ]
+
+ [[package]]
+@@ -1985,7 +1985,7 @@
+ dependencies = [
+  "proc-macro2",
+  "quote",
+- "syn",
++ "syn 2.0.117",
+ ]
+
+ [[package]]
+@@ -2064,7 +2064,7 @@
+ checksum = "479ca8adacdd7ce8f1fb39ce9ecccbfe93a3f1344b3d0d97f20bc0196208f62b"
+ dependencies = [
+  "proc-macro2",
+- "syn",
++ "syn 2.0.117",
+ ]
+
+ [[package]]
+@@ -2575,7 +2575,7 @@
+ dependencies = [
+  "proc-macro2",
+  "quote",
+- "syn",
++ "syn 2.0.117",
+ ]
+
+ [[package]]
+@@ -2780,6 +2780,17 @@
+ ]
+
+ [[package]]
++name = "syn"
++version = "3.0.9"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "d78c8dee4c7bf0e14673097256fed6142ce9d3b85a408189d07482442145823b"
++dependencies = [
++ "proc-macro2",
++ "quote",
++ "unicode-ident",
++]
++
++[[package]]
+ name = "sync_wrapper"
+ version = "1.0.2"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+@@ -2796,7 +2807,7 @@
+ dependencies = [
+  "proc-macro2",
+  "quote",
+- "syn",
++ "syn 2.0.117",
+ ]
+
+ [[package]]
+@@ -2854,7 +2865,7 @@
+ dependencies = [
+  "proc-macro2",
+  "quote",
+- "syn",
++ "syn 2.0.117",
+ ]
+
+ [[package]]
+@@ -2865,7 +2876,7 @@
+ dependencies = [
+  "proc-macro2",
+  "quote",
+- "syn",
++ "syn 2.0.117",
+ ]
+
+ [[package]]
+@@ -2957,7 +2968,7 @@
+ dependencies = [
+  "proc-macro2",
+  "quote",
+- "syn",
++ "syn 2.0.117",
+ ]
+
+ [[package]]
+@@ -3119,7 +3130,7 @@
+ dependencies = [
+  "proc-macro2",
+  "quote",
+- "syn",
++ "syn 2.0.117",
+ ]
+
+ [[package]]
+@@ -3308,7 +3319,7 @@
+  "proc-macro2",
+  "quote",
+  "regex",
+- "syn",
++ "syn 2.0.117",
+ ]
+
+ [[package]]
+@@ -3417,7 +3428,7 @@
+  "bumpalo",
+  "proc-macro2",
+  "quote",
+- "syn",
++ "syn 2.0.117",
+  "wasm-bindgen-shared",
+ ]
+
+@@ -3662,7 +3673,7 @@
+  "heck",
+  "indexmap",
+  "prettyplease",
+- "syn",
++ "syn 2.0.117",
+  "wasm-metadata",
+  "wit-bindgen-core",
+  "wit-component",
+@@ -3678,7 +3689,7 @@
+  "prettyplease",
+  "proc-macro2",
+  "quote",
+- "syn",
++ "syn 2.0.117",
+  "wit-bindgen-core",
+  "wit-bindgen-rust",
+ ]
+@@ -3754,7 +3765,7 @@
+ dependencies = [
+  "proc-macro2",
+  "quote",
+- "syn",
++ "syn 2.0.117",
+  "synstructure",
+ ]
+
+@@ -3775,7 +3786,7 @@
+ dependencies = [
+  "proc-macro2",
+  "quote",
+- "syn",
++ "syn 2.0.117",
+ ]
+
+ [[package]]
+@@ -3795,7 +3806,7 @@
+ dependencies = [
+  "proc-macro2",
+  "quote",
+- "syn",
++ "syn 2.0.117",
+  "synstructure",
+ ]
+
+@@ -3816,7 +3827,7 @@
+ dependencies = [
+  "proc-macro2",
+  "quote",
+- "syn",
++ "syn 2.0.117",
+ ]
+
+ [[package]]
+@@ -3849,7 +3860,7 @@
+ dependencies = [
+  "proc-macro2",
+  "quote",
+- "syn",
++ "syn 2.0.117",
+ ]
+
+ [[package]]
+diff --git a/backend/src/audit/worker.rs b/backend/src/audit/worker.rs
+--- a/backend/src/audit/worker.rs
++++ b/backend/src/audit/worker.rs
+@@ -308,13 +308,19 @@
+
+     /// One event left the queue: keep the depth gauge honest.
+     fn note_received(&self) {
+-        let depth = self
+-            .depth
+-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+-                Some(current.saturating_sub(1))
+-            })
+-            .unwrap_or(0)
+-            .saturating_sub(1);
++        let mut current = self.depth.load(Ordering::Relaxed);
++        let depth = loop {
++            let next = current.saturating_sub(1);
++            match self.depth.compare_exchange_weak(
++                current,
++                next,
++                Ordering::Relaxed,
++                Ordering::Relaxed,
++            ) {
++                Ok(_) => break next,
++                Err(observed) => current = observed,
++            }
++        };
+         self.metrics.set_queue_depth(depth);
+     }
+
+diff --git a/backend/src/github_app/template_install.rs b/backend/src/github_app/template_install.rs
+--- a/backend/src/github_app/template_install.rs
++++ b/backend/src/github_app/template_install.rs
+@@ -27,7 +27,9 @@
+ use secrecy::{ExposeSecret, SecretString};
+
+ use super::api::{GithubApi, PullRequestSummary};
+-use super::templates::{bundled_templates, encode_content, TemplateInstallOutcome};
++use super::templates::{
++    bundled_templates, encode_content, repository_config, TemplateInstallOutcome,
++};
+ use super::GithubAppError;
+
+ #[cfg(test)]
+@@ -101,7 +103,7 @@
+     // must be ours.
+     files
+         .iter()
+-        .all(|f| is_bundled(&f.filename) && f.previous_filename.as_deref().is_none_or(&is_bundled))
++        .all(|f| is_bundled(&f.filename) && f.previous_filename.as_deref().is_none_or(is_bundled))
+ }
+
+ /// Rebuild the install branch from the current base head and open a fresh PR,
+@@ -137,6 +139,7 @@
+     repo: &str,
+     target_version: u32,
+ ) -> Result<TemplateInstallOutcome, GithubAppError> {
++    let config = repository_config(owner, repo).map_err(|_| GithubAppError::InvalidRepoRef)?;
+     let branch = template_branch(target_version);
+     let title = pr_title(target_version);
+
+@@ -166,7 +169,12 @@
+             .content_file(token, owner, repo, tf.path, Some(&base))
+             .await?;
+         let sha = existing.map(|f| f.sha);
+-        let content_b64 = encode_content(tf.content);
++        let content = if tf.path == ".github/ISSUE_TEMPLATE/config.yml" {
++            config.as_str()
++        } else {
++            tf.content
++        };
++        let content_b64 = encode_content(content);
+         let msg = format!("chore(fkst): sync {} to v{target_version}", tf.path);
+         api.put_file(
+             token,
+@@ -345,6 +353,8 @@
+     repo: &str,
+     target_version: u32,
+ ) -> Result<TemplateInstallOutcome, GithubAppError> {
++    // Validate before any API effects, including pending-PR reconciliation.
++    repository_config(owner, repo).map_err(|_| GithubAppError::InvalidRepoRef)?;
+     // Exact + owner-qualified: a busy repo's 100-PR listing page cannot hide
+     // this, and a fork branch of the same name cannot impersonate it.
+     let pending = api
+diff --git a/backend/src/github_app/template_install_tests.rs b/backend/src/github_app/template_install_tests.rs
+--- a/backend/src/github_app/template_install_tests.rs
++++ b/backend/src/github_app/template_install_tests.rs
+@@ -84,6 +84,7 @@
+     fail_delete_ref: bool,
+     fail_pull_files: bool,
+     calls: Mutex<Vec<String>>,
++    writes: Mutex<Vec<(String, String)>>,
+ }
+
+ impl FakeApi {
+@@ -249,11 +250,19 @@
+         _repo: &str,
+         path: &str,
+         _message: &str,
+-        _content_base64: &str,
++        content_base64: &str,
+         _branch: &str,
+         _sha: Option<&str>,
+     ) -> Result<(), GithubAppError> {
+         self.record(format!("put_file:{path}"));
++        use base64::Engine;
++        let body = String::from_utf8(
++            base64::engine::general_purpose::STANDARD
++                .decode(content_base64)
++                .unwrap(),
++        )
++        .unwrap();
++        self.writes.lock().unwrap().push((path.to_string(), body));
+         Ok(())
+     }
+
+@@ -700,3 +709,50 @@
+     ));
+     assert!(!is_same_repo(&pull(1, "any", None), OWNER, REPO));
+ }
++
++#[tokio::test]
++async fn nyxid_reconciliation_writes_repository_security_contact() {
++    let api = FakeApi::fresh();
++    assert_eq!(
++        install_templates_with_api(
++            &api,
++            &token(),
++            "ChronoAIProject",
++            "NyxID",
++            super::super::templates::FKST_ISSUE_TEMPLATES_VERSION
++        )
++        .await
++        .unwrap(),
++        TemplateInstallOutcome::Merged
++    );
++    let writes = api.writes.lock().unwrap();
++    let config = writes
++        .iter()
++        .find(|(path, _)| path == ".github/ISSUE_TEMPLATE/config.yml")
++        .unwrap();
++    assert_eq!(
++        config.1,
++        repository_config("ChronoAIProject", "NyxID").unwrap()
++    );
++    assert!(config
++        .1
++        .contains("https://github.com/ChronoAIProject/NyxID/security/policy"));
++    assert!(!config.1.contains("/advisories/new"));
++    assert_eq!(writes.len(), bundled_templates().len());
++    // Inert bundled content only: unrelated files and the repository's unmanaged
++    // bug_report.yml security warning are outside this writer's path allowlist.
++    assert!(writes
++        .iter()
++        .all(|(path, _)| bundled_templates().iter().any(|tf| tf.path == path)));
++}
++
++#[tokio::test]
++async fn malformed_repository_is_rejected_before_any_reconcile_effect() {
++    let api = FakeApi::fresh();
++    assert!(matches!(
++        install_templates_with_api(&api, &token(), "owner\ncontact_links:", "repo", TARGET).await,
++        Err(GithubAppError::InvalidRepoRef)
++    ));
++    assert!(api.calls.lock().unwrap().is_empty());
++    assert!(api.writes.lock().unwrap().is_empty());
++}
+diff --git a/backend/src/github_app/templates.rs b/backend/src/github_app/templates.rs
+--- a/backend/src/github_app/templates.rs
++++ b/backend/src/github_app/templates.rs
+@@ -23,13 +23,16 @@
+
+ use async_trait::async_trait;
+
++mod security;
++pub(super) use security::repository_config;
++
+ use super::{issue_templates_permissions, GithubAppError, GithubAppTokens};
+
+ /// Compile-time source of truth for the bundled issue templates. Bump on ANY
+ /// change to the bundled files below; the bundled `config.yml` marker MUST equal
+ /// this (enforced by a unit test). Repos whose installed version is below this
+ /// get a merged PR to catch up.
+-pub const FKST_ISSUE_TEMPLATES_VERSION: u32 = 13;
++pub const FKST_ISSUE_TEMPLATES_VERSION: u32 = 14;
+
+ /// Repo-relative directory the templates live under.
+ const TEMPLATE_DIR: &str = ".github/ISSUE_TEMPLATE";
+diff --git a/backend/src/github_app/templates/security.rs b/backend/src/github_app/templates/security.rs
+new file mode 100644
+--- /dev/null
++++ b/backend/src/github_app/templates/security.rs
+@@ -0,0 +1,88 @@
++//! Deterministic security reporting contact. Never merge repository-supplied
++//! YAML into a template PR that the App may automatically merge.
++const CONFIG: &str = include_str!("../templates_assets/config.yml");
++const URL_SLOT: &str = "__FKST_SECURITY_POLICY_URL__";
++
++#[derive(Debug, PartialEq, Eq)]
++pub(crate) struct InvalidRepository;
++
++pub(crate) fn repository_config(owner: &str, repo: &str) -> Result<String, InvalidRepository> {
++    // GitHub owner/repository path components only; no URL/YAML metacharacters,
++    // credentials, percent encodings, extra segments or dot-segment traversal.
++    if owner.is_empty()
++        || owner.len() > 39
++        || owner.starts_with('-')
++        || owner.ends_with('-')
++        || !owner
++            .bytes()
++            .all(|b| b.is_ascii_alphanumeric() || b == b'-')
++        || repo.is_empty()
++        || repo.len() > 100
++        || matches!(repo, "." | "..")
++        || !repo
++            .bytes()
++            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
++    {
++        return Err(InvalidRepository);
++    }
++    // The policy page works whether or not private advisory reporting is enabled.
++    // It does not imply that a repository has enabled a reporting channel.
++    Ok(CONFIG.replace(
++        URL_SLOT,
++        &format!("https://github.com/{owner}/{repo}/security/policy"),
++    ))
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    #[test]
++    fn nyxid_chooser_routes_through_maintained_policy() {
++        let output = repository_config("ChronoAIProject", "NyxID").unwrap();
++        assert!(output.contains("url: https://github.com/ChronoAIProject/NyxID/security/policy\n"));
++        assert!(output.contains("Do not disclose vulnerabilities or secrets in public issues."));
++        assert_eq!(
++            output
++                .matches("Security policy and vulnerability reporting")
++                .count(),
++            1
++        );
++        assert_eq!(
++            output.matches("# fkst-issue-templates-version: ").count(),
++            1
++        );
++        assert!(output.contains("blank_issues_enabled: false"));
++        assert!(output.contains("name: fkst docs & help"));
++        assert!(!output.contains(URL_SLOT));
++    }
++    #[test]
++    fn generic_repository_does_not_assume_private_reporting() {
++        let output = repository_config("some-owner", ".github_repo-2").unwrap();
++        assert!(output.contains("https://github.com/some-owner/.github_repo-2/security/policy"));
++        assert!(!output.contains("/advisories/new"));
++        assert_eq!(
++            output,
++            repository_config("some-owner", ".github_repo-2").unwrap()
++        );
++    }
++    #[test]
++    fn malformed_components_cannot_inject_urls_or_yaml() {
++        for bad in [
++            "", "/", "a/b", "a:b", "a?b", "a#b", "a%2fb", "a\nb", "a b", "a@b", "é",
++        ] {
++            assert!(repository_config(bad, "repo").is_err(), "owner {bad:?}");
++            assert!(repository_config("owner", bad).is_err(), "repo {bad:?}");
++        }
++        for bad in [".", ".."] {
++            assert!(repository_config("owner", bad).is_err());
++        }
++        for bad in ["-owner", "owner-", &"a".repeat(40)] {
++            assert!(repository_config(bad, "repo").is_err());
++        }
++        assert!(repository_config("owner", &"a".repeat(101)).is_err());
++    }
++    #[test]
++    fn bundle_has_exactly_one_renderer_slot() {
++        assert_eq!(CONFIG.matches(URL_SLOT).count(), 1);
++    }
++}
+diff --git a/backend/src/github_app/templates_assets/config.yml b/backend/src/github_app/templates_assets/config.yml
+--- a/backend/src/github_app/templates_assets/config.yml
++++ b/backend/src/github_app/templates_assets/config.yml
+@@ -1,9 +1,12 @@
+-# fkst-issue-templates-version: 13
++# fkst-issue-templates-version: 14
+ # Managed by fkst-hosted. Do not edit by hand — changes are overwritten on the
+ # next reconcile. Bump the version marker above only by changing the bundled
+ # templates in fkst-hosted.
+ blank_issues_enabled: false
+ contact_links:
++  - name: Security policy and vulnerability reporting
++    url: __FKST_SECURITY_POLICY_URL__
++    about: Read the repository security policy before reporting vulnerabilities. Do not disclose vulnerabilities or secrets in public issues.
+   - name: fkst docs & help
+     url: https://github.com/ChronoAIProject/fkst-hosted
+     about: How fkst agent sessions work, and where to get help.

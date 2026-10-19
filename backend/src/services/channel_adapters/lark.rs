@@ -142,13 +142,15 @@ impl LarkFamilyAdapter {
         http: &reqwest::Client,
         app_id: &str,
         app_secret: &str,
-    ) -> AppResult<String> {
+    ) -> AppResult<zeroize::Zeroizing<String>> {
         let config = lark_family_token_exchange_config();
-        let credential_json = serde_json::json!({
-            "app_id": app_id,
-            "app_secret": app_secret,
-        })
-        .to_string();
+        let credential_json = zeroize::Zeroizing::new(
+            serde_json::json!({
+                "app_id": app_id,
+                "app_secret": app_secret,
+            })
+            .to_string(),
+        );
         let mut credential_map = serde_json::Map::new();
         credential_map.insert("app_id".to_string(), serde_json::json!(app_id));
         credential_map.insert("app_secret".to_string(), serde_json::json!(app_secret));
@@ -1002,10 +1004,9 @@ impl PlatformAdapter for LarkFamilyAdapter {
         let Some((app_id, app_secret)) = credentials.token.split_once(':') else {
             return Ok(None);
         };
-        let token = zeroize::Zeroizing::new(
-            self.get_tenant_access_token(http, app_id, app_secret)
-                .await?,
-        );
+        let token = self
+            .get_tenant_access_token(http, app_id, app_secret)
+            .await?;
         let response = media::response_json(
             http.get(format!("{}/open-apis/bot/v3/info", self.base_url))
                 .bearer_auth(token.as_str()),
@@ -1034,10 +1035,9 @@ impl PlatformAdapter for LarkFamilyAdapter {
         let Some((app_id, app_secret)) = credentials.token.split_once(':') else {
             return Ok(None);
         };
-        let token = zeroize::Zeroizing::new(
-            self.get_tenant_access_token(http, app_id, app_secret)
-                .await?,
-        );
+        let token = self
+            .get_tenant_access_token(http, app_id, app_secret)
+            .await?;
         let response = media::response_json(
             http.get(format!(
                 "{}/open-apis/im/v1/chats/{conversation_id}",
@@ -1064,10 +1064,9 @@ impl PlatformAdapter for LarkFamilyAdapter {
             .token
             .split_once(':')
             .ok_or_else(media::fetch_failed)?;
-        let token = zeroize::Zeroizing::new(
-            self.get_tenant_access_token(http, app_id, app_secret)
-                .await?,
-        );
+        let token = self
+            .get_tenant_access_token(http, app_id, app_secret)
+            .await?;
         media::download(
             &attachment.url,
             &[host],
@@ -1102,10 +1101,9 @@ impl PlatformAdapter for LarkFamilyAdapter {
                 .token
                 .split_once(':')
                 .ok_or_else(media::upload_failed)?;
-            let token = zeroize::Zeroizing::new(
-                self.get_tenant_access_token(http, app_id, app_secret)
-                    .await?,
-            );
+            let token = self
+                .get_tenant_access_token(http, app_id, app_secret)
+                .await?;
             let mut last = None;
             for attachment in &reply.attachments {
                 if let Some(caption) = &attachment.caption {
@@ -1208,7 +1206,7 @@ impl PlatformAdapter for LarkFamilyAdapter {
         crate::services::channel_platform::mark_provider_attempt();
         let resp: serde_json::Value = http
             .post(&url)
-            .header("Authorization", format!("Bearer {tenant_token}"))
+            .bearer_auth(tenant_token.as_str())
             .json(&body)
             .send()
             .await
@@ -1293,7 +1291,7 @@ impl PlatformAdapter for LarkFamilyAdapter {
         };
 
         let resp: serde_json::Value = request
-            .header("Authorization", format!("Bearer {tenant_token}"))
+            .bearer_auth(tenant_token.as_str())
             .json(&body)
             .send()
             .await

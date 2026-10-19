@@ -495,14 +495,31 @@ async fn curation_human_cross_service_request_collision_and_concurrent_create() 
     let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
     let hook_a = transactions::TransactionCollisionHook::new(barrier.clone());
     let hook_b = transactions::TransactionCollisionHook::new(barrier);
+    let creation_keys = crate::test_utils::test_encryption_keys();
     let (a, b) = tokio::join!(
         COLLISION.scope(
             hook_a,
-            create(&db, &first, &human_id, &input, &request, &fingerprint)
+            create(
+                &db,
+                &creation_keys,
+                &first,
+                &human_id,
+                &input,
+                &request,
+                &fingerprint
+            )
         ),
         COLLISION.scope(
             hook_b,
-            create(&db, &second, &human_id, &input, &request, &fingerprint)
+            create(
+                &db,
+                &creation_keys,
+                &second,
+                &human_id,
+                &input,
+                &request,
+                &fingerprint
+            )
         )
     );
     assert_eq!(a.unwrap().id, b.unwrap().id);

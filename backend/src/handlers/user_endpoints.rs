@@ -344,7 +344,8 @@ pub async fn update_endpoint(
         TelemetryEvent::EndpointUpdated {
             endpoint_type: endpoint_type.to_string(),
         },
-    );
+    )
+    .await;
 
     Ok(Json(endpoint_response(ep, false)))
 }
@@ -400,7 +401,8 @@ pub async fn delete_endpoint(
         TelemetryEvent::EndpointDeleted {
             endpoint_type: endpoint_type.to_string(),
         },
-    );
+    )
+    .await;
 
     Ok(StatusCode::NO_CONTENT)
 }

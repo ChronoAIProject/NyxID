@@ -54,11 +54,11 @@ The credential is not stored anywhere after this point. It exists in process mem
 
 NyxID maintains explicit allowlists for which request headers to forward and which response headers to pass back. Headers outside the allowlist are stripped. This prevents callers from injecting internal headers and prevents downstream headers from leaking NyxID's internal context.
 
-Request bodies are forwarded as-is, up to the configured size limit (100 MB for proxy routes by default). If approval is enabled for the service, the body is buffered briefly to build the action description shown to the approver; it is not persisted.
+Request bodies are normally forwarded as-is, except for configured credential injection or protocol transforms, up to the configured size limit (100 MiB for authenticated proxy routes by default). If approval is enabled for the service, the body is buffered briefly to build the action description shown to the approver; it is not persisted.
 
 ## Streaming responses
 
-SSE (`text/event-stream`) responses, media types (`video/*`, `audio/*`), and large responses are streamed chunk-by-chunk rather than buffered in memory. Small responses (JSON API responses) are buffered, which allows error bodies to be logged for diagnostics. The streaming/buffering decision is made by inspecting the response `Content-Type` and `Content-Length`.
+SSE (`text/event-stream`) responses, media types (`video/*`, `audio/*`), and large responses are streamed chunk-by-chunk rather than buffered in memory. Small responses (JSON API responses) are buffered. Proxy error diagnostics log status and body size; upstream error body content is excluded. The streaming/buffering decision is made by inspecting the response `Content-Type` and `Content-Length`.
 
 For node-routed responses, NyxID and the node agent use a WebSocket binary frame protocol for streaming chunks — data chunks travel as raw bytes prefixed with a request ID, avoiding the 33% overhead of base64 encoding.
 

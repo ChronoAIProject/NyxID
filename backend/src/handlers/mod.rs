@@ -3,6 +3,7 @@ pub mod admin_anonymous_endpoints;
 pub mod admin_billing;
 #[cfg(test)]
 mod admin_billing_tests;
+pub mod admin_encrypted_records;
 pub mod admin_feature_flags;
 pub mod admin_groups;
 pub mod admin_helpers;
@@ -14,6 +15,7 @@ pub mod admin_roles;
 pub mod admin_sa_connections;
 pub mod admin_sa_providers;
 pub mod admin_service_accounts;
+pub mod admin_token_admission;
 pub mod admin_upload_retention;
 pub mod admin_usage;
 pub mod agent_bindings;

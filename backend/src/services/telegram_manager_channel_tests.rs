@@ -316,8 +316,8 @@ async fn assert_invalid_webhook(state: &crate::AppState, server: &MockServer, in
             .unwrap()
             .unwrap();
         assert_eq!(
-            bson::to_document(&before).unwrap(),
-            bson::to_document(&after).unwrap()
+            bson::to_document(&*before).unwrap(),
+            bson::to_document(&*after).unwrap()
         );
     }
 }
@@ -605,7 +605,7 @@ async fn telegram_manager_channel_unready_configuration_is_projected_without_lif
         state
             .db
             .collection::<PlatformCredential>(CREDENTIALS)
-            .replace_one(doc! {"_id": &original.id}, &original)
+            .replace_one(doc! {"_id": &original.id}, &*original)
             .await
             .unwrap();
         state
@@ -693,7 +693,7 @@ async fn telegram_manager_channel_unready_configuration_is_projected_without_lif
     state
         .db
         .collection::<PlatformCredential>(CREDENTIALS)
-        .insert_one(&original)
+        .insert_one(&*original)
         .await
         .unwrap();
     let detail = channel_bots::get_bot(
@@ -834,8 +834,8 @@ async fn telegram_manager_channel_get_me_failure_persists_safe_status_and_verify
         .unwrap()
         .unwrap();
     assert_eq!(
-        bson::to_document(&manager_before).unwrap(),
-        bson::to_document(&manager_after).unwrap()
+        bson::to_document(&*manager_before).unwrap(),
+        bson::to_document(&*manager_after).unwrap()
     );
     assert_only_telegram_reads(&server, 1, 1).await;
 

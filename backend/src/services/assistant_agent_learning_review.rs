@@ -2253,8 +2253,11 @@ async fn approve_core(
     let mut session = db.client().start_session().await?;
     let claim_future = session
         .start_transaction()
+        .read_concern(mongodb::options::ReadConcern::snapshot())
+        .write_concern(mongodb::options::WriteConcern::majority())
         .and_run2(async move |session| {
             let result: AppResult<LearningPublication> = async {
+                super::erasure_admission::fence_in_session(&db, &agent_for_claim.user_id, session).await?;
                 let fresh = db.collection::<AssistantAgentLearningProposal>(PROPOSALS_COLLECTION_NAME)
                     .find_one(doc! {"_id":&proposal_id,"revision":revision_filter(proposal_revision),"publication.operation_id":&operation_id})
                     .session(&mut *session).await?.ok_or_else(conflict)?;
@@ -2456,9 +2459,17 @@ async fn mark_started(
     let target = target_id(p);
     let operation = p.operation_id.clone();
     let sha = p.sha256.clone();
+    let owner = row.owner_id.clone();
     let mut session = db.client().start_session().await?;
-    session.start_transaction().and_run2(async move |session| {
+    session.start_transaction()
+        .read_concern(mongodb::options::ReadConcern::snapshot())
+        .write_concern(mongodb::options::WriteConcern::majority())
+        .and_run2(async move |session| {
         let result: AppResult<()> = async {
+            // The durable dispatch boundary and erasure acceptance write the
+            // same owner barrier. A request held in package validation cannot
+            // start an external publication after erasure was accepted.
+            super::erasure_admission::fence_in_session(&db, &owner, session).await?;
             let changed = db.collection::<bson::Document>(PROPOSALS_COLLECTION_NAME)
                 .update_one(filter.clone(), vec![doc! {"$set":{"publication.started":true,"publication.dispatched_at":{"$ifNull":["$publication.dispatched_at",bson::DateTime::now()]},"publication.last_stage":"publish"}}])
                 .session(&mut *session).await?;
@@ -2753,8 +2764,11 @@ async fn execute(
     let mut session = db.client().start_session().await?;
     let revision = session
         .start_transaction()
+        .read_concern(mongodb::options::ReadConcern::snapshot())
+        .write_concern(mongodb::options::WriteConcern::majority())
         .and_run2(async move |session| {
             let result: AppResult<i64> = async {
+                super::erasure_admission::fence_in_session(&db, &row_for_pin.owner_id, session).await?;
                 let marked = db
                     .collection::<bson::Document>(PROPOSALS_COLLECTION_NAME)
                     .update_one(

@@ -80,6 +80,40 @@ async fn discovery_producer_advertises_real_512_token_callback_bound() {
 fn binding() -> ManagerBinding {
     serde_json::from_value(fixture()["binding"].clone()).unwrap()
 }
+
+#[tokio::test]
+async fn public_assertions_validate_retained_signer_without_weakening_scope_or_body_binding() {
+    let (old, current) = crate::crypto::jwt::test_rotation_keys();
+    let mut state = crate::test_utils::test_app_state_no_db().await;
+    state.jwt_keys = old;
+    let authority = json!({"binding":binding(),"nyxagent_service_id":uuid::Uuid::new_v4().to_string(),"nyxagent_catalog_digest":"a".repeat(64),"probe_id":uuid::Uuid::new_v4().to_string()});
+    let token = assertion(
+        &state,
+        "probe_model",
+        authority.clone(),
+        b"retained exact bytes",
+        Utc::now() + Duration::seconds(30),
+    )
+    .unwrap();
+    state.jwt_keys = current;
+    assert_eq!(
+        verify_assertion(&state, &token, "probe_model", b"retained exact bytes").unwrap(),
+        authority
+    );
+    assert!(verify_assertion(&state, &token, "cleanup", b"retained exact bytes").is_err());
+    assert!(verify_assertion(&state, &token, "probe_model", b"changed bytes").is_err());
+    let fresh = assertion(
+        &state,
+        "probe_model",
+        authority,
+        b"retained exact bytes",
+        Utc::now() + Duration::seconds(30),
+    )
+    .unwrap();
+    state.jwt_keys.retained.clear();
+    assert!(verify_assertion(&state, &token, "probe_model", b"retained exact bytes").is_err());
+    verify_assertion(&state, &fresh, "probe_model", b"retained exact bytes").unwrap();
+}
 fn outer() -> DownstreamService {
     let mut service = crate::test_utils::test_auto_connected_catalog_service();
     service.slug = super::super::assistant_nyxagent::SERVICE_SLUG.into();

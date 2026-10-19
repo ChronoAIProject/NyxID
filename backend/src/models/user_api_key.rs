@@ -15,8 +15,16 @@ pub struct OAuthAppObservation {
     pub observed_at: DateTime<Utc>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct UserApiKey {
+    /// Explicit field storage dispatch. Missing entries use the documented
+    /// legacy decoder only while trusted legacy reads remain enabled.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub secret_context_versions: std::collections::BTreeMap<String, u8>,
+    /// Stable known-copy origins survive refresh, transfer and encryption rewrap.
+    /// Absence is legacy unknown provenance, never evidence of grant isolation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grant_lineage: Option<super::oauth_grant_lineage::OAuthGrantLineage>,
     #[serde(rename = "_id")]
     pub id: String,
     pub user_id: String,
@@ -117,6 +125,17 @@ pub fn default_credential_epoch() -> i64 {
     1
 }
 
+impl std::fmt::Debug for UserApiKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UserApiKey")
+            .field("id", &self.id)
+            .field("user_id", &self.user_id)
+            .field("credential_type", &self.credential_type)
+            .field("status", &self.status)
+            .finish_non_exhaustive()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -129,6 +148,8 @@ mod tests {
     #[test]
     fn bson_roundtrip_api_key() {
         let key = UserApiKey {
+            grant_lineage: None,
+            secret_context_versions: Default::default(),
             oauth_app_observation: None,
             credential_source: None,
             id: uuid::Uuid::new_v4().to_string(),
@@ -167,6 +188,8 @@ mod tests {
     #[test]
     fn missing_credential_epoch_defaults_to_one() {
         let key = UserApiKey {
+            grant_lineage: None,
+            secret_context_versions: Default::default(),
             oauth_app_observation: None,
             credential_source: None,
             id: uuid::Uuid::new_v4().to_string(),
@@ -203,6 +226,8 @@ mod tests {
     fn bson_roundtrip_oauth2() {
         let conn_id = uuid::Uuid::new_v4().to_string();
         let key = UserApiKey {
+            grant_lineage: None,
+            secret_context_versions: Default::default(),
             oauth_app_observation: None,
             credential_source: None,
             id: uuid::Uuid::new_v4().to_string(),

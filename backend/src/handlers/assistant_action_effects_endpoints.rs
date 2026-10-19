@@ -246,7 +246,15 @@ async fn external_key_credential_matches(
     let Some(ciphertext) = ciphertext else {
         return Ok(false);
     };
-    Ok(state.encryption_keys.decrypt(ciphertext).await? == credential.as_bytes())
+    let field = if key.credential_type == "oauth2" {
+        "access_token_encrypted"
+    } else {
+        "credential_encrypted"
+    };
+    let plaintext = crate::services::credential_record_service::CredentialRecord::key(key)
+        .decrypt(&state.encryption_keys, field, ciphertext)
+        .await?;
+    Ok(plaintext.as_slice() == credential.as_bytes())
 }
 
 async fn resolve_endpoint_owner(
@@ -949,6 +957,8 @@ mod tests {
 
     fn fixture_external_key(key_id: &str, user_id: &str, label: &str) -> UserApiKey {
         UserApiKey {
+            grant_lineage: None,
+            secret_context_versions: Default::default(),
             oauth_app_observation: None,
             credential_epoch: 1,
             credential_source: None,
@@ -979,6 +989,7 @@ mod tests {
 
     fn grant_provider() -> ProviderConfig {
         ProviderConfig {
+            secret_context_versions: Default::default(),
             id: Uuid::new_v4().to_string(),
             slug: "github".to_string(),
             name: "GitHub".to_string(),
@@ -988,6 +999,7 @@ mod tests {
             token_url: Some("https://example.com/token".to_string()),
             revocation_url: None,
             revocation: Some(RevocationConfig {
+                effect_scope: None,
                 request_encoding: "form".to_string(),
                 style: "github".to_string(),
                 url: "https://example.com/revoke".to_string(),
@@ -1486,6 +1498,8 @@ mod tests {
             return;
         };
         let provider = grant_provider();
+        let state = test_app_state(db.clone());
+        crate::test_utils::init_test_audit_chain_hmac_key();
         db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
             .insert_one(&provider)
             .await
@@ -1501,7 +1515,24 @@ mod tests {
             key.provider_config_id = Some(provider.id.clone());
             key.connection_id = Some(Uuid::new_v4().to_string());
             key.credential_source = Some("platform".to_string());
-            key.access_token_encrypted = Some(vec![9, 8, 7]);
+            key.credential_encrypted = None;
+            key.access_token_encrypted = Some(
+                crate::services::credential_record_service::encrypt(
+                    &state.encryption_keys,
+                    USER_API_KEYS,
+                    &key.id,
+                    &actor_id,
+                    "access_token_encrypted",
+                    format!("cascade-access-{slug}").as_bytes(),
+                )
+                .await
+                .unwrap(),
+            );
+            crate::services::credential_record_service::mark_version(
+                &mut key.secret_context_versions,
+                &state.encryption_keys,
+                "access_token_encrypted",
+            );
             db.collection::<UserApiKey>(USER_API_KEYS)
                 .insert_one(&key)
                 .await
@@ -1528,7 +1559,6 @@ mod tests {
             keys.push(key_id);
         }
         let primary_key = keys[0].clone();
-        let state = test_app_state(db);
         let token = access_token(&state, &actor_id);
 
         let (status, first) = request(
@@ -1594,6 +1624,31 @@ mod tests {
         assert_eq!(status, StatusCode::OK, "{confirmed}");
         assert_eq!(confirmed["replayed"], false);
         assert_eq!(confirmed["resource"]["externalKeyId"], primary_key);
+
+        // Consent permits local cascade teardown, but cannot make a delayed
+        // broad provider request safe against a successor upstream grant.
+        let effects = crate::services::personal_erasure_service::provider::EFFECTS;
+        for _ in 0..2 {
+            crate::services::personal_erasure_service::provider::drain_one(
+                &state.db,
+                &state.encryption_keys,
+            )
+            .await
+            .unwrap();
+        }
+        assert_eq!(
+            state
+                .db
+                .collection::<UserApiKey>(USER_API_KEYS)
+                .count_documents(doc! {"_id":{"$in":&keys}})
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(state.db.collection::<mongodb::bson::Document>(effects)
+            .count_documents(doc! {"user_id":&actor_id,"kind":"oauth_disconnect",
+                "status":"operator_action","reason":"provider_grant_scope_requires_external_reconciliation",
+                "capability_encrypted":{"$exists":true}}).await.unwrap(), 2);
 
         let (status, evidence) = request(
             app(state),

@@ -557,84 +557,90 @@ async fn send_one(
     ctx: &ImageSendContext<'_>,
     attachment: MaterializedAttachment,
 ) -> AppResult<Option<&'static str>> {
-    let outbound = OutboundReply {
-        text: None,
-        metadata: None,
-        attachments: vec![attachment],
-        reply_to_platform_message_id: None,
-    };
-    match &ctx.anchor {
-        ImageAnchor::NoAnchor => Err(AppError::NotFound("Image anchor unavailable".into())),
-        ImageAnchor::Inbound { message_id } => {
-            let auth = super::route_key_auth(state, ctx.channel).await?;
-            let body = crate::handlers::channel_relay::AsyncReplyRequest {
-                message_id: message_id.clone(),
-                thread_reply: false,
-                reply: crate::handlers::channel_relay::AsyncReplyBody {
-                    text: None,
-                    metadata: None,
-                    attachments: Vec::new(),
-                },
-            };
-            let headers = HeaderMap::new();
-            let context = crate::handlers::channel_relay::resolve_reply_request_context(
-                state,
-                &headers,
-                Some(&auth),
-                &body,
-            )
-            .await?;
-            let adapter = crate::handlers::channel_relay::reply_adapter(state, &context)?;
-            let response = crate::handlers::channel_relay::deliver_prepared_reply(
-                state,
-                &headers,
-                context,
-                outbound,
-                false,
-                adapter.as_ref(),
-            )
-            .await?
-            .0;
-            response
-                .platform_message_id
-                .ok_or_else(media::upload_failed)?;
-            Ok(response.delivered_as.as_ref().and_then(|kinds| {
-                (kinds.first().map(String::as_str) == Some("file")).then_some("as_document")
-            }))
-        }
-        ImageAnchor::Thread { origin } => {
-            let result = super::thread_follow::send_bound_reply(
-                state,
-                ctx.channel,
-                ctx.owner,
-                origin,
-                ctx.conversation_id,
-                &outbound,
-            )
-            .await?;
-            if let Some(error) = result.error {
-                return Err(error);
+    // Keep this multi-stage delivery future on the heap. Its callers include
+    // Tokio workers and nested image/automation delivery on normal stacks.
+    Box::pin(async move {
+        let outbound = OutboundReply {
+            text: None,
+            metadata: None,
+            attachments: vec![attachment],
+            reply_to_platform_message_id: None,
+        };
+        match &ctx.anchor {
+            ImageAnchor::NoAnchor => Err(AppError::NotFound("Image anchor unavailable".into())),
+            ImageAnchor::Inbound { message_id } => {
+                let auth = super::route_key_auth(state, ctx.channel).await?;
+                let body = crate::handlers::channel_relay::AsyncReplyRequest {
+                    message_id: message_id.clone(),
+                    thread_reply: false,
+                    reply: crate::handlers::channel_relay::AsyncReplyBody {
+                        text: None,
+                        metadata: None,
+                        attachments: Vec::new(),
+                    },
+                };
+                let headers = HeaderMap::new();
+                let context = crate::handlers::channel_relay::resolve_reply_request_context(
+                    state,
+                    &headers,
+                    Some(&auth),
+                    &body,
+                )
+                .await?;
+                let adapter = crate::handlers::channel_relay::reply_adapter(state, &context)?;
+                let response = crate::handlers::channel_relay::deliver_prepared_reply(
+                    state,
+                    &headers,
+                    context,
+                    outbound,
+                    false,
+                    adapter.as_ref(),
+                )
+                .await?
+                .0;
+                response
+                    .platform_message_id
+                    .ok_or_else(media::upload_failed)?;
+                Ok(response.delivered_as.as_ref().and_then(|kinds| {
+                    (kinds.first().map(String::as_str) == Some("file")).then_some("as_document")
+                }))
             }
-            if result.message_ids.is_empty() {
-                return Err(media::upload_failed());
+            ImageAnchor::Thread { origin } => {
+                let result = super::thread_follow::send_bound_reply(
+                    state,
+                    ctx.channel,
+                    ctx.owner,
+                    origin,
+                    ctx.conversation_id,
+                    &outbound,
+                )
+                .await?;
+                if let Some(error) = result.error {
+                    return Err(error);
+                }
+                if result.message_ids.is_empty() {
+                    return Err(media::upload_failed());
+                }
+                Ok((result.delivered_kinds.first() == Some(&MediaKind::File))
+                    .then_some("as_document"))
             }
-            Ok((result.delivered_kinds.first() == Some(&MediaKind::File)).then_some("as_document"))
+            ImageAnchor::Initiated { chat_id } => {
+                let target = ctx
+                    .initiated
+                    .filter(|target| target.thread.id == *chat_id)
+                    .ok_or_else(|| AppError::Conflict("Image post target unavailable".into()))?;
+                let response =
+                    super::chats::send_post_with_fence(state, target, outbound, ctx.fence).await?;
+                response
+                    .platform_message_id
+                    .ok_or_else(media::upload_failed)?;
+                Ok(response.delivered_as.as_ref().and_then(|kinds| {
+                    (kinds.first().map(String::as_str) == Some("file")).then_some("as_document")
+                }))
+            }
         }
-        ImageAnchor::Initiated { chat_id } => {
-            let target = ctx
-                .initiated
-                .filter(|target| target.thread.id == *chat_id)
-                .ok_or_else(|| AppError::Conflict("Image post target unavailable".into()))?;
-            let response =
-                super::chats::send_post_with_fence(state, target, outbound, ctx.fence).await?;
-            response
-                .platform_message_id
-                .ok_or_else(media::upload_failed)?;
-            Ok(response.delivered_as.as_ref().and_then(|kinds| {
-                (kinds.first().map(String::as_str) == Some("file")).then_some("as_document")
-            }))
-        }
-    }
+    })
+    .await
 }
 
 pub fn failure_note(report: &ImageReport) -> String {
