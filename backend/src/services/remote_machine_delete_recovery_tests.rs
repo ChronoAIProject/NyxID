@@ -319,6 +319,7 @@ struct RecoveryCluster {
     pv: Option<Value>,
     pods: Vec<Value>,
     attachments: Vec<Value>,
+    response_override: Option<(String, ResponseTemplate)>,
     pod_list_error: Option<u16>,
     pv_read_error: Option<u16>,
     owned_pvc_pages: Option<Vec<Value>>,
@@ -327,13 +328,27 @@ struct RecoveryCluster {
     patches: Vec<Value>,
 }
 impl RecoveryCluster {
-    fn list(kind: &str, version: &str, values: Vec<Value>) -> ResponseTemplate {
+    fn list(kind: &str, version: &str, mut values: Vec<Value>) -> ResponseTemplate {
+        // Kubernetes built-in typed Lists may omit item TypeMeta. Keep stored
+        // objects and intentionally corrupt response overrides unchanged.
+        for value in &mut values {
+            if value["kind"] == kind && value["apiVersion"] == version {
+                let fields = value.as_object_mut().unwrap();
+                fields.remove("kind");
+                fields.remove("apiVersion");
+            }
+        }
         ResponseTemplate::new(200).set_body_json(json!({"kind":format!("{kind}List"),"apiVersion":version,"metadata":{"resourceVersion":"500"},"items":values}))
     }
     fn respond(&mut self, request: &wiremock::Request) -> ResponseTemplate {
         let path = request.url.path();
         self.requests
             .push((request.method.to_string(), path.to_string()));
+        if let Some((target, response)) = &self.response_override
+            && target == path
+        {
+            return response.clone();
+        }
         let sandbox_item = path.contains("/sandboxes/");
         if request.method.as_str() == "DELETE" {
             let body: Value = serde_json::from_slice(&request.body).unwrap();
@@ -406,6 +421,9 @@ impl RecoveryCluster {
             return ResponseTemplate::new(status);
         }
         if path == "/api/v1/pods" {
+            return ResponseTemplate::new(403);
+        }
+        if path == "/api/v1/namespaces/nyxid-machine/pods" {
             return self
                 .pod_list_error
                 .map(ResponseTemplate::new)
@@ -2289,7 +2307,8 @@ async fn ordinary_native_storage_read_failure_retain_and_claim_conflict_prevent_
         assert!(f.cluster.lock().unwrap().patches.is_empty(), "{defect}");
         let current = f.current().await;
         let expected_blocker = match defect {
-            "pv_forbidden" | "pv_unavailable" => "delete_resource_observation_unknown",
+            "pv_forbidden" => "delete_kubernetes_access_denied",
+            "pv_unavailable" => "delete_kubernetes_http_failed",
             "Retain" => "delete_volume_identity_conflict",
             "claim_uid" | "claim_ref_reassigned" => "delete_pv_claim_identity_conflict",
             _ => unreachable!(),
@@ -2697,7 +2716,7 @@ async fn malformed_foreign_pod_owner_blocks_cleanup_and_absence_finality() {
             let mut cluster = f.cluster.lock().unwrap();
             cluster.pods = vec![json!({
                 "apiVersion":"v1","kind":"Pod",
-                "metadata":{"name":"foreign-pod","namespace":"other-namespace",
+                "metadata":{"name":"foreign-pod","namespace":"nyxid-machine",
                     "uid":"foreign-pod-uid","resourceVersion":"2",
                     "ownerReferences":[{"apiVersion":"apps/v1","kind":"ReplicaSet",
                         "name":"foreign","uid":"foreign-owner","controller":"true"}]},
@@ -2710,7 +2729,7 @@ async fn malformed_foreign_pod_owner_blocks_cleanup_and_absence_finality() {
         }
         let invariants = PendingDeleteInvariants::capture(&f).await;
         assert!(
-            matches!(f.step().await, Err(AppError::Conflict(code)) if code == "delete_resource_observation_unknown"),
+            matches!(f.step().await, Err(AppError::Conflict(code)) if code == "delete_kubernetes_response_invalid"),
             "malformed nonmatching Pod ownership must block both cleanup and workload absence"
         );
         let current = f.current().await;
@@ -2722,14 +2741,9 @@ async fn malformed_foreign_pod_owner_blocks_cleanup_and_absence_finality() {
                 .is_none_or(|p| !p.resources_complete)
         );
         assert!(f.cluster.lock().unwrap().deletes.is_empty());
-        assert!(
-            f.cluster
-                .lock()
-                .unwrap()
-                .requests
-                .iter()
-                .any(|(method, path)| method == "GET" && path == "/api/v1/pods")
-        );
+        assert!(f.cluster.lock().unwrap().requests.iter().any(
+            |(method, path)| method == "GET" && path == "/api/v1/namespaces/nyxid-machine/pods"
+        ));
         invariants.assert_retained(&f).await;
         f.db.drop().await.unwrap();
     }
@@ -3605,6 +3619,17 @@ async fn finalized_delete_blocks_failed_or_incomplete_inventory_before_late_clai
         );
         assert!(f.cluster.lock().unwrap().deletes.is_empty(), "{defect}");
         assert!(f.cluster.lock().unwrap().patches.is_empty(), "{defect}");
+        let current = f.current().await;
+        let expected = match defect {
+            "forbidden" => "delete_kubernetes_access_denied",
+            "unavailable" => "delete_kubernetes_http_failed",
+            _ => "delete_kubernetes_inventory_incomplete",
+        };
+        assert_eq!(
+            current.delete_recovery.as_ref().unwrap().blocker.as_deref(),
+            Some(expected)
+        );
+        assert!(!current.delete_recovery.as_ref().unwrap().resources_complete);
         invariants.assert_unchanged(&f).await;
         f.db.drop().await.unwrap();
     }
@@ -4046,4 +4071,681 @@ async fn finalized_absence_stop_survives_new_unresolved_original_creation_work_a
     assert_eq!(progress.evidence_id, original_progress.evidence_id);
     invariants.assert_unchanged(&f).await;
     f.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn early_pod_observation_failure_persists_original_delete_diagnostic_once() {
+    let f = recovery_fixture("delete_early_diagnostic", true).await;
+    {
+        let mut cluster = f.cluster.lock().unwrap();
+        cluster.sandbox = None;
+        cluster.pvc = None;
+        cluster.pod_list_error = Some(403);
+    }
+    assert!(f.current().await.delete_recovery.is_none());
+    // Historical overdue projection is replaced by the next real failure,
+    // without guessing a cause or backfilling old operations.
+    f.db.collection::<Document>(crate::models::remote_machine_operation::COLLECTION_NAME)
+        .update_one(doc! {"_id":&f.machine.active_operation_id},
+            doc! {"$set":{"error_code":"cleanup_overdue","error_message":"legacy overdue projection"}})
+        .await.unwrap();
+    let result = f.step().await;
+    assert!(
+        matches!(result, Err(AppError::Conflict(code)) if code == "delete_kubernetes_access_denied")
+    );
+    let current = f.current().await;
+    let progress = current
+        .delete_recovery
+        .as_ref()
+        .expect("early failure is durable");
+    assert_eq!(
+        progress.blocker.as_deref(),
+        Some("delete_kubernetes_access_denied")
+    );
+    assert!(!progress.resources_complete);
+    assert!(!current.writer_admitted);
+    assert!(progress.stop.is_none());
+    let op = operations::get_operation(
+        &f.db,
+        &current.owner_id,
+        current.active_operation_id.as_deref().unwrap(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        op.error_code.as_deref(),
+        Some("delete_kubernetes_access_denied")
+    );
+    assert_eq!(op.retry_count, 1);
+    assert_eq!(op.delete_retry.as_ref().unwrap().attempts, 1);
+    f.manager
+        .progress(&op.id, "runtime_evidence_pending")
+        .await
+        .unwrap();
+    f.manager
+        .progress(&op.id, "sandbox_effect_pending")
+        .await
+        .unwrap();
+    assert_eq!(
+        operations::get_operation(&f.db, &current.owner_id, &op.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .error_code,
+        op.error_code
+    );
+    assert!(f.cluster.lock().unwrap().deletes.is_empty());
+    assert!(
+        f.cluster
+            .lock()
+            .unwrap()
+            .requests
+            .iter()
+            .all(|(_, path)| path != "/api/v1/pods")
+    );
+    f.slot_retained().await;
+    f.db.drop().await.unwrap();
+}
+
+#[derive(Clone)]
+struct DiagnosticLogWriter(Arc<Mutex<Vec<u8>>>);
+impl std::io::Write for DiagnosticLogWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn observation_failure_classes_persist_for_each_original_delete() {
+    for (status, expected) in [
+        (401, "delete_kubernetes_authentication_failed"),
+        (403, "delete_kubernetes_access_denied"),
+        (500, "delete_kubernetes_http_failed"),
+        (404, "delete_kubernetes_http_failed"),
+    ] {
+        for path in [
+            "/api/v1/persistentvolumes",
+            "/apis/storage.k8s.io/v1/volumeattachments",
+        ] {
+            let f = recovery_fixture("delete_observation_classes", true).await;
+            f.set_pv("Delete");
+            f.cluster.lock().unwrap().response_override = Some((path.into(), ResponseTemplate::new(status).set_body_string("fixture-secret-token fixture-writer-fence https://fixture.invalid/path?credential=secret")));
+            use tracing::instrument::WithSubscriber;
+            let captured = Arc::new(Mutex::new(Vec::new()));
+            let sink = captured.clone();
+            let subscriber = tracing_subscriber::fmt()
+                .with_ansi(false)
+                .without_time()
+                .with_writer(move || DiagnosticLogWriter(sink.clone()))
+                .finish();
+            let result = f.step().with_subscriber(subscriber).await;
+            assert!(
+                matches!(result, Err(AppError::Conflict(code)) if code == expected),
+                "{status} {path}"
+            );
+            let logged = String::from_utf8(captured.lock().unwrap().clone()).unwrap();
+            assert_eq!(
+                logged
+                    .matches("Remote Machine Kubernetes observation failed")
+                    .count(),
+                1
+            );
+            for forbidden in [
+                "fixture-secret-token",
+                "fixture-writer-fence",
+                "https://fixture.invalid",
+                "credential=secret",
+                f.machine.writer_fence.as_str(),
+            ] {
+                assert!(!logged.contains(forbidden));
+            }
+            assert!(logged.contains(&f.machine.node_id));
+            assert!(logged.contains(f.machine.active_operation_id.as_deref().unwrap()));
+            assert!(logged.contains("stage=\"request\""));
+            assert!(logged.contains("verb=\"list\""));
+            assert!(logged.contains(&format!("http_status={status}")));
+            assert!(logged.contains(if path == "/api/v1/persistentvolumes" {
+                "resource_kind=\"PersistentVolume\""
+            } else {
+                "resource_kind=\"VolumeAttachment\""
+            }));
+            let current = f.current().await;
+            assert_eq!(
+                current.delete_recovery.as_ref().unwrap().blocker.as_deref(),
+                Some(expected)
+            );
+            assert!(!current.delete_recovery.as_ref().unwrap().resources_complete);
+            let op = operations::get_operation(
+                &f.db,
+                &current.owner_id,
+                current.active_operation_id.as_deref().unwrap(),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert_eq!(op.error_code.as_deref(), Some(expected));
+            assert_eq!(op.retry_count, 1);
+            assert!(!current.writer_admitted);
+            assert!(f.cluster.lock().unwrap().deletes.is_empty());
+            f.slot_retained().await;
+            f.db.drop().await.unwrap();
+        }
+    }
+}
+
+#[tokio::test]
+async fn invalid_observation_and_foreign_namespace_remain_durable_blockers() {
+    for defect in ["json", "type", "namespace", "pagination", "timeout"] {
+        let f = recovery_fixture("delete_invalid_observation", true).await;
+        let mut pod = f.pod();
+        let mut list = json!({"kind":"PodList","apiVersion":"v1","metadata":{"resourceVersion":"500"},"items":[]});
+        let response = match defect {
+            "timeout" => ResponseTemplate::new(200)
+                .set_body_json(list)
+                .set_delay(std::time::Duration::from_secs(6)),
+            "json" => ResponseTemplate::new(200).set_body_string("fixture-secret-token {"),
+            "type" => {
+                pod["kind"] = json!("Secret");
+                list["items"] = json!([pod]);
+                ResponseTemplate::new(200).set_body_json(list)
+            }
+            "namespace" => {
+                pod["metadata"]["namespace"] = json!("other-namespace");
+                list["items"] = json!([pod]);
+                ResponseTemplate::new(200).set_body_json(list)
+            }
+            _ => {
+                list["metadata"]["continue"] = json!("repeated");
+                ResponseTemplate::new(200).set_body_json(list)
+            }
+        };
+        f.cluster.lock().unwrap().response_override =
+            Some(("/api/v1/namespaces/nyxid-machine/pods".into(), response));
+        let expected = match defect {
+            "pagination" => "delete_kubernetes_inventory_incomplete",
+            "timeout" => "delete_kubernetes_observation_timed_out",
+            _ => "delete_kubernetes_response_invalid",
+        };
+        assert!(
+            matches!(f.step().await, Err(AppError::Conflict(code)) if code == expected),
+            "{defect}"
+        );
+        let current = f.current().await;
+        assert_eq!(
+            current.delete_recovery.as_ref().unwrap().blocker.as_deref(),
+            Some(expected)
+        );
+        assert!(!current.writer_admitted);
+        assert!(f.cluster.lock().unwrap().deletes.is_empty());
+        f.slot_retained().await;
+        f.db.drop().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn stale_observation_diagnostic_cannot_overwrite_revision_operation_claim_or_terminal_state()
+{
+    for change in [
+        "revision",
+        "operation",
+        "claim",
+        "claim_expired",
+        "terminal",
+    ] {
+        let f = recovery_fixture("delete_diagnostic_race", true).await;
+        let target = format!(
+            "/apis/agents.x-k8s.io/v1beta1/namespaces/nyxid-machine/sandboxes/{}",
+            f.machine.sandbox_name
+        );
+        f.cluster.lock().unwrap().response_override = Some((
+            target.clone(),
+            ResponseTemplate::new(403).set_delay(std::time::Duration::from_millis(400)),
+        ));
+        let snapshot = f.current().await;
+        let manager = f.manager.clone();
+        let attempt = tokio::spawn(async move { advance(&manager, &snapshot).await });
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if f.cluster
+                    .lock()
+                    .unwrap()
+                    .requests
+                    .iter()
+                    .any(|(_, path)| path == &target)
+                {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        match change {
+            "revision" => {
+                f.db.collection::<Document>(MACHINE_COLLECTION)
+                    .update_one(
+                        doc! {"_id":&f.machine.node_id},
+                        doc! {"$inc":{"revision":1_i64}},
+                    )
+                    .await
+                    .unwrap();
+            }
+            "operation" => {
+                f.db.collection::<Document>(MACHINE_COLLECTION)
+                    .update_one(
+                        doc! {"_id":&f.machine.node_id},
+                        doc! {"$set":{"active_operation_id":"successor-delete"}},
+                    )
+                    .await
+                    .unwrap();
+            }
+            "claim_expired" => {
+                f.db.collection::<Document>(crate::models::remote_machine_operation::COLLECTION_NAME)
+                    .update_one(doc! {"_id":&f.machine.active_operation_id},
+                        doc! {"$set":{"delete_retry.claim_until":bson::DateTime::from_chrono(Utc::now() - chrono::Duration::seconds(1))}})
+                    .await.unwrap();
+            }
+            "claim" => {
+                f.db.collection::<Document>(
+                    crate::models::remote_machine_operation::COLLECTION_NAME,
+                )
+                .update_one(
+                    doc! {"_id":&f.machine.active_operation_id},
+                    doc! {"$set":{"delete_retry.claim_id":"successor-claim"}},
+                )
+                .await
+                .unwrap();
+            }
+            _ => {
+                f.db.collection::<Document>(crate::models::remote_machine_operation::COLLECTION_NAME).update_one(doc! {"_id":&f.machine.active_operation_id}, doc! {"$set":{"state":"succeeded","terminal_at":bson::DateTime::now(),"cleanup_state":"complete"}}).await.unwrap();
+            }
+        }
+        let before = f.current().await;
+        assert!(attempt.await.unwrap().is_err(), "{change}");
+        let after = f.current().await;
+        assert_eq!(after.revision, before.revision, "{change}");
+        assert!(after.delete_recovery.is_none(), "{change}");
+        let op = operations::get_operation(
+            &f.db,
+            &f.machine.owner_id,
+            f.machine.active_operation_id.as_deref().unwrap(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_ne!(
+            op.error_code.as_deref(),
+            Some("delete_kubernetes_access_denied"),
+            "{change}"
+        );
+        if change == "claim" {
+            assert_eq!(
+                op.delete_retry.as_ref().unwrap().claim_id.as_deref(),
+                Some("successor-claim")
+            );
+        }
+        if change == "terminal" {
+            assert_eq!(op.state, OperationState::Succeeded);
+            assert_eq!(
+                op.cleanup_state,
+                crate::models::remote_machine_operation::CleanupState::Complete
+            );
+        }
+        assert!(f.cluster.lock().unwrap().deletes.is_empty());
+        f.db.drop().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn ordinary_delete_pod_query_failure_preserves_classified_reason() {
+    let f = recovery_fixture("delete_ordinary_pod_diagnostic", true).await;
+    seed_ordinary_native_storage(&f).await;
+    f.cluster.lock().unwrap().pod_list_error = Some(403);
+    assert!(
+        matches!(f.step().await, Err(AppError::Conflict(code)) if code == "delete_kubernetes_access_denied")
+    );
+    let current = f.current().await;
+    assert_eq!(
+        current.delete_recovery.as_ref().unwrap().blocker.as_deref(),
+        Some("delete_kubernetes_access_denied")
+    );
+    assert!(!current.delete_recovery.as_ref().unwrap().resources_complete);
+    let op = operations::get_operation(
+        &f.db,
+        &current.owner_id,
+        current.active_operation_id.as_deref().unwrap(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        op.error_code.as_deref(),
+        Some("delete_kubernetes_access_denied")
+    );
+    assert_eq!(op.retry_count, 1);
+    assert!(f.cluster.lock().unwrap().deletes.is_empty());
+    f.slot_retained().await;
+
+    f.cluster.lock().unwrap().pod_list_error = None;
+    let _ = f.step().await;
+    assert_eq!(f.cluster.lock().unwrap().deletes.len(), 1);
+    let progressed = f.current().await;
+    assert_eq!(
+        progressed.delete_recovery.as_ref().unwrap().blocker,
+        None,
+        "successful ordinary observation clears the resolved access failure"
+    );
+    assert!(
+        !progressed
+            .delete_recovery
+            .as_ref()
+            .unwrap()
+            .resources_complete
+    );
+    let progressed_op = operations::get_operation(&f.db, &current.owner_id, &op.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        progressed_op.error_code, None,
+        "successful ordinary observation clears the original operation's resolved access failure"
+    );
+    assert_eq!(progressed_op.error_message, None);
+    assert_eq!(progressed_op.retry_count, 2);
+    assert_eq!(progressed_op.delete_retry.as_ref().unwrap().attempts, 2);
+    for code in ["runtime_evidence_pending", "sandbox_effect_pending"] {
+        f.manager.progress(&op.id, code).await.unwrap();
+        let wrapped = operations::get_operation(&f.db, &current.owner_id, &op.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(wrapped.error_code.as_deref(), Some(code));
+        assert_eq!(wrapped.retry_count, progressed_op.retry_count);
+        assert_eq!(
+            wrapped.delete_retry.as_ref().unwrap().attempts,
+            progressed_op.delete_retry.as_ref().unwrap().attempts
+        );
+        assert_eq!(wrapped.next_attempt_at, progressed_op.next_attempt_at);
+        assert!(wrapped.terminal_at.is_none());
+    }
+    assert!(!progressed.writer_admitted);
+    f.slot_retained().await;
+    f.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn ordinary_observation_progress_cannot_clear_a_successor_or_current_other_blocker() {
+    for change in [
+        "revision",
+        "operation",
+        "runtime_generation",
+        "credential_epoch",
+        "writer_fence",
+        "claim",
+        "claim_expired",
+        "terminal",
+        "other_blocker",
+        "other_observation",
+    ] {
+        let f = recovery_fixture("delete_progress_race", true).await;
+        seed_ordinary_native_storage(&f).await;
+        f.cluster.lock().unwrap().pod_list_error = Some(403);
+        assert!(
+            matches!(f.step().await, Err(AppError::Conflict(code)) if code == "delete_kubernetes_access_denied")
+        );
+        // Hold the last successful observation before the paired progress save.
+        let target = "/apis/storage.k8s.io/v1/volumeattachments";
+        {
+            let mut cluster = f.cluster.lock().unwrap();
+            cluster.pod_list_error = None;
+            cluster.requests.clear();
+            cluster.response_override = Some((
+                target.into(),
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({
+                        "kind":"VolumeAttachmentList", "apiVersion":"storage.k8s.io/v1",
+                        "metadata":{"resourceVersion":"40"}, "items":[],
+                    }))
+                    .set_delay(std::time::Duration::from_millis(400)),
+            ));
+        }
+        f.due().await;
+        let snapshot = f.current().await;
+        let manager = f.manager.clone();
+        let attempt = tokio::spawn(async move { advance(&manager, &snapshot).await });
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if f.cluster
+                    .lock()
+                    .unwrap()
+                    .requests
+                    .iter()
+                    .any(|(_, path)| path == target)
+                {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let machine_rows = f.db.collection::<Document>(MACHINE_COLLECTION);
+        let operation_rows =
+            f.db.collection::<Document>(crate::models::remote_machine_operation::COLLECTION_NAME);
+        let operation_id = f.machine.active_operation_id.as_deref().unwrap();
+        match change {
+            "revision" | "runtime_generation" | "credential_epoch" => {
+                let mut increment = Document::new();
+                increment.insert(change, 1_i64);
+                machine_rows
+                    .update_one(doc! {"_id":&f.machine.node_id}, doc! {"$inc":increment})
+                    .await
+                    .unwrap();
+            }
+            "operation" | "writer_fence" => {
+                let field = if change == "operation" {
+                    "active_operation_id"
+                } else {
+                    "writer_fence"
+                };
+                let mut changed = Document::new();
+                changed.insert(field, "successor");
+                machine_rows
+                    .update_one(doc! {"_id":&f.machine.node_id}, doc! {"$set":changed})
+                    .await
+                    .unwrap();
+            }
+            "claim" => {
+                operation_rows
+                    .update_one(
+                        doc! {"_id":operation_id},
+                        doc! {"$set":{"delete_retry.claim_id":"successor-claim"}},
+                    )
+                    .await
+                    .unwrap();
+            }
+            "claim_expired" => {
+                operation_rows.update_one(doc! {"_id":operation_id},
+                    doc! {"$set":{"delete_retry.claim_until":bson::DateTime::from_chrono(Utc::now() - chrono::Duration::seconds(1))}})
+                    .await.unwrap();
+            }
+            "terminal" => {
+                operation_rows.update_one(doc! {"_id":operation_id}, doc! {"$set":{
+                    "state":"succeeded","terminal_at":bson::DateTime::now(),"cleanup_state":"complete",
+                    "error_code":bson::Bson::Null,"error_message":bson::Bson::Null,
+                }}).await.unwrap();
+            }
+            _ => {
+                let code = if change == "other_blocker" {
+                    "accounting_pending"
+                } else {
+                    "delete_kubernetes_credentials_unavailable"
+                };
+                operation_rows
+                    .update_one(
+                        doc! {"_id":operation_id},
+                        doc! {"$set":{"error_code":code,"error_message":"current blocker"}},
+                    )
+                    .await
+                    .unwrap();
+            }
+        }
+        let before = f.current().await;
+        let before_op = operations::get_operation(&f.db, &f.machine.owner_id, operation_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let outcome = attempt.await.unwrap();
+        let current_other_cause = matches!(change, "other_blocker" | "other_observation");
+        if current_other_cause {
+            assert!(
+                outcome.is_err(),
+                "cleanup still awaits resource disappearance"
+            );
+            assert!(
+                !matches!(outcome, Err(AppError::Conflict(code)) if code == "delete_evidence_raced"),
+                "a different diagnostic must not prevent authorized progress"
+            );
+        } else {
+            assert!(
+                matches!(outcome, Err(AppError::Conflict(code)) if code == "delete_evidence_raced"),
+                "{change}"
+            );
+        }
+        let after = f.current().await;
+        if current_other_cause {
+            assert_eq!(after.revision, before.revision + 1, "{change}");
+            assert_eq!(
+                after.delete_recovery.as_ref().unwrap().blocker,
+                None,
+                "{change}"
+            );
+            assert!(!after.delete_recovery.as_ref().unwrap().resources_complete);
+        } else {
+            assert_eq!(after.revision, before.revision, "{change}");
+            assert_eq!(
+                bson::to_bson(&after.delete_recovery).unwrap(),
+                bson::to_bson(&before.delete_recovery).unwrap(),
+                "{change}"
+            );
+        }
+        let after_op = operations::get_operation(&f.db, &f.machine.owner_id, operation_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(after_op.error_code, before_op.error_code, "{change}");
+        assert_eq!(after_op.error_message, before_op.error_message, "{change}");
+        assert_eq!(after_op.state, before_op.state, "{change}");
+        assert_eq!(after_op.terminal_at, before_op.terminal_at, "{change}");
+        assert_eq!(after_op.cleanup_state, before_op.cleanup_state, "{change}");
+        assert_eq!(after_op.retry_count, 2, "{change}");
+        assert_eq!(
+            after_op.delete_retry.as_ref().unwrap().attempts,
+            2,
+            "{change}"
+        );
+        if change == "claim" {
+            assert_eq!(
+                after_op.delete_retry.as_ref().unwrap().claim_id.as_deref(),
+                Some("successor-claim")
+            );
+        }
+        assert_eq!(
+            f.cluster.lock().unwrap().deletes.len(),
+            usize::from(current_other_cause),
+            "{change}"
+        );
+        assert!(!after.writer_admitted);
+        f.slot_retained().await;
+        f.db.drop().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn finalized_scan_diagnostic_cannot_adopt_a_newer_revision() {
+    let (f, _, invariants) = finalized_recovery_fixture("delete_final_diagnostic_race").await;
+    let target = format!(
+        "/apis/agents.x-k8s.io/v1beta1/namespaces/nyxid-machine/sandboxes/{}",
+        f.machine.sandbox_name
+    );
+    {
+        let mut cluster = f.cluster.lock().unwrap();
+        cluster.requests.clear();
+        cluster.response_override = Some((
+            target.clone(),
+            ResponseTemplate::new(403).set_delay(std::time::Duration::from_millis(400)),
+        ));
+    }
+    let snapshot = f.current().await;
+    let manager = f.manager.clone();
+    let attempt = tokio::spawn(async move { advance(&manager, &snapshot).await });
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if f.cluster
+                .lock()
+                .unwrap()
+                .requests
+                .iter()
+                .any(|(_, path)| path == &target)
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    f.db.collection::<Document>(MACHINE_COLLECTION)
+        .update_one(
+            doc! {"_id":&f.machine.node_id},
+            doc! {"$inc":{"revision":1_i64}},
+        )
+        .await
+        .unwrap();
+    let before = f.current().await;
+    assert!(attempt.await.unwrap().is_err());
+    let after = f.current().await;
+    assert_eq!(after.revision, before.revision);
+    assert_eq!(after.delete_recovery, before.delete_recovery);
+    assert_eq!(after.cleanup_state, "complete");
+    invariants.assert_unchanged(&f).await;
+    f.db.drop().await.unwrap();
+}
+
+#[test]
+fn unclassified_delete_observation_never_logs_upstream_material() {
+    let (machine, _) = fixture();
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let sink = captured.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_ansi(false)
+        .without_time()
+        .with_writer(move || DiagnosticLogWriter(sink.clone()))
+        .finish();
+    let error = tracing::subscriber::with_default(subscriber, || {
+        api_pending(
+            &machine,
+            anyhow::anyhow!(
+                "fixture-secret-token fixture-writer-fence https://fixture.invalid/?credential=secret"
+            ),
+        )
+    });
+    assert!(
+        matches!(error, AppError::Conflict(code) if code == "delete_resource_observation_unknown")
+    );
+    let logged = String::from_utf8(captured.lock().unwrap().clone()).unwrap();
+    assert_eq!(
+        logged
+            .matches("Remote Machine Kubernetes observation failed")
+            .count(),
+        1
+    );
+    assert!(logged.contains("error_kind=\"unclassified\""));
+    assert!(!logged.contains("fixture-"));
+    assert!(!logged.contains("credential=secret"));
 }

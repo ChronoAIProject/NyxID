@@ -383,7 +383,7 @@ pub async fn sweep(db: &Database, now: DateTime<Utc>) -> AppResult<()> {
         {
             record(db,&op,"cleanup_overdue","Cleanup remains pending beyond the 24-hour target; platform investigation is required",true).await?;
             escalate_cleanup(db, &op).await?;
-            db.collection::<Document>(OPERATIONS).update_one(doc! {"_id":&op.id,"terminal_at":bson::Bson::Null},doc! {"$set":{"deadline_at":bson::DateTime::from_chrono(op.created_at+Duration::hours(24)),"cleanup_state":"pending","error_code":"cleanup_overdue","error_message":"Cleanup remains pending; no completion is inferred from the deadline"}}).await?;
+            db.collection::<Document>(OPERATIONS).update_one(doc! {"_id":&op.id,"terminal_at":bson::Bson::Null},doc! {"$set":{"deadline_at":bson::DateTime::from_chrono(op.created_at+Duration::hours(24)),"cleanup_state":"pending"}}).await?;
         } else if now >= op.created_at + Duration::minutes(15) {
             record(db,&op,"reconciliation_delayed","Platform reconciliation is taking longer than expected; retained work data will not be deleted automatically",true).await?;
         }
@@ -527,6 +527,195 @@ mod pagination_tests {
                 .unwrap();
         }
         op
+    }
+
+    async fn overdue_delete_operation(
+        db: &Database,
+        error: Option<(&str, &str)>,
+    ) -> MachineOperation {
+        let op = account_safety_operation(db, LifecycleAction::Delete, "fixture").await;
+        let (code, message) = error.unzip();
+        db.collection::<Document>(OPERATIONS)
+            .update_one(
+                doc! {"_id":&op.id},
+                doc! {"$set":{
+                    "created_at":bson::DateTime::from_chrono(Utc::now()-Duration::hours(25)),
+                    "deadline_at":bson::Bson::Null,
+                    "error_code":code,
+                    "error_message":message
+                }},
+            )
+            .await
+            .unwrap();
+        db.collection::<MachineOperation>(OPERATIONS)
+            .find_one(doc! {"_id":&op.id})
+            .await
+            .unwrap()
+            .unwrap()
+    }
+
+    async fn assert_overdue_projection(
+        db: &Database,
+        original: &MachineOperation,
+        error: Option<(&str, &str)>,
+    ) {
+        let op = db
+            .collection::<MachineOperation>(OPERATIONS)
+            .find_one(doc! {"_id":&original.id})
+            .await
+            .unwrap()
+            .unwrap();
+        let (code, message) = error.unzip();
+        assert_eq!(op.error_code.as_deref(), code);
+        assert_eq!(op.error_message.as_deref(), message);
+        assert_eq!(op.state, original.state);
+        assert!(op.terminal_at.is_none());
+        assert_eq!(
+            op.cleanup_state,
+            crate::models::remote_machine_operation::CleanupState::Pending
+        );
+        assert_eq!(op.deadline_at, Some(op.created_at + Duration::hours(24)));
+        assert_eq!(op.retry_count, original.retry_count);
+        assert_eq!(
+            db.collection::<Document>(EVENTS)
+                .count_documents(
+                    doc! {"operation_id":&op.id,"kind":"cleanup_overdue","notification":true}
+                )
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            db.collection::<Document>(crate::models::audit_log::COLLECTION_NAME)
+                .count_documents(doc! {"event_type":"machine_cleanup_overdue_operator_action","event_data.operation_id":&op.id})
+                .await
+                .unwrap(),
+            1
+        );
+        let row = db
+            .collection::<Document>(OPERATIONS)
+            .find_one(doc! {"_id":&op.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(row.get_datetime("operator_escalated_at").is_ok());
+        assert_eq!(row.get_str("operator_escalation"), Ok("cleanup_overdue"));
+    }
+
+    #[tokio::test]
+    async fn cleanup_overdue_preserves_specific_error_before_sweep() {
+        let db =
+            crate::test_utils::connect_transaction_test_database("machine_overdue_specific").await;
+        ensure_indexes(&db).await.unwrap();
+        let error = Some((
+            "delete_kubernetes_access_denied",
+            "Kubernetes access denied while observing cleanup resources",
+        ));
+        let op = overdue_delete_operation(&db, error).await;
+        for _ in 0..2 {
+            sweep(&db, Utc::now()).await.unwrap();
+            assert_overdue_projection(&db, &op, error).await;
+        }
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn cleanup_overdue_preserves_specific_error_after_earlier_sweep() {
+        let db =
+            crate::test_utils::connect_transaction_test_database("machine_overdue_order").await;
+        ensure_indexes(&db).await.unwrap();
+        // A pre-upgrade overdue code is replaced only by a real observation;
+        // the projection does not infer what the previous failure meant.
+        let legacy = Some((
+            "cleanup_overdue",
+            "Cleanup remains pending; no completion is inferred from the deadline",
+        ));
+        let op = overdue_delete_operation(&db, legacy).await;
+        sweep(&db, Utc::now()).await.unwrap();
+        assert_overdue_projection(&db, &op, legacy).await;
+        let error = Some((
+            "delete_kubernetes_response_invalid",
+            "Kubernetes cleanup observation response is invalid",
+        ));
+        let (code, message) = error.unwrap();
+        db.collection::<Document>(OPERATIONS)
+            .update_one(
+                doc! {"_id":&op.id,"terminal_at":bson::Bson::Null},
+                doc! {"$set":{"error_code":code,"error_message":message}},
+            )
+            .await
+            .unwrap();
+        for _ in 0..2 {
+            sweep(&db, Utc::now()).await.unwrap();
+            assert_overdue_projection(&db, &op, error).await;
+        }
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn cleanup_overdue_does_not_invent_an_error_when_none_is_known() {
+        let db =
+            crate::test_utils::connect_transaction_test_database("machine_overdue_no_error").await;
+        ensure_indexes(&db).await.unwrap();
+        let op = overdue_delete_operation(&db, None).await;
+        for _ in 0..2 {
+            sweep(&db, Utc::now()).await.unwrap();
+            assert_overdue_projection(&db, &op, None).await;
+        }
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn cleanup_overdue_does_not_reopen_a_terminal_delete() {
+        let db =
+            crate::test_utils::connect_transaction_test_database("machine_overdue_terminal").await;
+        ensure_indexes(&db).await.unwrap();
+        let op = overdue_delete_operation(&db, None).await;
+        let terminal = bson::DateTime::now();
+        db.collection::<Document>(OPERATIONS)
+            .update_one(
+                doc! {"_id":&op.id},
+                doc! {"$set":{"state":"succeeded","cleanup_state":"complete","terminal_at":terminal}},
+            )
+            .await
+            .unwrap();
+        for _ in 0..2 {
+            sweep(&db, Utc::now()).await.unwrap();
+            let retained = db
+                .collection::<MachineOperation>(OPERATIONS)
+                .find_one(doc! {"_id":&op.id})
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                retained.state,
+                crate::models::remote_machine_operation::OperationState::Succeeded
+            );
+            assert_eq!(
+                retained.cleanup_state,
+                crate::models::remote_machine_operation::CleanupState::Complete
+            );
+            assert_eq!(retained.terminal_at, Some(terminal.to_chrono()));
+            assert_eq!(retained.deadline_at, None);
+            assert_eq!(retained.error_code, None);
+            assert_eq!(retained.error_message, None);
+            assert_eq!(retained.retry_count, op.retry_count);
+            assert_eq!(
+                db.collection::<Document>(EVENTS)
+                    .count_documents(doc! {"operation_id":&op.id,"kind":"cleanup_overdue"})
+                    .await
+                    .unwrap(),
+                0
+            );
+            assert_eq!(
+                db.collection::<Document>(crate::models::audit_log::COLLECTION_NAME)
+                    .count_documents(doc! {"event_type":"machine_cleanup_overdue_operator_action","event_data.operation_id":&op.id})
+                    .await
+                    .unwrap(),
+                0
+            );
+        }
+        db.drop().await.unwrap();
     }
 
     #[tokio::test]

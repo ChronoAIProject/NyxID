@@ -225,8 +225,9 @@ The backend Pod's Google identity (`chrono-nyxid` in the intended deployment)
 is distinct from the Kubernetes ServiceAccount `nyxid-machine-manager` in the
 example RBAC. That binding does **not** establish access for a Google principal.
 Before environment acceptance, an operator must record the actual authenticated
-principal, its least-privilege Sandbox writes and required read-only Pod/PVC,
-direct Node/PV GET, StorageClass GET/LIST, TokenReview and diagnostic permissions,
+principal, its least-privilege Sandbox writes, namespaced Pod/PVC GET/LIST and
+UID/resourceVersion-preconditioned cleanup DELETE, Node/PV GET, cluster PV and
+VolumeAttachment LIST, StorageClass GET/LIST, TokenReview and diagnostic permissions,
 API reachability, trusted CA and hostname. Inventory the permissions in the
 existing manifests/probes against that principal. This change grants no IAM or
 RBAC roles and does not authorize modifying the target environment. Real Google
@@ -303,6 +304,50 @@ cloud-erasure claim. Cleanup and accounting retry separately, while final
 deleted state, operation success and slot release wait for both. Unknown runtime
 periods are not universally charged, and later top-ups do not fund uncapped
 residual costs.
+
+Pod discovery reads every page in the original validated namespace through
+`/api/v1/namespaces/{namespace}/pods` (`nyxid-machine` for the Manager), without
+a label selector or an all-namespace Pod request. A Pod using the original claim
+still blocks when it has no NyxID labels or uses a volume name other than
+`workspace`. All returned namespace identities are validated before filtering.
+PVC discovery remains namespaced; PV and VolumeAttachment inventories remain
+cluster-scoped. Later-page failures return no partial inventory and cannot
+authorize deletion or finalization.
+
+For typed Pod/PVC/PV/VolumeAttachment Lists, the validated outer kind/apiVersion
+supplies item TypeMeta only when those fields are absent. Explicit matching
+strings pass; explicit null, non-string, empty or wrong values fail. Normalized
+item kinds remain available to cleanup. TypeMeta inheritance is restricted to
+these typed List items. Existing strict recovery-object validation remains
+unchanged for pre-suspension Sandbox reads and Lease reads. Namespace, UID, owner,
+claimRef, stable resourceVersion, pagination consistency and bounded inventory
+checks remain mandatory. Exact GET/DELETE 404 means that object is absent;
+LIST 404 remains a failed observation.
+
+Deletion diagnostics distinguish authentication (401), access denial (403),
+credential preparation, timeout, transport, other HTTP status, invalid response,
+incomplete inventory and inventory limits. The corresponding fixed
+`delete_kubernetes_*` blocker and pending original operation error survive generic
+pending reporting; unclassified failures retain
+`delete_resource_observation_unknown`. Validated resource identity conflicts
+retain their existing business blockers. One structured warning per actual
+failure contains only verified Machine/operation IDs, fixed stage/resource/verb/
+error classifications and optional numeric HTTP status. Raw errors, bodies,
+URLs/query strings, headers, credentials, writer fences, authorization digests
+and Pod specifications are excluded. Failures before the first milestone are
+also persisted under the original operation, authorized revision and retry
+claim without consuming another attempt. The complete attempt timeout remains
+`delete_attempt_timed_out`; see the [diagnostic mapping](../../docs/REMOTE_MACHINE_DELETE_RECOVERY.md#observation-diagnostics-and-overdue-cleanup)
+for the exact blocker strings.
+
+After 24 hours, `cleanup_overdue` is a deduplicated timeline/notification event,
+deadline and durable operator escalation. Projection leaves `error_code` and
+`error_message` unchanged, including empty values, and never reopens a terminal
+operation. A legacy `cleanup_overdue` error is replaced by the next actual
+classified observation; no historical failure is inferred or backfilled.
+Pending deletion retains its ten-attempt round, one-minute schedule and original
+operation; the existing owner manual retry can renew an exhausted round. Neither
+overdue projection nor diagnostic persistence spends an extra retry attempt.
 
 Initial absence of the original Sandbox and Pods can establish
 `ControlPlaneWorkloadAbsent` after complete original-scope reads, verified
@@ -399,6 +444,25 @@ requesting additional controller Deployment/rollout diagnostics, with
 `NYXID_REMOTE_MACHINE_CONTROLLER_NAMESPACE` and
 `NYXID_REMOTE_MACHINE_CONTROLLER_DEPLOYMENT` configured.
 
+The deletion request scopes are the following existing API dependencies:
+
+| Scope | API group / resource | Verbs |
+|---|---|---|
+| Original `nyxid-machine` namespace | `agents.x-k8s.io / sandboxes` | get, list, create, patch, delete |
+| Original `nyxid-machine` namespace | core / pods | get, list, delete |
+| Original `nyxid-machine` namespace | core / persistentvolumeclaims | get, list, delete |
+| Cluster | core / persistentvolumes | get, list |
+| Cluster | `storage.k8s.io / volumeattachments` | list |
+
+The read-only healthcheck requires namespace Pod LIST, not all-namespace Pod
+LIST, and retains PV/VolumeAttachment and Pod/PVC DELETE permission checks at
+their existing scopes. A missing required permission still fails the check and
+blocks runtime cleanup observation; a 403 does not establish absence. The table
+does not configure production RBAC or bind the actual backend identity.
+Existing Node Lease checks and optional Controller Deployment diagnostics do not
+become additional deletion-completion gates. Operators remain responsible for
+the target identity's authorization and selected-cluster acceptance.
+
 `render-observer-rbac.py` is an optional offline renderer for that exact
 Deployment observer. Its optional `--telemetry-node` selections add only exact
 `nodes/stats` GET permissions; the baseline manifests do not need them. Detailed
@@ -437,7 +501,9 @@ and hostile template mutations for creates and retained updates. To coordinate b
 then pass that fresh output to `tests/contracts.sh /tmp/nyxid-sandbox-contracts.json`.
 `tests/healthcheck-contracts.py` drives the actual
 healthcheck with an explicitly declared local kubectl double; it checks command
-and failure behavior without contacting a cluster. Rust adapter tests use real
+and failure behavior without contacting a cluster, including success when
+all-namespace Pod LIST is denied but namespace LIST is allowed, rejection of
+each required scoped permission, and the absence of mutating commands. Rust adapter tests use real
 parsing/HTTP clients against local Kubernetes API fixtures; those fixtures are
 not a Kubernetes controller, scheduler, runtime or CSI. Image startup smokes use
 throwaway isolated containers and protocol fixtures and are reported separately

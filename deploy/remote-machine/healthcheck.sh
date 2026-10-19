@@ -27,7 +27,6 @@ kubectl auth can-i --as="$manager" create tokenreviews.authentication.k8s.io >/d
 kubectl auth can-i --as="$manager" get nodes >/dev/null
 kubectl auth can-i --as="$manager" get persistentvolumes >/dev/null
 kubectl auth can-i --as="$manager" list persistentvolumes >/dev/null
-kubectl auth can-i --as="$manager" list pods --all-namespaces >/dev/null
 kubectl auth can-i --as="$manager" get leases.coordination.k8s.io -n kube-node-lease >/dev/null
 for verb in get list; do
   kubectl auth can-i --as="$manager" "$verb" volumeattachments.storage.k8s.io >/dev/null

@@ -146,6 +146,9 @@ impl Cluster {
         if path == "/apis/storage.k8s.io/v1/storageclasses/existing-fixture-storage" {
             return ResponseTemplate::new(200).set_body_json(json!({"kind":"StorageClass","apiVersion":"storage.k8s.io/v1","metadata":{"name":"existing-fixture-storage","uid":"storage-fixture"},"provisioner":"fixture.csi.example"}));
         }
+        if path == "/api/v1/pods" {
+            return ResponseTemplate::new(403);
+        }
         let object = if sandbox_item {
             self.sandbox.clone()
         } else if path.ends_with("/sandboxes") {
@@ -181,7 +184,16 @@ impl Cluster {
             None => ResponseTemplate::new(404),
         }
     }
-    fn list(kind: &str, version: &str, object: Option<Value>) -> ResponseTemplate {
+    fn list(kind: &str, version: &str, mut object: Option<Value>) -> ResponseTemplate {
+        if kind != "SandboxList"
+            && let Some(value) = &mut object
+            && value["kind"].as_str() == kind.strip_suffix("List")
+            && value["apiVersion"] == version
+        {
+            let fields = value.as_object_mut().unwrap();
+            fields.remove("kind");
+            fields.remove("apiVersion");
+        }
         ResponseTemplate::new(200)
             .set_body_json(json!({"kind":kind,"apiVersion":version,"metadata":{"resourceVersion":"complete-fixture-snapshot"},"items":object.into_iter().collect::<Vec<_>>()}))
     }
@@ -417,7 +429,7 @@ impl Fixture {
         match resource {
             // Recovery also finds original UID/claim users outside owner-label
             // selectors, so Pods are inventoried through the cluster API.
-            "pods" => "/api/v1/pods".into(),
+            "pods" => "/api/v1/namespaces/nyxid-machine/pods".into(),
             "persistentvolumeclaims" => format!(
                 "/api/v1/namespaces/{}/{resource}",
                 self.machine.sandbox_namespace
@@ -1227,9 +1239,14 @@ async fn native_delete_rejects_incomplete_owned_lists_before_finality() {
             let requests_before_inventory = f._server.received_requests().await.unwrap().len();
             f.make_original_delete_due().await;
             let error = f.manager.observe(&f.current().await).await.unwrap_err();
+            let expected = if defect == "malformed_owner" {
+                "delete_kubernetes_response_invalid"
+            } else {
+                "delete_kubernetes_inventory_incomplete"
+            };
             assert!(
-                matches!(error, crate::errors::AppError::Conflict(ref reason) if reason == "delete_resource_observation_unknown"),
-                "{resource}/{defect} must remain an unknown inventory: {error}"
+                matches!(error, crate::errors::AppError::Conflict(ref reason) if reason == expected),
+                "{resource}/{defect} must retain its classified inventory error: {error}"
             );
             assert!(
                 f._server

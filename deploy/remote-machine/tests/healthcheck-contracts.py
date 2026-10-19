@@ -69,18 +69,30 @@ if args[:2] in (['get', 'storageclass'], ['get', 'storageclasses']):
         print(name + ": passed")
 
 
+check("namespace Pod discovery succeeds when cluster Pod LIST is denied", EXPLICIT,
+      denied="list pods --all-namespaces", contains=("list pods -n nyxid-machine",),
+      excludes=("list pods --all-namespaces",))
 check("unset storage selects actual cluster default without runtime or provider selection", {},
       contains=(f"get storageclasses --as={MANAGER}", "get storageclasses.storage.k8s.io",
                 "list storageclasses.storage.k8s.io", "get nodes", "get persistentvolumes", "create tokenreviews"),
       excludes=("runtimeclass", "deployment", "nodes/stats", "nodes/proxy", "get storageclass existing-csi"))
 check("delete recovery requires residual deletes and complete read permissions", EXPLICIT,
-      contains=("delete pods", "delete persistentvolumeclaims", "list pods --all-namespaces",
+      contains=("delete pods -n nyxid-machine", "delete persistentvolumeclaims -n nyxid-machine",
+                "list pods -n nyxid-machine", "list persistentvolumeclaims -n nyxid-machine",
                 "list persistentvolumes", "get leases.coordination.k8s.io -n kube-node-lease",
-                "get volumeattachments.storage.k8s.io", "list volumeattachments.storage.k8s.io"))
-for permission in ("delete pods", "delete persistentvolumeclaims", "list pods --all-namespaces",
-                   "list persistentvolumes", "get leases.coordination.k8s.io",
-                   "get volumeattachments.storage.k8s.io", "list volumeattachments.storage.k8s.io"):
+                "get volumeattachments.storage.k8s.io", "list volumeattachments.storage.k8s.io"),
+      excludes=("list pods --all-namespaces",))
+required_cleanup_permissions = tuple(
+    f"{verb} {resource} -n nyxid-machine"
+    for resource, verbs in (("sandboxes.agents.x-k8s.io", ("get", "list", "create", "patch", "delete")),
+                            ("pods", ("get", "list", "delete")),
+                            ("persistentvolumeclaims", ("get", "list", "delete")))
+    for verb in verbs
+) + ("get persistentvolumes", "list persistentvolumes", "list volumeattachments.storage.k8s.io")
+for permission in required_cleanup_permissions:
     check(f"delete recovery missing {permission} permission fails", EXPLICIT, expected=1, denied=permission)
+for permission in ("get leases.coordination.k8s.io -n kube-node-lease", "get volumeattachments.storage.k8s.io"):
+    check(f"existing lifecycle missing {permission} permission fails", EXPLICIT, expected=1, denied=permission)
 check("explicit existing storage is read as manager", EXPLICIT,
       contains=(f"get storageclass existing-csi --as={MANAGER}",), excludes=("get storageclasses --as=",))
 check("blank optional storage also selects cluster default", {"NYXID_REMOTE_MACHINE_STORAGE_CLASS": ""},

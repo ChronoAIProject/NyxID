@@ -189,8 +189,72 @@ async fn finalized_authorized(manager: &Manager, machine: &ManagedMachine) -> Ap
 fn pending(code: &str) -> AppError {
     AppError::Conflict(code.into())
 }
-fn api_pending(_: anyhow::Error) -> AppError {
-    pending("delete_resource_observation_unknown")
+/// Delete-only projection: upstream text never enters diagnostics or logs.
+pub(crate) fn api_pending(machine: &ManagedMachine, error: anyhow::Error) -> AppError {
+    use nyxid_machine_updater::sandbox_observation::{
+        ObservationErrorKind, SandboxObservationError,
+    };
+    let (stage, resource_kind, verb, error_kind, http_status, code) = if let Some(error) =
+        error.downcast_ref::<SandboxObservationError>()
+    {
+        let code = match error.error_kind {
+            ObservationErrorKind::Authentication => "delete_kubernetes_authentication_failed",
+            ObservationErrorKind::Forbidden => "delete_kubernetes_access_denied",
+            ObservationErrorKind::Timeout => "delete_kubernetes_observation_timed_out",
+            ObservationErrorKind::CredentialUnavailable => {
+                "delete_kubernetes_credentials_unavailable"
+            }
+            ObservationErrorKind::Transport => "delete_kubernetes_transport_failed",
+            ObservationErrorKind::HttpStatus => "delete_kubernetes_http_failed",
+            ObservationErrorKind::InvalidResponse | ObservationErrorKind::InvalidIdentity => {
+                "delete_kubernetes_response_invalid"
+            }
+            ObservationErrorKind::PaginationIncomplete => "delete_kubernetes_inventory_incomplete",
+            ObservationErrorKind::InventoryLimit => "delete_kubernetes_inventory_limit_exceeded",
+        };
+        (
+            error.stage.as_str(),
+            error.resource_kind.as_str(),
+            error.verb.as_str(),
+            error.error_kind.as_str(),
+            error.http_status,
+            code,
+        )
+    } else {
+        (
+            "unclassified",
+            "unclassified",
+            "unclassified",
+            "unclassified",
+            None,
+            "delete_resource_observation_unknown",
+        )
+    };
+    tracing::warn!(machine_id = %machine.node_id,
+        operation_id = machine.active_operation_id.as_deref().unwrap_or("unavailable"),
+        stage, resource_kind, verb, error_kind, http_status,
+        "Remote Machine Kubernetes observation failed");
+    pending(code)
+}
+
+pub(crate) fn observation_error_code(error: &AppError) -> Option<&str> {
+    let AppError::Conflict(code) = error else {
+        return None;
+    };
+    matches!(
+        code.as_str(),
+        "delete_kubernetes_authentication_failed"
+            | "delete_kubernetes_access_denied"
+            | "delete_kubernetes_observation_timed_out"
+            | "delete_kubernetes_credentials_unavailable"
+            | "delete_kubernetes_transport_failed"
+            | "delete_kubernetes_http_failed"
+            | "delete_kubernetes_response_invalid"
+            | "delete_kubernetes_inventory_incomplete"
+            | "delete_kubernetes_inventory_limit_exceeded"
+            | "delete_resource_observation_unknown"
+    )
+    .then_some(code)
 }
 fn now() -> DateTime<Utc> {
     DateTime::from_timestamp_millis(Utc::now().timestamp_millis()).expect("valid current timestamp")
@@ -206,7 +270,7 @@ pub(crate) fn advance<'a>(
 }
 
 async fn advance_inner(manager: &Manager, snapshot: &ManagedMachine) -> AppResult<()> {
-    let machine = lifecycle::managed_machine_for_node(&manager.db, &snapshot.node_id)
+    let mut machine = lifecycle::managed_machine_for_node(&manager.db, &snapshot.node_id)
         .await?
         .ok_or_else(|| pending("delete_machine_missing"))?;
     if machine.resource_state == ResourceState::Deleted {
@@ -214,23 +278,11 @@ async fn advance_inner(manager: &Manager, snapshot: &ManagedMachine) -> AppResul
         // Manager scan keeps resolving late Kubernetes resources without
         // reopening execution, the operation, accounting or the free slot.
         finalized_authorized(manager, &machine).await?;
-        let result = recover_resources(manager, machine.clone()).await;
-        if let Err(error) = &result {
-            // Inventory transport/parse failures may occur before a milestone
-            // save. Retain an explicit pending diagnostic under the same live
-            // tombstone fence, without reopening its completed operation.
-            if let Some(latest) =
-                lifecycle::managed_machine_for_node(&manager.db, &machine.node_id).await?
-                && finalized_authorized(manager, &latest).await.is_ok()
-            {
-                let mut progress = initial_progress(&latest)?;
-                progress.resources_complete = false;
-                progress.blocker = Some(match error {
-                    AppError::Conflict(code) => code.clone(),
-                    _ => "delete_resource_observation_unknown".into(),
-                });
-                save(&manager.db, &latest, &mut progress, Document::new()).await?;
-            }
+        let result = recover_resources(manager, &mut machine).await;
+        if let Err(error) = &result
+            && let Some(code) = observation_error_code(error)
+        {
+            save_observation_failure(&manager.db, &machine, None, code).await?;
         }
         return result;
     }
@@ -260,17 +312,28 @@ async fn advance_inner(manager: &Manager, snapshot: &ManagedMachine) -> AppResul
         return Ok(());
     };
     let op_id = op.id;
-    let result = tokio::time::timeout(
+    let mut result = tokio::time::timeout(
         super::remote_machine_delete_retry::ATTEMPT_TIMEOUT,
-        pending_attempt(manager, machine),
+        pending_attempt(manager, &mut machine, &claim_id),
     )
     .await
     .unwrap_or_else(|_| Err(pending("delete_attempt_timed_out")));
+    if let Err(error) = &result
+        && let Some(code) = observation_error_code(error)
+        && let Err(save_error) =
+            save_observation_failure(&manager.db, &machine, Some(&claim_id), code).await
+    {
+        result = Err(save_error);
+    }
     super::remote_machine_delete_retry::finish(&manager.db, &op_id, &claim_id).await?;
     result
 }
 
-async fn pending_attempt(manager: &Manager, mut machine: ManagedMachine) -> AppResult<()> {
+async fn pending_attempt(
+    manager: &Manager,
+    machine: &mut ManagedMachine,
+    claim_id: &str,
+) -> AppResult<()> {
     // This path proves local non-submission, never remote absence. Paid zero
     // runtime settlement remains its existing restricted implementation.
     let _ = super::remote_machine_runtime::finalize_never_submitted(
@@ -286,10 +349,7 @@ async fn pending_attempt(manager: &Manager, mut machine: ManagedMachine) -> AppR
         return manager.complete_if_final(&machine).await;
     }
     if machine.sandbox_uid.is_none() {
-        manager.observe_resource(&machine).await?;
-        machine = lifecycle::managed_machine_for_node(&manager.db, &machine.node_id)
-            .await?
-            .ok_or_else(|| pending("delete_machine_missing"))?;
+        manager.observe_delete_resource(machine).await?;
     }
     // An already valid ordinary stop remains ordinary authority. Retain its
     // real source operation when delete only relabels an already stopped CR.
@@ -300,7 +360,7 @@ async fn pending_attempt(manager: &Manager, mut machine: ManagedMachine) -> AppR
         && machine.native_pv_uid.is_some()
         && machine.native_pv_reclaim_policy.is_some()
     {
-        if let Some(machine) = prepare_ordinary_stop(manager, &machine).await? {
+        if let Some(machine) = prepare_ordinary_stop(manager, machine, claim_id).await? {
             return manager.finish_ordinary_native_delete(&machine).await;
         }
         return Ok(());
@@ -312,19 +372,21 @@ async fn pending_attempt(manager: &Manager, mut machine: ManagedMachine) -> AppR
 /// relabelling its controller observation or adding host/cloud prerequisites.
 async fn prepare_ordinary_stop(
     manager: &Manager,
-    machine: &ManagedMachine,
+    machine: &mut ManagedMachine,
+    claim_id: &str,
 ) -> AppResult<Option<ManagedMachine>> {
     let mut progress = initial_progress(machine)?;
     progress.resources_complete = false;
     let native = machine
         .native_observation
         .as_ref()
-        .ok_or_else(|| pending("delete_ordinary_stop_missing"))?;
+        .ok_or_else(|| pending("delete_ordinary_stop_missing"))?
+        .clone();
     let sandbox = manager
         .api
         .get(&machine.sandbox_namespace, &machine.sandbox_name)
         .await
-        .map_err(api_pending)?;
+        .map_err(|error| api_pending(machine, error))?;
     if let Some(sandbox) = &sandbox {
         if !sandbox_matches(machine, sandbox) {
             block(
@@ -338,7 +400,7 @@ async fn prepare_ordinary_stop(
         if !sandbox.desired_suspended || sandbox.shutdown_time.is_some() {
             // A real spec transition receives its own generation anchor and
             // controller observation through the existing ordinary verifier.
-            manager.observe_resource(machine).await?;
+            manager.observe_delete_resource(machine).await?;
             return Ok(None);
         }
         if sandbox.operation_id != machine.active_operation_id {
@@ -349,8 +411,8 @@ async fn prepare_ordinary_stop(
                 false,
                 &manager.bootstrap_base_url,
             );
-            let saved = save(&manager.db, machine, &mut progress, Document::new()).await?;
-            live_before_effect(&manager.db, &saved).await?;
+            *machine = save(&manager.db, machine, &mut progress, Document::new()).await?;
+            live_before_effect(&manager.db, machine).await?;
             manager
                 .api
                 .suspend_if_identity(
@@ -365,7 +427,7 @@ async fn prepare_ordinary_stop(
                         .ok_or_else(|| pending("delete_sandbox_revision_missing"))?,
                 )
                 .await
-                .map_err(api_pending)?;
+                .map_err(|error| api_pending(machine, error))?;
             return Ok(None);
         }
         if !sandbox.suspended || sandbox.observed_generation != sandbox.generation {
@@ -390,12 +452,20 @@ async fn prepare_ordinary_stop(
         });
     }
     retain_known_volume(machine, &mut progress);
-    let mut machine = machine.clone();
-    let pvc = discover_original_claim(manager, &mut machine, &mut progress).await?;
-    discover_original_volume(manager, &mut machine, &mut progress, pvc.as_ref()).await?;
-    Ok(Some(
-        save(&manager.db, &machine, &mut progress, Document::new()).await?,
-    ))
+    let pvc = discover_original_claim(manager, machine, &mut progress).await?;
+    discover_original_volume(manager, machine, &mut progress, pvc.as_ref()).await?;
+    let resolved_observation = progress
+        .blocker
+        .as_deref()
+        .filter(|code| observation_error_code(&pending(code)).is_some())
+        .map(str::to_owned);
+    progress.blocker = None;
+    *machine = if let Some(code) = resolved_observation {
+        save_observation_progress(&manager.db, machine, &mut progress, claim_id, &code).await?
+    } else {
+        save(&manager.db, machine, &mut progress, Document::new()).await?
+    };
+    Ok(Some(machine.clone()))
 }
 
 /// Called only after the established ordinary cleanup contract checked exact
@@ -532,11 +602,154 @@ async fn save(
         );
     }
     bindings.insert("updated_at", bson::DateTime::now());
-    db.collection::<ManagedMachine>(MACHINES).find_one_and_update(doc!{"_id":&machine.node_id,"owner_id":&machine.owner_id,
-        "revision":machine.revision,"resource_state":bson::to_bson(&machine.resource_state).map_err(|_|pending("delete_evidence_encoding_failed"))?,"active_operation_id":&machine.active_operation_id,
-        "runtime_generation":machine.runtime_generation,"credential_epoch":machine.credential_epoch,"writer_fence":&machine.writer_fence,
-        "native_uncertainty":&machine.native_uncertainty,"deletion_basis":bson::to_bson(&machine.deletion_basis).map_err(|_|pending("delete_evidence_encoding_failed"))?},
-        doc!{"$set":bindings,"$inc":{"revision":1_i64}}).return_document(ReturnDocument::After).await?.ok_or_else(||pending("delete_evidence_raced"))
+    db.collection::<ManagedMachine>(MACHINES)
+        .find_one_and_update(
+            save_filter(machine)?,
+            doc! {"$set":bindings,"$inc":{"revision":1_i64}},
+        )
+        .return_document(ReturnDocument::After)
+        .await?
+        .ok_or_else(|| pending("delete_evidence_raced"))
+}
+
+fn save_filter(machine: &ManagedMachine) -> AppResult<Document> {
+    Ok(doc! {"_id":&machine.node_id,"owner_id":&machine.owner_id,
+    "revision":machine.revision,"resource_state":bson::to_bson(&machine.resource_state).map_err(|_|pending("delete_evidence_encoding_failed"))?,
+    "active_operation_id":&machine.active_operation_id,"runtime_generation":machine.runtime_generation,
+    "credential_epoch":machine.credential_epoch,"writer_fence":&machine.writer_fence,
+    "native_uncertainty":&machine.native_uncertainty,
+    "deletion_basis":bson::to_bson(&machine.deletion_basis).map_err(|_|pending("delete_evidence_encoding_failed"))?})
+}
+
+/// Clear the resolved paired diagnostic at the ordinary observation milestone.
+/// A successor snapshot or lost original retry claim aborts both writes. A
+/// different current operation cause remains visible as observation progresses.
+async fn save_observation_progress(
+    db: &Database,
+    machine: &ManagedMachine,
+    progress: &mut DeleteRecoveryProgress,
+    claim_id: &str,
+    resolved_code: &str,
+) -> AppResult<ManagedMachine> {
+    use crate::models::remote_machine_operation::COLLECTION_NAME as OPERATIONS;
+    if !binding_matches(machine, progress) {
+        return Err(pending("delete_evidence_raced"));
+    }
+    progress.evaluated_revision = machine.revision;
+    progress.observed_at = now();
+    let mut machine_filter = save_filter(machine)?;
+    machine_filter.insert("delete_recovery.blocker", resolved_code);
+    let operation_filter = doc! {"_id":&progress.operation_id,"owner_id":&machine.owner_id,
+    "machine_id":&machine.node_id,"action":"delete",
+    "state":{"$in":["accepted","applying","reconciling"]},"terminal_at":bson::Bson::Null,
+    "delete_retry.claim_id":claim_id,"$expr":{"$gt":["$delete_retry.claim_until", "$$NOW"]}};
+    let resolved = doc! {"$eq":["$error_code", {"$literal":resolved_code}]};
+    let bindings = doc! {"delete_recovery":bson::to_bson(progress).map_err(|_|pending("delete_evidence_encoding_failed"))?,
+    "writer_admitted":false,"updated_at":bson::DateTime::now()};
+    let db = db.clone();
+    db.client()
+        .start_session()
+        .await?
+        .start_transaction()
+        .write_concern(mongodb::options::WriteConcern::majority())
+        .and_run2(async move |session| {
+            let result: AppResult<ManagedMachine> = async {
+                let changed = db
+                    .collection::<Document>(OPERATIONS)
+                    .update_one(
+                        operation_filter.clone(),
+                        vec![doc! {"$set":{
+                            "error_code":{"$cond":[resolved.clone(),bson::Bson::Null,"$error_code"]},
+                            "error_message":{"$cond":[resolved.clone(),bson::Bson::Null,"$error_message"]},
+                            "updated_at":bson::DateTime::now(),
+                        }}],
+                    )
+                    .session(&mut *session)
+                    .await?;
+                if changed.matched_count != 1 {
+                    return Err(pending("delete_evidence_raced"));
+                }
+                db.collection::<ManagedMachine>(MACHINES)
+                    .find_one_and_update(
+                        machine_filter.clone(),
+                        doc! {"$set":bindings.clone(),"$inc":{"revision":1_i64}},
+                    )
+                    .return_document(ReturnDocument::After)
+                    .session(&mut *session)
+                    .await?
+                    .ok_or_else(|| pending("delete_evidence_raced"))
+            }
+            .await;
+            super::api_key_mutation_service::transaction_result(result)
+        })
+        .await
+        .map_err(super::api_key_mutation_service::map_transaction_error)
+}
+
+/// Save only the snapshot advanced by this authorized invocation. The machine
+/// CAS and pending operation's captured retry claim commit together; a late
+/// failure cannot adopt a successor revision, operation or retry reservation.
+async fn save_observation_failure(
+    db: &Database,
+    machine: &ManagedMachine,
+    claim_id: Option<&str>,
+    code: &str,
+) -> AppResult<()> {
+    use crate::models::remote_machine_operation::COLLECTION_NAME as OPERATIONS;
+    let mut progress = initial_progress(machine)?;
+    progress.resources_complete = false;
+    progress.blocker = Some(code.into());
+    progress.evaluated_revision = machine.revision;
+    progress.observed_at = now();
+    let machine_filter = save_filter(machine)?;
+    let finalized = machine.resource_state == ResourceState::Deleted;
+    if (!finalized && (machine.resource_state != ResourceState::Deleting || claim_id.is_none()))
+        || (finalized && claim_id.is_some())
+        || !lifecycle::has_owner_deletion_basis(machine)
+        || machine.writer_admitted
+    {
+        return Err(pending("delete_evidence_raced"));
+    }
+    let mut operation_filter = doc! {"_id":&progress.operation_id,"owner_id":&machine.owner_id,
+    "machine_id":&machine.node_id,"action":"delete"};
+    if finalized {
+        operation_filter.insert("state", "succeeded");
+        operation_filter.insert("terminal_at", doc! {"$ne":bson::Bson::Null});
+    } else {
+        operation_filter.insert("state", doc! {"$in":["accepted","applying","reconciling"]});
+        operation_filter.insert("terminal_at", bson::Bson::Null);
+        operation_filter.insert("delete_retry.claim_id", claim_id);
+        operation_filter.insert("$expr", doc! {"$gt":["$delete_retry.claim_until", "$$NOW"]});
+    }
+    let bindings = doc! {"delete_recovery":bson::to_bson(&progress).map_err(|_|pending("delete_evidence_encoding_failed"))?,
+    "writer_admitted":false,"cleanup_state":"pending","updated_at":bson::DateTime::now()};
+    let code = code.to_owned();
+    let db = db.clone();
+    db.client().start_session().await?.start_transaction()
+        .write_concern(mongodb::options::WriteConcern::majority())
+        .and_run2(async move |session| {
+            let result: AppResult<()> = async {
+                let operations = db.collection::<Document>(OPERATIONS);
+                if finalized {
+                    if operations.find_one(operation_filter.clone()).session(&mut *session).await?.is_none() {
+                        return Err(pending("delete_evidence_raced"));
+                    }
+                } else {
+                    let changed = operations.update_one(operation_filter.clone(), doc! {"$set":{
+                        "state":"reconciling","error_code":&code,
+                        "error_message":"Awaiting verified lifecycle responsibilities; work data remains retained",
+                        "updated_at":bson::DateTime::now(),
+                    }}).session(&mut *session).await?;
+                    if changed.matched_count != 1 { return Err(pending("delete_evidence_raced")); }
+                }
+                let changed = db.collection::<Document>(MACHINES).update_one(machine_filter.clone(),
+                    doc! {"$set":bindings.clone(),"$inc":{"revision":1_i64}})
+                    .session(&mut *session).await?;
+                if changed.matched_count != 1 { return Err(pending("delete_evidence_raced")); }
+                Ok(())
+            }.await;
+            super::api_key_mutation_service::transaction_result(result)
+        }).await.map_err(super::api_key_mutation_service::map_transaction_error)
 }
 
 async fn block(
@@ -619,6 +832,9 @@ async fn storage_observation_error<T>(
     progress: &mut DeleteRecoveryProgress,
     error: AppError,
 ) -> AppResult<T> {
+    if observation_error_code(&error).is_some() {
+        return Err(error);
+    }
     let code = match &error {
         AppError::Conflict(code) => code.as_str(),
         _ => "delete_resource_observation_unknown",
@@ -653,7 +869,7 @@ async fn discover_original_claim_inner(
         .api
         .list_owned_resources(&machine.sandbox_namespace, "persistentvolumeclaims", uid)
         .await
-        .map_err(api_pending)?;
+        .map_err(|error| api_pending(machine, error))?;
     if pvcs.len() > 1 || pvcs.iter().any(|p| !owned(machine, p)) {
         return Err(pending("delete_pvc_ownership_conflict"));
     }
@@ -668,7 +884,7 @@ async fn discover_original_claim_inner(
             .api
             .resource(&machine.sandbox_namespace, "persistentvolumeclaims", name)
             .await
-            .map_err(api_pending)?;
+            .map_err(|error| api_pending(machine, error))?;
         if exact.as_ref().is_some_and(|p| {
             !owned(machine, p)
                 || machine
@@ -821,7 +1037,7 @@ async fn discover_original_volume_inner(
                 machine.pvc_uid.as_deref(),
             )
             .await
-            .map_err(api_pending)?
+            .map_err(|error| api_pending(machine, error))?
     } else {
         Vec::new()
     };
@@ -844,7 +1060,7 @@ async fn discover_original_volume_inner(
             .api
             .persistent_volume(&name)
             .await
-            .map_err(api_pending)?
+            .map_err(|error| api_pending(machine, error))?
     } else {
         None
     };
@@ -880,7 +1096,7 @@ async fn discover_original_volume_inner(
             .api
             .volume_attachments(&volume.pv_name)
             .await
-            .map_err(api_pending)?
+            .map_err(|error| api_pending(machine, error))?
             .is_empty()
         {
             return Err(pending("delete_volume_attachment_present"));
@@ -899,12 +1115,12 @@ async fn discover_original_volume_inner(
 
 fn recover_resources<'a>(
     manager: &'a Manager,
-    machine: ManagedMachine,
+    machine: &'a mut ManagedMachine,
 ) -> futures::future::BoxFuture<'a, AppResult<()>> {
     Box::pin(recover_resources_inner(manager, machine))
 }
 
-async fn recover_resources_inner(manager: &Manager, mut machine: ManagedMachine) -> AppResult<()> {
+async fn recover_resources_inner(manager: &Manager, machine: &mut ManagedMachine) -> AppResult<()> {
     let mut progress = initial_progress(&machine)?;
     // A retained completion is historical evidence until this pass has
     // completed its current inventory. Persist pending before any new effect.
@@ -927,7 +1143,7 @@ async fn recover_resources_inner(manager: &Manager, mut machine: ManagedMachine)
         .api
         .get(&machine.sandbox_namespace, &machine.sandbox_name)
         .await
-        .map_err(api_pending)?;
+        .map_err(|error| api_pending(machine, error))?;
     if let Some(sandbox) = &sandbox {
         if !sandbox_matches(&machine, sandbox) {
             return block(
@@ -950,7 +1166,7 @@ async fn recover_resources_inner(manager: &Manager, mut machine: ManagedMachine)
                 false,
                 &manager.bootstrap_base_url,
             );
-            machine = save(&manager.db, &machine, &mut progress, Document::new()).await?;
+            *machine = save(&manager.db, &machine, &mut progress, Document::new()).await?;
             live_before_effect(&manager.db, &machine).await?;
             manager
                 .api
@@ -966,7 +1182,7 @@ async fn recover_resources_inner(manager: &Manager, mut machine: ManagedMachine)
                         .ok_or_else(|| pending("delete_sandbox_revision_missing"))?,
                 )
                 .await
-                .map_err(api_pending)?;
+                .map_err(|error| api_pending(machine, error))?;
             return Ok(());
         }
     }
@@ -989,7 +1205,7 @@ async fn recover_resources_inner(manager: &Manager, mut machine: ManagedMachine)
         .sandbox_uid
         .clone()
         .ok_or_else(|| pending("creation_result_unknown"))?;
-    let pvc = discover_original_claim(manager, &mut machine, &mut progress).await?;
+    let pvc = discover_original_claim(manager, machine, &mut progress).await?;
     let pods = manager
         .api
         .recovery_pods(
@@ -999,7 +1215,7 @@ async fn recover_resources_inner(manager: &Manager, mut machine: ManagedMachine)
             machine.pvc_name.as_deref(),
         )
         .await
-        .map_err(api_pending)?;
+        .map_err(|error| api_pending(machine, error))?;
     if pods.iter().any(|p| {
         !owned(&machine, p)
             || machine
@@ -1046,7 +1262,7 @@ async fn recover_resources_inner(manager: &Manager, mut machine: ManagedMachine)
             .await;
         }
         progress.resources_complete = false;
-        machine = save(&manager.db, &machine, &mut progress, Document::new()).await?;
+        *machine = save(&manager.db, &machine, &mut progress, Document::new()).await?;
         live_before_effect(&manager.db, &machine).await?;
         manager
             .api
@@ -1062,7 +1278,7 @@ async fn recover_resources_inner(manager: &Manager, mut machine: ManagedMachine)
                     .ok_or_else(|| pending("delete_pod_revision_missing"))?,
             )
             .await
-            .map_err(api_pending)?;
+            .map_err(|error| api_pending(machine, error))?;
         return block(manager, &machine, &mut progress, "delete_pod_gc_pending").await;
     }
     if let Some(name) = &machine.native_pod_name
@@ -1070,7 +1286,7 @@ async fn recover_resources_inner(manager: &Manager, mut machine: ManagedMachine)
             .api
             .resource(&machine.sandbox_namespace, "pods", name)
             .await
-            .map_err(api_pending)?
+            .map_err(|error| api_pending(machine, error))?
     {
         if pod.uid != machine.pod_uid || !owned(&machine, &pod) {
             return block(
@@ -1087,7 +1303,7 @@ async fn recover_resources_inner(manager: &Manager, mut machine: ManagedMachine)
         return block(manager, &machine, &mut progress, "delete_pod_still_present").await;
     }
     // Pending claims and exact persisted PVs share the same current verifier.
-    let pv = discover_original_volume(manager, &mut machine, &mut progress, pvc.as_ref()).await?;
+    let pv = discover_original_volume(manager, machine, &mut progress, pvc.as_ref()).await?;
     let current_creation_terminal =
         operations::creation_responsibilities_terminal(&manager.db, &machine).await?;
     if machine.resource_state != ResourceState::Deleted {
@@ -1155,7 +1371,7 @@ async fn recover_resources_inner(manager: &Manager, mut machine: ManagedMachine)
     }
     progress.resources_complete = false;
     progress.blocker = None;
-    machine = save(&manager.db, &machine, &mut progress, Document::new()).await?;
+    *machine = save(&manager.db, &machine, &mut progress, Document::new()).await?;
     if !stop_is_valid(&delete_projection(&machine), &progress) {
         return block(
             manager,
@@ -1199,7 +1415,7 @@ async fn recover_resources_inner(manager: &Manager, mut machine: ManagedMachine)
                     .ok_or_else(|| pending("delete_sandbox_revision_missing"))?,
             )
             .await
-            .map_err(api_pending)?;
+            .map_err(|error| api_pending(machine, error))?;
         return block(
             manager,
             &machine,
@@ -1233,7 +1449,7 @@ async fn recover_resources_inner(manager: &Manager, mut machine: ManagedMachine)
                     .ok_or_else(|| pending("delete_pvc_revision_missing"))?,
             )
             .await
-            .map_err(api_pending)?;
+            .map_err(|error| api_pending(machine, error))?;
         return block(manager, &machine, &mut progress, "delete_pvc_gc_pending").await;
     }
     if pv.is_some() {
@@ -1252,7 +1468,7 @@ async fn recover_resources_inner(manager: &Manager, mut machine: ManagedMachine)
     }
     progress.blocker = None;
     let cleanup = doc! {"cleanup_state":"complete","cleanup_evidence_digest":&progress.evidence_id};
-    machine = save(&manager.db, &machine, &mut progress, cleanup).await?;
+    *machine = save(&manager.db, &machine, &mut progress, cleanup).await?;
     if machine.resource_state == ResourceState::Deleted {
         // Only the resource milestone changes. Original stop/accounting and
         // successful operation/slot state remain final and idempotent.

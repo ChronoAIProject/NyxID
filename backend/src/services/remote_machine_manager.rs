@@ -311,7 +311,9 @@ impl Manager {
                 doc! {"_id":&machine.node_id,"resource_state":"deleted"},
                 doc! {"$set":{"manager_observed_at":bson::DateTime::now()}},
             ).await?;
-            if !matches!(result, Ok(Ok(()))) {
+            if !matches!(result, Ok(Ok(())))
+                && !matches!(&result, Ok(Err(error)) if super::remote_machine_delete_recovery::observation_error_code(error).is_some())
+            {
                 tracing::warn!(machine_id=%machine.node_id, "Remote Machine retained-resource cleanup pending");
             }
             Ok::<(), AppError>(())
@@ -713,19 +715,24 @@ impl Manager {
         machine: &'a ManagedMachine,
         observed: &'a SandboxObservation,
     ) -> futures::future::BoxFuture<'a, AppResult<()>> {
-        Box::pin(self.record_observation_inner(machine, observed))
+        Box::pin(self.record_observation_inner(machine, observed, None))
     }
 
     async fn record_observation_inner(
         &self,
         machine: &ManagedMachine,
         observed: &SandboxObservation,
+        delete_snapshot: Option<&mut ManagedMachine>,
     ) -> AppResult<()> {
         use super::remote_machine_native as native;
         use crate::models::remote_machine::NativeRuntimeObservation;
-        let mut machine = lifecycle::get_machine(&self.db, &machine.owner_id, &machine.node_id)
-            .await?
-            .ok_or_else(unavailable)?;
+        let mut machine = if delete_snapshot.is_some() {
+            machine.clone()
+        } else {
+            lifecycle::get_machine(&self.db, &machine.owner_id, &machine.node_id)
+                .await?
+                .ok_or_else(unavailable)?
+        };
         if machine.native_uncertainty.is_some() {
             return Err(unavailable());
         }
@@ -783,12 +790,24 @@ impl Manager {
             .api
             .list_owned_resources(&machine.sandbox_namespace, "pods", uid)
             .await
-            .map_err(api_error)?;
+            .map_err(|error| {
+                if delete_snapshot.is_some() {
+                    super::remote_machine_delete_recovery::api_pending(&machine, error)
+                } else {
+                    api_error(error)
+                }
+            })?;
         let pvcs = self
             .api
             .list_owned_resources(&machine.sandbox_namespace, "persistentvolumeclaims", uid)
             .await
-            .map_err(api_error)?;
+            .map_err(|error| {
+                if delete_snapshot.is_some() {
+                    super::remote_machine_delete_recovery::api_pending(&machine, error)
+                } else {
+                    api_error(error)
+                }
+            })?;
         if pods.len() > 1 || pvcs.len() > 1 {
             return self.uncertain(&machine, "multiple_owned_resources").await;
         }
@@ -856,7 +875,13 @@ impl Manager {
                 .api
                 .resource(&machine.sandbox_namespace, "pods", name)
                 .await
-                .map_err(api_error)?
+                .map_err(|error| {
+                    if delete_snapshot.is_some() {
+                        super::remote_machine_delete_recovery::api_pending(&machine, error)
+                    } else {
+                        api_error(error)
+                    }
+                })?
                 .is_some()
         {
             return self
@@ -903,7 +928,13 @@ impl Manager {
                 .api
                 .persistent_volume(name)
                 .await
-                .map_err(api_error)?
+                .map_err(|error| {
+                    if delete_snapshot.is_some() {
+                        super::remote_machine_delete_recovery::api_pending(&machine, error)
+                    } else {
+                        api_error(error)
+                    }
+                })?
                 .ok_or_else(unavailable)?;
             if pv.claim_uid != pvc.uid
                 || pv.claim_namespace.as_deref() != Some(machine.sandbox_namespace.as_str())
@@ -1003,7 +1034,10 @@ impl Manager {
                 uid, generation, resource_version
             ),
         };
-        native::record(&self.db, &machine, &observation, bindings).await?;
+        let saved = native::record(&self.db, &machine, &observation, bindings).await?;
+        if let Some(snapshot) = delete_snapshot {
+            *snapshot = saved;
+        }
         Ok(())
     }
 
@@ -1011,15 +1045,35 @@ impl Manager {
         &'a self,
         machine: &'a ManagedMachine,
     ) -> futures::future::BoxFuture<'a, AppResult<()>> {
-        Box::pin(self.observe_resource_inner(machine))
+        Box::pin(self.observe_resource_inner(machine, None))
     }
 
-    async fn observe_resource_inner(&self, machine: &ManagedMachine) -> AppResult<()> {
+    pub(crate) fn observe_delete_resource<'a>(
+        &'a self,
+        machine: &'a mut ManagedMachine,
+    ) -> futures::future::BoxFuture<'a, AppResult<()>> {
+        Box::pin(async move {
+            let snapshot = machine.clone();
+            self.observe_resource_inner(&snapshot, Some(machine)).await
+        })
+    }
+
+    async fn observe_resource_inner(
+        &self,
+        machine: &ManagedMachine,
+        mut delete_snapshot: Option<&mut ManagedMachine>,
+    ) -> AppResult<()> {
         if let Some(mut observed) = self
             .api
             .get(&machine.sandbox_namespace, &machine.sandbox_name)
             .await
-            .map_err(api_error)?
+            .map_err(|error| {
+                if delete_snapshot.is_some() {
+                    super::remote_machine_delete_recovery::api_pending(machine, error)
+                } else {
+                    api_error(error)
+                }
+            })?
         {
             // A previously admitted HTTP request can finish after a newer
             // owner transaction. Repair only the current Sandbox desired state;
@@ -1027,6 +1081,9 @@ impl Manager {
             let mut current = lifecycle::get_machine(&self.db, &machine.owner_id, &machine.node_id)
                 .await?
                 .ok_or_else(unavailable)?;
+            if delete_snapshot.is_some() && current.revision != machine.revision {
+                return Err(AppError::Conflict("delete_evidence_raced".into()));
+            }
             if current
                 .sandbox_uid
                 .as_deref()
@@ -1156,6 +1213,9 @@ impl Manager {
                 }
                 observed = if current.resource_state == ResourceState::Deleting {
                     current = self.prepare_delete_suspension(&current, &observed).await?;
+                    if let Some(snapshot) = delete_snapshot.as_deref_mut() {
+                        *snapshot = current.clone();
+                    }
                     self.api
                         .suspend_if_identity(
                             &intent,
@@ -1166,7 +1226,13 @@ impl Manager {
                                 .ok_or_else(unavailable)?,
                         )
                         .await
-                        .map_err(api_error)?
+                        .map_err(|error| {
+                            if delete_snapshot.is_some() {
+                                super::remote_machine_delete_recovery::api_pending(&current, error)
+                            } else {
+                                api_error(error)
+                            }
+                        })?
                 } else {
                     self.api
                         .apply_if_uid(&intent, &uid)
@@ -1178,7 +1244,13 @@ impl Manager {
                         .await?;
                 }
             }
-            self.record_observation(&current, &observed).await?;
+            if let Some(snapshot) = delete_snapshot {
+                *snapshot = current.clone();
+                Box::pin(self.record_observation_inner(&current, &observed, Some(snapshot)))
+                    .await?;
+            } else {
+                self.record_observation(&current, &observed).await?;
+            }
         } else if machine.sandbox_uid.is_some() {
             return self
                 .uncertain(machine, "sandbox_disappeared_without_native_stop")
@@ -1424,7 +1496,9 @@ impl Manager {
                 .api
                 .claim_users(&machine.sandbox_namespace, claim)
                 .await
-                .map_err(api_error)?
+                .map_err(|error| {
+                    super::remote_machine_delete_recovery::api_pending(machine, error)
+                })?
                 .is_empty()
         {
             return Err(unavailable());
@@ -1440,7 +1514,7 @@ impl Manager {
             .api
             .get(&machine.sandbox_namespace, &machine.sandbox_name)
             .await
-            .map_err(api_error)?
+            .map_err(|error| super::remote_machine_delete_recovery::api_pending(machine, error))?
         {
             if sandbox.sandbox_uid.as_deref() != Some(uid)
                 || sandbox.machine_id.as_deref() != Some(&machine.node_id)
@@ -1462,7 +1536,9 @@ impl Manager {
                         .ok_or_else(unavailable)?,
                 )
                 .await
-                .map_err(api_error)?;
+                .map_err(|error| {
+                    super::remote_machine_delete_recovery::api_pending(machine, error)
+                })?;
             return Err(unavailable()); // submission is never cleanup completion
         }
         for resource in ["pods", "persistentvolumeclaims"] {
@@ -1470,7 +1546,9 @@ impl Manager {
                 .api
                 .list_owned_resources(&machine.sandbox_namespace, resource, uid)
                 .await
-                .map_err(api_error)?
+                .map_err(|error| {
+                    super::remote_machine_delete_recovery::api_pending(machine, error)
+                })?
                 .is_empty()
             {
                 return Err(unavailable());
@@ -1481,7 +1559,9 @@ impl Manager {
                 .api
                 .resource(&machine.sandbox_namespace, "pods", name)
                 .await
-                .map_err(api_error)?
+                .map_err(|error| {
+                    super::remote_machine_delete_recovery::api_pending(machine, error)
+                })?
                 .is_some()
         {
             return Err(unavailable());
@@ -1491,7 +1571,9 @@ impl Manager {
                 .api
                 .resource(&machine.sandbox_namespace, "persistentvolumeclaims", name)
                 .await
-                .map_err(api_error)?
+                .map_err(|error| {
+                    super::remote_machine_delete_recovery::api_pending(machine, error)
+                })?
                 .is_some()
             {
                 return Err(unavailable());
@@ -1505,7 +1587,9 @@ impl Manager {
                 .api
                 .volume_attachments(pv_name)
                 .await
-                .map_err(api_error)?
+                .map_err(|error| {
+                    super::remote_machine_delete_recovery::api_pending(machine, error)
+                })?
                 .is_empty()
                 || !self
                     .api
@@ -1515,7 +1599,9 @@ impl Manager {
                         Some(machine.pvc_uid.as_deref().ok_or_else(unavailable)?),
                     )
                     .await
-                    .map_err(api_error)?
+                    .map_err(|error| {
+                        super::remote_machine_delete_recovery::api_pending(machine, error)
+                    })?
                     .is_empty()
             {
                 return Err(unavailable());
@@ -1525,7 +1611,9 @@ impl Manager {
                     .api
                     .persistent_volume(pv_name)
                     .await
-                    .map_err(api_error)?
+                    .map_err(|error| {
+                        super::remote_machine_delete_recovery::api_pending(machine, error)
+                    })?
                     .is_some()
             {
                 return Err(unavailable());
