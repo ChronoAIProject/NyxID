@@ -421,7 +421,7 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - name: Check Clippy with resource samples
-        run: python3 .github/scripts/ci_resources.py clippy cargo clippy --locked --workspace --all-targets -- -D warnings
+        run: python3 .github/scripts/ci_resources.py clippy cargo clippy --locked --workspace --all-targets --features nyxid/aws-kms,nyxid/gcp-kms -- -D warnings
       - name: Check vendored compiler regression with original negative control
         run: python3 scripts/test-proc-macro-visibility.py --evidence-dir "$RUNNER_TEMP/proc-macro-visibility"
       - name: Check locked artifact metadata tools
@@ -466,7 +466,7 @@ jobs:
         run: bash scripts/check-rci-backend-boundary.sh
 
       - name: Run backend tests
-        run: python3 .github/scripts/ci_resources.py backend-test cargo nextest run -p nyxid -p nyxid-service-adapters --profile ci
+        run: python3 .github/scripts/ci_resources.py backend-test cargo nextest run --locked -p nyxid -p nyxid-service-adapters --features nyxid/aws-kms,nyxid/gcp-kms --profile ci
       - name: Test MongoDB diagnostics
         if: failure() || cancelled()
         continue-on-error: true

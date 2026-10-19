@@ -11,7 +11,7 @@ rust-version = "1.93"
 [workspace.dependencies]
 axum = { version = "0.8.8", features = ["macros", "ws"] }
 tokio = { version = "1.51", features = ["full"] }
-mongodb = "3.5.2"
+mongodb = "3.9.1"
 bson = { version = "2.15", features = ["uuid-1", "chrono-0_4"] }
 futures = "0.3.31"
 serde = { version = "1.0.228", features = ["derive"] }

@@ -70,6 +70,10 @@ impl AwsKmsKeyMetadata {
     }
 }
 
+#[cfg(test)]
+#[path = "aws_kms_provider_tests.rs"]
+mod transport_tests;
+
 impl std::fmt::Debug for AwsKmsKeyMetadata {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AwsKmsProvider")

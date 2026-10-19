@@ -492,6 +492,40 @@ mod tests {
                 .is_ok()
         );
     }
+    #[tokio::test]
+    async fn unencrypted_pdf_text_and_page_sections_survive_isolated_extraction() {
+        use lopdf::{Document, Object, Stream, dictionary};
+        let mut pdf = Document::with_version("1.5");
+        let pages = pdf.new_object_id();
+        let font = pdf.add_object(dictionary! {
+            "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica",
+        });
+        let resources = pdf.add_object(dictionary! { "Font" => dictionary! { "F1" => font } });
+        let content = pdf.add_object(Stream::new(
+            dictionary! {},
+            b"BT /F1 12 Tf 20 40 Td (NyxID PDF fixture) Tj ET".to_vec(),
+        ));
+        let page = pdf.add_object(dictionary! {
+            "Type" => "Page", "Parent" => pages, "Resources" => resources,
+            "Contents" => content, "MediaBox" => vec![0.into(), 0.into(), 200.into(), 100.into()],
+        });
+        pdf.objects.insert(
+            pages,
+            Object::Dictionary(dictionary! {
+                "Type" => "Pages", "Kids" => vec![page.into()], "Count" => 1,
+            }),
+        );
+        let catalog = pdf.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages });
+        pdf.trailer.set("Root", catalog);
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        let result = extract(bytes, "pdf".into()).await.unwrap();
+        assert_eq!(result.content_type, "application/pdf");
+        assert!(result.text.contains("NyxID PDF fixture"));
+        assert_eq!(result.sections.len(), 1);
+        assert_eq!(result.sections[0].offset, 0);
+        assert_eq!(result.sections[0].label, "Page 1");
+    }
     #[test]
     fn encrypted_pdf_and_malformed_pdf_are_rejected() {
         use lopdf::{

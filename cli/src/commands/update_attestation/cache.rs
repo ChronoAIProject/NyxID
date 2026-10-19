@@ -220,13 +220,7 @@ struct Recording<T> {
 
 #[tough::async_trait]
 impl<T: Transport + Clone + 'static> Transport for Recording<T> {
-    async fn fetch(
-        &self,
-        url: url::Url,
-    ) -> Result<
-        futures::stream::BoxStream<'static, Result<tough::Bytes, TransportError>>,
-        TransportError,
-    > {
+    async fn fetch(&self, url: url::Url) -> Result<tough::TransportStream, TransportError> {
         let root_version = url
             .path()
             .rsplit('/')

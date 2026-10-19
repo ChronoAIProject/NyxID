@@ -764,7 +764,7 @@ mod tests {
             Step::RollingBack,
         ] {
             for created in [false, true] {
-                let root = tempfile::tempdir().unwrap();
+                let root = private_test_directory();
                 let mut swap = swap(step);
                 // create succeeded but saving its ID may have failed.
                 if step == Step::Prepared {
@@ -804,7 +804,7 @@ mod tests {
     #[tokio::test]
     async fn every_committed_cleanup_boundary_is_idempotent_and_never_restores_old() {
         for boundary in 0..4 {
-            let root = tempfile::tempdir().unwrap();
+            let root = private_test_directory();
             let swap = swap(Step::Committed);
             let (_server, engine, api) = engine(&swap, boundary < 3, true).await;
             {
@@ -832,7 +832,7 @@ mod tests {
 
     #[tokio::test]
     async fn successor_waits_for_predecessor_and_commits_only_its_fenced_heartbeat() {
-        let root = tempfile::tempdir().unwrap();
+        let root = private_test_directory();
         let mut swap = swap(Step::Released);
         swap.deadline_ms = now_ms() + HANDOFF_MS;
         let (_server, engine, api) = engine(&swap, true, true).await;
@@ -855,7 +855,7 @@ mod tests {
 
     #[test]
     fn companion_failure_preserves_connected_machine_and_reports_only_fixed_metadata() {
-        let root = tempfile::tempdir().unwrap();
+        let root = private_test_directory();
         report(
             root.path(),
             &Progress {

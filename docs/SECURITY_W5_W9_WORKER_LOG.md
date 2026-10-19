@@ -590,6 +590,81 @@ no descriptor declares a platform. Focused OCI tests pass8/8, adding valid and
 mismatched nested-envelope cases and direct-manifest absent/v8/v9 cases. This
 correction does not establish final producer/signature/scan acceptance.
 
+## W7 supported Rust dependency remediation (working batch)
+
+The main Rust graph now uses maintained MongoDB3.9.1 with BSON2 compatibility,
+Hickory0.26.3, Tough0.22, Sigstore0.14, Russh0.63.3 and lopdf0.42. The GCP
+provider uses the same upstream's maintained gcloud-kms1.5 package through its
+existing Cargo alias; AWS uses the SDK's modern default HTTPS client. Supported
+owner updates remove the old libcrux/OpenSSL paths and update the affected TLS,
+QUIC, random, archive and parsing dependencies without advisory suppressions.
+CI Clippy/backend tests include both optional KMS features and use --locked.
+
+Caller changes preserve bounded Tough streaming, existing raw SSH host-key pins
+and persisted TOFU, and explicitly reject negotiated host certificates. The
+actual local SSH wire suite passes12/0, including a successful backend-style
+OpenSSH user-certificate authentication after raw-key authentication refusal.
+Host-certificate rejection and user-certificate authentication are distinct
+controls. GCP tests exercise local gRPC current/previous wrap/unwrap, denial and
+retry handling, plus an RSA-signed service-account JWT/local OAuth exchange.
+AWS fixtures use explicit dummy credentials and local HTTPS with a fixture CA;
+production TLS/default client construction remains unchanged. The isolated AWS
+module harness passes2/0 but does not substitute for the integrated backend run.
+
+The first both-KMS integrated backend executable passed246crypto,455model,
+5PDF/DOCX parent,1live Mongo transaction,46key-service and12agent-binding tests.
+The one attachment ignore is a subprocess entrypoint invoked by its parent,
+not an unavailable database test. Actual Mongo commit/abort, key rotation replay
+and concurrent binding mutation checks executed against Mongo8.0.17. This
+first executable predates the added AWS transport module/direct dev dependency.
+The final both-KMS rebuild passes and its executable passes248crypto (including
+the2actual AWS HTTPS tests),455models,5PDF/DOCX parents,1live transaction,
+46key-service and12binding tests, with the same one child-entrypoint ignore.
+The first full workspace Clippy failed on clippy::err_expect in the new GCP
+denial fixture. Its failed log is retained. The only source correction replaces
+Result.err().expect(...) with Result.expect_err(...); the exact integrated GCP
+test then executes1/0/0, and corrected full workspace Clippy passes with both
+KMS features, all targets, --locked and -D warnings. Formatting, whitespace,
+strict workflow YAML, reusable permissions and build-input checks pass.
+The macOS linker reported a large __eh_frame performance warning; the build
+and these tests exited0. This is no Linux backend/image execution claim.
+
+Final working source is basee30188e2 plus19effective reviewed overlays:
+w7-rust-updated-tests-source-v4.tar SHA256
+dc54d8c1952f8d9f2761167dc7ae25c1b4cc0bf575895e39e893462a4a8027c6.
+The sole test-only Clippy correction is frozen as v5 tar SHA256
+6bea5bcd4aea7d239897ab04614a7b9c6d4660b4e75eaa2ff28f368d7d340351;
+all19effective overlay hashes match the bounded dependency code being committed.
+The unchanged broad groups retain their v4 executable provenance; the corrected
+test and Clippy receipts bind v5 separately. No result is relabeled as a final
+release/archive/image run.
+Cargo.lock SHA256 is
+0fd7d32fb7386f4dbbb08098cfc2edcb53a24d82ce951de8773619cd61c6d783.
+The final guest updater suites pass120/0/1library and79/0/4binary. Each live
+TUF test was also explicitly executed: CLI1/0, updater library1/0 and updater
+binary1/0. The CLI's other verifier cases pass40/0/1. Binary updater ignores
+are that same live TUF case, one companion child entrypoint and two Docker
+parents; the child/parents remain pending final container integration.
+Initial guest permission-fixture failures are retained. Test-only helpers now
+create private files/directories explicitly while the invalid0666/0770,
+missing-token and no-repair controls remain; production policy is unchanged.
+
+Exact final-lock Trivy0.76.0 scan passes792packages/0vulnerabilities with raw
+report SHA256
+98efb01748fb00871051d262515c6a07c7be09b4181c66f9538f20bb10fab447.
+This is a source dependency scan, not a final rebuilt image/archive scan.
+The exact final command arguments, explicit environment, exit status, executable
+SHA256, each group log SHA256 and frozen overlay hashes are retained in
+w7-rust-remediation-final-receipt.json under the active nyxid-w5w9-validation
+directory. Final build: cargo test --locked -p nyxid --bin nyxid-server
+--features aws-kms,gcp-kms --no-run, with CARGO_BUILD_JOBS=2,
+CARGO_PROFILE_TEST_DEBUG=0, CARGO_PROFILE_DEV_DEBUG=0, CARGO_INCREMENTAL=0 and
+the isolated validation CARGO_TARGET_DIR. Direct group tests use --nocapture
+and NYXID_TEST_DATABASE_URL=mongodb://127.0.0.1:27189/?replicaSet=rs-security.
+R1-15 application wiring/actual stripped
+artifact identity, immutable distro inputs, producer signatures/scans and full
+final artifact coverage remain OPEN. Mobile R1-05/R1-06 remain untouched OPEN.
+
 ## Remaining authorized batches
 
 W5 final container review/integration; W7 pinned,

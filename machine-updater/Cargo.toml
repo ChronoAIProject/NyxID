@@ -25,8 +25,8 @@ const-oid = { version = "0.9", features = ["db"] }
 pki-types = { package = "rustls-pki-types", version = "1.11" }
 reqwest = { version = "0.12", features = ["json", "rustls-tls", "stream"], default-features = false }
 sha2 = "0.10"
-sigstore = { version = "0.13", default-features = false, features = ["bundle", "cosign", "sigstore-trust-root", "rustls-tls"] }
-tough = { version = "0.21", default-features = false }
+sigstore = { version = "0.14", default-features = false, features = ["cert", "sigstore-trust-root", "rustls-tls"] }
+tough = { version = "0.22", default-features = false }
 webpki = { package = "rustls-webpki", version = "0.103", default-features = false, features = ["std"] }
 x509-cert = "0.2"
 rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "logging", "aws_lc_rs"] }

@@ -18,7 +18,7 @@ name = "nyxid-server"
 path = "src/main.rs"
 
 [dependencies]
-lopdf = { version = "0.38", default-features = false }
+lopdf = { version = "0.42", default-features = false }
 zip = { version = "6", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 quick-xml = "0.41"
 image = { version = "0.25.9", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
@@ -95,9 +95,8 @@ http = "1.4"
 http-body-util = "0.1"
 httpdate = "1"
 # Direct rustls dep so we can install a default CryptoProvider at startup.
-# Feature unification picks up BOTH `ring` (via google-cloud-kms ->
-# google-cloud-auth -> jsonwebtoken 9.x and via the transitively-enabled
-# `reqwest/__rustls-ring`) AND `aws_lc_rs` (requested here). With both
+# Feature unification can pick up BOTH `ring` (via transitive HTTP clients)
+# AND `aws_lc_rs` (requested here). With both
 # providers compiled in, rustls cannot auto-select and panics on first
 # TLS use (rustls/src/crypto/mod.rs:249). The CLI hit the same trap; see
 # cli/Cargo.toml + cli/src/main.rs's install_rustls_crypto_provider.
@@ -105,12 +104,19 @@ rustls = { version = "0.23", default-features = false, features = ["std", "tls12
 
 # Optional KMS provider dependencies (behind feature flags)
 aws-config = { version = "1", optional = true }
-aws-sdk-kms = { version = "1", optional = true }
-google-cloud-kms = { version = "0.6", optional = true }
+aws-sdk-kms = { version = "1", optional = true, default-features = false, features = ["default-https-client", "rt-tokio"] }
+# Same upstream's maintained package name; the pre-rename 0.6 line retains
+# jsonwebtoken 9 and its obsolete certificate-validation dependency chain.
+google-cloud-kms = { package = "gcloud-kms", version = "1.5", optional = true }
 tempfile = "3.27.0"
 axum-extra = { version = "0.12.6", features = ["form", "query"] }
 
 [dev-dependencies]
+aws-smithy-http-client = { version = "1.1", default-features = false, features = ["rustls-aws-lc"] }
+google-cloud-gax = { package = "gcloud-gax", version = "1.4" }
+tonic = { version = "0.14", features = ["transport"] }
+tonic-prost = "0.14"
+tokio-stream = { version = "0.1", features = ["net"] }
 nyxid-machine-updater = { path = "../machine-updater", features = ["test-support"] }
 flate2 = "1"
 # TLS echo proxy for multi-origin routing and redirect acceptance tests.
