@@ -1193,11 +1193,8 @@ async fn execute_turn_inner(
         .await
         .map_err(|error| {
             TurnError::internal(
-                if matches!(
-                    error,
-                    crate::services::assistant_channel_media::IngestError::Timeout
-                ) {
-                    "turn_timeout"
+                if matches!(error, AppError::AssistantTurnRequired) {
+                    "cancelled"
                 } else {
                     "assistant_unavailable"
                 },

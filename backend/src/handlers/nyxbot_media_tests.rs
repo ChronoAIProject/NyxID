@@ -1603,33 +1603,43 @@ async fn streaming_ingestion_provider(
         )
         .route(
             "/open-apis/im/v1/messages/{native}/resources/{key}",
-            get(move || {
-                let counted = counted.clone();
-                let db = db.clone();
-                let channel = channel.clone();
-                let payload = payload.clone();
-                let gate = gate.clone();
-                async move {
-                    counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                    if revoke {
-                        db.collection::<bson::Document>(CHANNELS)
-                            .update_one(doc! {"_id":channel}, doc! {"$set":{"owner_sender_ids":[]}})
-                            .await
-                            .unwrap();
+            get(
+                move |axum::extract::Path((_native, resource)): axum::extract::Path<(
+                    String,
+                    String,
+                )>| {
+                    let counted = counted.clone();
+                    let db = db.clone();
+                    let channel = channel.clone();
+                    let payload = payload.clone();
+                    let gate = gate.clone();
+                    async move {
+                        counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        if revoke {
+                            db.collection::<bson::Document>(CHANNELS)
+                                .update_one(
+                                    doc! {"_id":channel},
+                                    doc! {"$set":{"owner_sender_ids":[]}},
+                                )
+                                .await
+                                .unwrap();
+                        }
+                        if let Some(gate) = gate
+                            && resource != "fast"
+                        {
+                            gate.notified().await;
+                        }
+                        let chunks: Vec<_> = payload
+                            .chunks(32768)
+                            .map(|c| Ok::<_, std::io::Error>(Bytes::copy_from_slice(c)))
+                            .collect();
+                        axum::http::Response::builder()
+                            .header("content-type", "image/png")
+                            .body(Body::from_stream(futures::stream::iter(chunks)))
+                            .unwrap()
                     }
-                    if let Some(gate) = gate {
-                        gate.notified().await;
-                    }
-                    let chunks: Vec<_> = payload
-                        .chunks(32768)
-                        .map(|c| Ok::<_, std::io::Error>(Bytes::copy_from_slice(c)))
-                        .collect();
-                    axum::http::Response::builder()
-                        .header("content-type", "image/png")
-                        .body(Body::from_stream(futures::stream::iter(chunks)))
-                        .unwrap()
-                }
-            }),
+                },
+            ),
         );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let origin = format!("http://{}", listener.local_addr().unwrap());
@@ -1763,7 +1773,27 @@ async fn channel_media_stop_and_whole_step_deadline_cancel_blocked_fetch_and_fin
         let gate = Arc::new(tokio::sync::Notify::new());
         let (downloads, provider) =
             streaming_ingestion_provider(&state, &row, native_png(), false, Some(gate)).await;
-        media_source(&state, &row, "cancel-fetch", "cancel-fetch", "").await;
+        let mut source = media_source(&state, &row, "cancel-fetch", "cancel-fetch", "").await;
+        if deadline {
+            let mut fast = source.attachments[0].clone();
+            fast.provider_ref = fast.provider_ref.replace("img_receipt", "fast");
+            fast.image_key = Some("fast".into());
+            fast.size_bytes = None;
+            source.attachments[0].size_bytes = None;
+            source.attachments.insert(0, fast);
+            let mut not_started = source.attachments[1].clone();
+            not_started.provider_ref = not_started
+                .provider_ref
+                .replace("img_receipt", "not-started");
+            not_started.image_key = Some("not-started".into());
+            source.attachments.push(not_started);
+            state
+                .db
+                .collection::<ChannelMessage>(MESSAGES)
+                .replace_one(doc! {"_id": &source.id}, &source)
+                .await
+                .unwrap();
+        }
         let response = respond(
             &state,
             &key,
@@ -1772,12 +1802,15 @@ async fn channel_media_stop_and_whole_step_deadline_cancel_blocked_fetch_and_fin
         )
         .await;
         for _ in 0..1000 {
-            if downloads.load(std::sync::atomic::Ordering::SeqCst) == 1 {
+            if downloads.load(std::sync::atomic::Ordering::SeqCst) == if deadline { 2 } else { 1 } {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        assert_eq!(downloads.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(
+            downloads.load(std::sync::atomic::Ordering::SeqCst),
+            if deadline { 2 } else { 1 }
+        );
         let event = state
             .db
             .collection::<NyxbotEvent>(EVENTS)
@@ -1807,21 +1840,30 @@ async fn channel_media_stop_and_whole_step_deadline_cancel_blocked_fetch_and_fin
             .unwrap()
             .unwrap();
         assert!(message.media_pending.is_none());
-        assert!(message.attachments.is_empty());
-        assert_eq!(
-            message.media_bound.unwrap().failed[0].status,
-            if deadline {
-                "not_processed: timeout"
-            } else {
-                "not_processed: stopped"
-            }
-        );
-        assert!(calls.lock().await.is_empty());
+        let receipt = message.media_bound.unwrap();
+        if deadline {
+            assert_eq!(message.attachments.len(), 1);
+            assert_eq!(receipt.ok.len(), 1);
+            assert_eq!(receipt.failed.len(), 2);
+            assert!(receipt.failed.iter().all(|item| item.status == "timeout"));
+            assert_eq!(receipt.failed[0].index, Some(1));
+            assert_eq!(receipt.failed[1].index, Some(2));
+            let input = calls.lock().await.last().unwrap().to_string();
+            assert!(input.contains("input_image"));
+            assert!(input.contains("timeout"));
+            assert_eq!(downloads.load(std::sync::atomic::Ordering::SeqCst), 2);
+        } else {
+            assert!(message.attachments.is_empty());
+            assert_eq!(receipt.failed[0].status, "not_processed: stopped");
+            assert!(calls.lock().await.is_empty());
+        }
         assert_eq!(
             state
                 .db
                 .collection::<bson::Document>(crate::models::assistant_upload::COLLECTION_NAME)
-                .count_documents(doc! {})
+                .count_documents(
+                    doc! {"message_id": bson::Bson::Null, "parent_attachment_id": bson::Bson::Null}
+                )
                 .await
                 .unwrap(),
             0

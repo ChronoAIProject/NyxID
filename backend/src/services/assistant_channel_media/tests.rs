@@ -357,6 +357,50 @@ async fn channel_media_stop_before_bind_cleans_known_roots_chunks_and_late_commi
 }
 
 #[tokio::test]
+async fn channel_media_timeout_receipt_excludes_unknown_upload_and_cleans_late_commit() {
+    let (state, row, message, event) = fixture().await;
+    let known = upload(&state, &row, &event).await;
+    let mut receipt = proposed(&event, known.clone());
+    let mut timed_out = receipt.ok.remove(0);
+    timed_out.upload_id = None;
+    timed_out.status = "timeout".into();
+    receipt.failed.push(timed_out);
+    receipt.context = "Attachment timed out".into();
+    let bound = binding::bind(&state.db, &message, &receipt).await.unwrap();
+    assert!(bound.ok.is_empty());
+    assert!(saved(&state, &message).await.attachments.is_empty());
+    settle(&state, &row, None).await;
+    let roots = state
+        .db
+        .collection::<bson::Document>(crate::models::assistant_upload::COLLECTION_NAME);
+    assert_eq!(
+        roots
+            .count_documents(doc! {"$or":[{"_id":&known},{"parent_attachment_id":&known}]})
+            .await
+            .unwrap(),
+        0
+    );
+    // Model a store acknowledgement that arrives only after timeout settlement.
+    let late = upload(&state, &row, &event).await;
+    let replay = binding::bind(&state.db, &message, &proposed(&event, late.clone()))
+        .await
+        .unwrap();
+    assert!(replay.ok.is_empty());
+    assert_eq!(replay.failed[0].status, "timeout");
+    let late_row = roots.find_one(doc! {"_id": &late}).await.unwrap().unwrap();
+    assert_eq!(late_row.get("message_id"), Some(&bson::Bson::Null));
+    roots.update_one(doc! {"_id": &late}, doc! {"$set":{"created_at":bson::DateTime::from_chrono(Utc::now()-ChronoDuration::days(2))}}).await.unwrap();
+    retention::sweep(&state.db).await.unwrap();
+    assert_eq!(
+        roots
+            .count_documents(doc! {"$or":[{"_id":&late},{"parent_attachment_id":&late}]})
+            .await
+            .unwrap(),
+        0
+    );
+}
+
+#[tokio::test]
 async fn channel_media_late_bind_immediate_image_deletion_success_failure_stop() {
     for code in [None, Some("assistant_unavailable"), Some("cancelled")] {
         let (state, row, message, event) = fixture().await;

@@ -325,6 +325,7 @@ async fn collect(
     row: &AssistantConversation,
     message: &AssistantMessage,
 ) -> AppResult<MediaBound> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(90);
     let mut receipt = MediaBound {
         event_ids: message.media_event_ids.clone(),
         ok: Vec::new(),
@@ -351,15 +352,28 @@ async fn collect(
         };
         let Some(media) = &event.media else { continue };
         for item in media.items.iter().take(10) {
-            match Box::pin(fetch_item(state, row, &event, item)).await {
-                Ok(id) => receipt.ok.push(outcome(
+            let fetched = if tokio::time::Instant::now() >= deadline {
+                None
+            } else {
+                let result = tokio::time::timeout_at(
+                    deadline,
+                    Box::pin(fetch_item(state, row, &event, item)),
+                )
+                .await
+                .ok();
+                // A fetch's own timer may wake in the same poll as the budget.
+                // Once the budget is exhausted its terminal class is timeout.
+                result.filter(|_| tokio::time::Instant::now() < deadline)
+            };
+            match fetched {
+                Some(Ok(id)) => receipt.ok.push(outcome(
                     &event,
                     Some(item.index),
                     item.embedded,
                     "bound",
                     Some(id),
                 )),
-                Err(error) => {
+                Some(Err(error)) => {
                     let status = match error {
                         AppError::ChannelMediaTooLarge => "too_large",
                         AppError::NotFound(_) | AppError::Forbidden(_) => "source_unavailable",
@@ -375,6 +389,13 @@ async fn collect(
                         None,
                     ));
                 }
+                None => receipt.failed.push(outcome(
+                    &event,
+                    Some(item.index),
+                    item.embedded,
+                    "timeout",
+                    None,
+                )),
             }
         }
         if media.declared > media.items.len() {
@@ -398,22 +419,11 @@ async fn collect(
     Ok(receipt)
 }
 
-#[derive(Debug)]
-pub enum IngestError {
-    Timeout,
-    Failed,
-}
-pub async fn ingest_and_bind(
-    state: &AppState,
-    row: &AssistantConversation,
-) -> Result<String, IngestError> {
-    tokio::time::timeout(Duration::from_secs(90), ingest_inner(state, row))
-        .await
-        .map_err(|_| IngestError::Timeout)?
-        .map_err(|_| IngestError::Failed)
-}
-
-async fn ingest_inner(state: &AppState, row: &AssistantConversation) -> AppResult<String> {
+// The collection deadline is an item failure, so successful siblings still bind
+// and the model receives the failure context. Bind is outside that deadline.
+// Database/transport failures before a receipt exists may fail the turn; shared
+// settlement then records not_processed: failed (or stopped on a missed fence).
+pub async fn ingest_and_bind(state: &AppState, row: &AssistantConversation) -> AppResult<String> {
     let Some(turn) = row.active_turn.as_ref() else {
         return Ok(String::new());
     };
