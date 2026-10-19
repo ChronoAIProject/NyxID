@@ -229,14 +229,14 @@ async fn setup_options_with_tool_gate(
                         engine::attach_routed_image(&image_state.db, &image_state.encryption_keys, OWNER, &row.id,
                             "camera__snapshot", "image/png", b"fixture pixels", true).await.unwrap();
                     }
-                    if matches!(failure, Some("http_capacity" | "http_capacity_long" | "http_draining" | "http_busy" | "http_slow_body")) {
+                    if matches!(failure, Some("http_capacity" | "http_capacity_long" | "http_capacity_observed" | "http_draining" | "http_busy" | "http_slow_body")) {
                         let status = if failure == Some("http_busy") { StatusCode::CONFLICT } else { StatusCode::SERVICE_UNAVAILABLE };
                         let code = if failure == Some("http_draining") { "draining" } else if failure == Some("http_busy") { "session_busy" } else { "capacity_exceeded" };
                         let body = async_stream::stream! {
                             if failure == Some("http_slow_body") { tokio::time::sleep(Duration::from_secs(2)).await; }
                             yield Ok::<_, Infallible>(axum::body::Bytes::from(json!({"error":{"code":code}}).to_string()));
                         };
-                        return (status, [("content-type", "application/json"), ("retry-after", if failure == Some("http_capacity_long") { "33" } else { "1" })], Body::from_stream(body)).into_response();
+                        return (status, [("content-type", "application/json"), ("retry-after", if failure == Some("http_capacity_observed") { "60" } else if failure == Some("http_capacity_long") { "33" } else { "1" })], Body::from_stream(body)).into_response();
                     }
                     let failure = if failure == Some("http_slow_accept") {
                         tokio::time::sleep(engine_policy::ACK_DELAY + Duration::from_secs(1)).await;
@@ -4331,8 +4331,10 @@ async fn stop_during_capacity_wait_releases_owner_permit_without_replay() {
 
 #[tokio::test]
 async fn capacity_wait_beyond_31_seconds_keeps_heartbeat_and_owner_slot() {
+    // Leave observation time between the heartbeat checks and provider retry.
+    // Other capacity tests keep their existing short/33-second fixture delays.
     let (state, calls, server) =
-        setup_script(None, Duration::ZERO, vec!["http_capacity_long"]).await;
+        setup_script(None, Duration::ZERO, vec!["http_capacity_observed"]).await;
     let started = std::time::Instant::now();
     let response = turns(
         State(state.clone()),
@@ -4341,16 +4343,58 @@ async fn capacity_wait_beyond_31_seconds_keeps_heartbeat_and_owner_slot() {
     )
     .await
     .unwrap();
+    let waiting = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(row) = state
+                .db
+                .collection::<AssistantConversation>(
+                    crate::models::assistant_conversation::COLLECTION_NAME,
+                )
+                .find_one(doc! {"user_id": OWNER, "active_turn.waiting_for_capacity": true})
+                .await
+                .unwrap()
+            {
+                break row;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("durable capacity wait");
+    let turn_id = waiting.active_turn.as_ref().unwrap().turn_id.clone();
+    let wait_observed = std::time::Instant::now();
     tokio::time::sleep(Duration::from_secs(31)).await;
-    let row = state
-        .db
-        .collection::<AssistantConversation>(crate::models::assistant_conversation::COLLECTION_NAME)
-        .find_one(doc! {"user_id": OWNER})
-        .await
-        .unwrap()
-        .unwrap();
+    let baseline = engine::get(&state.db, OWNER, &waiting.id).await.unwrap();
+    let heartbeat_before = baseline.active_turn.as_ref().unwrap().heartbeat_at.unwrap();
+    // A single observation at 31s can land on a delayed scheduler/DB tick.
+    // Require a fresh persisted heartbeat *after* that observation instead.
+    let row = tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            let row = engine::get(&state.db, OWNER, &waiting.id).await.unwrap();
+            let turn = row
+                .active_turn
+                .as_ref()
+                .expect("same capacity-wait turn remains live");
+            assert_eq!(turn.turn_id, turn_id);
+            assert!(turn.waiting_for_capacity);
+            assert_eq!(
+                calls.lock().await.len(),
+                1,
+                "no provider retry before fixture Retry-After"
+            );
+            if turn
+                .heartbeat_at
+                .is_some_and(|heartbeat| heartbeat > heartbeat_before)
+            {
+                break row;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("capacity-wait worker advances heartbeat after 31s");
     let turn = row.active_turn.as_ref().unwrap();
-    assert!(turn.waiting_for_capacity);
+    assert!(wait_observed.elapsed() >= Duration::from_secs(31));
     assert!(turn.capacity_wait_started_at.is_some());
     assert!(turn.capacity_wait_deadline.is_some());
     assert!((Utc::now() - turn.heartbeat_at.unwrap()).num_seconds() < 15);
@@ -4361,12 +4405,15 @@ async fn capacity_wait_beyond_31_seconds_keeps_heartbeat_and_owner_slot() {
         Err(AppError::RateLimited)
     ));
     drop(other);
-    let events = drain(response).await;
+    let events = tokio::time::timeout(Duration::from_secs(40), drain(response))
+        .await
+        .expect("provider retry eventually completes");
     assert!(events.contains("waiting_for_capacity"));
     assert!(events.contains("\"status\":\"completed\""));
-    assert!(started.elapsed() >= Duration::from_secs(33));
+    assert!(started.elapsed() >= Duration::from_secs(60));
     assert_eq!(calls.lock().await.len(), 2);
     server.abort();
+    state.db.drop().await.unwrap();
 }
 
 #[tokio::test]
