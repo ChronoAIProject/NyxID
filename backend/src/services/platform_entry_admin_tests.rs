@@ -1502,7 +1502,7 @@ fn unavailable_oauth_returns_repair_status_and_disconnected_inventory_without_hi
             &profile,
             runtime.manager_authority_epoch,
             "hello",
-            "status-repair",
+            "501",
         )
         .await;
         let binding = super::super::platform_personal_binding_service::tests::binding(

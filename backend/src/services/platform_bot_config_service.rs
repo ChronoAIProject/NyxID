@@ -997,7 +997,7 @@ mod tests {
             .unwrap();
         assert!(matches!(
             convert(&state.db, &actor, &bot, &foreign_person).await,
-            Err(AppError::ValidationError(_))
+            Err(AppError::Forbidden(_))
         ));
         let channels = state
             .db
