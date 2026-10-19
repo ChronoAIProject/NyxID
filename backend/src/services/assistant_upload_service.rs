@@ -163,9 +163,9 @@ async fn store_authorized(
     source: Option<crate::models::assistant_channel_media::UploadSource>,
 ) -> AppResult<TurnAttachment> {
     use sha2::{Digest, Sha256};
-    let content_sha256 = source
-        .as_ref()
-        .map(|_| format!("{:x}", Sha256::digest(&bytes)));
+    // Legacy rows may lack a digest; attachment-write egress can hash their
+    // decrypted bytes under its byte reservation. Every new upload has one.
+    let content_sha256 = Some(format!("{:x}", Sha256::digest(&bytes)));
     let channel_upload = source.is_some();
     let label = safe_name(name);
     let extension = label

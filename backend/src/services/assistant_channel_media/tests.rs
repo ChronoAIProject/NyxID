@@ -799,6 +799,15 @@ async fn channel_media_browser_single_read_accepts_above_initial_channel_limit_a
         .unwrap()
         .unwrap();
     assert_eq!(root.get_i64("size").unwrap(), payload.len() as i64);
+    use sha2::{Digest, Sha256};
+    assert_eq!(
+        root.get_str("content_sha256").unwrap(),
+        format!("{:x}", Sha256::digest(&payload))
+    );
+    assert!(
+        root.get("source")
+            .is_none_or(|source| matches!(source, bson::Bson::Null))
+    );
     let id = root.get_str("_id").unwrap();
     let chunks: Vec<bson::Document> = roots
         .find(doc! {"parent_attachment_id":id})
