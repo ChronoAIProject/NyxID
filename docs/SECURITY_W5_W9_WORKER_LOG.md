@@ -1553,3 +1553,32 @@ other fresh generated229 backend failures remain open and distinct from old54.
 
 Evidence: w9-health-fixture-c171-v1/final-handoff.json. The local commit contains
 only this shared fixture and log on a8bed; broader W9 and unrelated WIP excluded.
+
+## Batch 0 — replacement-worker triage, 2026-10-19
+
+PM/reviewer: heca 01a15431 (Claude Opus 5.5); worker: Codex GPT-6.1-sol, xhigh.
+HEAD be149b7c9; origin/main 618c627b9 is five commits ahead; no implementation edits or commits.
+Dedicated target/logs: /tmp/nyxid-w5w9-codex-b0.SPJwrX; own Mongo 8.0.17 replica set on port 50002, commit/abort controls 2/0.
+Executed cargo test --locked -p nyxid-cli: 1768 passed/0 failed/7 ignored, including 78 node-preparation cases.
+Executed cargo check --locked -p nyxid-cli --features node-proxy-test --lib: exit 0; cargo clippy --locked -p nyxid-cli --all-targets -- -D warnings: exit 101 (unfinished-node dead code and ordinary lint findings).
+Mobile frozen pnpm 10.34.7 install with repository .npmrc and --ignore-scripts passes; security patches 8/0/0, typecheck exit 0, application tests 52/0/0.
+Earlier scratch runs omitted .npmrc (0/8 module-resolution failures) and the backend alphabet fixture (51/1); corrected copies pass without source/test changes.
+Executed python3 scripts/test-build-inputs.py: 18/0; check-build-inputs.py, cargo fmt --all -- --check, git diff --check, four shell syntax checks and Python AST check pass.
+Archived adapter git apply --check fails at secret_backend.rs; v3 plan is reference only. Registration prep builds; legacy readers/writers, migration, daemon quiescence and OAuth durability/logging remain draft.
+APT wiring is partial; APK catalogs/wiring and Linux image/install tests remain open. Planning docs retained; ledger ownership/status refreshed. Awaiting PM Batch 0 verdict before merge.
+
+## Batch 1 — main integration, 2026-10-19–20 (awaiting PM review)
+
+PM/reviewer heca 01a15431 (Claude Opus 5.5); worker GPT-6.1-sol/xhigh. W8 belongs to stream B heca 01a154bb; its owned sources were untouched.
+Mobile 5cdca82b0 confirms GHSA-86w9-cpqp-85rv/CVE-2026-85393 and cites GHSA; post-edit patch tests 8/0/0. Real merge 31b3e4e0f integrates origin/main 618c627b9 without conflicts.
+Fixture commits 192daae96, 8d7e1fced, c1ea89810 declare exact owner/service preferences; global required=true and production approval behavior are preserved.
+Captured FAQ403/api_key_scope_forbidden/code9000; gateway personal actor/owner Pending then15s Elapsed; Discord admin-catalog target Pending then30s drain Elapsed despite a separate personal auto row.
+New guest missing/required-policy controls preserve403/code9000, zero forwarding and zero approval/grant/ack effects; original revocation/denial assertions remain.
+Both-KMS selected executable:45 passed/0 failed/0 ignored. Full same-artifact retry:9509 passed/6 failed/11 existing ignored,24959.29s,exit101; all original12, new guest control and scheduler regression pass in both.
+Six extra full failures: no-progress4s bound, onboard1s audit wait, X reply polling, near-expiry DeviceCodeExpired, renewal2s budget, eight-owner90s budget. Exact names/panics are in SECURITY_W5_W9_REVIEW.md; no assertion/timeout/ignore changed.
+Unchanged diagnostic onboard and X reruns each1/0/0; no-progress diagnostic reruns3x fail only the total-time bound after error/stage/response-ID assertions pass. These do not replace the failed full result.
+Original cargo full attempt was interrupted after491passes/20failures when disposable Mongo aborted on error24/nofile8192. Fresh PRIMARY used nofile60000/2GiB cache; redundant Cargo rebuild stopped and exact both-KMS test executable reused, not a clean cargo-test exit.
+Executed cargo test -p nyxid-cli with package test debug=0/codegen-units=256 and four threads:1768 passed/0 failed/7 ignored.
+Frontend npm run build exits0; npm test -- --maxWorkers=1:6255/0/0 in586 files; npm run lint:0errors/33warnings. Native nginx microphone/worklet and enforcing-CSP negatives:2/0/0; final pinned-image/credential-page parity remains open.
+Backend all-target both-KMS Clippy exits101 on four CLI WIP needless_borrow diagnostics; supplementary backend-bin Clippy exits0. CLI all-target Clippy exits101:18 dead_code+4 needless_borrow; untouched for Batch2. Format/diff checks pass.
+All23 non-document node/package WIP paths retain saved bytes/modes except main's expected Dockerfile COPY line; none committed. Logs/target:/tmp/nyxid-w5w9-codex-b0.SPJwrX. No push/publication; Batch1 verdict pending before any Batch2 commit.
