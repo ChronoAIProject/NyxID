@@ -1026,3 +1026,55 @@ execution, full producer/final artifact/image/scan gates remain open. The W9.3
 compiled sources, CodeQL consumer WIP/vendor bytes, unrelated package/mobile
 work and PM ledgers are excluded. No merge, push, release/signing, alert
 disposition or blocked R1-05/R1-06 probe is performed by this commit.
+
+
+## W7 bounded CodeQL consumer and telemetry-observer followup
+
+The actual JavaScript SARIF at PR merge448 identifies Telegram fixture flows
+524/525/526 and the production-test telemetry substring classifier527.
+Original raw SARIF f4854871cceadb639007dee6a620e165ce058bde098de725cd3baa1c9eb0eeb9
+and the four hosted annotations remain evidence. This batch preserves exact
+upstream Telegram fixture3c8c27bf6f51a778ed94f452cf6b501f54703b67ef162551f677171916fbcd99.
+It changes no scanner workflow, query, exclusion, vendor byte or alert state.
+
+Production-consumer assertions bind the one hardcoded Telegram script URL,
+exact permitted data attributes (no auth-url/onauth/post/discussion), and parsed
+HTTPS oauth.telegram.org /embed/fixturebot iframe with exact origin/return_to.
+Existing wrong-frame, wrong-origin, malformed-schema and replay controls remain.
+The actual built-consumer test passes. PM independently exercised18 normal,
+adversarial and unsafe-unused-branch/alternate-loader negative controls without
+CSP masking. These support only exact test-fixture/product-consumer
+non-exploitable classification for524-526; the vendor library is not generally
+safe. The served SPA's402 bytes are bound before/after; its manifest claimse672,
+whose unchanged Telegram component equals current26f686dab2356cf17431d8370179d46116ec37768aa1617ed71401263fe5eeb1.
+This is retained built-consumer evidence, not a fresh current-source build.
+
+The telemetry classifier now parses host/origin, but the observer additionally
+retains every cross-origin fetch/XHR. A lookalike, configured-prefix or unrelated
+origin allowed elsewhere by CSP cannot disappear from the egress assertion.
+Twenty focused controls include collector-level negatives, vendor scripts,
+userinfo, schemes and ports; the final assertion requires the configured origin.
+
+Initial browser execution passed Telegram/telemetry-disabled but failed both
+enabled cases with zero events. A bounded browser diagnostic captured normal
+UA151, webdriver=false, consent=true/DNT=null alongside Client Hints still
+advertising HeadlessChrome151. The exact installed SDK bot detector returned
+true for those hints and false for consistent human Chrome hints. The fixture
+now models that supported browser identity consistently across both surfaces;
+production filtering remains byte-unchanged. Original failures and the one
+diagnostic-script duplicate-declaration error remain separately retained.
+Final combined browser4/0, collector20/0, strict targeted TypeScript and scoped
+ESLint --max-warnings=0 all pass.
+
+Frozen14-file handoff w7-codeql-consumer-subset-v2.json
+(575ad289948cf114507eb2610fcee99ec78924a6a0988b55ea1a2a27ea9c9927),
+archived403528b64db4ccc9ae4ce0c7ed31d0f164e43dc953ec19702037e7bf6559135,
+binds exact source, commands/environments, logs, browser results,402 served
+files, fixture provenance, prior failed execution and bot diagnostic.
+PM independently runs collector20 and accepts the four implementation paths at
+P/telemetry-observer-review/completed-v2-review.json
+(b2c60b717130da9d1dd54a5b891f7037151998c5ff12fdb8b030abe14e295dee).
+This commit contains only those four paths and the worker log. Coordinator owns
+any later supported exact-alert disposition and PR push. No zero-finding
+scanner result, broader vendor safety, final image/artifact acceptance, merge,
+release, signing, blocked mobile probe or remote gate mutation is claimed.

@@ -184,7 +184,22 @@ test("actual Telegram loader uses bound cross-origin messages without eval, spoo
   const iframe = dialog.locator('iframe[src^="https://oauth.telegram.org/"]');
   await expect(iframe).toHaveCount(1);
   expect(loaderRequests).toBe(1);
-  expect(await dialog.locator("script[data-onauth]").count()).toBe(0);
+  const widgetScript = dialog.locator("script");
+  await expect(widgetScript).toHaveCount(1);
+  await expect(widgetScript).toHaveAttribute("src", "https://telegram.org/js/telegram-widget.js?22");
+  await expect(widgetScript).toHaveAttribute("data-telegram-login", "nyxid_policy_fixture_bot");
+  await expect(widgetScript).toHaveAttribute("data-size", "large");
+  // Bind the actual consumer attributes: the upstream auth-url/HTML callbacks,
+  // post and discussion branches remain outside this login-only contract.
+  expect(await widgetScript.evaluate((element) => Array.from(element.attributes)
+    .map((attribute) => attribute.name).filter((name) => name.startsWith("data-")).sort()))
+    .toEqual(["data-size", "data-telegram-login"]);
+  const frameURL = new URL((await iframe.getAttribute("src"))!);
+  expect(frameURL.protocol).toBe("https:");
+  expect(frameURL.origin).toBe("https://oauth.telegram.org");
+  expect(frameURL.pathname).toBe("/embed/nyxid_policy_fixture_bot");
+  expect(frameURL.searchParams.get("origin")).toBe(new URL(page.url()).origin);
+  expect(frameURL.searchParams.get("return_to")).toBe(page.url());
   const payload = JSON.stringify({ event: "auth_user", auth_data: {
     id: 123456, first_name: "Policy fixture", auth_date: 1792359000, hash: "a".repeat(64),
   } });

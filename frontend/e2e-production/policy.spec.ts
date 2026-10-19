@@ -2,6 +2,7 @@ import { expect } from "@playwright/test";
 import { test } from "../e2e/production-policy-fixture";
 import fs from "node:fs";
 import path from "node:path";
+import { hasOnlyConfiguredEgress, observeTelemetryEgress } from "../e2e/telemetry-request";
 
 const dist = path.resolve(process.env.NYXID_PRODUCTION_DIST ?? "dist");
 const manifest = JSON.parse(fs.readFileSync(path.join(dist, "release-integrity/releases.json"), "utf8")) as {
@@ -31,7 +32,9 @@ test("production response/header matrix and backend .js routing", async ({ reque
   }
   for (const url of ["/privacy", "/terms"]) {
     const initial = await request.get(url);
-    const cached = await request.get(url, { headers: { "if-none-match": initial.headers().etag } });
+    const etag = initial.headers().etag;
+    expect(etag).toBeDefined();
+    const cached = await request.get(url, { headers: { "if-none-match": etag! } });
     expect(cached.status()).toBe(304);
     expect(cached.headers()["content-security-policy"]).toContain("script-src 'self'");
     const denied = await request.post(url);
@@ -87,7 +90,7 @@ test("real microphone, shipped AudioWorklet, fonts and allowed websocket", async
       ws.onmessage = (event) => { clearTimeout(timer); resolve(String(event.data)); ws.close(); };
       ws.onerror = () => { clearTimeout(timer); reject(new Error("WebSocket failed")); };
     });
-    const track = stream.getAudioTracks()[0];
+    const track = stream.getAudioTracks()[0]!;
     const live = track.readyState;
     stream.getTracks().forEach((item) => item.stop());
     node.disconnect();
@@ -124,11 +127,17 @@ test("rejects injected inline scripts, event handlers and unlisted connections",
 });
 
 for (const [enabled, host] of [[false, "https://us.i.posthog.com"], [true, "https://us.i.posthog.com"], [true, "https://analytics.example"]] as const) {
-  test(`production PostHog ${enabled ? "enabled" : "disabled"} at ${host} has bounded egress and no lazy scripts`, async ({ page }) => {
+  test(`production PostHog ${enabled ? "enabled" : "disabled"} at ${host} has bounded egress and no lazy scripts`, async ({ page, baseURL }) => {
     await page.addInitScript((consent) => {
       // The vendor intentionally suppresses WebDriver traffic. Model the
-      // supported human-browser path without changing production filtering.
+      // supported human-browser path across both UA surfaces without changing
+      // production filtering. Chromium's UA Client Hints otherwise still
+      // advertise HeadlessChrome even with the configured normal Chrome UA.
       Object.defineProperty(navigator, "webdriver", { get: () => false });
+      Object.defineProperty(navigator, "userAgentData", { get: () => ({
+        brands: [{ brand: "Chromium", version: "151" }, { brand: "Google Chrome", version: "151" }],
+        mobile: false, platform: "macOS",
+      }) });
       localStorage.setItem("nyxid.telemetry_consent", JSON.stringify({ state: { asked: true, enabled: consent }, version: 1 }));
     }, enabled);
     await page.route("**/api/v1/public/config", (route) => route.fulfill({ json: {
@@ -136,7 +145,10 @@ for (const [enabled, host] of [[false, "https://us.i.posthog.com"], [true, "http
       telemetry_dsn: "phc_policy_fixture", telemetry_host: host, telemetry_share_analytics: false,
     } }));
     const requests: string[] = [];
-    page.on("request", (request) => { if (new URL(request.url()).hostname.includes("posthog.com") || request.url().startsWith(host)) requests.push(request.url()); });
+    const appOrigin = new URL(baseURL!).origin;
+    page.on("request", (request) => {
+      observeTelemetryEgress(requests, request.url(), request.resourceType(), appOrigin, host);
+    });
     await page.route("https://*.posthog.com/**", (route) => route.fulfill({ json: { status: 1 }, headers: { "access-control-allow-origin": "*" } }));
     await page.route("https://analytics.example/**", (route) => route.fulfill({ json: { status: 1 }, headers: { "access-control-allow-origin": "*" } }));
     await page.goto("/login");
@@ -144,7 +156,7 @@ for (const [enabled, host] of [[false, "https://us.i.posthog.com"], [true, "http
     if (enabled) await expect.poll(() => requests.length).toBeGreaterThan(0);
     await page.waitForTimeout(700);
     expect(requests.some((url) => /\.js(?:\?|$)|\/config|\/flags/.test(url))).toBe(false);
-    expect(requests.every((url) => new URL(url).origin === host)).toBe(true);
+    expect(hasOnlyConfiguredEgress(requests, host), JSON.stringify(requests)).toBe(true);
     expect(await page.locator('script[src*="posthog"]').count()).toBe(0);
     if (!enabled) expect(requests).toEqual([]);
   });
