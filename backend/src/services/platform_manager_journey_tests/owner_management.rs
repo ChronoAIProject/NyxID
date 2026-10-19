@@ -254,7 +254,7 @@ impl ManagementEgress {
         assert_eq!(watch.report_to, chat.report_to);
         assert_eq!(
             watch.report_provenance,
-            crate::services::nyxbot_watch_service::REPORT_PROVENANCE_V1
+            crate::models::assistant_conversation::REPORT_PROVENANCE_V1
         );
         assert_eq!(watch.status, "pending");
 

@@ -751,7 +751,12 @@ async fn refuse_control(
     {
         let reason = if runtime.emergency_stopped {
             UnavailableReason::EmergencyStopped
-        } else if !runtime.personal_enabled && reason == UnavailableReason::ConfirmationRejected {
+        } else if !runtime.personal_enabled
+            && matches!(
+                reason,
+                UnavailableReason::ConfirmationRejected | UnavailableReason::ControlInvalid
+            )
+        {
             UnavailableReason::PersonalDisabled
         } else {
             reason

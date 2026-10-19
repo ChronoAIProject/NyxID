@@ -19,6 +19,57 @@ async fn assert_fixed(state: &AppState, reason: UnavailableReason) {
 }
 
 #[test]
+fn disabled_native_and_telegram_login_reports_paused_without_intent_or_execution() {
+    crate::test_utils::run_native_journey_test("disabled_login_feedback", || async {
+        let native = NativeJourney::new().await;
+        let telegram = Journey::new().await;
+        for state in [&native.state, &telegram.state] {
+            state
+                .db
+                .collection::<Document>(
+                    crate::models::platform_bot_runtime_controls::COLLECTION_NAME,
+                )
+                .update_many(doc! {}, doc! {"$set":{"personal_enabled":false}})
+                .await
+                .unwrap();
+        }
+        // These fresh sender fixtures have never used an intent rate bucket.
+        native
+            .dispatch(native.admission(720, "login", None).await)
+            .await;
+        telegram
+            .webhook(&telegram.update(721, "/login", false))
+            .await;
+        let native_calls = native.server.received_requests().await.unwrap();
+        let body: Value = serde_json::from_slice(&native_calls.last().unwrap().body).unwrap();
+        let telegram_sends = telegram.sends().await;
+        for text in [
+            body["content"].as_str().unwrap(),
+            telegram_sends.last().unwrap()["text"].as_str().unwrap(),
+        ] {
+            assert!(text.contains("Personal NyxBot is paused"));
+            assert!(!text.contains("fresh account review") && !text.contains("nyx_pli_"));
+        }
+        for state in [&native.state, &telegram.state] {
+            assert_fixed(state, UnavailableReason::PersonalDisabled).await;
+            assert_eq!(
+                state
+                    .db
+                    .collection::<Document>(crate::models::platform_link_intent::COLLECTION_NAME)
+                    .count_documents(doc! {})
+                    .await
+                    .unwrap(),
+                0
+            );
+        }
+        assert_eq!(native.egress.0.load(Ordering::SeqCst), 0);
+        assert_eq!(telegram.egress.0.load(Ordering::SeqCst), 0);
+        native.state.db.drop().await.unwrap();
+        telegram.state.db.drop().await.unwrap();
+    });
+}
+
+#[test]
 fn rejected_native_confirmation_has_actionable_provider_correct_durable_feedback() {
     crate::test_utils::run_native_journey_test("native_control_feedback", || async {
         let j = NativeJourney::new().await;

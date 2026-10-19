@@ -72,7 +72,13 @@ it.each([
                 username: null,
               },
               sender: { id: "exact-native-id", display_name: "Person" },
-              state: availability || revoked ? "revoked" : consent,
+              state:
+                revoked ||
+                (availability !== undefined &&
+                  availability !== "available" &&
+                  availability !== "paused")
+                  ? "revoked"
+                  : consent,
               ...(availability
                 ? { consent_state: revoked ? "revoked" : consent }
                 : {}),
