@@ -368,6 +368,7 @@ async fn child(f: &Fixture) -> (String, Zeroizing<String>) {
             permission_snapshot: Some(summary.permission_snapshot),
         },
         Some(Utc::now() + Duration::hours(1)),
+        Utc::now(),
         &f.key.id,
         &id,
         &secret,

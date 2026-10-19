@@ -767,11 +767,136 @@ Final exported stripped app subjects, all-platform archives/images, package
 input receipts, SBOM/scanner/signature semantics and complete staged publication
 remain OPEN. No remote workflow/publication or implicated mobile probe ran.
 
+## W9 common new-key issuance defaults and client contract
+
+Ordinary key creation now resolves omitted/null/empty lifetime to 90 days and
+omitted service/node allow-all flags to false. Explicit nonexpiry carries typed
+issuance intent; managed NyxBot/conversation and directly constructed shared-entry
+transport authority retain deliberate nonexpiring policy. Stored model defaults
+are unchanged, including legacy missing/null lifetime and broad grant defaults.
+Rotation retains lifetime and grants and returns the stored expiry. Create/rotate
+metadata uses BSON millisecond precision; explicit fractional intent stays exact
+through scheduled scope-plan digest verification before storage normalization.
+
+Agent Key/auth-device approvals resolve parent and child intent before retryable
+transactions; new children default finite, bounded by the parent. Login-code mint
+persists the frozen intent; old-shaped pending rows derive defaults from stable
+row creation time. Stored child null remains null during delivery/authentication.
+False never_expires is omitted on wire and persisted selection. The genuinely
+new true intent requires all backend readers/issuance clients to upgrade; the
+cutover document requires pausing/draining issuance, approvals and code mint/
+redeem during rollout. It does not claim mixed-version runtime enforcement.
+
+Dashboard setup/reset/open and personal/org transitions retain restricted finite
+defaults. Shared hosted/local wizard now resets its effective visible lifetime on
+owner change and permits a fresh explicit nonexpiry choice. Original frozen v1
+owner regressions failed 2/2; corrected frozen v2 passes those unchanged controls
+in PM scratch. CLI omission/positive/zero and wizard allowlist/prefill preserve
+intent. Ordinary mobile UI/schema changes retain safe defaults and explicit
+nonexpiry without executing dependency/patch probes. Creation success reads the
+returned expiry and distinguishes an absent old-server field from null. Shared
+wizard/terminal rotation summaries omit lifetime; docs state that limitation.
+Device provisioning separately exposes api_key_expires_at while expires_in keeps
+its existing delivery-envelope meaning; polling looks up expiry before claiming
+one-time delivery.
+
+Client validation: corrected frontend focused suite86/7files, additional callers
+45/4files, TypeScript and scoped ESLint pass. Ordinary mobile12/0skip and TypeScript
+pass on unchanged client bytes with existing modules; no mobile dependency edits
+are included. Wizard rebuild/final-byte seal pass. Existing unchanged compiled
+wizard freshness executable also passes, explicitly a reused test executable.
+Frontend tests retain PostHog sourcemap warnings; scoped ESLint is zero-warning.
+PM independently verified frozen v2 overlay36files, focused86, same owner
+regressions2, separate callers37, TypeScript/lint/seal; these are separate runs.
+
+CLI debug executable7a6358f7a29f70aca25c112fd6cde593bdf294e8904e49c403503de9a56bf104
+passes key35/device13/pairing55/local-wizard68/parser34 =205/0/0; PM copied and ran
+all five filters independently with equal results. Debug RustEmbed reads assets
+from source, so this is not final release embedded-byte proof. Original verbatim
+v2-byte probes false are retained with the rust-embed cfg explanation.
+
+Final both-KMS backend test compile passed on frozen source9949575f in914.977s;
+its immutable debug executable0980b6c0 is retained. Corrected-source final CLI
+no-run also passed and reproduced exact executable7a6358f7. Both-feature backend/
+CLI bins/tests Clippy with -D warnings passed in1446.790s. The backend link retains
+the __eh_frame/compact-unwind size warning; no runtime correctness failure is
+inferred from it. Scoped rustfmt and git diff --check pass.
+
+PM full frozen-v2 frontend execution records6187pass/3fail. All three failed
+composition mapping builds resolve installed-package symlinks outside PM scratch;
+unchanged source with copied dependencies passes all14 tests in both failed
+files. A complete33656-entry dependency inventory matches apart from caches.
+The original full-suite failures remain; no full-suite zero-failure claim.
+
+Backend runtime and final fixture-only validation are complete within the scopes below.
+The initial key-service run is43pass/1fail: an old fixture attempts new issuance
+already expired, which the new policy correctly rejects. The reviewed final fixture
+correction issues a valid key and then expires its stored row before testing
+authentication. The original failure remains. During Agent login group05,
+Mongo exhausted its8192FD process limit and exited. That run was interrupted,
+not passed. Only local Mongo8.0.17 was restarted, using the same dbpath/replica set
+with process limit65536, followed by real commit/abort readiness checks and no
+existing-database deletion. The exact0980 matrix replay completed on that endpoint. Agent Key login28/0/0, auth-device7/0/0, login-code9/0/0, device provisioning45/0/0,
+assistant actions8/0/0 and managed credentials10/0/0 completed after restart.
+Permission11, scheduled fractional1, key mutation5, key scope7, durable grants7,
+machine-source13, machine-runtime3, org membership8 and platform setup6 also pass;
+NyxBot128 also passes. Across20 distinct groups the exact0980 snapshot records
+391pass/1 retained expired-fixture failure/0ignored. The original groups01-04 and
+replayed05-20 receipts remain separately bound. Restart and original crash receipts/logs
+remain distinct. PM independently copied exact0980 and passed10/0/0 selected
+actual HTTP/precision/rotation, BSON legacy, parent/child/auth-device, transaction
+conflict, login-code frozen/rollback, assistant rotation, permission and scheduled
+fractional-digest cases; that selected run is separate from the worker matrix.
+All original failed frontend/types assertions, initial backend no-library-target
+command, prior-source successful compile and deliberately interrupted later build
+remain in separate receipts. No interrupted build is a passing runtime result.
+
+Final v3 source4336c599699cc60fc8ddc239c6cf3f8595991b6064429406cbd43233651ad1fb
+differs from frozen v2 in only two reviewed test sections: issue-then-expire
+fixture setup and expanded real HTTP empty-expiry/false-gates table. Rustfmt
+changes in those sections are retained in the exact delta receipt. All other32
+backend/CLI snapshot inputs, including production prefixes and manifests/lock,
+remain unchanged. The final binary build, affected groups and Clippy results
+are recorded below; broad0980 execution retains its original executable scope.
+
+Final v3 both-KMS backend test build passes in594.479s with actual successful
+BuildFinished and unchanged source inputs. Copied immutable test executable
+12b77ea53bdb96689c6c60e0bb77a2b7422b4d951fd8cca80bd8935183cb86c1
+passes full affected key-service44/0/0 and API handlers41/0/0. The corrected
+expired-auth test retains Unauthorized after explicitly expiring a valid stored
+row. Expanded HTTP table covers empty date and explicit false gates alongside
+exact returned/stored precision and unchanged rotation lifetime. Runtime source
+and executable hashes stay unchanged; no final tests are ignored.
+PM independently copies that exact executable and passes the two changed exact
+cases2/0/0 on the healthy configured Mongo endpoint, with source34 unchanged.
+Its final review binds the worker build and both affected-group command/log
+receipts. This is separate from the earlier exact0980 broad matrix and the205
+CLI tests; no results are reassigned between executables.
+Final scoped Clippy passes exit0 in386.242s on the consistent final source:
+cargo clippy --locked -p nyxid -p nyxid-cli --bins --tests
+--features nyxid/gcp-kms,nyxid/aws-kms -- -D warnings.
+Its exact argv/environment/input/exit receipt and log SHA256
+4c01a4dba853a692ff808727af7cbaf33471a58a4ff420ca761123f8f6c76a45
+are retained. Final scoped rustfmt and whitespace checks pass. The complete
+w9-final-handoff-receipt.json indexes53 command receipts, frozen source/delta,
+old and final executable scopes, failure accounting and PM evidence under the
+active validation directory. w9-final-bounded-source-hashes.json binds the64
+implementation paths separately from this worker log. No unrelated Docker,
+APT/APK, mobile dependency/patch or PM-ledger work enters this bounded commit.
+
+This batch implements the common creation/lifetime contract; it does not close
+W9.3 readiness/required-approval, W9.4-6 OS storage/migration, W8 durable audit,
+or W7 shipped-artifact/source/package/scanner/SBOM/signature/producer gates.
+R1-05/R1-06 remain untouched OPEN. No remote workflow, signing/publication,
+live credential use or implicated mobile probe occurred. Next implementation
+is W9.3 readiness and usable required approval; queued W7 Node/npm scratch
+preparation remains separate.
+
 ## Remaining authorized batches
 
 W5 final container review/integration; W7 pinned,
 locked and scanned builds, shipped-artifact SBOMs and mandatory official manifest
-signing; W9 all new-key creation defaults, readiness, real OS identity/key-service
+signing; W9 readiness, real OS identity/key-service
 boundaries and resumable full secret migration; W8 strict attribution, complete
 critical-operation durability, independent protected witness, prefix retention,
 key lifecycle and scoped API/UI. Major W8 code follows a concrete operation and

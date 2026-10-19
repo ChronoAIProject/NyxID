@@ -2184,7 +2184,7 @@ pub enum ApiKeyCommands {
         /// Scopes (space-separated: read write proxy)
         #[arg(long)]
         scopes: Option<String>,
-        /// Expiry in days (0 = no expiry)
+        /// Expiry in days (default: 90; 0 explicitly selects no expiry)
         #[arg(long)]
         expires_in_days: Option<u32>,
         /// Allowed service UUIDs or slugs (comma-separated; includes platform services)

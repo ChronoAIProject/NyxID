@@ -550,7 +550,10 @@ function SecretDispatcher({
     return (
       <DisplayOncePanel
         title="API key created"
-        description="Save this key now — it won't be shown again."
+        description={`Save this key now — it won't be shown again. ${result.expires_at === undefined
+          ? "Refresh the key details to confirm its expiry."
+          : result.expires_at === null ? "This key has no expiry."
+          : `Expires ${new Date(result.expires_at).toLocaleString()}.`}`}
         secret={result.full_key}
         ackButtonLabel="I have saved this — close"
         onAcknowledge={onAck}

@@ -257,7 +257,7 @@ function MintLoginCodePage() {
                 existing={selection?.kind === "existing"}
               />
               <label className="block space-y-2 text-12">
-                Login credential expiry (optional)
+                Login credential expiry (blank: 90 days, bounded by key expiry)
                 <Input
                   type="datetime-local"
                   value={credentialExpiry}

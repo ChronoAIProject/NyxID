@@ -698,7 +698,7 @@ cannot approve or mint login grants.
 or a `kind: "new"` selection containing the confirmed key permissions. Restricted
 decisions use a distinct fail-closed route so an old replica cannot silently
 interpret that choice as full account approval. Creation and delivery revalidate
-eligibility and effective authority.
+eligibility and effective authority. New parent keys default to restricted grants and 90 days; explicit `never_expires: true` selects a nonexpiring parent. Newly issued child credentials still default to at most 90 days, bounded by the parent expiry. Explicit child expiry cannot exceed the parent. The response reports the stored parent and child expiries separately. See [issuance rollout](API_KEY_ISSUANCE.md).
 
 Successful CLI polling returns a tagged union. `auth_kind: "account_session"`
 includes `access_token`, `refresh_token`, `token_type` and `expires_in`.
@@ -1145,22 +1145,25 @@ Create a new API key. The full key is returned only in this response and cannot 
 |--------------|--------|----------|----------------------------------------------|
 | `name`       | string | Yes      | Human-readable name for the key              |
 | `scopes`     | string | No       | Space-separated scopes (default: `"read"`)   |
-| `expires_at` | string | No       | ISO 8601 expiration datetime                 |
+| `expires_at` | string/null | No | Future RFC3339 instant or date-only UTC end of day. Omitted, null or empty means creation time + 90 days. Stored and returned at millisecond precision. |
+| `never_expires` | boolean | No | Explicitly select no expiry (default false); cannot be true with a nonempty `expires_at`. |
 | `description` | string | No      | Optional description of key purpose          |
-| `allowed_service_ids` | string[] | No | UserService IDs this key can proxy. Only enforced when `allow_all_services: false`. Providing values without also setting `allow_all_services: false` will silently store the list but **not** scope the key. |
-| `allowed_node_ids` | string[] | No | Node IDs this key can route through. Only enforced when `allow_all_nodes: false`. Providing values without also setting `allow_all_nodes: false` will silently store the list but **not** scope the key. |
-| `allow_all_services` | boolean | No | If true, key can access all user's external services (default: true) |
-| `allow_all_nodes` | boolean | No | If true, key can route through all user's nodes (default: true) |
+| `allowed_service_ids` | string[] | No | UserService IDs this key can proxy; omitted means empty. Incompatible with `allow_all_services: true`. |
+| `allowed_node_ids` | string[] | No | Node IDs this key can route through; omitted means empty. Incompatible with `allow_all_nodes: true`. |
+| `allow_all_services` | boolean | No | If true, key can access all user's external services (default: false) |
+| `allow_all_nodes` | boolean | No | If true, key can route through all user's nodes (default: false) |
 
-> **Scoping API keys:** To create a scoped key you must set BOTH `allow_all_services: false` AND a non-empty `allowed_service_ids` (and likewise `allow_all_nodes: false` + `allowed_node_ids` for node scoping). Either alone is a no-op. The defaults exist for backward compatibility with pre-scope keys, so a naive payload yields a broad key.
+> New keys start with restricted service/node authority and a finite lifetime. An empty restricted list grants no resources. Broad grants and nonexpiry require explicit choices. Existing stored keys retain their policy, including legacy absent fields; rotation preserves that policy. See [issuance and rollout](API_KEY_ISSUANCE.md).
 
-Broad key (default):
+Explicit broad, nonexpiring key:
 
 ```json
 {
   "name": "Production API Key",
   "scopes": "read write",
-  "expires_at": "2026-01-01T00:00:00Z"
+  "allow_all_services": true,
+  "allow_all_nodes": true,
+  "never_expires": true
 }
 ```
 
@@ -1184,7 +1187,8 @@ Scoped key:
   "key_prefix": "nyx_k_a1b2c3d4",
   "full_key": "nyx_k_a1b2c3d4e5f67890abcdef1234567890abcdef1234567890abcdef12345678",
   "scopes": "read write",
-  "created_at": "2025-06-01T10:00:00+00:00"
+  "created_at": "2025-06-01T10:00:00+00:00",
+  "expires_at": null
 }
 ```
 
@@ -1236,7 +1240,7 @@ curl -X DELETE http://localhost:3001/api/v1/api-keys/a1b2c3d4-e5f6-7890-abcd-ef1
 
 #### POST /api/v1/api-keys/{key_id}/rotate
 
-Rotate an API key: deactivate the existing key and create a new one with the same name and scopes. The new full key is returned in the response.
+Rotate an API key: deactivate the existing key and create a new one with the same stored permissions and expiry (including nonexpiry). The new full key is returned in the response.
 
 **Auth:** Required
 
@@ -1255,7 +1259,8 @@ Rotate an API key: deactivate the existing key and create a new one with the sam
   "key_prefix": "nyx_k_b2c3d4e5",
   "full_key": "nyx_k_b2c3d4e5f67890abcdef1234567890abcdef1234567890abcdef12345678ab",
   "scopes": "read write",
-  "created_at": "2025-06-02T10:00:00+00:00"
+  "created_at": "2025-06-02T10:00:00+00:00",
+  "expires_at": null
 }
 ```
 

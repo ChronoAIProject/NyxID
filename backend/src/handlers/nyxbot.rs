@@ -503,7 +503,9 @@ pub(crate) async fn create_gateway_agent_key(
         owner,
         &format!("NyxBot gateway agent {}", identifier(label)),
         "read proxy",
-        None,
+        crate::services::api_key_validation::NewKeyExpiry::NeverExpires(
+            crate::services::api_key_validation::NonExpiringReason::ManagedNyxbot,
+        ),
         Some("Authenticates the Agent Event Gateway to NyxBot. Managed by NyxBot."),
         Some(&[]),
         Some(&[]),
@@ -657,7 +659,9 @@ async fn connect_inner(
         &bot_owner_id,
         &format!("NyxBot channel route {}", identifier(&label)),
         "read proxy",
-        None,
+        crate::services::api_key_validation::NewKeyExpiry::NeverExpires(
+            crate::services::api_key_validation::NonExpiringReason::ManagedNyxbot,
+        ),
         Some("NyxBot channel route key. Managed by NyxBot; disconnect NyxBot to remove."),
         Some(&[]),
         Some(&[]),
@@ -1371,7 +1375,9 @@ async fn new_route_key(
         key_owner,
         &format!("NyxBot channel route {}", identifier(label)),
         "read proxy",
-        None,
+        crate::services::api_key_validation::NewKeyExpiry::NeverExpires(
+            crate::services::api_key_validation::NonExpiringReason::ManagedNyxbot,
+        ),
         Some("NyxBot channel route key. Managed by NyxBot; disconnect NyxBot to remove."),
         Some(&[]),
         Some(&[]),

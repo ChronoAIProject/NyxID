@@ -12949,6 +12949,7 @@ mod proxy_resolution_integration_tests {
                 name: "scoped-proxy-key".to_string(),
                 scopes: Some("proxy".to_string()),
                 expires_at: None,
+                never_expires: false,
                 description: None,
                 allowed_service_ids: vec![allowed_service.id.clone()],
                 allowed_node_ids: vec![allowed_node.id.clone()],

@@ -5,7 +5,7 @@
   "graphs": [
     {
       "path": "embedded-rendered-graph",
-      "sha256": "c3c8e6c5bbc5be0b0dd2f94c3a0080084e4679ab96e3729157e01c6bcbcd99e9",
+      "sha256": "b2d3b69f971875ce8c2b8f0dd5688303a577852bc93ce73580a6e61175d0e73f",
       "schema": "nyxid.rendered-composition.v1",
       "component": "wizard",
       "lock_sha256": "b8e51437261f9e2e450dea350187f07e78fbe601a50b3ba11f1ceb95dd61e94a",
@@ -2638,8 +2638,8 @@
             },
             {
               "id": "repo:frontend/src/components/cli-wizard/confirm-panels.tsx",
-              "source_sha256": "a1696eece369e88f9e84e584fd639743bdf808b9f5b2e82fd6a2864392bbec7a",
-              "rendered_length": 41073
+              "source_sha256": "fe23f0fb4997e161e1dc05cc5dd259f8c83da6ce178825628ef0d78fe18570bd",
+              "rendered_length": 43496
             },
             {
               "id": "repo:frontend/src/components/cli-wizard/disconnect-banner.tsx",
@@ -3363,8 +3363,8 @@
             },
             {
               "id": "repo:frontend/src/schemas/api-keys.ts",
-              "source_sha256": "059fe7e1b679c9ef8444358f67e5b16f567d78f1373824bed5ae6db4ae834103",
-              "rendered_length": 1454
+              "source_sha256": "a0f2e82e5482e23ed86e37eb1ff738b99fb7d65f507b9a9449afc209f5a0a641",
+              "rendered_length": 1636
             },
             {
               "id": "repo:frontend/src/schemas/assistant-wire-log.ts",
@@ -3443,8 +3443,8 @@
             },
             {
               "id": "repo:frontend/src/wizard-entry.tsx",
-              "source_sha256": "86b8bd7cc633d9e076fcca927eab5fe54abc0a95ae313730128da2c8dbf59cf3",
-              "rendered_length": 17350
+              "source_sha256": "6a173285526ef22bcc2c83233a5de14834f73224bbdc82a84717f1668f207c72",
+              "rendered_length": 17551
             }
           ]
         }
@@ -3452,8 +3452,8 @@
       "inline_candidates": [
         {
           "kind": "script",
-          "sha256": "a606dafb91e9d8d08222f96c52835f25f026dc9ab0f1d1a3bf2df923813ec7cb",
-          "size": 1125921,
+          "sha256": "5d90189626b5192f2be14ff445fa1b4dc584599b1a9d7509e3ca85e6e29addaf",
+          "size": 1127603,
           "path": "index.html",
           "transform": "pkg:npm/vite-plugin-singlefile@2.3.4"
         },
@@ -3995,8 +3995,8 @@
     },
     {
       "path": "index.html",
-      "size": 1336076,
-      "sha256": "e7e35711c358a448ac1c8a60c8c0daf5871d9b465d37ef8549f9c276e523c42e"
+      "size": 1337758,
+      "sha256": "642af3ab403cf69e398fb72a9f3c4f0a2c14e21f0b783f8178fb4571421eaf0d"
     },
     {
       "path": "nyxid-app-icon.svg",
@@ -4025,8 +4025,8 @@
       "inline": [
         {
           "kind": "script",
-          "sha256": "a606dafb91e9d8d08222f96c52835f25f026dc9ab0f1d1a3bf2df923813ec7cb",
-          "size": 1125921,
+          "sha256": "5d90189626b5192f2be14ff445fa1b4dc584599b1a9d7509e3ca85e6e29addaf",
+          "size": 1127603,
           "transform": "pkg:npm/vite-plugin-singlefile@2.3.4"
         },
         {
