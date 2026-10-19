@@ -91,6 +91,17 @@ fn answer_routing_parts(
             .map_or(PrimaryDestination::App, |origin| {
                 PrimaryDestination::ChannelEvent { origin }
             })
+    } else if matches!(turn.origin, TurnOrigin::Event)
+        && turn.events.iter().any(|e| !e.source_event_ids.is_empty())
+    {
+        turn.events
+            .iter()
+            .find(|e| !e.source_event_ids.is_empty())
+            .and_then(|e| e.reply_to.first())
+            .cloned()
+            .map_or(PrimaryDestination::App, |origin| {
+                PrimaryDestination::ChannelEvent { origin }
+            })
     } else if matches!(turn.origin, TurnOrigin::Event) {
         let mut origins = Vec::new();
         let mut seen = std::collections::HashSet::new();
@@ -386,6 +397,9 @@ pub fn base_prompt(
         ),
     };
     prompt.push_str(TASK_COMPLETION_PROMPT);
+    if row.role == AgentRole::Orchestrator && !row.guest_turn {
+        prompt.push_str("\n\nFor channel setup, first read nyxid__channel_setup_guide (built-in; no optional skill needed). Inspect list_channel_bots/get_channel_bot, list_channel_agents and list_channel_chats before changes. Use channel_bot_setup_link for a new messaging bot, list_channel_adapters for phone/SMS/speech. Distinguish catalog slug, service connection ID, credential connection_id, bot_id and provider slug. Report configured account, receive, send, route and automatic replies separately with evidence; never invent buttons/scopes or run Verify, Resubscribe or test sends as a diagnostic read. Native public/personal entry has its own authority; do not relink it as a personal bot.");
+    }
     prompt.push_str(WEB_RESEARCH_PROMPT);
     if let Some(agent) = agent {
         if !row.guest_turn {
@@ -1051,6 +1065,11 @@ pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
         (
             crate::models::assistant_acknowledgement::COLLECTION_NAME,
             doc! {"conversation_id": 1, "status": 1, "created_at": 1},
+            false,
+        ),
+        (
+            crate::models::assistant_acknowledgement::COLLECTION_NAME,
+            doc! {"user_id": 1, "conversation_id": 1, "creation_turn_id": 1},
             false,
         ),
         (
@@ -2091,7 +2110,17 @@ pub(crate) async fn begin_owner_turn_in_session(
         .await?
     };
     if start.origin == TurnOrigin::Event && events.is_empty() {
-        return Err(AppError::Conflict("No eligible pending events".into()));
+        collection
+            .update_one(
+                owner_filter(user_id, &id)?,
+                doc! {"$set": {
+                    "pending_events": bson::to_bson(&row.pending_events)
+                        .map_err(|_| AppError::Internal("Failed to encode events".into()))?
+                }},
+            )
+            .session(&mut *session)
+            .await?;
+        return Ok(OwnerTurnAdmission::Drained);
     }
     // Reduce authority before eligibility filtering; removed events cannot
     // create a new report destination for the retained events.
@@ -2484,6 +2513,32 @@ pub(crate) async fn begin_owner_turn_in_session(
         )
         .await?;
     }
+    // Bind every accepted destination of this one question in the same turn
+    // transaction. The source records retain their independent dispatch claims.
+    if let Some(turn) = row.active_turn.as_mut() {
+        for source in turn.events.iter().flat_map(|e| &e.source_event_ids) {
+            super::channel_turn_delivery::bind_in_session(
+                db,
+                session,
+                source,
+                &row.user_id,
+                &row.id,
+                turn_id,
+            )
+            .await?;
+        }
+        if turn.channel_event_id.is_none() {
+            turn.channel_event_id = turn
+                .events
+                .iter()
+                .flat_map(|e| &e.source_event_ids)
+                .next()
+                .cloned();
+        }
+        if let Some(event) = turn.events.iter().find(|e| !e.source_event_ids.is_empty()) {
+            turn.question_key = event.question_key.clone();
+        }
+    }
     Box::pin(super::async_service_operation::bind_in_session(
         db, &mut row, session,
     ))
@@ -2500,7 +2555,12 @@ pub(crate) async fn begin_owner_turn_in_session(
     if row.channel.is_none()
         && let Some(turn) = row.active_turn.as_mut()
     {
-        for origin in turn.events.iter().flat_map(|event| event.reply_to.iter()) {
+        for origin in turn
+            .events
+            .iter()
+            .filter(|e| e.source_event_ids.is_empty())
+            .flat_map(|event| event.reply_to.iter())
+        {
             if Some(origin) != answered_here.as_ref()
                 && !turn.also_deliver.contains(origin)
                 && turn.also_deliver.len() < MAX_ALSO_DELIVER
@@ -2801,22 +2861,71 @@ pub async fn push_events(
     if events.is_empty() {
         return get(db, user_id, id).await.map(Some);
     }
-    let entries = events
-        .iter()
-        .map(bson::to_bson)
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|_| AppError::Internal("Failed to encode event".into()))?;
-    Ok(db
-        .collection::<AssistantConversation>(CONVERSATIONS)
-        .find_one_and_update(
-            doc! {"_id": id, "user_id": user_id},
-            doc! {"$push": {"pending_events": {
-                "$each": entries,
-                "$slice": -(MAX_PENDING_EVENTS as i64),
-            }}},
-        )
-        .return_document(ReturnDocument::After)
-        .await?)
+    let db = db.clone();
+    let user_id = user_id.to_owned();
+    let id = id.to_owned();
+    let mut session = db.client().start_session().await?;
+    session
+        .start_transaction()
+        .and_run2(async move |session| {
+            let work: AppResult<Option<AssistantConversation>> = async {
+                append_events_in_session(&db, &user_id, &id, &events, session).await?;
+                Ok(db
+                    .collection::<AssistantConversation>(CONVERSATIONS)
+                    .find_one(doc! {"_id": &id, "user_id": &user_id})
+                    .session(&mut *session)
+                    .await?)
+            }
+            .await;
+            transactions::transaction_result(work)
+        })
+        .await
+        .map_err(transactions::map_transaction_error)
+}
+
+/// All bounded event writers share this policy. Ordinary events keep their
+/// oldest-first eviction semantics, but accepted source work is never evicted.
+/// A queue entirely occupied by source work returns an explicit capacity error;
+/// transactional outbox/decision writers then retain their retryable state.
+pub async fn append_events_in_session(
+    db: &Database,
+    user_id: &str,
+    id: &str,
+    events: &[AgentEvent],
+    session: &mut mongodb::ClientSession,
+) -> AppResult<bool> {
+    let rows = db.collection::<AssistantConversation>(CONVERSATIONS);
+    let Some(mut row) = rows
+        .find_one(doc! {"_id": id, "user_id": user_id})
+        .session(&mut *session)
+        .await?
+    else {
+        return Ok(false);
+    };
+    for event in events {
+        if row.pending_events.iter().any(|e| e.id == event.id) {
+            continue;
+        }
+        if row.pending_events.len() >= MAX_PENDING_EVENTS {
+            let index = row
+                .pending_events
+                .iter()
+                .position(|e| e.source_event_ids.is_empty())
+                .ok_or_else(|| AppError::Conflict("Assistant event queue is full".into()))?;
+            row.pending_events.remove(index);
+        }
+        row.pending_events.push(event.clone());
+    }
+    rows.update_one(
+        doc! {"_id": id, "user_id": user_id},
+        doc! {"$set": {
+            "pending_events": bson::to_bson(&row.pending_events)
+                .map_err(|_| AppError::Internal("Failed to encode events".into()))?,
+        }},
+    )
+    .session(session)
+    .await?;
+    Ok(true)
 }
 
 pub async fn clear_binding(

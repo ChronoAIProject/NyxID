@@ -637,6 +637,7 @@ pub async fn record_auto_allowed_with_link(
         operation_contract_digest: None,
         skill_selection: None,
         requested_turn_id: chat.turn_id.clone(),
+        creation_turn_id: chat.turn_id.clone(),
         voice_request_id: None,
         continuation_receipt_id: None,
         trigger_run_id: None,
@@ -1136,16 +1137,9 @@ async fn notify_nyxbot_denied(
                     text.clone(),
                     Some(&chat.agent_id),
                 );
-                let entry = bson::to_bson(&event)
-                    .map_err(|_| AppError::Internal("Failed to encode event".into()))?;
-                db.collection::<bson::Document>(CONVERSATIONS)
-                    .update_one(
-                        doc! {"_id": &home, "user_id": &chat.user_id},
-                        doc! {"$push": {"pending_events": {"$each": [entry],
-                            "$slice": -(super::assistant_nyxagent::MAX_PENDING_EVENTS as i64)}}},
-                    )
-                    .session(&mut *session)
-                    .await?;
+                super::assistant_nyxagent::append_events_in_session(
+                    &db, &chat.user_id, &home, &[event], session,
+                ).await?;
                 let message = AssistantMessage {
                     turn_metadata: None,
                     platform_delivery_recovery_queued: false,
@@ -1256,17 +1250,15 @@ pub async fn notify_nyxbot_request(
                 if queued.is_some() {
                     return Ok(Some(target));
                 }
-                let entry = bson::to_bson(&event)
-                    .map_err(|_| AppError::Internal("Failed to encode event".into()))?;
-                let pushed = threads
-                    .update_one(
-                        doc! {"_id": &target, "user_id": &chat.user_id, "role": "orchestrator"},
-                        doc! {"$push": {"pending_events": {"$each": [entry],
-                        "$slice": -(super::assistant_nyxagent::MAX_PENDING_EVENTS as i64)}}},
-                    )
-                    .session(&mut *session)
-                    .await?;
-                if pushed.matched_count != 1 {
+                if !super::assistant_nyxagent::append_events_in_session(
+                    &db,
+                    &chat.user_id,
+                    &target,
+                    &[event.clone()],
+                    session,
+                )
+                .await?
+                {
                     return Err(not_found());
                 }
                 Ok(Some(target))
@@ -1523,16 +1515,19 @@ pub async fn history(
     user: &str,
     conversation: &str,
 ) -> AppResult<Vec<AssistantAcknowledgement>> {
-    history_for_messages(db, user, conversation, None).await
+    history_for_messages(db, user, conversation, None, &[]).await
 }
 
 /// Keep decisions beside the messages being displayed, including older pages.
 /// The latest twenty remain visible even on an empty or narrowly loaded page.
+/// Exact page matches (1,000) and legacy time matches (100) have separate
+/// bounds; explicit card links remain available beyond these projection limits.
 pub async fn history_for_messages(
     db: &Database,
     user: &str,
     conversation: &str,
     oldest_message: Option<DateTime<Utc>>,
+    visible_turn_ids: &[String],
 ) -> AppResult<Vec<AssistantAcknowledgement>> {
     super::assistant_nyxagent::get(db, user, conversation).await?;
     expire(db, user, conversation).await?;
@@ -1554,18 +1549,33 @@ pub async fn history_for_messages(
         .try_collect()
         .await?;
     rows.extend(decided);
-    if let Some(oldest) = oldest_message {
+    let mut ids: std::collections::HashSet<_> = rows.iter().map(|r| r.id.clone()).collect();
+    if !visible_turn_ids.is_empty() {
         let visible: Vec<_> = collection
             .find(doc! {
                 "user_id": user, "conversation_id": conversation,
-                "status": {"$ne": "pending"},
-                "created_at": {"$gte": bson::DateTime::from_chrono(oldest)},
+                "status": {"$ne": "pending"}, "creation_turn_id": {"$in": visible_turn_ids},
             })
+            .sort(doc! {"created_at": -1, "_id": -1})
+            .limit(1000)
             .await?
             .try_collect()
             .await?;
-        let mut ids: std::collections::HashSet<_> = rows.iter().map(|r| r.id.clone()).collect();
         rows.extend(visible.into_iter().filter(|r| ids.insert(r.id.clone())));
+    }
+    if let Some(oldest) = oldest_message {
+        let legacy: Vec<_> = collection
+            .find(doc! {
+                "user_id": user, "conversation_id": conversation,
+                "status": {"$ne": "pending"}, "creation_turn_id": bson::Bson::Null,
+                "created_at": {"$gte": bson::DateTime::from_chrono(oldest)},
+            })
+            .sort(doc! {"created_at": -1, "_id": -1})
+            .limit(100)
+            .await?
+            .try_collect()
+            .await?;
+        rows.extend(legacy.into_iter().filter(|r| ids.insert(r.id.clone())));
     }
     rows.sort_by(|a, b| (a.created_at, &a.id).cmp(&(b.created_at, &b.id)));
     Ok(rows)
@@ -1813,6 +1823,7 @@ pub async fn request_tracked(
 #[derive(Clone)]
 pub struct RequestOrigin {
     pub requested_turn_id: Option<String>,
+    pub creation_turn_id: Option<String>,
     pub voice_request_id: Option<String>,
     pub trigger_run_id: Option<String>,
     /// The original turn's NyxBot involvement, stored with the claim; a
@@ -1962,6 +1973,7 @@ async fn prepare_request_candidate(
         link: None,
         status: "pending".into(),
         requested_turn_id: None,
+        creation_turn_id: None,
         voice_request_id: None,
         continuation_receipt_id: None,
         trigger_run_id: None,
@@ -2062,6 +2074,10 @@ async fn request_candidate_in_session(
         .sort(doc! {"seq": -1})
         .session(&mut *session)
         .await?;
+    row.creation_turn_id = conversation
+        .active_turn
+        .as_ref()
+        .map(|turn| turn.turn_id.clone());
     row.requested_turn_id = conversation
         .active_turn
         .as_ref()
@@ -2078,6 +2094,7 @@ async fn request_candidate_in_session(
         .and_then(|turn| turn.trigger_run_id.clone());
     if let Some(origin) = origin {
         row.requested_turn_id = origin.requested_turn_id.clone();
+        row.creation_turn_id = origin.creation_turn_id.clone();
         row.voice_request_id = origin.voice_request_id.clone();
         row.trigger_run_id = origin.trigger_run_id.clone();
     }

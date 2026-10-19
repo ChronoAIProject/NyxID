@@ -9,6 +9,9 @@ use wiremock::{
 #[path = "nyxbot_image_delivery_tests.rs"]
 mod image_delivery_tests;
 
+#[path = "nyxbot_source_queue_tests.rs"]
+mod source_queue_tests;
+
 struct Fixture {
     state: AppState,
     channel: NyxbotChannel,
@@ -106,6 +109,8 @@ async fn fixture(name: &str) -> Fixture {
         guest: false,
         addressed: true,
         transport: "gateway".into(),
+        source_route_id: channel.route_id.clone(),
+        source_route_api_key_id: Some(channel.route_api_key_id.clone()),
         stream_deadline: now + ChronoDuration::seconds(570),
         checked_at: now,
         claim_id: None,
@@ -169,7 +174,7 @@ async fn patch(f: &Fixture, fields: bson::Document) {
 }
 
 #[tokio::test]
-async fn long_turn_deadline_notice_then_durable_late_answer_once() {
+async fn long_turn_deadline_is_quiet_then_durable_late_answer_once() {
     let f = fixture("channel_late_deadline").await;
     f.state.db.collection::<bson::Document>(CONVERSATIONS).update_one(doc! {"_id": &f.event.conversation_id}, doc! {"$set": {"active_turn": {
         "turn_id": &f.event.turn_id, "origin": "channel", "started_at": bson::DateTime::now(), "stop_requested": false,
@@ -184,8 +189,9 @@ async fn long_turn_deadline_notice_then_durable_late_answer_once() {
         Utc::now() - ChronoDuration::seconds(late_delivery::STREAM_SECS + 1),
     );
     let text = body_text(response).await;
-    assert!(text.contains("still working"));
-    assert!(text.contains("post the answer here"));
+    assert!(!text.contains("response.output_text"));
+    assert!(!text.contains("response.output_item"));
+    assert!(text.contains("response.completed"));
     assert!(!text.contains("response.failed"));
     late_delivery::sweep(&f.state).await.unwrap();
     assert!(sends(&f).await.is_empty());

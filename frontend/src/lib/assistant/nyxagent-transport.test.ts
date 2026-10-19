@@ -2025,3 +2025,54 @@ it("starts new turn status without the previous turn's activity or wait clock", 
   controller.close();
   await sending;
 });
+
+function creationReceipt(turn: string | null, status: "pending" | "allowed" | "denied" = "allowed") {
+  return {
+    id: "12345678-1234-4123-8123-123456789012", kind: "action" as const, status,
+    summary: "Review the draft", decider: "user" as const, decided_by: "user" as const,
+    reason: null, service_slug: null, service_name: null, tool_name: "draft_agent_skill",
+    created_at: reset, decided_at: afterReset, expires_at: afterReset, creation_turn_id: turn,
+  };
+}
+it("joins decisions to the exact assistant event turn even when the initiating user is older", async () => {
+  const transport = new NyxAgentTransport();
+  const page = history();
+  page.messages.push({ ...page.messages[1]!, id: "event-answer", turn_id: "event-turn", seq: 3, created_at: "2026-09-17T00:00:05Z" });
+  const receipt = creationReceipt("event-turn");
+  page.acknowledgements = [receipt];
+  globalThis.__nyxidAssistantHttpMock = () => json(page);
+  await transport.history(id);
+  const key = `nyxagent-acknowledgement:${receipt.id}`;
+  expect(transport.session(id).messages.map((m) => m.id)).toEqual(["u", "a", "event-answer", key]);
+  // A decision-state refresh keeps one stable card row at the same anchor.
+  page.acknowledgements = [{ ...receipt, status: "denied" }];
+  await transport.history(id);
+  expect(transport.session(id).messages.map((m) => m.id)).toEqual(["u", "a", "event-answer", key]);
+  expect(transport.getHistory(id)?.acknowledgements[0]?.status).toBe("denied");
+});
+it("anchors an automatic receipt to the live assistant placeholder then the settled answer", async () => {
+  const transport = new NyxAgentTransport();
+  const page = history();
+  page.conversation.active_turn = { turn_id: "event-turn", started_at: afterReset, activities: [], attachments: [] };
+  const receipt = creationReceipt("event-turn");
+  page.acknowledgements = [receipt];
+  globalThis.__nyxidAssistantHttpMock = () => json(page);
+  await transport.history(id);
+  const key = `nyxagent-acknowledgement:${receipt.id}`;
+  expect(transport.session(id).messages.map((m) => m.id)).toEqual(["u", "a", "event-turn-assistant", key]);
+  page.conversation.active_turn = null;
+  page.messages.push({ ...page.messages[1]!, id: "event-answer", turn_id: "event-turn", seq: 3 });
+  await transport.history(id);
+  expect(transport.session(id).messages.map((m) => m.id)).toEqual(["u", "a", "event-answer", key]);
+});
+it.each([null, "unloaded-turn"])("keeps a linked receipt with %s anchor standalone and deduplicated", async (turn) => {
+  const transport = new NyxAgentTransport();
+  const page = history();
+  const receipt = creationReceipt(turn);
+  page.acknowledgements = [receipt];
+  page.messages = [page.messages[1]!];
+  globalThis.__nyxidAssistantHttpMock = () => json(page);
+  await transport.history(id, undefined, receipt.id);
+  await transport.history(id, undefined, receipt.id);
+  expect(transport.session(id).messages.map((m) => m.id)).toEqual([`nyxagent-acknowledgement:${receipt.id}`, "a"]);
+});

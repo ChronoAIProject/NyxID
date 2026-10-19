@@ -1105,6 +1105,7 @@ async fn confirmation_waits_and_resumes(kind: &str) {
             summary: "Delete a key".into(),
             status: "pending".into(),
             requested_turn_id: Some(run.id.clone()),
+            creation_turn_id: None,
             trigger_run_id: Some(run.id.clone()),
             created_at: Utc::now(),
             decided_at: None,

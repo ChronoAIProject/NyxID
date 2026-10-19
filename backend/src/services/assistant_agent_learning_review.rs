@@ -1158,20 +1158,14 @@ async fn push_publication_event(
     owner_id: &str,
     event: &crate::models::assistant_conversation::AgentEvent,
 ) -> AppResult<()> {
-    db.collection::<bson::Document>(crate::models::assistant_conversation::COLLECTION_NAME)
-        .update_one(
-            doc! {
-                "_id": conversation_id,
-                "user_id": owner_id,
-                "pending_events": {"$not": {"$elemMatch": {"id": &event.id}}},
-            },
-            doc! {"$push": {"pending_events": {
-                "$each": [bson::to_bson(event).map_err(|_| conflict())?],
-                "$slice": -(super::assistant_nyxagent::MAX_PENDING_EVENTS as i64),
-            }}},
-        )
-        .session(session)
-        .await?;
+    super::assistant_nyxagent::append_events_in_session(
+        db,
+        owner_id,
+        conversation_id,
+        std::slice::from_ref(event),
+        session,
+    )
+    .await?;
     Ok(())
 }
 

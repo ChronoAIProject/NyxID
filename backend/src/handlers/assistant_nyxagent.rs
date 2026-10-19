@@ -696,6 +696,10 @@ pub async fn history(
         &user_id,
         &id,
         rows.first().map(|message| message.created_at),
+        &rows
+            .iter()
+            .map(|message| message.turn_id.clone())
+            .collect::<Vec<_>>(),
     )
     .await?;
     if let Some(card) = query.card {
@@ -956,6 +960,7 @@ pub async fn attachment(
 }
 #[derive(Serialize)]
 pub struct AcknowledgementResponse {
+    creation_turn_id: Option<String>,
     authored_skill: Option<Value>,
     continuation_owner: Option<&'static str>,
     continuation_receipt_id: Option<String>,
@@ -985,6 +990,7 @@ impl From<crate::models::assistant_acknowledgement::AssistantAcknowledgement>
 {
     fn from(row: crate::models::assistant_acknowledgement::AssistantAcknowledgement) -> Self {
         Self {
+            creation_turn_id: row.creation_turn_id,
             continuation_owner: (row.continuation_receipt_id.is_some() || row.authored_skill.is_some()).then_some("server"),
             authored_skill: row.authored_skill.map(|s| json!({"agent_id":s.agent_id,"proposal_id":s.proposal_id,"revision":s.revision,"skills_revision":s.skills_revision})),
             continuation_receipt_id: row.continuation_receipt_id,

@@ -2182,3 +2182,196 @@ async fn specialist_skill_card_request_denied_audited_and_routed() {
     assert!(created);
     assert_eq!(row.decider, "orchestrator");
 }
+
+#[tokio::test]
+async fn receipt_history_joins_visible_answer_turn_before_its_timestamp_beyond_latest_twenty() {
+    let f = fixture("receipt_visible_turn_page").await;
+    let card = acks::request(
+        &f.state.db,
+        &f.chat,
+        acks::Request {
+            kind: "account",
+            service: None,
+            tool: None,
+            arguments: None,
+            summary: "Account",
+            platform: false,
+        },
+    )
+    .await
+    .unwrap();
+    let created = card.created_at;
+    let turn = card.creation_turn_id.clone().unwrap();
+    assert_eq!(Some(&turn), f.row.active_turn.as_ref().map(|t| &t.turn_id));
+    let mut cards = Vec::new();
+    for i in 0..30 {
+        let mut next = card.clone();
+        next.id = Uuid::new_v4().to_string();
+        next.status = "allowed".into();
+        next.creation_turn_id = Some(format!("other-{i}"));
+        next.created_at = created + Duration::seconds(i + 2);
+        cards.push(next);
+    }
+    f.state
+        .db
+        .collection::<AssistantAcknowledgement>(ACKS)
+        .insert_many(cards)
+        .await
+        .unwrap();
+    f.state
+        .db
+        .collection::<bson::Document>(ACKS)
+        .update_one(doc! {"_id":&card.id}, doc! {"$set":{"status":"denied"}})
+        .await
+        .unwrap();
+    let recent = acks::history(&f.state.db, &f.owner, &f.row.id)
+        .await
+        .unwrap();
+    assert!(!recent.iter().any(|c| c.id == card.id));
+    // Page begins with the assistant answer, after the card's creation time.
+    let page = acks::history_for_messages(
+        &f.state.db,
+        &f.owner,
+        &f.row.id,
+        Some(created + Duration::seconds(1)),
+        std::slice::from_ref(&turn),
+    )
+    .await
+    .unwrap();
+    assert_eq!(page.iter().filter(|c| c.id == card.id).count(), 1);
+    assert_eq!(page.len(), 21);
+    let linked = page.iter().find(|c| c.id == card.id).unwrap();
+    assert_eq!(linked.requested_turn_id, card.requested_turn_id);
+    assert_eq!(linked.creation_turn_id.as_deref(), Some(turn.as_str()));
+    let dto = crate::handlers::assistant_nyxagent::AcknowledgementResponse::from(linked.clone());
+    assert_eq!(serde_json::to_value(dto).unwrap()["creation_turn_id"], turn);
+}
+
+#[tokio::test]
+async fn built_in_channel_guide_needs_no_ornn_and_respects_guest_specialist_authority() {
+    let f = orchestrator_fixture("builtin_setup_discovery").await;
+    assert!(super::assistant_team_tools::read_only(
+        "channel_setup_guide"
+    ));
+    assert!(super::assistant_team_tools::is_team_tool(
+        "nyxid__channel_setup_guide"
+    ));
+    let (guide, error) = crate::handlers::assistant_team::execute_tool(
+        &f.state,
+        &f.chat,
+        "nyxid__channel_setup_guide",
+        &json!({}),
+    )
+    .await;
+    assert!(!error, "{guide}");
+    assert_eq!(guide["live_provider_verified"], false);
+    let text = guide["guide"].as_str().unwrap();
+    assert!(text.contains("/api/v1/webhooks/channel/x/platform"));
+    assert!(text.contains("/2/dm_conversations/{id}/messages"));
+    assert!(text.contains("Ornn is optional"));
+    assert!(text.contains("Native public/personal") || text.contains("native public/personal"));
+    assert!(text.contains("list_channel_adapters"));
+    assert!(guide.to_string().len() < 16 * 1024);
+    let mut guest = f.chat.clone();
+    guest.guest = true;
+    assert!(
+        crate::handlers::assistant_team::execute_tool(
+            &f.state,
+            &guest,
+            "nyxid__channel_setup_guide",
+            &json!({})
+        )
+        .await
+        .1
+    );
+    let specialist = direct_fixture("builtin_guide_specialist_acl").await;
+    let (blocked, error) = crate::handlers::assistant_team::execute_tool(
+        &specialist.state,
+        &specialist.chat,
+        "nyxid__channel_setup_guide",
+        &json!({}),
+    )
+    .await;
+    assert!(error);
+    assert_eq!(blocked["error"], "orchestrator_only");
+}
+
+#[tokio::test]
+async fn channel_setup_health_discovery_is_authorized_metadata_and_has_no_provider_effects() {
+    let f = orchestrator_fixture("setup_health_acl_evidence").await;
+    let org = Uuid::new_v4().to_string();
+    f.state
+        .db
+        .collection(crate::models::user::COLLECTION_NAME)
+        .insert_one(test_user(&org, UserType::Org))
+        .await
+        .unwrap();
+    let bot_id = Uuid::new_v4().to_string();
+    let bot = bson::doc! {"_id":&bot_id,"user_id":&org,"platform":"x","label":"Org DM",
+    "platform_bot_id":"10","platform_bot_username":"support","webhook_registered":false,
+    "webhook_secret_hash":"secret-must-not-leak","status":"active","is_active":true,
+    "credential_source":"connection","connection_id":"credential-id",
+    "bot_token_encrypted":bson::Binary {subtype:bson::spec::BinarySubtype::Generic,bytes:vec![1,2,3]},
+    "created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now()};
+    let bots = f
+        .state
+        .db
+        .collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME);
+    bots.insert_one(&bot).await.unwrap();
+    let args = json!({"bot_id":bot_id});
+    let result = f
+        .tools()
+        .execute(&f.auth, "nyxid__get_channel_bot", &args)
+        .await;
+    assert!(result.is_error);
+    let memberships = f
+        .state
+        .db
+        .collection(crate::models::org_membership::COLLECTION_NAME);
+    memberships
+        .insert_one(crate::test_utils::test_membership(
+            &org,
+            &f.owner,
+            crate::models::org_membership::OrgRole::Member,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert!(
+        f.tools()
+            .execute(&f.auth, "nyxid__get_channel_bot", &args)
+            .await
+            .is_error
+    );
+    f.state
+        .db
+        .collection::<bson::Document>(crate::models::org_membership::COLLECTION_NAME)
+        .update_one(
+            doc! {"org_user_id":&org,"member_user_id":&f.owner},
+            doc! {"$set":{"role":"admin"}},
+        )
+        .await
+        .unwrap();
+    let view = call(&f, "get_channel_bot", args).await;
+    let health = &view["health"];
+    assert_eq!(health["provider_slug"], "twitter");
+    assert_eq!(health["credential_connection_id"], "credential-id");
+    assert_eq!(health["authorization"], "not_probed");
+    assert_eq!(health["automatic_reply"], "not_verified");
+    assert!(health["last_authenticated_inbound_at"].is_null());
+    assert!(health["last_outbound_attempt_at"].is_null());
+    assert!(!view.to_string().contains("secret-must-not-leak"));
+    assert_eq!(
+        bots.find_one(doc! {"_id":&bot_id}).await.unwrap().unwrap(),
+        bot
+    );
+    assert_eq!(
+        f.state
+            .db
+            .collection::<bson::Document>(crate::models::channel_message::COLLECTION_NAME)
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        0
+    );
+}

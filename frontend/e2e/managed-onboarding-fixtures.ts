@@ -62,6 +62,15 @@ export async function mockDashboard(page: Page) {
     else if (path === "/channel-platforms") body = { platforms: channelPlatforms };
     else if (path === "/channel-bots") body = { bots: [], total: 0 };
     else if (path === "/channel-bots/managed-whatsapp") body = managedBot;
+    else if (path.endsWith("/health")) body = {
+      id: path.split("/")[2], platform: "x", label: "DM Support", platform_bot_username: "support",
+      user_id: "test-user", mode: "poll", status: "active", webhook_registered: false,
+      poll_error_count: 0, last_polled_at: null, next_poll_at: null, error: null,
+      recommended_action: "none", recommended_action_text: "No recovery action needed.", can_write: true,
+      diagnostics: { last_inbound_at: null, last_inbound_source: null, last_outbound_at: null,
+        last_outbound_error: null, last_webhook_at: null, last_webhook_error: null,
+        subscription_state: null, consecutive_errors: 0, failure_reason: null },
+    };
     else if (path.endsWith("/activities")) body = { activities: [], total: 0, routes: [], retention_days: 30, page: 1, per_page: 20 };
     else if (path.includes("conversations"))
       body = { conversations: [], total: 0 };

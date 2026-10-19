@@ -117,6 +117,7 @@ pub fn event(kind: &str, text: String, agent_id: Option<&str>) -> AgentEvent {
         agent_id: agent_id.map(str::to_owned),
         question_key: None,
         reply_to: Vec::new(),
+        source_event_ids: Vec::new(),
         bound: false,
         report_to: None,
         created_at: Utc::now(),

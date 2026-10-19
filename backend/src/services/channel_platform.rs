@@ -32,6 +32,15 @@ impl WebhookSetupProgress {
     }
 }
 
+/// NyxBot channel family; managed Telegram keeps its raw provider slug on
+/// bot/route rows while the channel uses Telegram's runtime contract.
+pub(crate) fn canonical_platform(platform: &str) -> &str {
+    match platform {
+        "telegram-new" => "telegram",
+        other => other,
+    }
+}
+
 /// The platform name used in model instructions and delivery notices.
 pub fn platform_name(platform: &str) -> String {
     match platform {

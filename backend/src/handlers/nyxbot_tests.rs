@@ -67,6 +67,12 @@ pub(super) fn relay_callback_completed(channel_id: &str, message_id: &str) {
 }
 
 async fn setup(name: &str) -> (AppState, Calls, tokio::task::JoinHandle<()>) {
+    setup_with_reply(name, "Here is your answer").await
+}
+async fn setup_with_reply(
+    name: &str,
+    reply: &'static str,
+) -> (AppState, Calls, tokio::task::JoinHandle<()>) {
     let db = connect_transaction_test_database(name).await;
     engine::ensure_indexes(&db).await.unwrap();
     db.collection(USERS)
@@ -89,7 +95,7 @@ async fn setup(name: &str) -> (AppState, Calls, tokio::task::JoinHandle<()>) {
                         "response": {"id": response, "conversation": {"id": session},
                             "status": "completed", "output": [{"type": "message",
                             "role": "assistant", "content": [{"type": "output_text",
-                            "text": "Here is your answer"}]}]},
+                            "text": reply}]}]},
                     });
                     yield Ok::<_, Infallible>(Event::default().data(completed.to_string()));
                 };
@@ -167,7 +173,7 @@ async fn channel(state: &AppState, transport: &str) -> (NyxbotChannel, String) {
         status: "active".into(),
         last_error: None,
         route_api_key_id: route.id.clone(),
-        route_id: None,
+        route_id: Some(Uuid::new_v4().to_string()),
         agent_api_key_id: Some(agent.id.clone()),
         agent_key_ciphertext: Some(
             state
@@ -179,6 +185,7 @@ async fn channel(state: &AppState, transport: &str) -> (NyxbotChannel, String) {
         gateway_channel_id: None,
         gateway_record_id: None,
         gateway_version: None,
+        gateway_no_progress: false,
         binding_id: None,
         gateway_groups: None,
         gateway_groups_retry_at: None,
@@ -218,6 +225,14 @@ async fn channel(state: &AppState, transport: &str) -> (NyxbotChannel, String) {
         .insert_one(bot)
         .await
         .unwrap();
+    state.db.collection::<bson::Document>(crate::models::channel_conversation::COLLECTION_NAME)
+        .insert_one(doc! {
+            "_id": row.route_id.as_deref().unwrap(), "user_id": OWNER,
+            "channel_bot_id": &row.channel_bot_id, "platform": &row.platform,
+            "platform_conversation_id": "*", "platform_conversation_type": "private",
+            "agent_api_key_id": &row.route_api_key_id, "default_agent": true,
+            "is_active": true, "created_at": bson::DateTime::now(), "updated_at": bson::DateTime::now(),
+        }).await.unwrap();
     (row, agent.full_key)
 }
 
@@ -480,7 +495,10 @@ async fn gateway_turns_admit_once_answer_only_the_verified_owner_and_keep_contex
         .await,
     )
     .await;
-    assert!(busy.contains("answer this right after"), "{busy}");
+    assert!(
+        busy.contains("response.completed") && !busy.contains("response.output_item.done"),
+        "{busy}"
+    );
     let queued = crate::services::assistant_nyxagent::get(&state.db, OWNER, &conversation.id)
         .await
         .unwrap();
@@ -1738,7 +1756,7 @@ async fn owner_messages_taken_by_another_route_are_explained() {
     .await
     .unwrap();
     let (row, _) = channel(&state, "direct").await;
-    let route_id = Uuid::new_v4().to_string();
+    let route_id = row.route_id.clone().unwrap();
     state
         .db
         .collection::<NyxbotChannel>(CHANNELS)
@@ -2438,7 +2456,11 @@ async fn group_chats_share_one_thread_and_members_talk_as_guests() {
         .await,
     )
     .await;
-    assert!(owner_queued.contains("right after"), "{owner_queued}");
+    assert!(
+        owner_queued.contains("response.completed")
+            && !owner_queued.contains("response.output_item.done"),
+        "{owner_queued}"
+    );
     settle(&state, &thread.id).await;
     // ...and a message the owner writes in the app on the group's thread does
     // not take it (its reply stays in the app; the group's answer comes from
@@ -2975,6 +2997,7 @@ fn telegram_mentions_and_replies_to_the_bot_are_recognised() {
             gateway_channel_id: None,
             gateway_record_id: None,
             gateway_version: None,
+            gateway_no_progress: false,
             binding_id: None,
             gateway_groups: None,
             gateway_groups_retry_at: None,
@@ -3631,7 +3654,7 @@ async fn the_same_question_is_not_worked_on_twice() {
         .update_one(
             doc! {"_id": &home},
             doc! {"$set": {"active_turn": {
-                "turn_id": "busy", "origin": "channel",
+                "turn_id": "busy", "origin": "channel", "channel_event_id": "first-source",
                 "started_at": bson::DateTime::now(), "stop_requested": false,
                 "question_key": engine::question_key(question),
                 "question": question,
@@ -3651,31 +3674,52 @@ async fn the_same_question_is_not_worked_on_twice() {
         .await,
     )
     .await;
-    assert!(again.contains("still working on that question"), "{again}");
+    assert!(
+        again.contains("response.completed") && !again.contains("response.output_item.done"),
+        "{again}"
+    );
     // From Lark: it waits for the same answer.
     assert_eq!(
         direct_private(&state, &lark, "msg-q3", "ou_alice", question).await,
         StatusCode::ACCEPTED
     );
-    let thread = home_thread_once(&state, &home, |thread| {
-        thread
-            .active_turn
-            .as_ref()
-            .is_some_and(|turn| !turn.also_deliver.is_empty())
-    })
-    .await;
-    let turn = thread.active_turn.as_ref().unwrap();
-    assert_eq!(turn.also_deliver.len(), 1);
-    assert_eq!(turn.also_deliver[0].nyxbot_channel_id, lark.id);
+    // Wait for the authenticated direct callback, then inspect each source.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let destinations = state
+            .db
+            .collection::<NyxbotEvent>(EVENTS)
+            .count_documents(doc! {
+                "conversation_id": &home, "turn_id": "busy", "status": "queued",
+            })
+            .await
+            .unwrap();
+        if destinations == 2 {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "source destinations did not join"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    let thread = engine::get(&state.db, OWNER, &home).await.unwrap();
+    assert!(thread.active_turn.as_ref().unwrap().also_deliver.is_empty());
     assert!(thread.pending_events.is_empty(), "nothing queued twice");
     // A different question is queued once; asking it again is not.
     let other = "Please book a table for Friday evening";
     let queued =
         body_text(respond(&state, &agent_key, &event(other, "7", "evt-q4"), "evt_q4").await).await;
-    assert!(queued.contains("right after"), "{queued}");
+    assert!(
+        queued.contains("response.completed") && !queued.contains("response.output_item.done"),
+        "{queued}"
+    );
     let repeat =
         body_text(respond(&state, &agent_key, &event(other, "7", "evt-q5"), "evt_q5").await).await;
-    assert!(repeat.contains("already queued"), "{repeat}");
+    assert!(
+        repeat.contains("response.completed") && !repeat.contains("response.output_item.done"),
+        "{repeat}"
+    );
     // The same queued question from Lark: Lark gets that answer too.
     assert_eq!(
         direct_private(&state, &lark, "msg-q6", "ou_alice", other).await,
@@ -3685,16 +3729,36 @@ async fn the_same_question_is_not_worked_on_twice() {
         thread
             .pending_events
             .first()
-            .is_some_and(|event| event.reply_to.len() > 1)
+            .is_some_and(|event| event.source_event_ids.len() == 3)
     })
     .await;
     assert_eq!(thread.pending_events.len(), 1);
-    let waiting: Vec<&str> = thread.pending_events[0]
-        .reply_to
-        .iter()
-        .map(|origin| origin.nyxbot_channel_id.as_str())
-        .collect();
-    assert_eq!(waiting, vec![telegram.id.as_str(), lark.id.as_str()]);
+    let accepted: Vec<NyxbotEvent> = state
+        .db
+        .collection(EVENTS)
+        .find(doc! {
+            "_id": {"$in": &thread.pending_events[0].source_event_ids}
+        })
+        .await
+        .unwrap()
+        .try_collect()
+        .await
+        .unwrap();
+    assert_eq!(accepted.len(), 3);
+    assert_eq!(
+        accepted
+            .iter()
+            .filter(|event| event.channel_id == telegram.id)
+            .count(),
+        2
+    );
+    assert_eq!(
+        accepted
+            .iter()
+            .filter(|event| event.channel_id == lark.id)
+            .count(),
+        1
+    );
     assert_eq!(calls.lock().await.len(), 1, "no second turn for either");
     // Settlement hands the waiting chats over once.
     state
@@ -3971,6 +4035,17 @@ async fn mock_gateway(
                 .as_str()
                 .unwrap_or_default()
                 .to_owned();
+            let (preparing, _) = provider_channel(&nyxid, &bearer(&key))
+                .await
+                .unwrap_or_else(|_| panic!("pending provider key must authenticate"));
+            assert!(
+                !preparing.gateway_no_progress,
+                "new binding must not inherit quiet proof"
+            );
+            if preparing.transport == "direct" {
+                assert!(preparing.pending_agent_api_key_id.is_some());
+                assert!(preparing.pending_route_api_key_id.is_some());
+            }
             let bound = put_binding(
                 State(nyxid),
                 Path("binding-moved".into()),
@@ -5660,5 +5735,148 @@ async fn simultaneous_auto_and_manual_creation_fences_stale_preflight_at_insert(
         .unwrap();
     assert_eq!(settled.status, "failed");
     wait_for_event(&state, &home.id, "could not be linked").await;
+    server.abort();
+}
+
+#[tokio::test]
+async fn successful_empty_gateway_handler_and_replay_have_no_text_or_progress() {
+    let (state, calls, server) = setup_with_reply("nyxbot_empty_gateway_handler", " \n\t").await;
+    let (row, agent_key) = channel(&state, "gateway").await;
+    state
+        .db
+        .collection::<NyxbotChannel>(CHANNELS)
+        .update_one(
+            doc! {"_id":&row.id},
+            doc! {"$set":{"owner_sender_ids":["7"]}},
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        put_binding(
+            State(state.clone()),
+            Path("empty-binding".into()),
+            bearer(&agent_key),
+            Json(binding_body(&agent_key, OWNER))
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        put_conversation(
+            State(state.clone()),
+            Path(("empty-binding".into(), PARTITION.into())),
+            bearer(&agent_key)
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+    for _ in 0..2 {
+        let response = respond(
+            &state,
+            &agent_key,
+            &event("A quiet support request", "7", "empty-handler"),
+            "empty-handler",
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = body_text(response).await;
+        assert!(body.contains("response.completed"), "{body}");
+        assert!(!body.contains("response.output_item.done"), "{body}");
+        assert!(
+            !body.contains("Done") && !body.contains("Working on") && !body.contains("Got it"),
+            "{body}"
+        );
+    }
+    assert_eq!(calls.lock().await.len(), 1);
+    let source = state
+        .db
+        .collection::<NyxbotEvent>(EVENTS)
+        .find_one(doc! {"channel_id":&row.id,"event_id":"empty-handler"})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(source.status, "completed");
+    assert_eq!(source.delivery.unwrap().state, "silent");
+    server.abort();
+}
+
+#[tokio::test]
+async fn authenticated_telegram_directed_start_registers_group_without_a_welcome_reply() {
+    let (state, calls, server) = setup_with_reply("nyxbot_telegram_command_registration", "").await;
+    let (mut row, _) = channel(&state, "direct").await;
+    row.platform = "telegram".into();
+    row.owner_sender_ids = vec!["7".into()];
+    state
+        .db
+        .collection::<NyxbotChannel>(CHANNELS)
+        .replace_one(doc! {"_id":&row.id}, &row)
+        .await
+        .unwrap();
+    state.db.collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME).update_one(
+        doc! {"_id":&row.channel_bot_id},doc! {"$set":{"platform":"telegram","platform_bot_username":"Helper_bot","platform_bot_id":"99"}}).await.unwrap();
+    let body = json!({"message_id":"command-source","correlation_id":"command-correlation","platform":"telegram",
+        "conversation":{"id":"route","platform_id":"-100","type":"group"},
+        "sender":{"platform_id":"7","display_name":"Owner"},
+        "content":{"type":"text","text":"/start@Helper_bot arguments"},
+        "raw_platform_data":{"message":{"chat":{"id":-100,"type":"supergroup"},"from":{"id":7,"is_bot":false},
+            "text":"/start@Helper_bot arguments","entities":[{"type":"bot_command","offset":0,"length":17}]}}});
+    let bytes = serde_json::to_vec(&body).unwrap();
+    let token = crate::crypto::jwt::generate_relay_callback_token(
+        &state.jwt_keys,
+        &state.config,
+        "command-correlation",
+        &row.route_api_key_id,
+        "command-source",
+        "telegram",
+        &sha256_hex(&bytes),
+    )
+    .unwrap();
+    let mut headers = HeaderMap::new();
+    headers.insert("x-nyxid-callback-token", token.parse().unwrap());
+    let (_guard, done) = watch_relay_callback(&row.id, "command-source");
+    assert_eq!(
+        relay_callback(
+            State(state.clone()),
+            Path(row.id.clone()),
+            headers,
+            Bytes::from(bytes)
+        )
+        .await
+        .status(),
+        StatusCode::ACCEPTED
+    );
+    tokio::time::timeout(Duration::from_secs(30), done)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        calls.lock().await.len(),
+        1,
+        "directed command reaches the model without changing privacy policy"
+    );
+    let chats = serde_json::to_value(
+        chats::list_chats(&state, OWNER, Some(&row.id))
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    let registered = chats
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|chat| chat["kind"] == "group")
+        .unwrap();
+    assert_eq!(registered["registration_evidence"], "authenticated_inbound");
+    assert!(registered["registered_at"].as_str().is_some());
+    let source = state
+        .db
+        .collection::<NyxbotEvent>(EVENTS)
+        .find_one(doc! {"channel_id":&row.id,"event_id":"command-source"})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(source.delivery.unwrap().state, "silent");
     server.abort();
 }

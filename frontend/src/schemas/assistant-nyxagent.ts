@@ -194,6 +194,7 @@ export const nyxAgentModelSchema = z.object({
 export type NyxAgentModel = z.infer<typeof nyxAgentModelSchema>;
 
 export const nyxAgentAcknowledgementSchema = z.object({
+  creation_turn_id: z.string().nullish(),
   authored_skill: z.object({ agent_id: z.string(), proposal_id: z.string(), revision: z.number(), skills_revision: z.number() }).nullish(),
   continuation_owner: z.literal("server").nullish(),
   continuation_receipt_id: z.string().uuid().nullish(),

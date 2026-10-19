@@ -209,7 +209,9 @@ fn description(name: &str) -> String {
             "List the user's channel bots and those of organizations they administer (owner: \
             personal or the org), without credentials or tokens."
         }
-        "get_channel_bot" => "Inspect a channel bot's non-secret settings.",
+        "get_channel_bot" => {
+            "Inspect an authorized bot's credential source/connection ID, read-only health, authenticated receive/outbound timestamps and recovery recommendation. Does not Verify, Resubscribe or send. Use channel_setup_guide for the built-in procedure; historical traffic does not prove current automatic replies."
+        }
         "update_channel_bot" => {
             "Update a channel bot label or public app id. Enter credentials in the UI."
         }
@@ -1167,7 +1169,19 @@ impl AccountTools<'_> {
             "get_channel_bot" => {
                 let bot = self.managed_bot(user, text(args, "bot_id")).await?;
                 let orgs = self.org_names(user, [bot.user_id.clone()]).await?;
-                Ok(owned_bot_view(&bot, user, &orgs))
+                let mut view = owned_bot_view(&bot, user, &orgs);
+                let gateway = channel_bot_service::gateway_linked(self.db, &bot.id).await?;
+                view["health"] = super::channel_bot_health::setup_evidence(&bot, gateway);
+                view["personal_routing_available"] = json!(
+                    super::platform_bot_authority::permits_personal_routes(self.db, &bot.id)
+                        .await?
+                );
+                view["setup_url"] = json!(format!(
+                    "{}/channel-bots/{}",
+                    self.config.frontend_url.trim_end_matches('/'),
+                    bot.id
+                ));
+                Ok(view)
             }
             "update_channel_bot" | "delete_channel_bot" => {
                 let bot = self.managed_bot(user, text(args, "bot_id")).await?;

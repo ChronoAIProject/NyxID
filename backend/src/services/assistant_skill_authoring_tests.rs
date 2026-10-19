@@ -4663,6 +4663,8 @@ async fn interrupted_prepared_draft_recovers_same_proposal_and_original_turn_ide
         .unwrap()
         .unwrap();
     assert_eq!(recovered.requested_turn_id, card.requested_turn_id);
+    assert!(card.creation_turn_id.is_some());
+    assert_eq!(recovered.creation_turn_id, card.creation_turn_id);
     assert_eq!(recovered.trigger_run_id, card.trigger_run_id);
     assert_eq!(recovered.voice_request_id, card.voice_request_id);
     // The original turn's routing, never the replaced turn's. The drafting

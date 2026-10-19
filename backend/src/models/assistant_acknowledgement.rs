@@ -44,6 +44,9 @@ pub struct AssistantAcknowledgement {
     /// Denial is sticky for the user turn that requested it. A new user turn
     /// may ask again; the model is explicitly instructed not to retry otherwise.
     pub requested_turn_id: Option<String>,
+    /// Presentation only; never used to authorize or retry an action.
+    #[serde(default)]
+    pub creation_turn_id: Option<String>,
     #[serde(default)]
     pub voice_request_id: Option<String>,
     #[serde(default)]

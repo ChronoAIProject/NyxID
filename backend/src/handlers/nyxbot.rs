@@ -69,10 +69,7 @@ tokio::task_local! {
 }
 
 fn canonical_platform(platform: &str) -> &str {
-    match platform {
-        "telegram-new" => "telegram",
-        other => other,
-    }
+    crate::services::channel_platform::canonical_platform(platform)
 }
 
 /// The feature flag that puts a platform's bots on the Agent Event
@@ -212,7 +209,7 @@ pub(crate) async fn release_org_channel(state: &AppState, row: &NyxbotChannel) -
         .collection::<NyxbotChannel>(CHANNELS)
         .update_one(
             doc! {"_id": &row.id, "status": {"$in": ["pending", "active"]}},
-            doc! {"$set": {"status": "failed", "last_error": "org_access_lost",
+            doc! {"$set": {"status": "failed", "gateway_no_progress": false, "last_error": "org_access_lost",
             "updated_at": bson::DateTime::now()},
             "$unset": {"link_code_hash": "", "link_code_expires_at": ""}},
         )
@@ -706,6 +703,7 @@ async fn connect_inner(
         gateway_channel_id: None,
         gateway_record_id: None,
         gateway_version: None,
+        gateway_no_progress: false,
         binding_id: None,
         gateway_groups: None,
         gateway_groups_retry_at: None,
@@ -1016,7 +1014,7 @@ fn gateway_policy(
         "provider": {"slug": PROVIDER_SLUG},
         "sources": [source],
         "partition": {"version": 1, "key": "conversation_and_sender"},
-        "reply": {"auto_final": true, "ack_after_ms": 2500, "sinks": [{"type": "source"}]},
+        "reply": {"auto_final": true, "ack_after_ms": 0, "sinks": [{"type": "source"}]},
     });
     if row.gateway_threads.version == Some(1) {
         policy["reply"]["thread_contract"] = gateway_threads::policy(&row.gateway_threads);
@@ -1090,7 +1088,7 @@ async fn connect_gateway(
         .update_one(
             doc! {"_id": &row.id},
             doc! {"$set": {"gateway_channel_id": channel_id, "gateway_record_id": &record_id,
-            "gateway_version": version, "binding_id": binding_id}},
+            "gateway_version": version, "gateway_no_progress": false, "binding_id": binding_id}},
         )
         .await
         .map_err(|_| "storage_unavailable")?;
@@ -1176,7 +1174,7 @@ async fn connect_gateway(
                 .update_one(
                     doc! {"_id": &row.id},
                     // A new gateway channel starts with the default admission.
-                    doc! {"$set": {"gateway_version": version},
+                    doc! {"$set": {"gateway_version": version, "gateway_no_progress": false},
                     "$unset": {"gateway_groups": ""}},
                 )
                 .await;
@@ -1336,7 +1334,7 @@ async fn fall_back_to_direct(
         .collection::<NyxbotChannel>(CHANNELS)
         .update_one(
             doc! {"_id": &row.id},
-            doc! {"$set": {"transport": "direct", "route_api_key_id": &route_key.id,
+            doc! {"$set": {"transport": "direct", "gateway_no_progress": false, "route_api_key_id": &route_key.id,
                 "gateway_fallback_at": bson::DateTime::now()},
             "$unset": {"agent_api_key_id": "", "agent_key_ciphertext": "",
                 "gateway_channel_id": "", "gateway_record_id": "", "gateway_version": "",
@@ -1478,7 +1476,7 @@ async fn move_to_gateway(state: &AppState, row: &NyxbotChannel) -> Result<(), &'
                 doc! {"_id": &row.id, "transport": "direct",
                 "pending_agent_api_key_id": &agent.id},
                 doc! {"$unset": {"pending_agent_api_key_id": "", "pending_route_api_key_id": "",
-                "binding_id": ""}},
+                "binding_id": ""}, "$set": {"gateway_no_progress": false}},
             )
             .await;
         code
@@ -1490,7 +1488,7 @@ async fn move_to_gateway(state: &AppState, row: &NyxbotChannel) -> Result<(), &'
             doc! {"_id": &row.id, "status": "active", "transport": "direct",
             "route_api_key_id": &row.route_api_key_id},
             doc! {"$set": {"pending_agent_api_key_id": &agent.id,
-            "pending_route_api_key_id": &route_key.id},
+            "pending_route_api_key_id": &route_key.id, "gateway_no_progress": false},
             "$unset": {"binding_id": ""}},
         )
         .await
@@ -1594,7 +1592,7 @@ async fn move_to_gateway(state: &AppState, row: &NyxbotChannel) -> Result<(), &'
     "agent_key_ciphertext": bson::Binary {
         subtype: bson::spec::BinarySubtype::Generic, bytes: ciphertext },
     "gateway_channel_id": channel_id, "gateway_record_id": &record_id,
-    "gateway_version": version, "updated_at": bson::DateTime::now()};
+    "gateway_version": version, "gateway_no_progress": false, "updated_at": bson::DateTime::now()};
     if let Some(binding_id) = created.body["provider"]["binding_id"].as_str() {
         set.insert("binding_id", binding_id);
     }
@@ -1723,7 +1721,7 @@ pub async fn disconnect(state: &AppState, owner: &str, id: &str) -> AppResult<Va
         .collection::<NyxbotChannel>(CHANNELS)
         .update_one(
             doc! {"_id": &row.id, "user_id": owner},
-            doc! {"$set": {"status": "disconnected", "updated_at": bson::DateTime::now()},
+            doc! {"$set": {"status": "disconnected", "gateway_no_progress": false, "updated_at": bson::DateTime::now()},
             "$unset": {"agent_key_ciphertext": "", "link_code_hash": ""}},
         )
         .await?;
@@ -2631,6 +2629,8 @@ enum Inbound {
     Turn(broadcast::Receiver<Value>),
     /// A reply without a turn (link confirmation, refusal, busy notice).
     Reply(String),
+    /// Accepted work; its acknowledgement must not clear the original target.
+    Queued,
     /// Nothing to say (e.g. a stranger in a group chat).
     Silent,
     /// Retry later: this chat's turn is still running or the pool is full.
@@ -3184,7 +3184,8 @@ async fn start_chat_turn(
             }
             // The same question is never worked on twice: a repeat waits for
             // the answer in progress (sent to this chat too) or already queued.
-            if exists
+            if guest
+                && exists
                 && (!guest || origin.thread.is_none())
                 && let Some(key) = question_key.as_deref()
                 && let Some(reply) =
@@ -3221,19 +3222,14 @@ async fn start_chat_turn(
                 crate::services::assistant_team_service::bound_event("message", note, None, None);
             event.question_key = question_key;
             event.reply_to = vec![origin.clone()];
-            let queued = if origin.thread.is_some() {
-                crate::services::channel_thread_follow_service::enqueue(
-                    &state.db,
-                    &row.user_id,
-                    &conversation_id,
-                    event,
-                )
-                .await?
-            } else {
-                engine::push_events(&state.db, &row.user_id, &conversation_id, vec![event])
-                    .await?
-                    .is_some()
-            };
+            event.source_event_ids = vec![event_key.to_owned()];
+            let queued = crate::services::channel_turn_delivery::enqueue(
+                &state.db,
+                &row.user_id,
+                &conversation_id,
+                event,
+            )
+            .await?;
             if !queued {
                 if let Some(binding) = origin.thread.as_deref() {
                     crate::services::channel_thread_follow_service::note_busy(
@@ -3243,14 +3239,17 @@ async fn start_chat_turn(
                 }
                 return Ok(Inbound::Busy);
             }
-            if shared {
-                engine::set_reply_channel(&state.db, &row.user_id, &conversation_id, &origin)
-                    .await?;
+            // This preference is for unrelated future updates. Durable source
+            // acceptance already owns this answer and must survive its failure.
+            if shared
+                && engine::set_reply_channel(&state.db, &row.user_id, &conversation_id, &origin)
+                    .await
+                    .is_err()
+            {
+                tracing::warn!("Accepted channel source retained without async reply preference");
             }
             super::assistant_team::wake(state, &row.user_id, &conversation_id).await;
-            Ok(Inbound::Reply(
-                "Got it. I'll answer this right after the message I'm working on.".into(),
-            ))
+            Ok(Inbound::Queued)
         }
         // A concurrent first message created the chat: it now exists.
         Err(AppError::Conflict(_)) | Err(AppError::DatabaseError(_)) if !exists => {
@@ -3397,7 +3396,7 @@ async fn final_reply(mut receiver: broadcast::Receiver<Value>) -> Result<String,
 
 fn bounded_reply(text: &str) -> String {
     if text.trim().is_empty() {
-        "Done.".into()
+        String::new()
     } else {
         text.into()
     }
@@ -3521,17 +3520,27 @@ pub async fn put_binding(
     {
         return problem(StatusCode::CONFLICT, "binding_conflict");
     }
-    if state
+    match state
         .db
         .collection::<NyxbotChannel>(CHANNELS)
         .update_one(
-            doc! {"_id": &row.id},
-            doc! {"$set": {"binding_id": &binding_id, "updated_at": bson::DateTime::now()}},
+            doc! {"_id": &row.id, "binding_id": &row.binding_id,
+            "route_api_key_id": &row.route_api_key_id, "transport": &row.transport,
+            "status": &row.status, "agent_api_key_id": &row.agent_api_key_id,
+            "pending_agent_api_key_id": &row.pending_agent_api_key_id},
+            {
+                let mut set = doc! {"binding_id": &binding_id, "updated_at": bson::DateTime::now()};
+                if row.binding_id.as_deref() != Some(binding_id.as_str()) {
+                    set.insert("gateway_no_progress", false);
+                }
+                doc! {"$set": set}
+            },
         )
         .await
-        .is_err()
     {
-        return problem(StatusCode::SERVICE_UNAVAILABLE, "provider_unavailable");
+        Ok(updated) if updated.matched_count == 1 => {}
+        Ok(_) => return problem(StatusCode::CONFLICT, "binding_conflict"),
+        Err(_) => return problem(StatusCode::SERVICE_UNAVAILABLE, "provider_unavailable"),
     }
     let mut refused = vec![json!({"field": "model",
         "reason": "NyxBot runs the owner's NyxAgent profile"})];
@@ -3587,15 +3596,22 @@ pub async fn delete_binding(
     if row.binding_id.as_deref() != Some(binding_id.as_str()) {
         return StatusCode::NOT_FOUND.into_response();
     }
-    let _ = state
+    match state
         .db
         .collection::<NyxbotChannel>(CHANNELS)
         .update_one(
-            doc! {"_id": &row.id},
-            doc! {"$unset": {"binding_id": ""}, "$set": {"updated_at": bson::DateTime::now()}},
+            doc! {"_id": &row.id, "binding_id": &binding_id,
+            "route_api_key_id": &row.route_api_key_id, "transport": &row.transport,
+            "status": &row.status, "agent_api_key_id": &row.agent_api_key_id,
+            "pending_agent_api_key_id": &row.pending_agent_api_key_id},
+            doc! {"$unset": {"binding_id": ""}, "$set": {"gateway_no_progress": false, "updated_at": bson::DateTime::now()}},
         )
-        .await;
-    StatusCode::NO_CONTENT.into_response()
+        .await
+    {
+        Ok(updated) if updated.matched_count == 1 => StatusCode::NO_CONTENT.into_response(),
+        Ok(_) => problem(StatusCode::CONFLICT, "binding_conflict"),
+        Err(_) => problem(StatusCode::SERVICE_UNAVAILABLE, "provider_unavailable"),
+    }
 }
 
 fn valid_partition(value: &str) -> bool {
@@ -3768,7 +3784,7 @@ fn sse(frames: impl futures::Stream<Item = Value> + Send + 'static) -> Response 
 fn message_frames(response_id: &str, text: Option<&str>) -> Vec<Value> {
     let mut frames = Vec::new();
     let mut output = Vec::new();
-    if let Some(text) = text {
+    if let Some(text) = text.filter(|text| !text.trim().is_empty()) {
         let item_id = format!("msg_{}", Uuid::new_v4().simple());
         let item = json!({"id": item_id, "type": "message", "role": "assistant",
             "content": [{"type": "output_text", "text": text}]});
@@ -4059,9 +4075,10 @@ async fn responses_with_producers_impl(
                 .collection::<NyxbotEvent>(EVENTS)
                 .update_one(
                     if thread_reply {
-                        doc! {"_id": &event_key, "delivery": bson::Bson::Null}
+                        doc! {"_id": &event_key, "delivery": bson::Bson::Null,
+                        "status": {"$in": ["running", "resuming"]}, "turn_id": bson::Bson::Null}
                     } else {
-                        doc! {"_id": &event_key}
+                        unaccepted_provider_event(&event_key)
                     },
                     doc! {"$set": {"status": status, "conversation_id": conversation},
                     "$unset": {"event_context_ciphertext": ""}},
@@ -4075,6 +4092,13 @@ async fn responses_with_producers_impl(
         created["response"]["thread_reply"] = json!(true);
     }
     match inbound {
+        Ok(Inbound::Queued) => {
+            // Queue admission and the original target were committed together.
+            late_delivery::process(&state, &event_key).await;
+            sse(futures::stream::iter(
+                std::iter::once(created).chain(message_frames(&response_id, None)),
+            ))
+        }
         Ok(Inbound::Reply(text)) => {
             finish("refused", None).await;
             sse(futures::stream::iter(
@@ -4090,15 +4114,22 @@ async fn responses_with_producers_impl(
         Ok(Inbound::Busy) => {
             // Let the gateway retry this same event after the running turn.
             let _ = events
-                .delete_one(doc! {"_id": &event_key,"native_bot_budget_claimed":{"$ne":true}})
+                .delete_one({
+                    let mut filter = unaccepted_provider_event(&event_key);
+                    filter.insert("native_bot_budget_claimed", doc! {"$ne": true});
+                    filter
+                })
                 .await;
             if human {
                 // Busy proves this event started no turn. Retain the reset
                 // claim so retries cannot refill automated hops again.
                 let _ = events
                     .update_one(
-                        doc! {"_id": &event_key, "native_bot_budget_claimed": true,
-                        "turn_id": bson::Bson::Null},
+                        {
+                            let mut filter = unaccepted_provider_event(&event_key);
+                            filter.insert("native_bot_budget_claimed", true);
+                            filter
+                        },
                         doc! {"$set": {"status": "retryable"}},
                     )
                     .await;
@@ -4113,18 +4144,32 @@ async fn responses_with_producers_impl(
             late_delivery::provider_stream(state, event_key, response_id, created, receiver, now)
         }
         Err(_) => {
-            let _ = events
-                .delete_one(doc! {"_id": &event_key,"native_bot_budget_claimed":{"$ne":true}})
-                .await;
-            let _ = events
-                .update_one(
-                    doc! {"_id":&event_key,"native_bot_budget_claimed":true},
-                    doc! {"$set":{"status":"failed"},"$unset":{"event_context_ciphertext":""}},
-                )
-                .await;
+            discard_failed_provider_event(&state.db, &event_key).await;
             problem(StatusCode::SERVICE_UNAVAILABLE, "provider_unavailable")
         }
     }
+}
+
+/// Only pre-acceptance provider failures may discard source metadata. A
+/// committed queue admission or turn binding wins over any later handler error.
+fn unaccepted_provider_event(event: &str) -> bson::Document {
+    doc! {"_id": event, "status": {"$in": ["running", "resuming"]},
+    "turn_id": bson::Bson::Null}
+}
+
+async fn discard_failed_provider_event(db: &mongodb::Database, event: &str) {
+    let events = db.collection::<NyxbotEvent>(EVENTS);
+    let mut discard = unaccepted_provider_event(event);
+    discard.insert("native_bot_budget_claimed", doc! {"$ne": true});
+    let _ = events.delete_one(discard).await;
+    let mut fail = unaccepted_provider_event(event);
+    fail.insert("native_bot_budget_claimed", true);
+    let _ = events
+        .update_one(
+            fail,
+            doc! {"$set": {"status": "failed"}, "$unset": {"event_context_ciphertext": ""}},
+        )
+        .await;
 }
 
 /// A gateway message: record its chat (private chats keep the gateway's
@@ -4358,36 +4403,7 @@ pub(crate) async fn delivery_target(
     row: &crate::models::assistant_conversation::AssistantConversation,
     origin: &ChannelOrigin,
 ) -> AppResult<Option<(NyxbotChannel, NyxbotThread)>> {
-    let channel = load_channel(state, &row.user_id, &origin.nyxbot_channel_id).await?;
-    if channel.status != "active"
-        || !crate::services::platform_bot_authority::permits_personal_routes(
-            &state.db,
-            &channel.channel_bot_id,
-        )
-        .await?
-    {
-        return Ok(None);
-    }
-    if !org_access_holds(state, &channel).await? {
-        Box::pin(release_org_channel(state, &channel)).await?;
-        return Ok(None);
-    }
-    let Some(thread) = state
-        .db
-        .collection::<NyxbotThread>(THREADS)
-        .find_one(doc! {"channel_id": &channel.id, "partition": &origin.partition})
-        .await?
-    else {
-        return Ok(None);
-    };
-    // A relinked chat belongs to another agent now; this thread's late
-    // replies stay in the app.
-    if thread.conversation_id.as_deref() != Some(row.id.as_str()) {
-        return Ok(None);
-    }
-    let own_chat = row.channel.as_ref() == Some(origin);
-    let owners_private_chat = thread.kind.as_deref() == Some("private") && thread.owner_chat;
-    Ok((own_chat || owners_private_chat).then_some((channel, thread)))
+    crate::services::channel_turn_delivery::target(&state.db, row, origin).await
 }
 
 /// Deliver `text` from the conversation `row` to one chat. Best effort.
@@ -4442,6 +4458,9 @@ pub async fn deliver_to(
             )
             .await;
             reply = images::append_failure(&reply, &report);
+        }
+        if reply.trim().is_empty() {
+            return Ok(());
         }
         // A chat from before its bot moved to the gateway has no gateway
         // reference yet: it is answered through NyxID's relay, as before.
@@ -4872,9 +4891,14 @@ pub async fn relay_callback(
             .await?
             {
                 Inbound::Reply(text) => Some(text),
+                Inbound::Queued => {
+                    late_delivery::process(&state, &admitted.id).await;
+                    None
+                }
                 Inbound::Silent => None,
                 Inbound::Busy => Some(
-                    "I'm still working on the previous message. I'll pick this up next.".into(),
+                    "I couldn't accept this message right now. Please try again in a moment."
+                        .into(),
                 ),
                 Inbound::Turn(receiver) => {
                     let _ = final_reply(receiver).await;
