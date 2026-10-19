@@ -2499,6 +2499,8 @@ mod tests {
                 "nyxbot:thread-follow",
                 "nyxbot:service-adapters",
                 "assistant:operation-scopes",
+                "assistant:channel-media",
+                "assistant:attachment-writes",
                 "assistant:live-turn-gate",
                 "assistant:machine-capabilities",
                 "assistant:machine-contexts",
