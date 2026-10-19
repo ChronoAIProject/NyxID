@@ -579,6 +579,17 @@ caller checks are the next implementation priority. The116fully redacted
 Gitleaks candidates require specific classification and negative controls;
 they are not116confirmed leaks. Mobile R1-05/R1-06 remain OPEN and untouched.
 
+## W7 R1-17 OCI platform ancestry correction
+
+PM's metadata-only review found that a nested envelope could override an outer
+platform declaration, and a direct manifest without a descriptor platform
+could bypass config-variant policy. Validation now carries every ancestor
+platform declaration to each runnable config and requires all to agree under
+the supported arm64/v8 normalization. Config variant policy applies even when
+no descriptor declares a platform. Focused OCI tests pass8/8, adding valid and
+mismatched nested-envelope cases and direct-manifest absent/v8/v9 cases. This
+correction does not establish final producer/signature/scan acceptance.
+
 ## Remaining authorized batches
 
 W5 final container review/integration; W7 pinned,

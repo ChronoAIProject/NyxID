@@ -49,6 +49,34 @@ class OciSubjectTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "mismatched OCI runnable platform"):
                 self.inspect(self.put(bad))
 
+    def test_nested_envelope_preserves_every_ancestor_platform_boundary(self):
+        for platform, valid in (({"os": "linux", "architecture": "arm64", "variant": "v8"}, True),
+                                ({"os": "linux", "architecture": "amd64"}, False)):
+            outer = {"schemaVersion": 2, "mediaType": oci.OCI_INDEX,
+                     "manifests": [{**self.root, "platform": platform}]}
+            if valid:
+                self.assertEqual(self.inspect(self.put(outer))["runnable"][0]["platform"], "linux/arm64")
+            else:
+                with self.assertRaisesRegex(ValueError, "mismatched OCI runnable platform"):
+                    self.inspect(self.put(outer))
+
+    def test_direct_manifest_config_variant_is_validated_without_descriptor_platform(self):
+        original = self.envelope["manifests"][0]
+        for variant in (None, "v8", "v9"):
+            manifest = json.loads(self.blobs[original["digest"]])
+            config = json.loads(self.blobs[manifest["config"]["digest"]])
+            if variant is None:
+                config.pop("variant", None)
+            else:
+                config["variant"] = variant
+            manifest["config"] = {**self.put(config), "mediaType": "application/vnd.oci.image.config.v1+json"}
+            descriptor = self.put(manifest)
+            if variant != "v9":
+                self.assertEqual(self.inspect(descriptor)["runnable"][0]["platform"], "linux/arm64")
+            else:
+                with self.assertRaisesRegex(ValueError, "mismatched OCI runnable platform"):
+                    self.inspect(descriptor)
+
     def test_duplicate_runnable_and_unbound_or_unknown_auxiliaries_fail(self):
         envelope = copy.deepcopy(self.envelope)
         envelope["manifests"].append(envelope["manifests"][0])

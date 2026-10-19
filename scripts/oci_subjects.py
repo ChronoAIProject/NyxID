@@ -78,12 +78,13 @@ def inspect(root, read_blob, expected_platforms, expected_commit=None):
             raise ValueError("OCI metadata bytes differ from content descriptor")
         return json.loads(data, object_pairs_hook=unique_object)
 
-    def manifest(descriptor, inherited_platform=None, depth=0):
+    def manifest(descriptor, inherited_platforms=(), depth=0):
         if depth > 2 or descriptor["digest"] in visited:
             raise ValueError("nested/duplicate OCI subject descriptor")
         visited.add(descriptor["digest"])
         document = value(descriptor)
         media = descriptor["mediaType"]
+        declarations = inherited_platforms + ((descriptor["platform"],) if "platform" in descriptor else ())
         if document.get("schemaVersion") != 2 or document.get("mediaType", media) != media:
             raise ValueError("OCI schema/media type mismatch")
         if media in (OCI_INDEX, DOCKER_INDEX):
@@ -92,11 +93,10 @@ def inspect(root, read_blob, expected_platforms, expected_commit=None):
                 raise ValueError("OCI index descriptor count exceeds policy")
             envelopes.append({"digest": descriptor["digest"], "manifests": children})
             for child in children:
-                declared = child.get("platform")
                 if child.get("annotations", {}).get("vnd.docker.reference.type") == "attestation-manifest":
                     pending_attestations.append(child)
                 else:
-                    manifest(child, declared or inherited_platform, depth + 1)
+                    manifest(child, declarations, depth + 1)
             return
         if media not in (OCI_MANIFEST, DOCKER_MANIFEST) or document.get("artifactType") or document.get("subject"):
             raise ValueError("unsupported OCI runnable manifest")
@@ -105,8 +105,8 @@ def inspect(root, read_blob, expected_platforms, expected_commit=None):
             raise ValueError("unsupported OCI runnable config")
         config_value = value(config)
         platform = config_value.get("os", "") + "/" + config_value.get("architecture", "")
-        declared = descriptor.get("platform") or inherited_platform
-        if platform not in expected_platforms or platform in runnable or (declared is not None and not declared_platform_matches(declared, config_value)):
+        config_platform = {key: config_value[key] for key in ("os", "architecture", "variant") if key in config_value}
+        if platform not in expected_platforms or platform in runnable or not declared_platform_matches(config_platform, config_value) or any(not declared_platform_matches(declared, config_value) for declared in declarations):
             raise ValueError("missing/duplicate/extra/mismatched OCI runnable platform")
         if expected_commit is not None and config_value.get("config", {}).get("Labels", {}).get("org.opencontainers.image.revision") != expected_commit:
             raise ValueError("OCI image config source revision differs from expected commit")
