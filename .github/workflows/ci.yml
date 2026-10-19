@@ -65,6 +65,7 @@ jobs:
       backend: ${{ steps.filter.outputs.backend }}
       backend_image: ${{ steps.filter.outputs.backend_image }}
       apt: ${{ steps.filter.outputs.apt }}
+      apk: ${{ steps.filter.outputs.apk }}
       cli: ${{ steps.filter.outputs.cli }}
       machine: ${{ steps.filter.outputs.machine }}
       permissions: ${{ steps.filter.outputs.permissions }}
@@ -101,6 +102,16 @@ jobs:
               - 'scripts/install-release-dependencies.sh'
               - '.github/scripts/install-linux-build-deps.sh'
               - 'security/apt-snapshots.tsv'
+              - 'security/build-input-pins.json'
+              - '.dockerignore'
+            apk:
+              - '**/Dockerfile*'
+              - 'Dockerfile*'
+              - 'scripts/*apk*'
+              - 'scripts/apt_inputs.py'
+              - 'scripts/check-build-inputs.py'
+              - 'scripts/test-build-inputs.py'
+              - 'security/apk/**'
               - 'security/build-input-pins.json'
               - '.dockerignore'
             backend_image:
@@ -265,6 +276,14 @@ jobs:
     permissions:
       contents: read
     uses: ./.github/workflows/apt-inputs.yml
+
+  apk-inputs:
+    name: APK Inputs
+    needs: changes
+    if: inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.apk == 'true'
+    permissions:
+      contents: read
+    uses: ./.github/workflows/apk-inputs.yml
 
   # ---------------------------------------------------------------------------
   # Reusable workflow permissions: a ci.yml job requesting a scope that the
@@ -1445,6 +1464,7 @@ jobs:
       - changes
       - workflow-permissions
       - apt-inputs
+      - apk-inputs
       - cursor-plugin-validate
       - codex-plugin-validate
       - claude-plugin-validate
@@ -1478,6 +1498,7 @@ jobs:
             changes=${{ needs.changes.result }}
             workflow-permissions=${{ needs.workflow-permissions.result }}
             apt-inputs=${{ needs.apt-inputs.result }}
+            apk-inputs=${{ needs.apk-inputs.result }}
             cursor-plugin-validate=${{ needs.cursor-plugin-validate.result }}
             codex-plugin-validate=${{ needs.codex-plugin-validate.result }}
             claude-plugin-validate=${{ needs.claude-plugin-validate.result }}

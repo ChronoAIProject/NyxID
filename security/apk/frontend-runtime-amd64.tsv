@@ -1,0 +1,21 @@
+# nyxid.apk-inputs.v1
+# base-image nginxinc/nginx-unprivileged:1.30-alpine@sha256:782bb89768cc87b7f95c18b95baa1af250e5d451f26794f59363540161147c01
+# arch x86_64
+# refreshed-on 2026-10-19
+# packages python3
+# before-sha256 4a6832cff416935b412721c133c67aadd782a7df8f5470eb4c5920c111431bdd
+# after-sha256 c583666875271b6e2fd956fcfb278e0f67cc5207ec50ac26abca18192aee56ce
+gdbm	1.26-r0	x86_64	3278ccba30b241168ca4ab93c919be805411b918fdc062f06d3684d12dc33ae3	https://dl-cdn.alpinelinux.org/alpine/v3.24/main/x86_64/gdbm-1.26-r0.apk
+libexpat	2.9.0-r0	x86_64	32b127f31e0a919110a18a7f0bb3780d8fb66ba4d8d61b2d301d633f0e319d0e	https://dl-cdn.alpinelinux.org/alpine/v3.24/main/x86_64/libexpat-2.9.0-r0.apk
+libffi	3.5.2-r1	x86_64	6da1a19313a40c56cac756fb11e2c4d5267831e1c22fc8323f24c943c94da6e0	https://dl-cdn.alpinelinux.org/alpine/v3.24/main/x86_64/libffi-3.5.2-r1.apk
+libpanelw	6.6_p20260516-r0	x86_64	057be8b1b788580f4cb72c382a6dcc03467d15bd69700f32192bd709e7a57a12	https://dl-cdn.alpinelinux.org/alpine/v3.24/main/x86_64/libpanelw-6.6_p20260516-r0.apk
+libx11	1.8.14-r0	x86_64	016efc189c6d566061ffe206ed0780e32686c1a8c832a3917d35d2c66d61a40f	https://dl-cdn.alpinelinux.org/alpine/v3.24/main/x86_64/libx11-1.8.14-r0.apk
+libxpm	3.5.20-r0	x86_64	1ed312a00abac5a5840c1f3721921ea8183e664566c19763ed00aa9f35bb2178	https://dl-cdn.alpinelinux.org/alpine/v3.24/main/x86_64/libxpm-3.5.20-r0.apk
+mpdecimal	4.0.1-r0	x86_64	1278f374bbc8b4aad674244458cca5fc63e0780a921138eef400d5db64381a31	https://dl-cdn.alpinelinux.org/alpine/v3.24/main/x86_64/mpdecimal-4.0.1-r0.apk
+pyc	3.14.8-r0	noarch	45894c74dcf5229c373b5693045df60b90c671639103fd43a37eaefb0961557f	https://dl-cdn.alpinelinux.org/alpine/v3.24/main/x86_64/pyc-3.14.8-r0.apk
+python3	3.14.8-r0	x86_64	802caff00b3398c01bb227cd925c8f9e33585ff19f58f0f25295a761ff2509cd	https://dl-cdn.alpinelinux.org/alpine/v3.24/main/x86_64/python3-3.14.8-r0.apk
+python3-pyc	3.14.8-r0	noarch	f3784543adb738ac7e3816ab55bbab057f4301b545a83044ebfa21cc822fbf56	https://dl-cdn.alpinelinux.org/alpine/v3.24/main/x86_64/python3-pyc-3.14.8-r0.apk
+python3-pycache-pyc0	3.14.8-r0	x86_64	14fb0adaa0db1d73c6d925d05134571b5cd0d7be26fbe6ccec552b6dd613bf4b	https://dl-cdn.alpinelinux.org/alpine/v3.24/main/x86_64/python3-pycache-pyc0-3.14.8-r0.apk
+readline	8.3.3-r1	x86_64	766911ecb986a6c5cf0841a6b556cd1e9dbbf22b3559726de32416486cd15c81	https://dl-cdn.alpinelinux.org/alpine/v3.24/main/x86_64/readline-8.3.3-r1.apk
+sqlite-libs	3.53.4-r0	x86_64	a8a216e53d22faa3f04d2e3650c1991af66f8d0b42fadff5afcdb9afb60b19e5	https://dl-cdn.alpinelinux.org/alpine/v3.24/main/x86_64/sqlite-libs-3.53.4-r0.apk
+zlib	1.3.2-r1	x86_64	63aeea03c15a2f9018f81805cfc8aa926bdf5cd68921f22149c2fbb5d0ee9f47	https://dl-cdn.alpinelinux.org/alpine/v3.24/main/x86_64/zlib-1.3.2-r1.apk

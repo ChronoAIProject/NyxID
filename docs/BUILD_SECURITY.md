@@ -95,14 +95,61 @@ application image behavior. Logs, exact prefixes and inventories are retained
 as seven-day workflow artifacts. These jobs need no repository secrets, OIDC,
 registry login or remote publication permissions.
 
+Alpine additions use six reviewed catalogs under `security/apk/`: frontend
+runtime, updater builder and updater E2E, each for amd64 and arm64. A catalog
+binds the digest-pinned base, native architecture, refresh date, explicit
+requested packages, before/after installed inventories, and exact archive
+name/version/architecture/SHA-256/HTTPS URL. Both the portable installer parser
+and Dockerfile admission reject malformed or duplicate headers/rows, mutable
+origins, path traversal, architecture mismatches and absent matrix members.
+Signed noarch metadata is retained even when an APK 3 repository install had
+recorded a native architecture for the same meta-package.
+
+Product builds never update APK indexes or solve against a mutable repository.
+A download step checks every catalog archive's checksum, distro signature and
+signed `.PKGINFO` identity. A separate `RUN --network=none` step rechecks those
+inputs, preflights the complete local closure, and installs with APK networking,
+repository files and cache disabled. Unlisted files cannot enter the transaction.
+The final installed inventory must match the catalog or the image layer fails.
+Successful catalog/base/final records remain under
+`/usr/share/nyxid/build-inputs/apk/<catalog-sha256>/`. The updater's production
+stage continues to copy only its binary and CA bundle into scratch.
+
+`resolve-apk-candidates.py --arch amd64 --output /tmp/apk-candidates` (and arm64)
+is an explicit candidate-refresh tool, never a product build input. It copies
+the exact target image's package database/keyring/repositories into an isolated
+solver root and runs signature-checked repository resolution with scripts and
+APK self-reexecution disabled. It can resolve another architecture without
+running foreign binaries. Downloaded archive signatures and identities are
+checked before writing candidates; review the resulting `archives.tsv`,
+inventories and indexes before copying the catalog into `security/apk/`.
+Mutable resolution is confined to this candidate-generation path. The C-2
+catalogs were generated in bounded resolution containers in the existing local
+validation VM; that is input preparation, not hosted acceptance evidence.
+
+On relevant PRs, `CI / APK Inputs` calls `apk-inputs.yml`, required by
+`CI Pipeline`; the same workflow runs weekly. `APK Policy` runs the portable
+catalog/caller negatives. Two native `APK Closures (arch)` jobs run all three
+closures: successful offline replay (including an unlisted poison archive),
+wrong base/architecture, duplicate header, unsafe origin, wrong base inventory,
+wrong checksum, corrupt archive, bad/missing signatures with updated catalog
+checksums, missing archive/dependency, signed identity mismatch and wrong final
+inventory. Pre-install rejections require unchanged installed database bytes;
+a wrong final inventory must reject the completed transaction without issuing
+a success record. Two `APK Dockerfile Layers (arch)` jobs build the three real
+package-stage prefixes with their physical offline install boundary and inspect
+retained inventories. Seven-day artifacts contain exact prefixes, logs and
+package records. These jobs have contents:read only, no repository secrets,
+OIDC, registry login or publication. Final application images, SBOMs and browser
+behavior require the later packaging jobs; package prefixes do not prove those.
+
 The reproducibility contract fixes source revision, language tools, dependency
-locks, Actions, base image indices, explicit downloaded tool checksums and APT
-snapshots. **Bit-for-bit image reproducibility is not claimed.** APK closure
-catalogs and wiring remain the next batch, and hosted runner OS images remain
-variable. Shipped package inventories must still be scanned, included in actual
-artifact SBOMs and bound to final subject digests. A source lockfile by itself
-is never the shipped-artifact SBOM. Linux execution of the new APT jobs remains
-an acceptance prerequisite until the PR run passes.
+locks, Actions, base image indices, downloaded tool checksums, APT snapshots and
+APK archives. **Bit-for-bit image reproducibility is not claimed.** Hosted
+runner OS images remain variable. Shipped inventories must still be scanned,
+included in actual-artifact SBOMs and bound to final subject digests. A source
+lockfile by itself is never the shipped-artifact SBOM. Linux acceptance of the
+new APT/APK gates remains pending until their PR CI runs pass.
 
 The proc-macro-error2 2.0.1 vendor directory preserves the authenticated original
 crate/license and documents the one-line E0365 visibility correction. The
