@@ -1470,3 +1470,15 @@ corrected fixture archives, six command/log pairs and exact proposed index bytes
 Only committed storage plus this expression and this log append enter the commit;
 broader uncommitted W9 registration/transaction APIs remain in the working file.
 This selected type/lint/behavior result is not full workspace or W9 acceptance.
+
+## Sticky-bit correction formatting followup
+
+The later isolated CLI format check exposed a missed rustfmt line wrap in the
+737ea sticky predicate. Its natural format1 receipt/log remain preserved.
+This followup changes only the assignment's whitespace to rustfmt output.
+The exact committed module passes rustfmt check (0.039s); token bytes excluding
+whitespace are identical. The Linux/Darwin predicate type/behavior evidence and
+CLI94/0/1ignored source graph remain attributed to their original storage bytes.
+No runtime is repeated or newly credited for this wrap. Broader working W9
+storage remains excluded; CLI test fixture changes remain a separate handoff.
+Evidence: w9-storage-sticky-format-handoff-v1.json.
