@@ -289,12 +289,39 @@ async fn check_manager_in_session(
     })
 }
 
+#[derive(Clone, Copy)]
+enum NativeTransportCheck {
+    ReadOnly,
+    LiveEffect,
+    RuntimeControls,
+}
+
 pub(super) async fn native_transport_ready(
     db: &Database,
     session: &mut ClientSession,
     profile: &PlatformBotConfig,
     write_fence: bool,
 ) -> AppResult<bool> {
+    check_native_transport(
+        db,
+        session,
+        profile,
+        if write_fence {
+            NativeTransportCheck::LiveEffect
+        } else {
+            NativeTransportCheck::ReadOnly
+        },
+    )
+    .await
+}
+
+async fn check_native_transport(
+    db: &Database,
+    session: &mut ClientSession,
+    profile: &PlatformBotConfig,
+    check: NativeTransportCheck,
+) -> AppResult<bool> {
+    let write_fence = !matches!(check, NativeTransportCheck::ReadOnly);
     if db.collection::<Document>(crate::models::channel_bot::COLLECTION_NAME)
         .find_one(doc! {"_id":&profile.channel_bot_id,"platform_profile_id":&profile.id,"platform_entry_pending":{"$exists":false}})
         .session(&mut *session).await?.is_none() {return Ok(false);}
@@ -341,9 +368,24 @@ pub(super) async fn native_transport_ready(
         }
         Err(error) => return Err(error),
     };
-    Ok(credentials.token_usable_or_refreshable()
-        && credentials.fingerprint()? == configuration.credential_fingerprint
-        && (!write_fence || credentials.fence_in_session(db, session).await?))
+    if !credentials.token_usable_or_refreshable()
+        || credentials.fingerprint()? != configuration.credential_fingerprint
+    {
+        return Ok(false);
+    }
+    match check {
+        NativeTransportCheck::ReadOnly => {
+            credentials
+                .validate_runtime_controls_in_session(db, session)
+                .await
+        }
+        NativeTransportCheck::LiveEffect => credentials.fence_in_session(db, session).await,
+        NativeTransportCheck::RuntimeControls => {
+            credentials
+                .fence_runtime_controls_in_session(db, session)
+                .await
+        }
+    }
 }
 
 pub(crate) fn profile_identity(profile: &PlatformBotConfig) -> AppResult<EntryIdentity> {
@@ -605,7 +647,7 @@ pub async fn update(
                         if proposed.personal_enabled || proposed.public_enabled {
                             let native=matches!(profile_identity(&live)?,EntryIdentity::NativeV2 {..});
                             if native {
-                                if !native_transport_ready(db,session,&live,true).await? {return Err(changed());}
+                                if !check_native_transport(db,session,&live,NativeTransportCheck::RuntimeControls).await? {return Err(changed());}
                             } else if db.collection::<Document>(crate::models::platform_credential::COLLECTION_NAME)
                                 .update_one(doc! {"provider":"telegram-new","fields.manager_bot_id":&live.manager_bot_id,"fields.webhook_ready":"true"},doc! {"$inc":{"runtime_configuration_revision":1_i64}})
                                 .session(&mut *session).await?.matched_count != 1 {

@@ -1533,6 +1533,42 @@ fn unavailable_oauth_returns_repair_status_and_disconnected_inventory_without_hi
             .await
             .unwrap()
             .unwrap();
+        let owners = fixture
+            .state
+            .db
+            .collection::<Document>(crate::models::user::COLLECTION_NAME);
+        owners
+            .update_one(
+                doc! {"_id":&fixture.bot.user_id},
+                doc! {"$set":{"is_active":false}},
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            super::super::platform_bot_status_service::view(&fixture.state.db, Some(&runtime))
+                .await
+                .unwrap()
+                .state,
+            "connection_repair_required",
+            "disabled credential owner"
+        );
+        assert_eq!(
+            super::super::platform_personal_binding_service::inventory_state(
+                &fixture.state.db,
+                &binding
+            )
+            .await
+            .unwrap(),
+            crate::models::platform_personal_binding::PersonalBindingState::Revoked,
+            "disabled credential owner"
+        );
+        owners
+            .update_one(
+                doc! {"_id":&fixture.bot.user_id},
+                doc! {"$set":{"is_active":true}},
+            )
+            .await
+            .unwrap();
         for (cause, change) in [
             ("revoked", doc! {"status":"revoked"}),
             ("missing scopes", doc! {"token_scopes":""}),
@@ -1587,11 +1623,17 @@ fn unavailable_oauth_returns_repair_status_and_disconnected_inventory_without_hi
             .encrypt(b"synthetic-refresh-token")
             .await
             .unwrap();
+        let refresh = bson::Binary {
+            subtype: bson::spec::BinarySubtype::Generic,
+            bytes: refresh,
+        };
         keys.update_one(
             doc! {"_id":fixture.bot.connection_id.as_ref().unwrap()},
             doc! {"$set":{"expires_at":bson::DateTime::from_millis(0),
-                "refresh_token_encrypted":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:refresh}}},
-        ).await.unwrap();
+            "refresh_token_encrypted":refresh.clone()}},
+        )
+        .await
+        .unwrap();
         let requests_before_status = fixture.server.received_requests().await.unwrap().len();
         let refreshable =
             super::super::platform_bot_status_service::view(&fixture.state.db, Some(&runtime))
@@ -1615,6 +1657,134 @@ fn unavailable_oauth_returns_repair_status_and_disconnected_inventory_without_hi
             fixture.server.received_requests().await.unwrap().len(),
             requests_before_status,
             "status and inventory never perform provider refresh"
+        );
+        use super::super::platform_bot_runtime_control_service::{RuntimeChange, update};
+        let actor = super::super::audit_service::AuditActor::from_auth_user(
+            &crate::test_utils::test_auth_user(&fixture.bot.user_id),
+        );
+        let mut change = RuntimeChange {
+            initialize: false,
+            expected_profile_generation: None,
+            expected_manager_authority_epoch: runtime.manager_authority_epoch,
+            expected_personal_control_revision: runtime.personal_control_revision,
+            expected_public_policy_revision: runtime.public_policy_revision,
+            personal_enabled: None,
+            public_enabled: None,
+            emergency_stopped: Some(true),
+            public_policy: None,
+            public_deployment_digest: None,
+        };
+        let paused = update(
+            &fixture.state.db,
+            &actor,
+            b"native-review-test-audit",
+            &profile.id,
+            &change,
+            &NoPublic,
+        )
+        .await
+        .unwrap();
+        assert!(paused.emergency_stopped);
+        assert_eq!(
+            super::super::platform_bot_status_service::view(&fixture.state.db, Some(&paused))
+                .await
+                .unwrap()
+                .state,
+            "paused"
+        );
+        change.expected_personal_control_revision = paused.personal_control_revision;
+        change.expected_public_policy_revision = paused.public_policy_revision;
+        change.personal_enabled = Some(true);
+        change.public_enabled = Some(true);
+        change.emergency_stopped = Some(false);
+        let bot = super::super::channel_bot_service::get_bot(&fixture.state.db, &fixture.bot.id)
+            .await
+            .unwrap();
+        let snapshot = super::super::platform_entry_credentials::EntryCredentialSnapshot::load(
+            &fixture.state.db,
+            fixture.transport.adapter.as_ref(),
+            &bot,
+        )
+        .await
+        .unwrap();
+        assert!(snapshot.token_usable_or_refreshable());
+        keys.update_one(
+            doc! {"_id":fixture.bot.connection_id.as_ref().unwrap()},
+            doc! {"$unset":{"refresh_token_encrypted":""}},
+        )
+        .await
+        .unwrap();
+        let mut session = fixture.state.db.client().start_session().await.unwrap();
+        session.start_transaction().await.unwrap();
+        assert!(
+            !snapshot
+                .fence_runtime_controls_in_session(&fixture.state.db, &mut session)
+                .await
+                .unwrap(),
+            "removing refresh access after snapshot capture must fence Resume"
+        );
+        session.abort_transaction().await.unwrap();
+        assert!(
+            matches!(
+                update(
+                    &fixture.state.db,
+                    &actor,
+                    b"native-review-test-audit",
+                    &profile.id,
+                    &change,
+                    &NoPublic
+                )
+                .await,
+                Err(AppError::Conflict(_))
+            ),
+            "expired without refresh cannot resume"
+        );
+        keys.update_one(
+            doc! {"_id":fixture.bot.connection_id.as_ref().unwrap()},
+            doc! {"$set":{"refresh_token_encrypted":refresh}},
+        )
+        .await
+        .unwrap();
+        let resumed = update(
+            &fixture.state.db,
+            &actor,
+            b"native-review-test-audit",
+            &profile.id,
+            &change,
+            &NoPublic,
+        )
+        .await
+        .unwrap();
+        assert!(
+            !resumed.emergency_stopped && resumed.public_enabled && resumed.personal_enabled,
+            "expired refreshable credentials must allow one atomic Resume"
+        );
+        assert_eq!(
+            super::super::platform_bot_status_service::view(&fixture.state.db, Some(&resumed))
+                .await
+                .unwrap()
+                .state,
+            "active"
+        );
+        session.start_transaction().await.unwrap();
+        assert!(
+            !snapshot
+                .fence_in_session(&fixture.state.db, &mut session)
+                .await
+                .unwrap(),
+            "runtime configuration cannot authorize expired message admission or delivery"
+        );
+        session.abort_transaction().await.unwrap();
+        assert!(
+            snapshot
+                .send_token(&fixture.state.encryption_keys)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            fixture.server.received_requests().await.unwrap().len(),
+            requests_before_status,
+            "status, inventory and atomic Resume never perform provider refresh"
         );
         keys.delete_one(doc! {"_id":fixture.bot.connection_id.as_ref().unwrap()})
             .await
