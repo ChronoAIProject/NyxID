@@ -741,6 +741,45 @@ async fn server_main() {
         config.instance_name.clone(),
         config.internal_advertise_url.clone(),
     ));
+    // Register before serving. Reuse the process generation, not node socket
+    // heartbeats: a replica can enforce policy without owning any node sockets.
+    services::security_readiness_service::ensure_indexes(&db)
+        .await
+        .expect("security replica indexes failed");
+    services::security_readiness_service::initialize(
+        services::security_readiness_service::Runtime {
+            identity: (*replica_identity).clone(),
+            config: config.security_rollout.clone(),
+            platform_policy_required: services::proxy_service::actor_addressed_policy_required(),
+        },
+    );
+    services::security_readiness_service::observe(
+        &db,
+        &replica_identity,
+        &config.security_rollout,
+        services::proxy_service::actor_addressed_policy_required(),
+    )
+    .await
+    .expect("security replica observation failed");
+    let readiness_db = db.clone();
+    let readiness_identity = replica_identity.clone();
+    let readiness_config = config.security_rollout.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
+        loop {
+            interval.tick().await;
+            if let Err(error) = services::security_readiness_service::observe(
+                &readiness_db,
+                &readiness_identity,
+                &readiness_config,
+                services::proxy_service::actor_addressed_policy_required(),
+            )
+            .await
+            {
+                tracing::error!(%error, "Security replica observation failed");
+            }
+        }
+    });
     let internal_auth = services::internal_auth::InternalAuth::new(
         db.clone(),
         internal_dispatch_hmac_key,

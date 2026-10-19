@@ -5,7 +5,10 @@ export interface NotificationSettings {
   readonly push_enabled: boolean;
   readonly push_device_count: number;
   readonly approval_required: boolean;
+  /** Older-server compatibility only. */
   readonly approval_suspended: boolean;
+  readonly approval_delivery_configured?: boolean;
+  readonly approval_web_available?: boolean;
   readonly approval_timeout_secs: number;
   readonly grant_expiry_days: number;
 }

@@ -62,7 +62,8 @@ pub struct NotificationChannel {
 
     // -- User preferences --
     /// How long to wait for user response before auto-rejecting (seconds).
-    /// Default: 30. Min: 10. Max: 300.
+    /// Legacy missing-field default: 30; newly created settings: 300.
+    /// Min: 10. Max: 300.
     #[serde(default = "default_approval_timeout")]
     pub approval_timeout_secs: u32,
 
@@ -71,9 +72,9 @@ pub struct NotificationChannel {
     #[serde(default = "default_grant_expiry_days")]
     pub grant_expiry_days: u32,
 
-    /// The user's global approval-protection preference. Enforcement is suspended
-    /// while no active notification channel is available and resumes when one returns.
-    /// Explicit per-service approval configuration is evaluated independently.
+    /// The user's global approval-protection preference, independent of delivery.
+    /// Missing fields on existing rows retain their legacy false value. New rows
+    /// use true. Explicit per-service configuration is evaluated independently.
     #[serde(default)]
     pub approval_required: bool,
 

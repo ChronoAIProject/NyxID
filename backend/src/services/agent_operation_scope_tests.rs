@@ -749,6 +749,9 @@ async fn agent_key_operation_scopes_save_fence_revisions_and_reach_auth() {
     let stale = set_key(&db, &owner, &key.id, &service, &selection(0, vec![])).await;
     assert!(matches!(stale, Err(crate::errors::AppError::Conflict(_))));
 
+    // Stored scopes still bind actual authentication and transport checks after
+    // configuration is disabled. Disabling the editor cannot widen a key.
+    crate::test_utils::set_agent_operation_scopes_enabled(&db, &owner, false).await;
     // Authentication carries the key's scopes into every transport.
     let stored = crate::services::key_service::get_api_key(&db, &owner, &key.id)
         .await
@@ -791,6 +794,7 @@ async fn agent_key_operation_scopes_save_fence_revisions_and_reach_auth() {
             .unwrap()
     );
 
+    crate::test_utils::set_agent_operation_scopes_enabled(&db, &owner, true).await;
     // Returning to all operations removes the restriction.
     let all = OperationSelection {
         all_operations: true,

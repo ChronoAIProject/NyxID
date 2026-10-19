@@ -4015,7 +4015,7 @@ Forward any HTTP request to a registered downstream service. NyxID resolves the 
 
 **Streaming:** If the client sends `Accept: text/event-stream` or the upstream responds with `Content-Type: text/event-stream`, NyxID forwards the SSE stream without buffering and strips `content-length`.
 
-**Transaction Approval:** If the resource owner has `approval_required` enabled, has at least one active notification channel, and the request uses a non-session auth method (API key, delegated token, service account, or access token), the proxy checks for an existing approval grant. If no grant exists, an approval request is created (with Telegram notification if configured) and the **HTTP connection is held open** until the user approves/rejects or the configured timeout expires. If approved, the request proceeds and the downstream response is returned. If rejected or timed out, a `403 Forbidden` is returned. The implicit global default is suspended while the owner has no active notification channel and never applies to auto-connected (auto-provisioned, credential-free) services. Explicit per-service `ServiceApprovalConfig` rows apply regardless of channel availability or the auto-connected exemption. Direct browser sessions (session cookie auth) bypass approval.
+**Transaction Approval:** When the resolved approval policy requires approval and the request uses a non-session auth method (API key, delegated token, service account, or access token), the proxy checks for an existing grant in grant mode. Otherwise it persists a pending request and **holds the HTTP connection open** until approval, rejection, or timeout. Notification delivery is attempted when configured; an unavailable provider or missing channel never authorizes execution. Review and decide pending requests in `/approvals/history`, using **Refresh** to discover requests created after the page opened. Approved requests proceed; rejection or timeout returns `403 Forbidden`. New notification settings and users without a settings row require approval by default. Existing explicit false preferences and legacy rows with a missing preference retain false. The implicit global default exempts auto-connected (auto-provisioned, credential-free) services; explicit per-service and org `ServiceApprovalConfig` policies retain their precedence and existing grant semantics. Direct browser sessions (session cookie auth) bypass approval. Upgrade and drain all serving replicas before relying on this contract; see [security rollout readiness](SECURITY_ROLLOUT_READINESS.md).
 
 **Limits:** Request body is limited to 10 MB for proxy requests.
 
@@ -4191,7 +4191,7 @@ Three access modes are available:
 
 Streaming is supported for providers that expose SSE-compatible streaming APIs. When the request sets `"stream": true`, NyxID returns `text/event-stream` and forwards or translates provider SSE events on the fly.
 
-**Transaction Approval:** The same blocking approval flow applies to LLM gateway endpoints as to the proxy. If the resource owner has `approval_required` enabled, has at least one active notification channel, and the request uses a non-session auth method (API key, delegated token, service account, or access token), the connection is held open until the user approves/rejects or the timeout expires. The implicit global default is suspended while the owner has no active notification channel and never applies to auto-connected (auto-provisioned, credential-free) services. Explicit per-service `ServiceApprovalConfig` rows apply regardless of channel availability or the auto-connected exemption. See the [Proxy](#proxy) section for details.
+**Transaction Approval:** LLM gateway endpoints share the blocking approval flow described under [Proxy](#proxy). Required programmatic requests wait for approval, rejection, or expiry independently of notification availability. New settings and the no-row first-request case require approval by default; existing preferences, explicit per-service/org policies, auto-connected exemptions and grant semantics retain their documented behavior. Pending requests remain available in web Approval History when delivery is unavailable.
 
 #### GET /api/v1/llm/status
 
@@ -7804,6 +7804,29 @@ Service account tokens do **not** include `sid`, `roles`, `groups`, `permissions
 
 ---
 
+## Security Rollout Readiness
+
+```
+GET /api/v1/admin/security-readiness
+Authorization: Bearer <admin_or_operator_access_token>
+```
+
+Returns a map keyed by security capability. Each report includes `ready`,
+`blockers`, `expected_replicas`, `live_generations`,
+`platform_policy_required`, `catalog_missing_policy`, and
+`catalog_explicit_empty_policy`. Catalog counts apply to the platform-policy
+capability. Missing, duplicate, stale, unsupported or differently configured
+serving processes block effective activation. Ordinary effective flag gates
+return `503 security_readiness_unavailable` (code `12900`) while unready.
+
+This endpoint requires admin/operator access and is separate from public
+`/health`. Roster/drain declarations are operational prerequisites; the
+`approval:required-web-v1` report is diagnostic and does not fence old serving
+replicas. See [security rollout readiness](SECURITY_ROLLOUT_READINESS.md) for
+configuration, stored-policy boundaries and sticky platform cutover/recovery.
+
+---
+
 ## Notification Settings
 
 Manage notification channels and approval preferences. All endpoints require authentication (human-only, no service accounts or delegated tokens).
@@ -7826,12 +7849,14 @@ Authorization: Bearer <access_token>
   "push_device_count": 1,
   "approval_required": true,
   "approval_suspended": false,
+  "approval_delivery_configured": true,
+  "approval_web_available": true,
   "approval_timeout_secs": 30,
   "grant_expiry_days": 30
 }
 ```
 
-The global `approval_required` preference is enforced only while at least one Telegram or push notification channel is active. `approval_suspended` is `true` when the stored preference remains on but no channel is currently available; enforcement resumes automatically when a channel becomes active again.
+The stored `approval_required` preference is enforced independently of notification delivery. This server returns `approval_suspended: false` and `approval_web_available: true`: pending requests can be decided in Approval History even without Telegram or push. `approval_delivery_configured` reports an enabled registration with initialized server provider credentials/configuration; it does not promise a successful send. Each request records its actual delivery result. Newly created settings use `approval_required: true` and a 300-second timeout; the same required preference applies on a first execution before any settings GET. Existing settings keep their stored preference and timeout, including the legacy false/30-second read defaults for missing fields. Older servers may omit the new fields or report suspension; clients must retain cautious channel guidance in that case. The all-replica upgrade/drain contract is documented in [security rollout readiness](SECURITY_ROLLOUT_READINESS.md).
 
 **curl:**
 
@@ -7865,7 +7890,7 @@ All fields are optional. Only provided fields are updated.
 - `approval_timeout_secs`: 10..=300
 - `grant_expiry_days`: 1..=365
 - `telegram_enabled: true` requires a linked Telegram account
-- `approval_required: true` (turning it on from off) requires an active Telegram or push channel; an already-enabled preference may keep its value while channels are disabled (protection is suspended)
+- `approval_required: true` can be enabled with no external notification channel. Pending requests wait for a web decision or expire without executing.
 
 **Response (200):**
 
@@ -7878,6 +7903,8 @@ All fields are optional. Only provided fields are updated.
   "push_device_count": 1,
   "approval_required": true,
   "approval_suspended": false,
+  "approval_delivery_configured": true,
+  "approval_web_available": true,
   "approval_timeout_secs": 60,
   "grant_expiry_days": 14
 }
@@ -7936,7 +7963,7 @@ Clears the linked Telegram account and disables Telegram notifications.
 }
 ```
 
-If approval protection remains enabled but no active channel remains, the message is `Telegram disconnected. Approval protection is suspended until a notification channel is available; it resumes automatically.`
+If approval remains required and no configured delivery remains, the response directs the user to Approval History on the web. Disconnecting Telegram does not suspend required approval.
 
 **curl:**
 
@@ -7959,7 +7986,7 @@ Authorization: Bearer <access_token>
 Content-Type: application/json
 ```
 
-Register or refresh a device token for push notifications. If a device with the same `token` already exists, its metadata is updated (token refresh). The first registered device automatically enables push notifications. Registration never changes the stored `approval_required` preference; if protection was suspended, it resumes from that existing preference when the push channel becomes active.
+Register or refresh a device token for push notifications. If a device with the same `token` already exists, its metadata is updated (token refresh). The first registered device automatically enables push notifications. Registration never changes the stored `approval_required` preference. It adds a notification route; required approval is already enforced independently of that route, and provider configuration does not guarantee successful delivery.
 
 **Request Body:**
 
@@ -8066,7 +8093,7 @@ Remove a registered push notification device. If no devices remain after removal
 }
 ```
 
-If approval protection remains enabled but no active channel remains, the message is `Device removed. Approval protection is suspended until a notification channel is available; it resumes automatically.`
+If approval remains required and no configured delivery remains, the response directs the user to Approval History on the web. Removing the last device does not suspend required approval.
 
 **Errors:**
 - `1003 not_found` -- Device not found

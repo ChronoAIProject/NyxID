@@ -20,6 +20,7 @@ async fn node(f: &Fixture, owner: &str) -> crate::models::node::Node {
     .await
 }
 async fn enable(f: &Fixture) {
+    super::security_readiness_service::ready_test_replica(&f.state.db).await;
     access::ensure_indexes(&f.state.db).await.unwrap();
     super::feature_flag_service::set_platform_override(
         &f.state.db,

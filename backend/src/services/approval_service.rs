@@ -39,12 +39,13 @@ pub async fn resolve_approval_mode(
     Ok(per_service.map(|c| c.approval_mode).unwrap_or_default())
 }
 
-/// Check whether the user's global approval preference is currently enforceable.
-/// A stored opt-in is suspended while the user has no active notification channel.
+/// Resolve the stored preference, or the new-user default before lazy settings
+/// creation. Notification delivery never authorizes an otherwise gated effect:
+/// requests remain pending for a web decision or expire without executing.
 pub async fn user_requires_approval(db: &Database, user_id: &str) -> AppResult<bool> {
     Ok(user_global_approval_setting(db, user_id)
         .await?
-        .unwrap_or(false))
+        .unwrap_or(true))
 }
 
 // `requires_approval_for_service` was removed in favor of the org-aware
@@ -383,8 +384,7 @@ async fn user_global_approval_setting(db: &Database, user_id: &str) -> AppResult
         .collection::<NotificationChannel>(CHANNELS)
         .find_one(doc! { "user_id": user_id })
         .await?;
-    Ok(channel
-        .map(|c| c.approval_required && notification_service::has_active_notification_channel(&c)))
+    Ok(channel.map(|c| c.approval_required))
 }
 
 /// Pure resolution helper kept for unit-testable semantics. Used to be the
@@ -392,7 +392,7 @@ async fn user_global_approval_setting(db: &Database, user_id: &str) -> AppResult
 /// still exercise it directly.
 #[cfg(test)]
 fn resolve_approval_requirement(per_service: Option<bool>, global: Option<bool>) -> bool {
-    per_service.or(global).unwrap_or(false)
+    per_service.or(global).unwrap_or(true)
 }
 
 /// Check whether the request has a valid (non-expired, non-revoked) approval grant.
@@ -839,15 +839,12 @@ pub async fn create_tool_approval_request(
     requester_id: &str,
     requester_label: Option<&str>,
 ) -> AppResult<ApprovalRequest> {
-    let channel = db
-        .collection::<NotificationChannel>(CHANNELS)
-        .find_one(doc! { "user_id": user_id })
-        .await?;
-
-    let timeout_secs = channel
-        .as_ref()
-        .map(|c| c.approval_timeout_secs)
-        .unwrap_or(30);
+    // Materialize the same new-user defaults as proxy/LLM/SSH before freezing
+    // this request's lifetime. Existing and legacy missing-field values remain
+    // governed by the model's stored read defaults.
+    let timeout_secs = notification_service::get_or_create_channel(db, user_id)
+        .await?
+        .approval_timeout_secs;
 
     let collection = db.collection::<ApprovalRequest>(REQUESTS);
 
@@ -2234,6 +2231,251 @@ fn is_duplicate_key_error(e: &mongodb::error::Error) -> bool {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn first_tool_request_uses_new_timeout_and_preserves_legacy_read_default() {
+        let db = crate::test_utils::connect_test_database("tool_first_request_timeout")
+            .await
+            .expect("configured Mongo required");
+        let state = crate::test_utils::test_app_state(db.clone());
+        let owner = uuid::Uuid::new_v4().to_string();
+        assert_eq!(
+            db.collection::<NotificationChannel>(CHANNELS)
+                .count_documents(doc! {"user_id": &owner})
+                .await
+                .unwrap(),
+            0
+        );
+        for expected in [300, 300, 30] {
+            if expected == 30 {
+                db.collection::<NotificationChannel>(CHANNELS)
+                    .update_one(
+                        doc! {"user_id": &owner},
+                        doc! {"$unset": {"approval_timeout_secs": ""}},
+                    )
+                    .await
+                    .unwrap();
+            }
+            let request = create_tool_approval_request(
+                &db,
+                &state.config,
+                &state.http_client,
+                None,
+                None,
+                &owner,
+                "fixture_tool",
+                None,
+                None,
+                false,
+                "api_key",
+                "fixture_requester",
+                None,
+            )
+            .await
+            .unwrap();
+            assert_eq!(request.status, "pending");
+            assert!(request.notification_channel.is_none());
+            assert_eq!(
+                (request.expires_at - request.created_at).num_seconds(),
+                expected
+            );
+            let stored = get_request(&db, &request.id).await.unwrap();
+            assert_eq!(
+                stored.expires_at.timestamp_millis(),
+                request.expires_at.timestamp_millis()
+            );
+            assert_eq!(
+                (stored.expires_at - stored.created_at).num_seconds(),
+                expected
+            );
+            assert_eq!(
+                notification_service::get_or_create_channel(&db, &owner)
+                    .await
+                    .unwrap()
+                    .approval_timeout_secs,
+                expected as u32
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn required_web_approval_without_delivery_creates_lists_decides_and_expires() {
+        use axum::{
+            Json,
+            extract::{Path, State},
+            http::HeaderMap,
+        };
+        let db = crate::test_utils::connect_test_database("required_web_approval")
+            .await
+            .expect("configured Mongo required");
+        let state = crate::test_utils::test_app_state(db.clone());
+        let owner = uuid::Uuid::new_v4().to_string();
+        db.collection(USERS)
+            .insert_one(crate::test_utils::test_user(
+                &owner,
+                crate::models::user::UserType::Person,
+            ))
+            .await
+            .unwrap();
+        // No prior settings GET, channel insert, device or provider credentials.
+        assert!(user_requires_approval(&db, &owner).await.unwrap());
+        assert_eq!(
+            db.collection::<NotificationChannel>(CHANNELS)
+                .count_documents(doc! {"user_id": &owner})
+                .await
+                .unwrap(),
+            0
+        );
+        for mode in 0..4 {
+            let mut channel = notification_service::get_or_create_channel(&db, &owner)
+                .await
+                .unwrap();
+            match mode {
+                0 => {}
+                1 => {
+                    channel.telegram_enabled = true;
+                    channel.telegram_chat_id = Some(42);
+                } // server provider absent
+                2 => {
+                    channel.push_enabled = true;
+                    channel.push_devices = vec![crate::models::notification_channel::DeviceToken {
+                        device_id: "dummy".into(),
+                        platform: "fcm".into(),
+                        token: "dummy-registration".into(),
+                        device_name: None,
+                        app_id: None,
+                        registered_at: Utc::now(),
+                        last_used_at: None,
+                    }];
+                }
+                _ => {
+                    channel.push_devices.clear();
+                    channel.telegram_chat_id = None;
+                    channel.telegram_enabled = false;
+                } // removed/invalid device and disconnected channel
+            }
+            db.collection::<NotificationChannel>(CHANNELS)
+                .replace_one(doc! {"_id": &channel.id}, &channel)
+                .await
+                .unwrap();
+            assert!(!notification_service::approval_delivery_configured(
+                &channel,
+                &state.config,
+                false,
+                false
+            ));
+            for decision in [Some(true), Some(false), None] {
+                let service = uuid::Uuid::new_v4().to_string();
+                assert!(matches!(
+                    evaluate_and_check(
+                        &db,
+                        &owner,
+                        &owner,
+                        &service,
+                        &test_operation(),
+                        Some("api_key"),
+                        "agent",
+                        false,
+                        false
+                    )
+                    .await
+                    .unwrap(),
+                    ApprovalOutcome::NeedsApproval(_)
+                ));
+                let request = create_approval_request(
+                    &db,
+                    &state.config,
+                    &state.http_client,
+                    None,
+                    None,
+                    &owner,
+                    &service,
+                    "Fixture",
+                    "fixture",
+                    "api_key",
+                    "agent",
+                    None,
+                    ApprovalRequestOperation::from_descriptor(&test_operation(), None),
+                    ApprovalMode::PerRequest,
+                    300,
+                    vec![],
+                    false,
+                )
+                .await
+                .unwrap();
+                assert_eq!(request.status, "pending");
+                assert!(request.notification_channel.is_none());
+                let (listed, _) = list_requests(&db, &owner, &[], &["pending"], 1, 100)
+                    .await
+                    .unwrap();
+                assert!(listed.iter().any(|r| r.id == request.id));
+                if let Some(approved) = decision {
+                    let Json(result) = crate::handlers::approvals::decide_request(
+                        State(state.clone()),
+                        crate::test_utils::test_auth_user(&owner),
+                        Path(request.id.clone()),
+                        Default::default(),
+                        HeaderMap::new(),
+                        Json(crate::handlers::approvals::DecideRequest {
+                            approved,
+                            duration_sec: None,
+                        }),
+                    )
+                    .await
+                    .unwrap();
+                    assert_eq!(
+                        result.status,
+                        if approved { "approved" } else { "rejected" }
+                    );
+                    assert_eq!(
+                        wait_for_decision(&db, &request.id, 1).await.is_ok(),
+                        approved
+                    );
+                    assert_eq!(
+                        get_request(&db, &request.id)
+                            .await
+                            .unwrap()
+                            .decision_channel
+                            .as_deref(),
+                        Some("web")
+                    );
+                } else {
+                    db.collection::<ApprovalRequest>(REQUESTS).update_one(doc! {"_id": &request.id}, doc! {"$set": {"expires_at": bson::DateTime::from_chrono(Utc::now() - Duration::seconds(1))}}).await.unwrap();
+                    assert_eq!(
+                        expire_pending_requests(
+                            &db,
+                            &state.config,
+                            &state.http_client,
+                            None,
+                            None,
+                            None
+                        )
+                        .await
+                        .unwrap(),
+                        1
+                    );
+                    assert!(wait_for_decision(&db, &request.id, 1).await.is_err());
+                }
+                assert_eq!(
+                    db.collection::<ApprovalGrant>(GRANTS)
+                        .count_documents(doc! {"service_id": &service})
+                        .await
+                        .unwrap(),
+                    0
+                );
+            }
+        }
+        // A legacy document lacking the field remains false; do not reinterpret
+        // stored read defaults when changing newly created settings.
+        db.collection::<NotificationChannel>(CHANNELS)
+            .update_one(
+                doc! {"user_id": &owner},
+                doc! {"$unset": {"approval_required": ""}},
+            )
+            .await
+            .unwrap();
+        assert!(!user_requires_approval(&db, &owner).await.unwrap());
+    }
+
     fn test_operation() -> OperationDescriptor {
         crate::services::operation_descriptor::build_http_descriptor("GET", "/v1/models", None)
     }
@@ -2341,8 +2583,8 @@ mod tests {
     }
 
     #[test]
-    fn resolve_approval_requirement_defaults_to_false_when_no_settings() {
-        assert!(!resolve_approval_requirement(None, None));
+    fn resolve_approval_requirement_defaults_to_required_when_no_settings() {
+        assert!(resolve_approval_requirement(None, None));
     }
 
     #[test]
@@ -3341,7 +3583,7 @@ mod tests {
     // --- user_requires_approval ---
 
     #[tokio::test]
-    async fn user_requires_approval_false_when_no_channel() {
+    async fn user_requires_approval_true_before_first_settings_read() {
         let Some(db) = connect_test_database("appr_svc_user_req_no_ch").await else {
             eprintln!("skipping: no MongoDB");
             return;
@@ -3349,7 +3591,13 @@ mod tests {
         let user_id = uuid::Uuid::new_v4().to_string();
 
         let result = user_requires_approval(&db, &user_id).await.unwrap();
-        assert!(!result);
+        assert!(result);
+        assert!(
+            notification_service::get_or_create_channel(&db, &user_id)
+                .await
+                .unwrap()
+                .approval_required
+        );
     }
 
     #[tokio::test]
@@ -3367,7 +3615,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn suspended_global_approval_fails_open_and_resumes_when_channel_returns() {
+    async fn required_approval_survives_channel_disconnect_and_reconnect() {
         let Some(db) = connect_test_database("appr_svc_suspended_global").await else {
             eprintln!("skipping: no MongoDB");
             return;
@@ -3394,10 +3642,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(matches!(
-            suspended,
-            ApprovalOutcome::Allowed { required: false }
-        ));
+        assert!(matches!(suspended, ApprovalOutcome::NeedsApproval(_)));
         assert_eq!(
             db.collection::<ApprovalRequest>(REQUESTS)
                 .count_documents(doc! {})

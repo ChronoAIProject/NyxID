@@ -1829,6 +1829,7 @@ pub(crate) fn test_app_config() -> AppConfig {
         gcp_kms_key_name: None,
         gcp_kms_key_name_previous: None,
         instance_name: "test-backend".to_string(),
+        security_rollout: Default::default(),
         internal_bind_addr: "127.0.0.1:3002".to_string(),
         internal_advertise_url: "http://127.0.0.1:3002".to_string(),
         internal_dispatch_hmac_key: None,
@@ -2809,6 +2810,9 @@ pub async fn set_agent_operation_scopes_enabled(
     owner: &str,
     enabled: bool,
 ) {
+    if enabled {
+        crate::services::security_readiness_service::ready_test_replica(db).await;
+    }
     crate::services::feature_flag_service::set_platform_override(
         db,
         crate::services::feature_flag_service::AGENT_OPERATION_SCOPES_FLAG_KEY,

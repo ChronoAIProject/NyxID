@@ -1078,3 +1078,92 @@ This commit contains only those four paths and the worker log. Coordinator owns
 any later supported exact-alert disposition and PR push. No zero-finding
 scanner result, broader vendor safety, final image/artifact acceptance, merge,
 release, signing, blocked mobile probe or remote gate mutation is claimed.
+
+## W9.3 deployment readiness and durable required web approval
+
+The serving process now owns an immutable configured replica roster and startup
+generation. It registers before serving, renews its observation, and evaluates
+fresh indexed observations against its own generation/roster. Missing,
+undeclared, stale, duplicate-generation or unsupported processes fail readiness.
+Effective security-feature activation is checked by actual callers, including
+inherited/cleared overrides and membership/default changes. Platform operation
+policy has a sticky durable activation marker: expiration of a true sibling
+cannot restore a false-local legacy path. The admin/operator diagnostic reports
+blockers and operation-policy completeness. The drain/roster declaration remains
+an operator assertion; observations cannot detect a hidden old serving binary.
+Required-web capability is explicitly diagnostic and requires all-replica drain
+and upgrade, rather than claiming that a green observation fences old binaries.
+
+No-row users require approval on their first ordinary programmatic request.
+New settings default to required=true and300seconds; legacy stored false,
+missing preference=false and missing timeout30 remain unchanged. First tool
+creation uses the same deliberate new-row timeout. Stored required policy no
+longer depends on channel presence. Pending requests precede notification
+attempts and remain decidable on web when registration/provider credentials are
+absent or delivery fails. Explicit service/org policies, auto-connected
+exemptions, session/grant/assistant-mode precedence and live authority remain.
+Notification status separates required policy, web capability and configured
+provider delivery. Frontend/mobile/CLI preserve unknown and older suspended
+server semantics. Approval history exposes Refresh in normal/empty states;
+real-query tests cover discovery after empty state, decisions and expiry.
+
+Original source/build failures are retained in w93-prior-compile-failures.json.
+The original e95 executable's15-group matrix retains14completed groups with
+554pass/4fail/1ignored and an explicitly terminated partial group13
+(childSIGTERM-15/wrapper241). Three failures were stale lost-channel preference
+assertions; the org-skills failure was diagnosed through the actual generic
+approval Pending timeout after independent consent, with the catalog-bound
+service identity corrected. A real qualifying auto-provision route control
+passed separately; an earlier incorrect filter ran0 and receives no credit.
+Historical results are not relabelled as execution of the corrected executable.
+
+The final accepted correction preserves production prefixes and uses explicit
+test-fixture preferences to isolate independent authority suites. The actual
+new no-settings control uses Nyxmode and the direct proxy handler with fixture
+AuthUser: Pending300/no provider/no upstream effect, actual web decision, then
+one upstream effect. It is not a new full HTTP auth-extractor test. The final
+consistent locked both-KMS backend BuildFinished succeeds in701.790s, copied
+binaryb6ca19b94235f2ee50e8b345266f28ad8f252ae8964d68ae5683d4da5018bc52.
+All1293 source inputs plus seven reference inputs match before/after/current.
+Final eight affected groups execute401distinct tests with401pass/0fail/0ignored,
+configured real Mongo and no skip markers. The separately executed new control
+passes1 and overlaps that401. The original matrix remains separate earlier
+coverage, not a second final-binary whole-matrix claim.
+
+Final scoped locked backend+CLI bins/tests Clippy with bothKMS and warnings
+denied exits0 in294.839s (log1eabc02b86030d0d1332a130733b3bcab2875c8f997ed6a4de771f0bf90cb931).
+Final CLI BuildFinished produces849b200f445c4527a7f29834ada83b4bf3755e7e122522eb3666479dc94bb0fa;
+notification10/0/0 is independently reproduced by PM. The new modern table
+branch executes without a captured rendered-text assertion. This is debug
+binary evidence, not release embedding proof. Accepted clientv2 frontend66,
+types/scopedlint and unchanged ordinary mobile13/types are carried without
+redundant reruns; PM real-query5 overlaps that client scope. Original clientv1
+legacy/unknown capability copy failures remain retained and superseded by the
+reviewed three-path v2 correction.
+
+Frozen backend45 archive19c6fc84ff5aeaedbf3199c7f000d5efb703ea1c643d3fd94532a8843d462e29
+and client15 archive0b04c8f6dcefd81d0c17dc1d693e4e96c17385047e8225d90a5ae2ced9af0209
+bind the exact reviewed source. Validation w93-final-handoff-v1.json and
+w93-final-affected-matrix-v4-audit.json bind source maps, commands/environments,
+executable/log hashes, exact group names, prior failures and PM review receipts.
+This commit contains exactly50 accepted implementation paths plus this log;
+manifest/lock/reference files and unrelated Docker/package/mobile/PM-ledger
+work are excluded. No blockedR1-05/06 dependency probe, keyring/OS-service probe,
+remote publication, merge, deployment, signing or alert mutation is performed.
+
+Remaining order is the actual hosted updater tagged-digest regression and
+metadata-only Rust528 test diagnostic hardening, then W9.4-6 node custody/
+migration/separation and W8 durable audit core. Bounded W7 immutable inputs/
+producers continue between validations; final exact-export artifact/image,
+scanner/SBOM/signature gates remain open. Coordinator owns PR publication and
+exact GitHub-generated main3fc integration attribution without merging this
+branch. W9.3 acceptance does not close OS custody, external audit witnesses,
+final artifacts or the provider-blocked findings.
+
+PM independently copied finalb6ca and passed the exact new no-settings,
+corrected org-skills and renamed logout controls3/0/0 with no skips. All45
+frozen sources,1293 compiled/current inputs and executable remain unchanged.
+P/w93-backend-review/final-selected-v4/completed-review.json
+(ab18ffb85c064667d7a11da56aadd32487ba529c05dc2c63217030ce05d437db)
+and final-handoff-v1-review.json bind the accepted bounded source/caller batch.
+PM returned Mongo idle before this stable commit. These3 overlap final401.

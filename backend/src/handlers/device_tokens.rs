@@ -397,8 +397,13 @@ pub async fn remove_device(
         .await?;
 
     let updated_channel = notification_service::get_or_create_channel(&state.db, &user_id).await?;
-    let approval_suspended = updated_channel.approval_required
-        && !notification_service::has_active_notification_channel(&updated_channel);
+    let web_only = updated_channel.approval_required
+        && !notification_service::approval_delivery_configured(
+            &updated_channel,
+            &state.config,
+            state.fcm_auth.is_some(),
+            state.apns_auth.is_some(),
+        );
 
     audit_service::log_for_user(
         state.db.clone(),
@@ -406,7 +411,8 @@ pub async fn remove_device(
         "push_device_removed",
         Some(serde_json::json!({
             "device_id": device_id,
-            "approval_suspended": approval_suspended,
+            "approval_suspended": false,
+            "approval_web_only": web_only,
         })),
     );
 
@@ -423,8 +429,8 @@ pub async fn remove_device(
         );
     }
 
-    let message = if approval_suspended {
-        "Device removed. Approval protection is suspended until a notification channel is available; it resumes automatically.".to_string()
+    let message = if web_only {
+        "Device removed. Approval remains required. Review pending requests in Approval History on the web.".to_string()
     } else {
         "Device removed".to_string()
     };
@@ -480,9 +486,14 @@ pub async fn remove_current_device(
         .await?;
 
     let updated_channel = notification_service::get_or_create_channel(&state.db, &user_id).await?;
-    let approval_suspended = token_was_present
+    let web_only = token_was_present
         && updated_channel.approval_required
-        && !notification_service::has_active_notification_channel(&updated_channel);
+        && !notification_service::approval_delivery_configured(
+            &updated_channel,
+            &state.config,
+            state.fcm_auth.is_some(),
+            state.apns_auth.is_some(),
+        );
 
     audit_service::log_for_user(
         state.db.clone(),
@@ -491,7 +502,8 @@ pub async fn remove_current_device(
         Some(serde_json::json!({
             "platform": body.platform,
             "token_removed": token_was_present,
-            "approval_suspended": approval_suspended,
+            "approval_suspended": false,
+            "approval_web_only": web_only,
         })),
     );
 
@@ -509,8 +521,8 @@ pub async fn remove_current_device(
         );
     }
 
-    let message = if approval_suspended {
-        "Current device removed. Approval protection is suspended until a notification channel is available; it resumes automatically.".to_string()
+    let message = if web_only {
+        "Current device removed. Approval remains required. Review pending requests in Approval History on the web.".to_string()
     } else {
         "Current device removed".to_string()
     };
@@ -634,8 +646,8 @@ fn push_device_registered_audit_metadata(
     serde_json::json!({
         "device_id": device_id,
         "platform": platform,
-        "approval_resumed": channel.approval_required
-            && !notification_service::has_active_notification_channel(channel),
+        "approval_required": channel.approval_required,
+        "approval_resumed": false,
     })
 }
 
@@ -1012,7 +1024,8 @@ mod tests {
 
         let metadata = push_device_registered_audit_metadata(&channel, "device-id", "fcm");
 
-        assert_eq!(metadata["approval_resumed"], true);
+        assert_eq!(metadata["approval_resumed"], false);
+        assert_eq!(metadata["approval_required"], true);
         assert_eq!(metadata["device_id"], "device-id");
         assert_eq!(metadata["platform"], "fcm");
         assert!(metadata.get("token").is_none());
@@ -1156,7 +1169,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn logout_login_round_trip_preserves_approval_and_resumes_enforcement() {
+    async fn logout_login_round_trip_keeps_approval_required() {
         let Some(db) = connect_test_database("device_logout_login_approval").await else {
             eprintln!("skipping: no MongoDB");
             return;
@@ -1212,7 +1225,7 @@ mod tests {
             &after_logout
         ));
         assert!(
-            !crate::services::approval_service::user_requires_approval(&db, &user_id)
+            crate::services::approval_service::user_requires_approval(&db, &user_id)
                 .await
                 .unwrap()
         );
@@ -1312,7 +1325,7 @@ mod tests {
             &saved
         ));
         assert!(
-            !crate::services::approval_service::user_requires_approval(&db, &previous_user_id)
+            crate::services::approval_service::user_requires_approval(&db, &previous_user_id)
                 .await
                 .unwrap()
         );

@@ -19,15 +19,19 @@ export function ApprovalSetupWizard({
   channelEnabled,
   approvalEnabled,
   approvalSuspended,
+  deliveryConfigured,
+  webAvailable,
 }: {
   readonly hasChannel: boolean;
   readonly channelEnabled: boolean;
   readonly approvalEnabled: boolean;
   readonly approvalSuspended: boolean;
+  readonly deliveryConfigured?: boolean;
+  readonly webAvailable?: boolean;
 }) {
   const steps: readonly SetupStep[] = [
     {
-      label: "Connect a notification channel",
+      label: webAvailable === true ? "Connect an optional notification channel" : "Connect a notification channel",
       description:
         "Connect Telegram or install the NyxID mobile app and sign in to register a device.",
       done: hasChannel,
@@ -46,18 +50,16 @@ export function ApprovalSetupWizard({
     },
   ];
 
-  const allDone = steps.every((s) => s.done) && !approvalSuspended;
+  const allDone = approvalEnabled && !approvalSuspended && webAvailable === true;
 
-  if (approvalSuspended) {
+  if (approvalEnabled && (approvalSuspended || webAvailable !== true)) {
     return (
       <div className="flex items-start gap-3 rounded-lg border border-amber-500/30 bg-amber-500/5 p-4">
         <Info className="mt-0.5 h-5 w-5 shrink-0 text-amber-500" />
         <div className="space-y-0.5">
-          <p className="text-12 font-medium">Approval protection is suspended</p>
+          <p className="text-12 font-medium">{approvalSuspended ? "Server reports approval is suspended" : "Web-only approval support is unconfirmed"}</p>
           <p className="text-xs text-muted-foreground">
-            Your approval preference is still on, but no enabled notification
-            channel is available. Connect or re-enable Telegram or push
-            notifications and protection will resume automatically.
+            Keep a configured notification channel enabled until the server confirms required approval and web decisions remain available without delivery.
           </p>
         </div>
       </div>
@@ -73,6 +75,7 @@ export function ApprovalSetupWizard({
             Approval protection is active
           </p>
           <p className="text-xs text-muted-foreground">
+            {deliveryConfigured === undefined ? "Notification configuration is unknown. " : deliveryConfigured ? "Notifications are configured; delivery can still fail. " : "Notifications are unavailable; use the web to decide. "}
             Programmatic proxy, LLM gateway, and SSH requests require your
             approval by default. Auto-connected services remain available
             unless you add an explicit per-service policy. You can approve via
@@ -100,16 +103,18 @@ export function ApprovalSetupWizard({
           Set up approval protection
         </CardTitle>
         <CardDescription>
-          Approval protection requires a notification channel so you can
-          approve or reject requests in real time. Follow these steps to get
-          started. You can always approve requests from the{" "}
+          {webAvailable === true ? <>
+          Approval protection can be enabled without notifications. Pending requests wait for a decision or expire without running. Review them in the{" "}
           <Link
             to="/approvals/history"
             className="underline underline-offset-2 hover:text-foreground"
           >
             Approval History
           </Link>{" "}
-          page as a fallback.
+          page. Telegram and push are optional notifications.
+          </> : <>
+            Web-only approval support is unconfirmed. Connect and enable a notification channel before turning on approval protection on this server.
+          </>}
         </CardDescription>
       </CardHeader>
       <CardContent>

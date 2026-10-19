@@ -7,9 +7,9 @@ use crate::errors::AppError;
 use crate::models::coordination::CoordinationHolder;
 use crate::models::notification_channel::{COLLECTION_NAME as CHANNELS, NotificationChannel};
 use crate::services::coordination_service::{ClusterLeaseRuntime, LeaseStore};
-use crate::services::{approval_service, audit_service, notification_service, telegram_service};
+use crate::services::{approval_service, audit_service, telegram_service};
 
-const TELEGRAM_LINKED_APPROVAL_ACTIVE_MESSAGE: &str = "Your Telegram account has been linked to NyxID. Approval protection is now active and approval requests will be delivered here.";
+const TELEGRAM_LINKED_APPROVAL_ACTIVE_MESSAGE: &str = "Your Telegram account has been linked to NyxID. Approval remains required and notifications will be attempted here. Pending requests can also be reviewed on the web.";
 const TELEGRAM_LINKED_APPROVAL_OFF_MESSAGE: &str = "Your Telegram account has been linked to NyxID. Approval protection is off — enable it in NyxID notification settings when you want requests delivered here.";
 const TELEGRAM_POLLER_LEASE_NAME: &str = "telegram-poller";
 
@@ -365,8 +365,7 @@ fn telegram_link_outcome(channel: &NotificationChannel) -> TelegramLinkOutcome {
         } else {
             TELEGRAM_LINKED_APPROVAL_OFF_MESSAGE
         },
-        approval_resumed: channel.approval_required
-            && !notification_service::has_active_notification_channel(channel),
+        approval_resumed: false,
     }
 }
 
@@ -507,8 +506,8 @@ mod tests {
         let metadata = telegram_link_audit_metadata(Some("nyx"), 1234, outcome);
 
         assert_eq!(outcome.message, TELEGRAM_LINKED_APPROVAL_ACTIVE_MESSAGE);
-        assert!(outcome.approval_resumed);
-        assert_eq!(metadata["approval_resumed"], true);
+        assert!(!outcome.approval_resumed);
+        assert_eq!(metadata["approval_resumed"], false);
     }
 
     #[test]

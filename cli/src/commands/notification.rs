@@ -20,7 +20,8 @@ pub async fn run(command: NotificationCommands) -> Result<()> {
                     let telegram_connected =
                         settings["telegram_connected"].as_bool().unwrap_or(false);
                     let approval = optional_bool_display(&settings, "approval_required");
-                    let approval_suspended = optional_bool_display(&settings, "approval_suspended");
+                    let delivery = optional_bool_display(&settings, "approval_delivery_configured");
+                    let web = optional_bool_display(&settings, "approval_web_available");
 
                     eprintln!("Notification Settings");
                     eprintln!();
@@ -28,7 +29,21 @@ pub async fn run(command: NotificationCommands) -> Result<()> {
                     eprintln!("Telegram Enabled:    {telegram}");
                     eprintln!("Telegram Connected:  {telegram_connected}");
                     eprintln!("Approval Required:   {approval}");
-                    eprintln!("Approval Suspended:  {approval_suspended}");
+                    eprintln!("Delivery Configured: {delivery}");
+                    eprintln!("Web Decisions:       {web}");
+                    eprintln!(
+                        "Server Suspended:    {}",
+                        optional_bool_display(&settings, "approval_suspended")
+                    );
+                    if settings["approval_suspended"].as_bool() == Some(true) {
+                        eprintln!("Warning: this server reports approval protection is suspended.");
+                    }
+                    if settings["approval_web_available"].as_bool() != Some(true) {
+                        eprintln!(
+                            "Web-only approval support is unconfirmed; keep a configured notification channel enabled."
+                        );
+                    }
+                    eprintln!("Pending requests:    /approvals/history");
                 }
             }
             Ok(())
@@ -228,6 +243,30 @@ mod tests {
         })
         .await
         .expect("settings table should succeed");
+    }
+
+    #[tokio::test]
+    async fn settings_table_output_supports_required_web_without_delivery() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/notifications/settings"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "push_enabled": false, "telegram_enabled": false,
+                "telegram_connected": false, "approval_required": true,
+                "approval_suspended": false, "approval_web_available": true,
+                "approval_delivery_configured": false
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        run(NotificationCommands::Settings {
+            auth: crate::test_support::mock_auth_with_output(
+                server.uri(),
+                crate::cli::OutputFormat::Table,
+            ),
+        })
+        .await
+        .expect("modern required web approval needs no notification delivery");
     }
 
     #[tokio::test]

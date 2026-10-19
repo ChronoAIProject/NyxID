@@ -1,3 +1,4 @@
+import { approvalDeliveryWarning } from "./approvalDeliveryPolicy";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { NativeStackScreenProps } from "@react-navigation/native-stack";
 import { Alert, Image, Linking, Pressable, ScrollView, StyleSheet, Switch, Text, View } from "react-native";
@@ -300,9 +301,9 @@ export function AccountSettingsScreen({ navigation }: Props) {
       );
       return;
     }
-    const willSuspendApproval = isLastChannel("push") && notifSettings?.approval_required;
-    const message = willSuspendApproval
-      ? "This is your only notification channel. Approval protection will be suspended until a channel is available, then resume automatically."
+    const willUseWebApproval = isLastChannel("push") && notifSettings?.approval_required;
+    const message = willUseWebApproval
+      ? approvalDeliveryWarning(notifSettings)
       : "You will no longer receive push notifications for approval requests.";
 
     Alert.alert("Disable Push Notifications", message, [
@@ -333,10 +334,10 @@ export function AccountSettingsScreen({ navigation }: Props) {
       );
       return;
     }
-    const willSuspendApproval = isLastChannel("telegram") && notifSettings?.approval_required;
+    const willUseWebApproval = isLastChannel("telegram") && notifSettings?.approval_required;
     const willDisconnect = true; // disabling always disconnects
-    const message = willSuspendApproval
-      ? "This is your only notification channel. Disabling it will disconnect Telegram and suspend approval protection until a channel is available."
+    const message = willUseWebApproval
+      ? `This disconnects Telegram. ${approvalDeliveryWarning(notifSettings)}`
       : "This will disconnect your Telegram account and stop all Telegram notifications.";
 
     Alert.alert("Disable Telegram", message, [
@@ -584,8 +585,8 @@ export function AccountSettingsScreen({ navigation }: Props) {
               </View>
               {notifSettings && (
                 <Text style={styles.channelHint}>
-                  {notifSettings.approval_suspended
-                    ? "Approval protection is suspended until a notification channel is available; it resumes automatically."
+                  {notifSettings.approval_required
+                    ? approvalDeliveryWarning(notifSettings)
                     : "Push or Telegram delivers requests when approval protection is on."}
                 </Text>
               )}
