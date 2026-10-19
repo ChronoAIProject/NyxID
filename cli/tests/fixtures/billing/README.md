@@ -15,3 +15,15 @@ real field shapes.
 compact JSON request generated from the test's explicit contract, including an
 empty operation-price array to clear incompatible previous overrides. Live
 tariff freshness tests replace the synthetic timestamp relative to the clock.
+
+`managed-endpoints.json` and `wallet.json` use synthetic values.
+`telnyx-template-service.json` and `telnyx-template-endpoints.json` were captured
+from the real local backend on 2026-10-20 after native template creation and
+billing setup, using synthetic data in a disposable MongoDB replica set with
+Lago unset. User and service identifiers were replaced with deterministic dummy
+UUIDs and public digests with fixture strings. These catalog fixtures follow `ServiceResponse` / `ServiceListResponse` in
+`backend/src/handlers/services.rs` and `EndpointResponse` /
+`EndpointListResponse` in `backend/src/handlers/endpoints.rs`. Endpoint execution
+and response defaults follow `backend/src/models/service_endpoint.rs`. The full
+rendered template test exercises every authored field, with service and endpoint
+responses kept separate as on the API.

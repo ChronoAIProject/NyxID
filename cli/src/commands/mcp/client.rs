@@ -13,6 +13,7 @@ pub(super) struct Client {
     version: String,
     next_id: u64,
     initialized: bool,
+    discovery: bool,
 }
 
 enum Reply {
@@ -28,6 +29,14 @@ impl Client {
             version: VERSION.into(),
             next_id: 0,
             initialized: false,
+            discovery: false,
+        }
+    }
+
+    pub(super) fn for_discovery(api: ApiClient) -> Self {
+        Self {
+            discovery: true,
+            ..Self::new(api)
         }
     }
 
@@ -41,12 +50,14 @@ impl Client {
         if !notification {
             body["id"] = json!(id);
         }
+        let read = method != "tools/call"
+            || (self.discovery && body["params"]["name"] == "nyx__search_tools");
         let response = self
             .api
-            .mcp_request(self.session.as_deref(), &self.version, &body)
+            .mcp_request(self.session.as_deref(), &self.version, &body, read)
             .await?;
         let status = response.status();
-        if status == reqwest::StatusCode::NOT_FOUND {
+        if status == reqwest::StatusCode::NOT_FOUND && self.session.is_some() {
             return Ok(Reply::SessionExpired);
         }
         if !status.is_success() {
@@ -74,7 +85,7 @@ impl Client {
             return Ok(Reply::Message(Value::Null));
         }
         let value = message(response, id).await?;
-        if value["error"]["code"] == -32002 {
+        if value["error"]["code"] == -32002 && self.session.is_some() {
             return Ok(Reply::SessionExpired);
         }
         if let Some(error) = value.get("error") {
@@ -95,7 +106,12 @@ impl Client {
     async fn initialize(&mut self) -> Result<bool> {
         self.session = None;
         self.version = VERSION.into();
-        let reply=self.send("initialize",json!({"protocolVersion":VERSION,"capabilities":{},"clientInfo":{"name":"nyxid-cli","version":env!("CARGO_PKG_VERSION")}}),false).await?;
+        let params = json!({
+            "protocolVersion": VERSION,
+            "capabilities": {},
+            "clientInfo": {"name": "nyxid-cli", "version": env!("CARGO_PKG_VERSION")}
+        });
+        let reply = self.send("initialize", params, false).await?;
         let Reply::Message(result) = reply else {
             return Ok(false);
         };

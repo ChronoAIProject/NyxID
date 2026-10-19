@@ -48,7 +48,7 @@ pub async fn run(command: BillingExecutionCommands) -> Result<()> {
                     support::print(&row, auth.output, || {
                         execution_table(std::slice::from_ref(&row))
                     })?;
-                    return support::exit_if_not_ready(terminal);
+                    return support::exit_if_not_ready(!wait || terminal);
                 }
                 tokio::time::sleep_until((Instant::now() + Duration::from_secs(1)).min(deadline))
                     .await;
@@ -97,10 +97,25 @@ mod tests {
     #[tokio::test]
     async fn execution_list_and_since_filter_use_the_self_scoped_route() {
         let server = MockServer::start().await;
-        Mock::given(method("GET")).and(path("/api/v1/billing/executions")).respond_with(ResponseTemplate::new(200).set_body_json(json!([
-            {"id":ID,"created_at":"2026-10-20T00:00:00Z","state":"settled","maximum_credits":"0.000000000001","pending_reason":null},
-            {"id":ID,"created_at":"2026-10-18T00:00:00Z","state":"pending"}
-        ]))).expect(1).mount(&server).await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/billing/executions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+                {
+                    "id": ID,
+                    "created_at": "2026-10-20T00:00:00Z",
+                    "state": "settled",
+                    "maximum_credits": "0.000000000001",
+                    "pending_reason": null
+                },
+                {
+                    "id": ID,
+                    "created_at": "2026-10-18T00:00:00Z",
+                    "state": "pending"
+                }
+            ])))
+            .expect(1)
+            .mount(&server)
+            .await;
         run(BillingExecutionCommands::List {
             since: Some("2026-10-19T00:00:00Z".into()),
             auth: mock_auth(server.uri()),
@@ -108,11 +123,22 @@ mod tests {
         .await
         .unwrap();
     }
+
     #[tokio::test]
     async fn execution_show_wait_settled_released_and_pending_timeout() {
         for state in ["settled", "released", "pending", "dispatch_admitted"] {
             let server = MockServer::start().await;
-            Mock::given(method("GET")).and(path(format!("/api/v1/billing/executions/{ID}"))).respond_with(ResponseTemplate::new(200).set_body_json(json!({"id":ID,"state":state,"maximum_credits":"0.002048","pending_reason":"verification"}))).expect(1).mount(&server).await;
+            Mock::given(method("GET"))
+                .and(path(format!("/api/v1/billing/executions/{ID}")))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "id": ID,
+                    "state": state,
+                    "maximum_credits": "0.002048",
+                    "pending_reason": "verification"
+                })))
+                .expect(1)
+                .mount(&server)
+                .await;
             let result = run(BillingExecutionCommands::Show {
                 id: ID.into(),
                 wait: true,
@@ -134,6 +160,7 @@ mod tests {
             }
         }
     }
+
     #[tokio::test]
     async fn executions_reject_invalid_uuid_since_and_agent_key_before_requests() {
         let server = MockServer::start().await;

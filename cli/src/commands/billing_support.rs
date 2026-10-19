@@ -10,14 +10,22 @@ use crate::{
 };
 
 pub(crate) fn require_human(auth: &AuthArgs) -> Result<()> {
-    let agent_profile = crate::auth::agent_key::is_agent_key_profile(auth.profile.as_deref());
-    let agent_token = crate::auth::resolve_access_token_override(auth)
-        .map(|resolved| resolved.token)
-        .or_else(|| crate::auth::read_saved_token_for(auth.profile.as_deref()))
-        .is_some_and(|token| token.trim().starts_with("nyxid_"));
-    if agent_profile || agent_token {
+    let is_api_key = |token: &str| {
+        let token = token.trim();
+        token.starts_with("nyx_") || token.starts_with("nyxid_")
+    };
+    let agent_credential = match crate::auth::resolve_access_token_override(auth) {
+        Some(resolved) => is_api_key(&resolved.token),
+        None => {
+            crate::auth::agent_key::is_agent_key_profile(auth.profile.as_deref())
+                || crate::auth::read_saved_token_for(auth.profile.as_deref())
+                    .is_some_and(|token| is_api_key(&token))
+        }
+    };
+    if agent_credential {
         bail!(
-            "This command requires a human account session. Run `nyxid login` with a human account, using a separate --profile from your Agent Key."
+            "This command requires a human account session. Run `nyxid login` with a human account, \
+             using a separate --profile from your Agent Key."
         );
     }
     Ok(())
@@ -25,7 +33,9 @@ pub(crate) fn require_human(auth: &AuthArgs) -> Result<()> {
 
 pub(crate) async fn human_api(auth: &AuthArgs) -> Result<ApiClient> {
     require_human(auth)?;
-    ApiClient::from_auth_checked(auth).await
+    Ok(ApiClient::from_auth_checked(auth)
+        .await?
+        .without_write_refresh())
 }
 
 pub(crate) async fn service(api: &mut ApiClient, reference: &str) -> Result<Value> {

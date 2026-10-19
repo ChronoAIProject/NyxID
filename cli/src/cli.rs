@@ -506,6 +506,9 @@ pub enum AdminCatalogCommands {
     },
     /// Create or update every provider and service in a manifest; safe to rerun
     Apply {
+        /// Allow disabling live platform access or clearing its owner allowlist
+        #[arg(long)]
+        allow_access_change: bool,
         #[command(flatten)]
         manifest: ManifestArgs,
         /// Show the plan without changing anything
@@ -2139,7 +2142,7 @@ pub enum BillingCommands {
         /// Provision the wallet if it does not exist
         #[arg(long)]
         provision: bool,
-        /// Owner ID to manage, usually an org user ID (org admin access required)
+        /// Owner ID (org admin required); uses POST and provisions if missing
         #[arg(long)]
         owner_id: Option<String>,
         #[command(flatten)]
@@ -4853,6 +4856,7 @@ pub enum OpenClawCommands {
 pub enum McpCommands {
     /// List MCP tools and input schemas through Streamable HTTP
     Tools {
+        /// Service slug; enumerate all operations from the authoritative catalog
         #[arg(long)]
         service: Option<String>,
         #[command(flatten)]
@@ -4860,11 +4864,17 @@ pub enum McpCommands {
     },
     /// Invoke an MCP tool once using a saved human session
     Call {
+        /// Fully qualified MCP tool name
         tool: String,
+        /// JSON object or @path to a JSON arguments file
         #[arg(long)]
         args: String,
+        /// Include the tool name and RFC3339 execution correlation bounds
         #[arg(long)]
         envelope: bool,
+        /// Total timeout in seconds; 0 waits indefinitely, like proxy request
+        #[arg(long, default_value_t = 0)]
+        timeout_secs: u64,
         #[command(flatten)]
         auth: AuthArgs,
     },
@@ -6551,71 +6561,4 @@ pub enum CatalogEndpointCommands {
         #[command(flatten)]
         auth: AuthArgs,
     },
-}
-
-impl AdminPlatformCredentialsCommands {
-    pub(crate) fn auth(&self) -> &AuthArgs {
-        match self {
-            Self::Show { auth, .. } | Self::Set { auth, .. } | Self::Clear { auth, .. } => auth,
-        }
-    }
-}
-
-impl InviteCodeCommands {
-    pub(crate) fn auth(&self) -> &AuthArgs {
-        match self {
-            Self::Create { auth, .. } | Self::List { auth, .. } | Self::Deactivate { auth, .. } => {
-                auth
-            }
-        }
-    }
-}
-
-impl AdminUserCommands {
-    pub(crate) fn auth(&self) -> &AuthArgs {
-        match self {
-            Self::List { auth, .. }
-            | Self::Show { auth, .. }
-            | Self::SetRole { auth, .. }
-            | Self::Roles { auth, .. }
-            | Self::GrantRole { auth, .. }
-            | Self::RevokeRole { auth, .. } => auth,
-        }
-    }
-}
-
-impl AdminProviderCommands {
-    pub(crate) fn auth(&self) -> &AuthArgs {
-        match self {
-            Self::List { auth, .. }
-            | Self::Show { auth, .. }
-            | Self::Create { auth, .. }
-            | Self::Update { auth, .. }
-            | Self::SetCredentials { auth, .. }
-            | Self::Link { auth, .. }
-            | Self::Delete { auth, .. } => auth,
-        }
-    }
-}
-
-impl AdminToolsCommands {
-    pub(crate) fn auth(&self) -> &AuthArgs {
-        match self {
-            Self::Icon { auth, .. }
-            | Self::Add { auth, .. }
-            | Self::Apply { auth, .. }
-            | Self::Validate { auth, .. } => auth,
-        }
-    }
-}
-
-impl AdminCatalogCommands {
-    pub(crate) fn auth(&self) -> &AuthArgs {
-        match self {
-            Self::Icon { auth, .. }
-            | Self::Add { auth, .. }
-            | Self::Apply { auth, .. }
-            | Self::Validate { auth, .. } => auth,
-        }
-    }
 }

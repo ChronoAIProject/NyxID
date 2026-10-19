@@ -57,5 +57,13 @@
     "resale_billable": false,
     "byok_pricing": null,
     "platform_pricing": null
+  },
+  "proxy_operation_policy": {
+    "rules": [
+      {
+        "method": "POST",
+        "path_template": "/ai/openai/chat/completions"
+      }
+    ]
   }
 }

@@ -312,16 +312,23 @@ pub async fn run_catalog(command: AdminCatalogCommands) -> Result<()> {
         AdminCatalogCommands::Apply {
             manifest,
             dry_run,
+            allow_access_change,
             auth,
         } => {
             let manifest = Manifest::load(&manifest.file, &manifest.vars, false)?;
             let clients = clients_from_env(&manifest)?;
-            let mut api = if dry_run {
-                ApiClient::from_auth(&auth)?.without_token_refresh()
-            } else {
-                ApiClient::from_auth_with_credential_transport(&auth)?.without_token_refresh()
-            };
-            let rows = apply(&mut api, &manifest, dry_run, &clients).await?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
+            if !dry_run {
+                api.require_credential_transport()?;
+            }
+            let rows = apply_with_access_change(
+                &mut api,
+                &manifest,
+                dry_run,
+                &clients,
+                allow_access_change,
+            )
+            .await?;
             print_apply(&rows, dry_run, auth.output)?;
             fail_on_errors(&rows)
         }
@@ -368,9 +375,7 @@ pub async fn run_catalog(command: AdminCatalogCommands) -> Result<()> {
                 eprintln!("Saved manifest to {}", path.display());
             }
             if dry_run {
-                let mut api = ApiClient::from_auth_checked(&auth)
-                    .await?
-                    .without_token_refresh();
+                let mut api = ApiClient::from_auth_checked(&auth).await?;
                 let rows = apply(&mut api, &manifest, true, &BTreeMap::new()).await?;
                 print_apply(&rows, true, auth.output)?;
                 return fail_on_errors(&rows);
@@ -400,7 +405,7 @@ pub async fn run_catalog(command: AdminCatalogCommands) -> Result<()> {
 
             let redirect = redirect_uri(&auth)?;
 
-            let mut api = ApiClient::from_auth(&auth)?.without_token_refresh();
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
             let plan = apply(&mut api, &manifest, true, &clients).await?;
             print_apply(&plan, true, OutputFormat::Table)?;
             fail_on_errors(&plan)?;
@@ -781,6 +786,16 @@ async fn apply(
     dry_run: bool,
     clients: &Clients,
 ) -> Result<Vec<ApplyRow>> {
+    apply_with_access_change(api, manifest, dry_run, clients, false).await
+}
+
+async fn apply_with_access_change(
+    api: &mut ApiClient,
+    manifest: &Manifest,
+    dry_run: bool,
+    clients: &Clients,
+    allow_access_change: bool,
+) -> Result<Vec<ApplyRow>> {
     let mut rows = Vec::new();
     let mut provider_ids: BTreeMap<String, Option<String>> = BTreeMap::new();
     let existing_providers = list_providers(api).await?;
@@ -804,6 +819,22 @@ async fn apply(
     if !rows.is_empty() {
         return Ok(rows);
     }
+
+    let mut warnings = Vec::new();
+    for desired in &manifest.services {
+        if let Some(current) = unambiguous_row(&existing_services, &text(desired, "slug"))?
+            && let Some(warning) = platform_access_warning(desired, current)
+        {
+            warnings.push(warning);
+        }
+    }
+    authorize_access_changes(
+        &warnings,
+        dry_run,
+        allow_access_change,
+        std::io::stdin().is_terminal(),
+        || confirm("Allow these live platform access changes?"),
+    )?;
 
     for authored in &manifest.providers {
         let fields = playbook::api_fields(authored);
@@ -954,7 +985,7 @@ async fn apply(
         let current = unambiguous_row(&existing_services, &slug)?;
         let row = match current {
             None if dry_run => ApplyRow::new("service", &slug, "create"),
-            None => match api.post::<Value, _>("/services", &body).await {
+            None => match create_service(api, &body).await {
                 Ok(created) => ApplyRow {
                     id: created["id"].as_str().map(str::to_string),
                     ..ApplyRow::new("service", &slug, "created")
@@ -1091,6 +1122,42 @@ async fn list_operations(api: &mut ApiClient, service_id: &str) -> Result<Vec<Va
         .unwrap_or_default())
 }
 
+async fn create_service(api: &mut ApiClient, desired: &Value) -> Result<Value> {
+    // CreateServiceRequest derives credential requirements from the category;
+    // identity propagation and delegation injection are update-only fields.
+    let mut body = desired.clone();
+    let fields = body.as_object_mut().context("Service must be an object")?;
+    let requires = fields.remove("requires_user_credential");
+    let update_only = ["identity_propagation_mode", "inject_delegation_token"];
+    for key in update_only {
+        fields.remove(key);
+    }
+    let category = if body["auth_method"] == "none" {
+        "internal"
+    } else if body["auth_method"] == "oidc" {
+        "provider"
+    } else {
+        body["service_category"].as_str().unwrap_or("connection")
+    };
+    if requires.is_some_and(|value| value != json!(category == "connection")) {
+        bail!("requires_user_credential is derived from service_category");
+    }
+    let mut created: Value = api.post("/services", &body).await?;
+    let update = pick(
+        desired,
+        &changed_fields(desired, &created, &[])
+            .into_iter()
+            .filter(|key| update_only.contains(&key.as_str()))
+            .collect::<Vec<_>>(),
+    );
+    if update.as_object().is_some_and(|fields| !fields.is_empty()) {
+        created = api
+            .put(&format!("/services/{}", text(&created, "id")), &update)
+            .await?;
+    }
+    Ok(created)
+}
+
 async fn apply_service_update(
     api: &mut ApiClient,
     slug: &str,
@@ -1136,9 +1203,6 @@ async fn apply_service_update(
             ..ApplyRow::new("service", slug, "unchanged")
         };
     }
-    if let Some(warning) = platform_access_warning(body, current) {
-        eprintln!("Warning: {warning}");
-    }
     if !dry_run {
         if !changed.is_empty()
             && let Err(error) = api
@@ -1166,6 +1230,27 @@ async fn apply_service_update(
         changed,
         ..ApplyRow::new("service", slug, if dry_run { "update" } else { "updated" })
     }
+}
+
+fn authorize_access_changes(
+    warnings: &[String],
+    dry_run: bool,
+    allowed: bool,
+    interactive: bool,
+    confirm_change: impl FnOnce() -> Result<bool>,
+) -> Result<()> {
+    for warning in warnings {
+        eprintln!("Warning: {warning}");
+    }
+    if warnings.is_empty() || dry_run || allowed {
+        return Ok(());
+    }
+    if interactive && confirm_change()? {
+        return Ok(());
+    }
+    bail!(
+        "Live platform access change requires confirmation; pass --allow-access-change to admin catalog apply"
+    );
 }
 
 fn platform_access_warning(desired: &Value, current: &Value) -> Option<String> {
@@ -2828,6 +2913,7 @@ mod tests {
         }
         result.unwrap();
     }
+
     #[test]
     fn manifest_evidence_is_strict_and_never_in_api_fields() {
         let manifest=Manifest::from_document(json!({
@@ -3319,6 +3405,7 @@ mod tests {
                 .all(|request| request.method == wiremock::http::Method::GET)
         );
     }
+
     #[test]
     fn catalog_billing_sync_and_bson_dates_do_not_create_drift() {
         let raw: Value = serde_json::from_str(include_str!(
@@ -3353,6 +3440,7 @@ mod tests {
             super::super::admin_billing::normalize_billing(&after)
         );
     }
+
     #[test]
     fn telnyx_template_pins_one_disabled_restricted_operation_with_typed_variables() {
         let manifest = Manifest::from_document(
@@ -3397,6 +3485,7 @@ mod tests {
             );
         }
     }
+
     #[test]
     fn typed_variables_preserve_default_charset_and_reject_unknown_types() {
         for spec in [
@@ -3422,6 +3511,7 @@ mod tests {
             .is_ok()
         );
     }
+
     #[test]
     fn catalog_apply_warns_before_disabling_or_clearing_live_platform_access() {
         let live = json!({"slug":"telnyx-platform","is_active":true,"platform_key":{"enabled":true,"allowed_owner_ids":["person"]}});
@@ -3441,5 +3531,19 @@ mod tests {
             )
             .is_none()
         );
+    }
+
+    #[test]
+    fn live_access_changes_require_confirmation_flag_or_dry_run() {
+        let warnings = vec!["Disables live access".into()];
+        assert!(
+            authorize_access_changes(&warnings, false, false, false, || panic!("no terminal"))
+                .is_err()
+        );
+        assert!(authorize_access_changes(&warnings, false, false, true, || Ok(false)).is_err());
+        authorize_access_changes(&warnings, false, false, true, || Ok(true)).unwrap();
+        authorize_access_changes(&warnings, false, true, false, || panic!("explicit flag"))
+            .unwrap();
+        authorize_access_changes(&warnings, true, false, false, || panic!("dry run")).unwrap();
     }
 }

@@ -167,10 +167,8 @@ pub async fn run(command: BillingCommands) -> Result<()> {
             owner_id,
             auth,
         } => {
-            let mut api = super::billing_support::human_api(&auth)
-                .await?
-                .without_token_refresh();
-            let wallet: BillingWalletResponse = if provision {
+            let mut api = super::billing_support::human_api(&auth).await?;
+            let wallet: BillingWalletResponse = if provision || owner_id.is_some() {
                 api.post(
                     "/billing/wallet",
                     &ProvisionWalletRequest {
@@ -179,18 +177,12 @@ pub async fn run(command: BillingCommands) -> Result<()> {
                 )
                 .await?
             } else {
-                let path = owner_id
-                    .as_ref()
-                    .map(|id| format!("/billing/wallet?owner_id={}", urlencoding::encode(id)))
-                    .unwrap_or_else(|| "/billing/wallet".into());
-                api.get(&path).await?
+                api.get("/billing/wallet").await?
             };
             print_wallet(&wallet, auth.output)
         }
         BillingCommands::Usage { period, auth } => {
-            let mut api = super::billing_support::human_api(&auth)
-                .await?
-                .without_token_refresh();
+            let mut api = super::billing_support::human_api(&auth).await?;
             let usage = get_usage(&mut api, period).await?;
             print_usage(&usage, auth.output)
         }
@@ -201,9 +193,7 @@ pub async fn run(command: BillingCommands) -> Result<()> {
             open,
             auth,
         } => {
-            let mut api = super::billing_support::human_api(&auth)
-                .await?
-                .without_token_refresh();
+            let mut api = super::billing_support::human_api(&auth).await?;
             let key =
                 idempotency_key.unwrap_or_else(|| format!("nyxid-cli-topup-{}", Uuid::new_v4()));
             let response: TopUpResponse = api
@@ -230,9 +220,7 @@ pub async fn run(command: BillingCommands) -> Result<()> {
             poll_interval_secs,
             auth,
         } => {
-            let mut api = super::billing_support::human_api(&auth)
-                .await?
-                .without_token_refresh();
+            let mut api = super::billing_support::human_api(&auth).await?;
             let response = verify_topup_flow(
                 &mut api,
                 amount_credits,
@@ -1131,12 +1119,15 @@ mod tests {
             "created": false
         })
     }
+
     #[tokio::test]
-    async fn wallet_get_sends_owner_id_query() {
+    async fn wallet_owner_scope_posts_even_without_provision() {
         let server = MockServer::start().await;
-        Mock::given(method("GET"))
+        Mock::given(method("POST"))
             .and(path("/api/v1/billing/wallet"))
-            .and(wiremock::matchers::query_param("owner_id", "org-owner"))
+            .and(wiremock::matchers::body_json(
+                serde_json::json!({"owner_id":"org-owner"}),
+            ))
             .respond_with(ResponseTemplate::new(200).set_body_json(wallet_json(false)))
             .expect(1)
             .mount(&server)

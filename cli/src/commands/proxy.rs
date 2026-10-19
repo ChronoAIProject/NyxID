@@ -68,9 +68,10 @@ pub async fn run(command: ProxyCommands) -> Result<()> {
             if envelope && !matches!(auth.output, OutputFormat::Json) {
                 bail!("--envelope requires --output json");
             }
-            let mut api = ApiClient::from_auth_checked(&auth)
-                .await?
-                .without_token_refresh();
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
+            if !matches!(method.to_ascii_uppercase().as_str(), "GET" | "HEAD") {
+                api = api.without_token_refresh();
+            }
 
             // Build proxy path
             let trimmed_path = path.trim_start_matches('/');
@@ -156,11 +157,7 @@ pub async fn run(command: ProxyCommands) -> Result<()> {
             }
             if envelope {
                 let mut headers = serde_json::Map::new();
-                for name in [
-                    "x-nyxid-execution-id",
-                    "x-nyxid-agent-id",
-                    "x-nyxid-request-id",
-                ] {
+                for name in ["x-nyxid-execution-id", "x-nyxid-agent-id", "x-request-id"] {
                     if let Some(value) = resp.headers().get(name).and_then(|v| v.to_str().ok()) {
                         headers.insert(name.into(), Value::String(value.into()));
                     }

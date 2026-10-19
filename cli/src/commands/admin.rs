@@ -6,23 +6,6 @@ use crate::api::ApiClient;
 use crate::cli::{AdminCommands, AdminUserCommands, InviteCodeCommands, OutputFormat};
 
 pub async fn run(command: AdminCommands) -> Result<()> {
-    match &command {
-        AdminCommands::PlatformCredentials { command } => {
-            super::billing_support::require_human(command.auth())?
-        }
-        AdminCommands::InviteCode { command } => {
-            super::billing_support::require_human(command.auth())?
-        }
-        AdminCommands::User { command } => super::billing_support::require_human(command.auth())?,
-        AdminCommands::Provider { command } => {
-            super::billing_support::require_human(command.auth())?
-        }
-        AdminCommands::Tools { command } => super::billing_support::require_human(command.auth())?,
-        AdminCommands::Catalog { command } => {
-            super::billing_support::require_human(command.auth())?
-        }
-        _ => {}
-    }
     match command {
         AdminCommands::Billing { command } => super::admin_billing::run(command).await,
         AdminCommands::Credits { command } => super::admin_credits::run(command).await,

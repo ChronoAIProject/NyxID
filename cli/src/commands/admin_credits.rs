@@ -39,7 +39,7 @@ pub async fn run(command: AdminCreditsCommands) -> Result<()> {
             if expires_at.is_some_and(|expires| expires <= Utc::now()) {
                 bail!("expires-at must be in the future");
             }
-            let mut api = support::human_api(&auth).await?.without_token_refresh();
+            let mut api = support::human_api(&auth).await?;
             let user = super::admin::resolve_user_id(&mut api, &user).await?;
             let mut refs = vec![];
             for reference in service {
@@ -63,26 +63,48 @@ pub async fn run(command: AdminCreditsCommands) -> Result<()> {
                     bail!("Grant issuance cancelled");
                 }
             }
-            let body = json!({"amount_credits":amount,"target_kind":"selected_users","target_user_ids":[user],"all_services":all_services,"service_refs":refs,"expires_at":expires_at.map(support::rfc3339),"reason":reason});
+            let body = json!({
+                "amount_credits": amount,
+                "target_kind": "selected_users",
+                "target_user_ids": [
+                    user
+                ],
+                "all_services": all_services,
+                "service_refs": refs,
+                "expires_at": expires_at.map(support::rfc3339),
+                "reason": reason
+            });
             let result: Value = api.post("/admin/credits/grants", &body).await?;
             support::print(&result, auth.output, || support::fields(&result))
         }
-        CreditGrantCommands::List { user, auth } => {
+        CreditGrantCommands::List {
+            user,
+            page,
+            per_page,
+            auth,
+        } => {
             let mut api = support::human_api(&auth).await?;
             let query = match user {
                 Some(user) => format!(
-                    "?recipient_user_id={}",
+                    "&recipient_user_id={}",
                     urlencoding::encode(&super::admin::resolve_user_id(&mut api, &user).await?)
                 ),
                 None => String::new(),
             };
-            let value: Value = api.get(&format!("/admin/credits/grants{query}")).await?;
+            if page == 0 || !(1..=500).contains(&per_page) {
+                bail!("page must be positive and per-page must be in 1..=500");
+            }
+            let value: Value = api
+                .get(&format!(
+                    "/admin/credits/grants?page={page}&per_page={per_page}{query}"
+                ))
+                .await?;
             support::print(&value, auth.output, || support::fields(&value))
         }
         CreditGrantCommands::Revoke { grant_id, auth } => {
             support::require_human(&auth)?;
             let id = support::uuid(&grant_id)?;
-            let mut api = support::human_api(&auth).await?.without_token_refresh();
+            let mut api = support::human_api(&auth).await?;
             let value: Value = api.delete(&format!("/admin/credits/grants/{id}")).await?;
             support::print(&value, auth.output, || support::fields(&value))
         }
@@ -130,13 +152,41 @@ mod tests {
             .mount(server)
             .await;
     }
+
     #[tokio::test]
     async fn grant_issue_resolves_email_scope_and_posts_once_with_activation_states() {
         let server = MockServer::start().await;
         lookups(&server).await;
-        Mock::given(method("POST")).and(path("/api/v1/admin/credits/grants")).and(body_json(json!({"amount_credits":5,"target_kind":"selected_users","target_user_ids":[ID],"all_services":false,"service_refs":[ID],"expires_at":null,"reason":"Pilot"}))).respond_with(ResponseTemplate::new(200).set_body_json(json!({"batch_id":"batch-test","recipients":[{"recipient_user_id":ID,"activation_state":"pending_activation"}]}))).expect(1).mount(&server).await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/admin/credits/grants"))
+            .and(body_json(json!({
+                "amount_credits": 5,
+                "target_kind": "selected_users",
+                "target_user_ids": [
+                    ID
+                ],
+                "all_services": false,
+                "service_refs": [
+                    ID
+                ],
+                "expires_at": null,
+                "reason": "Pilot"
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "batch_id": "batch-test",
+                "recipients": [
+                    {
+                        "recipient_user_id": ID,
+                        "activation_state": "pending_activation"
+                    }
+                ]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
         run(issue(&server, true)).await.unwrap();
     }
+
     #[tokio::test]
     async fn grant_issue_without_yes_refuses_nonterminal_and_never_posts() {
         let server = MockServer::start().await;
@@ -152,6 +202,7 @@ mod tests {
                 .all(|request| request.method == "GET")
         );
     }
+
     #[tokio::test]
     async fn grant_list_user_and_revoke_routes() {
         let server = MockServer::start().await;
@@ -172,6 +223,8 @@ mod tests {
             .await;
         run(AdminCreditsCommands::Grant {
             command: CreditGrantCommands::List {
+                page: 1,
+                per_page: 50,
                 user: Some(ID.into()),
                 auth: mock_auth(server.uri()),
             },
@@ -187,6 +240,7 @@ mod tests {
         .await
         .unwrap();
     }
+
     #[tokio::test]
     async fn grant_errors_are_not_retried_and_invalid_revoke_is_local() {
         let server = MockServer::start().await;

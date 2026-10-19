@@ -137,6 +137,7 @@ mod tests {
             auth: mock_auth(server.uri()),
         }
     }
+
     #[tokio::test]
     async fn usage_sends_bounded_window_service_uuid_user_and_pagination() {
         let server = MockServer::start().await;
@@ -168,6 +169,7 @@ mod tests {
         args.per_page = 50;
         run(args).await.unwrap();
     }
+
     #[tokio::test]
     async fn usage_periods_and_invalid_windows_are_validated_locally() {
         for period in ["24h", "7d", "30d"] {
@@ -211,9 +213,20 @@ mod tests {
         }
         assert!(server.received_requests().await.unwrap().is_empty());
     }
+
     #[test]
     fn usage_prints_token_classes_and_all_exact_costs_without_float_conversion() {
-        let usage = json!({"quantities":{"input_tokens":91,"output_tokens":5,"cache_read_tokens":10},"gross_cost":"123456789012345.123456789012","wallet_cost":"0.000000000001","grant_cost":"0.000000000002","allowance_cost":"0.000000000003"});
+        let usage = json!({
+            "quantities": {
+                "input_tokens": 91,
+                "output_tokens": 5,
+                "cache_read_tokens": 10
+            },
+            "gross_cost": "123456789012345.123456789012",
+            "wallet_cost": "0.000000000001",
+            "grant_cost": "0.000000000002",
+            "allowance_cost": "0.000000000003"
+        });
         let mut service = usage.clone();
         service["service_slug"] = json!("telnyx-platform");
         service["gross_cost"] = json!("0.123456789012");

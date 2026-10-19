@@ -120,7 +120,7 @@ async fn run_config(command: BillingConfigCommands) -> Result<()> {
                     )?;
                 json!(amount)
             };
-            let mut api = support::human_api(&auth).await?.without_token_refresh();
+            let mut api = support::human_api(&auth).await?;
             (
                 api.put::<Value, _>(
                     "/admin/billing/config",
@@ -219,6 +219,64 @@ fn effective_table(row: &Value) -> String {
     output
 }
 
+fn raw_billing_table(billing: &Value) -> String {
+    let mut output = String::from("Managed contract:\n");
+    let contract = &billing["managed_execution"];
+    output.push_str(&support::table(
+        &["Field", "Value"],
+        [
+            "model",
+            "max_input_tokens",
+            "max_output_tokens",
+            "max_request_bytes",
+            "max_response_bytes",
+            "tariff_version",
+            "tariff_source",
+            "tariff_verified_at",
+        ]
+        .into_iter()
+        .map(|key| {
+            let value = if key == "tariff_verified_at" {
+                support::bson_date(&contract[key])
+                    .map(support::rfc3339)
+                    .unwrap_or_else(|| support::text(&contract[key]))
+            } else {
+                support::text(&contract[key])
+            };
+            vec![key.into(), value]
+        }),
+    ));
+    output.push_str("\nConfigured price lanes:\n");
+    output.push_str(&support::table(
+        &[
+            "Lane / row",
+            "Metric",
+            "Operation",
+            "Credits / unit",
+            "Sync",
+            "Sync error",
+            "Lago code",
+        ],
+        configured_rows(billing).into_iter().map(|(name, row)| {
+            let mut cells = vec![name];
+            cells.extend(
+                [
+                    "metric",
+                    "operation",
+                    "credits_per_unit",
+                    "sync_status",
+                    "sync_error",
+                    "lago_metric_code",
+                ]
+                .into_iter()
+                .map(|key| support::text(&row[key])),
+            );
+            cells
+        }),
+    ));
+    output
+}
+
 async fn run_service(command: BillingServiceCommands) -> Result<()> {
     match command {
         BillingServiceCommands::Show { service, auth } => {
@@ -230,13 +288,17 @@ async fn run_service(command: BillingServiceCommands) -> Result<()> {
                     support::text(&raw["id"])
                 ))
                 .await?;
-            let value = json!({"service":effective,"billing":raw["billing"],"credential_configured":raw["credential_configured"]});
+            let value = json!({
+                "service": effective,
+                "billing": raw["billing"],
+                "credential_configured": raw["credential_configured"]
+            });
             support::print(&value, auth.output, || {
                 format!(
                     "{}\nCredential configured: {}\n{}",
                     effective_table(&value["service"]),
                     support::text(&value["credential_configured"]),
-                    support::fields(&value["billing"])
+                    raw_billing_table(&value["billing"])
                 )
             })
         }
@@ -251,7 +313,7 @@ async fn run_service(command: BillingServiceCommands) -> Result<()> {
             let document: Value =
                 serde_json::from_slice(&raw).context("Invalid billing JSON file")?;
             let patch = billing_patch(document)?;
-            let mut api = support::human_api(&auth).await?.without_token_refresh();
+            let mut api = support::human_api(&auth).await?;
             update(&mut api, &service, patch, dry_run, auth.output).await
         }
         BillingServiceCommands::SetManaged {
@@ -270,7 +332,7 @@ async fn run_service(command: BillingServiceCommands) -> Result<()> {
                 managed_billing::validate_probe(&response, &managed)?;
             }
             eprintln!("Conservative full reservation ceiling: {ceiling} credits");
-            let mut api = support::human_api(&auth).await?.without_token_refresh();
+            let mut api = support::human_api(&auth).await?;
             update(
                 &mut api,
                 &service,
@@ -281,7 +343,7 @@ async fn run_service(command: BillingServiceCommands) -> Result<()> {
             .await
         }
         BillingServiceCommands::Resync { service, auth } => {
-            let mut api = support::human_api(&auth).await?.without_token_refresh();
+            let mut api = support::human_api(&auth).await?;
             let raw = support::service(&mut api, &service).await?;
             let value: Value = api
                 .post(
@@ -323,7 +385,16 @@ async fn run_service(command: BillingServiceCommands) -> Result<()> {
                 ))
                 .await?;
             let rates: Vec<Value> = api.get("/admin/billing/rates").await?;
-            let report = readiness(&config, &raw, &effective, &rates, managed);
+            let endpoints = if managed {
+                api.get(&format!(
+                    "/services/{}/endpoints",
+                    support::text(&raw["id"])
+                ))
+                .await?
+            } else {
+                Value::Null
+            };
+            let report = readiness(&config, &raw, &effective, &rates, managed, &endpoints);
             support::print(&report, auth.output, || {
                 let mut result = support::table(
                     &["Check", "Result"],
@@ -474,6 +545,21 @@ fn validate_price(row: &Value) -> Result<()> {
 
 pub(super) fn merged_billing(current: &Value, patch: &Value) -> Value {
     let mut merged = current.as_object().cloned().unwrap_or_default();
+    // BillingUpdate preserves legacy fields only when a lane key is present.
+    if patch.get("byok_pricing").is_none() && patch.get("platform_key_pricing").is_none() {
+        for (field, default) in [
+            ("platform_billable", json!(false)),
+            ("platform_metric", Value::Null),
+            ("platform_pricing", Value::Null),
+            ("resale_billable", json!(false)),
+            ("resale_metric", json!("tokens")),
+            ("lago_resale_metric_code", Value::Null),
+        ] {
+            if patch.get(field).is_none() {
+                merged.insert(field.into(), default);
+            }
+        }
+    }
     for (field, value) in patch.as_object().into_iter().flatten() {
         let mut value = value.clone();
         if ["byok_pricing", "platform_key_pricing"].contains(&field.as_str())
@@ -568,12 +654,13 @@ async fn update(
     output: OutputFormat,
 ) -> Result<()> {
     let raw = support::service(api, reference).await?;
-    let merged = merged_billing(&raw["billing"], &patch);
-    let body = json!({"billing":merged});
     if dry_run {
-        let report = json!({"dry_run":true,"body":body,"diff":field_diff(&raw["billing"],&merged)});
+        let merged = merged_billing(&raw["billing"], &patch);
+        let diff = field_diff(&raw["billing"], &merged);
+        let report = json!({"dry_run":true, "body":{"billing":merged}, "diff":diff});
         support::print(&report, output, || support::fields(&report))
     } else {
+        let body = json!({"billing":patch});
         let result: Value = api
             .put(
                 &format!("/admin/billing/services/{}", support::text(&raw["id"])),
@@ -590,6 +677,7 @@ fn readiness(
     effective: &Value,
     rates: &[Value],
     managed: bool,
+    endpoints: &Value,
 ) -> Value {
     let billing = &raw["billing"];
     let rows = configured_rows(billing);
@@ -619,6 +707,49 @@ fn readiness(
         ),
     ]);
     if managed {
+        let active: Vec<_> = endpoints["endpoints"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|endpoint| endpoint["is_active"] == true)
+            .collect();
+        checks.insert("one_active_operation".into(), active.len() == 1);
+        let endpoint = active.first().copied().unwrap_or(&Value::Null);
+        checks.insert(
+            "managed_operation_route".into(),
+            endpoint["method"] == "POST" && endpoint["path"] == "/ai/openai/chat/completions",
+        );
+        let contract = &billing["managed_execution"];
+        let properties = &endpoint["request_body_schema"]["properties"];
+        checks.insert(
+            "operation_model_pinned".into(),
+            contract["model"].is_string()
+                && properties["model"]["enum"] == json!([contract["model"]]),
+        );
+        checks.insert(
+            "operation_output_cap_pinned".into(),
+            contract["max_output_tokens"].is_u64()
+                && properties["max_tokens"]["maximum"] == contract["max_output_tokens"],
+        );
+        let rules = &raw["proxy_operation_policy"]["rules"];
+        checks.insert(
+            "proxy_only_managed_route".into(),
+            rules.as_array().is_some_and(|rules| {
+                rules.len() == 1
+                    && rules[0]["method"] == "POST"
+                    && rules[0]["path_template"] == "/ai/openai/chat/completions"
+            }),
+        );
+        for field in [
+            "platform_billable",
+            "platform_charge_nyxid_credentials_only",
+        ] {
+            checks.insert(field.into(), billing[field] == true);
+        }
+        checks.insert(
+            "resale_disabled".into(),
+            billing["resale_billable"] == false,
+        );
         checks.insert(
             "dedicated_internal_offering".into(),
             raw["service_category"] == "internal" && raw["requires_user_credential"] == false,
@@ -681,7 +812,14 @@ fn readiness(
             row["sync_status"] == "synced" && exact && fresh,
         );
     }
-    json!({"configuration_ready":checks.values().all(|pass|*pass),"checks":checks,"limits":"Checks saved configuration and fresh exact prices. Does not prove replica versions, payer funding, tariff provenance or upstream behavior. Access may remain disabled during this check."})
+    json!({
+        "configuration_ready": checks.values().all(|pass|*pass),
+        "checks": checks,
+        "limits": concat!(
+            "Checks saved configuration and fresh exact prices. Does not prove replica versions, ",
+            "payer funding, tariff provenance or upstream behavior. Access may remain disabled during this check."
+        )
+    })
 }
 
 async fn run_ledger(command: BillingLedgerCommands) -> Result<()> {

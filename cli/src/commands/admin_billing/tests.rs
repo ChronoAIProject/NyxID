@@ -16,6 +16,7 @@ fn fixture(name: &str) -> Value {
         "service" => include_str!("../../../tests/fixtures/billing/service.json"),
         "raw" => include_str!("../../../tests/fixtures/billing/catalog-service.json"),
         "priced" => include_str!("../../../tests/fixtures/billing/catalog-priced-service.json"),
+        "endpoints" => include_str!("../../../tests/fixtures/billing/managed-endpoints.json"),
         "managed" => include_str!("../../../tests/fixtures/billing/managed-service.json"),
         _ => panic!("unknown fixture"),
     };
@@ -45,7 +46,26 @@ fn managed_args() -> ManagedBillingArgs {
     }
 }
 fn probe() -> Value {
-    json!({"id":"chatcmpl-test","model":"org/model:1","usage":{"prompt_tokens":100,"completion_tokens":5,"total_tokens":105,"prompt_tokens_details":{"cached_tokens":10}},"choices":[{"message":{"role":"assistant","content":"OK"}}]})
+    json!({
+        "id": "chatcmpl-test",
+        "model": "org/model:1",
+        "usage": {
+            "prompt_tokens": 100,
+            "completion_tokens": 5,
+            "total_tokens": 105,
+            "prompt_tokens_details": {
+                "cached_tokens": 10
+            }
+        },
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": "OK"
+                }
+            }
+        ]
+    })
 }
 fn valid_state() -> (Value, Value, Vec<Value>) {
     let mut raw = fixture("managed");
@@ -54,10 +74,41 @@ fn valid_state() -> (Value, Value, Vec<Value>) {
     let mut prices = vec![];
     let mut rates = vec![];
     for (_, row) in configured_rows(&raw["billing"]) {
-        prices.push(json!({"metric":row["metric"],"credits_per_unit":row["credits_per_unit"],"lago_metric_code":row["lago_metric_code"],"sync_status":"synced","cached_rate":{"credits_per_unit":row["credits_per_unit"],"stale":false,"retired":false}}));
-        rates.push(json!({"lago_metric_code":row["lago_metric_code"],"model":null,"credits_per_unit":row["credits_per_unit"],"stale":false,"retired_at":null}));
+        prices.push(json!({
+            "metric": row["metric"],
+            "credits_per_unit": row["credits_per_unit"],
+            "lago_metric_code": row["lago_metric_code"],
+            "sync_status": "synced",
+            "cached_rate": {
+                "credits_per_unit": row["credits_per_unit"],
+                "stale": false,
+                "retired": false
+            }
+        }));
+        rates.push(json!({
+            "lago_metric_code": row["lago_metric_code"],
+            "model": null,
+            "credits_per_unit": row["credits_per_unit"],
+            "stale": false,
+            "retired_at": null
+        }));
     }
-    let effective = json!({"id":ID,"slug":"telnyx-platform","effective":{"classes":[{"lane":"platform_key","credential_classes":["nyxid_managed_master"],"platform_charged":true,"reason":"lane_synced","prices":prices,"pending":[]}]}});
+    let effective = json!({
+        "id": ID,
+        "slug": "telnyx-platform",
+        "effective": {
+            "classes": [
+                {
+                    "lane": "platform_key",
+                    "credential_classes": ["nyxid_managed_master"],
+                    "platform_charged": true,
+                    "reason": "lane_synced",
+                    "prices": prices,
+                    "pending": []
+                }
+            ]
+        }
+    });
     (raw, effective, rates)
 }
 
@@ -65,8 +116,11 @@ fn valid_state() -> (Value, Value, Vec<Value>) {
 async fn config_show_reads_sanitized_fixture_and_redacts_secret_values() {
     let server = MockServer::start().await;
     let mut config = fixture("config");
-    config["environment"][0] =
-        json!({"key":"LAGO_API_KEY","secret_set":true,"value":"TOP_SECRET_VALUE"});
+    config["environment"][0] = json!({
+        "key": "LAGO_API_KEY",
+        "secret_set": true,
+        "value": "TOP_SECRET_VALUE"
+    });
     let safe = safe_config(config.clone());
     assert!(
         !serde_json::to_string(&safe)
@@ -269,13 +323,20 @@ async fn ambiguous_and_missing_slugs_fail_with_catalog_hint() {
 }
 
 #[tokio::test]
-async fn billing_updates_wrap_strip_merge_and_dry_run_without_put() {
+async fn billing_updates_put_only_validated_patch_and_preview_merged_dry_run() {
     for wrapped in [false, true] {
         for dry_run in [false, true] {
             let server = MockServer::start().await;
             let current = fixture("managed");
             mount(&server, "GET", &format!("/services/{ID}"), current.clone()).await;
-            let patch = json!({"platform_key_pricing":{"metric":"input_tokens","credits_per_unit":"0.0000003","sync_status":"failed","lago_metric_code":"ignored"}});
+            let patch = json!({
+                "platform_key_pricing": {
+                    "metric": "input_tokens",
+                    "credits_per_unit": "0.0000003",
+                    "sync_status": "failed",
+                    "lago_metric_code": "ignored"
+                }
+            });
             let document = if wrapped {
                 json!({"billing":patch})
             } else {
@@ -294,7 +355,7 @@ async fn billing_updates_wrap_strip_merge_and_dry_run_without_put() {
             if !dry_run {
                 Mock::given(method("PUT"))
                     .and(path(format!("/api/v1/admin/billing/services/{ID}")))
-                    .and(body_json(json!({"billing":merged})))
+                    .and(body_json(json!({"billing":cleaned})))
                     .respond_with(ResponseTemplate::new(200).set_body_json(fixture("service")))
                     .expect(1)
                     .mount(&server)
@@ -371,8 +432,13 @@ fn set_managed_body_matches_golden_bytes_and_exact_ceiling() {
 async fn set_managed_posts_once_and_clears_incompatible_previous_operation_prices() {
     let server = MockServer::start().await;
     let mut current = fixture("managed");
-    current["billing"]["platform_key_pricing"]["operations"] =
-        json!([{"operation":"chat_completions","credits_per_unit":"1","sync_status":"synced"}]);
+    current["billing"]["platform_key_pricing"]["operations"] = json!([
+        {
+            "operation": "chat_completions",
+            "credits_per_unit": "1",
+            "sync_status": "synced"
+        }
+    ]);
     mount(&server, "GET", &format!("/services/{ID}"), current).await;
     Mock::given(method("PUT"))
         .and(path(format!("/api/v1/admin/billing/services/{ID}")))
@@ -602,13 +668,20 @@ fn managed_readiness_accepts_disabled_access_and_exact_equivalent_rates() {
     let (raw, effective, mut rates) = valid_state();
     rates[0]["credits_per_unit"] = json!("0.000000250000");
     assert_eq!(
-        readiness(&fixture("config"), &raw, &effective, &rates, true)["configuration_ready"],
+        readiness(
+            &fixture("config"),
+            &raw,
+            &effective,
+            &rates,
+            true,
+            &fixture("endpoints")
+        )["configuration_ready"],
         true
     );
 }
 
 #[tokio::test]
-async fn verify_reads_all_four_contracts_and_reports_not_ready() {
+async fn verify_reads_billing_and_published_operations_before_reporting_not_ready() {
     let server = MockServer::start().await;
     let (mut raw, effective, rates) = valid_state();
     raw["credential_configured"] = json!(false);
@@ -622,6 +695,13 @@ async fn verify_reads_all_four_contracts_and_reports_not_ready() {
     )
     .await;
     mount(&server, "GET", "/admin/billing/rates", json!(rates)).await;
+    mount(
+        &server,
+        "GET",
+        &format!("/services/{ID}/endpoints"),
+        fixture("endpoints"),
+    )
+    .await;
     let error = run(AdminBillingCommands::Service {
         command: BillingServiceCommands::Verify {
             service: ID.into(),
@@ -654,7 +734,14 @@ macro_rules! not_ready {
             };
             *target.pointer_mut($pointer).unwrap() = $value;
             assert_eq!(
-                readiness(&config, &raw, &effective, &rates, true)["configuration_ready"],
+                readiness(
+                    &config,
+                    &raw,
+                    &effective,
+                    &rates,
+                    true,
+                    &fixture("endpoints")
+                )["configuration_ready"],
                 false
             );
         }
@@ -882,10 +969,6 @@ async fn agent_key_credentials_reject_admin_and_billing_leaves_before_any_reques
             "test",
             "--yes",
         ],
-        vec!["user", "list"],
-        vec!["provider", "list"],
-        vec!["catalog", "apply", "--file", "missing.json", "--dry-run"],
-        vec!["tools", "apply", "--file", "missing.json", "--dry-run"],
     ] {
         let error =
             crate::commands::admin::run(admin_command(&server, &args, "nyxid_ag_SECRET_SENTINEL"))
@@ -899,7 +982,7 @@ async fn agent_key_credentials_reject_admin_and_billing_leaves_before_any_reques
 }
 
 #[test]
-fn agent_key_profile_rejected_even_with_explicit_human_override() {
+fn explicit_human_override_wins_over_agent_key_profile() {
     let _lock = env_lock().lock().unwrap();
     let dir = tempfile::tempdir().unwrap();
     let old = std::env::var_os("HOME");
@@ -911,16 +994,235 @@ fn agent_key_profile_rejected_even_with_explicit_human_override() {
     std::fs::write(profile.join("auth_kind"), "agent_key").unwrap();
     let mut auth: AuthArgs = mock_auth("http://127.0.0.1:1");
     auth.profile = Some("billing-test".into());
-    assert!(
-        support::require_human(&auth)
-            .unwrap_err()
-            .to_string()
-            .contains("nyxid login")
-    );
+    support::require_human(&auth).unwrap();
     unsafe {
         match old {
             Some(old) => std::env::set_var("HOME", old),
             None => std::env::remove_var("HOME"),
         }
+    }
+}
+
+#[test]
+fn raw_billing_table_labels_contract_and_price_rows_in_stable_order() {
+    let output = raw_billing_table(&fixture("managed")["billing"]);
+    let mut previous = 0;
+    for label in [
+        "Managed contract:",
+        "model",
+        "max_input_tokens",
+        "tariff_version",
+        "Configured price lanes:",
+        "platform_key_pricing",
+        "output_tokens",
+        "cache_read_tokens",
+    ] {
+        let index = previous + output[previous..].find(label).unwrap();
+        assert!(index >= previous, "{label}");
+        previous = index;
+    }
+    assert!(output.contains("0.00000025"));
+    assert!(output.contains("synced"));
+}
+
+macro_rules! unsafe_surface {
+    ($name:ident, $target:ident, $pointer:expr, $value:expr, $check:expr) => {
+        #[test]
+        fn $name() {
+            let (mut raw, effective, rates) = valid_state();
+            let mut endpoints = fixture("endpoints");
+            let target = if stringify!($target) == "raw" {
+                &mut raw
+            } else {
+                &mut endpoints
+            };
+            *target.pointer_mut($pointer).unwrap() = $value;
+            let report = readiness(
+                &fixture("config"),
+                &raw,
+                &effective,
+                &rates,
+                true,
+                &endpoints,
+            );
+            assert_eq!(report["configuration_ready"], false);
+            assert_eq!(report["checks"][$check], false);
+        }
+    };
+}
+unsafe_surface!(
+    verify_rejects_extra_active_operation,
+    endpoints,
+    "/endpoints",
+    json!([
+        fixture("endpoints")["endpoints"][0],
+        fixture("endpoints")["endpoints"][0]
+    ]),
+    "one_active_operation"
+);
+unsafe_surface!(
+    verify_rejects_wrong_operation_route,
+    endpoints,
+    "/endpoints/0/path",
+    json!("/other"),
+    "managed_operation_route"
+);
+unsafe_surface!(
+    verify_rejects_unpinned_operation_model,
+    endpoints,
+    "/endpoints/0/request_body_schema/properties/model/enum",
+    json!(["other"]),
+    "operation_model_pinned"
+);
+unsafe_surface!(
+    verify_rejects_wrong_operation_output_cap,
+    endpoints,
+    "/endpoints/0/request_body_schema/properties/max_tokens/maximum",
+    json!(1025),
+    "operation_output_cap_pinned"
+);
+unsafe_surface!(
+    verify_rejects_broad_proxy_policy,
+    raw,
+    "/proxy_operation_policy/rules/0/path_template",
+    json!("/**"),
+    "proxy_only_managed_route"
+);
+unsafe_surface!(
+    verify_rejects_disabled_platform_billing,
+    raw,
+    "/billing/platform_billable",
+    json!(false),
+    "platform_billable"
+);
+unsafe_surface!(
+    verify_rejects_billing_user_credentials,
+    raw,
+    "/billing/platform_charge_nyxid_credentials_only",
+    json!(false),
+    "platform_charge_nyxid_credentials_only"
+);
+unsafe_surface!(
+    verify_rejects_resale_billing,
+    raw,
+    "/billing/resale_billable",
+    json!(true),
+    "resale_disabled"
+);
+
+#[test]
+fn all_new_command_leaf_arguments_have_help() {
+    use clap::CommandFactory;
+    fn walk(command: &clap::Command) {
+        if command.get_subcommands().next().is_none() {
+            for arg in command.get_arguments() {
+                if !matches!(arg.get_id().as_str(), "help" | "version") && !arg.is_hide_set() {
+                    assert!(
+                        arg.get_help().is_some() || arg.get_long_help().is_some(),
+                        "{}: {} has no help",
+                        command.get_name(),
+                        arg.get_id()
+                    );
+                }
+            }
+            let mut command = command.clone();
+            assert!(!command.render_long_help().to_string().is_empty());
+        } else {
+            for sub in command.get_subcommands() {
+                walk(sub);
+            }
+        }
+    }
+    let mut command = Cli::command();
+    command.build();
+    for path in [
+        &["admin", "billing"][..],
+        &["admin", "credits"],
+        &["admin", "usage"],
+        &["billing", "executions"],
+        &["mcp", "tools"],
+        &["mcp", "call"],
+    ] {
+        let mut leaf = &command;
+        for name in path {
+            leaf = leaf.find_subcommand(name).unwrap();
+        }
+        walk(leaf);
+    }
+}
+
+#[test]
+fn human_guard_honors_override_precedence_and_all_server_api_key_prefixes() {
+    let _lock = env_lock().lock().unwrap();
+    let old = std::env::var_os("NYXID_BILLING_TEST_TOKEN");
+    let mut auth = mock_auth("http://127.0.0.1:1");
+    auth.access_token_env = "NYXID_BILLING_TEST_TOKEN".into();
+    for prefix in ["nyx_", "nyxid_", "nyxid_ag_", "nyxid_sk_"] {
+        auth.access_token = Some(format!("{prefix}private-sentinel"));
+        let error = support::require_human(&auth).unwrap_err().to_string();
+        assert!(!error.contains("private-sentinel"));
+        unsafe {
+            std::env::set_var("NYXID_BILLING_TEST_TOKEN", "human-fixture");
+        }
+        assert!(
+            support::require_human(&auth).is_err(),
+            "explicit API key wins"
+        );
+        auth.access_token = None;
+        support::require_human(&auth).unwrap();
+        unsafe {
+            std::env::set_var(
+                "NYXID_BILLING_TEST_TOKEN",
+                format!("{prefix}private-sentinel"),
+            );
+        }
+        assert!(support::require_human(&auth).is_err());
+    }
+    unsafe {
+        match old {
+            Some(old) => std::env::set_var("NYXID_BILLING_TEST_TOKEN", old),
+            None => std::env::remove_var("NYXID_BILLING_TEST_TOKEN"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn every_server_api_key_prefix_is_rejected_before_requests() {
+    let server = MockServer::start().await;
+    for prefix in ["nyx_", "nyxid_", "nyxid_ag_", "nyxid_sk_"] {
+        let mut auth = mock_auth(server.uri());
+        auth.access_token = Some(format!("{prefix}fixture"));
+        let error = run(AdminBillingCommands::Config {
+            command: BillingConfigCommands::Show { auth },
+        })
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("human account session"));
+    }
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+#[test]
+fn billing_preview_matches_server_legacy_defaults_and_lane_preservation() {
+    // handlers/services.rs BillingUpdate::preserve_omitted_fields (396-466)
+    // retains the legacy full-block semantics unless a lane key is present.
+    let current = json!({
+        "platform_billable":true, "platform_metric":"requests",
+        "platform_pricing":{"metric":"requests","credits_per_unit":"1"},
+        "resale_billable":true,"resale_metric":"requests","lago_resale_metric_code":"resale",
+        "platform_charge_nyxid_credentials_only":true,
+        "managed_execution":{"model":"org/model:1"}
+    });
+    let legacy = merged_billing(&current, &json!({"platform_metric":"tokens"}));
+    assert_eq!(legacy["platform_billable"], false);
+    assert_eq!(legacy["platform_pricing"], Value::Null);
+    assert_eq!(legacy["resale_billable"], false);
+    assert_eq!(legacy["resale_metric"], "tokens");
+    assert_eq!(legacy["lago_resale_metric_code"], Value::Null);
+    assert_eq!(legacy["managed_execution"], current["managed_execution"]);
+    assert_eq!(legacy["platform_charge_nyxid_credentials_only"], true);
+    let lane = merged_billing(&current, &json!({"byok_pricing":null}));
+    for key in current.as_object().unwrap().keys() {
+        assert_eq!(lane[key], current[key], "{key}");
     }
 }

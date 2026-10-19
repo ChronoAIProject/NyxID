@@ -86,20 +86,42 @@ pub(super) fn body(args: &ManagedBillingArgs, now: DateTime<Utc>) -> Result<(Val
         })
         .context("Reservation ceiling is out of range")?;
     Ok((
-        json!({"billing":{
-            "platform_billable":true,"platform_charge_nyxid_credentials_only":true,
-            "managed_execution":{
-                "model":args.model,"max_input_tokens":args.max_input_tokens,"max_output_tokens":args.max_output_tokens,
-                "max_request_bytes":args.max_request_bytes,"max_response_bytes":args.max_response_bytes,
-                "tariff_version":args.tariff_version,"tariff_source":args.tariff_source,
-                "tariff_verified_at":{"$date":rfc3339(verified)}
-            },
-            "platform_key_pricing":{"metric":"input_tokens","credits_per_unit":args.input_price,"operations":[],"components":[
-                {"metric":"output_tokens","credits_per_unit":args.output_price},
-                {"metric":"cache_read_tokens","credits_per_unit":args.cache_read_price}
-            ]},
-            "resale_billable":false,"byok_pricing":null,"platform_pricing":null
-        }}),
+        json!({
+            "billing": {
+                "platform_billable": true,
+                "platform_charge_nyxid_credentials_only": true,
+                "managed_execution": {
+                    "model": args.model,
+                    "max_input_tokens": args.max_input_tokens,
+                    "max_output_tokens": args.max_output_tokens,
+                    "max_request_bytes": args.max_request_bytes,
+                    "max_response_bytes": args.max_response_bytes,
+                    "tariff_version": args.tariff_version,
+                    "tariff_source": args.tariff_source,
+                    "tariff_verified_at": {
+                        "$date": rfc3339(verified)
+                    }
+                },
+                "platform_key_pricing": {
+                    "metric": "input_tokens",
+                    "credits_per_unit": args.input_price,
+                    "operations": [],
+                    "components": [
+                        {
+                            "metric": "output_tokens",
+                            "credits_per_unit": args.output_price
+                        },
+                        {
+                            "metric": "cache_read_tokens",
+                            "credits_per_unit": args.cache_read_price
+                        }
+                    ]
+                },
+                "resale_billable": false,
+                "byok_pricing": null,
+                "platform_pricing": null
+            }
+        }),
         credits(ceiling),
     ))
 }
@@ -119,7 +141,10 @@ pub(super) fn validate_probe(response: &Value, args: &ManagedBillingArgs) -> Res
     }
     let usage = &response["usage"];
     let number = |v: &Value| {
-        v.as_u64().filter(|n|*n<=i64::MAX as u64).context("Probe needs nonnegative integer prompt, completion, total and cached token counts; missing cached_tokens is not zero")
+        v.as_u64().filter(|n| *n <= i64::MAX as u64).context(concat!(
+            "Probe needs nonnegative integer prompt, completion, total and cached token counts; ",
+            "missing cached_tokens is not zero"
+        ))
     };
     let prompt = number(&usage["prompt_tokens"])?;
     let completion = number(&usage["completion_tokens"])?;
