@@ -74,6 +74,24 @@ pub async fn convert_queued(db: &Database, before: DateTime<Utc>) -> AppResult<u
                 let mut count = 0;
                 for event in current.pending_events.iter().filter(|e|!e.media_event_ids.is_empty() && e.media_sent_at.unwrap_or(e.created_at)<=before).take(50) {
                     notice_in_session(db,session,&row.user_id,&row.id,event).await?;
+                    // Project the terminal class before removing the queue's
+                    // durable evidence, in the same transaction as the notice.
+                    let mut receipt = MediaBound {
+                        event_ids: event.media_event_ids.clone(), ok: Vec::new(),
+                        failed: Vec::new(), context: String::new(),
+                    };
+                    for source_id in &event.media_event_ids {
+                        if let Some(source) = db.collection::<NyxbotEvent>(EVENTS)
+                            .find_one(doc! {"_id":source_id,"user_id":&row.user_id,"conversation_id":&row.id})
+                            .session(&mut *session).await?
+                            && let Some(media) = &source.media
+                        {
+                            for item in &media.items {
+                                receipt.failed.push(outcome(&source,Some(item.index),item.embedded,"not_processed: expired",None));
+                            }
+                        }
+                    }
+                    binding::reconcile_in_session(db,session,&receipt).await?;
                     count += db.collection::<bson::Document>(CONVERSATIONS).update_one(doc! {"_id":&row.id,"user_id":&row.user_id},
                         doc! {"$pull":{"pending_events":{"id":&event.id,"media_event_ids":&event.media_event_ids}}})
                         .session(&mut *session).await?.modified_count;

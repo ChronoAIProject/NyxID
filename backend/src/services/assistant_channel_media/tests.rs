@@ -713,6 +713,16 @@ async fn channel_media_six_day_conversion_survives_seven_day_source_deletion_and
             .unwrap(),
         1
     );
+    let converted = state
+        .db
+        .collection::<NyxbotEvent>(EVENTS)
+        .find_one(doc! {"_id":&event.id})
+        .await
+        .unwrap()
+        .unwrap();
+    for item in converted.media.unwrap().items {
+        assert_eq!(item.outcome.unwrap().status, "not_processed: expired");
+    }
     state
         .db
         .collection::<bson::Document>(EVENTS)
@@ -980,12 +990,41 @@ async fn channel_media_missing_seven_day_source_is_not_executed_and_notice_is_vi
 #[tokio::test]
 async fn channel_media_early_admin_conversion_requires_first_party_human_admin() {
     use axum::extract::State;
-    let (state, row, _, _) = fixture().await;
+    let (state, row, _, event) = fixture().await;
+    let queued: AgentEvent = bson::from_document(doc! {
+        "id":Uuid::new_v4().to_string(),"kind":"message","text":"queued photo",
+        "created_at":bson::DateTime::now(),"media_event_ids":[&event.id],"source_event_ids":[&event.id],
+        "media_declared":1i64,"media_sent_at":bson::DateTime::now(),
+    }).unwrap();
+    state
+        .db
+        .collection::<bson::Document>(CONVERSATIONS)
+        .update_one(
+            doc! {"_id":&row.id},
+            doc! {"$set":{"pending_events":[bson::to_bson(&queued).unwrap()]}},
+        )
+        .await
+        .unwrap();
     let auth = crate::test_utils::test_auth_user(&row.user_id);
     assert!(
         crate::handlers::admin_assistant::drain_channel_media(State(state.clone()), auth.clone())
             .await
             .is_err()
+    );
+    let unchanged = state
+        .db
+        .collection::<NyxbotEvent>(EVENTS)
+        .find_one(doc! {"_id":&event.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        unchanged
+            .media
+            .unwrap()
+            .items
+            .iter()
+            .all(|i| i.outcome.is_none())
     );
     crate::services::role_service::seed_system_roles(&state.db)
         .await
@@ -1006,6 +1045,24 @@ async fn channel_media_early_admin_conversion_requires_first_party_human_admin()
         crate::handlers::admin_assistant::drain_channel_media(State(state.clone()), auth.clone())
             .await;
     assert!(result.is_ok());
+    let converted = state
+        .db
+        .collection::<NyxbotEvent>(EVENTS)
+        .find_one(doc! {"_id":&event.id})
+        .await
+        .unwrap()
+        .unwrap();
+    for item in converted.media.unwrap().items {
+        assert_eq!(item.outcome.unwrap().status, "not_processed: expired");
+    }
+    let drained = state
+        .db
+        .collection::<AssistantConversation>(CONVERSATIONS)
+        .find_one(doc! {"_id":&row.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(drained.pending_events.is_empty());
     for method in [
         crate::mw::auth::AuthMethod::ApiKey,
         crate::mw::auth::AuthMethod::Delegated,
