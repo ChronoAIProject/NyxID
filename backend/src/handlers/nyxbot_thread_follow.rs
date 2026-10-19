@@ -186,6 +186,8 @@ async fn inbound_impl(
     {
         let own = own_user_id(state, &bot).await;
         let inbound = InboundMessage {
+            embedded_attachments: Vec::new(),
+            embedded_attachments_omitted: 0,
             platform_message_id: facts.message_id.clone(),
             conversation_id: facts.chat_id.clone(),
             conversation_type: payload["conversation"]["type"]

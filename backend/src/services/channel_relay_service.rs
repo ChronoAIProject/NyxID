@@ -213,18 +213,9 @@ pub(crate) fn inbound_metadata(
     agent_api_key_id: &str,
     message_id: &str,
 ) -> ChannelMessage {
-    let (embedded, omitted) = if matches!(platform, "lark" | "feishu") {
-        super::channel_adapters::lark::embedded_attachments(
-            platform,
-            &inbound.raw_data,
-            &inbound.platform_message_id,
-        )
-    } else {
-        (Vec::new(), 0)
-    };
     ChannelMessage {
-        embedded_attachments: embedded,
-        embedded_attachments_omitted: omitted,
+        embedded_attachments: inbound.embedded_attachments.clone(),
+        embedded_attachments_omitted: inbound.embedded_attachments_omitted,
         duplicate_of_media_key: None,
         thread_context: None,
         activity: None,
@@ -823,6 +814,8 @@ mod tests {
             crate::test_utils::connect_transaction_test_database("channel_relay_native_identity")
                 .await;
         let inbound = InboundMessage {
+            embedded_attachments: Vec::new(),
+            embedded_attachments_omitted: 0,
             platform_message_id: "77".into(),
             conversation_id: "-100".into(),
             conversation_type: "group".into(),
@@ -1394,6 +1387,8 @@ mod tests {
             updated_at: now,
         };
         let inbound = InboundMessage {
+            embedded_attachments: Vec::new(),
+            embedded_attachments_omitted: 0,
             platform_message_id: "om_file_msg".to_string(),
             conversation_id: "oc_chat".to_string(),
             conversation_type: "private".to_string(),
@@ -1520,6 +1515,8 @@ mod tests {
             "user-1",
             "lark",
             &InboundMessage {
+                embedded_attachments: Vec::new(),
+                embedded_attachments_omitted: 0,
                 platform_message_id: "om_group".to_string(),
                 conversation_id: "oc_group".to_string(),
                 conversation_type: "group".to_string(),
@@ -1554,6 +1551,8 @@ mod tests {
             updated_at: now,
         };
         let group = InboundMessage {
+            embedded_attachments: Vec::new(),
+            embedded_attachments_omitted: 0,
             platform_message_id: "om_group".to_string(),
             conversation_id: "oc_group".to_string(),
             conversation_type: "group".to_string(),

@@ -17,6 +17,8 @@ async fn media_source(
     text: &str,
 ) -> ChannelMessage {
     let inbound = InboundMessage {
+        embedded_attachments: Vec::new(),
+        embedded_attachments_omitted: 0,
         platform_message_id: native.into(),
         conversation_id: "oc_human".into(),
         conversation_type: "private".into(),
@@ -863,5 +865,95 @@ async fn interrupted_media_case(rebuilt: bool) {
         .is_err()
     );
     session.abort_transaction().await.unwrap();
+    server.abort();
+}
+
+async fn mount_media_provider(provider: &MockServer, native: &str) {
+    Mock::given(method("POST"))
+        .and(path("/open-apis/auth/v3/tenant_access_token/internal"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"code":0,"tenant_access_token":"test-token","expire":7200})),
+        )
+        .mount(provider)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!(
+            "/open-apis/im/v1/messages/{native}/resources/img_receipt"
+        )))
+        .and(query_param("type", "image"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_bytes(b"receipt bytes")
+                .insert_header("content-type", "image/png"),
+        )
+        .expect(1)
+        .mount(provider)
+        .await;
+}
+
+#[tokio::test]
+async fn channel_media_embedded_selectors_fetch_from_lark_feishu_adapter_origin() {
+    use crate::services::channel_platform::PlatformAdapter;
+    let (state, row, _, _, server) = media_fixture("media_embedded_origin", "direct").await;
+    let mut bot = channel_bot_service::get_bot(&state.db, &row.channel_bot_id)
+        .await
+        .unwrap();
+    for platform in ["lark", "feishu"] {
+        let provider = MockServer::start().await;
+        mount_media_provider(&provider, "om_receipt").await;
+        let adapter =
+            crate::services::channel_adapters::lark::LarkFamilyAdapter::media_test_adapter(
+                &provider.uri(),
+                platform,
+            );
+        let inbound = adapter
+            .parse_inbound(include_bytes!(
+                "../services/channel_adapters/fixtures/lark_callback/lark-post-in.json"
+            ))
+            .await
+            .unwrap();
+        let source = crate::services::channel_relay_service::inbound_metadata(
+            &row.channel_bot_id,
+            row.route_id.as_deref().unwrap(),
+            OWNER,
+            platform,
+            &inbound[0],
+            &row.route_api_key_id,
+            "embedded-source",
+        );
+        assert!(source.attachments.is_empty());
+        assert_eq!(source.embedded_attachments.len(), 1);
+        assert_eq!(
+            source.embedded_attachments[0].provider_ref,
+            format!(
+                "{}/open-apis/im/v1/messages/om_receipt/resources/img_receipt?type=image",
+                provider.uri()
+            )
+        );
+        bot.platform = platform.into();
+        let fetched = crate::services::channel_media_fetch::fetch(
+            &state.db,
+            &state.encryption_keys,
+            &state.http_client,
+            &bot,
+            &source.embedded_attachments[0],
+            &adapter,
+            1024,
+        )
+        .await
+        .unwrap();
+        assert_eq!(fetched.bytes.as_ref(), b"receipt bytes");
+        assert_eq!(
+            provider
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .filter(|request| request.method == "GET")
+                .count(),
+            1
+        );
+    }
     server.abort();
 }

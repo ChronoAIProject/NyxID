@@ -60,18 +60,13 @@ pub fn post_from_raw(raw: &serde_json::Value, bot_open_id: Option<&str>) -> Opti
     )
 }
 
-pub fn embedded_attachments(
-    platform: &str,
+fn embedded_attachments(
+    base_url: &str,
     raw: &serde_json::Value,
     message_id: &str,
 ) -> (Vec<crate::models::channel_message::StoredAttachment>, usize) {
     let Some(post) = post_from_raw(raw, None) else {
         return (Vec::new(), 0);
-    };
-    let base = if platform == "feishu" {
-        "https://open.feishu.cn"
-    } else {
-        "https://open.larksuite.com"
     };
     let items = post
         .attachments
@@ -81,7 +76,7 @@ pub fn embedded_attachments(
             let key = item.image_key.as_deref().or(item.file_key.as_deref());
             if let Some(key) = key {
                 item.provider_ref = lark_resource_url(
-                    base,
+                    base_url,
                     message_id,
                     key,
                     if item.content_type == "image" {
@@ -655,6 +650,9 @@ fn parse_message_event(
     let attachments =
         extract_attachments(base_url, message_id, message_type, parsed_content.as_ref());
 
+    let (embedded_attachments, embedded_attachments_omitted) =
+        embedded_attachments(base_url, &raw, message_id);
+
     let sender = event.get("sender");
     let sender_id = sender
         .and_then(|s| s.get("sender_id"))
@@ -680,6 +678,8 @@ fn parse_message_event(
         .map(String::from);
 
     Some(InboundMessage {
+        embedded_attachments,
+        embedded_attachments_omitted,
         platform_message_id: message_id.to_string(),
         conversation_id: chat_id.to_string(),
         conversation_type: map_conversation_type(chat_type).to_string(),
@@ -735,6 +735,8 @@ fn parse_card_action_event(
         .map(String::from);
 
     Some(InboundMessage {
+        embedded_attachments: Vec::new(),
+        embedded_attachments_omitted: 0,
         platform_message_id: header.get("event_id").and_then(|v| v.as_str())?.to_string(),
         conversation_id: chat_id.to_string(),
         conversation_type: map_conversation_type(chat_type).to_string(),

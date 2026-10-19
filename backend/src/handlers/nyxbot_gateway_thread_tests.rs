@@ -167,6 +167,8 @@ impl Fixture {
             ..Default::default()
         };
         let inbound = InboundMessage {
+            embedded_attachments: Vec::new(),
+            embedded_attachments_omitted: 0,
             platform_message_id: native,
             conversation_id: "oc_chat".into(),
             conversation_type: "group".into(),

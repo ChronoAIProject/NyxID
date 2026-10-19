@@ -97,6 +97,8 @@ impl PlatformAdapter for OpenClawAdapter {
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
         let inbound = InboundMessage {
+            embedded_attachments: Vec::new(),
+            embedded_attachments_omitted: 0,
             platform_message_id: message_id,
             conversation_id: msg.channel_user_id.clone(),
             conversation_type: "private".to_string(),

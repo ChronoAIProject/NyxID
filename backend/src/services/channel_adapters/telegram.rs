@@ -343,6 +343,8 @@ fn parse_message(msg: &serde_json::Value, raw: serde_json::Value) -> Option<Inbo
     let attachments = extract_attachments(msg);
 
     Some(InboundMessage {
+        embedded_attachments: Vec::new(),
+        embedded_attachments_omitted: 0,
         platform_message_id: message_id.to_string(),
         conversation_id: chat_id.to_string(),
         conversation_type: map_conversation_type(chat_type).to_string(),
