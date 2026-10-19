@@ -3022,11 +3022,7 @@ mod tests {
             .unwrap();
         assert!(replaced.owner.is_none());
     }
-}
 
-#[cfg(test)]
-mod channel_media_flags_tests {
-    use super::*;
     #[test]
     fn channel_media_and_attachment_writes_are_registered_default_off() {
         for key in [
