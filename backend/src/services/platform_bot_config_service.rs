@@ -961,6 +961,20 @@ mod tests {
 
     #[tokio::test]
     async fn platform_onboarding_conversion_rejects_foreign_funding_and_pending_transport() {
+        let (basic, admin, _, basic_bot) = fixture("platform_convert_basic_admin").await;
+        basic
+            .db
+            .collection::<Document>(crate::models::org_membership::COLLECTION_NAME)
+            .delete_many(doc! {"member_user_id":&admin})
+            .await
+            .unwrap();
+        let basic_profile = convert(&basic.db, &admin, &basic_bot, &admin)
+            .await
+            .unwrap();
+        assert!(!basic_profile.enabled);
+        assert_eq!(basic_profile.funding_owner_user_id, admin);
+        basic.db.drop().await.unwrap();
+
         let (state, actor, funding, bot) = fixture("platform_convert_authority").await;
         let foreign =
             super::super::org_service::create_org_user(&state.db, "Foreign funding", None, None)
@@ -971,8 +985,18 @@ mod tests {
             convert(&state.db, &actor, &bot, &foreign).await,
             Err(AppError::Forbidden(_))
         ));
+        let foreign_person = uuid::Uuid::new_v4().to_string();
+        state
+            .db
+            .collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+            .insert_one(crate::test_utils::test_user(
+                &foreign_person,
+                crate::models::user::UserType::Person,
+            ))
+            .await
+            .unwrap();
         assert!(matches!(
-            convert(&state.db, &actor, &bot, &actor).await,
+            convert(&state.db, &actor, &bot, &foreign_person).await,
             Err(AppError::ValidationError(_))
         ));
         let channels = state

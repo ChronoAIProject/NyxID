@@ -418,6 +418,11 @@ fn classify(
                     .get("subtype")
                     .is_some_and(|value| value != "file_share")
                 || native.get("bot_id").is_some()
+                || native["attachments"].as_array().is_some_and(|attachments| {
+                    attachments
+                        .iter()
+                        .any(|attachment| attachment["is_msg_unfurl"] == true)
+                })
                 || !no_forwarding(native)
             {
                 return Err(refused());
