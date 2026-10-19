@@ -2986,14 +2986,7 @@ async fn start_chat_turn(
     )
     .await?;
     let (declared, media_event_ids, media_sent_at) =
-        crate::services::channel_media_events::for_turn(
-            &state.db,
-            row,
-            event_key,
-            chat.platform_chat_id.as_deref().unwrap_or_default(),
-            sender.id,
-        )
-        .await?;
+        crate::services::channel_media_events::for_turn(&state.db, row, event_key).await?;
     let had_media = declared > 0;
     if text.trim().is_empty() && !had_media {
         return Ok(Inbound::Silent);

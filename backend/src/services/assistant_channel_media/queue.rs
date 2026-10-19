@@ -6,12 +6,18 @@ use chrono::{DateTime, Utc};
 use futures::TryStreamExt;
 use mongodb::{ClientSession, options::ReturnDocument};
 
+pub enum NoticeReason {
+    Expired,
+    Revoked,
+}
+
 pub async fn notice_in_session(
     db: &Database,
     session: &mut ClientSession,
     user: &str,
     conversation: &str,
     event: &AgentEvent,
+    reason: NoticeReason,
 ) -> AppResult<()> {
     let key =
         doc! {"user_id":user,"conversation_id":conversation,"media_queue_notice_id":&event.id};
@@ -43,8 +49,12 @@ pub async fn notice_in_session(
         .unwrap_or(event.created_at)
         .format("%H:%M");
     let quoted: String = event.text.chars().take(3000).collect();
+    let reason = match reason {
+        NoticeReason::Expired => "expired before it could be processed",
+        NoticeReason::Revoked => "could no longer be processed",
+    };
     let text = format!(
-        "a photo sent at {sent} UTC expired before it could be processed; please resend\n\nQuoted history (not a new request):\n> {}",
+        "a photo sent at {sent} UTC {reason}; please resend\n\nQuoted history (not a new request):\n> {}",
         quoted.replace('\n', "\n> ")
     );
     messages.update_one(key,doc! {"$setOnInsert":{
@@ -73,7 +83,7 @@ pub async fn convert_queued(db: &Database, before: DateTime<Utc>) -> AppResult<u
                     .session(&mut *session).await? else {return Ok(0)};
                 let mut count = 0;
                 for event in current.pending_events.iter().filter(|e|!e.media_event_ids.is_empty() && e.media_sent_at.unwrap_or(e.created_at)<=before).take(50) {
-                    notice_in_session(db,session,&row.user_id,&row.id,event).await?;
+                    notice_in_session(db,session,&row.user_id,&row.id,event,NoticeReason::Expired).await?;
                     // Project the terminal class before removing the queue's
                     // durable evidence, in the same transaction as the notice.
                     let mut receipt = MediaBound {

@@ -877,7 +877,21 @@ async fn original_route_revocation_prunes_only_that_source_before_event_executio
             .replace_one(doc! {"_id": &b.id}, &b)
             .await
             .unwrap();
-        assert!(queue(&f, &a, "same route question").await);
+        let mut media_work = work(&a, "same route question");
+        media_work.media_event_ids = vec![a.id.clone()];
+        media_work.media_declared = Some(1);
+        media_work.media_sent_at = Some(a.created_at);
+        let notice_id = media_work.id.clone();
+        assert!(
+            delivery::enqueue(
+                &f.state.db,
+                OWNER,
+                f.event.conversation_id.as_deref().unwrap(),
+                media_work,
+            )
+            .await
+            .unwrap()
+        );
         assert!(queue(&f, &b, "same route question").await);
         let routes = f.state.db.collection::<bson::Document>(ROUTES);
         let route_id = f.channel.route_id.as_deref().unwrap();
@@ -945,6 +959,37 @@ async fn original_route_revocation_prunes_only_that_source_before_event_executio
         );
         assert_eq!(record(&f, &a.id).await.status, "refused", "{change}");
         assert!(record(&f, &a.id).await.turn_id.is_none(), "{change}");
+        assert!(
+            !active.events[0].media_event_ids.contains(&a.id),
+            "{change}"
+        );
+        let messages = engine::messages(
+            &f.state.db,
+            OWNER,
+            f.event.conversation_id.as_deref().unwrap(),
+            100,
+            None,
+        )
+        .await
+        .unwrap();
+        let notices: Vec<_> = messages
+            .iter()
+            .filter(|message| message.media_queue_notice_id.as_deref() == Some(notice_id.as_str()))
+            .collect();
+        assert_eq!(notices.len(), 1, "{change}");
+        assert!(
+            notices[0]
+                .text
+                .contains("could no longer be processed; please resend"),
+            "{change}"
+        );
+        assert!(!notices[0].text.contains("expired before"), "{change}");
+        assert!(
+            notices[0]
+                .text
+                .contains("Quoted history (not a new request):"),
+            "{change}"
+        );
         assert_eq!(
             record(&f, &b.id).await.turn_id.as_deref(),
             Some(active.turn_id.as_str())

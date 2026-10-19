@@ -1,5 +1,7 @@
 use super::*;
-use crate::models::{channel_bot::ChannelBot, channel_message::ChannelMessage};
+use crate::models::{
+    channel_bot::ChannelBot, channel_message::ChannelMessage, nyxbot_channel::NyxbotEvent,
+};
 
 /// Returns live policy after taking the same fence as stop/settings/allocation.
 /// Queued work ignores subscription expiry only, never sender or agent changes.
@@ -261,12 +263,29 @@ pub async fn filter_events(
                     origins.push(origin);
                 } else {
                     if event.media_event_ids.contains(source) {
+                        use super::super::assistant_channel_media::queue::NoticeReason;
+                        let existing = db
+                            .collection::<NyxbotEvent>(
+                                crate::models::nyxbot_channel::EVENTS_COLLECTION_NAME,
+                            )
+                            .find_one(
+                                doc! {"_id":source,"user_id":owner,"conversation_id":conversation},
+                            )
+                            .session(&mut *session)
+                            .await?;
+                        let reason =
+                            if existing.is_none_or(|source| source.expires_at <= Utc::now()) {
+                                NoticeReason::Expired
+                            } else {
+                                NoticeReason::Revoked
+                            };
                         super::super::assistant_channel_media::queue::notice_in_session(
                             db,
                             session,
                             owner,
                             conversation,
                             &event,
+                            reason,
                         )
                         .await?;
                     }

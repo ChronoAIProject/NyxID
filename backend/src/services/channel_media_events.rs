@@ -31,8 +31,6 @@ pub async fn for_turn(
     db: &Database,
     channel: &crate::models::nyxbot_channel::NyxbotChannel,
     event_key: &str,
-    chat: &str,
-    sender: &str,
 ) -> AppResult<(usize, Vec<String>, Option<chrono::DateTime<Utc>>)> {
     let Some(event) = db
         .collection::<NyxbotEvent>(EVENTS)
@@ -51,7 +49,6 @@ pub async fn for_turn(
         .as_ref()
         .map(|_| vec![event.id])
         .unwrap_or_default();
-    let _ = (chat, sender);
     Ok((declared, ids, Some(event.created_at)))
 }
 
