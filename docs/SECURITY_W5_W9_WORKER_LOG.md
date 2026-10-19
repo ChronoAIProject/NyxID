@@ -1522,3 +1522,34 @@ The eventual local commit contains only these two test blobs plus this log on
 the formatting parent. The4,293-entry graph belongs to isolated generated229;
 it is not asserted equal the branch tip. Full hosted Linux CLI/workspace,
 modern reader/writers, W9 runtime/migration/OS and release gates remain open.
+
+## Main c171 shared health fixture compatibility
+
+Main c171 independently added the same typed channel-bot health fixture at the
+local insertion point. The candidate aligns that shared block with upstream and
+keeps the narrower effective channel-bot route scope through an early guard.
+Unrelated health paths retain their original empty object; conversation health
+paths retain their original empty conversations response. No production code or
+policy fixture is changed.
+
+A one-file temporary commit on a8bed merges with c171 using merge-tree exit0.
+The preview fixture equals the candidate. Its merged X spec retains the accepted
+production-policy import and all three upstream health-unavailable assertions.
+No branch, real index or working-source merge was performed.
+
+On that isolated preview, three actual Zod health parses and17 exact original
+route/fallback comparisons pass. Scoped ESLint passes. All32 listed tests in the
+complete X, WhatsApp and standalone setup browser files pass with zero failures,
+skips or retries. Four command/log pairs have identical4,309 recorded input path
+maps before, after and current. These are Vite Chromium fixture integration
+checks; production CSP/build and full frontend/backend acceptance remain separate.
+
+PM separately bound upstream scheduler heap-pinning changes to actual native
+generated43, whose entire tree equals c171: selected scheduler passes in both
+backend and coverage; full counts9481/0/8ignored and9497/0/10startup skips remain
+attributed to upstream. Original generated229 abort and external diagnostic plan
+are retained; the unused diagnostic is retired without execution. The twelve
+other fresh generated229 backend failures remain open and distinct from old54.
+
+Evidence: w9-health-fixture-c171-v1/final-handoff.json. The local commit contains
+only this shared fixture and log on a8bed; broader W9 and unrelated WIP excluded.
