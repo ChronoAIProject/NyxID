@@ -1235,3 +1235,13 @@ mod tests {
         assert!(restored.metadata.is_some());
     }
 }
+
+/// Server-authored shared-bot text must preserve proof bytes and avoid previews.
+pub(crate) fn shared_plain_text(reply: &OutboundReply) -> bool {
+    reply
+        .metadata
+        .as_ref()
+        .and_then(|value| value.get("shared_plain_text"))
+        .and_then(serde_json::Value::as_bool)
+        == Some(true)
+}

@@ -50,11 +50,13 @@ pub struct ManagerResponse {
     pub id: String,
     pub username: Option<String>,
     pub display_name: String,
+    pub platform: String,
 }
 #[derive(Serialize)]
 pub struct SenderResponse {
     pub id: String,
     pub display_name: Option<String>,
+    pub conversation_id: String,
 }
 #[derive(Serialize)]
 pub struct PreviewResponse {
@@ -74,6 +76,7 @@ pub struct AccountResponse {
 #[derive(Serialize)]
 pub struct Disclosures {
     pub telegram_transport: bool,
+    pub channel_transport: bool,
     pub existing_nyxbot_access: bool,
     pub can_approve_sensitive_actions: bool,
     pub started_work_may_continue_after_unlink: bool,
@@ -116,21 +119,26 @@ async fn manager(
     manager_bot_id: &str,
     required: bool,
 ) -> AppResult<ManagerResponse> {
-    if let Some(display) = bindings::manager_display(db, profile_id, manager_bot_id).await? {
-        return Ok(ManagerResponse {
-            id: profile_id.to_owned(),
-            display_name: format!("@{}", display.username),
-            username: Some(display.username),
-        });
-    }
-    if required {
-        return Err(bindings::unavailable());
-    }
-    // Retired inventory can still identify its exact historical bot numerically.
+    let display =
+        bindings::manager_inventory_display(db, profile_id, manager_bot_id, required).await?;
     Ok(ManagerResponse {
-        id: profile_id.to_owned(),
-        username: None,
-        display_name: format!("Telegram bot {manager_bot_id}"),
+        id: profile_id.into(),
+        platform: display.platform,
+        username: display.username,
+        display_name: display.display_name,
+    })
+}
+async fn sender(
+    db: &mongodb::Database,
+    profile: &str,
+    manager_id: &str,
+    id: i64,
+) -> AppResult<SenderResponse> {
+    let display = bindings::sender_display(db, profile, manager_id, id).await?;
+    Ok(SenderResponse {
+        id: display.id,
+        display_name: display.display_name,
+        conversation_id: display.conversation_id,
     })
 }
 fn project_status(row: PlatformLinkChallenge) -> StatusResponse {
@@ -190,10 +198,13 @@ pub async fn preview(
                 true,
             )
             .await?,
-            sender: SenderResponse {
-                id: row.telegram_sender_id.to_string(),
-                display_name: None,
-            },
+            sender: sender(
+                &state.db,
+                &row.platform_config_id,
+                &row.manager_bot_id,
+                row.telegram_sender_id,
+            )
+            .await?,
             expires_at: row.expires_at.to_rfc3339(),
             invitation_required: crate::services::feature_flag_service::invitation_code_required(
                 &state.db,
@@ -243,7 +254,8 @@ pub async fn review(
             billing: "personal",
             replaces_existing_binding: replaces,
             disclosures: Disclosures {
-                telegram_transport: true,
+                telegram_transport: !row.manager_bot_id.starts_with("channel:"),
+                channel_transport: true,
                 existing_nyxbot_access: true,
                 can_approve_sensitive_actions: true,
                 started_work_may_continue_after_unlink: true,
@@ -267,8 +279,14 @@ pub async fn approve(
         input.replace_existing,
     )
     .await?;
+    let manager = result.challenge.manager_bot_id.clone();
     let mut response = project_status(result.challenge);
-    response.confirmation_command = result.confirmation_command;
+    response.confirmation_command = result.confirmation_command.map(|command| {
+        Zeroizing::new(crate::services::platform_channel_service::format_controls(
+            &manager,
+            command.to_string(),
+        ))
+    });
     Ok((private_headers(), Json(response)))
 }
 
@@ -363,10 +381,13 @@ pub async fn list(
             id: row.id,
             generation: row.generation,
             manager: display,
-            sender: SenderResponse {
-                id: row.telegram_sender_id.to_string(),
-                display_name: None,
-            },
+            sender: sender(
+                &state.db,
+                &row.platform_config_id,
+                &row.manager_bot_id,
+                row.telegram_sender_id,
+            )
+            .await?,
             state: row.state,
             conversation_id: row.conversation_id,
             consented_at: row.consented_at.to_rfc3339(),

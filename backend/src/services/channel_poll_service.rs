@@ -15,10 +15,14 @@ use crate::models::channel_bot::{COLLECTION_NAME, ChannelBot};
 const LEASE_SECS: i64 = 90;
 pub const ERROR_THRESHOLD: u32 = 5;
 
-pub async fn sweep(state: &crate::AppState) -> AppResult<()> {
-    sweep_with_adapters(
+pub async fn sweep(
+    state: &crate::AppState,
+    producers: std::sync::Arc<super::platform_manager_contract::PlatformManagerProducers>,
+) -> AppResult<()> {
+    sweep_with_producers(
         state,
         super::channel_adapters::registered_adapters(&state.token_exchange_cache),
+        Some(producers),
     )
     .await
 }
@@ -26,6 +30,14 @@ pub async fn sweep(state: &crate::AppState) -> AppResult<()> {
 pub(crate) async fn sweep_with_adapters(
     state: &crate::AppState,
     adapters: Vec<Box<dyn PlatformAdapter>>,
+) -> AppResult<()> {
+    sweep_with_producers(state, adapters, None).await
+}
+
+async fn sweep_with_producers(
+    state: &crate::AppState,
+    adapters: Vec<Box<dyn PlatformAdapter>>,
+    producers: Option<std::sync::Arc<super::platform_manager_contract::PlatformManagerProducers>>,
 ) -> AppResult<()> {
     for adapter in adapters {
         let Ingestion::Poll { min_interval_secs } = adapter.ingestion() else {
@@ -44,12 +56,21 @@ pub(crate) async fn sweep_with_adapters(
             .await?;
         let adapter = adapter.as_ref();
         stream::iter(bots)
-            .for_each_concurrent(8, |bot| async move {
-                if poll_bot(state, adapter, &bot.id, min_interval_secs)
+            .for_each_concurrent(8, |bot| {
+                let producers = producers.clone();
+                async move {
+                    if poll_bot_with_producers(
+                        state,
+                        adapter,
+                        &bot.id,
+                        min_interval_secs,
+                        producers.clone(),
+                    )
                     .await
                     .is_err()
-                {
-                    tracing::warn!(bot_id = %bot.id, "Channel poll failed; continuing sweep");
+                    {
+                        tracing::warn!(bot_id = %bot.id, "Channel poll failed; continuing sweep");
+                    }
                 }
             })
             .await;
@@ -78,6 +99,16 @@ pub(crate) async fn poll_bot(
     adapter: &dyn PlatformAdapter,
     bot_id: &str,
     min_interval_secs: u64,
+) -> AppResult<()> {
+    poll_bot_with_producers(state, adapter, bot_id, min_interval_secs, None).await
+}
+
+async fn poll_bot_with_producers(
+    state: &crate::AppState,
+    adapter: &dyn PlatformAdapter,
+    bot_id: &str,
+    min_interval_secs: u64,
+    producers: Option<std::sync::Arc<super::platform_manager_contract::PlatformManagerProducers>>,
 ) -> AppResult<()> {
     let collection = state.db.collection::<ChannelBot>(COLLECTION_NAME);
     let mut filter = due_filter(adapter.platform_id(), min_interval_secs, Utc::now());
@@ -122,14 +153,21 @@ pub(crate) async fn poll_bot(
         let outcome = adapter
             .poll_inbound(&state.http_client, &credentials, bot.poll_cursor.as_deref())
             .await?;
-        let complete =
-            process_inbound_messages(InboundDeps::from(state), &bot, adapter, &outcome.messages)
-                .await
-                .map_err(|_| {
-                    AppError::ChannelPlatformError(
-                        "Inbound channel processing failed; the cursor was retained".to_string(),
-                    )
-                })?;
+        let complete = process_inbound_messages(
+            InboundDeps {
+                platform_manager: producers.clone().map(|producer| (state, producer)),
+                ..InboundDeps::from(state)
+            },
+            &bot,
+            adapter,
+            &outcome.messages,
+        )
+        .await
+        .map_err(|_| {
+            AppError::ChannelPlatformError(
+                "Inbound channel processing failed; the cursor was retained".to_string(),
+            )
+        })?;
         if !complete {
             return Err(AppError::ChannelPlatformError(
                 "Inbound channel processing failed; the cursor was retained".to_string(),

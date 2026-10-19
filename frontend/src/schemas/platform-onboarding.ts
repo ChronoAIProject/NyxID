@@ -144,6 +144,8 @@ export const platformProfileSchema = z.object({
   id: z.uuid(),
   channel_bot_id: z.uuid(),
   manager_bot_id: z.string(),
+  platform: z.string().optional(),
+  display_name: z.string().optional(),
   execution_profile: z.literal("platform_onboarding"),
   generation: z.number().int(),
   enabled: z.boolean(),

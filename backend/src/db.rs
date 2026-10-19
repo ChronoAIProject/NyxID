@@ -260,6 +260,7 @@ async fn ensure_core_indexes(db: &Database) -> Result<(), mongodb::error::Error>
     crate::services::coordination_service::ensure_indexes(db).await?;
     crate::services::service_concurrency_service::ensure_indexes(db).await?;
     crate::services::platform_bot_config_service::ensure_indexes(db).await?;
+    crate::services::platform_channel_service::ensure_indexes(db).await?;
     crate::services::platform_setup_service::ensure_indexes(db).await?;
     crate::services::platform_binding_service::ensure_indexes(db).await?;
     crate::services::platform_bot_runtime_control_service::ensure_indexes(db).await?;

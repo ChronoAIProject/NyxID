@@ -129,6 +129,7 @@ impl Journey {
         .unwrap();
         let now = Utc::now();
         let profile = PlatformBotConfig {
+            channel_transport: None,
             id: uuid::Uuid::new_v4().to_string(),
             channel_bot_id: bot.id.clone(),
             manager_bot_id: "100".into(),
@@ -174,6 +175,8 @@ impl Journey {
                 public_policy_revision: 1,
                 personal_enabled: true,
                 public_enabled: false,
+                resume_personal_enabled: None,
+                resume_public_enabled: None,
                 emergency_stopped: false,
                 retired: false,
                 public_policy: None,
@@ -1531,4 +1534,606 @@ async fn pending_action_renderer_uses_exact_turn_key_routing_and_unique_codes() 
         .is_err()
     );
     assert_eq!(j.sends().await.len(), 2);
+}
+
+#[tokio::test]
+async fn faq_admission_is_recoverable_without_question_retention_or_a_personal_turn() {
+    let j = Journey::new().await;
+    let db = &j.state.db;
+    db.collection::<Document>(crate::models::platform_bot_runtime_controls::COLLECTION_NAME)
+        .update_one(
+            doc! {"platform_config_id":&j.profile.id},
+            doc! {"$set":{"public_enabled":true}},
+        )
+        .await
+        .unwrap();
+    let raw = j.update(900, "/faq login private question must not persist", false);
+    let verified =
+        dispatch::verified_message(&j.profile.id, "100", 100, &j.profile.observation_id, &raw)
+            .unwrap();
+    let admitted = dispatch::admit_text_update(
+        db,
+        j.producers.identity.as_ref(),
+        &verified,
+        "/faq login private question must not persist",
+        true,
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        admitted,
+        IngressAdmission::Claimed {
+            audience: ManagerAudience::Public(_),
+            ..
+        }
+    ));
+    // Simulated process loss here: no deliver_faq call occurred after admission.
+    let pending = db
+        .collection::<Document>(crate::models::platform_manager_delivery::COLLECTION_NAME)
+        .find_one(doc! {"state":"pending"})
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!format!("{pending:?}").contains("private question"));
+    assert!(
+        pending
+            .get_document("reference")
+            .unwrap()
+            .get_array("article_ids")
+            .is_ok()
+    );
+    assert!(matches!(
+        dispatch::admit_text_update(
+            db,
+            j.producers.identity.as_ref(),
+            &verified,
+            "different input on retry",
+            true
+        )
+        .await
+        .unwrap(),
+        IngressAdmission::Duplicate { .. }
+    ));
+    let base = j.server.uri();
+    delivery::sweep_with_api(
+        &j.state,
+        j.producers.identity.clone(),
+        j.producers.public.clone(),
+        100,
+        &super::super::telegram_new_api::TelegramApi {
+            http: &j.state.http_client,
+            base_url: &base,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(j.sends().await.len(), 1);
+    let body = j.sends().await[0]["text"].as_str().unwrap().to_string();
+    assert!(body.contains("NyxID"));
+    assert!(!body.contains("private question"));
+    delivery::sweep_with_api(
+        &j.state,
+        j.producers.identity.clone(),
+        j.producers.public.clone(),
+        100,
+        &super::super::telegram_new_api::TelegramApi {
+            http: &j.state.http_client,
+            base_url: &base,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(j.sends().await.len(), 1);
+    assert_eq!(j.egress.0.load(Ordering::SeqCst), 0);
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn faq_delivery_uses_admitted_modes_and_content_but_refuses_later_drift() {
+    let j = Journey::new().await;
+    let db = &j.state.db;
+    let controls =
+        db.collection::<Document>(crate::models::platform_bot_runtime_controls::COLLECTION_NAME);
+    controls
+        .update_one(
+            doc! {"platform_config_id":&j.profile.id},
+            doc! {"$set":{"public_enabled":true}},
+        )
+        .await
+        .unwrap();
+    let base = j.server.uri();
+    let api = super::super::telegram_new_api::TelegramApi {
+        http: &j.state.http_client,
+        base_url: &base,
+    };
+    for (id, drift) in [(910, false), (911, true)] {
+        let verified = dispatch::verified_message(
+            &j.profile.id,
+            "100",
+            100,
+            &j.profile.observation_id,
+            &j.update(id, "/faq connect-services private-question-marker", false),
+        )
+        .unwrap();
+        let admission = dispatch::admit_text_update(
+            db,
+            j.producers.identity.as_ref(),
+            &verified,
+            "/faq connect-services private-question-marker",
+            true,
+        )
+        .await
+        .unwrap();
+        let IngressAdmission::Claimed {
+            audience: ManagerAudience::Public(public),
+            ..
+        } = admission
+        else {
+            panic!("expected public FAQ");
+        };
+        if drift {
+            controls
+                .update_one(
+                    doc! {"platform_config_id":&j.profile.id},
+                    doc! {"$set":{"personal_enabled":false}},
+                )
+                .await
+                .unwrap();
+        }
+        // The dispatch caller has stale mode/content flags; the stored reference wins.
+        let outcome = delivery::deliver_faq(
+            &j.state,
+            j.producers.identity.clone(),
+            &public,
+            "/faq unlink",
+            true,
+            false,
+            &api,
+        )
+        .await
+        .unwrap();
+        if drift {
+            assert!(matches!(outcome, DeliveryOutcome::Refused(_)));
+        } else {
+            assert!(matches!(outcome, DeliveryOutcome::Sent { .. }));
+            let sends = j.sends().await;
+            let body = sends[0]["text"].as_str().unwrap();
+            assert!(body.contains("Connecting services"));
+            assert!(body.contains("If this conversation is already linked"));
+            assert!(!body.contains("private-question-marker"));
+            assert!(matches!(
+                delivery::deliver_faq(
+                    &j.state,
+                    j.producers.identity.clone(),
+                    &public,
+                    "/faq unlink",
+                    true,
+                    false,
+                    &api
+                )
+                .await
+                .unwrap(),
+                DeliveryOutcome::Duplicate
+            ));
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    }
+    assert_eq!(j.sends().await.len(), 1);
+    for name in [
+        crate::models::platform_manager_delivery::COLLECTION_NAME,
+        INGRESS,
+    ] {
+        let rows: Vec<Document> = db
+            .collection::<Document>(name)
+            .find(doc! {})
+            .await
+            .unwrap()
+            .try_collect()
+            .await
+            .unwrap();
+        assert!(!format!("{rows:?}").contains("private-question-marker"));
+    }
+    assert_eq!(j.egress.0.load(Ordering::SeqCst), 0);
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn faq_commands_before_and_after_link_and_faq_only_mode_remain_canonical() {
+    let j = Journey::new().await;
+    let db = &j.state.db;
+    db.collection::<Document>(crate::models::platform_bot_runtime_controls::COLLECTION_NAME)
+        .update_one(
+            doc! {"platform_config_id":&j.profile.id},
+            doc! {"$set":{"public_enabled":true}},
+        )
+        .await
+        .unwrap();
+    for (id, command) in [(800, "/faq"), (801, "/help"), (802, "/start")] {
+        j.webhook(&j.update(id, command, false)).await;
+        assert!(
+            j.sends().await.last().unwrap()["text"]
+                .as_str()
+                .unwrap()
+                .contains("approved public help")
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    }
+    j.link().await;
+    for (id, command) in [(803, "/faq"), (804, "/help"), (805, "/start")] {
+        j.webhook(&j.update(id, command, false)).await;
+        let text = j.sends().await.last().unwrap()["text"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(text.contains("already linked"));
+        assert!(!text.contains("unavailable"));
+        tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    }
+    db.collection::<Document>(crate::models::platform_bot_runtime_controls::COLLECTION_NAME)
+        .update_one(
+            doc! {"platform_config_id":&j.profile.id},
+            doc! {"$set":{"personal_enabled":false}},
+        )
+        .await
+        .unwrap();
+    j.webhook(&j.update(806, "/faq", false)).await;
+    let text = j.sends().await.last().unwrap()["text"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(text.contains("previously linked"));
+    assert!(text.contains("Personal work and linking are paused"));
+    assert_eq!(j.egress.0.load(Ordering::SeqCst), 0);
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    j.webhook(&j.update(807, "Use my personal account", false))
+        .await;
+    assert!(
+        j.sends().await.last().unwrap()["text"]
+            .as_str()
+            .unwrap()
+            .contains("Personal NyxBot is paused")
+    );
+    assert_eq!(j.egress.0.load(Ordering::SeqCst), 0);
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn emergency_pause_consumes_legacy_setup_commands_despite_enabled_profile() {
+    let j = Journey::new().await;
+    j.state
+        .db
+        .collection::<Document>(PROFILES)
+        .update_one(doc! {"_id":&j.profile.id}, doc! {"$set":{"enabled":true}})
+        .await
+        .unwrap();
+    j.state
+        .db
+        .collection::<Document>(crate::models::platform_bot_runtime_controls::COLLECTION_NAME)
+        .update_one(
+            doc! {"platform_config_id":&j.profile.id},
+            doc! {"$set":{"emergency_stopped":true}},
+        )
+        .await
+        .unwrap();
+    let runtime =
+        super::super::platform_bot_runtime_control_service::get(&j.state.db, &j.profile.id)
+            .await
+            .unwrap()
+            .unwrap();
+    let base = j.server.uri();
+    for (id, text) in [
+        (930, "/onboarding"),
+        (931, "/setups"),
+        (932, "/confirm 1234-5678"),
+    ] {
+        let verified = dispatch::verified_message(
+            &j.profile.id,
+            "100",
+            100,
+            &j.profile.observation_id,
+            &j.update(id, text, false),
+        )
+        .unwrap();
+        assert!(
+            dispatch_verified_input(
+                &j.state,
+                j.producers.clone(),
+                &runtime,
+                verified,
+                "manager_bot",
+                text,
+                &super::super::telegram_new_api::TelegramApi {
+                    http: &j.state.http_client,
+                    base_url: &base
+                },
+                true,
+                true
+            )
+            .await
+            .unwrap()
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    }
+    assert_eq!(j.egress.0.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        j.state
+            .db
+            .collection::<Document>(crate::models::platform_personal_binding::COLLECTION_NAME)
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        0
+    );
+    j.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn discord_chat_option_cannot_execute_controls_or_explicit_faq() {
+    let j = Journey::new().await;
+    j.link().await;
+    j.state
+        .db
+        .collection::<Document>(crate::models::platform_bot_runtime_controls::COLLECTION_NAME)
+        .update_one(
+            doc! {"platform_config_id":&j.profile.id},
+            doc! {"$set":{"public_enabled":true}},
+        )
+        .await
+        .unwrap();
+    let runtime =
+        super::super::platform_bot_runtime_control_service::get(&j.state.db, &j.profile.id)
+            .await
+            .unwrap()
+            .unwrap();
+    let base = j.server.uri();
+    for (id, text) in [
+        (920, "/unlink"),
+        (921, "/confirm P-ABCD-EFGH"),
+        (922, "/faq login"),
+    ] {
+        let update = dispatch::verified_message(
+            &j.profile.id,
+            "100",
+            100,
+            &j.profile.observation_id,
+            &j.update(id, text, false),
+        )
+        .unwrap();
+        dispatch_verified_input(
+            &j.state,
+            j.producers.clone(),
+            &runtime,
+            update,
+            "manager_bot",
+            text,
+            &super::super::telegram_new_api::TelegramApi {
+                http: &j.state.http_client,
+                base_url: &base,
+            },
+            false,
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            j.state
+                .db
+                .collection::<PlatformPersonalBinding>(
+                    crate::models::platform_personal_binding::COLLECTION_NAME
+                )
+                .count_documents(doc! {"state":"active"})
+                .await
+                .unwrap(),
+            1
+        );
+        let sent = j.sends().await;
+        let body = sent.last().unwrap()["text"].as_str().unwrap();
+        assert!(body.contains("Attachments and other commands are unsupported"));
+        assert!(!body.contains("P-ABCD-EFGH"));
+        tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    }
+    assert_eq!(j.egress.0.load(Ordering::SeqCst), 0);
+    j.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn signed_slack_service_journey_consent_proof_personal_execution_and_delivery() {
+    use crate::models::channel_bot::ChannelBot;
+    use crate::services::{
+        channel_adapters::slack::SlackAdapter,
+        channel_platform::{PlatformAdapter, PlatformVerifySecrets},
+        platform_channel_service as channels,
+        platform_link_intent_service::tests as proofs,
+    };
+    use hmac::{Hmac, Mac};
+    let mut j = Journey::new().await;
+    channels::ensure_indexes(&j.state.db).await.unwrap();
+    let db = &j.state.db;
+    let mut bot = db
+        .collection::<ChannelBot>(crate::models::channel_bot::COLLECTION_NAME)
+        .find_one(doc! {"_id":&j.profile.channel_bot_id})
+        .await
+        .unwrap()
+        .unwrap();
+    bot.platform = "slack".into();
+    bot.platform_bot_id = "B1".into();
+    bot.credential_source = "user".into();
+    bot.status = "active".into();
+    bot.bot_token_encrypted = j
+        .state
+        .encryption_keys
+        .encrypt(b"local-bot-token")
+        .await
+        .unwrap();
+    db.collection::<ChannelBot>(crate::models::channel_bot::COLLECTION_NAME)
+        .replace_one(doc! {"_id":&bot.id}, &bot)
+        .await
+        .unwrap();
+    db.collection::<Document>(crate::models::channel_bot::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id":&bot.id},
+            doc! {"$set":{"platform_profile_id":&j.profile.id}},
+        )
+        .await
+        .unwrap();
+    j.profile.manager_bot_id = format!("channel:slack:{}", bot.id);
+    let mut session = db.client().start_session().await.unwrap();
+    j.profile.channel_transport = Some(
+        crate::models::platform_bot_config::PlatformChannelTransport {
+            platform: "slack".into(),
+            platform_bot_id: bot.platform_bot_id.clone(),
+            owner_user_id: j.owner.clone(),
+            ownership_version: bot.ownership_version,
+            authority_id: 5678,
+            credential_stamp: channels::credential_stamp(db, &mut session, &bot, false)
+                .await
+                .unwrap(),
+        },
+    );
+    db.collection::<PlatformBotConfig>(PROFILES)
+        .replace_one(doc! {"_id":&j.profile.id}, &j.profile)
+        .await
+        .unwrap();
+    db.collection::<Document>(crate::models::platform_bot_runtime_controls::COLLECTION_NAME)
+        .update_one(
+            doc! {"platform_config_id":&j.profile.id},
+            doc! {"$set":{"manager_bot_id":&j.profile.manager_bot_id,"telegram_bot_id":5678_i64}},
+        )
+        .await
+        .unwrap();
+    let adapter = SlackAdapter::new();
+    let secrets = PlatformVerifySecrets::from([("app_secret", "local-signing-material")]);
+    let signed = |id: &str, text: &str, chat: &str| {
+        let body=serde_json::to_vec(&json!({"type":"event_callback","event_id":id,"event":{"type":"message","channel_type":"im","channel":chat,"user":"U1","text":text,"ts":id}})).unwrap();
+        let timestamp = Utc::now().timestamp().to_string();
+        let mut mac = Hmac::<sha2::Sha256>::new_from_slice(b"local-signing-material").unwrap();
+        mac.update(format!("v0:{timestamp}:").as_bytes());
+        mac.update(&body);
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("x-slack-request-timestamp", timestamp.parse().unwrap());
+        headers.insert(
+            "x-slack-signature",
+            format!("v0={}", hex::encode(mac.finalize().into_bytes()))
+                .parse()
+                .unwrap(),
+        );
+        (body, headers)
+    };
+    let (body, headers) = signed("1.0", "link", "D1");
+    assert!(
+        adapter
+            .verify_webhook(&bot, Some(&secrets), &headers, b"tampered")
+            .await
+            .is_err()
+    );
+    adapter
+        .verify_webhook(&bot, Some(&secrets), &headers, &body)
+        .await
+        .unwrap();
+    let parsed = adapter.parse_inbound(&body).await.unwrap();
+    let first = channels::verified_input(db, &j.profile, &parsed[0])
+        .await
+        .unwrap();
+    let code = proofs::consent_code(db, &first, &j.owner, "signed-slack").await;
+    let (body, headers) = signed("2.0", &format!("confirm {code}"), "D1");
+    adapter
+        .verify_webhook(&bot, Some(&secrets), &headers, &body)
+        .await
+        .unwrap();
+    let parsed = adapter.parse_inbound(&body).await.unwrap();
+    let confirmed = channels::verified_input(db, &j.profile, &parsed[0])
+        .await
+        .unwrap();
+    proofs::confirm_code(db, &confirmed, &code).await.unwrap();
+    let (body, headers) = signed("3.0", "hello from my linked private conversation", "D1");
+    adapter
+        .verify_webhook(&bot, Some(&secrets), &headers, &body)
+        .await
+        .unwrap();
+    let parsed = adapter.parse_inbound(&body).await.unwrap();
+    let verified = channels::verified_input(db, &j.profile, &parsed[0])
+        .await
+        .unwrap();
+    let admission = dispatch::admit_manager_update(db, j.producers.identity.as_ref(), &verified)
+        .await
+        .unwrap();
+    let IngressAdmission::Claimed {
+        audience: ManagerAudience::Personal(admitted),
+        ..
+    } = admission
+    else {
+        panic!("expected personal admission")
+    };
+    let (events, mut receiver) = tokio::sync::mpsc::channel(16);
+    let started = j
+        .producers
+        .personal
+        .start_personal_turn(
+            db,
+            &admitted,
+            TurnInput {
+                text: parsed[0].text.clone().unwrap(),
+            },
+            events,
+        )
+        .await
+        .unwrap();
+    let PersonalTurnStart::Started { destination, .. } = started else {
+        panic!("expected personal execution")
+    };
+    let reply = loop {
+        let event = tokio::time::timeout(std::time::Duration::from_secs(20), receiver.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        if let ExecutionEvent::ReplyReady(reply) = event {
+            break reply;
+        }
+    };
+    let saved = db
+        .collection::<AssistantMessage>(MESSAGES)
+        .find_one(doc! {"_id":&reply.reply_id})
+        .await
+        .unwrap()
+        .unwrap();
+    let origin = saved.platform_origin.as_ref().unwrap();
+    assert_eq!(origin.thread.platform, "slack");
+    assert_eq!(
+        super::super::platform_personal_turn_service::contract_origin(origin)
+            .unwrap()
+            .authority
+            .user_id,
+        j.owner
+    );
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat.postMessage"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok":true,"ts":"out.1"})))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let outcome = delivery::deliver_channel_with_test_adapter(
+        &j.state,
+        j.producers.identity.clone(),
+        &destination,
+        &reply,
+        Box::new(SlackAdapter::media_test_adapter(&server.uri())),
+    )
+    .await
+    .unwrap();
+    assert!(
+        matches!(outcome,DeliveryOutcome::ChannelSent{message_ids} if message_ids==vec!["out.1"])
+    );
+    let requests = server.received_requests().await.unwrap();
+    let payload: Value = requests[0].body_json().unwrap();
+    assert_eq!(payload["channel"], "D1");
+    assert!(
+        payload["text"]
+            .as_str()
+            .unwrap()
+            .contains("Retained personal answer")
+    );
+    assert_eq!(payload["mrkdwn"], false);
+    assert_eq!(j.egress.0.load(Ordering::SeqCst), 1);
+    db.drop().await.unwrap();
 }

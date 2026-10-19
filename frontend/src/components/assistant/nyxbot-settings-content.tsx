@@ -23,7 +23,10 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { ACCESS_MODE_DESCRIPTION, ACCESS_MODE_LABEL } from "@/lib/assistant/nyxbot-labels";
+import {
+  ACCESS_MODE_DESCRIPTION,
+  ACCESS_MODE_LABEL,
+} from "@/lib/assistant/nyxbot-labels";
 import { ErrorBanner } from "@/components/shared/error-banner";
 import { ChannelBotsManager } from "@/components/assistant/nyxbot-channels";
 import {
@@ -73,14 +76,20 @@ export function NyxBotSettingsContent() {
           <ChannelBotsSection />
         </div>
       </DetailSection>
-      <DetailSection title="Personal Telegram links"><div className="p-5"><PlatformPersonalBindings /></div></DetailSection>
+      <DetailSection title="Linked channels">
+        <div className="p-5">
+          <PlatformPersonalBindings />
+        </div>
+      </DetailSection>
     </section>
   );
 }
 
 function formValues(settings: NyxAgentSettings): NyxAgentSettingsForm {
   return {
-    access_mode: settings.access_mode ?? (settings.skip_destructive_confirmation ? "autopilot" : "nyxmode"),
+    access_mode:
+      settings.access_mode ??
+      (settings.skip_destructive_confirmation ? "autopilot" : "nyxmode"),
     max_auto_continuations: settings.max_auto_continuations ?? 8,
     max_live_subagents: settings.max_live_subagents,
     max_concurrent_subagent_turns: settings.max_concurrent_subagent_turns,
@@ -149,8 +158,8 @@ function SettingsForm({ settings }: { readonly settings: NyxAgentSettings }) {
             <FormItem className="space-y-2 rounded-lg border border-border p-4">
               <FormLabel>Access mode</FormLabel>
               <FormDescription className="text-12">
-                When NyxBot and your specialists ask you before acting. An agent can
-                have its own mode in its details.
+                When NyxBot and your specialists ask you before acting. An agent
+                can have its own mode in its details.
               </FormDescription>
               <Select value={field.value} onValueChange={field.onChange}>
                 <FormControl>
@@ -166,18 +175,24 @@ function SettingsForm({ settings }: { readonly settings: NyxAgentSettings }) {
                   ))}
                 </SelectContent>
               </Select>
-              <p className="text-12 text-muted-foreground">{ACCESS_MODE_DESCRIPTION[mode]}</p>
+              <p className="text-12 text-muted-foreground">
+                {ACCESS_MODE_DESCRIPTION[mode]}
+              </p>
               {mode === "autopilot" ? (
                 <div
                   role="alert"
                   className="flex items-start gap-2 rounded-xl border border-warning/15 bg-warning/[0.04] px-3 py-2.5 text-12 text-warning"
                 >
-                  <AlertTriangle aria-hidden="true" className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                  <AlertTriangle
+                    aria-hidden="true"
+                    className="mt-0.5 h-3.5 w-3.5 shrink-0"
+                  />
                   <span>
-                    Approvals are bypassed: NyxBot deletes keys, channel bots, services and
-                    nodes and changes access without asking you first. Deletions cannot be
-                    undone. Automation, machine, saved-login, publication and service-approval
-                    confirmations are also bypassed and recorded in chat.
+                    Approvals are bypassed: NyxBot deletes keys, channel bots,
+                    services and nodes and changes access without asking you
+                    first. Deletions cannot be undone. Automation, machine,
+                    saved-login, publication and service-approval confirmations
+                    are also bypassed and recorded in chat.
                   </span>
                 </div>
               ) : null}
@@ -262,8 +277,9 @@ function SettingsForm({ settings }: { readonly settings: NyxAgentSettings }) {
             <FormItem className="space-y-2 rounded-lg border border-border p-4">
               <FormLabel>Specialist access requests</FormLabel>
               <FormDescription className="text-12">
-                Only you, and NyxBot for work it assigned or a group it is in, can grant access; specialists
-                cannot grant themselves or each other anything.
+                Only you, and NyxBot for work it assigned or a group it is in,
+                can grant access; specialists cannot grant themselves or each
+                other anything.
               </FormDescription>
               <Select value={field.value} onValueChange={field.onChange}>
                 <FormControl>
@@ -273,7 +289,9 @@ function SettingsForm({ settings }: { readonly settings: NyxAgentSettings }) {
                 </FormControl>
                 <SelectContent>
                   <SelectItem value="denied">Deny requests</SelectItem>
-                  <SelectItem value="routed_to_nyxbot">Route to NyxBot</SelectItem>
+                  <SelectItem value="routed_to_nyxbot">
+                    Route to NyxBot
+                  </SelectItem>
                 </SelectContent>
               </Select>
               <p className="text-12 text-muted-foreground">

@@ -20,6 +20,7 @@ it("distinguishes supported absent runtime, unsupported runtime, and malformed m
     supported: true,
     runtime: null,
     public_readiness: unavailable,
+    state:"setup_incomplete",reason:null,next_action:"enable",platform:"slack",display_name:"Support",connection_url:"/admin/platform-bots",faq_preview:"Approved FAQ",
   };
   expect(managerRuntimeSchema.parse(value).supported).toBe(true);
   expect(

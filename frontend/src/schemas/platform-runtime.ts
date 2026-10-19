@@ -39,7 +39,7 @@ export const publicSetupSchema = z
 export type PublicSetup = z.infer<typeof publicSetupSchema>;
 export const publicReadinessSchema = z
   .object({
-    status: z.enum(["ready", "unavailable"]),
+    status: z.enum(["ready", "faq_ready", "unavailable"]),
     reason: z
       .enum([
         "mode_disabled",
@@ -90,6 +90,7 @@ export type PublicReadiness = z.infer<typeof publicReadinessSchema>;
 export const managerRuntimeSchema = z
   .object({
     contract_version: z.literal(1),
+    profile_generation:z.number().int().nonnegative().optional(),
     supported: z.boolean(),
     runtime: z
       .object({
@@ -99,10 +100,26 @@ export const managerRuntimeSchema = z
         personal_enabled: z.boolean(),
         public_enabled: z.boolean(),
         emergency_stopped: z.boolean(),
+        resume_personal_enabled: z.boolean().nullish(),
+        resume_public_enabled: z.boolean().nullish(),
         public_policy: publicSetupSchema.nullable(),
       })
       .nullable(),
     public_readiness: publicReadinessSchema,
+    state: z.enum([
+      "active",
+      "paused",
+      "setup_incomplete",
+      "connection_repair_required",
+      "retired",
+    ]),
+    reason: z.string().nullable(),
+    next_action: z.string(),
+    platform: z.string(),
+    display_name: z.string(),
+    connection_url: z.string(),
+    faq_preview: z.string(),
+    connection:z.object({status:z.string(),webhook_url:z.string(),credential_source:z.string(),fields:z.array(z.object({name:z.string(),label:z.string(),secret:z.boolean()})),instructions:z.array(z.string())}).nullish(),
   })
   .refine(
     (value) => value.supported || value.runtime === null,

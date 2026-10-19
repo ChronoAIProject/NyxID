@@ -23,7 +23,8 @@ pub(crate) fn model_origin(origin: &contract::PlatformTurnOrigin) -> model::Plat
     let authority = &origin.authority;
     model::PlatformTurnOrigin {
         thread: model::PlatformThread {
-            platform: "telegram".into(),
+            platform: super::platform_channel_service::platform(&authority.manager.manager_bot_id)
+                .into(),
             profile_id: authority.manager.profile_id.clone(),
             manager_bot_id: authority.manager.manager_bot_id.clone(),
             telegram_bot_id: authority.manager.telegram_bot_id,
@@ -55,7 +56,10 @@ pub(crate) fn model_origin(origin: &contract::PlatformTurnOrigin) -> model::Plat
 pub(crate) fn contract_origin(
     origin: &model::PlatformTurnOrigin,
 ) -> AppResult<contract::PlatformTurnOrigin> {
-    if origin.thread.platform != "telegram" {
+    if origin.thread.platform
+        != super::platform_channel_service::platform(&origin.thread.manager_bot_id)
+        || !super::platform_channel_service::supports(&origin.thread.platform)
+    {
         return Err(AppError::AssistantTurnRequired);
     }
     Ok(contract::PlatformTurnOrigin {

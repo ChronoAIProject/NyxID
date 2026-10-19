@@ -18,7 +18,7 @@ fn changed() -> AppError {
 }
 
 /// Compare encrypted material directly in MongoDB; never log this filter.
-fn credential_filter(bot: &ChannelBot) -> AppResult<Document> {
+pub(crate) fn credential_filter(bot: &ChannelBot) -> AppResult<Document> {
     let stored = bson::to_document(bot)
         .map_err(|_| AppError::Internal("Unable to encode bot credentials".into()))?;
     let mut filter = doc! {};

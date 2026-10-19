@@ -964,6 +964,8 @@ mod tests {
             public_policy_revision: row.public_policy_revision,
             personal_enabled: false,
             public_enabled: true,
+            resume_personal_enabled: None,
+            resume_public_enabled: None,
             emergency_stopped: false,
             retired: false,
             public_policy: Some(PublicRuntimePolicy {

@@ -1,136 +1,191 @@
 # Platform BotFather
 
-Platform BotFather is an explicitly opted-in native Telegram onboarding manager.
-It collects a static assistant or restaurant draft, links the private Telegram
-sender to a first-party human account, and provisions only the client-reviewed
-specialist and exact Telegram child. The restaurant template publishes facts,
-FAQ and HTTPS request links; it never confirms a booking, takes payment or grants
-connector/machine access.
+A shared bot serves approved public FAQ answers to visitors. A person can then
+sign in to NyxID, review consent, and prove control of that exact private channel
+conversation to use their existing personal NyxBot. Each platform, bot, sender,
+and private conversation needs its own proof. Signing in alone does not link a
+messaging identity.
 
-## Authority and ownership
+Public FAQ is deterministic: it selects at most two articles from
+`backend/content/platform-public-faq.json`. It uses no language model, private
+context, personal credentials, or tools. Basic setup needs no sponsor
+organization, model discovery, inference budget, or public AI readiness probe.
+The older public NyxAgent contract remains unavailable; selecting its old policy
+does not make a bot ready. Replace that policy with built-in FAQ in the runtime
+controls.
 
-Only live NyxID admins using a first-party human session can discover, convert,
-configure, pause, verify, repair or retire platform profiles. Operators, org-only
-admins and former platform admins cannot use these controls. Ordinary channel
-bot lifecycle and conversation/default setters refuse converted managers.
+## Set up a shared bot
 
-Conversion is durable: paused, retired, missing or unknown claimed profiles stay
-closed to personal routing. Existing `telegram_manager` channels without explicit
-opt-in retain their personal behavior. Converted manager and installation markers
-survive setup/profile retention or deletion. There is no personal-route fallback
-for an opted-in manager or child.
+1. Connect an eligible messaging bot through **Channel bots**. Complete the
+   provider-specific connection setup and deliver a private test message so the
+   connection becomes active.
+2. As a live platform administrator using a first-party human session, open
+   **Admin → Platform bots**. Existing shared bots and their Resume actions are
+   shown before new setup. Select an eligible bot and choose **Prepare shared
+   bot**. Read-only organization bots and already reserved identities are not
+   offered. The bot's existing transport owner remains the billing owner.
+3. Choose **Public FAQ**, **Personal NyxBot linking**, or both, then **Enable
+   bot**. The newly prepared profile remains visible even when it is outside the
+   current list page. For Discord, configure the application commands in
+   **Connection setup and recovery** first.
+4. Test public help, then complete the personal flow below with a test account.
+   Public help remains available through its explicit command when a previously
+   linked person uses a FAQ-only bot. Ordinary personal text never silently
+   changes to another person's authority.
 
-The guide uses no personal assistant key, personal connection, inventory, tools,
-private context or upstream session, including when an administrator chats with
-it. A linked sender can access only narrowly projected, approved onboarding
-setups. Web and Telegram edit the same encrypted draft; chat transcripts are not
-merged. Anonymous drafts require explicit adoption after linking.
+Preparation reserves the exact provider account permanently for shared routing.
+It revokes obsolete owner route credentials and queues exact old-work cleanup.
+Pause, retirement, deleted local bot rows, and loss of a bot marker do not restore
+ordinary channel-owner routing. Reusing the same remote ID on a different
+platform is a separate identity. Native Telegram managers remain supported as
+`platform=telegram`, `credential_source=telegram_manager`; `telegram-new` normally
+identifies a managed child bot and is not an additional generic shared target.
 
-The client owns the specialist, child and published facts. A platform manager
-operator does not acquire client-resource ownership. Public child inference
-ignores the specialist's private grants, persona, skills, keys and home context;
-it separately checks that the owned specialist still exists.
+## Provider support and controls
 
-## Local workflow
+| Provider | Authenticated private input | User controls and setup |
+| --- | --- | --- |
+| Telegram bot token | Verified bot webhook, original private human messages | `/faq [topic]`, `/help`, `/start`, `/link`, `/confirm P-…`, `/unlink`; ordinary text after linking. The shared send path uses plain text, protected content and no link previews. |
+| Native Telegram manager | Existing manager webhook and observation | Same shared controls. Optional native creation/onboarding remains separate from FAQ/personal work and obeys emergency Pause. |
+| Slack | Signed JSON Events API `message.im` events | Send exact plain text `help`, `faq [topic]`, `link`, `confirm P-…`, `unlink` in the bot DM. Subscribe to `message.im`, grant `im:history` and `chat:write`, enable App Home messages and reinstall after scope changes. These are ordinary DM messages, not Slack slash commands. |
+| Discord | Signed application-command interactions in bot DMs | Use `/faq topic`, `/help`, `/start`, `/link`, `/confirm code`, `/unlink`, and `/chat message` for personal text and action decisions. Set the Interactions endpoint and public verification key in the provider portal, and install with `bot` + `applications.commands`. Ordinary gateway DMs do not reach this webhook. |
+| Lark / Feishu | Verified/encrypted message event from a user in a private chat | Configure the callback, verification/encryption fields and bot message permissions shown by connection setup. Use the slash-prefixed shared controls and ordinary private text. |
+| WhatsApp | Verified platform webhook with exact sender account | Configure the business phone ID and provider verification credentials. Use the slash-prefixed shared controls in a private conversation. Provider conversation-window and account policies still apply. |
+| X | Authenticated private DM webhook or supported existing polling connection | Connect the bot owner's X account through NyxID OAuth. Use slash-prefixed controls and private text. Public posts, mentions and encrypted Chat notifications do not establish personal DM proof. |
 
-1. An admin converts an existing manager channel and chooses a dedicated sponsor
-   organization they can administer. Conversion starts paused, revokes old route
-   and assistant keys, and queues exact old-turn/transport cleanup. It leaves the
-   shared native creation webhook intact.
-2. Save a paused guide configuration in `/admin/platform-bots`, discover its live
-   advertised models, then explicitly validate and enable the selected exact
-   model. Readiness/discovery use sponsor funding and can consume sponsor credits.
-3. Clients enter `/onboarding` or the manager's bare `/start`, link their account
-   using web approval plus same-private-chat confirmation, and resume or adopt
-   their draft. Linking grants bounded onboarding authority only.
-4. The client publishes and reviews the exact saved facts, limits and resource
-   plan. Approval binds the owner, revision, digest, profile/binding generations,
-   planned stable IDs and zero-capability policy.
-5. Open the native creation link. After Telegram creation is observed, review the
-   exact child identity and management revision in NyxID. Observation alone does
-   not authorize registration. Existing native workers enforce the setup scope,
-   request generation and claimed-step lease inside resource transactions.
-6. Once ready, an independent customer sends `/test` to the child and replies to
-   the exact observed test message with its challenge. The owner's chat and
-   `sendMessage` success alone cannot establish customer delivery.
-7. The client explicitly activates the reviewed installation. Public execution
-   remains fenced on installation/setup generations, live ownership, manager
-   observation, child management, funding and approved publication.
+Aurinko email is excluded: a claimed `From` address is not equivalent proof of
+private account control. OpenClaw is excluded because its current adapter cannot
+send the required replies. Other ordinary channel-relay capabilities do not
+imply shared FAQ/personal eligibility.
 
-Pending pages refresh at bounded intervals and have manual refresh. Metadata-only
-status notices and interrupted-delivery notices use bounded durable retries;
-browser status is authoritative if a Telegram notice is lost. Message bodies are
-not a durable delivery queue, and interrupted model work is not replayed.
+Discord's in-app **Configure Discord commands** action upserts only the known
+commands, preserving unrelated application commands. It declares bot-DM context
+and exact string options: `confirm.code` required, `chat.message` required, and
+`faq.topic` optional. The action fences the current profile and credentials.
+Repair clears command readiness; configure again before enabling. `/chat`
+argument text cannot execute link, confirmation, unlink, or explicit FAQ controls.
 
-## Funding and limits
+X retains its existing OAuth scopes, webhook subscriptions, billing and polling
+policies. Billing-enabled X needs the configured shared app webhook and the
+normal channel billing prerequisites; it never silently falls back to paid DM
+polling. Existing unbilled polling requires the polling worker and has the
+adapter's minimum 60-second interval. X API plan, DM permissions, paid transport
+rates, quotas and subscription recovery remain provider constraints. See
+[Channel Bot Relay](CHANNEL_BOT_RELAY.md#x-accounts-dms-mentions-and-replies) for
+exact configuration and billing rules. These X requirements are not public
+inference requirements and do not apply to other providers.
 
-Guide, discovery and readiness use a purpose-confined catalog-platform inference
-path billed to the explicitly authorized sponsor organization. The configured
-admin is never supplied as a personal payer. Ordinary platform-key execution
-continues to use `BillingOwnerResolver::resolve_for_execution` and bill the acting
-person; that global policy is unchanged. Child customer inference uses the client
-owner's personal execution payer. Neither path consults personal connections as
-a fallback.
+## Personal linking
 
-Only a live permitted HTTP inference catalog service with supported model
-listing can be selected. Discovery resolves GET `models` operation pricing and
-protocol headers. Readiness requires an advertised exact ID and an actual tiny
-response reporting that exact model. Aliases with a different reported model are
-refused. Missing service/model/grant/sponsor readiness fails closed.
+1. In the private bot conversation, request a link (`link` on Slack, `/link`
+   elsewhere). Open the one-time NyxID link from the delivered message.
+2. Sign in to the intended personal account. The review identifies the provider,
+   bot and private sender/conversation. Review the account, existing link and
+   personal access mode, then explicitly consent. Replacing an existing account
+   requires a separate acknowledgment.
+3. The website reveals a fresh confirmation command only after consent. Send it
+   in the same private conversation: `confirm P-…` on Slack, `/confirm code:P-…`
+   using Discord's application command, or `/confirm P-…` on other providers.
+4. Wait for same-channel confirmation. Use `/chat message` on Discord; send normal
+   text on other providers. The linked channel thread appears under **Linked
+   channels** and in the assistant sidebar. It uses that person's existing NyxBot,
+   permissions, memory, access and personal billing through a separate saved
+   channel thread. The existing home transcript is not automatically replayed
+   into that thread. Provider transport costs remain with the bot owner.
 
-Admission uses Mongo server-clock rate windows and leases, atomic maximum-cost
-reservations, sender/platform concurrency and exact daily-credit caps. The whole
-inference lifetime is bounded below the lease duration. Successful calls await
-lease release; cancellation has idempotent cleanup. Daily caps conservatively
-count the admitted maximum for forwarded calls while ledger settlement records
-actual usage. Before-forward holds are refundable. An independent database-only sweep settles expired holds once, using the original UTC reservation day; dispatch-admitted calls retain conservative spend after crashes. Capacity/funding error replies
-consume bounded reply admission and do not dispatch another model call.
+The link intent lasts up to 24 hours; web consent produces a fresh challenge
+valid for at most 10 minutes and no longer than its parent intent. Expired,
+wrong-conversation, cancelled, replaced or revoked proof cannot link. Request a
+fresh link in the original private conversation and repeat consent. Forwarded
+messages may be read as ordinary text but never prove control. Bot, self, edit,
+group and malformed provenance cannot enter personal execution. Unsupported human
+media receives supported-input help and never becomes personal model input.
 
-## Expiry, revocation and recovery
+The browser scrubs the link fragment and keeps bearer/proof material only for the
+active flow. Reload does not reconstruct the confirmation command. Terminal UI
+retains only safe provider/bot display metadata; logout/account changes clear the
+flow. Repeated confirmed proof revalidates current binding, owner, modes and
+manager epoch, so unlink, account disable and repair cannot be undone by replay.
 
-Draft expiry ends draft authority; TTL deletion cannot restore personal routing.
-Edits, pause/cancel, unlink/replacement and profile changes invalidate prior
-approval/test authority immediately, including resumed worker and late reply
-admission. Fresh human approval preserves planned resource identities rather than
-creating replacement bots. Native creation provenance supports reviewed recovery
-after native request retention, but management drift is refused. Provisioning
-stops after five failed or crashed attempts and requires a fresh owner review
-without replacing planned resource IDs. The setup page explains detected runtime
-unavailability instead of presenting an unavailable installation as serving.
+Use `unlink` on Slack or `/unlink` elsewhere to disconnect, or disconnect from
+**NyxBot settings → Linked channels**. First-person action decisions use the
+server-authored `yes CODE` / `no CODE` notice; on Discord send that message through
+`/chat`. Files, long replies and complex action review remain available in the
+exact NyxID conversation.
 
-Activated installations clear draft retention expiry. A same-owner onboarding
-binding renewal does not transfer client ownership or revive old onboarding
-requests. Onboarding expiry alone does not end active owned consent. Explicit
-unlink/replacement, account disable, specialist destruction/ownership change,
-manager/child management changes and platform pause fence public effects.
+## Pause, resume, repair and retire
 
-Conversion cleanup captures exact old turn, async operations, machine jobs and
-remote gateway identity/version. Claim expiry does not authorize cancelling a
-new owner turn. Exact machine cancellation requires advertised node capability;
-there is no broad-cancel fallback for old nodes. Gateway version drift is refused
-rather than deleting an unreviewed binding. Admins can inspect previous gateway
-connections and explicitly retry the captured version, preserve a changed binding,
-or close cleanup after confirming the remote connection is absent. Each resolution
-rechecks live admin authority and the exact reviewed remote version; it never adopts
-a newer binding into a deletion request. Runtime evidence is tracked in the checklist. Account disable pauses setups and revokes
-bindings; deletion clears encrypted/public setup content while retaining child
-installation tombstones. Durable retirement progress lets interrupted cleanup
-advance in bounded batches, and ordinary accounts with no platform state keep
-standalone Mongo compatibility. Runtime validation is tracked separately.
+**Pause bot** atomically pauses public FAQ and new personal work, including
+legacy optional setup entry points. Safe status notices and disconnect
+acknowledgments can still be delivered. It preserves the last selected modes.
+**Resume bot** restores those selections in one conditional update, including
+after a connection repair or missing Discord commands blocked setup. It does
+not silently turn a personal-only bot into a public bot.
+If both modes were off before Pause, both remain unchecked. Select at least one
+mode to enable or resume the bot; the page displays that requirement inline.
 
-## Deployment and external acceptance
+Status distinguishes active, paused, setup incomplete, connection repair
+required and retired. FAQ readiness is separate from disabled AI readiness; no
+AI evidence is fabricated. Missing/revoked/expired OAuth, insufficient scopes,
+a disabled provider or credential drift produces repair status while keeping the
+recovery controls and safe historical Linked channels inventory accessible.
+Database/internal failures remain errors.
 
-No deployment or live enablement was performed for this implementation. Before a
-rollout, all replicas handling manager/child traffic must enforce the new markers,
-worker scopes and admission checks. Rolling back to a binary that ignores those
-markers is unsafe; pause/deactivate opted-in traffic using a compatible enforcing
-binary and retain tombstones. Do not remove markers to simulate rollback.
+Any authorized platform admin can use **Connection setup and recovery** on this
+page; the ordinary owner-scoped channel page is not the recovery authority.
+**Verify connection** checks this exact provider identity and current connection;
+it does not pretend a manual callback is live. **Repair connection** can adopt
+replacement credentials only for the same provider account and original owner.
+For OAuth, the owner first reconnects the account; the admin may then supply its
+owner-scoped connection UUID. Managed platform credentials are changed through
+Admin platform credentials. Secrets clear after success or failure and are not
+stored in browser storage.
 
-Required external validation remains explicit: signed native manager creation and
-stale-form delivery, manager token rotation and shared webhook preservation,
-two distinct client accounts, a distinct independent Telegram customer, observed
-exact reply/challenge confirmation, and provider model/funding readiness against
-the intended staging catalog. Local mocked provider success or HTTP acknowledgments
-are not proof of A13 delivery. See the approved plan's A1–A16 table and
-[implementation evidence](plans/2026-10-14-platform-botfather-implementation.md)
-for actual commands, frozen snapshots and outstanding tests.
+Repair pauses the bot, increments its authority epoch, invalidates old links and
+pending replies, and changes profile generation. Old links show disconnected;
+everyone needs fresh consent and private proof. Complete the provider callback
+setup, send a private test message (or use the provider dashboard test), then
+**Refresh status**. Configure Discord commands when required, select the desired
+modes and Resume. Old cleanup is bounded and fenced to obsolete work; it cannot
+stop a new link's turn after resume. An ownership/account replacement requires
+restoring the original identity or retiring the profile and preparing another
+eligible bot.
+
+Retirement disables shared work and retains identity tombstones. It is not an
+escape hatch to restore ordinary owner routing. Existing history remains subject
+to its ordinary owner access and retention rules.
+
+## Delivery, storage and rollout
+
+Admission records an immutable audience. Duplicate provider events cannot change
+that audience. Built-in FAQ admission, approved article IDs, queued delivery and
+receipt settlement commit together: a crash before the transport call leaves
+metadata-only work for the sweep, without retaining the raw FAQ question.
+Deterministic event keys and durable exact peer identities do not expire into
+new replay authority, and there is no lifetime visitor-count exhaustion gate.
+Rate windows and bounded input/work limit ingress.
+
+Each send revalidates live authority and commits its claim with the exact
+encrypted bot/platform/OAuth credential snapshot. It sends using only that
+captured material, never credentials resolved after the claim. Partial or
+uncertain provider effects retain their evidence and are never automatically
+resent. A crash after claiming but before an observed provider outcome therefore
+requires inspection; exactly-once delivery across a provider boundary is not
+claimed.
+
+Discord's deferred interaction context is encrypted, bound to the profile/event
+and expires after 14 minutes. Prompt replies complete the original interaction.
+A long-running result after that expiry uses the bot token to send to the same
+bound private DM; it never reuses an expired interaction token. The provider may
+leave its old deferred interaction unresolved. Replies obey Discord's 2,000 UTF-16
+unit limit; longer personal output links to the exact NyxID conversation. Shared
+text payloads suppress unintended markup, mentions and link previews where the
+provider supports those flags.
+
+Upgrade all ingress, execution and delivery replicas before enabling generic
+profiles or new runtime/delivery variants. Do not roll back to binaries that
+ignore the new authority reservations or platform origins; pause first and retain
+tombstones and proof metadata. No production deployment or provider acceptance is
+implied by local tests. Use isolated Mongo replica-set tests, mocked provider
+requests and browser fixtures, then separately validate real provider setup with
+authorized test accounts before production enablement.

@@ -1122,6 +1122,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             get(handlers::platform_bots::list).post(handlers::platform_bots::convert),
         )
         .route(
+            "/platform-bots/targets",
+            get(handlers::platform_bots::targets),
+        )
+        .route(
             "/platform-bots/{id}",
             get(handlers::platform_bots::get).delete(handlers::platform_bots::delete),
         )
@@ -1156,6 +1160,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .route(
             "/platform-bots/{id}/verify",
             post(handlers::platform_bots::verify),
+        )
+        .route(
+            "/platform-bots/{id}/discord-commands",
+            post(handlers::platform_bots::discord_commands),
         )
         .route(
             "/platform-bots/{id}/repair",

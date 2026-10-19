@@ -162,7 +162,9 @@ pub(crate) mod platform_binding_service;
 pub(crate) mod platform_bot_authority;
 pub(crate) mod platform_bot_config_service;
 pub mod platform_bot_runtime_control_service;
+pub(crate) mod platform_channel_service;
 pub mod platform_credential_service;
+pub(crate) mod platform_faq_service;
 pub mod platform_link_intent_service;
 #[allow(dead_code)]
 pub mod platform_manager_command_service;
@@ -412,3 +414,6 @@ pub mod tools_manager_service;
 
 pub mod platform_manager_delivery;
 pub mod platform_manager_transport;
+
+pub mod platform_bot_connection_service;
+pub mod platform_bot_status_service;

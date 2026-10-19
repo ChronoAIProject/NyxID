@@ -85,7 +85,7 @@ pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
 }
 
 fn refused() -> AppError {
-    AppError::Conflict("Telegram reply authority is unavailable".into())
+    AppError::Conflict("Channel reply authority is unavailable".into())
 }
 
 pub(crate) fn fixed_text(reason: UnavailableReason) -> &'static str {
@@ -94,7 +94,7 @@ pub(crate) fn fixed_text(reason: UnavailableReason) -> &'static str {
             "Personal NyxBot is paused for this manager. Your saved thread remains in NyxID."
         }
         UnavailableReason::OwnerUnavailable | UnavailableReason::OriginRevoked => {
-            "This personal link is unavailable. Open NyxID to review your account and links."
+            "This personal link or confirmation is unavailable, expired, or belongs to another private chat. Send /link here to review a fresh request, or manage Linked channels in NyxID."
         }
         UnavailableReason::InsufficientFunds => {
             "Your NyxBot could not start with the available credits. Review Billing in NyxID."
@@ -132,10 +132,10 @@ pub(crate) fn render_saved(message: &AssistantMessage, frontend: &str) -> String
     if text.trim().is_empty() {
         text = "Your NyxBot turn finished. Open the conversation in NyxID for details.".into();
     }
-    // One Telegram operation per durable claim. Oversized output stays in the app.
+    // One text operation per durable claim. Oversized output stays in the app.
     if text.encode_utf16().count() > 3900 {
         text =
-            "Your NyxBot reply is ready in NyxID; it is too long for one Telegram message.".into();
+            "Your NyxBot reply is ready in NyxID; it is too long for one channel message.".into();
     }
     if let Ok(mut url) = reqwest::Url::parse(frontend) {
         url.set_path("/assistant");
@@ -220,6 +220,15 @@ async fn load_personal_saved(
     Ok(saved)
 }
 
+fn action_notice(summary: &str, code: &str, discord: bool) -> String {
+    let instruction = if discord {
+        format!("Use /chat message with yes {code} to allow or no {code} to deny.")
+    } else {
+        format!("Reply yes {code} to allow or no {code} to deny.")
+    };
+    format!("\n\nAction: {summary}\n{instruction}")
+}
+
 fn append_card_notices(
     message: &AssistantMessage,
     frontend: &str,
@@ -265,9 +274,8 @@ fn append_card_notices(
                 continue;
             }
             let summary = super::assistant_nyxagent::excerpt(&card.summary, 260);
-            notices.push_str(&format!(
-                "\n\nAction: {summary}\nReply yes {code} to allow or no {code} to deny."
-            ));
+            let discord = matches!(&message.platform_reply, Some(PlatformReplyRouting::Captured { origin, .. }) if origin.thread.platform == "discord");
+            notices.push_str(&action_notice(&summary, &code, discord));
         }
     }
     if !cards.is_empty() && notices.is_empty() {
@@ -400,8 +408,7 @@ fn receipt_claim(
     }
 }
 
-async fn enqueue(
-    state: &AppState,
+fn new_delivery(
     destination: &ReplyDestination,
     reference: DeliveryReference,
     ingress: Option<&IngressClaim>,
@@ -433,7 +440,7 @@ async fn enqueue(
         .as_bytes(),
     ));
     let now = Utc::now();
-    let row = Delivery {
+    Ok(Delivery {
         id: uuid::Uuid::new_v4().to_string(),
         dedupe_key: dedupe_key.clone(),
         profile_id: destination.manager.profile_id.clone(),
@@ -450,10 +457,23 @@ async fn enqueue(
         state: DeliveryState::Pending,
         claim_id: None,
         telegram_message_ids: vec![],
+        channel_message_ids: vec![],
         expires_at: destination.expires_at,
         retry_at: now,
         updated_at: now,
-    };
+    })
+}
+
+async fn enqueue(
+    state: &AppState,
+    destination: &ReplyDestination,
+    reference: DeliveryReference,
+    ingress: Option<&IngressClaim>,
+    origin: Option<crate::models::assistant_conversation::PlatformTurnOrigin>,
+    origin_turn_id: Option<&str>,
+) -> AppResult<Delivery> {
+    let row = new_delivery(destination, reference, ingress, origin, origin_turn_id)?;
+    let dedupe_key = row.dedupe_key.clone();
     let inserted = state
         .db
         .collection::<Delivery>(COLLECTION_NAME)
@@ -535,6 +555,19 @@ async fn fence_transport_in_session(
         || policy.manager_bot_id != row.manager_bot_id
     {
         return Err(refused());
+    }
+    if profile.channel_transport.is_some() {
+        let controls = controls::fence_manager_in_session(
+            &state.db,
+            session,
+            &profile.id,
+            &row.manager_bot_id,
+            row.telegram_bot_id,
+            Some(&profile.observation_id),
+        )
+        .await?
+        .ok_or_else(refused)?;
+        return Ok(Some((receipt, controls, profile.observation_id)));
     }
     let current = state
         .db
@@ -687,11 +720,102 @@ async fn validate_in_session(
         }
         DeliveryReference::Fixed { .. } | DeliveryReference::Handoff => {
             // Fixed responses cannot expose account-specific or model text.
+            let canonical = match &row.reference {
+                DeliveryReference::Fixed { reason } => {
+                    fixed_text(fixed_reason(reason).ok_or_else(refused)?)
+                }
+                _ => handoff_text(),
+            };
+            if super::platform_channel_service::format_controls(
+                &row.manager_bot_id,
+                canonical.into(),
+            ) != body
+            {
+                return Err(refused());
+            }
             if receipt.as_ref().ok_or_else(refused)?.audience == IngressAudience::Control {
                 return Err(refused());
             }
         }
         // Public proof output has its own executing-turn/intent transaction.
+        DeliveryReference::Faq {
+            article_ids,
+            public_policy_revision,
+            linked,
+            linking_enabled,
+        } => {
+            let receipt = receipt.as_ref().ok_or_else(refused)?;
+            if controls.emergency_stopped
+                || controls.retired
+                || (!linked && !controls.public_enabled)
+                || (!linked && controls.public_policy.is_some())
+                || controls.personal_enabled != *linking_enabled
+                || controls.public_policy_revision != *public_policy_revision
+                || if *linked {
+                    !matches!(receipt.audience, IngressAudience::Personal { .. })
+                } else {
+                    receipt.audience
+                        != (IngressAudience::Public {
+                            public_policy_revision: *public_policy_revision,
+                        })
+                }
+                || super::platform_channel_service::format_controls(
+                    &row.manager_bot_id,
+                    super::platform_faq_service::render_mode(
+                        article_ids,
+                        *linked,
+                        *linking_enabled,
+                    )?,
+                ) != body
+            {
+                return Err(refused());
+            }
+            if receipt.phase != IngressPhase::Settled {
+                return Err(refused());
+            }
+            if *linked {
+                let resolution = identity
+                    .resolve_sender(
+                        &state.db,
+                        session,
+                        &VerifiedManagerUpdate {
+                            profile_id: receipt.profile_id.clone(),
+                            manager_bot_id: receipt.manager_bot_id.clone(),
+                            telegram_bot_id: receipt.telegram_bot_id,
+                            observation_id: receipt.observation_id.clone(),
+                            sender_id: receipt.sender_id,
+                            chat_id: receipt.chat_id,
+                            chat_kind: ManagerChatKind::Private,
+                            update_id: receipt.update_id,
+                            message_id: receipt.message_id,
+                            command_eligibility: ManagerCommandEligibility::Ineligible,
+                        },
+                    )
+                    .await?;
+                let authorized = match (&receipt.audience, resolution) {
+                    (IngressAudience::Public { .. }, SenderResolution::Unlinked) => !linked,
+                    (
+                        IngressAudience::Personal {
+                            user_id,
+                            binding_id,
+                            binding_generation,
+                            personal_control_revision,
+                        },
+                        SenderResolution::Personal { authority, .. },
+                    ) => {
+                        *linked
+                            && authority.user_id == *user_id
+                            && authority.binding_id == *binding_id
+                            && authority.binding_generation == *binding_generation
+                            && authority.personal_control_revision == *personal_control_revision
+                    }
+                    _ => false,
+                };
+                if !authorized {
+                    return Err(refused());
+                }
+            }
+        }
         DeliveryReference::PublicReply { reply_id, .. } => {
             let destination = public_destination(row)?;
             let receipt = receipt.as_ref().ok_or_else(refused)?;
@@ -728,6 +852,7 @@ enum CapturedSend {
     Duplicate,
     Deferred,
     Ready(Box<PlatformCredential>),
+    Channel(Box<super::platform_channel_service::CredentialSnapshot>),
 }
 
 async fn send(
@@ -737,6 +862,19 @@ async fn send(
     row: Delivery,
     body: Zeroizing<String>,
     api: &super::telegram_new_api::TelegramApi<'_>,
+) -> AppResult<DeliveryOutcome> {
+    send_with_adapter(state, identity, public, row, body, api, None).await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn send_with_adapter(
+    state: &AppState,
+    identity: Arc<dyn ManagerIdentityProducer>,
+    public: Option<Arc<dyn PublicTurnProducer>>,
+    row: Delivery,
+    body: Zeroizing<String>,
+    api: &super::telegram_new_api::TelegramApi<'_>,
+    adapter: Option<Box<dyn super::channel_platform::PlatformAdapter>>,
 ) -> AppResult<DeliveryOutcome> {
     if row.state != DeliveryState::Pending {
         return Ok(DeliveryOutcome::Duplicate);
@@ -756,7 +894,10 @@ async fn send(
         row.reference,
         DeliveryReference::Reply { .. } | DeliveryReference::Command
     );
-    let public_lane = matches!(row.reference, DeliveryReference::PublicReply { .. });
+    let public_lane = matches!(
+        row.reference,
+        DeliveryReference::PublicReply { .. } | DeliveryReference::Faq { .. }
+    );
     let permits = if public_lane {
         &PUBLIC_SENDS
     } else if personal {
@@ -819,6 +960,35 @@ async fn send(
         return Ok(DeliveryOutcome::Deferred { retry_at });
     }
     let _permit = permit.map_err(|_| refused())?;
+    // Refresh before the final transaction, then capture the resulting encrypted
+    // token there. Never resolve a replacement credential after claiming a send.
+    if let Some(profile) = state
+        .db
+        .collection::<PlatformBotConfig>(PROFILES)
+        .find_one(doc! {"_id":&row.profile_id})
+        .await?
+        && let Some(transport) = &profile.channel_transport
+        && let Some(bot) = state
+            .db
+            .collection::<crate::models::channel_bot::ChannelBot>(
+                crate::models::channel_bot::COLLECTION_NAME,
+            )
+            .find_one(super::platform_channel_service::bot_filter(
+                &profile, transport,
+            ))
+            .await?
+        && bot.credential_source == "connection"
+    {
+        let adapter =
+            super::channel_adapters::resolve_adapter(&bot.platform, &state.token_exchange_cache)?;
+        let _token = super::channel_credentials::resolve_bot_token(
+            &state.db,
+            &state.encryption_keys,
+            adapter.as_ref(),
+            &bot,
+        )
+        .await?;
+    }
     let claim_id = uuid::Uuid::new_v4().to_string();
     let mut session = state.db.client().start_session().await?;
     let captured = state.clone();
@@ -828,12 +998,22 @@ async fn send(
         let result:AppResult<_>=async {
             let Some(observation)=validate_in_session(state,identity.as_ref(),public.as_deref(),session,row,body.as_str()).await? else {return Ok(CapturedSend::Deferred);};
             if state.db.collection::<Delivery>(COLLECTION_NAME).update_one(doc! {"_id":&row.id,"state":"pending","expires_at":{"$gt":bson::DateTime::now()}},doc! {"$set":{"state":"dispatching","claim_id":claim,"updated_at":bson::DateTime::now()}}).session(&mut *session).await?.matched_count!=1{return Ok(CapturedSend::Duplicate);}
+            let profile = state.db.collection::<PlatformBotConfig>(PROFILES).find_one(doc! {"_id":&row.profile_id,"observation_id":&observation,"deleted_at":bson::Bson::Null}).session(&mut *session).await?.ok_or_else(refused)?;
+            if let Some(transport)=&profile.channel_transport {
+                let bot=state.db.collection::<crate::models::channel_bot::ChannelBot>(crate::models::channel_bot::COLLECTION_NAME).find_one(super::platform_channel_service::bot_filter(&profile,transport)).session(&mut *session).await?.ok_or_else(refused)?;
+                let snapshot=super::platform_channel_service::CredentialSnapshot::load(&state.db,session,&bot,true).await?;
+                if snapshot.stamp()?!=transport.credential_stamp {return Err(refused());}
+                return Ok(CapturedSend::Channel(Box::new(snapshot)));
+            }
             let credential=state.db.collection::<PlatformCredential>(crate::models::platform_credential::COLLECTION_NAME).find_one(doc! {"provider":"telegram-new","fields.manager_bot_id":&row.manager_bot_id,"fields.observation_id":observation,"fields.webhook_ready":"true"}).session(&mut *session).await?.ok_or_else(refused)?;
             Ok(CapturedSend::Ready(Box::new(credential)))
         }.await;
         tx::transaction_result(result)
     })).await.map_err(tx::map_transaction_error);
     let credential = match result {
+        Ok(CapturedSend::Channel(snapshot)) => {
+            return send_channel_claimed(state, &row, &claim_id, body, &snapshot, adapter).await;
+        }
         Ok(CapturedSend::Ready(value)) => value,
         Ok(CapturedSend::Duplicate) => return Ok(DeliveryOutcome::Duplicate),
         Ok(CapturedSend::Deferred) => {
@@ -863,6 +1043,207 @@ async fn send(
         }
     };
     send_claimed(state, &row, &claim_id, body, credential, api).await
+}
+
+struct PreparedChannelSend {
+    adapter: Box<dyn super::channel_platform::PlatformAdapter>,
+    token: Zeroizing<String>,
+    secrets: Option<super::channel_platform::PlatformVerifySecrets>,
+    conversation_id: String,
+    reply: super::channel_platform::OutboundReply,
+}
+async fn prepare_channel_send(
+    state: &AppState,
+    row: &Delivery,
+    body: Zeroizing<String>,
+    snapshot: &super::platform_channel_service::CredentialSnapshot,
+) -> AppResult<PreparedChannelSend> {
+    let bot = &snapshot.bot;
+    let peer =
+        super::platform_channel_service::peer(&state.db, &row.profile_id, row.sender_id).await?;
+    if row.sender_id != row.chat_id {
+        return Err(refused());
+    }
+    let adapter =
+        super::channel_adapters::resolve_adapter(&bot.platform, &state.token_exchange_cache)?;
+    let token = snapshot.token(&state.encryption_keys).await?;
+    let secrets = Some(
+        snapshot
+            .secrets(&state.encryption_keys, adapter.as_ref())
+            .await?,
+    );
+    let limit = if bot.platform == "discord" {
+        2000
+    } else {
+        4096
+    };
+    let rendered = if body.encode_utf16().count() > limit {
+        if let DeliveryReference::Reply {
+            conversation_id, ..
+        } = &row.reference
+        {
+            format!(
+                "Your NyxBot reply is ready in NyxID: {}/assistant?c={}",
+                state.config.frontend_url.trim_end_matches('/'),
+                conversation_id
+            )
+        } else {
+            return Err(refused());
+        }
+    } else {
+        body.to_string()
+    };
+    let mut metadata = Some(serde_json::json!({"shared_plain_text":true}));
+    if bot.platform == "discord" {
+        if let Some(ingress_id) = &row.ingress_id {
+            let receipt = state
+                .db
+                .collection::<PlatformManagerIngress>(INGRESS)
+                .find_one(doc! {"_id":ingress_id})
+                .await?
+                .ok_or_else(refused)?;
+            let context = state.db.collection::<crate::models::platform_channel_identity::PlatformChannelIdentity>(crate::models::platform_channel_identity::COLLECTION_NAME)
+                .find_one(doc! {"profile_id":&row.profile_id,"kind":"message","handle":receipt.message_id,"sender_id":&peer.sender_id,"conversation_id":&peer.conversation_id,"expires_at":{"$gt":bson::DateTime::now()}}).await?;
+            // Expired interaction tokens cannot complete the deferred interaction.
+            // Deliver long-running results using the bot token to the same bound DM.
+            if let Some(context) = context {
+                let bytes = Zeroizing::new(
+                    state
+                        .encryption_keys
+                        .decrypt_with_aad(
+                            &context.reply_context_encrypted,
+                            format!("platform-reply:{}:{}", row.profile_id, receipt.message_id)
+                                .as_bytes(),
+                        )
+                        .await?,
+                );
+                let thread = std::str::from_utf8(&bytes).map_err(|_| refused())?;
+                metadata = Some(
+                    serde_json::json!({"shared_plain_text":true,"interaction_thread_id":thread}),
+                );
+            }
+        }
+    }
+    let reply = super::channel_platform::OutboundReply {
+        attachments: vec![],
+        text: Some(rendered),
+        reply_to_platform_message_id: None,
+        metadata,
+    };
+    Ok(PreparedChannelSend {
+        adapter,
+        token,
+        secrets,
+        conversation_id: peer.conversation_id,
+        reply,
+    })
+}
+
+async fn send_channel_claimed(
+    state: &AppState,
+    row: &Delivery,
+    claim_id: &str,
+    body: Zeroizing<String>,
+    snapshot: &super::platform_channel_service::CredentialSnapshot,
+    adapter: Option<Box<dyn super::channel_platform::PlatformAdapter>>,
+) -> AppResult<DeliveryOutcome> {
+    let mut prepared = match prepare_channel_send(state, row, body, snapshot).await {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            let terminal = matches!(
+                error,
+                AppError::Conflict(_)
+                    | AppError::ValidationError(_)
+                    | AppError::NotFound(_)
+                    | AppError::Forbidden(_)
+            );
+            let retry_at = Utc::now() + Duration::seconds(5);
+            state.db.collection::<Delivery>(COLLECTION_NAME).update_one(
+                doc! {"_id":&row.id,"claim_id":claim_id,"state":"dispatching"},
+                doc! {"$set":{"state":if terminal {"refused"} else {"pending"},"claim_id":bson::Bson::Null,"retry_at":bson::DateTime::from_chrono(retry_at),"updated_at":bson::DateTime::now()}},
+            ).await?;
+            return Ok(if terminal {
+                DeliveryOutcome::Refused(UnavailableReason::TransportUnavailable)
+            } else {
+                DeliveryOutcome::Deferred { retry_at }
+            });
+        }
+    };
+    if let Some(adapter) = adapter {
+        prepared.adapter = adapter;
+    }
+    send_prepared_channel(state, row, claim_id, snapshot, prepared).await
+}
+
+async fn send_prepared_channel(
+    state: &AppState,
+    row: &Delivery,
+    claim_id: &str,
+    snapshot: &super::platform_channel_service::CredentialSnapshot,
+    prepared: PreparedChannelSend,
+) -> AppResult<DeliveryOutcome> {
+    let bot = &snapshot.bot;
+    let billing = super::channel_billing_service::ChannelBilling::for_bot(
+        &state.db,
+        &state.billing,
+        bot,
+        None,
+    );
+    let credentials = super::channel_platform::BotCredentials {
+        token: &prepared.token,
+        platform_bot_id: Some(&bot.platform_bot_id),
+        platform_secrets: prepared.secrets.as_ref(),
+        billing: billing.as_ref(),
+    };
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(25),
+        prepared.adapter.send_reply_outcome(
+            &state.http_client,
+            &credentials,
+            &prepared.conversation_id,
+            &prepared.reply,
+        ),
+    )
+    .await;
+    let mut ids = vec![];
+    let mut observation = None;
+    let mut accepted = false;
+    if let Ok(Ok(outcome)) = result {
+        accepted = outcome.error.is_none()
+            && outcome
+                .observation
+                .as_ref()
+                .is_none_or(|record| record.complete && !record.uncertain);
+        ids = outcome
+            .observation
+            .as_ref()
+            .map(|record| record.component_ids.clone())
+            .unwrap_or_default();
+        if let Some(id) = outcome.final_id
+            && !ids.contains(&id)
+        {
+            ids.push(id);
+        }
+        observation = outcome.observation;
+    }
+    // An uncertain or partial provider effect is retained and is never replayed.
+    state.db.collection::<Delivery>(COLLECTION_NAME).update_one(
+        doc! {"_id":&row.id,"claim_id":claim_id,"state":"dispatching"},
+        doc! {"$set":{"state":if accepted {"sent"} else {"uncertain"},"channel_message_ids":&ids,"channel_send":bson::to_bson(&observation).map_err(|_|refused())?,"updated_at":bson::DateTime::now()}},
+    ).await?;
+
+    let error = AppError::ChannelPlatformError("Shared bot delivery is uncertain".into());
+    super::channel_bot_service::record_outbound_outcome(
+        &state.db,
+        &bot.id,
+        if accepted { None } else { Some(&error) },
+    )
+    .await;
+    Ok(if accepted {
+        DeliveryOutcome::ChannelSent { message_ids: ids }
+    } else {
+        DeliveryOutcome::Uncertain
+    })
 }
 
 async fn send_claimed(
@@ -990,6 +1371,18 @@ pub async fn deliver(
     content: ReplyContent,
     api: &super::telegram_new_api::TelegramApi<'_>,
 ) -> AppResult<DeliveryOutcome> {
+    deliver_with_adapter(state, identity, destination, reference, content, api, None).await
+}
+
+async fn deliver_with_adapter(
+    state: &AppState,
+    identity: Arc<dyn ManagerIdentityProducer>,
+    destination: &ReplyDestination,
+    reference: &DeliveryRef,
+    content: ReplyContent,
+    api: &super::telegram_new_api::TelegramApi<'_>,
+    adapter: Option<Box<dyn super::channel_platform::PlatformAdapter>>,
+) -> AppResult<DeliveryOutcome> {
     let claim = receipt_claim(destination, reference)?;
     let (stored, body, origin, source_turn) = match (reference, content, &destination.authority) {
         (DeliveryRef::Reply(reply), ReplyContent::Text(text), ReplyAuthority::Personal { .. }) => {
@@ -1018,7 +1411,10 @@ pub async fn deliver(
             DeliveryReference::Fixed {
                 reason: format!("{reason:?}"),
             },
-            Zeroizing::new(fixed_text(reason).into()),
+            Zeroizing::new(super::platform_channel_service::format_controls(
+                &destination.manager.manager_bot_id,
+                fixed_text(reason).into(),
+            )),
             None,
             None,
         ),
@@ -1060,9 +1456,107 @@ pub async fn deliver(
         source_turn.as_deref(),
     )
     .await?;
-    let outcome = send(state, identity, None, row, body, api).await?;
+    let outcome = send_with_adapter(state, identity, None, row, body, api, adapter).await?;
     report_delivery(&outcome, "reply");
     Ok(outcome)
+}
+
+pub(crate) async fn deliver_faq(
+    state: &AppState,
+    identity: Arc<dyn ManagerIdentityProducer>,
+    admitted: &PublicIngress,
+    text: &str,
+    linked: bool,
+    linking_enabled: bool,
+    api: &super::telegram_new_api::TelegramApi<'_>,
+) -> AppResult<DeliveryOutcome> {
+    let article_ids = super::platform_faq_service::select(text)?;
+    let mut session = state.db.client().start_session().await?;
+    let row = session
+        .start_transaction()
+        .and_run(
+            (&state.db, admitted, article_ids, linked, linking_enabled),
+            |session, (db, admitted, ids, linked, enabled)| {
+                Box::pin(async move {
+                    tx::transaction_result(
+                        queue_faq_in_session(db, session, admitted, ids, *linked, *enabled).await,
+                    )
+                })
+            },
+        )
+        .await
+        .map_err(tx::map_transaction_error)?;
+    let DeliveryReference::Faq {
+        article_ids,
+        linked,
+        linking_enabled,
+        ..
+    } = &row.reference
+    else {
+        return Err(refused());
+    };
+    // Admission owns the selected content and mode guidance, including when the
+    // caller still holds an earlier runtime snapshot. Final validation checks drift.
+    let body = Zeroizing::new(super::platform_channel_service::format_controls(
+        &row.manager_bot_id,
+        super::platform_faq_service::render_mode(article_ids, *linked, *linking_enabled)?,
+    ));
+    send(state, identity, None, row, body, api).await
+}
+
+/// Joins admission's transaction so a crash before the first send still leaves
+/// an approved-content reference for recovery, never the visitor's question.
+pub(crate) async fn queue_faq_in_session(
+    db: &Database,
+    session: &mut mongodb::ClientSession,
+    admitted: &PublicIngress,
+    article_ids: &[String],
+    linked: bool,
+    linking_enabled: bool,
+) -> AppResult<Delivery> {
+    let destination = ReplyDestination {
+        manager: admitted.manager.clone(),
+        sender_id: admitted.sender_id,
+        chat_id: admitted.chat_id,
+        authority: ReplyAuthority::Fixed {
+            ingress: admitted.ingress.clone(),
+        },
+        expires_at: Utc::now() + Duration::minutes(2),
+    };
+    let proposed = new_delivery(
+        &destination,
+        DeliveryReference::Faq {
+            article_ids: article_ids.to_vec(),
+            linked,
+            linking_enabled,
+            public_policy_revision: admitted.public_policy_revision,
+        },
+        Some(&admitted.ingress),
+        None,
+        None,
+    )?;
+    let claim = &admitted.ingress;
+    let receipt=db.collection::<PlatformManagerIngress>(INGRESS).find_one(doc! {"_id":&claim.receipt_id,"claim_id":&claim.claim_id,"phase":{"$in":["admitted","settled"]}}).session(&mut *session).await?.ok_or_else(refused)?;
+    if receipt.profile_id != proposed.profile_id
+        || receipt.sender_id != proposed.sender_id
+        || receipt.chat_id != proposed.chat_id
+    {
+        return Err(refused());
+    }
+    db.collection::<Delivery>(COLLECTION_NAME)
+        .update_one(
+            doc! {"dedupe_key":&proposed.dedupe_key},
+            doc! {"$setOnInsert":bson::to_document(&proposed).map_err(|_|refused())?},
+        )
+        .upsert(true)
+        .session(&mut *session)
+        .await?;
+    db.collection::<PlatformManagerIngress>(INGRESS).update_one(doc! {"_id":&claim.receipt_id,"claim_id":&claim.claim_id},doc! {"$set":{"phase":"settled","settled_at":bson::DateTime::now(),"delivery_recovery_queued":true}}).session(&mut *session).await?;
+    db.collection::<Delivery>(COLLECTION_NAME)
+        .find_one(doc! {"dedupe_key":&proposed.dedupe_key})
+        .session(session)
+        .await?
+        .ok_or_else(refused)
 }
 
 fn public_reply_ref(row: &Delivery) -> AppResult<ReplyRef> {
@@ -1178,7 +1672,13 @@ pub async fn deliver_command(
         },
         expires_at: Utc::now() + Duration::minutes(1),
     };
-    let body = command.reply.render(&state.config.frontend_url)?;
+    let body = Zeroizing::new(super::platform_channel_service::format_controls(
+        &destination.manager.manager_bot_id,
+        command
+            .reply
+            .render(&state.config.frontend_url)?
+            .to_string(),
+    ));
     let row = enqueue(
         state,
         &destination,
@@ -1333,7 +1833,9 @@ pub(crate) async fn deliver_public_signup_with_api(
     ).await.map_err(tx::map_transaction_error);
     let credential = match result {
         Ok(CapturedSend::Ready(credential)) => credential,
-        Ok(CapturedSend::Duplicate) => return Ok(PublicSignupDeliveryOutcome::Unavailable),
+        Ok(CapturedSend::Duplicate | CapturedSend::Channel(_)) => {
+            return Ok(PublicSignupDeliveryOutcome::Unavailable);
+        }
         Ok(CapturedSend::Deferred)
         | Err(AppError::Conflict(_) | AppError::NotFound(_) | AppError::ValidationError(_)) => {
             refuse_pending(state, &row).await?;
@@ -1350,7 +1852,9 @@ pub(crate) async fn deliver_public_signup_with_api(
     let outcome = send_claimed(state, &row, &claim, body, credential, api).await?;
     report_delivery(&outcome, "public_signup");
     Ok(match outcome {
-        DeliveryOutcome::Sent { .. } => PublicSignupDeliveryOutcome::Sent,
+        DeliveryOutcome::Sent { .. } | DeliveryOutcome::ChannelSent { .. } => {
+            PublicSignupDeliveryOutcome::Sent
+        }
         DeliveryOutcome::Uncertain => PublicSignupDeliveryOutcome::Uncertain,
         DeliveryOutcome::Duplicate
         | DeliveryOutcome::Deferred { .. }
@@ -1366,6 +1870,11 @@ fn report_delivery(outcome: &DeliveryOutcome, source: &'static str) {
             source,
             message_count = telegram_message_ids.len(),
             "Manager delivery confirmed by Telegram"
+        ),
+        DeliveryOutcome::ChannelSent { message_ids } => tracing::debug!(
+            source,
+            message_count = message_ids.len(),
+            "Shared delivery accepted by channel provider"
         ),
         DeliveryOutcome::Duplicate => tracing::debug!(source, "Manager delivery already claimed"),
         DeliveryOutcome::Deferred { retry_at } => {
@@ -1386,6 +1895,22 @@ pub async fn sweep(
     identity: Arc<dyn ManagerIdentityProducer>,
     public: Arc<dyn PublicTurnProducer>,
     limit: u32,
+) -> AppResult<RecoveryBatch> {
+    sweep_with_api(
+        state,
+        identity,
+        public,
+        limit,
+        &super::telegram_new_api::TelegramApi::new(&state.http_client),
+    )
+    .await
+}
+pub(crate) async fn sweep_with_api(
+    state: &AppState,
+    identity: Arc<dyn ManagerIdentityProducer>,
+    public: Arc<dyn PublicTurnProducer>,
+    limit: u32,
+    api: &super::telegram_new_api::TelegramApi<'_>,
 ) -> AppResult<RecoveryBatch> {
     let batch = limit.min(100);
     if batch == 0 {
@@ -1460,10 +1985,26 @@ pub async fn sweep(
                         Err(error) => return Err(error),
                     }
                 }
-                DeliveryReference::Fixed { reason } => {
-                    fixed_reason(reason).map(|reason| fixed_text(reason).to_owned())
-                }
+                DeliveryReference::Fixed { reason } => fixed_reason(reason).map(|reason| {
+                    super::platform_channel_service::format_controls(
+                        &row.manager_bot_id,
+                        fixed_text(reason).to_owned(),
+                    )
+                }),
                 DeliveryReference::Handoff => Some(handoff_text().to_owned()),
+                DeliveryReference::Faq {
+                    article_ids,
+                    linked,
+                    linking_enabled,
+                    ..
+                } => Some(super::platform_channel_service::format_controls(
+                    &row.manager_bot_id,
+                    super::platform_faq_service::render_mode(
+                        article_ids,
+                        *linked,
+                        *linking_enabled,
+                    )?,
+                )),
                 DeliveryReference::Command | DeliveryReference::PublicSignup { .. } => None,
             };
             if let Some(body) = body {
@@ -1473,7 +2014,7 @@ pub async fn sweep(
                     Some(public.clone()),
                     row,
                     Zeroizing::new(body),
-                    &super::telegram_new_api::TelegramApi::new(&state.http_client),
+                    api,
                 )
                 .await
                 {
@@ -1533,4 +2074,229 @@ fn fixed_reason(reason: &str) -> Option<UnavailableReason> {
     ]
     .into_iter()
     .find(|candidate| format!("{candidate:?}") == reason)
+}
+
+#[cfg(test)]
+mod channel_notice_tests {
+    #[test]
+    fn discord_action_notice_preserves_summary_and_uses_deliverable_command() {
+        let summary = "Reply yes MODEL_TEXT; https://example.test/a_b";
+        let text = super::action_notice(summary, "A1B2", true);
+        assert!(text.contains(summary));
+        assert!(text.contains("/chat message with yes A1B2"));
+        assert!(super::action_notice(summary, "A1B2", false).contains("Reply yes A1B2"));
+    }
+}
+
+#[cfg(test)]
+mod channel_pre_send_tests {
+    use super::*;
+    use mongodb::bson::Document;
+    #[tokio::test]
+    async fn expired_discord_context_falls_back_to_same_private_dm_and_settles_sent() {
+        let (db, _, _, profile, bot) = super::super::platform_channel_service::tests::fixture(
+            "discord_expired_reply_context",
+            "discord",
+        )
+        .await;
+        let state = crate::test_utils::test_app_state(db.clone());
+        ensure_indexes(&db).await.unwrap();
+        let input = super::super::channel_platform::InboundMessage {
+            platform_message_id: "interaction-one".into(),
+            conversation_id: "D1".into(),
+            conversation_type: "private".into(),
+            sender_platform_id: "U1".into(),
+            sender_display_name: None,
+            content_type: "text".into(),
+            text: Some("/faq".into()),
+            attachments: vec![],
+            reply_to_platform_message_id: None,
+            thread_id: None,
+            raw_data: serde_json::json!({}),
+        };
+        let update = super::super::platform_channel_service::verified_input(&db, &profile, &input)
+            .await
+            .unwrap();
+        db.collection::<Document>(crate::models::platform_bot_runtime_controls::COLLECTION_NAME)
+            .update_one(
+                doc! {"platform_config_id":&profile.id},
+                doc! {"$set":{"public_enabled":true}},
+            )
+            .await
+            .unwrap();
+        let identity = super::super::platform_personal_binding_service::producer(state.clone());
+        super::super::platform_manager_dispatch_service::admit_text_update(
+            &db,
+            identity.as_ref(),
+            &update,
+            "/faq",
+            true,
+        )
+        .await
+        .unwrap();
+        let row = db
+            .collection::<Delivery>(COLLECTION_NAME)
+            .find_one(doc! {})
+            .await
+            .unwrap()
+            .unwrap();
+        db.collection::<Delivery>(COLLECTION_NAME)
+            .update_one(
+                doc! {"_id":&row.id},
+                doc! {"$set":{"state":"dispatching","claim_id":"expiry-claim"}},
+            )
+            .await
+            .unwrap();
+        // Invalid expired ciphertext must never be decrypted or sent to Discord.
+        db.collection::<Document>(crate::models::platform_channel_identity::COLLECTION_NAME).insert_one(doc! {
+            "_id":uuid::Uuid::new_v4().to_string(),"profile_id":&profile.id,"kind":"message","external_key":"interaction-one","handle":update.message_id,"sender_id":"U1","conversation_id":"D1",
+            "reply_context_encrypted":bson::Binary {subtype:bson::spec::BinarySubtype::Generic,bytes:vec![0]},"expires_at":bson::DateTime::from_chrono(Utc::now()-Duration::minutes(1)),
+        }).await.unwrap();
+        let mut session = db.client().start_session().await.unwrap();
+        let snapshot = super::super::platform_channel_service::CredentialSnapshot::load(
+            &db,
+            &mut session,
+            &bot,
+            false,
+        )
+        .await
+        .unwrap();
+        let mut prepared = prepare_channel_send(
+            &state,
+            &row,
+            Zeroizing::new("Long-running result".into()),
+            &snapshot,
+        )
+        .await
+        .unwrap();
+        assert!(
+            prepared
+                .reply
+                .metadata
+                .as_ref()
+                .unwrap()
+                .get("interaction_thread_id")
+                .is_none()
+        );
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST")).and(wiremock::matchers::path("/channels/D1/messages"))
+            .and(wiremock::matchers::body_json(serde_json::json!({"content":"Long-running result","allowed_mentions":{"parse":[],"replied_user":false},"flags":4})))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({"id":"discord-result"}))).expect(1).mount(&server).await;
+        prepared.adapter = Box::new(
+            super::super::channel_adapters::discord::DiscordAdapter::media_test_adapter(
+                &server.uri(),
+            ),
+        );
+        assert!(matches!(
+            send_prepared_channel(&state, &row, "expiry-claim", &snapshot, prepared)
+                .await
+                .unwrap(),
+            DeliveryOutcome::ChannelSent { .. }
+        ));
+        let finished = db
+            .collection::<Delivery>(COLLECTION_NAME)
+            .find_one(doc! {"_id":&row.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(finished.state, DeliveryState::Sent));
+        assert_eq!(finished.channel_message_ids, vec!["discord-result"]);
+        server.verify().await;
+        db.drop().await.unwrap();
+    }
+    #[tokio::test]
+    async fn missing_peer_before_provider_effect_is_refused_without_uncertain_claim() {
+        let (db, update, _, profile, bot) = super::super::platform_channel_service::tests::fixture(
+            "generic_no_effect_settlement",
+            "slack",
+        )
+        .await;
+        let state = crate::test_utils::test_app_state(db.clone());
+        ensure_indexes(&db).await.unwrap();
+        let identity = super::super::platform_personal_binding_service::producer(state.clone());
+        db.collection::<Document>(crate::models::platform_bot_runtime_controls::COLLECTION_NAME)
+            .update_one(
+                doc! {"platform_config_id":&profile.id},
+                doc! {"$set":{"public_enabled":true}},
+            )
+            .await
+            .unwrap();
+        super::super::platform_manager_dispatch_service::admit_text_update(
+            &db,
+            identity.as_ref(),
+            &update,
+            "/faq",
+            true,
+        )
+        .await
+        .unwrap();
+        let row = db
+            .collection::<Delivery>(COLLECTION_NAME)
+            .find_one(doc! {})
+            .await
+            .unwrap()
+            .unwrap();
+        db.collection::<Delivery>(COLLECTION_NAME)
+            .update_one(
+                doc! {"_id":&row.id},
+                doc! {"$set":{"state":"dispatching","claim_id":"test-claim"}},
+            )
+            .await
+            .unwrap();
+        let mut session = db.client().start_session().await.unwrap();
+        let snapshot = super::super::platform_channel_service::CredentialSnapshot::load(
+            &db,
+            &mut session,
+            &bot,
+            false,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            send_channel_claimed(
+                &state,
+                &row,
+                "test-claim",
+                Zeroizing::new("Safe FAQ".into()),
+                &snapshot,
+                None,
+            )
+            .await
+            .unwrap(),
+            DeliveryOutcome::Refused(_)
+        ));
+        let finished = db
+            .collection::<Delivery>(COLLECTION_NAME)
+            .find_one(doc! {"_id":&row.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(finished.state, DeliveryState::Refused));
+        assert!(finished.channel_message_ids.is_empty());
+        db.drop().await.unwrap();
+    }
+}
+
+/// Inject only the provider HTTP adapter; the service integration uses the same
+/// canonical enqueue, pacing, claim transaction and effect settlement as production.
+#[cfg(test)]
+pub(crate) async fn deliver_channel_with_test_adapter(
+    state: &AppState,
+    identity: Arc<dyn ManagerIdentityProducer>,
+    destination: &ReplyDestination,
+    reply: &ReplyRef,
+    adapter: Box<dyn super::channel_platform::PlatformAdapter>,
+) -> AppResult<DeliveryOutcome> {
+    let message = load_personal_saved(state, destination, reply).await?;
+    let body = render_personal(state, &message, None).await?;
+    deliver_with_adapter(
+        state,
+        identity,
+        destination,
+        &DeliveryRef::Reply(reply.clone()),
+        ReplyContent::Text(body),
+        &super::telegram_new_api::TelegramApi::new(&state.http_client),
+        Some(adapter),
+    )
+    .await
 }

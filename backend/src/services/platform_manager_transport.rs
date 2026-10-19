@@ -172,20 +172,56 @@ pub(crate) async fn dispatch_update(
     ) else {
         return Ok(true);
     };
-    let text = update["message"]["text"].as_str().unwrap_or("");
+    dispatch_verified_input(
+        state,
+        producers,
+        &runtime,
+        verified,
+        &username,
+        update["message"]["text"].as_str().unwrap_or(""),
+        &service.api,
+        true,
+        true,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn dispatch_verified_input(
+    state: &AppState,
+    producers: Arc<PlatformManagerProducers>,
+    runtime: &crate::models::platform_bot_runtime_controls::PlatformBotRuntimeControls,
+    verified: VerifiedManagerUpdate,
+    username: &str,
+    text: &str,
+    api: &super::telegram_new_api::TelegramApi<'_>,
+    native_setup: bool,
+    controls_allowed: bool,
+) -> AppResult<bool> {
+    // Discord's chat option is message content. A leading command is unsupported
+    // content, never an application control or an explicit public FAQ request.
+    let text = if !controls_allowed && text.trim_start().starts_with('/') {
+        "/unsupported"
+    } else {
+        text
+    };
     let verb = text.split_whitespace().next().unwrap_or("");
     let base = verb.split('@').next().unwrap_or("");
     // Legacy setup commands retain their purpose, never becoming personal turns.
-    if matches!(base, "/onboarding" | "/setups")
-        || (base == "/confirm" && commands::personal_command(text, &username).is_none())
+    if native_setup
+        && (matches!(base, "/onboarding" | "/setups")
+            || (base == "/confirm" && commands::personal_command(text, username).is_none()))
     {
-        if verified.command_eligibility != ManagerCommandEligibility::OriginalPrivateMessage {
+        if runtime.emergency_stopped
+            || runtime.retired
+            || verified.command_eligibility != ManagerCommandEligibility::OriginalPrivateMessage
+        {
             refuse_control(state, &producers, &verified).await?;
             return Ok(true);
         }
         return Ok(false); // The HTTP adapter retains legacy setup command handling.
     }
-    if let Some(kind) = commands::personal_command(text, &username) {
+    if let Some(kind) = commands::personal_command(text, username).filter(|_| controls_allowed) {
         if let Some(command) =
             OriginalManagerCommand::from_verified(verified.clone(), TurnInput { text: text.into() })
         {
@@ -214,13 +250,8 @@ pub(crate) async fn dispatch_update(
                 Err(error) => return Err(error),
             };
             if let Some(output) = output {
-                let _ = delivery::deliver_command(
-                    state,
-                    producers.identity.clone(),
-                    output,
-                    &service.api,
-                )
-                .await?;
+                let _ = delivery::deliver_command(state, producers.identity.clone(), output, api)
+                    .await?;
             }
             return Ok(true);
         }
@@ -235,10 +266,25 @@ pub(crate) async fn dispatch_update(
         refuse_control(state, &producers, &verified).await?;
         return Ok(true);
     }
-    let admission = producers
-        .transport
-        .admit_manager_update(&state.db, &verified)
-        .await?;
+    let faq_only = controls_allowed
+        && matches!(base, "/faq" | "/help" | "/start")
+        && runtime.public_enabled
+        && runtime.public_policy.is_none();
+    let admission = if runtime.public_policy.is_none() {
+        dispatch::admit_text_update(
+            &state.db,
+            producers.identity.as_ref(),
+            &verified,
+            text,
+            faq_only,
+        )
+        .await?
+    } else {
+        producers
+            .transport
+            .admit_manager_update(&state.db, &verified)
+            .await?
+    };
     let (ingress, audience) = match admission {
         IngressAdmission::Claimed { ingress, audience } => (ingress, audience),
         IngressAdmission::Duplicate { receipt_id } => {
@@ -285,20 +331,23 @@ pub(crate) async fn dispatch_update(
                 return Ok(true);
             }
             if text.trim().is_empty() || text.starts_with('/') {
-                let destination = fixed_destination(
-                    super::platform_bot_runtime_control_service::policy(&runtime).manager,
-                    &verified,
-                    ingress.clone(),
-                );
-                let _ = producers
-                    .transport
-                    .deliver_platform_reply(
-                        &state.db,
-                        &destination,
-                        &DeliveryRef::Fixed { ingress },
-                        ReplyContent::Fixed(UnavailableReason::EngineUnavailable),
-                    )
-                    .await?;
+                let public = PublicIngress {
+                    manager: admitted.authority.manager.clone(),
+                    sender_id: verified.sender_id,
+                    chat_id: verified.chat_id,
+                    public_policy_revision: runtime.public_policy_revision,
+                    ingress: ingress.clone(),
+                };
+                delivery::deliver_faq(
+                    state,
+                    producers.identity.clone(),
+                    &public,
+                    text,
+                    true,
+                    runtime.personal_enabled,
+                    api,
+                )
+                .await?;
                 return Ok(true);
             }
             if verified.command_eligibility == ManagerCommandEligibility::OriginalPrivateMessage
@@ -464,6 +513,19 @@ pub(crate) async fn dispatch_update(
                 .await?;
         }
         ManagerAudience::Public(admitted) => {
+            if runtime.public_policy.is_none() {
+                delivery::deliver_faq(
+                    state,
+                    producers.identity.clone(),
+                    &admitted,
+                    text,
+                    false,
+                    runtime.personal_enabled,
+                    api,
+                )
+                .await?;
+                return Ok(true);
+            }
             let context = match producers
                 .public
                 .prepare_public_context(&state.db, &admitted)
@@ -599,7 +661,13 @@ async fn refuse_control(
                 &state.db,
                 &destination,
                 &DeliveryRef::Fixed { ingress },
-                ReplyContent::Fixed(UnavailableReason::ModeDisabled),
+                ReplyContent::Fixed(if runtime.emergency_stopped {
+                    UnavailableReason::EmergencyStopped
+                } else if !runtime.personal_enabled {
+                    UnavailableReason::PersonalDisabled
+                } else {
+                    UnavailableReason::OriginRevoked
+                }),
             )
             .await?;
     }

@@ -25,6 +25,8 @@ pub struct PlatformManagerDelivery {
     pub state: DeliveryState,
     pub claim_id: Option<String>,
     pub telegram_message_ids: Vec<i64>,
+    #[serde(default)]
+    pub channel_message_ids: Vec<String>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub expires_at: DateTime<Utc>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
@@ -50,6 +52,12 @@ pub enum DeliveryReference {
     },
     Fixed {
         reason: String,
+    },
+    Faq {
+        linked: bool,
+        linking_enabled: bool,
+        article_ids: Vec<String>,
+        public_policy_revision: i64,
     },
     Handoff,
     /// One ephemeral original-private command attempt. Never recover its body.

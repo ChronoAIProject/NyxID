@@ -83,6 +83,7 @@ pub mod ownership_transfer;
 pub mod platform_binding;
 pub mod platform_bot_config;
 pub mod platform_bot_runtime_controls;
+pub mod platform_channel_identity;
 pub mod platform_credential;
 pub mod platform_link_intent;
 pub mod platform_manager_ingress;

@@ -85,7 +85,11 @@ pub async fn connection_token(
     Ok(Zeroizing::new(token.to_string()))
 }
 
-fn validate_connection(key: &UserApiKey, provider_id: &str, scopes: &[&str]) -> AppResult<()> {
+pub(crate) fn validate_connection(
+    key: &UserApiKey,
+    provider_id: &str,
+    scopes: &[&str],
+) -> AppResult<()> {
     if key.credential_type != "oauth2" || key.provider_config_id.as_deref() != Some(provider_id) {
         return Err(reconnect("Connection uses a different OAuth provider"));
     }

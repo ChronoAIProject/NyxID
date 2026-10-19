@@ -156,8 +156,8 @@ impl PersonalCommandReply {
                 url.set_path("/nyxbot/link");url.set_query(None);url.set_fragment(Some(&format!("intent_token={}",token.as_str())));
                 format!("Review your NyxID account at {url}\nThis links your own NyxBot, its existing access and memory, and your personal billing. After approving on the web, return to this private chat with the confirmation command. Never share the link or enter a password here.")
             },
-            Self::Confirmed=>"Your personal NyxBot is linked. New messages here use your account's existing NyxBot access and credits. This Telegram thread will appear in NyxID. Send /unlink to disconnect.".into(),
-            Self::Unlinked=>"This Telegram chat is disconnected. Your saved history remains in NyxID; independently started work may continue there. Send /link to reconnect.".into(),
+            Self::Confirmed=>"Your personal NyxBot is linked. Send a text message to use your NyxBot with your account's existing access and credits. This channel thread will appear in NyxID. Send /unlink to disconnect.".into(),
+            Self::Unlinked=>"This private conversation is disconnected. Your saved history remains in NyxID; independently started work may continue there. Send /link to reconnect.".into(),
         }))
     }
 }

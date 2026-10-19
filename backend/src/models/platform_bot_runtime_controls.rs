@@ -29,6 +29,10 @@ pub struct PlatformBotRuntimeControls {
     pub public_policy_revision: i64,
     pub personal_enabled: bool,
     pub public_enabled: bool,
+    #[serde(default)]
+    pub resume_personal_enabled: Option<bool>,
+    #[serde(default)]
+    pub resume_public_enabled: Option<bool>,
     pub emergency_stopped: bool,
     pub retired: bool,
     pub public_policy: Option<PublicRuntimePolicy>,

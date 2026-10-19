@@ -58,12 +58,14 @@ pub(crate) fn verified_message(
     })
 }
 
-pub(crate) async fn admit_in_session(
+async fn admit_selected_in_session(
     db: &Database,
     session: &mut ClientSession,
     identity: &dyn ManagerIdentityProducer,
     update: &VerifiedManagerUpdate,
     claim: &IngressClaim,
+    faq_only: bool,
+    faq: Option<&(Vec<String>, bool)>,
 ) -> AppResult<IngressAdmission> {
     // Deliberately precedes current authority resolution: retries keep history.
     if let Some(receipt) = ingress::find_in_session(db, session, update).await? {
@@ -88,6 +90,14 @@ pub(crate) async fn admit_in_session(
         ManagerAudience::Fixed(UnavailableReason::EmergencyStopped)
     } else if update.chat_kind != ManagerChatKind::Private {
         ManagerAudience::PrivateChatHandoff
+    } else if faq_only && policy.public_enabled && row.public_policy.is_none() {
+        ManagerAudience::Public(PublicIngress {
+            ingress: claim.clone(),
+            manager: policy.manager.clone(),
+            sender_id: update.sender_id,
+            chat_id: update.chat_id,
+            public_policy_revision: policy.public_policy_revision,
+        })
     } else {
         match identity.resolve_sender(db, session, update).await? {
             SenderResolution::Personal { authority, .. } => {
@@ -112,14 +122,77 @@ pub(crate) async fn admit_in_session(
             SenderResolution::Unavailable(reason) => ManagerAudience::Fixed(reason),
         }
     };
-    ingress::record_admission_in_session(db, session, update, &policy.manager, claim, &audience)
-        .await
+    let admission = ingress::record_admission_in_session(
+        db,
+        session,
+        update,
+        &policy.manager,
+        claim,
+        &audience,
+    )
+    .await?;
+    if let Some((ids, help)) = faq {
+        let target = match &audience {
+            ManagerAudience::Public(public) if row.public_policy.is_none() => {
+                Some((public.clone(), false))
+            }
+            ManagerAudience::Personal(personal) if *help => Some((
+                PublicIngress {
+                    ingress: claim.clone(),
+                    manager: personal.authority.manager.clone(),
+                    sender_id: update.sender_id,
+                    chat_id: update.chat_id,
+                    public_policy_revision: policy.public_policy_revision,
+                },
+                true,
+            )),
+            _ => None,
+        };
+        if let Some((public, linked)) = target {
+            super::platform_manager_delivery::queue_faq_in_session(
+                db,
+                session,
+                &public,
+                ids,
+                linked,
+                policy.personal_enabled,
+            )
+            .await?;
+        }
+    }
+    Ok(admission)
 }
 
 pub async fn admit_manager_update(
     db: &Database,
     identity: &dyn ManagerIdentityProducer,
     update: &VerifiedManagerUpdate,
+) -> AppResult<IngressAdmission> {
+    admit_selected(db, identity, update, false, None).await
+}
+pub(crate) async fn admit_text_update(
+    db: &Database,
+    identity: &dyn ManagerIdentityProducer,
+    update: &VerifiedManagerUpdate,
+    text: &str,
+    faq_only: bool,
+) -> AppResult<IngressAdmission> {
+    let ids = super::platform_faq_service::select(text)?;
+    admit_selected(
+        db,
+        identity,
+        update,
+        faq_only,
+        Some((ids, text.trim().is_empty() || text.starts_with('/'))),
+    )
+    .await
+}
+async fn admit_selected(
+    db: &Database,
+    identity: &dyn ManagerIdentityProducer,
+    update: &VerifiedManagerUpdate,
+    faq_only: bool,
+    faq: Option<(Vec<String>, bool)>,
 ) -> AppResult<IngressAdmission> {
     let claim = IngressClaim {
         receipt_id: uuid::Uuid::new_v4().to_string(),
@@ -129,11 +202,20 @@ pub async fn admit_manager_update(
     let result = session
         .start_transaction()
         .and_run(
-            (db, identity, update, claim),
-            |session, (db, identity, update, claim)| {
+            (db, identity, update, claim, faq_only, faq),
+            |session, (db, identity, update, claim, faq_only, faq)| {
                 Box::pin(async move {
                     transaction_result(
-                        admit_in_session(db, session, *identity, update, claim).await,
+                        admit_selected_in_session(
+                            db,
+                            session,
+                            *identity,
+                            update,
+                            claim,
+                            *faq_only,
+                            faq.as_ref(),
+                        )
+                        .await,
                     )
                 })
             },

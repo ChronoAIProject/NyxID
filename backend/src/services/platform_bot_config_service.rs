@@ -145,12 +145,21 @@ pub(crate) async fn fence_admin(
 
 pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> {
     db.collection::<PlatformBotConfig>(COLLECTION_NAME)
-        .create_index(
+        .create_indexes([
             IndexModel::builder()
                 .keys(doc! {"manager_bot_id": 1})
                 .options(IndexOptions::builder().unique(true).build())
                 .build(),
-        )
+            IndexModel::builder()
+                .keys(doc! {"channel_bot_id": 1})
+                .build(),
+            // Reservations survive removal and must remain indexed as tombstones.
+            IndexModel::builder()
+                .keys(
+                    doc! {"channel_transport.platform": 1, "channel_transport.platform_bot_id": 1},
+                )
+                .build(),
+        ])
         .await?;
     db.collection::<Document>(crate::models::platform_bot_config::CLEANUP_COLLECTION)
         .create_index(
@@ -196,12 +205,14 @@ pub(crate) async fn convert(
     let manager = row
         .get_str("platform_bot_id")
         .map_err(|_| AppError::Conflict("Manager identity unavailable".into()))?;
-    super::telegram_new_service::with_operation(
-        db,
-        &format!("telegram-manager-identity:{manager}"),
-        convert_locked(db, actor, bot, funding),
-    )
-    .await
+    let platform = row.get_str("platform").unwrap_or("");
+    let lock = if platform == "telegram" {
+        format!("telegram-manager-identity:{manager}")
+    } else {
+        format!("platform-manager-identity:{platform}:{manager}")
+    };
+    super::telegram_new_service::with_operation(db, &lock, convert_locked(db, actor, bot, funding))
+        .await
 }
 
 /// The admin handler is the only production caller. Conversion is permanent:
@@ -227,6 +238,8 @@ async fn convert_locked(
     session.start_transaction().and_run2(async move |session| {
         let result: AppResult<_> = async {
             fence_admin(&db, &actor, session).await?;
+            db.collection::<Document>(crate::models::platform_settings::COLLECTION_NAME)
+                .update_one(doc! {"_id":crate::models::platform_settings::PLATFORM_SETTINGS_ID},doc! {"$inc":{"channel_bot_registration_revision":1_i64}}).upsert(true).session(&mut *session).await?;
             if db.collection::<Document>(crate::models::nyxbot_channel::COLLECTION_NAME)
                 .find_one(doc! {"channel_bot_id": &bot_id, "$or": [
                     {"status": "pending"},
@@ -237,6 +250,7 @@ async fn convert_locked(
             {
                 return Err(AppError::Conflict("Finish or cancel the channel transport attempt before platform conversion".into()));
             }
+            if funding != actor {
             let funding_user = db.collection::<Document>(crate::models::user::COLLECTION_NAME)
                 .find_one(doc! {"_id": &funding, "user_type": "org", "is_active": true})
                 .session(&mut *session).await?;
@@ -249,22 +263,49 @@ async fn convert_locked(
                 .session(&mut *session).await?.is_none() {
                 return Err(AppError::Forbidden("Funding organization authority changed".into()));
             }
+            }
             let bot = db.collection::<Document>(crate::models::channel_bot::COLLECTION_NAME)
-                .find_one_and_update(doc! {"_id": &bot_id, "credential_source": "telegram_manager", "is_active": true, "platform_profile_id": {"$exists": false}},
+                .find_one_and_update(doc! {"_id": &bot_id, "is_active": true, "platform_profile_id": {"$exists": false}, "platform_installation_id": {"$exists": false}},
                     doc! {"$set": {"platform_profile_id": &id}, "$inc": {"route_revision": 1_i64}})
                 .session(&mut *session).await?
                 .ok_or_else(|| AppError::Conflict("Manager channel is unavailable or already platform managed".into()))?;
-            let manager_id = bot.get_str("platform_bot_id").map_err(|_| AppError::Conflict("Manager identity unavailable".into()))?;
-            let manager = db.collection::<Document>(crate::models::platform_credential::COLLECTION_NAME)
-                .find_one(doc! {"provider": "telegram-new", "fields.manager_bot_id": manager_id, "fields.webhook_ready": "true"})
-                .session(&mut *session).await?
-                .ok_or_else(|| AppError::Conflict("Manager configuration is not ready".into()))?;
-            let observation = manager.get_document("fields").ok().and_then(|f| f.get_str("observation_id").ok())
-                .ok_or_else(|| AppError::Conflict("Manager observation identity unavailable".into()))?;
+            let remote_id = bot.get_str("platform_bot_id").map_err(|_| AppError::Conflict("Bot identity unavailable".into()))?;
+            if db.collection::<Document>(COLLECTION_NAME).find_one(super::platform_bot_authority::profile_filter(&bot_id, bot.get_str("platform").unwrap_or(""), remote_id)).session(&mut *session).await?.is_some() {
+                return Err(AppError::Conflict("This bot is already reserved by a platform profile; recover its existing connection".into()));
+            }
+                let owner = bot.get_str("user_id").map_err(|_| AppError::Conflict("Channel owner is unavailable".into()))?;
+                if owner != actor {
+                    if db.collection::<Document>(crate::models::user::COLLECTION_NAME).update_one(doc! {"_id":owner,"user_type":"org","is_active":true},doc! {"$inc":{"platform_conversion_revision":1_i64}}).session(&mut *session).await?.matched_count!=1
+                        || db.collection::<Document>(crate::models::org_membership::COLLECTION_NAME).update_one(doc! {"org_user_id":owner,"member_user_id":&actor,"role":"admin","revoked_at":bson::Bson::Null},doc! {"$inc":{"platform_conversion_revision":1_i64}}).session(&mut *session).await?.matched_count!=1 {
+                        return Err(AppError::Forbidden("Live channel owner admin access is required".into()));
+                    }
+                }
+            let (manager_id, observation, channel_transport) = if bot.get_str("platform").ok()==Some("telegram") && bot.get_str("credential_source").ok() == Some("telegram_manager") {
+                let manager = db.collection::<Document>(crate::models::platform_credential::COLLECTION_NAME)
+                    .find_one(doc! {"provider":"telegram-new","fields.manager_bot_id":remote_id,"fields.webhook_ready":"true"})
+                    .session(&mut *session).await?.ok_or_else(|| AppError::Conflict("Manager configuration is not ready".into()))?;
+                let observation = manager.get_document("fields").ok().and_then(|f| f.get_str("observation_id").ok())
+                    .ok_or_else(|| AppError::Conflict("Manager observation identity unavailable".into()))?;
+                (remote_id.to_owned(), observation.to_owned(), None)
+            } else {
+                let platform = bot.get_str("platform").map_err(|_| AppError::ValidationError("Channel platform is missing".into()))?;
+                if !super::platform_channel_service::supports(platform) || bot.get_str("status").ok() != Some("active") {
+                    return Err(AppError::ValidationError("Connect and verify a supported messaging bot first".into()));
+                }
+                let ownership_version = bot.get_i64("ownership_version").unwrap_or(0);
+                db.collection::<Document>(crate::models::channel_bot::COLLECTION_NAME)
+                    .update_one(doc! {"_id":&bot_id},doc! {"$set":{"ownership_version":ownership_version}}).session(&mut *session).await?;
+                let typed_bot: crate::models::channel_bot::ChannelBot = bson::from_document(bot.clone()).map_err(|_|AppError::Conflict("Channel credentials unavailable".into()))?;
+                let credential_stamp = super::platform_channel_service::credential_stamp(&db,session,&typed_bot,true).await?;
+                (format!("channel:{platform}:{bot_id}"), uuid::Uuid::new_v4().to_string(), Some(crate::models::platform_bot_config::PlatformChannelTransport {
+                    platform: platform.into(), platform_bot_id: remote_id.into(), owner_user_id: owner.into(), ownership_version,
+                    authority_id: super::platform_channel_service::authority_id(), credential_stamp,
+                }))
+            };
             let now = Utc::now();
-            let profile = PlatformBotConfig { guide: None,
-            id: id.clone(), channel_bot_id: bot_id.clone(), manager_bot_id: manager_id.into(),
-                observation_id: observation.into(), execution_profile: PlatformExecutionProfile::PlatformOnboarding,
+            let profile = PlatformBotConfig { guide: None, channel_transport,
+            id: id.clone(), channel_bot_id: bot_id.clone(), manager_bot_id: manager_id,
+                observation_id: observation, execution_profile: PlatformExecutionProfile::PlatformOnboarding,
                 generation: 1, enabled: false, funding_owner_user_id: funding.clone(), configured_by: actor.clone(),
                 created_at: now, updated_at: now, deleted_at: None };
             db.collection::<PlatformBotConfig>(COLLECTION_NAME).insert_one(&profile).session(&mut *session).await?;
@@ -377,9 +418,22 @@ pub(crate) async fn disable(
 }
 
 pub(crate) async fn invalidate_manager(db: &Database, manager: &str) -> AppResult<()> {
-    db.collection::<Document>(COLLECTION_NAME).update_many(doc! {"manager_bot_id": manager},
-        doc! {"$set": {"enabled": false, "updated_at": bson::DateTime::now()}, "$inc": {"generation": 1_i64}}).await?;
-    Ok(())
+    let mut session = db.client().start_session().await?;
+    session.start_transaction().and_run((db, manager), |session, (db, manager)| Box::pin(async move {
+        let result: AppResult<()> = async {
+            if let Some(row) = db.collection::<PlatformBotConfig>(COLLECTION_NAME)
+                .find_one_and_update(doc! {"manager_bot_id":*manager,"deleted_at":bson::Bson::Null},
+                    doc! {"$set":{"enabled":false,"updated_at":bson::DateTime::now()},"$inc":{"generation":1_i64}})
+                .session(&mut *session).await? {
+                super::platform_bot_runtime_control_service::emergency_stop_in_session(db, session, &row.id, false).await?;
+                db.collection::<Document>(crate::models::platform_bot_runtime_controls::COLLECTION_NAME)
+                    .update_one(doc! {"platform_config_id":&row.id,"retired":false},doc! {"$inc":{"manager_authority_epoch":1_i64}})
+                    .session(session).await?;
+            }
+            Ok(())
+        }.await;
+        transaction_result(result)
+    })).await.map_err(map_transaction_error)
 }
 
 pub(crate) async fn verify_manager(
@@ -664,6 +718,38 @@ mod tests {
     use super::*;
     use crate::test_utils::{connect_transaction_test_database, test_app_state, test_user};
 
+    #[tokio::test]
+    async fn shared_identity_indexes_include_tombstone_reservations() {
+        use futures::TryStreamExt;
+        let db = connect_transaction_test_database("shared_identity_indexes").await;
+        ensure_indexes(&db).await.unwrap();
+        let indexes: Vec<IndexModel> = db
+            .collection::<Document>(COLLECTION_NAME)
+            .list_indexes()
+            .await
+            .unwrap()
+            .try_collect()
+            .await
+            .unwrap();
+        for keys in [
+            doc! {"channel_bot_id": 1},
+            doc! {"channel_transport.platform": 1, "channel_transport.platform_bot_id": 1},
+        ] {
+            let index = indexes
+                .iter()
+                .find(|index| index.keys == keys)
+                .expect("hot-path identity index");
+            assert!(
+                index
+                    .options
+                    .as_ref()
+                    .and_then(|options| options.partial_filter_expression.as_ref())
+                    .is_none()
+            );
+        }
+        db.drop().await.unwrap();
+    }
+
     async fn fixture(name: &str) -> (crate::AppState, String, String, String) {
         let db = connect_transaction_test_database(name).await;
         ensure_indexes(&db).await.unwrap();
@@ -710,6 +796,72 @@ mod tests {
             "fields": {"manager_bot_id": "123", "webhook_ready": "true", "observation_id": "observation"}
         }).await.unwrap();
         (test_app_state(db), actor, funding, bot)
+    }
+
+    #[tokio::test]
+    async fn native_manager_conversion_needs_no_sponsor_and_retains_identity_reservation() {
+        let (state, actor, _, bot) = fixture("native_no_sponsor").await;
+        let profile = convert(&state.db, &actor, &bot, &actor).await.unwrap();
+        assert!(profile.channel_transport.is_none());
+        assert_eq!(profile.funding_owner_user_id, actor);
+        assert!(
+            !super::super::platform_bot_authority::permits_personal_routes(&state.db, &bot)
+                .await
+                .unwrap()
+        );
+        let replacement = uuid::Uuid::new_v4().to_string();
+        state
+            .db
+            .collection::<Document>(crate::models::channel_bot::COLLECTION_NAME)
+            .delete_one(doc! {"_id":&bot})
+            .await
+            .unwrap();
+        state
+            .db
+            .collection::<Document>(crate::models::channel_bot::COLLECTION_NAME)
+            .insert_one(doc! {"_id":&replacement,"platform":"telegram","platform_bot_id":"123"})
+            .await
+            .unwrap();
+        assert!(
+            !super::super::platform_bot_authority::permits_personal_routes(&state.db, &replacement)
+                .await
+                .unwrap()
+        );
+        state
+            .db
+            .collection::<Document>(crate::models::channel_bot::COLLECTION_NAME)
+            .update_one(
+                doc! {"_id":&replacement},
+                doc! {"$set":{"platform":"slack"}},
+            )
+            .await
+            .unwrap();
+        assert!(
+            super::super::platform_bot_authority::permits_personal_routes(&state.db, &replacement)
+                .await
+                .unwrap()
+        );
+        state.db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn native_repair_invalidates_personal_epoch_and_preserves_resume_modes() {
+        let (db, update, _) =
+            super::super::platform_personal_binding_service::tests::fixture("native_repair_epoch")
+                .await;
+        invalidate_manager(&db, &update.manager_bot_id)
+            .await
+            .unwrap();
+        let runtime =
+            super::super::platform_bot_runtime_control_service::get(&db, &update.profile_id)
+                .await
+                .unwrap()
+                .unwrap();
+        assert!(runtime.emergency_stopped && runtime.cleanup_pending);
+        assert!(!runtime.personal_enabled && !runtime.public_enabled);
+        assert!(runtime.resume_personal_enabled == Some(true));
+        assert_eq!(runtime.manager_authority_epoch, 2);
+        db.drop().await.unwrap();
     }
 
     #[tokio::test]
@@ -777,10 +929,6 @@ mod tests {
         assert!(matches!(
             convert(&state.db, &actor, &bot, &foreign).await,
             Err(AppError::Forbidden(_))
-        ));
-        assert!(matches!(
-            convert(&state.db, &actor, &bot, &actor).await,
-            Err(AppError::ValidationError(_))
         ));
         let channels = state
             .db

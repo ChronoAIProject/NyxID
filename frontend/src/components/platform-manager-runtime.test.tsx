@@ -1,76 +1,76 @@
 import { beforeEach, expect, it, vi } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { ManagerRuntimeSettings } from "./platform-manager-runtime";
 import type { ManagerRuntime } from "@/schemas/platform-runtime";
 import type { PlatformProfile } from "@/schemas/platform-onboarding";
-const sponsor = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
-const { query, mutateAsync } = vi.hoisted(() => ({
+const { query, mutate, recovery, pending } = vi.hoisted(() => ({
   query: {
     data: {} as ManagerRuntime,
     isPending: false,
     error: null,
     refetch: vi.fn(),
   },
-  mutateAsync: vi.fn(),
+  mutate: vi.fn(),
+  recovery: vi.fn(),
+  pending: { modes: false, connection: false },
 }));
 vi.mock("@/hooks/use-platform-runtime", () => ({
   useManagerRuntime: () => query,
-  useManagerRuntimeAction: () => ({ mutateAsync, isPending: false }),
+  useManagerRuntimeAction: () => ({ mutate, isPending: pending.modes }),
 }));
 vi.mock("@/hooks/use-platform-onboarding", () => ({
-  useAdminPlatformTargets: () => ({ data: { orgs: [] } }),
+  useAdminPlatformAction: () => ({
+    mutate: recovery,
+    reset: vi.fn(),
+    isPending: pending.connection,
+  }),
 }));
-const unavailable = {
-  status: "unavailable" as const,
-  reason: "public_not_ready" as const,
-  checked_at: null,
-  expires_at: null,
-  evidence_digest: null,
-};
-const ready = () => ({
-  status: "ready",
-  reason: null,
-  checked_at: new Date().toISOString(),
-  expires_at: new Date(Date.now() + 60000).toISOString(),
-  evidence_digest: "server-proof",
-});
 const profile = {
   id: "profile",
   generation: 7,
-  funding_owner_user_id: sponsor,
-  guide: null,
   deleted_at: null,
 } as PlatformProfile;
 beforeEach(() => {
+  vi.clearAllMocks();
+  pending.modes = false;
+  pending.connection = false;
   query.data = {
     contract_version: 1,
     supported: true,
+    profile_generation: 7,
     runtime: null,
-    public_readiness: { ...unavailable, reason: "runtime_uninitialized" },
+    public_readiness: {
+      status: "unavailable",
+      reason: "runtime_uninitialized",
+      checked_at: null,
+      expires_at: null,
+      evidence_digest: null,
+    },
+    state: "setup_incomplete",
+    reason: null,
+    next_action: "enable",
+    platform: "slack",
+    display_name: "Support bot",
+    connection_url: "/admin/platform-bots#profile",
+    faq_preview: "Approved public help",
+    connection: {
+      status: "active",
+      webhook_url: "https://local.test/callback",
+      credential_source: "user",
+      fields: [{ name: "bot_token", label: "Bot token", secret: true }],
+      instructions: [],
+    },
   };
-  mutateAsync.mockReset().mockImplementation(async ({ action }) =>
-    action === "profiles"
-      ? {
-          profiles: [{ id: "nyxagent/chat", label: "NyxAgent chat" }],
-          default_profile: "nyxagent/chat",
-          readiness: unavailable,
-        }
-      : action === "readiness"
-        ? { public_readiness: ready() }
-        : query.data,
-  );
 });
-
-it("does no automatic paid discovery and initializes both lanes with the exact creation CAS", async () => {
+it("enables FAQ and personal linking with one CAS and no model, sponsor or paid discovery", async () => {
   render(<ManagerRuntimeSettings profile={profile} />);
-  expect(mutateAsync).not.toHaveBeenCalled();
-  expect(screen.getByLabelText("Total public budget per day")).toHaveValue("1");
-  expect(screen.getByLabelText("Free quota per person per day")).toHaveValue(
-    "0.1",
-  );
+  expect(
+    screen.queryByLabelText(/budget|sponsor|model/i),
+  ).not.toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: "Enable bot" }));
-  await waitFor(() => expect(mutateAsync).toHaveBeenCalledTimes(3));
-  expect(mutateAsync.mock.calls[2]![0]).toEqual({
+  await waitFor(() => expect(mutate).toHaveBeenCalledTimes(1));
+  expect(mutate.mock.calls[0]![0]).toEqual({
     action: "update",
     body: {
       initialize: true,
@@ -78,117 +78,144 @@ it("does no automatic paid discovery and initializes both lanes with the exact c
       expected_manager_authority_epoch: 0,
       expected_personal_control_revision: 0,
       expected_public_policy_revision: 0,
-      personal_enabled: true,
       public_enabled: true,
-      public_policy: {
-        source: "nyxagent",
-        profile: "nyxagent/chat",
-        total_daily_credits: "1",
-        sender_daily_credits: "0.1",
-      },
-    },
-  });
-});
-
-it("does not enable either lane on unavailable public proof, with explicit personal-only initialization available", async () => {
-  mutateAsync.mockImplementation(async ({ action }) =>
-    action === "profiles"
-      ? {
-          profiles: [{ id: "nyxagent/chat", label: "Chat" }],
-          readiness: unavailable,
-        }
-      : { public_readiness: unavailable },
-  );
-  render(<ManagerRuntimeSettings profile={profile} />);
-  fireEvent.click(screen.getByRole("button", { name: "Enable bot" }));
-  await screen.findByText(
-    /Public access is unavailable. Settings were not enabled/,
-  );
-  expect(mutateAsync.mock.calls.map(([x]) => x.action)).toEqual([
-    "profiles",
-    "readiness",
-  ]);
-  fireEvent.click(screen.getByText("Advanced", { selector: "summary" }));
-  fireEvent.click(
-    screen.getByRole("button", { name: "Enable personal access only" }),
-  );
-  await waitFor(() => expect(mutateAsync).toHaveBeenCalledTimes(3));
-  expect(mutateAsync.mock.calls[2]![0]).toEqual({
-    action: "update",
-    body: {
-      initialize: true,
-      expected_profile_generation: 7,
-      expected_manager_authority_epoch: 0,
-      expected_personal_control_revision: 0,
-      expected_public_policy_revision: 0,
       personal_enabled: true,
-      public_enabled: false,
+      emergency_stopped: false,
+      public_policy: null,
     },
   });
+  expect(screen.getByText(/exact plain text help/)).toBeInTheDocument();
 });
-
-it("retains exact existing money and keeps personal control out of public save and pause", async () => {
+it("remembers personal-only modes across paused reload and atomically resumes them", async () => {
+  query.data.state = "paused";
   query.data.runtime = {
-    manager_authority_epoch: 1,
+    manager_authority_epoch: 4,
     personal_control_revision: 2,
     public_policy_revision: 3,
     personal_enabled: false,
-    public_enabled: true,
-    emergency_stopped: false,
-    public_policy: {
-      source: "nyxagent",
-      profile: "nyxagent/chat",
-      sponsor_owner_user_id: sponsor,
-      total_daily_credits: "2.000000000001",
-      sender_daily_credits: "0.123456789012",
-    },
+    public_enabled: false,
+    emergency_stopped: true,
+    public_policy: null,
+    resume_personal_enabled: true,
+    resume_public_enabled: false,
   };
   render(<ManagerRuntimeSettings profile={profile} />);
-  expect(screen.getByLabelText("Free quota per person per day")).toHaveValue(
-    "0.123456789012",
-  );
-  fireEvent.change(screen.getByLabelText("Total public budget per day"), {
-    target: { value: "3.000000000001" },
-  });
-  fireEvent.click(screen.getByRole("button", { name: "Save public settings" }));
-  await waitFor(() => expect(mutateAsync).toHaveBeenCalledTimes(3));
-  expect(mutateAsync.mock.calls[2]![0].body).toEqual({
-    expected_manager_authority_epoch: 1,
-    expected_personal_control_revision: 2,
-    expected_public_policy_revision: 3,
-    public_enabled: true,
-    public_policy: {
-      source: "nyxagent",
-      profile: "nyxagent/chat",
-      total_daily_credits: "3.000000000001",
-      sender_daily_credits: "0.123456789012",
-    },
-  });
-  fireEvent.click(screen.getByRole("button", { name: "Pause public guide" }));
-  expect(mutateAsync.mock.calls[3]![0].body).toEqual({
-    expected_manager_authority_epoch: 1,
-    expected_personal_control_revision: 2,
-    expected_public_policy_revision: 3,
+  expect(
+    screen.getByRole("checkbox", { name: "Public FAQ" }),
+  ).not.toBeChecked();
+  expect(
+    screen.getByRole("checkbox", { name: "Personal NyxBot linking" }),
+  ).toBeChecked();
+  fireEvent.click(screen.getByRole("button", { name: "Resume bot" }));
+  await waitFor(() => expect(mutate).toHaveBeenCalledOnce());
+  expect(mutate.mock.calls[0]![0].body).toMatchObject({
+    personal_enabled: true,
     public_enabled: false,
+    emergency_stopped: false,
+    expected_manager_authority_epoch: 4,
   });
+});
+it("Enter in replacement credentials repairs the connection and never submits modes", async () => {
+  const user = userEvent.setup();
+  render(<ManagerRuntimeSettings profile={profile} />);
+  fireEvent.click(screen.getByText("Connection setup and recovery"));
+  await user.type(
+    screen.getByLabelText("Bot token replacement (optional)"),
+    "replacement{Enter}",
+  );
+  await waitFor(() => expect(recovery).toHaveBeenCalledOnce());
+  expect(recovery.mock.calls[0]![0]).toMatchObject({
+    action: "repair",
+    fields: { bot_token: "replacement" },
+    profile: { generation: 7 },
+  });
+  expect(mutate).not.toHaveBeenCalled();
+  expect(screen.getByRole("button", { name: "Enable bot" })).toBeDisabled();
+  expect(
+    screen.getByLabelText("Bot token replacement (optional)"),
+  ).toHaveAttribute("type", "password");
+});
+it("explains both-off Resume and requires an explicit mode choice", async () => {
+  query.data.state = "paused";
+  query.data.runtime = {
+    manager_authority_epoch: 4,
+    personal_control_revision: 2,
+    public_policy_revision: 3,
+    personal_enabled: false,
+    public_enabled: false,
+    emergency_stopped: true,
+    public_policy: null,
+    resume_personal_enabled: false,
+    resume_public_enabled: false,
+  };
+  render(<ManagerRuntimeSettings profile={profile} />);
+  expect(screen.getByRole("button", { name: "Resume bot" })).toBeDisabled();
+  expect(
+    screen.getByText("Select at least one mode to enable or resume this bot."),
+  ).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("checkbox", { name: "Public FAQ" }));
+  expect(screen.getByRole("button", { name: "Resume bot" })).toBeEnabled();
+  fireEvent.click(screen.getByRole("button", { name: "Resume bot" }));
+  await waitFor(() => expect(mutate).toHaveBeenCalledOnce());
+  expect(mutate.mock.calls[0]![0].body).toMatchObject({
+    personal_enabled: false,
+    public_enabled: true,
+    emergency_stopped: false,
+  });
+});
+it("shows provider recovery and refetches status without reloading the page", () => {
+  query.data.state = "connection_repair_required";
+  render(<ManagerRuntimeSettings profile={profile} />);
+  expect(screen.getByRole("button", { name: "Enable bot" })).toBeDisabled();
+  fireEvent.click(screen.getByText("Connection setup and recovery"));
+  fireEvent.click(screen.getByRole("button", { name: "Refresh status" }));
+  expect(query.refetch).toHaveBeenCalledOnce();
+});
+it("disables recovery while modes are pending", () => {
+  pending.modes = true;
+  query.data.profile_generation = 9;
+  render(<ManagerRuntimeSettings profile={profile} />);
+  fireEvent.click(screen.getByText("Connection setup and recovery"));
+  expect(
+    screen.getByRole("button", { name: "Repair connection" }),
+  ).toBeDisabled();
 });
 
-it("preserves legacy saved monetary limits and distinguishes unsupported routes", () => {
-  const saved = {
-    ...profile,
-    guide: {
-      limits: { daily_credits: "9.123456789012" },
-      anonymous_daily_credits: "0.2",
-    },
-  } as PlatformProfile;
-  const view = render(<ManagerRuntimeSettings profile={saved} />);
-  expect(screen.getByLabelText("Total public budget per day")).toHaveValue(
-    "9.123456789012",
-  );
-  query.data = { ...query.data, supported: false };
-  view.rerender(<ManagerRuntimeSettings profile={saved} />);
-  expect(screen.getByText(/not supported by this server/)).toBeInTheDocument();
-  expect(
-    screen.queryByRole("button", { name: "Enable bot" }),
-  ).not.toBeInTheDocument();
-});
+it.each(["connection_repair_required", "setup_incomplete"] as const)(
+  "retains remembered choices across paused %s recovery and refresh",
+  async (state) => {
+    query.data.state = state;
+    query.data.reason =
+      state === "setup_incomplete"
+        ? "discord_commands_required"
+        : "connection_unavailable";
+    query.data.runtime = {
+      manager_authority_epoch: 4,
+      personal_control_revision: 2,
+      public_policy_revision: 3,
+      personal_enabled: false,
+      public_enabled: false,
+      emergency_stopped: true,
+      public_policy: null,
+      resume_personal_enabled: true,
+      resume_public_enabled: false,
+    };
+    const view = render(<ManagerRuntimeSettings profile={profile} />);
+    expect(screen.getByRole("button", { name: "Resume bot" })).toBeDisabled();
+    query.data = { ...query.data, state: "paused", reason: null };
+    view.rerender(<ManagerRuntimeSettings profile={profile} />);
+    expect(
+      screen.getByRole("checkbox", { name: "Personal NyxBot linking" }),
+    ).toBeChecked();
+    expect(
+      screen.getByRole("checkbox", { name: "Public FAQ" }),
+    ).not.toBeChecked();
+    fireEvent.click(screen.getByRole("button", { name: "Resume bot" }));
+    await waitFor(() => expect(mutate).toHaveBeenCalledOnce());
+    expect(mutate.mock.calls[0]![0].body).toMatchObject({
+      personal_enabled: true,
+      public_enabled: false,
+      emergency_stopped: false,
+    });
+  },
+);

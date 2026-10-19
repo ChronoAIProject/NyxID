@@ -618,6 +618,7 @@ mod tests {
             .unwrap();
         let now = Utc::now();
         let profile = PlatformBotConfig {
+            channel_transport: None,
             guide: None,
             id: uuid::Uuid::new_v4().to_string(),
             channel_bot_id: uuid::Uuid::new_v4().to_string(),

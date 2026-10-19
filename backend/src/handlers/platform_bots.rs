@@ -6,9 +6,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 
 use crate::services::{audit_service, platform_bot_config_service as configs};
-use crate::{
-    AppState, errors::AppResult, models::platform_bot_config::PlatformBotConfig, mw::auth::AuthUser,
-};
+use crate::{AppState, errors::AppResult, mw::auth::AuthUser};
 
 async fn admin(state: &AppState, auth: &AuthUser) -> AppResult<()> {
     super::login_client_context::require_first_party_human(auth)?;
@@ -28,7 +26,7 @@ fn private_headers() -> HeaderMap {
 #[serde(deny_unknown_fields)]
 pub struct ConvertRequest {
     pub channel_bot_id: uuid::Uuid,
-    pub funding_owner_user_id: uuid::Uuid,
+    pub funding_owner_user_id: Option<uuid::Uuid>,
 }
 
 #[derive(Deserialize)]
@@ -42,6 +40,8 @@ pub struct ConfigResponse {
     pub id: String,
     pub channel_bot_id: String,
     pub manager_bot_id: String,
+    pub platform: String,
+    pub display_name: String,
     pub execution_profile: &'static str,
     pub generation: i64,
     pub enabled: bool,
@@ -50,9 +50,16 @@ pub struct ConfigResponse {
     pub guide: Option<GuideInput>,
 }
 
-impl From<PlatformBotConfig> for ConfigResponse {
-    fn from(row: PlatformBotConfig) -> Self {
+impl From<crate::services::platform_bot_status_service::ProfileDisplay> for ConfigResponse {
+    fn from(view: crate::services::platform_bot_status_service::ProfileDisplay) -> Self {
+        let row = view.profile;
         Self {
+            platform: row
+                .channel_transport
+                .as_ref()
+                .map(|t| t.platform.clone())
+                .unwrap_or_else(|| "telegram".into()),
+            display_name: view.display_name,
             guide: row.guide.map(Into::into),
             id: row.id,
             channel_bot_id: row.channel_bot_id,
@@ -94,10 +101,47 @@ pub async fn list(
     Ok((
         private_headers(),
         Json(ConfigListResponse {
-            profiles: rows.into_iter().map(Into::into).collect(),
+            profiles: crate::services::platform_bot_status_service::profile_displays(
+                &state.db, rows,
+            )
+            .await?
+            .into_iter()
+            .map(Into::into)
+            .collect(),
             next_before_id,
         }),
     ))
+}
+
+#[derive(Serialize)]
+pub struct EligibleTarget {
+    id: String,
+    platform: String,
+    label: String,
+    platform_bot_username: String,
+}
+#[derive(Serialize)]
+pub struct EligibleTargets {
+    bots: Vec<EligibleTarget>,
+}
+pub async fn targets(
+    State(state): State<AppState>,
+    auth: AuthUser,
+) -> AppResult<(HeaderMap, Json<EligibleTargets>)> {
+    admin(&state, &auth).await?;
+    let actor = auth.user_id.to_string();
+    let eligible =
+        crate::services::platform_bot_status_service::eligible_targets(&state.db, &actor)
+            .await?
+            .into_iter()
+            .map(|bot| EligibleTarget {
+                id: bot.id,
+                platform: bot.platform,
+                label: bot.label,
+                platform_bot_username: bot.platform_bot_username,
+            })
+            .collect();
+    Ok((private_headers(), Json(EligibleTargets { bots: eligible })))
 }
 
 pub async fn convert(
@@ -110,7 +154,10 @@ pub async fn convert(
         &state.db,
         &auth.user_id.to_string(),
         &body.channel_bot_id.to_string(),
-        &body.funding_owner_user_id.to_string(),
+        &body
+            .funding_owner_user_id
+            .unwrap_or(auth.user_id)
+            .to_string(),
     )
     .await?;
     audit_service::log_for_user(
@@ -119,7 +166,14 @@ pub async fn convert(
         "platform_bot_converted",
         Some(serde_json::json!({"platform_config_id": row.id, "generation": row.generation})),
     );
-    Ok((private_headers(), Json(row.into())))
+    Ok((
+        private_headers(),
+        Json(
+            crate::services::platform_bot_status_service::profile_display(&state.db, row)
+                .await?
+                .into(),
+        ),
+    ))
 }
 
 pub async fn get(
@@ -130,7 +184,14 @@ pub async fn get(
     admin(&state, &auth).await?;
     Ok((
         private_headers(),
-        Json(configs::get(&state.db, &id.to_string()).await?.into()),
+        Json(
+            crate::services::platform_bot_status_service::profile_display(
+                &state.db,
+                configs::get(&state.db, &id.to_string()).await?,
+            )
+            .await?
+            .into(),
+        ),
     ))
 }
 
@@ -160,7 +221,14 @@ async fn disable(
         },
         Some(serde_json::json!({"platform_config_id": row.id, "generation": row.generation})),
     );
-    Ok((private_headers(), Json(row.into())))
+    Ok((
+        private_headers(),
+        Json(
+            crate::services::platform_bot_status_service::profile_display(&state.db, row)
+                .await?
+                .into(),
+        ),
+    ))
 }
 
 pub async fn pause(
@@ -188,6 +256,24 @@ pub async fn verify(
     Json(body): Json<GenerationRequest>,
 ) -> AppResult<(HeaderMap, Json<ConfigResponse>)> {
     admin(&state, &auth).await?;
+    let profile = configs::get(&state.db, &id.to_string()).await?;
+    if profile.channel_transport.is_some() {
+        let row = crate::services::platform_bot_connection_service::verify(
+            &state,
+            &profile.id,
+            body.generation,
+            &auth.user_id.to_string(),
+        )
+        .await?;
+        return Ok((
+            private_headers(),
+            Json(
+                crate::services::platform_bot_status_service::profile_display(&state.db, row)
+                    .await?
+                    .into(),
+            ),
+        ));
+    }
     let row = configs::verify_manager(
         &super::telegram_new::service(&state),
         &id.to_string(),
@@ -195,20 +281,92 @@ pub async fn verify(
         &auth.user_id.to_string(),
     )
     .await?;
-    Ok((private_headers(), Json(row.into())))
+    Ok((
+        private_headers(),
+        Json(
+            crate::services::platform_bot_status_service::profile_display(&state.db, row)
+                .await?
+                .into(),
+        ),
+    ))
 }
 
-pub async fn repair(
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RepairRequest {
+    generation: i64,
+    #[serde(default)]
+    fields: std::collections::BTreeMap<String, zeroize::Zeroizing<String>>,
+    connection_id: Option<uuid::Uuid>,
+}
+pub async fn discord_commands(
     State(state): State<AppState>,
     auth: AuthUser,
     Path(id): Path<uuid::Uuid>,
     Json(body): Json<GenerationRequest>,
 ) -> AppResult<(HeaderMap, Json<ConfigResponse>)> {
     admin(&state, &auth).await?;
+    let row = crate::services::platform_bot_connection_service::configure_discord_commands(
+        &state,
+        &id.to_string(),
+        body.generation,
+        &auth.user_id.to_string(),
+    )
+    .await?;
+    audit_service::log_for_user(
+        state.db.clone(),
+        &auth,
+        "platform_bot_discord_commands_configured",
+        Some(serde_json::json!({"platform_config_id":row.id,"generation":row.generation})),
+    );
+    Ok((
+        private_headers(),
+        Json(
+            crate::services::platform_bot_status_service::profile_display(&state.db, row)
+                .await?
+                .into(),
+        ),
+    ))
+}
+pub async fn repair(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(id): Path<uuid::Uuid>,
+    Json(body): Json<RepairRequest>,
+) -> AppResult<(HeaderMap, Json<ConfigResponse>)> {
+    admin(&state, &auth).await?;
     let row = configs::get(&state.db, &id.to_string()).await?;
     if row.generation != body.generation || row.deleted_at.is_some() {
         return Err(crate::errors::AppError::Conflict(
             "Platform configuration changed".into(),
+        ));
+    }
+    if row.channel_transport.is_some() {
+        let row = crate::services::platform_bot_connection_service::repair(
+            &state,
+            &row.id,
+            body.generation,
+            &auth.user_id.to_string(),
+            &body.fields,
+            body.connection_id
+                .as_ref()
+                .map(|id| id.to_string())
+                .as_deref(),
+        )
+        .await?;
+        audit_service::log_for_user(
+            state.db.clone(),
+            &auth,
+            "platform_bot_repaired",
+            Some(serde_json::json!({"platform_config_id":row.id,"generation":row.generation})),
+        );
+        return Ok((
+            private_headers(),
+            Json(
+                crate::services::platform_bot_status_service::profile_display(&state.db, row)
+                    .await?
+                    .into(),
+            ),
         ));
     }
     let service = super::telegram_new::service(&state);
@@ -228,7 +386,14 @@ pub async fn repair(
         "platform_bot_repaired",
         Some(serde_json::json!({"platform_config_id": row.id, "generation": row.generation})),
     );
-    Ok((private_headers(), Json(row.into())))
+    Ok((
+        private_headers(),
+        Json(
+            crate::services::platform_bot_status_service::profile_display(&state.db, row)
+                .await?
+                .into(),
+        ),
+    ))
 }
 
 pub(crate) async fn sweep_cleanup(state: &AppState) -> AppResult<()> {
@@ -411,7 +576,14 @@ pub async fn configure_guide(
             serde_json::json!({"platform_config_id": row.id, "generation": row.generation, "enabled": row.enabled}),
         ),
     );
-    Ok((private_headers(), Json(row.into())))
+    Ok((
+        private_headers(),
+        Json(
+            crate::services::platform_bot_status_service::profile_display(&state.db, row)
+                .await?
+                .into(),
+        ),
+    ))
 }
 
 #[derive(Serialize)]
@@ -781,6 +953,8 @@ pub struct RuntimeResponse {
     personal_enabled: bool,
     public_enabled: bool,
     emergency_stopped: bool,
+    resume_personal_enabled: Option<bool>,
+    resume_public_enabled: Option<bool>,
     public_policy: Option<PublicPolicyResponse>,
 }
 impl From<crate::models::platform_bot_runtime_controls::PlatformBotRuntimeControls>
@@ -794,6 +968,8 @@ impl From<crate::models::platform_bot_runtime_controls::PlatformBotRuntimeContro
             personal_enabled: r.personal_enabled,
             public_enabled: r.public_enabled,
             emergency_stopped: r.emergency_stopped,
+            resume_personal_enabled: r.resume_personal_enabled,
+            resume_public_enabled: r.resume_public_enabled,
             public_policy: r.public_policy.map(|p| PublicPolicyResponse {
                 source: "nyxagent",
                 profile: p.nyxagent_profile,
@@ -854,28 +1030,84 @@ impl PublicReadinessResponse {
     }
 }
 #[derive(Serialize)]
+pub struct ConnectionField {
+    name: &'static str,
+    label: &'static str,
+    secret: bool,
+}
+#[derive(Serialize)]
+pub struct ConnectionResponse {
+    status: String,
+    webhook_url: String,
+    credential_source: String,
+    fields: Vec<ConnectionField>,
+    instructions: Vec<String>,
+}
+#[derive(Serialize)]
 pub struct ManagerRuntimeResponse {
     contract_version: u32,
+    profile_generation: i64,
     supported: bool,
     runtime: Option<RuntimeResponse>,
     public_readiness: PublicReadinessResponse,
+    state: &'static str,
+    reason: Option<&'static str>,
+    next_action: &'static str,
+    platform: String,
+    display_name: String,
+    connection_url: String,
+    faq_preview: String,
+    connection: Option<ConnectionResponse>,
 }
-fn runtime_response(
-    row: Option<crate::models::platform_bot_runtime_controls::PlatformBotRuntimeControls>,
-) -> ManagerRuntimeResponse {
-    use manager_contract::UnavailableReason;
-    let reason = match &row {
-        None => UnavailableReason::RuntimeUninitialized,
-        Some(r) if r.retired => UnavailableReason::ManagerUnavailable,
-        Some(r) if r.emergency_stopped => UnavailableReason::EmergencyStopped,
-        _ => UnavailableReason::PublicNotReady,
-    };
-    ManagerRuntimeResponse {
-        contract_version: manager_contract::CONTRACT_VERSION,
-        supported: true,
-        runtime: row.map(Into::into),
-        public_readiness: PublicReadinessResponse::unavailable(reason),
+impl From<crate::services::platform_bot_status_service::RuntimeView> for ManagerRuntimeResponse {
+    fn from(view: crate::services::platform_bot_status_service::RuntimeView) -> Self {
+        use crate::services::platform_bot_status_service::FaqReadiness;
+        Self {
+            contract_version: view.contract_version,
+            profile_generation: view.profile_generation,
+            supported: view.supported,
+            runtime: view.runtime.map(Into::into),
+            public_readiness: match view.public_readiness {
+                FaqReadiness::Ready => PublicReadinessResponse {
+                    status: "faq_ready",
+                    reason: None,
+                    checked_at: None,
+                    expires_at: None,
+                    evidence_digest: None,
+                },
+                FaqReadiness::Unavailable(reason) => PublicReadinessResponse::unavailable(reason),
+            },
+            state: view.state,
+            reason: view.reason,
+            next_action: view.next_action,
+            platform: view.platform,
+            display_name: view.display_name,
+            connection_url: view.connection_url,
+            faq_preview: view.faq_preview,
+            connection: view.connection.map(|c| ConnectionResponse {
+                status: c.status,
+                webhook_url: c.webhook_url,
+                credential_source: c.credential_source,
+                instructions: c.instructions,
+                fields: c
+                    .fields
+                    .into_iter()
+                    .map(|f| ConnectionField {
+                        name: f.name,
+                        label: f.label,
+                        secret: f.secret,
+                    })
+                    .collect(),
+            }),
+        }
     }
+}
+async fn runtime_view(state: &AppState, id: &str) -> AppResult<ManagerRuntimeResponse> {
+    Ok(
+        crate::services::platform_bot_status_service::view(state, id)
+            .await?
+            .into(),
+    )
 }
 
 pub async fn get_runtime(
@@ -885,12 +1117,9 @@ pub async fn get_runtime(
     Path(id): Path<uuid::Uuid>,
 ) -> AppResult<(HeaderMap, Json<ManagerRuntimeResponse>)> {
     admin(&state, &auth).await?;
-    configs::get(&state.db, &id.to_string()).await?;
     Ok((
         private_headers(),
-        Json(runtime_response(
-            runtime_controls::get(&state.db, &id.to_string()).await?,
-        )),
+        Json(runtime_view(&state, &id.to_string()).await?),
     ))
 }
 pub async fn put_runtime(
@@ -901,7 +1130,7 @@ pub async fn put_runtime(
     Json(input): Json<RuntimeInput>,
 ) -> AppResult<(HeaderMap, Json<ManagerRuntimeResponse>)> {
     admin(&state, &auth).await?;
-    let row = runtime_controls::update_patch(
+    let _row = runtime_controls::update_patch(
         &state.db,
         &audit_service::AuditActor::from_auth_user(&auth),
         state.audit_chain_hmac_key.as_ref().as_ref(),
@@ -910,7 +1139,10 @@ pub async fn put_runtime(
         producers.public.as_ref(),
     )
     .await?;
-    Ok((private_headers(), Json(runtime_response(Some(row)))))
+    Ok((
+        private_headers(),
+        Json(runtime_view(&state, &id.to_string()).await?),
+    ))
 }
 pub async fn clear_runtime_emergency_stop(
     State(state): State<AppState>,
@@ -920,7 +1152,7 @@ pub async fn clear_runtime_emergency_stop(
     Json(input): Json<ClearEmergencyInput>,
 ) -> AppResult<(HeaderMap, Json<ManagerRuntimeResponse>)> {
     admin(&state, &auth).await?;
-    let row = runtime_controls::clear_emergency_stop(
+    let _row = runtime_controls::clear_emergency_stop(
         &state.db,
         &audit_service::AuditActor::from_auth_user(&auth),
         state.audit_chain_hmac_key.as_ref().as_ref(),
@@ -932,7 +1164,10 @@ pub async fn clear_runtime_emergency_stop(
         },
     )
     .await?;
-    Ok((private_headers(), Json(runtime_response(Some(row)))))
+    Ok((
+        private_headers(),
+        Json(runtime_view(&state, &id.to_string()).await?),
+    ))
 }
 #[derive(Serialize)]
 pub struct PublicProfileResponse {
@@ -1082,7 +1317,10 @@ mod runtime_input_tests {
     }
     #[test]
     fn absent_configuration_advertises_supported_without_inventing_versions() {
-        let value = serde_json::to_value(runtime_response(None)).unwrap();
+        let value = serde_json::to_value(ManagerRuntimeResponse::from(
+            crate::services::platform_bot_status_service::initial(None),
+        ))
+        .unwrap();
         assert_eq!(value["supported"], true);
         assert!(value["runtime"].is_null());
         assert_eq!(value["public_readiness"]["reason"], "runtime_uninitialized");

@@ -6,10 +6,12 @@ const manager = z.object({
   id: z.string(),
   username: z.string().nullable(),
   display_name: z.string(),
+  platform: z.string().default("telegram"),
 });
 const sender = z.object({
-  id: z.string().regex(/^-?\d+$/),
+  id: z.string().min(1).max(512),
   display_name: z.string().nullable(),
+  conversation_id: z.string().optional(),
 });
 export const personalLinkPreviewSchema = z.object({
   purpose: z.literal("personal_nyxbot"),
@@ -30,7 +32,8 @@ export const personalLinkReviewSchema = z.object({
   billing: z.literal("personal"),
   replaces_existing_binding: z.boolean(),
   disclosures: z.object({
-    telegram_transport: z.literal(true),
+    telegram_transport: z.boolean(),
+    channel_transport: z.boolean().optional(),
     existing_nyxbot_access: z.literal(true),
     can_approve_sensitive_actions: z.literal(true),
     started_work_may_continue_after_unlink: z.literal(true),
@@ -50,7 +53,7 @@ export const personalLinkStatusSchema = z.object({
   binding: z.object({ id: z.uuid(), generation: version }).nullable(),
   confirmation_command: z
     .string()
-    .regex(/^\/confirm P-[A-Z0-9]{4}-[A-Z0-9]{4}$/)
+    .regex(/^\/?confirm P-[A-Z0-9]{4}-[A-Z0-9]{4}$/)
     .nullable(),
 });
 export const personalBindingSchema = z.object({
@@ -71,15 +74,40 @@ export type PersonalBinding = z.infer<typeof personalBindingSchema>;
 export type PersonalLinkReview = z.infer<typeof personalLinkReviewSchema>;
 
 export const platformThreadSchema = z.object({
-  platform: z.literal("telegram"),
+  platform: z.enum([
+    "telegram",
+    "discord",
+    "slack",
+    "lark",
+    "feishu",
+    "whatsapp",
+    "x",
+  ]),
   manager_id: z.string(),
   binding_id: z.uuid(),
   binding_generation: version,
 });
 export const platformTurnOriginSchema = z.object({
+  platform:z.string().optional(),
   binding_id: z.uuid(),
   binding_generation: version,
   manager_authority_epoch: version,
   personal_control_revision: version,
 });
 export type PlatformThread = z.infer<typeof platformThreadSchema>;
+
+export function personalPlatformLabel(platform: string): string {
+  return (
+    (
+      {
+        telegram: "Telegram",
+        discord: "Discord",
+        slack: "Slack",
+        lark: "Lark",
+        feishu: "Feishu",
+        whatsapp: "WhatsApp",
+        x: "X",
+      } as Record<string, string>
+    )[platform] ?? platform
+  );
+}

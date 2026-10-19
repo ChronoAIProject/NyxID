@@ -524,14 +524,61 @@ pub async fn list_owned(
         }
         filter.insert("_id", doc! {"$lt":before});
     }
-    Ok(db
+    let mut rows: Vec<PlatformPersonalBinding> = db
         .collection::<PlatformPersonalBinding>(COLLECTION_NAME)
         .find(filter)
         .sort(doc! {"_id":-1})
         .limit(51)
         .await?
         .try_collect()
-        .await?)
+        .await?;
+    // Authority epochs invalidate old links immediately. Project them as
+    // disconnected even while bounded stop cleanup is still draining old work.
+    let ids: Vec<_> = rows
+        .iter()
+        .map(|row| row.platform_config_id.clone())
+        .collect();
+    let controls: Vec<PlatformBotRuntimeControls> = db
+        .collection(crate::models::platform_bot_runtime_controls::COLLECTION_NAME)
+        .find(doc! {"platform_config_id":{"$in":&ids}})
+        .await?
+        .try_collect()
+        .await?;
+    let mut connected = std::collections::HashMap::new();
+    for row in &rows {
+        if !connected.contains_key(&row.platform_config_id) {
+            connected.insert(
+                row.platform_config_id.clone(),
+                manager_display(db, &row.platform_config_id, &row.manager_bot_id)
+                    .await?
+                    .is_some(),
+            );
+        }
+    }
+    for row in &mut rows {
+        if row.state == PersonalBindingState::Active
+            && (!connected
+                .get(&row.platform_config_id)
+                .copied()
+                .unwrap_or(false)
+                || controls
+                    .iter()
+                    .find(|c| c.platform_config_id == row.platform_config_id)
+                    .is_none_or(|c| {
+                        c.retired || c.manager_authority_epoch != row.manager_authority_epoch
+                    }))
+        {
+            row.state = PersonalBindingState::Revoked;
+            row.revoked_at = Some(
+                controls
+                    .iter()
+                    .find(|c| c.platform_config_id == row.platform_config_id)
+                    .map(|c| c.updated_at)
+                    .unwrap_or(row.updated_at),
+            );
+        }
+    }
+    Ok(rows)
 }
 
 pub async fn revoke_owned(
@@ -767,6 +814,7 @@ pub(crate) mod tests {
             .await
             .unwrap();
         let profile = PlatformBotConfig {
+            channel_transport: None,
             id: profile_id.clone(),
             channel_bot_id: bot_id.clone(),
             manager_bot_id: "991100".into(),
@@ -801,6 +849,8 @@ pub(crate) mod tests {
             public_policy_revision: 1,
             personal_enabled: true,
             public_enabled: false,
+            resume_personal_enabled: None,
+            resume_public_enabled: None,
             emergency_stopped: false,
             retired: false,
             public_policy: None,
@@ -1666,7 +1716,53 @@ mod stop_completion_tests {
 }
 
 pub struct ManagerDisplay {
-    pub username: String,
+    pub username: Option<String>,
+    pub display_name: String,
+    pub platform: String,
+}
+pub struct SenderDisplay {
+    pub id: String,
+    pub conversation_id: String,
+    pub display_name: Option<String>,
+}
+pub async fn sender_display(
+    db: &Database,
+    profile: &str,
+    manager: &str,
+    id: i64,
+) -> AppResult<SenderDisplay> {
+    if manager.starts_with("channel:") {
+        let peer = super::platform_channel_service::peer(db, profile, id).await?;
+        return Ok(SenderDisplay {
+            id: peer.sender_id,
+            conversation_id: peer.conversation_id,
+            display_name: peer.sender_display_name,
+        });
+    }
+    Ok(SenderDisplay {
+        id: id.to_string(),
+        conversation_id: id.to_string(),
+        display_name: None,
+    })
+}
+pub async fn manager_inventory_display(
+    db: &Database,
+    profile: &str,
+    manager: &str,
+    required: bool,
+) -> AppResult<ManagerDisplay> {
+    if let Some(value) = manager_display(db, profile, manager).await? {
+        return Ok(value);
+    }
+    if required {
+        return Err(unavailable());
+    }
+    let platform = super::platform_channel_service::platform(manager).to_string();
+    Ok(ManagerDisplay {
+        display_name: format!("{} bot", super::channel_platform::platform_name(&platform)),
+        username: None,
+        platform,
+    })
 }
 
 /// Safe current manager metadata only. The projections never load credentials
@@ -1688,6 +1784,41 @@ pub async fn manager_display(
     else {
         return Ok(None);
     };
+    if let Some(transport) = &profile.channel_transport {
+        let mut session = db.client().start_session().await?;
+        if !super::platform_channel_service::fence_transport(
+            db,
+            &mut session,
+            &profile,
+            None,
+            false,
+        )
+        .await?
+        {
+            return Ok(None);
+        }
+        let bot = db
+            .collection::<Document>(crate::models::channel_bot::COLLECTION_NAME)
+            .find_one(super::platform_channel_service::bot_filter(
+                &profile, transport,
+            ))
+            .projection(doc! {"label":1,"platform_bot_username":1})
+            .await?;
+        return Ok(bot.map(|bot| ManagerDisplay {
+            platform: transport.platform.clone(),
+            username: bot
+                .get_str("platform_bot_username")
+                .ok()
+                .filter(|value| !value.is_empty())
+                .map(str::to_string),
+            display_name: bot
+                .get_str("label")
+                .unwrap_or("Shared bot")
+                .chars()
+                .take(200)
+                .collect(),
+        }));
+    }
     let Some(credential)=db.collection::<Document>(crate::models::platform_credential::COLLECTION_NAME).find_one(doc! {"provider":"telegram-new","fields.manager_bot_id":manager_bot_id,"fields.observation_id":&profile.observation_id,"fields.webhook_ready":"true"}).projection(doc! {"_id":0,"fields.manager_username":1}).await? else {return Ok(None);};
     let Some(bot)=db.collection::<Document>(crate::models::channel_bot::COLLECTION_NAME).find_one(doc! {"_id":&profile.channel_bot_id,"platform_profile_id":profile_id,"platform_bot_id":manager_bot_id,"is_active":true}).projection(doc! {"_id":0,"platform_bot_username":1}).await? else {return Ok(None);};
     let valid = |value: &str| {
@@ -1707,6 +1838,8 @@ pub async fn manager_display(
                 .filter(|value| valid(value))
         });
     Ok(username.map(|username| ManagerDisplay {
-        username: username.to_owned(),
+        username: Some(username.to_owned()),
+        display_name: format!("@{username}"),
+        platform: "telegram".into(),
     }))
 }

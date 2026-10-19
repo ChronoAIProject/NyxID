@@ -14,6 +14,18 @@ pub(crate) fn installation_filter(bot_id: &str, platform: &str, platform_bot_id:
     }
 }
 
+/// Tombstones reserve provider identities even after a local channel is deleted.
+pub(crate) fn profile_filter(bot_id: &str, platform: &str, remote: &str) -> Document {
+    let mut alternatives = vec![
+        doc! {"channel_bot_id":bot_id},
+        doc! {"channel_transport.platform":platform,"channel_transport.platform_bot_id":remote},
+    ];
+    if matches!(platform, "telegram" | "telegram-new") {
+        alternatives.push(doc! {"manager_bot_id":remote,"channel_transport":bson::Bson::Null});
+    }
+    doc! {"$or":alternatives}
+}
+
 /// Read persisted authority rather than trusting a cached channel/link snapshot.
 /// This checks profile authority; callers retain their normal bot-liveness checks.
 pub(crate) async fn permits_personal_routes(
@@ -30,12 +42,6 @@ pub(crate) async fn permits_personal_routes(
     if bot.contains_key("platform_profile_id") || bot.contains_key("platform_installation_id") {
         return Ok(false);
     }
-    if !matches!(
-        bot.get_str("platform").ok(),
-        Some("telegram" | "telegram-new")
-    ) {
-        return Ok(true);
-    }
     if db
         .collection::<Document>(crate::models::platform_installation::COLLECTION_NAME)
         .find_one(installation_filter(
@@ -51,10 +57,11 @@ pub(crate) async fn permits_personal_routes(
     // A paused or tombstoned profile must never restore personal routing.
     let profile = db
         .collection::<Document>(crate::models::platform_bot_config::COLLECTION_NAME)
-        .find_one(doc! {"$or": [
-            {"channel_bot_id": bot_id},
-            {"manager_bot_id": bot.get_str("platform_bot_id").unwrap_or("")}
-        ]})
+        .find_one(profile_filter(
+            bot_id,
+            bot.get_str("platform").unwrap_or(""),
+            bot.get_str("platform_bot_id").unwrap_or(""),
+        ))
         .await?;
     Ok(profile.is_none())
 }
@@ -113,12 +120,20 @@ pub(crate) async fn fence_personal_routes(
             "This installation requires its reviewed setup authority".into(),
         ));
     }
-    if matches!(bot.get_str("platform").ok(), Some("telegram" | "telegram-new"))
-        && db.collection::<Document>(crate::models::platform_bot_config::COLLECTION_NAME)
-            .find_one(doc! {"$or": [{"channel_bot_id": bot_id}, {"manager_bot_id": bot.get_str("platform_bot_id").unwrap_or("")}]})
-            .session(&mut *session).await?.is_some()
+    if db
+        .collection::<Document>(crate::models::platform_bot_config::COLLECTION_NAME)
+        .find_one(profile_filter(
+            bot_id,
+            bot.get_str("platform").unwrap_or(""),
+            bot.get_str("platform_bot_id").unwrap_or(""),
+        ))
+        .session(&mut *session)
+        .await?
+        .is_some()
     {
-        return Err(AppError::Forbidden("The platform manager cannot use personal channel routes".into()));
+        return Err(AppError::Forbidden(
+            "The platform manager cannot use personal channel routes".into(),
+        ));
     }
     Ok(())
 }

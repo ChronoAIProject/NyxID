@@ -1,10 +1,5 @@
 import { beforeEach, expect, it, vi } from "vitest";
-import {
-  act,
-  render,
-  screen,
-  fireEvent,
-} from "@testing-library/react";
+import { act, render, screen, fireEvent } from "@testing-library/react";
 import {
   AdminPlatformBotsPage,
   GatewayCleanupControls,
@@ -40,6 +35,7 @@ vi.mock("@/hooks/use-platform-onboarding", () => ({
   useGatewayCleanup: () => ({ data: cleanup }),
   useGatewayCleanupAction: () => ({ mutate, isPending: false }),
   useAdminPlatformTargets: () => ({ data: { bots: [], orgs: [] } }),
+  useAdminPlatformProfile: () => ({ data: undefined }),
   useAdminPlatformProfiles: () => ({
     data: { profiles: [{ ...profile }], next_before_id: null },
   }),
@@ -49,7 +45,9 @@ vi.mock("@/hooks/use-platform-onboarding", () => ({
   }),
   useAdminGuideMutation: () => ({ mutate: guideMutate, isPending: false }),
 }));
-vi.mock("@/components/platform-manager-runtime", () => ({ ManagerRuntimeSettings: () => <div>Bot access controls</div> }));
+vi.mock("@/components/platform-manager-runtime", () => ({
+  ManagerRuntimeSettings: () => <div>Bot access controls</div>,
+}));
 beforeEach(() => {
   cleanup.splice(0);
   profile.generation = 1;

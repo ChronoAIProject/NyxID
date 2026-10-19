@@ -14,6 +14,7 @@ import {
   ACCESS_MODE_LABEL,
   ACCESS_MODE_DESCRIPTION,
 } from "@/lib/assistant/nyxbot-labels";
+import { personalPlatformLabel } from "@/schemas/platform-personal";
 import type { PersonalLinkReview } from "@/schemas/platform-personal";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -42,12 +43,18 @@ function PersonalLinkFlow({
   const preview = usePersonalLinkPreview();
   const config = usePublicConfig();
   const client = useQueryClient();
-  const [handoff] = useState(readPersonalLink);
+  const [handoff] = useState(() => {
+    const current = readPersonalLink();
+    return current
+      ? { expiresAt: current.expiresAt, challenge: current.challenge }
+      : undefined;
+  });
   const [challenge, setChallenge] = useState(() =>
     handoff?.challenge && handoff.challenge.accountId === actor
       ? handoff.challenge
       : undefined,
   );
+  const [display, setDisplay] = useState<{ platform: string; bot: string }>();
   const [review, setReview] = useState<PersonalLinkReview>();
   const [command, setCommand] = useState<string>();
   const [replace, setReplace] = useState(false);
@@ -60,7 +67,13 @@ function PersonalLinkFlow({
     return () => clearInterval(timer);
   }, []);
   useEffect(() => {
-    if (preview.data) shortenPersonalLink(preview.data.expires_at);
+    if (preview.data) {
+      shortenPersonalLink(preview.data.expires_at);
+      setDisplay({
+        platform: preview.data.manager.platform,
+        bot: preview.data.manager.display_name,
+      });
+    }
   }, [preview.data]);
   const status = useQuery({
     queryKey: ["personal-link-status", actor, challenge?.id],
@@ -142,6 +155,9 @@ function PersonalLinkFlow({
       setReview(result);
     });
   }
+  const platform = personalPlatformLabel(
+    preview.data?.manager.platform ?? display?.platform ?? "channel",
+  );
   const returnTo =
     typeof window !== "undefined"
       ? `${window.location.origin}/nyxbot/link`
@@ -150,16 +166,19 @@ function PersonalLinkFlow({
     <main className="mx-auto max-w-lg space-y-5 px-4 py-10" data-sensitive>
       <meta name="referrer" content="no-referrer" />
       <PageHeader
-        title="Use your NyxBot in Telegram"
+        title={`Use your NyxBot in ${platform}`}
         description="Link only if you requested this in the bot's private chat."
       />
       {status.data?.status === "confirmed" ? (
         <section className="space-y-3 rounded-xl border border-border bg-card p-5">
-          <p role="status">Telegram is linked.</p>
+          <p role="status">
+            {platform} is linked{display?.bot ? ` to ${display.bot}` : ""}.
+          </p>
           <p className="text-12 text-muted-foreground">
-            Send a new private message to the bot to start your dedicated
-            Telegram thread. Your thread and approvals will be available in
-            NyxID.
+            {(display?.platform ?? preview.data?.manager.platform) === "discord"
+              ? "Use /chat message in the bot DM to start your personal channel thread."
+              : "Send a new private text message to the bot to start your personal channel thread."}{" "}
+            Your thread and approvals will be available in NyxID.
           </p>
           <Button asChild variant="primary">
             <a href="/assistant?panel=nyxbot">Open NyxBot</a>
@@ -169,11 +188,11 @@ function PersonalLinkFlow({
         status.data?.status === "denied" ||
         status.data?.status === "cancelled" ? (
         <p role="status">
-          Linking was cancelled. No new personal access was granted. Send /link
-          to start again.
+          Linking was cancelled. No new personal access was granted. Request a
+          fresh link in that private conversation to start again.
         </p>
       ) : intentExpired ? (
-        <ErrorBanner message="This linking request is missing or expired. Reopen the original link in this browser, or send /link again in the bot's private chat. Storage must be available to continue after navigating away." />
+        <ErrorBanner message="This linking request is missing or expired. Reopen the original link in this browser, or request a fresh link in the bot's private conversation. Storage must be available to continue after navigating away." />
       ) : (
         <>
           {preview.isPending && (
@@ -190,15 +209,21 @@ function PersonalLinkFlow({
               <p>
                 Bot: <strong>{preview.data.manager.display_name}</strong>
               </p>
-              <p>
-                Telegram account:{" "}
-                {preview.data.sender.display_name ?? preview.data.sender.id}
+              <p className="break-all">
+                {platform} account:{" "}
+                {preview.data.sender.display_name
+                  ? `${preview.data.sender.display_name} (${preview.data.sender.id})`
+                  : preview.data.sender.id}
+              </p>
+              <p className="break-all">
+                Private conversation:{" "}
+                {preview.data.sender.conversation_id ?? preview.data.sender.id}
               </p>
               {!actor ? (
                 <>
                   <p>
                     Sign in to review personal access. Registration and email
-                    verification do not link Telegram automatically.
+                    verification do not link this channel automatically.
                   </p>
                   {(config.data?.invite_code_required ?? true) && (
                     <p>
@@ -262,24 +287,25 @@ function PersonalLinkFlow({
                 {ACCESS_MODE_DESCRIPTION[review.permission_mode]}
               </p>
               <p>
-                Telegram uses your existing NyxBot access to connected services
-                and account management, including existing memory and persona.
-                Changes to your NyxBot settings apply here too.
+                This channel uses your existing NyxBot access to connected
+                services and account management, including existing memory and
+                persona. Changes to your NyxBot settings apply here too.
               </p>
               <p>
-                Personal work uses your normal billing and credits. The public
-                sponsor does not pay for your personal turns. Existing
+                Personal work uses your account's billing and credits. Existing
                 organization resource billing rules still apply.
               </p>
               <p>
-                Telegram confirmations can approve sensitive actions, including
-                destructive actions, machine access and saved logins. Your
-                current permission mode determines when NyxBot asks for
+                Private channel confirmations can approve sensitive actions,
+                including destructive actions, machine access and saved logins.
+                Your current permission mode determines when NyxBot asks for
                 confirmation.
               </p>
               <p>
-                This Telegram bot is operated by the platform. Telegram bot
-                chats are not end-to-end encrypted.
+                This bot is operated by the platform. The messaging provider and
+                bot operator can process messages delivered through this
+                channel. Use NyxID directly for information you do not want to
+                send through them.
               </p>
               <p>
                 This creates a new personal thread. Public chat and your old
@@ -295,7 +321,7 @@ function PersonalLinkFlow({
                   />
                   <span>
                     I agree to replace the existing personal link for this
-                    Telegram account. Its previous history will not transfer.
+                    channel identity. Its previous history will not transfer.
                   </span>
                 </label>
               )}
@@ -341,20 +367,24 @@ function PersonalLinkFlow({
                 </Button>
               </div>
               <p className="text-muted-foreground">
-                Approve here, then confirm in the same private Telegram chat
-                within 10 minutes.
+                Approve here, then confirm in the same private channel
+                conversation within 10 minutes.
               </p>
             </section>
           )}
           {!review && challenge && !challengeExpired && (
             <section className="space-y-3 rounded-xl border border-border bg-card p-5 text-12">
               <p role="status">
-                Waiting for confirmation from the same private Telegram chat.
-                Browser approval alone does not grant access.
+                Waiting for confirmation from the same private channel
+                conversation. Browser approval alone does not grant access.
               </p>
               {command ? (
                 <>
-                  <p>Send this one-time command in the private chat:</p>
+                  <p>
+                    {preview.data?.manager.platform === "discord"
+                      ? "In the same bot DM, choose the /confirm application command and enter the shown P-… value in its code option. Ordinary text does not reach this integration."
+                      : "Send this one-time command in the private chat:"}
+                  </p>
                   <code className="block select-all rounded-lg bg-muted p-3 font-mono">
                     {command}
                   </code>
@@ -409,13 +439,6 @@ function PersonalLinkFlow({
           )}
         </>
       )}
-      <p className="text-12 text-muted-foreground">
-        Looking for child-bot setup?{" "}
-        <a className="underline" href="/onboarding">
-          Open BotFather setup
-        </a>
-        .
-      </p>
     </main>
   );
 }

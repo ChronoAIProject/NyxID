@@ -189,6 +189,7 @@ impl From<&crate::models::assistant_conversation::PlatformThread> for PlatformTh
 }
 #[derive(Serialize)]
 pub struct PlatformTurnOriginResponse {
+    platform: String,
     binding_id: String,
     binding_generation: i64,
     manager_authority_epoch: i64,
@@ -199,6 +200,7 @@ impl From<&crate::models::assistant_conversation::PlatformTurnOrigin>
 {
     fn from(origin: &crate::models::assistant_conversation::PlatformTurnOrigin) -> Self {
         Self {
+            platform: origin.thread.platform.clone(),
             binding_id: origin.thread.binding_id.clone(),
             binding_generation: origin.thread.binding_generation,
             manager_authority_epoch: origin.manager_authority_epoch,

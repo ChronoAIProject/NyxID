@@ -1339,9 +1339,15 @@ async fn server_main() {
                     );
                 }
                 if poll_state.config.channel_poll_interval_secs > 0
-                    && services::channel_poll_service::sweep(&poll_state)
-                        .await
-                        .is_err()
+                    && services::channel_poll_service::sweep(
+                        &poll_state,
+                        services::platform_manager_transport::compose(
+                            poll_state.clone(),
+                            handlers::assistant_team::owner_turn_settled_hook(poll_state.clone()),
+                        ),
+                    )
+                    .await
+                    .is_err()
                 {
                     tracing::warn!("Channel poll sweep failed; retrying on the next tick");
                 }

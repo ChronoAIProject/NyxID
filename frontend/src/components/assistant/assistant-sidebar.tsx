@@ -1,3 +1,4 @@
+import {personalPlatformLabel} from "@/schemas/platform-personal";
 import { useAccountPanel } from "@/hooks/use-account-panel";
 import { AssistantAccountMenu } from "@/components/assistant/assistant-account-menu";
 import { agentOwnerSections } from "@/lib/assistant/nyxbot-labels";
@@ -179,7 +180,7 @@ function ConversationRow({
             className="h-3 w-3 shrink-0 text-text-tertiary"
           />
           <span className="min-w-0 truncate">{shownTitle}</span>
-          {conversation.platform_thread && <span className="shrink-0 rounded bg-muted px-1 text-10 text-muted-foreground">Telegram</span>}
+          {conversation.platform_thread && <span className="shrink-0 rounded bg-muted px-1 text-10 text-muted-foreground">{personalPlatformLabel(conversation.platform_thread.platform)}</span>}
         </span>
         {showDraft && (
           <span

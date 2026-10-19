@@ -417,7 +417,16 @@ async fn handle_webhook_inner(
     body: &[u8],
 ) -> Result<Option<serde_json::Value>, Box<dyn std::error::Error + Send + Sync>> {
     handle_webhook_inner_with_deps(
-        WebhookHandlerDeps::from(state),
+        WebhookHandlerDeps {
+            platform_manager: Some((
+                state,
+                crate::services::platform_manager_transport::compose(
+                    state.clone(),
+                    crate::handlers::assistant_team::owner_turn_settled_hook(state.clone()),
+                ),
+            )),
+            ..WebhookHandlerDeps::from(state)
+        },
         bot_id,
         expected_platform,
         headers,
@@ -1812,6 +1821,7 @@ mod tests {
             std::sync::Arc::new(config.clone()),
         );
         let deps = || WebhookHandlerDeps {
+            platform_manager: None,
             db: &db,
             config: &config,
             billing: &billing,

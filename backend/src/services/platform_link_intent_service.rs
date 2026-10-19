@@ -716,9 +716,6 @@ pub async fn confirm_in_session(
     {
         return Err(bindings::unavailable());
     }
-    if row.state == ChallengeState::Confirmed {
-        return row.completion.ok_or_else(bindings::unavailable);
-    }
     let controls = super::platform_bot_runtime_control_service::fence_manager_in_session(
         db,
         session,
@@ -733,7 +730,10 @@ pub async fn confirm_in_session(
         || controls.emergency_stopped
         || !controls.personal_enabled
         || controls.manager_authority_epoch != row.manager_authority_epoch
-        || row.state != ChallengeState::AwaitingChatConfirmation
+        || !matches!(
+            row.state,
+            ChallengeState::AwaitingChatConfirmation | ChallengeState::Confirmed
+        )
         || row.expires_at <= controls.updated_at
         || !fence_access_mode(
             db,
@@ -745,6 +745,15 @@ pub async fn confirm_in_session(
         || !bindings::fence_person(db, session, &row.reviewed_user_id).await?
     {
         return Err(bindings::unavailable());
+    }
+    if row.state == ChallengeState::Confirmed {
+        let completion = row.completion.ok_or_else(bindings::unavailable)?;
+        let binding=db.collection::<PlatformPersonalBinding>(crate::models::platform_personal_binding::COLLECTION_NAME)
+            .find_one_and_update(doc! {"_id":&completion.binding_id,"generation":completion.binding_generation,"platform_config_id":&row.platform_config_id,"manager_authority_epoch":controls.manager_authority_epoch,"telegram_sender_id":update.sender_id,"telegram_chat_id":update.chat_id,"user_id":&row.reviewed_user_id,"state":"active"},doc! {"$inc":{"effect_revision":1_i64}}).session(&mut *session).await?;
+        if binding.is_none() {
+            return Err(bindings::unavailable());
+        }
+        return Ok(completion);
     }
     let intent=db.collection::<PlatformLinkIntent>(COLLECTION_NAME).find_one(doc! {"_id":&row.intent_id,"purpose":PURPOSE,"claimant_user_id":&row.reviewed_user_id,"current_challenge_id":&row.id,"state":"pending","$expr":live()}).session(&mut *session).await?.ok_or_else(bindings::unavailable)?;
     let previous = bindings::latest_for_sender(
@@ -883,7 +892,7 @@ pub async fn confirm_original_in_session(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::services::platform_personal_binding_service::tests::{binding, fixture};
     const KEY: &[u8] = b"personal-proof-test-key";
@@ -1890,6 +1899,216 @@ mod tests {
             .await
             .unwrap();
         refused_public(&db, &context).await;
+        db.drop().await.unwrap();
+    }
+    pub(crate) async fn consent_code(
+        db: &Database,
+        update: &VerifiedManagerUpdate,
+        owner: &str,
+        reference: &str,
+    ) -> String {
+        let issued = issue(db, update, reference).await;
+        elapsed_spacing(db, owner).await;
+        let challenge = review(db, KEY, owner, &issued.token.unwrap())
+            .await
+            .unwrap();
+        elapsed_spacing(db, owner).await;
+        approve(
+            db,
+            KEY,
+            owner,
+            &challenge.id,
+            &challenge.review_digest,
+            false,
+        )
+        .await
+        .unwrap()
+        .confirmation_command
+        .unwrap()
+        .split_whitespace()
+        .nth(1)
+        .unwrap()
+        .to_string()
+    }
+    pub(crate) async fn confirm_code(
+        db: &Database,
+        update: &VerifiedManagerUpdate,
+        code: &str,
+    ) -> AppResult<PersonalBindingCompletion> {
+        elapsed_spacing(
+            db,
+            &format!(
+                "confirm:{}:{}:{}",
+                update.profile_id, update.sender_id, update.chat_id
+            ),
+        )
+        .await;
+        let mut session = db.client().start_session().await.unwrap();
+        session.start_transaction().await.unwrap();
+        let result = confirm_in_session(
+            db,
+            &mut session,
+            KEY,
+            b"audit-key",
+            update,
+            false,
+            code,
+            &LocalEffects,
+        )
+        .await;
+        if result.is_ok() {
+            session.commit_transaction().await.unwrap();
+        } else {
+            session.abort_transaction().await.unwrap();
+        }
+        result
+    }
+    #[tokio::test]
+    async fn generic_expired_challenge_uses_current_server_time_with_live_parent_intent() {
+        let (db, update, owner, _, _) =
+            super::super::platform_channel_service::tests::fixture("generic_proof_expiry", "slack")
+                .await;
+        let code = consent_code(&db, &update, &owner, "expiry").await;
+        db.collection::<Document>(CHALLENGES).update_many(doc! {}, doc! {"$set":{"expires_at":bson::DateTime::from_chrono(Utc::now()-Duration::minutes(11))}}).await.unwrap();
+        db.collection::<Document>(crate::models::platform_bot_runtime_controls::COLLECTION_NAME).update_one(doc! {"platform_config_id":&update.profile_id},doc! {"$set":{"updated_at":bson::DateTime::from_chrono(Utc::now()-Duration::hours(4))}}).await.unwrap();
+        assert!(
+            db.collection::<PlatformLinkIntent>(COLLECTION_NAME)
+                .find_one(doc! {"expires_at":{"$gt":bson::DateTime::now()},"state":"pending"})
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(confirm_code(&db, &update, &code).await.is_err());
+        assert_eq!(
+            db.collection::<Document>(crate::models::platform_personal_binding::COLLECTION_NAME)
+                .count_documents(doc! {"state":"active"})
+                .await
+                .unwrap(),
+            0
+        );
+        db.drop().await.unwrap();
+    }
+    #[tokio::test]
+    async fn generic_repair_epoch_disconnects_inventory_and_old_proof_cannot_revive_it() {
+        use crate::models::platform_personal_binding::{
+            COLLECTION_NAME as BINDINGS, PersonalBindingState,
+        };
+        let (db, update, owner, _, _) =
+            super::super::platform_channel_service::tests::fixture("generic_repair_proof", "slack")
+                .await;
+        let code = consent_code(&db, &update, &owner, "original").await;
+        let first = confirm_code(&db, &update, &code).await.unwrap();
+        assert_eq!(
+            bindings::list_owned(&db, &owner, None).await.unwrap()[0].state,
+            PersonalBindingState::Active
+        );
+        // The repair transaction changes the manager authority epoch. Historical
+        // rows stay durable, but inventory and repeated proof use live authority.
+        db.collection::<Document>(crate::models::platform_bot_runtime_controls::COLLECTION_NAME)
+            .update_one(
+                doc! {"platform_config_id":&update.profile_id},
+                doc! {"$inc":{"manager_authority_epoch":1_i64}},
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            bindings::list_owned(&db, &owner, None).await.unwrap()[0].state,
+            PersonalBindingState::Revoked
+        );
+        assert!(confirm_code(&db, &update, &code).await.is_err());
+        let fresh = consent_code(&db, &update, &owner, "after-repair").await;
+        let next = confirm_code(&db, &update, &fresh).await.unwrap();
+        assert_ne!(first.binding_id, next.binding_id);
+        let inventory = bindings::list_owned(&db, &owner, None).await.unwrap();
+        assert_eq!(
+            inventory
+                .iter()
+                .filter(|row| row.state == PersonalBindingState::Active)
+                .count(),
+            1
+        );
+        assert_eq!(
+            inventory
+                .iter()
+                .find(|row| row.state == PersonalBindingState::Active)
+                .unwrap()
+                .id,
+            next.binding_id
+        );
+        assert!(confirm_code(&db, &update, &code).await.is_err());
+        // Delayed repair cleanup may stop only the obsolete epoch's work.
+        for (id, label) in [(&first.binding_id, "old"), (&next.binding_id, "new")] {
+            let row = db
+                .collection::<PlatformPersonalBinding>(BINDINGS)
+                .find_one(doc! {"_id":id})
+                .await
+                .unwrap()
+                .unwrap();
+            let origin=bindings::stored_origin(&crate::services::platform_manager_contract::PlatformTurnOrigin {
+                authority:bindings::authority(&row,1),nyxbot_agent_id:uuid::Uuid::new_v4().to_string(),
+                source:crate::services::platform_manager_contract::PlatformOriginSource::ThreadEvent {admission_id:uuid::Uuid::new_v4().to_string()},
+            });
+            let active = crate::models::platform_personal_binding::PersonalActiveTurn {
+                conversation_id: format!("{label}-thread"),
+                turn_id: format!("{label}-turn"),
+                origin,
+            };
+            db.collection::<Document>(BINDINGS)
+                .update_one(
+                    doc! {"_id":id},
+                    doc! {"$set":{"active_turn":bson::to_bson(&active).unwrap()}},
+                )
+                .await
+                .unwrap();
+        }
+        let mut session = db.client().start_session().await.unwrap();
+        session.start_transaction().await.unwrap();
+        bindings::stop_manager_batch_in_session(
+            &db,
+            &mut session,
+            &update.profile_id,
+            None,
+            false,
+            &LocalEffects,
+        )
+        .await
+        .unwrap();
+        session.commit_transaction().await.unwrap();
+        assert!(
+            db.collection::<PlatformPersonalBinding>(BINDINGS)
+                .find_one(doc! {"_id":&first.binding_id})
+                .await
+                .unwrap()
+                .unwrap()
+                .active_turn
+                .is_none()
+        );
+        assert!(
+            db.collection::<PlatformPersonalBinding>(BINDINGS)
+                .find_one(doc! {"_id":&next.binding_id})
+                .await
+                .unwrap()
+                .unwrap()
+                .active_turn
+                .is_some()
+        );
+        db.collection::<Document>(crate::models::user::COLLECTION_NAME)
+            .update_one(doc! {"_id":&owner}, doc! {"$set":{"is_active":false}})
+            .await
+            .unwrap();
+        assert!(confirm_code(&db, &update, &fresh).await.is_err());
+        db.collection::<Document>(crate::models::user::COLLECTION_NAME)
+            .update_one(doc! {"_id":&owner}, doc! {"$set":{"is_active":true}})
+            .await
+            .unwrap();
+        db.collection::<Document>(BINDINGS)
+            .update_one(
+                doc! {"_id":&next.binding_id},
+                doc! {"$set":{"state":"revoked","revocation_reason":"unlinked"}},
+            )
+            .await
+            .unwrap();
+        assert!(confirm_code(&db, &update, &fresh).await.is_err());
         db.drop().await.unwrap();
     }
 }

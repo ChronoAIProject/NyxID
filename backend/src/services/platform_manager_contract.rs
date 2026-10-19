@@ -603,6 +603,7 @@ pub struct RecoveryBatch {
 #[derive(Clone, Debug)]
 pub enum DeliveryOutcome {
     Sent { telegram_message_ids: Vec<i64> },
+    ChannelSent { message_ids: Vec<String> },
     Duplicate,
     Deferred { retry_at: DateTime<Utc> },
     Refused(UnavailableReason),
