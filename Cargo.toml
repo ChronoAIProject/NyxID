@@ -24,6 +24,7 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
 [workspace.metadata.dist]
 cargo-dist-version = "0.30.0"
 cargo-auditable = true
+precise-builds = true
 allow-dirty = ["ci"]
 ci = "github"
 # Windows is intentionally omitted: nix/libc-based node daemon process checks
@@ -41,6 +42,11 @@ packages = ["nyxid-cli"]
 install-path = "~/.local/bin"
 hosting = "github"
 install-updater = false
+# The official build uses a verified raw committed export without .git.
+# cargo-dist's built-in source task invokes attribute-sensitive `git archive`.
+# Keep the source subject through its supported explicit-artifact hook instead.
+source-tarball = false
+extra-artifacts = [{ build = ["python3", "scripts/build-release-source.py"], artifacts = ["target/release-source/source.tar.gz", "target/release-source/source.tar.gz.sha256"] }]
 
 [workspace.metadata.dist.github-custom-runners]
 aarch64-apple-darwin = "macos-latest"

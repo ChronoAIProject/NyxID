@@ -20,12 +20,17 @@ mod tls;
 mod update_check;
 mod wizard;
 
+mod build_identity {
+    include!(concat!(env!("OUT_DIR"), "/nyxid_build_identity.rs"));
+}
+
 use anyhow::Result;
 use clap::Parser;
 
 use crate::cli::{Cli, Commands};
 
 fn main() {
+    build_identity::retain();
     // rustls-native-certs 0.8 treats empty SSL_CERT_FILE as a selected path.
     // Normalize empty CA variables before Tokio or any other worker starts.
     for name in ["NYXID_CA_CERT", "SSL_CERT_FILE", "SSL_CERT_DIR"] {

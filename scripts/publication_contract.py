@@ -41,8 +41,10 @@ def dist_contract(dist, metadata, commit, epoch, policy=None):
     cli = policy["cli"]
     targets = cli["targets"]
     configured = metadata["metadata"]["dist"]
-    if len(targets) != len(set(targets)) or sorted(configured["targets"]) != sorted(targets) or configured.get("cargo-auditable") is not True:
+    if len(targets) != len(set(targets)) or sorted(configured["targets"]) != sorted(targets) or configured.get("cargo-auditable") is not True or configured.get("precise-builds") is not True:
         raise ValueError("Cargo dist target/auditable policy mismatch")
+    if configured.get("source-tarball") is not False or configured.get("extra-artifacts") != [cli["source_archive_build"]]:
+        raise ValueError("Cargo dist must build the required source archive from the verified raw export")
     packages = [item for item in metadata["packages"] if item["name"] == cli["package"]]
     releases = dist.get("releases", [])
     if len(packages) != 1 or len(releases) != 1 or releases[0]["app_name"] != cli["package"] or releases[0]["app_version"] != packages[0]["version"]:
@@ -67,7 +69,10 @@ def dist_contract(dist, metadata, commit, epoch, policy=None):
     subjects = []
     for name, kind in sorted(expected.items()):
         artifact = artifacts[name]
-        if artifact.get("name") != name or artifact.get("kind") != kind:
+        # cargo-dist labels explicit hook outputs as extra-artifact. Preserve
+        # their source/checksum semantics in our independently validated plan.
+        dist_kind = "extra-artifact" if name in ("source.tar.gz", "source.tar.gz.sha256") else kind
+        if artifact.get("name") != name or artifact.get("kind") != dist_kind:
             raise ValueError("dist artifact identity differs from expected plan")
         subject = {"id": "file:" + name, "kind": "file", "name": name, "artifact_kind": kind}
         if name in archive_targets:
@@ -110,6 +115,17 @@ def image_contract(commit, epoch, matrix, owner="chronoaiproject", policy=None):
 def require_success(results, expected_jobs):
     if set(results) != set(expected_jobs) or any(value != "success" for value in results.values()):
         raise ValueError("required publication job failed, skipped, cancelled, absent or unexpected")
+
+
+def require_build_execution(receipt, source, archive_sha256):
+    """Require an actual successful invocation in addition to artifact presence."""
+    if receipt.get("schema") != "nyxid.exported-build-execution.v1" or \
+            receipt.get("source") != source or receipt.get("exit_code") != 0 or \
+            receipt.get("post_build_source_verified") is not True or \
+            receipt.get("post_build_source_error") is not None or \
+            receipt.get("source_archive", {}).get("sha256") != archive_sha256:
+        raise ValueError("required exported build failed, was cancelled or used different source inputs")
+    return receipt
 
 
 def require_build_identity(receipt, package, version, target, source, local_investigation=False):

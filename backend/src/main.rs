@@ -327,7 +327,12 @@ enum Commands {
     CleanupOrphans(cleanup_cli::CleanupArgs),
 }
 
+mod build_identity {
+    include!(concat!(env!("OUT_DIR"), "/nyxid_build_identity.rs"));
+}
+
 fn main() {
+    build_identity::retain();
     if std::env::args().nth(1).as_deref() == Some("--attachment-worker") {
         services::attachment_extraction::worker();
         return;

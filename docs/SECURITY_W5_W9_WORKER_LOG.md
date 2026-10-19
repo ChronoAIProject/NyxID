@@ -707,6 +707,66 @@ backend/CLI/updater bins with both KMS features; it remains a separate working
 integration snapshot. Official producer export/build wiring, actual stripped
 application subjects and full final evidence remain required for R1-15.
 
+## W7 R1-15 application/source packaging and required build wiring
+
+Backend, CLI and updater build scripts now use the shared retained identity
+helper, and all three main entrypoints retain the marker. Docker builders copy
+the helper and require full commit plus commit epoch; backend credential build
+uses the same inputs. Official CI/release/cache/image builds export and verify
+raw committed source. Supported local image commands now use the same export
+wrapper, and node Compose consumes the explicitly prebuilt local image.
+Dirty local Cargo builds remain honestly unverified/dirty. This bounded commit
+contains identity-only Docker changes; snapshot APT/APK work remains separate.
+
+Pinned cargo-dist0.30 cannot package its default Git source task from a no-Git
+export. Supported source-tarball=false, precise-builds=true and an explicit
+extra-artifact hook now package deterministic gzip of the exact verified raw
+source.tar. The hook never uses Git archive, attributes or generated source.
+Actual full-tree no-Git global packaging passes exit0 in10.633s on committed
+integration fixture22590776, with source/export/hook/archive/manifest receipts.
+This proves packaging compatibility, not a complete release.
+
+Pinned dist also ignores required Cargo child completion. Its supported CARGO
+override now enforces --locked, exact target/package/profile, actual child exit0,
+one successful BuildFinished stream and hashes of produced executables.
+The producer requires fresh staged archives whose binary bytes match those
+completed children. It verifies all four local target receipts before global
+packaging and checks the fresh source-hook result. The pinned rust-cache cleanup
+retains empty directory trees: the producer removes only directory-only residue
+within the two reserved staging roots, records it, and rejects/preserves any
+stale file, symlink or other object before deleting anything. Dependency cache
+files remain available. Failed/cancelled child plus outer0 and an old same-source
+binary cannot satisfy completion. Required local/global workflow jobs must
+actually succeed; skipped/failed jobs cannot authorize host publication.
+
+Actual tiny CLI fixture d401230d passes reviewed dist -> guard -> auditable
+Cargo -> stripped Mach-O archive in5.364s, with completed child and archived
+binary SHA equality. It is deliberately a dependency-free fixture, not a product
+binary. Original v1 checksum-validation failure and v2 receipt remain intact;
+fixture-input supplements distinguish the original product template manifest
+from exact executed tiny root/CLI manifests, main/build source and lock hashes.
+The final working application check passes cargo check --locked -p nyxid-cli
+-p nyxid-machine-updater -p nyxid --bins --features nyxid/gcp-kms,nyxid/aws-kms
+in111.963s, with nine unchanged before/after input hashes. It is compile evidence,
+not final stripped application/archive/image acceptance.
+
+Frozen validation tree d0063ec755e2126ce24e44f5a5c73cede62b97e0 passes exporter10,
+identity/cache7, source-hook4, exported-execution7, required-completion6,
+publication10, archive5, local-image3, actual tiny-Cargo embed-guard4 and
+build-input15 tests. Strict YAML/reusable/build-input, shell/JS syntax and
+whitespace checks pass. Exact command/environment/exit/log hashes are under
+w7-source-wiring-{source,producer,guards}-receipt.json; the aggregate
+w7-source-wiring-handoff-receipt.json binds these, the actual working compile,
+global packaging and separate tiny fixtures. Node Compose structural assertions
+pass; actual Compose CLI is unavailable on both host and guest, so no Compose
+runtime/config command pass is claimed. Release credential workflow now verifies
+the wizard source/final-byte seal; final archive inspection's independent embedded
+byte check still needs the complete final security-gate wiring.
+
+Final exported stripped app subjects, all-platform archives/images, package
+input receipts, SBOM/scanner/signature semantics and complete staged publication
+remain OPEN. No remote workflow/publication or implicated mobile probe ran.
+
 ## Remaining authorized batches
 
 W5 final container review/integration; W7 pinned,

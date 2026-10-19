@@ -18,6 +18,12 @@ on:
       - Cargo.lock
       - Cargo.toml
       - "**/Cargo.toml"
+      - "build-support/**"
+      - "scripts/*build*.py"
+      - "scripts/guard-dist-cargo.py"
+      - "scripts/publication_contract.py"
+      - "scripts/check-dist-artifacts.py"
+      - "security/publication-policy.json"
       - .github/workflows/release.yml
       - .github/workflows/release-cache.yml
   # Pull requests that change this workflow build the matrix to verify it,
@@ -41,20 +47,36 @@ jobs:
     runs-on: "ubuntu-24.04"
     outputs:
       val: ${{ steps.plan.outputs.manifest }}
+      source-commit: ${{ steps.source.outputs.commit }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
           submodules: recursive
+      - name: Export exact cache-plan inputs
+        id: source
+        run: |
+          commit=$(git rev-parse HEAD)
+          python3 scripts/export-build-source.py export --destination "$RUNNER_TEMP/plan-source" --commit "$commit"
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
       - name: Install checksummed dist
         run: |
           python3 scripts/bootstrap-build-tool.py cargo-dist --bin-dir "$HOME/.cargo/bin"
           python3 scripts/bootstrap-build-tool.py cargo-auditable --bin-dir "$HOME/.cargo/bin"
       - id: plan
         run: |
-          dist plan --output-format=json > plan-dist-manifest.json
-          python3 scripts/check-build-inputs.py --dist-plan plan-dist-manifest.json
-          echo "manifest=$(jq -c "." plan-dist-manifest.json)" >> "$GITHUB_OUTPUT"
+          python3 scripts/run-exported-build.py --export "$RUNNER_TEMP/plan-source" \
+            --commit "${{ steps.source.outputs.commit }}" --receipt "$RUNNER_TEMP/plan-execution.json" \
+            --generated target -- dist plan --output-format=json > "$RUNNER_TEMP/plan-dist-manifest.json"
+          python3 scripts/check-build-inputs.py --dist-plan "$RUNNER_TEMP/plan-dist-manifest.json"
+          python3 scripts/make-publication-plan.py cli --dist-plan "$RUNNER_TEMP/plan-dist-manifest.json" --output "$RUNNER_TEMP/publication-plan.json"
+          echo "manifest=$(jq -c "." "$RUNNER_TEMP/plan-dist-manifest.json")" >> "$GITHUB_OUTPUT"
+      - name: Upload complete expected cache-build plan
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: cache-publication-plan
+          path: ${{ runner.temp }}/publication-plan.json
+          if-no-files-found: error
 
   warm:
     name: warm (${{ join(matrix.targets, ', ') }})
@@ -69,6 +91,8 @@ jobs:
         with:
           persist-credentials: false
           submodules: recursive
+      - name: Export exact committed cache-build inputs
+        run: python3 scripts/export-build-source.py export --destination "$RUNNER_TEMP/release-source" --commit "${{ needs.plan.outputs.source-commit }}"
       - name: Install reviewed release dependencies
         run: sh scripts/install-release-dependencies.sh
       - name: Install checksummed Rust bootstrap in container
@@ -87,20 +111,31 @@ jobs:
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           shared-key: dist-${{ join(matrix.targets, '-') }}
+          # The producer removes directory-only restored staging residue and
+          # rejects/preserves any stale artifact or symlink before dist runs.
+          workspaces: ${{ runner.temp }}/release-source/source -> target
           save-if: ${{ github.event_name != 'pull_request' }}
       - name: Install checksummed dist
         run: |
           python3 scripts/bootstrap-build-tool.py cargo-dist --bin-dir "$HOME/.cargo/bin"
           python3 scripts/bootstrap-build-tool.py cargo-auditable --bin-dir "$HOME/.cargo/bin"
+      - name: Fetch complete expected cache-build plan
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: cache-publication-plan
+          path: ${{ runner.temp }}/release-plan
       - name: Build artifacts
         env:
-          DIST_ARGS: ${{ matrix.dist_args }}
+          TARGET: ${{ matrix.targets[0] }}
+          TARGET_COUNT: ${{ toJSON(matrix.targets) }}
         if: steps.cache.outputs.cache-hit != 'true'
         shell: bash
         run: |
-          if [[ ",${{ join(matrix.targets, ',') }}," == *",aarch64-unknown-linux-gnu,"* ]]; then
+          jq -e 'length == 1' <<< "$TARGET_COUNT"
+          if [[ "$TARGET" == aarch64-unknown-linux-gnu ]]; then
             export CC=clang
             export CXX=clang++
           fi
-          read -r -a DIST_ARGV <<< "$DIST_ARGS"
-          dist build --print=linkage --output-format=json "${DIST_ARGV[@]}" > /dev/null
+          python3 scripts/run-dist-build.py --export "$RUNNER_TEMP/release-source" \
+            --plan "$RUNNER_TEMP/release-plan/publication-plan.json" --mode local --target "$TARGET" \
+            --evidence "$RUNNER_TEMP/build-evidence/$TARGET"

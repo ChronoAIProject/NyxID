@@ -114,10 +114,8 @@ For the **actual production nginx 1.30 image** on Linux, build with exactly the
 same commit/epoch and replace the native server command:
 
 ```sh
-docker build -f frontend/Dockerfile \
-  --build-arg NYXID_GIT_HASH="$(git rev-parse HEAD)" \
-  --build-arg SOURCE_DATE_EPOCH="$(git show -s --format=%ct HEAD)" \
-  -t nyxid-policy-frontend .
+python3 scripts/build-local-image.py --file frontend/Dockerfile \
+  --tag nyxid-policy-frontend
 python3 frontend/scripts/production-policy-server.py \
   --frontend-image nyxid-policy-frontend \
   --evidence-dir "$NYXID_POLICY_EVIDENCE/nginx"

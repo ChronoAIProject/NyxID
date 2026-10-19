@@ -95,7 +95,8 @@ try {
   assert.ok(process.env.CI !== 'true' || process.env.GITHUB_TOKEN, 'CI requires GITHUB_TOKEN for authenticated attestation checks');
   if (!testPublished) console.log('SKIP (opt-in): published 0.41.0 updater uses unauthenticated GitHub API');
   if (!process.env.UPDATER_PRODUCTION_IMAGE) {
-    execFileSync('docker', ['build', '--target', 'production', '-f', 'cli/Dockerfile.machine-updater', '-t', updater, '.'], { stdio: 'inherit' });
+    execFileSync('python3', ['scripts/build-local-image.py', '--target', 'production',
+      '--file', 'cli/Dockerfile.machine-updater', '--tag', updater], { stdio: 'inherit' });
   } else {
     // Publish Images passes a pushed digest that is not local yet. Pull it
     // first: an implicit pull would print progress on the stderr that the

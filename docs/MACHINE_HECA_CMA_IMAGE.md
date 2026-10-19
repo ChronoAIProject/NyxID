@@ -19,11 +19,16 @@ From the NyxID repository root, build the hosted target with a BuildKit named
 context for the local CMA checkout:
 
 ```sh
-docker build \
+python3 scripts/build-local-image.py \
   --file cli/Dockerfile.machine-hosted \
   --build-context cma="$HOME/Work/Project/aevatarAI/cma" \
-  --tag nyxid-machine:hosted-local .
+  --tag nyxid-machine:hosted-local
 ```
+
+The NyxID checkout must be clean and committed. The wrapper builds from a
+verified raw export, supplies its full commit/epoch, and retains the source and
+execution receipts. Named contexts remain separate inputs and must satisfy the
+target's pinned source/output checks described below.
 
 The target contains its own CLI builder, full desktop stage and tool stages;
 there is no `MACHINE_BASE_IMAGE` build argument or prerequisite base-image build.

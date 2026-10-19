@@ -1154,7 +1154,7 @@ cargo +1.98.1 test -j 1 -p nyxid --bin nyxid-server -- machine_loopback_exec_per
 cargo +1.98.1 test -j 1 -p nyxid --bin nyxid-server -- machine_gateway_streaming_and_git_performance --ignored --nocapture --test-threads 1
 cargo +1.98.1 test -j 1 -p nyxid --bin nyxid-server -- machine_setup_change_stream_wakes_thread_without_sweep --nocapture --test-threads 1
 cargo +1.98.1 test -j 1 -p nyxid --bin nyxid-server -- machine_exec_dispatch_performance --ignored --nocapture --test-threads 1
-docker build -f cli/Dockerfile.machine -t nyxid-node-machine:local .
+python3 scripts/build-local-image.py --file cli/Dockerfile.machine --tag nyxid-node-machine:local
 docker build --build-arg MACHINE_IMAGE=nyxid-node-machine:local -f cli/tests/Dockerfile.machine -t nyxid-machine-e2e:local .
 docker run --rm -e NYXID_MACHINE_STRICT_BENCHMARK=1 --shm-size=256m --security-opt seccomp=cli/resources/machine-container/seccomp.json nyxid-machine-e2e:local
 ```

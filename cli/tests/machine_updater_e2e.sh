@@ -35,7 +35,8 @@ docker tag "$old_machine" ghcr.io/chronoaiproject/nyxid/nyxid-node-machine:0.40.
 docker build --build-arg "MACHINE_IMAGE=$machine_image" -f cli/tests/Dockerfile.updater-browser -t "$local_image" .
 updater_image="${UPDATER_E2E_IMAGE:-nyxid-machine-updater-e2e:local}"
 if [ -z "${UPDATER_E2E_IMAGE:-}" ]; then
-    docker build --target e2e -f cli/Dockerfile.machine-updater -t "$updater_image" .
+    python3 scripts/build-local-image.py --target e2e \
+        --file cli/Dockerfile.machine-updater --tag "$updater_image"
 fi
 for variant in old new bad; do
     printf 'FROM %s\nLABEL dev.nyxid.test.companion=%s\n' "$updater_image" "$variant" | docker build -t "$companion_image-$variant" -

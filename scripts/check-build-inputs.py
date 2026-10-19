@@ -43,6 +43,11 @@ def check(root, plan=None):
         ["cargo", "metadata", "--locked", "--no-deps", "--format-version=1"], cwd=root, text=True))
     if metadata["metadata"].get("dist", {}).get("cargo-auditable") is not True:
         errors.append("Cargo dist metadata: shipped binaries require cargo-auditable")
+    dist_config = metadata["metadata"].get("dist", {})
+    source_policy = json.loads((root / "security/publication-policy.json").read_text())["cli"]["source_archive_build"]
+    if dist_config.get("precise-builds") is not True or dist_config.get("source-tarball") is not False or \
+            dist_config.get("extra-artifacts") != [source_policy]:
+        errors.append("Cargo dist metadata: require precise builds and explicit verified raw-source archive")
     errors.extend(check_containers(metadata["metadata"].get("dist", {}), image_pins, "Cargo dist metadata"))
     if plan is not None:
         errors.extend(check_containers(plan, image_pins, "generated dist plan"))
@@ -106,6 +111,8 @@ def check(root, plan=None):
             errors.append(name + ": missing checksummed dist bootstrap")
         if "scripts/bootstrap-build-tool.py cargo-auditable" not in text:
             errors.append(name + ": missing checksummed cargo-auditable bootstrap")
+        if re.search(r"(?m)^\s*dist build\b", text) or "scripts/run-dist-build.py" not in text:
+            errors.append(name + ": dist build must enforce verified export, fresh staging and required locked child completion")
     return errors
 
 

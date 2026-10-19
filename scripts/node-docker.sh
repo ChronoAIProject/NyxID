@@ -43,7 +43,8 @@ cmd_build() {
     script_dir="$(cd "$(dirname "$0")" && pwd)"
     local project_root="$script_dir/.."
     echo "Building node agent image..."
-    docker build -f "$project_root/cli/Dockerfile.node" -t "$IMAGE" "$project_root"
+    python3 "$project_root/scripts/build-local-image.py" --root "$project_root" \
+        --file cli/Dockerfile.node --tag "$IMAGE"
 }
 
 cmd_start() {

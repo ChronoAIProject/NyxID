@@ -21,6 +21,7 @@ COPY security/build-tools.json /opt/nyxid-build-inputs/security/build-tools.json
 RUN python3 /opt/nyxid-build-inputs/scripts/bootstrap-build-tool.py cargo-auditable --bin-dir /usr/local/cargo/bin
 
 COPY Cargo.toml Cargo.lock ./
+COPY build-support/ build-support/
 COPY vendor/ vendor/
 COPY backend/ backend/
 COPY cli/ cli/
@@ -34,6 +35,10 @@ COPY machine-updater/ machine-updater/
 COPY docs/AI_AGENT_PLAYBOOK.md docs/AI_AGENT_PLAYBOOK.md
 
 # Build only the CLI binary (includes node agent subcommand)
+ARG NYXID_GIT_HASH
+ARG SOURCE_DATE_EPOCH
+ENV NYXID_GIT_HASH=${NYXID_GIT_HASH}
+ENV SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH}
 ARG TARGETARCH
 # An optional snapshot-only seed contains public registry archives and index
 # metadata, never host Cargo configuration, credentials, sources, or binaries.

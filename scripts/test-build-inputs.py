@@ -118,6 +118,15 @@ class BuildPolicy(unittest.TestCase):
         self.metadata["metadata"]["dist"]["cargo-auditable"] = False
         self.assertTrue(any("require cargo-auditable" in error for error in policy.check(self.root)))
 
+    def test_dist_source_hook_precise_builds_and_guarded_execution_are_required(self):
+        for field, value in (("source-tarball", True), ("precise-builds", False), ("extra-artifacts", [])):
+            original = self.metadata["metadata"]["dist"][field]
+            self.metadata["metadata"]["dist"][field] = value
+            self.assertTrue(any("explicit verified raw-source" in error for error in policy.check(self.root)))
+            self.metadata["metadata"]["dist"][field] = original
+        self.mutate(".github/workflows/release.yml", "python3 scripts/run-dist-build.py", "dist build #",
+                    "required locked child completion")
+
     def test_download_checksum_failure(self):
         response = io.BytesIO(b"well-formed executable with altered bytes")
         response.url = "https://github.com/official/release"

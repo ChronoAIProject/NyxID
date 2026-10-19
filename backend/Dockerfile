@@ -6,11 +6,12 @@ WORKDIR /build
 # Bound simultaneous compiler work in both backend release builds.
 ENV CARGO_BUILD_JOBS=1
 
-# Commit hash baked into the binary for /health. `.git` is excluded from the
-# Docker context, so CI must pass this ARG explicitly; otherwise the build
-# script falls back to "unknown".
-ARG NYXID_GIT_HASH=unknown
+# Full source identity is retained in the binary and exposed by /health.
+# Exported Docker sources require the exact commit and its commit epoch.
+ARG NYXID_GIT_HASH
+ARG SOURCE_DATE_EPOCH
 ENV NYXID_GIT_HASH=${NYXID_GIT_HASH}
+ENV SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH}
 
 # Copy workspace manifests and lock file for dependency caching.
 # `cloud-auth/` (NyxID#716) and `nyxid-crypto/` (NyxID#773) are workspace
@@ -22,6 +23,7 @@ COPY security/build-tools.json /opt/nyxid-build-inputs/security/build-tools.json
 RUN python3 /opt/nyxid-build-inputs/scripts/bootstrap-build-tool.py cargo-auditable --bin-dir /usr/local/cargo/bin
 
 COPY Cargo.toml Cargo.lock ./
+COPY build-support/ build-support/
 COPY vendor/ vendor/
 COPY backend/Cargo.toml backend/Cargo.toml
 COPY cli/Cargo.toml cli/Cargo.toml
@@ -83,6 +85,7 @@ COPY permissions/src permissions/src
 COPY permissions/examples permissions/examples
 COPY machine/resources machine/resources
 COPY machine-updater/src machine-updater/src
+COPY machine-updater/build.rs machine-updater/build.rs
 COPY cli/src/tls.rs cli/src/tls.rs
 COPY cli/src/tls cli/src/tls
 COPY cli/src/commands/update_attestation.rs cli/src/commands/update_attestation.rs
@@ -110,7 +113,7 @@ WORKDIR /build/frontend
 COPY frontend/package.json frontend/package-lock.json frontend/.npmrc ./
 RUN npm ci
 COPY frontend/ ./
-ARG NYXID_GIT_HASH=unknown
+ARG NYXID_GIT_HASH
 ARG SOURCE_DATE_EPOCH
 ENV SOURCE_COMMIT=${NYXID_GIT_HASH}
 ENV SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH}

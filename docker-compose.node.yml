@@ -1,5 +1,8 @@
 # Docker Compose for NyxID Node Agents
 #
+# Build exact clean committed inputs first (refuses a dirty checkout):
+#   python3 scripts/build-local-image.py --file cli/Dockerfile.node --tag nyxid-node:latest
+#
 # Option A: Auto-register and start (no host setup needed):
 #   NYXID_NODE_TOKEN=nyx_nreg_... NYXID_NODE_URL=wss://... \
 #     docker compose -f docker-compose.node.yml up -d
@@ -11,10 +14,8 @@
 
 services:
   node:
-    build:
-      context: .
-      dockerfile: cli/Dockerfile.node
     image: nyxid-node:latest
+    pull_policy: never
     container_name: nyxid-node
     restart: unless-stopped
     user: "${UID:-1000}:${GID:-1000}"

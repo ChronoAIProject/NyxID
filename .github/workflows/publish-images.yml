@@ -92,6 +92,16 @@ jobs:
             file: cli/Dockerfile.machine-updater
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Export exact committed image inputs
+        id: source
+        run: |
+          commit=$(git rev-parse HEAD)
+          python3 scripts/export-build-source.py export --destination "$RUNNER_TEMP/image-source" --commit "$commit"
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+          echo "epoch=$(git show -s --format=%ct HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Prepare backend image memory reserve
         if: matrix.component == 'backend'
@@ -125,28 +135,32 @@ jobs:
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.licenses=Apache-2.0
 
-      - name: Compute short git hash
-        id: git
-        run: echo "hash=$(git rev-parse --short=12 HEAD)" >> "$GITHUB_OUTPUT"
+      - name: Verify exported image inputs before build
+        run: python3 scripts/export-build-source.py verify --destination "$RUNNER_TEMP/image-source" --commit "${{ steps.source.outputs.commit }}"
 
       - name: Build and push by digest
         id: build
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         with:
-          context: ${{ matrix.context }}
-          file: ${{ matrix.file }}
+          context: ${{ runner.temp }}/image-source/source
+          file: ${{ runner.temp }}/image-source/source/${{ matrix.file }}
           platforms: ${{ matrix.platform }}
           labels: ${{ steps.meta.outputs.labels }}
-          # Build-args: git hash for backend/node-agent surface tagging
-          # (stamped on /health). Telemetry config is fetched at runtime
+          # Full source commit and commit epoch identify every actual builder.
+          # Telemetry config is fetched at runtime
           # from the backend's /api/v1/public/config endpoint, so no
           # build-args for telemetry are needed here.
           build-args: |
-            NYXID_GIT_HASH=${{ steps.git.outputs.hash }}
+            NYXID_GIT_HASH=${{ steps.source.outputs.commit }}
+            SOURCE_DATE_EPOCH=${{ steps.source.outputs.epoch }}
           outputs: type=image,name=${{ steps.repo.outputs.image }},push-by-digest=true,name-canonical=true,push=true
           cache-from: type=gha,scope=${{ matrix.component }}-${{ matrix.platform_pair }}
           cache-to: type=gha,mode=max,scope=${{ matrix.component }}-${{ matrix.platform_pair }}
           provenance: false
+
+      - name: Verify exported image inputs after build
+        if: ${{ always() && steps.source.outcome == 'success' }}
+        run: python3 scripts/export-build-source.py verify --destination "$RUNNER_TEMP/image-source" --commit "${{ steps.source.outputs.commit }}"
 
       - name: Verify machine browser and desktop
         if: matrix.component == 'nyxid-node-machine'

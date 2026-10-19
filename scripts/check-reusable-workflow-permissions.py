@@ -34,7 +34,7 @@ def permissions(block, where):
 def main():
     failures = []
     callers = 0
-    for caller_path in sorted(WORKFLOWS.glob("*.yml")):
+    for caller_path in sorted(path for path in WORKFLOWS.iterdir() if path.suffix in (".yml", ".yaml")):
         caller = load_unique(caller_path.read_text())
         workflow_grant = permissions(caller.get("permissions"), caller_path)
         for job_name, job in (caller.get("jobs") or {}).items():

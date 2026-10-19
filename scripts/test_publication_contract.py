@@ -12,6 +12,8 @@ def dist_fixture():
     policy = contract.load_json(contract.POLICY)
     cli = policy["cli"]
     artifacts = {name: {"name": name, "kind": kind} for name, kind in cli["global_artifacts"].items()}
+    for name in ("source.tar.gz", "source.tar.gz.sha256"):
+        artifacts[name]["kind"] = "extra-artifact"
     for target in cli["targets"]:
         name = "nyxid-cli-" + target + ".tar.gz"
         artifacts[name] = {"name": name, "kind": "executable-zip", "target_triples": [target], "assets": [
@@ -19,7 +21,9 @@ def dist_fixture():
         artifacts[name + ".sha256"] = {"name": name + ".sha256", "kind": "checksum"}
     dist = {"announcement_tag": "v0.71.0", "releases": [{"app_name": "nyxid-cli", "app_version": "0.71.0", "artifacts": list(artifacts)}],
             "artifacts": artifacts, "ci": {"github": {"artifacts_matrix": {"include": [{"targets": [target]} for target in cli["targets"]]}}}}
-    metadata = {"metadata": {"dist": {"targets": cli["targets"], "cargo-auditable": True}}, "packages": [{"name": "nyxid-cli", "version": "0.71.0"}]}
+    metadata = {"metadata": {"dist": {"targets": cli["targets"], "cargo-auditable": True, "precise-builds": True,
+                "source-tarball": False, "extra-artifacts": [cli["source_archive_build"]]}},
+                "packages": [{"name": "nyxid-cli", "version": "0.71.0"}]}
     return dist, metadata
 
 
@@ -44,6 +48,14 @@ def records(plan):
 
 
 class PublicationContractTests(unittest.TestCase):
+    def test_source_archive_cannot_be_omitted_or_switch_back_to_git_archive(self):
+        for change in ({"source-tarball": True}, {"extra-artifacts": []},
+                       {"extra-artifacts": [{"build": ["git", "archive"], "artifacts": ["source.tar.gz"]}]}):
+            dist, metadata = dist_fixture()
+            metadata["metadata"]["dist"].update(change)
+            with self.assertRaisesRegex(ValueError, "required source archive"):
+                contract.dist_contract(dist, metadata, "a" * 40, 1792367116)
+
     def test_actual_retained_identity_binds_version_source_target_and_release_state(self):
         source = {"commit": "a" * 40, "epoch": 1792367116}
         identity = {"schema": "nyxid.build-identity.v1", "package": "nyxid-cli", "package_version": "0.71.0",

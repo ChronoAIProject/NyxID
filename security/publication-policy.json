@@ -5,7 +5,8 @@
     "binary": "nyxid",
     "targets": ["aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu"],
     "global_artifacts": {"source.tar.gz": "source-tarball", "source.tar.gz.sha256": "checksum", "nyxid-cli-installer.sh": "installer", "sha256.sum": "unified-checksum"},
-    "supplemental_artifacts": {"releases.json": "credential-manifest"}
+    "supplemental_artifacts": {"releases.json": "credential-manifest"},
+    "source_archive_build": {"build": ["python3", "scripts/build-release-source.py"], "artifacts": ["target/release-source/source.tar.gz", "target/release-source/source.tar.gz.sha256"]}
   },
   "images": {
     "platforms": ["linux/amd64", "linux/arm64"],
