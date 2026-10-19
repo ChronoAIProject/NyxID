@@ -219,13 +219,24 @@ nyxid proxy request telnyx-verification ai/openai/chat/completions --method POST
 Generate a nonsecret catalog manifest with platform access disabled and an empty
 restricted allowlist. The template creates one internal service and one
 `chat_completions` operation, pins the model enum and renders the output cap as
-an integer. It contains no billing block. Review the dry run before applying:
+an integer. It contains no billing block. The internal service uses server
+defaults for `requires_user_credential: false`, `identity_propagation_mode: none`
+and `inject_delegation_token: false`; those fields are left unauthored. The
+template explicitly disables access-token forwarding. Review the dry run before
+applying:
 
 ```sh
 nyxid admin catalog add --template telnyx-platform --var model="$MODEL" --var max_output_tokens="$MAX_OUTPUT_TOKENS" --save telnyx-platform.catalog.json --dry-run --profile billing-admin --output json
 nyxid admin catalog apply --file telnyx-platform.catalog.json --dry-run --profile billing-admin --output json
 nyxid admin catalog apply --file telnyx-platform.catalog.json --profile billing-admin --output json
 ```
+
+Reapplying these disabled access defaults to a live pilot requires interactive
+confirmation, or `nyxid admin catalog apply --allow-access-change --file
+telnyx-platform.catalog.json` for non-interactive use. `catalog add --yes` does
+not authorize the change; a dry run only warns. If creation succeeds but a
+follow-up update fails, apply reports `created`, the service ID and the failed
+fields, then exits 1. Rerun apply to reconcile that existing service.
 
 Author the managed contract and the three exact prices. Review its request body,
 field diff and conservative full reservation ceiling before running the same
@@ -266,6 +277,20 @@ nyxid service update telnyx-platform --catalog-admin --platform-key-audience res
 nyxid service add telnyx-platform --platform-key --profile pilot
 ```
 
+Personal wallet GETs also provision a missing wallet. With `--owner-id`, the
+wallet command always uses an owner-aware POST and provisions the selected
+wallet if missing, even without `--provision`; the server checks org access.
+Platform-key execution is billed to the acting person, so provision the pilot's
+personal wallet for this walkthrough.
+
+Billing commands, catalog apply, proxy requests and MCP tools/calls check saved
+sessions before work and refresh expired tokens. Billing reads, catalog apply,
+MCP discovery and proxy GET/HEAD retain 401 refresh and replay. Idempotent wallet
+provisioning and top-up checkout POSTs also retain it; checkout reuses the same
+idempotency key. Billing configuration/grant writes, other proxy methods and MCP
+execution calls do not replay on 401. Explicit or environment credentials never
+switch to a saved session for refresh.
+
 The next HTTP POST and MCP call each spend real Telnyx funds and NyxID credits.
 Run one attended call at a time. The MCP envelope records `started_at` and
 `finished_at` RFC3339 bounds for correlation. `chat-request.json` uses the same
@@ -284,17 +309,30 @@ nyxid admin billing ledger verify --all --profile billing-admin --output json
 
 A successful HTTP call carries an execution ID; unchanged proxy invocations keep
 the provider body on stdout and print the ID on stderr. The envelope includes
-it in JSON. A pending HTTP or MCP outcome exits 2 with the ID: inspect execution
-state and do not automatically repeat the paid request. MCP success currently
-omits the ID, so identify `MCP_EXECUTION_UUID` from the self-scoped latest-50 list,
-matching the called service and creation time between the envelope's `started_at`
-and `finished_at` bounds. The client enumerates all service operations from
-`/mcp/config`, obtains their server-built input schemas, and uses the universal
-dispatcher for calls. Calls wait indefinitely by default, matching proxy requests;
-`--timeout-secs` bounds the whole MCP exchange. A timeout before `tools/call`
-dispatch exits 1 and reports that nothing was executed. After dispatch, a timeout
-exits 2 with `managed_outcome_uncertain` and correlation bounds: inspect
-executions before retrying because a paid call may have completed.
+it in JSON with HTTP status, a JSON-or-text body and a `headers` object limited
+to `x-nyxid-execution-id`, `x-nyxid-agent-id` and `x-request-id` when present.
+A managed pending HTTP or MCP outcome exits 2 with the ID: inspect execution
+state and do not automatically repeat the paid request. Other MCP `isError`
+results exit 1. MCP success omits the ID, so identify `MCP_EXECUTION_UUID` from
+the self-scoped latest-50 list, matching the called service and creation time
+between the envelope's `started_at` and `finished_at` bounds. The list has no
+pagination. Plain execution show exits 0 for nonterminal state; `--wait` exits
+2 if its timeout expires before `settled` or `released`.
+
+MCP service discovery enumerates the complete visible operation list from GET
+`/mcp/config` and reads every page of `tools/list`. It resolves missing, lazily
+exposed schemas through `nyx__search_tools` using exact fully qualified tool
+names, and fails loudly for any missing or invalid schema. Service calls use
+`nyx__call_tool`; native meta-tools are called directly. The client reinitializes
+once on HTTP 404 or JSON-RPC session-expired -32002 only when a session was sent;
+a 404 during initialization is an `http_error`.
+
+Calls wait indefinitely by default, matching proxy requests, with a 10-second
+connection timeout. `--timeout-secs` bounds the whole MCP exchange. A timeout
+before `tools/call` dispatch exits 1 and reports that nothing was executed.
+After dispatch, a timeout exits 2 with `managed_outcome_uncertain` and correlation
+bounds: inspect executions before retrying because a paid call may have
+completed.
 
 Execution reads expose state and reservation ceilings. Compare admin usage in
 the tight attended window with provider usage: input = prompt minus cached,

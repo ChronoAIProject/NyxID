@@ -134,14 +134,19 @@ nyxid admin billing service verify telnyx-platform --managed
 nyxid admin billing ledger verify --all
 nyxid admin usage --period 24h --service telnyx-platform
 nyxid admin credits grant list --user "$PILOT_UUID"
-nyxid billing executions list --since "$T0"
-nyxid billing executions show "$EXECUTION_UUID" --wait --timeout-secs 120
 ```
 
 `set-managed` provides typed contract and three-price flags; see the billing
 reference before using it. `credits grant issue` requires a reason and explicit
 confirmation or `--yes`; each invocation creates a new batch. Ready, pending,
 and broken results use exits 0/2; server HTTP errors preserve status and body.
+
+Grant lists support `--page` and `--per-page` (1..=500), and include `total`.
+`admin catalog apply` asks before disabling platform access or clearing a live
+service's owner allowlist. Non-interactive applies require
+`--allow-access-change`; `--dry-run` only warns. `catalog add --yes` does not
+authorize this change; use `nyxid admin catalog apply --allow-access-change
+--file <manifest>` after reviewing it.
 
 ## MCP Configuration
 
@@ -151,10 +156,27 @@ nyxid mcp config --tool claude-code                    # generate MCP config for
 nyxid mcp config --tool vscode                         # generate MCP config for VS Code
 ```
 
-The native Streamable HTTP client also supports `nyxid mcp tools --service
-<slug>` and `nyxid mcp call <tool> --args @file --envelope --output json` with a
-human session. Calls may spend funds. An `isError` result exits 1; managed pending
-usage exits 2 with its execution ID. See [billing.md](billing.md#execute-and-correlate).
+The native Streamable HTTP client supports tool discovery and calls with a
+human session. Calls may spend funds; run this example only with spending
+authorized. Save the MCP envelope to correlate executions using its RFC3339
+bounds:
+
+```sh
+nyxid mcp tools --service telnyx-platform --output json
+nyxid mcp call telnyx-platform__chat_completions --args @chat-request.json --envelope --output json > mcp.json
+nyxid billing executions list --since "$(jq -r .started_at mcp.json)"
+nyxid billing executions show "$EXECUTION_UUID" --wait --timeout-secs 120
+```
+
+Select `EXECUTION_UUID` from the self-scoped latest-50 list by the called service
+and creation time between `started_at` and `finished_at`. An `isError` result
+exits 1; managed pending usage exits 2 with its execution ID. Plain execution
+show exits 0 for nonterminal state; `--wait` exits 2 on a nonterminal timeout.
+MCP calls wait indefinitely by default. `--timeout-secs` bounds the exchange:
+timeout before tool dispatch exits 1 with nothing executed; after dispatch it
+exits 2 with `managed_outcome_uncertain`. Inspect execution state before
+retrying. See [billing.md](billing.md#execute-and-correlate) for complete
+discovery, session, envelope and timeout behavior.
 
 ## Approval and Errors
 
@@ -165,8 +187,3 @@ usage exits 2 with its execution ID. See [billing.md](billing.md#execute-and-cor
 - `8003 node_proxy_error` -- node agent proxy failed (check `nyxid node list`)
 - **403 from downstream with no NyxID error code** -- the downstream service itself rejected the request. A common cause is WAF rules blocking your User-Agent header (e.g. `OpenAI/Python 2.30.0`). The user can set a per-service custom User-Agent override via the frontend (key detail page > Service > User-Agent) or via API: `PATCH /api/v1/user-services/{id}` with `{"custom_user_agent": "MyApp/1.0"}`. Set to `""` to clear and revert to passthrough.
 - **Any other static header a downstream requires on every call** (scope hint, API version, routing key) should be configured once as a service default via `nyxid service update <id> --default-header 'name=value'` rather than sent from every caller.
-
-`admin catalog apply` asks before disabling platform access or clearing a live
-service's owner allowlist. Non-interactive applies require
-`--allow-access-change`; `--dry-run` only warns. Grant lists support `--page` and
-`--per-page` (1..=500), and include `total`.
