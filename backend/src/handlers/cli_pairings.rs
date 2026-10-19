@@ -203,10 +203,7 @@ pub async fn claim_pairing(
         return Err(AppError::RateLimited);
     }
 
-    // `extract_ip` IS still used below for audit logging only — where
-    // spoofability is informational, not security-critical — so the
-    // X-Forwarded-For hint can be captured without gating throttling.
-    let ip_string = extract_ip(&headers, Some(peer));
+    let ip_string = extract_ip(&headers, Some(peer), &state.config.trusted_proxy_ips);
 
     let ClaimedPairing {
         id,

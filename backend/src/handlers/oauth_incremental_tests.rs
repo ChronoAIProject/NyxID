@@ -137,6 +137,7 @@ impl IncrementalFixture {
             &self.state,
             &TelemetryContext::default(),
             &HeaderMap::new(),
+            None,
             request,
         )
         .await
@@ -200,6 +201,7 @@ async fn revoked_incremental_code_returns_invalid_grant_at_token_endpoint() {
     .unwrap();
     let response = token(
         State(fixture.state),
+        axum::extract::ConnectInfo("127.0.0.1:43123".parse().unwrap()),
         TelemetryContext::default(),
         HeaderMap::new(),
         Form(request),
@@ -309,6 +311,7 @@ async fn incremental_ordinary_and_binding_flows_preserve_full_refresh_grant() {
             &fixture.state,
             &TelemetryContext::default(),
             &HeaderMap::new(),
+            None,
             request,
         )
         .await

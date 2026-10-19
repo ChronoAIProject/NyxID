@@ -827,20 +827,12 @@ impl McpAuthContext {
     }
 }
 
-fn mcp_extract_ip(headers: &HeaderMap) -> Option<String> {
-    if let Some(forwarded) = headers
-        .get("x-forwarded-for")
-        .and_then(|v| v.to_str().ok())
-        .map(|v| v.split(',').next().unwrap_or("").trim().to_string())
-        .filter(|s| !s.is_empty())
-    {
-        return Some(forwarded);
-    }
-    headers
-        .get("x-real-ip")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
+fn mcp_extract_ip(
+    headers: &HeaderMap,
+    peer: Option<std::net::SocketAddr>,
+    trusted_proxies: &[crate::config::TrustedProxyRange],
+) -> Option<String> {
+    super::admin_helpers::extract_ip(headers, peer, trusted_proxies)
 }
 
 fn mcp_extract_user_agent(headers: &HeaderMap) -> Option<String> {
@@ -871,12 +863,20 @@ enum McpAuthentication {
     Public(Box<crate::services::platform_public_tools::PublicMcpAuthority>),
 }
 
+#[cfg(test)]
 async fn authenticate_mcp(
     state: &AppState,
     headers: &HeaderMap,
     session_fallback: bool,
 ) -> Result<McpAuthContext, Box<Response>> {
-    authenticate_mcp_for_method(state, headers, session_fallback, axum::http::Method::POST).await
+    authenticate_mcp_for_method(
+        state,
+        headers,
+        session_fallback,
+        axum::http::Method::POST,
+        None,
+    )
+    .await
 }
 
 async fn authenticate_mcp_for_method(
@@ -884,8 +884,9 @@ async fn authenticate_mcp_for_method(
     headers: &HeaderMap,
     session_fallback: bool,
     method: axum::http::Method,
+    peer: Option<std::net::SocketAddr>,
 ) -> Result<McpAuthContext, Box<Response>> {
-    match authenticate_mcp_or_public(state, headers, session_fallback, false, method)
+    match authenticate_mcp_or_public(state, headers, session_fallback, false, method, peer)
         .await
         .map_err(Box::new)?
     {
@@ -901,8 +902,9 @@ async fn authenticate_mcp_or_public(
     session_fallback: bool,
     allow_public: bool,
     method: axum::http::Method,
+    peer: Option<std::net::SocketAddr>,
 ) -> Result<McpAuthentication, Response> {
-    let request_ip = mcp_extract_ip(headers);
+    let request_ip = mcp_extract_ip(headers, peer, &state.config.trusted_proxy_ips);
     let request_ua = mcp_extract_user_agent(headers);
 
     // --- Try API key first (stateless auth for headless clients) ---
@@ -1518,6 +1520,10 @@ pub async fn mcp_post(
     request: Request<Body>,
 ) -> Response {
     let headers = request.headers().clone();
+    let peer = request
+        .extensions()
+        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+        .map(|axum::extract::ConnectInfo(peer)| *peer);
     let body = match super::body_limit::read_request_body(
         request,
         state.config.proxy_max_body_size,
@@ -1551,6 +1557,7 @@ pub async fn mcp_post(
         !is_initialize,
         true,
         axum::http::Method::POST,
+        peer,
     )
     .await
     {
@@ -1795,12 +1802,23 @@ async fn resolve_session(
 // GET /mcp -- SSE notification stream
 // ---------------------------------------------------------------------------
 
-pub async fn mcp_get(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    let auth =
-        match authenticate_mcp_for_method(&state, &headers, true, axum::http::Method::GET).await {
-            Ok(a) => a,
-            Err(resp) => return *resp,
-        };
+pub async fn mcp_get(
+    State(state): State<AppState>,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    headers: HeaderMap,
+) -> Response {
+    let auth = match authenticate_mcp_for_method(
+        &state,
+        &headers,
+        true,
+        axum::http::Method::GET,
+        Some(peer),
+    )
+    .await
+    {
+        Ok(a) => a,
+        Err(resp) => return *resp,
+    };
 
     if let Err(e) = crate::mw::rate_limit::check_agent_rate_limit_raw(
         &state.per_agent_limiter,
@@ -1884,9 +1902,19 @@ pub async fn mcp_get(State(state): State<AppState>, headers: HeaderMap) -> Respo
 // DELETE /mcp -- session termination
 // ---------------------------------------------------------------------------
 
-pub async fn mcp_delete(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    let auth = match authenticate_mcp_for_method(&state, &headers, true, axum::http::Method::DELETE)
-        .await
+pub async fn mcp_delete(
+    State(state): State<AppState>,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    headers: HeaderMap,
+) -> Response {
+    let auth = match authenticate_mcp_for_method(
+        &state,
+        &headers,
+        true,
+        axum::http::Method::DELETE,
+        Some(peer),
+    )
+    .await
     {
         Ok(a) => a,
         Err(resp) => return *resp,
@@ -6447,11 +6475,17 @@ mod tests {
             let mut headers = HeaderMap::new();
             headers.insert(name, value.parse().unwrap());
             headers.insert("mcp-session-id", "unrelated-owner-session".parse().unwrap());
-            let failure =
-                authenticate_mcp_or_public(&state, &headers, true, true, axum::http::Method::POST)
-                    .await
-                    .err()
-                    .expect("unproven public runtime denied");
+            let failure = authenticate_mcp_or_public(
+                &state,
+                &headers,
+                true,
+                true,
+                axum::http::Method::POST,
+                None,
+            )
+            .await
+            .err()
+            .expect("unproven public runtime denied");
             assert_eq!(failure.status(), StatusCode::FORBIDDEN);
             let body = axum::body::to_bytes(failure.into_body(), 4096)
                 .await
@@ -7923,25 +7957,149 @@ mod tests {
         assert!(!record.session_fallback_allowed);
     }
 
+    #[tokio::test]
+    async fn mcp_and_http_authentication_capture_strict_transport_attribution() {
+        use axum::extract::FromRequestParts;
+        let db = crate::test_utils::connect_transaction_test_database("w8_auth_attribution").await;
+        let owner = uuid::Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_one(test_user(&owner, UserType::Person))
+            .await
+            .unwrap();
+        let key = crate::services::key_service::create_api_key(
+            &db,
+            &owner,
+            "attribution",
+            "proxy",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        for (ranges, peer, xff, duplicate, expected) in [
+            (
+                vec![],
+                Some("10.0.0.1:443"),
+                "1.1.1.1, 8.8.8.8",
+                false,
+                Some("10.0.0.1"),
+            ),
+            (
+                vec!["10.0.0.0/8"],
+                Some("10.0.0.1:443"),
+                "1.1.1.1, 8.8.8.8",
+                false,
+                Some("8.8.8.8"),
+            ),
+            (
+                vec!["10.0.0.0/8"],
+                Some("9.9.9.9:443"),
+                "1.1.1.1, 8.8.8.8",
+                false,
+                Some("9.9.9.9"),
+            ),
+            (
+                vec!["10.0.0.0/8"],
+                Some("10.0.0.1:443"),
+                "1.1.1.1, malformed, 8.8.8.8",
+                false,
+                Some("10.0.0.1"),
+            ),
+            (
+                vec!["10.0.0.0/8"],
+                Some("10.0.0.1:443"),
+                "8.8.8.8",
+                true,
+                Some("10.0.0.1"),
+            ),
+            (vec!["10.0.0.0/8"], None, "8.8.8.8", false, None),
+        ] {
+            let mut state = test_app_state(db.clone());
+            state.config.trusted_proxy_ips = ranges
+                .into_iter()
+                .map(|range| range.parse().unwrap())
+                .collect();
+            let peer = peer.map(|peer| peer.parse::<std::net::SocketAddr>().unwrap());
+            let mut request = Request::builder()
+                .uri("/api/v1/proxy/s/test")
+                .body(Body::empty())
+                .unwrap();
+            request
+                .headers_mut()
+                .insert("x-api-key", key.full_key.parse().unwrap());
+            request
+                .headers_mut()
+                .insert("x-forwarded-for", xff.parse().unwrap());
+            request
+                .headers_mut()
+                .insert("x-real-ip", "4.4.4.4".parse().unwrap());
+            if duplicate {
+                request
+                    .headers_mut()
+                    .append("x-forwarded-for", "9.9.9.9".parse().unwrap());
+            }
+            if let Some(peer) = peer {
+                request
+                    .extensions_mut()
+                    .insert(axum::extract::ConnectInfo(peer));
+            }
+            let mcp =
+                authenticate_mcp_for_method(&state, request.headers(), false, Method::GET, peer)
+                    .await
+                    .unwrap();
+            assert_eq!(mcp.ip_address.as_deref(), expected, "MCP: {xff}");
+            let (mut parts, _) = request.into_parts();
+            let http = crate::mw::auth::AuthUser::from_request_parts(&mut parts, &state)
+                .await
+                .unwrap();
+            assert_eq!(http.ip_address.as_deref(), expected, "HTTP: {xff}");
+        }
+    }
+
     #[test]
     fn mcp_extract_ip_prefers_forwarded_for() {
         let mut headers = HeaderMap::new();
         headers.insert("x-forwarded-for", "1.2.3.4, 5.6.7.8".parse().unwrap());
         headers.insert("x-real-ip", "9.9.9.9".parse().unwrap());
-        assert_eq!(mcp_extract_ip(&headers).as_deref(), Some("1.2.3.4"));
+        assert_eq!(
+            mcp_extract_ip(
+                &headers,
+                Some("10.10.10.1:443".parse().unwrap()),
+                &["10.10.10.1".parse().unwrap(), "5.6.7.8".parse().unwrap()]
+            )
+            .as_deref(),
+            Some("1.2.3.4")
+        );
     }
 
     #[test]
     fn mcp_extract_ip_falls_back_to_real_ip() {
         let mut headers = HeaderMap::new();
         headers.insert("x-real-ip", "9.9.9.9".parse().unwrap());
-        assert_eq!(mcp_extract_ip(&headers).as_deref(), Some("9.9.9.9"));
+        assert_eq!(
+            mcp_extract_ip(
+                &headers,
+                Some("10.10.10.1:443".parse().unwrap()),
+                &["10.10.10.1".parse().unwrap()]
+            )
+            .as_deref(),
+            Some("9.9.9.9")
+        );
     }
 
     #[test]
     fn mcp_extract_ip_returns_none_when_absent() {
         let headers = HeaderMap::new();
-        assert!(mcp_extract_ip(&headers).is_none());
+        assert!(mcp_extract_ip(&headers, None, &[]).is_none());
     }
 
     #[tokio::test]
@@ -8108,25 +8266,49 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn mcp_extract_ip_ignores_empty_forwarded_for() {
+    fn mcp_extract_ip_rejects_empty_forwarded_for_without_secondary_recovery() {
         let mut headers = HeaderMap::new();
         headers.insert("x-forwarded-for", "".parse().unwrap());
         headers.insert("x-real-ip", "10.0.0.1".parse().unwrap());
-        assert_eq!(mcp_extract_ip(&headers).as_deref(), Some("10.0.0.1"));
+        assert_eq!(
+            mcp_extract_ip(
+                &headers,
+                Some("10.10.10.1:443".parse().unwrap()),
+                &["10.10.10.1".parse().unwrap()]
+            )
+            .as_deref(),
+            Some("10.10.10.1")
+        );
     }
 
     #[test]
     fn mcp_extract_ip_trims_whitespace_in_real_ip() {
         let mut headers = HeaderMap::new();
         headers.insert("x-real-ip", "  8.8.8.8  ".parse().unwrap());
-        assert_eq!(mcp_extract_ip(&headers).as_deref(), Some("8.8.8.8"));
+        assert_eq!(
+            mcp_extract_ip(
+                &headers,
+                Some("10.10.10.1:443".parse().unwrap()),
+                &["10.10.10.1".parse().unwrap()]
+            )
+            .as_deref(),
+            Some("8.8.8.8")
+        );
     }
 
     #[test]
     fn mcp_extract_ip_single_forwarded_for() {
         let mut headers = HeaderMap::new();
         headers.insert("x-forwarded-for", "203.0.113.50".parse().unwrap());
-        assert_eq!(mcp_extract_ip(&headers).as_deref(), Some("203.0.113.50"));
+        assert_eq!(
+            mcp_extract_ip(
+                &headers,
+                Some("10.10.10.1:443".parse().unwrap()),
+                &["10.10.10.1".parse().unwrap()]
+            )
+            .as_deref(),
+            Some("203.0.113.50")
+        );
     }
 
     // -----------------------------------------------------------------------

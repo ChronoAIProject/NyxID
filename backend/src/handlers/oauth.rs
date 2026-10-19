@@ -2385,11 +2385,12 @@ pub async fn pushed_authorization_request(
 /// standard OAuth/OIDC client libraries depend on the standard error shape.
 pub async fn token(
     State(state): State<AppState>,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     tele: TelemetryContext,
     headers: HeaderMap,
     Form(body): Form<TokenRequest>,
 ) -> Response {
-    match token_inner(&state, &tele, &headers, body).await {
+    match token_inner(&state, &tele, &headers, Some(peer), body).await {
         Ok(json) => json.into_response(),
         Err(err) => oauth_error_response(err),
     }
@@ -2430,6 +2431,7 @@ async fn token_inner(
     state: &AppState,
     tele: &TelemetryContext,
     headers: &HeaderMap,
+    peer: Option<std::net::SocketAddr>,
     body: TokenRequest,
 ) -> AppResult<Json<TokenResponse>> {
     match body.grant_type.as_str() {
@@ -2616,7 +2618,11 @@ async fn token_inner(
                             .as_ref()
                             .map(|external_subject| external_subject.platform.clone()),
                     })),
-                    crate::handlers::admin_helpers::extract_ip(headers),
+                    crate::handlers::admin_helpers::extract_ip(
+                        headers,
+                        peer,
+                        &state.config.trusted_proxy_ips,
+                    ),
                     crate::handlers::admin_helpers::extract_user_agent(headers),
                     None,
                     None,
@@ -2781,7 +2787,11 @@ async fn token_inner(
                         "client_id": client_id,
                         "scope": &result.scope,
                     })),
-                    crate::handlers::admin_helpers::extract_ip(headers),
+                    crate::handlers::admin_helpers::extract_ip(
+                        headers,
+                        peer,
+                        &state.config.trusted_proxy_ips,
+                    ),
                     crate::handlers::admin_helpers::extract_user_agent(headers),
                     None,
                     None,
@@ -2867,7 +2877,11 @@ async fn token_inner(
                             sender_constraint.as_ref(),
                         ),
                     })),
-                    crate::handlers::admin_helpers::extract_ip(headers),
+                    crate::handlers::admin_helpers::extract_ip(
+                        headers,
+                        peer,
+                        &state.config.trusted_proxy_ips,
+                    ),
                     crate::handlers::admin_helpers::extract_user_agent(headers),
                     None,
                     None,
@@ -2923,7 +2937,7 @@ async fn token_inner(
                             "client_id": client_id,
                             "scope": &response.scope,
                         })),
-                        extract_ip(headers),
+                        extract_ip(headers, peer, &state.config.trusted_proxy_ips),
                         extract_user_agent(headers),
                         None,
                         None,
@@ -2948,7 +2962,7 @@ async fn token_inner(
                         None,
                         "sa.auth_failed".to_string(),
                         Some(serde_json::json!({ "client_id": client_id })),
-                        extract_ip(headers),
+                        extract_ip(headers, peer, &state.config.trusted_proxy_ips),
                         extract_user_agent(headers),
                         None,
                         None,
@@ -3325,6 +3339,7 @@ pub async fn get_binding(
 /// calls for.
 pub async fn delete_binding(
     State(state): State<AppState>,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     headers: HeaderMap,
     axum::extract::Path(raw_binding_id): axum::extract::Path<String>,
     Query(query): Query<GetBindingQuery>,
@@ -3369,7 +3384,11 @@ pub async fn delete_binding(
                 "binding_hash": oauth_broker_service::binding_hash_prefix(&binding_hash),
                 "reason": "client_revoked",
             })),
-            crate::handlers::admin_helpers::extract_ip(&headers),
+            crate::handlers::admin_helpers::extract_ip(
+                &headers,
+                Some(peer),
+                &state.config.trusted_proxy_ips,
+            ),
             crate::handlers::admin_helpers::extract_user_agent(&headers),
             None,
             None,
@@ -3385,6 +3404,7 @@ pub async fn delete_binding(
 /// revoking the token. Always returns 200 per the spec.
 pub async fn revoke(
     State(state): State<AppState>,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     headers: HeaderMap,
     Form(body): Form<RevokeRequest>,
 ) -> StatusCode {
@@ -3444,7 +3464,11 @@ pub async fn revoke(
                     "binding_hash": oauth_broker_service::binding_hash_prefix(&binding_hash),
                     "reason": "client_revoked",
                 })),
-                crate::handlers::admin_helpers::extract_ip(&headers),
+                crate::handlers::admin_helpers::extract_ip(
+                    &headers,
+                    Some(peer),
+                    &state.config.trusted_proxy_ips,
+                ),
                 crate::handlers::admin_helpers::extract_user_agent(&headers),
                 None,
                 None,
@@ -5275,6 +5299,7 @@ mod tests {
             &state,
             &TelemetryContext::default(),
             &HeaderMap::new(),
+            None,
             TokenRequest {
                 grant_type: "authorization_code".to_string(),
                 code: Some(code.to_string()),
@@ -5327,6 +5352,7 @@ mod tests {
             &state,
             &TelemetryContext::default(),
             &HeaderMap::new(),
+            None,
             TokenRequest {
                 grant_type: "refresh_token".to_string(),
                 code: None,
@@ -5357,6 +5383,7 @@ mod tests {
             &state,
             &TelemetryContext::default(),
             &HeaderMap::new(),
+            None,
             TokenRequest {
                 grant_type: "refresh_token".to_string(),
                 code: None,
@@ -5385,6 +5412,7 @@ mod tests {
             &state,
             &TelemetryContext::default(),
             &HeaderMap::new(),
+            None,
             TokenRequest {
                 grant_type: "urn:ietf:params:oauth:grant-type:token-exchange".to_string(),
                 code: None,
@@ -5542,6 +5570,7 @@ mod tests {
             &state,
             &TelemetryContext::default(),
             &HeaderMap::new(),
+            None,
             TokenRequest {
                 grant_type: "authorization_code".to_string(),
                 code: Some(code),
@@ -5573,6 +5602,7 @@ mod tests {
             &state,
             &TelemetryContext::default(),
             &HeaderMap::new(),
+            None,
             TokenRequest {
                 grant_type: "urn:ietf:params:oauth:grant-type:token-exchange".to_string(),
                 code: None,
@@ -5632,6 +5662,7 @@ mod tests {
             &state,
             &TelemetryContext::default(),
             &HeaderMap::new(),
+            None,
             TokenRequest {
                 grant_type: "authorization_code".to_string(),
                 code: Some(code.to_string()),
@@ -5701,6 +5732,7 @@ mod tests {
             &state,
             &TelemetryContext::default(),
             &headers,
+            None,
             TokenRequest {
                 grant_type: "authorization_code".to_string(),
                 code: Some(code.to_string()),
@@ -5810,6 +5842,7 @@ mod tests {
             &state,
             &TelemetryContext::default(),
             &HeaderMap::new(),
+            None,
             TokenRequest {
                 grant_type: "urn:ietf:params:oauth:grant-type:token-exchange".to_string(),
                 code: None,
@@ -5881,6 +5914,7 @@ mod tests {
 
         let status = delete_binding(
             State(state.clone()),
+            axum::extract::ConnectInfo("127.0.0.1:43123".parse().unwrap()),
             HeaderMap::new(),
             Path(raw_binding_id.clone()),
             Query(GetBindingQuery {
@@ -5894,6 +5928,7 @@ mod tests {
 
         let wrong_client_status = delete_binding(
             State(state),
+            axum::extract::ConnectInfo("127.0.0.1:43123".parse().unwrap()),
             HeaderMap::new(),
             Path(other_raw_binding_id.clone()),
             Query(GetBindingQuery {
@@ -5994,6 +6029,7 @@ mod tests {
             &state,
             &TelemetryContext::default(),
             &HeaderMap::new(),
+            None,
             TokenRequest {
                 grant_type: "authorization_code".to_string(),
                 code: None,
@@ -6028,6 +6064,7 @@ mod tests {
             &state,
             &TelemetryContext::default(),
             &HeaderMap::new(),
+            None,
             TokenRequest {
                 grant_type: "refresh_token".to_string(),
                 code: None,
@@ -6076,6 +6113,7 @@ mod tests {
     async fn refresh_grant_error(state: &AppState, refresh_token: &str) -> (StatusCode, String) {
         let response = token(
             State(state.clone()),
+            axum::extract::ConnectInfo("127.0.0.1:43123".parse().unwrap()),
             TelemetryContext::default(),
             HeaderMap::new(),
             Form(refresh_grant_request(refresh_token)),
@@ -6218,6 +6256,7 @@ mod tests {
             &state,
             &TelemetryContext::default(),
             &HeaderMap::new(),
+            None,
             TokenRequest {
                 grant_type: "magic_grant".to_string(),
                 code: None,
@@ -6356,6 +6395,7 @@ mod tests {
             &state,
             &TelemetryContext::default(),
             &HeaderMap::new(),
+            None,
             TokenRequest {
                 grant_type: "client_credentials".to_string(),
                 code: None,
@@ -6390,6 +6430,7 @@ mod tests {
             &state,
             &TelemetryContext::default(),
             &HeaderMap::new(),
+            None,
             TokenRequest {
                 grant_type: "client_credentials".to_string(),
                 code: None,
@@ -6424,6 +6465,7 @@ mod tests {
             &state,
             &TelemetryContext::default(),
             &HeaderMap::new(),
+            None,
             TokenRequest {
                 grant_type: "urn:ietf:params:oauth:grant-type:token-exchange".to_string(),
                 code: None,
@@ -6460,6 +6502,7 @@ mod tests {
             &state,
             &TelemetryContext::default(),
             &HeaderMap::new(),
+            None,
             TokenRequest {
                 grant_type: "urn:ietf:params:oauth:grant-type:token-exchange".to_string(),
                 code: None,

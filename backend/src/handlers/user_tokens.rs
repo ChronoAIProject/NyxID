@@ -468,6 +468,7 @@ pub async fn initiate_oauth_connect(
 /// GET /api/v1/providers/{provider_id}/callback (legacy per-provider route)
 pub async fn oauth_callback(
     State(state): State<AppState>,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     Path(provider_id): Path<String>,
     Query(query): Query<OAuthCallbackQuery>,
     headers: HeaderMap,
@@ -504,7 +505,11 @@ pub async fn oauth_callback(
             // connection, null for the legacy single-tenant path.
             "connection_id": &outcome.connection_id,
         })),
-        crate::handlers::admin_helpers::extract_ip(&headers),
+        crate::handlers::admin_helpers::extract_ip(
+            &headers,
+            Some(peer),
+            &state.config.trusted_proxy_ips,
+        ),
         crate::handlers::admin_helpers::extract_user_agent(&headers),
         None,
         None,

@@ -1102,6 +1102,30 @@ mod tests {
     }
 
     #[test]
+    fn cloudflare_location_rejects_empty_trust_and_repeated_fields() {
+        let peer = "10.0.0.8:443".parse::<SocketAddr>().unwrap();
+        let mut headers = HeaderMap::new();
+        for (name, value) in [
+            ("cf-ipcountry", "SG"),
+            ("cf-ipcity", "Singapore"),
+            ("cf-region", "Singapore"),
+            ("cf-ipcontinent", "AS"),
+            ("cf-timezone", "Asia/Singapore"),
+        ] {
+            headers.insert(name, value.parse().unwrap());
+            headers.append(name, value.parse().unwrap());
+        }
+        assert_eq!(
+            trusted_client_location(&headers, peer, &[]),
+            Default::default()
+        );
+        assert_eq!(
+            trusted_client_location(&headers, peer, &["10.0.0.0/8".parse().unwrap()]),
+            Default::default()
+        );
+    }
+
+    #[test]
     fn preview_response_maps_verbose_fields_additively() {
         let now = chrono::Utc::now();
         let response = preview_response(PreviewOutput {

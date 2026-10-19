@@ -49,6 +49,16 @@ class PolicyInputs(unittest.TestCase):
         self.assertNotIn("preload", spa)
         self.assertIn('Strict-Transport-Security ""', self.render({})["spa-headers.conf"])
 
+    def test_all_backend_proxy_locations_clear_unverified_cloudflare_fields(self):
+        config = self.render({})["default.conf"]
+        # Each parent proxy location sets Host locally, so server-level header
+        # clears would not be inherited. The nested reply location inherits its
+        # parent's entire proxy_set_header set.
+        self.assertEqual(config.count('proxy_set_header Host $host;'), 6)
+        for field in ["CF-Connecting-IP", "CF-IPCountry", "CF-IPCity", "CF-Region",
+                      "CF-IPContinent", "CF-Timezone"]:
+            self.assertEqual(config.count(f'proxy_set_header {field} "";'), 6)
+
     @staticmethod
     def render(env):
         template = Path(__file__).parents[1].joinpath("nginx.conf.template").read_text()

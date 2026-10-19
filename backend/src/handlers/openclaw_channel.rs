@@ -63,6 +63,7 @@ pub struct MappingResponse {
 /// allowing users to migrate to the unified channel bot relay incrementally.
 pub async fn handle_channel_message(
     State(state): State<AppState>,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Json<ChannelWebhookResponse>, (StatusCode, Json<serde_json::Value>)> {
@@ -163,7 +164,11 @@ pub async fn handle_channel_message(
             "agent_id": &message.agent_id,
             "direction": &message.direction,
         })),
-        crate::handlers::admin_helpers::extract_ip(&headers),
+        crate::handlers::admin_helpers::extract_ip(
+            &headers,
+            Some(peer),
+            &state.config.trusted_proxy_ips,
+        ),
         crate::handlers::admin_helpers::extract_user_agent(&headers),
         None,
         None,
@@ -450,9 +455,14 @@ mod tests {
             HeaderValue::from_static("secret"),
         );
 
-        let err = handle_channel_message(State(state), headers, Bytes::from_static(b"{}"))
-            .await
-            .expect_err("missing signature header should be unauthorized");
+        let err = handle_channel_message(
+            State(state),
+            axum::extract::ConnectInfo("127.0.0.1:43123".parse().unwrap()),
+            headers,
+            Bytes::from_static(b"{}"),
+        )
+        .await
+        .expect_err("missing signature header should be unauthorized");
 
         assert_eq!(err.0, StatusCode::UNAUTHORIZED);
         assert_eq!(
@@ -492,9 +502,14 @@ mod tests {
         let wrong_secret = "wrong-secret";
         let headers = webhook_headers(wrong_secret, &signature(wrong_secret, body.as_bytes()));
 
-        let err = handle_channel_message(State(state), headers, Bytes::from(body))
-            .await
-            .expect_err("wrong webhook secret should fail verification");
+        let err = handle_channel_message(
+            State(state),
+            axum::extract::ConnectInfo("127.0.0.1:43123".parse().unwrap()),
+            headers,
+            Bytes::from(body),
+        )
+        .await
+        .expect_err("wrong webhook secret should fail verification");
 
         assert_eq!(err.0, StatusCode::UNAUTHORIZED);
         assert_eq!(
@@ -535,9 +550,14 @@ mod tests {
         .to_string();
         let headers = webhook_headers(&secret, &signature(&secret, body.as_bytes()));
 
-        let Json(response) = handle_channel_message(State(state), headers, Bytes::from(body))
-            .await
-            .unwrap();
+        let Json(response) = handle_channel_message(
+            State(state),
+            axum::extract::ConnectInfo("127.0.0.1:43123".parse().unwrap()),
+            headers,
+            Bytes::from(body),
+        )
+        .await
+        .unwrap();
 
         assert_eq!(response.status, "resolved");
         assert_eq!(response.nyxid_user_id.as_deref(), Some(user_id.as_str()));
