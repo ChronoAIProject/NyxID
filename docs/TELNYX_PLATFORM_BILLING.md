@@ -267,17 +267,18 @@ nyxid service add telnyx-platform --platform-key --profile pilot
 ```
 
 The next HTTP POST and MCP call each spend real Telnyx funds and NyxID credits.
-Record nonsecret RFC3339 timestamps `T0` and `T1` around one attended call at a
-time. `chat-request.json` uses the same flat text-chat shape for HTTP and MCP.
+Run one attended call at a time. The MCP envelope records `started_at` and
+`finished_at` RFC3339 bounds for correlation. `chat-request.json` uses the same
+flat text-chat shape for HTTP and MCP.
 
 ```sh
 nyxid proxy request telnyx-platform ai/openai/chat/completions --method POST --header 'Content-Type: application/json' --data @chat-request.json --profile pilot --output json --envelope > http.json
 nyxid billing executions show "$(jq -r .execution_id http.json)" --wait --timeout-secs 120 --profile pilot --output json
 nyxid mcp tools --service telnyx-platform --profile pilot --output json
-nyxid mcp call telnyx-platform__chat_completions --args @chat-request.json --envelope --profile pilot --output json
-nyxid billing executions list --since "$T0" --profile pilot --output json
+nyxid mcp call telnyx-platform__chat_completions --args @chat-request.json --envelope --profile pilot --output json > mcp.json
+nyxid billing executions list --since "$(jq -r .started_at mcp.json)" --profile pilot --output json
 nyxid billing executions show "$MCP_EXECUTION_UUID" --wait --timeout-secs 120 --profile pilot --output json
-nyxid admin usage --from "$T0" --to "$T1" --service telnyx-platform --user "$PILOT_PERSON_UUID" --profile billing-admin --output json
+nyxid admin usage --from "$(jq -r .started_at mcp.json)" --to "$(jq -r .finished_at mcp.json)" --service telnyx-platform --user "$PILOT_PERSON_UUID" --profile billing-admin --output json
 nyxid admin billing ledger verify --all --profile billing-admin --output json
 ```
 
@@ -285,9 +286,14 @@ A successful HTTP call carries an execution ID; unchanged proxy invocations keep
 the provider body on stdout and print the ID on stderr. The envelope includes
 it in JSON. A pending HTTP or MCP outcome exits 2 with the ID: inspect execution
 state and do not automatically repeat the paid request. MCP success currently
-omits the ID, so identify `MCP_EXECUTION_UUID` from the self-scoped latest-50 list
-in the attended window. The MCP client searches lazily exposed service tools and
-uses the server's universal dispatcher to activate and execute them.
+omits the ID, so identify `MCP_EXECUTION_UUID` from the self-scoped latest-50 list,
+matching the called service and creation time between the envelope's `started_at`
+and `finished_at` bounds. The client enumerates all service operations from
+`/mcp/config`, obtains their server-built input schemas, and uses the universal
+dispatcher for calls. Calls wait indefinitely by default, matching proxy requests;
+`--timeout-secs` bounds the whole MCP exchange. A timeout exits 2 with
+`managed_outcome_uncertain` and correlation bounds: inspect executions before
+retrying because a paid call may have completed.
 
 Execution reads expose state and reservation ceilings. Compare admin usage in
 the tight attended window with provider usage: input = prompt minus cached,
@@ -330,7 +336,13 @@ and log in to a separate human admin profile against its loopback URL.
 Use `--base-url http://localhost:3001 --profile local-billing` on the catalog,
 set-managed, service-show, resync and readiness commands above. Use only
 synthetic tariff evidence and no upstream credential. This exercises failed
-price synchronization and row error rendering without a vendor request; resync
-and readiness should exit 2. A successful Lago sync and paid execution require
+price synchronization and row error rendering without a vendor request. Verified
+on 2026-10-20 against a disposable local replica set: template dry-run, apply,
+unchanged reapply, set-managed and service show exited 0. Resync exited 2 with
+`synced: false` and three failed price rows whose error was `Lago is not
+configured; the reconcile sweep will retry`. Managed verification exited 2:
+Lago, the absent credential and fresh exact rate checks failed, while the
+published operation, model/output schema, proxy policy and billing flags passed.
+A successful Lago sync and paid execution require
 the separately authorized live acceptance run. Do not point this setup at a
 shared database or production API.

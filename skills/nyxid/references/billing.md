@@ -1,7 +1,9 @@
 # Billing, managed execution and credit grants
 
-All `nyxid admin` and `nyxid billing` commands require a human account session.
-An Agent Key profile or credential is refused locally before any request. Use a
+The billing commands in this reference (`admin billing`, `admin usage`,
+`admin credits` and `billing`) require a human account session. The selected
+credential is checked locally before any request; explicit or environment token
+overrides take precedence over the saved profile. API keys are refused. Use a
 separate profile authorized with `nyxid login --profile billing-admin`; retain the
 agent profile for its normal execution scope. Billing reads are self-scoped;
 admin reads require admin/operator authority and billing writes require admin.
@@ -58,6 +60,14 @@ are never automatically replayed. Resync runs once and prints row status;
 its `synced` flag means something changed, and exit 2 reports remaining unsynced
 rows. Inspect state before deciding to retry.
 
+Service updates send only the validated authored patch. The dry-run preview
+follows the server's merge rules: lane patches preserve omitted fallback/resale
+fields and omitted component/operation arrays. A billing block without either
+lane key keeps the legacy full-block defaults for omitted platform/resale fields
+(false, null or `tokens` as appropriate). Inspect the preview before applying
+legacy-only changes; contract and credential-only settings retain omission
+semantics independently.
+
 ## Author a Telnyx managed offering
 
 Use verified facts, prices in **credits per token**, and a fresh tariff evidence
@@ -90,7 +100,9 @@ Submit the upstream credential using `nyxid service update telnyx-platform
 securely through the environment. Never put it in argv or a manifest.
 `service verify --managed` checks billing/Lago availability, active service,
 configured credential, dedicated restricted settings, fresh tariff evidence,
-three synced prices with exactly matching fresh nonretired cache rates, and
+one active POST chat endpoint with pinned model/output schema, an exact proxy
+allowlist, the required platform-only billing flags, three synced prices with
+exactly matching fresh nonretired cache rates, and
 the effective platform charging reason. It can pass while access is disabled.
 It does not prove replica versions, payer funding, tariff provenance or upstream
 behavior. Verify those independently before enabling access.
@@ -106,8 +118,10 @@ nyxid admin credits grant list --user "$PILOT_UUID_OR_EMAIL" --output json
 nyxid admin credits grant revoke "$GRANT_UUID"
 ```
 
-Wallet `--owner-id` is sent on both GET and provisioning; org access is checked
-by the server. Grants accept 1..=1,000,000 whole credits. Repeat `--service` for
+Wallet `--owner-id` always uses POST `/billing/wallet` with the owner in its JSON body,
+even without `--provision`. This provisions the selected wallet if missing, as
+the personal GET does. The server checks org access. Grants accept
+1..=1,000,000 whole credits. Repeat `--service` for
 multiple catalog services or use `--all-services`. Optional `--expires-at` is an
 RFC3339 instant. A nonblank `--reason` and confirmation (or `--yes`) are required.
 Issue creates a new batch on every successful invocation; it is not idempotent.
@@ -125,10 +139,10 @@ Authorize spending and enable only the intended restricted owners first.
 nyxid proxy request telnyx-platform ai/openai/chat/completions --method POST \
   --header 'Content-Type: application/json' --data @chat-request.json --output json --envelope
 nyxid mcp tools --service telnyx-platform --output json
-nyxid mcp call telnyx-platform__chat_completions --args @chat-request.json --envelope --output json
-nyxid billing executions list --since "$T0" --output json
+nyxid mcp call telnyx-platform__chat_completions --args @chat-request.json --envelope --output json > mcp.json
+nyxid billing executions list --since "$(jq -r .started_at mcp.json)" --output json
 nyxid billing executions show "$EXECUTION_UUID" --wait --timeout-secs 120 --output json
-nyxid admin usage --from "$T0" --to "$T1" --service telnyx-platform --user "$PILOT_UUID" --output json
+nyxid admin usage --from "$(jq -r .started_at mcp.json)" --to "$(jq -r .finished_at mcp.json)" --service telnyx-platform --user "$PILOT_UUID" --output json
 nyxid admin usage --period 24h --page 1 --per-page 25
 ```
 
@@ -144,8 +158,11 @@ Human sessions expose service tools lazily: `tools --service` supplements
 `tools/list` with `nyx__search_tools`, and service calls use `nyx__call_tool` to
 activate and execute the named tool. Native meta-tools are called directly.
 Tool `isError` exits 1, or 2 with its execution ID when managed usage is pending.
-Successful MCP results currently omit execution IDs: correlate the self-scoped
-latest-50 execution list with a tight `--since` timestamp. That list has no
+Successful MCP envelopes provide `started_at` and `finished_at` RFC3339 bounds.
+Correlate the self-scoped latest-50 execution list with `--since started_at`,
+then select only executions of the called service created at or before `finished_at`.
+An execution ID is emitted only when known (for example, a pending result).
+That list has no
 pagination, owner override, usage breakdown or settlement amounts. Show waits
 for `settled`/`released`, with exit 2 on a nonterminal timeout.
 
@@ -154,3 +171,19 @@ It shows service/credential-class token quantities and exact gross, wallet,
 grant and allowance costs. Compare an attended window with provider usage;
 it cannot provide per-execution settlement evidence. Public tariff list rates
 do not prove vendor invoice parity.
+
+MCP calls wait indefinitely by default, matching `proxy request` (the transport
+still has a 10-second connection timeout). Set `--timeout-secs` to bound the
+entire handshake and result stream. Expiry of `--timeout-secs` exits 2 with
+`managed_outcome_uncertain`, the tool and timestamp bounds. Check execution state
+before retrying: the provider may have completed and charged the call. Reads
+refresh expired saved sessions; non-idempotent writes never replay after a 401.
+
+`mcp tools --service` enumerates every visible operation through `/mcp/config`
+and resolves each server-built input schema; a missing schema fails loudly.
+Grant lists expose `total` and accept `--page` and `--per-page` (1 through 500).
+
+Applying a manifest that disables platform access or empties a live service's
+owner allowlist requires an interactive confirmation or
+`admin catalog apply --allow-access-change`. Dry-run only warns. Review the
+Telnyx template's disabled access defaults before reapplying it to a pilot.

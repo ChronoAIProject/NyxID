@@ -604,6 +604,7 @@ nyxid admin billing ledger verify [--all]
 nyxid admin usage [--period 24h|7d|30d | --from RFC3339 --to RFC3339]
 nyxid admin credits grant issue|list|revoke
 nyxid billing wallet [--provision] [--owner-id <UUID>] | executions list|show
+# --owner-id always uses the owner-aware POST, provisioning if missing; personal reads use GET.
 nyxid mcp tools [--service <SLUG>] | call <TOOL> --args @file [--envelope]
 
 # Agent isolation

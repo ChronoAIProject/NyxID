@@ -118,8 +118,9 @@ Notes for admins helping new users:
 
 Use [billing.md](billing.md) for complete command flags, exact-decimal prices,
 managed Telnyx setup, grant confirmation, pending execution handling and exit
-codes. All admin and billing commands refuse Agent Key profiles/credentials
-locally; authorize a separate human profile with `nyxid login`.
+codes. `admin billing`, `admin usage`, `admin credits` and `billing` refuse API
+key credentials locally. Explicit and environment credentials retain precedence
+over saved profiles; authorize a human session with `nyxid login`.
 
 ```sh
 nyxid admin billing config show
@@ -164,3 +165,8 @@ usage exits 2 with its execution ID. See [billing.md](billing.md#execute-and-cor
 - `8003 node_proxy_error` -- node agent proxy failed (check `nyxid node list`)
 - **403 from downstream with no NyxID error code** -- the downstream service itself rejected the request. A common cause is WAF rules blocking your User-Agent header (e.g. `OpenAI/Python 2.30.0`). The user can set a per-service custom User-Agent override via the frontend (key detail page > Service > User-Agent) or via API: `PATCH /api/v1/user-services/{id}` with `{"custom_user_agent": "MyApp/1.0"}`. Set to `""` to clear and revert to passthrough.
 - **Any other static header a downstream requires on every call** (scope hint, API version, routing key) should be configured once as a service default via `nyxid service update <id> --default-header 'name=value'` rather than sent from every caller.
+
+`admin catalog apply` asks before disabling platform access or clearing a live
+service's owner allowlist. Non-interactive applies require
+`--allow-access-change`; `--dry-run` only warns. Grant lists support `--page` and
+`--per-page` (1..=500), and include `total`.
