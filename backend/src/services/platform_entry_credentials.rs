@@ -26,6 +26,7 @@ pub(crate) struct EntryCredentialSnapshot {
     connection_identity: Option<Document>,
     connection_token: Option<Zeroizing<Vec<u8>>>,
     token_expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    connection_refreshable: bool,
     guards: Vec<Guard>,
 }
 
@@ -50,6 +51,7 @@ impl EntryCredentialSnapshot {
             connection_identity: None,
             connection_token: None,
             token_expires_at: None,
+            connection_refreshable: false,
             guards: Vec::new(),
         };
         if bot.credential_source != "connection" {
@@ -128,6 +130,7 @@ impl EntryCredentialSnapshot {
                 .ok_or_else(changed)?,
         ));
         result.token_expires_at = connection.expires_at;
+        result.connection_refreshable = connection.refresh_token_encrypted.is_some();
         result.connection_identity = Some(identity);
         result.guards.push(Guard {
             collection: crate::models::user_api_key::COLLECTION_NAME,
@@ -226,6 +229,15 @@ impl EntryCredentialSnapshot {
             .map_err(|_| changed())?,
         );
         Ok(hex::encode(Sha256::digest(material.as_slice())))
+    }
+
+    /// Operational availability permits the authenticated refresh producer to
+    /// renew expired material without changing the stable entry identity.
+    pub(crate) fn token_usable_or_refreshable(&self) -> bool {
+        self.connection_refreshable
+            || self
+                .token_expires_at
+                .is_none_or(|expiry| expiry > chrono::Utc::now())
     }
 
     /// Materialize exactly the encrypted credential captured before the final

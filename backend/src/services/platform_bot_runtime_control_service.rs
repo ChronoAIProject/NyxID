@@ -341,10 +341,9 @@ pub(super) async fn native_transport_ready(
         }
         Err(error) => return Err(error),
     };
-    Ok(
-        credentials.fingerprint()? == configuration.credential_fingerprint
-            && (!write_fence || credentials.fence_in_session(db, session).await?),
-    )
+    Ok(credentials.token_usable_or_refreshable()
+        && credentials.fingerprint()? == configuration.credential_fingerprint
+        && (!write_fence || credentials.fence_in_session(db, session).await?))
 }
 
 pub(crate) fn profile_identity(profile: &PlatformBotConfig) -> AppResult<EntryIdentity> {

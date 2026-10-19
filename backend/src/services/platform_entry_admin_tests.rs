@@ -1533,10 +1533,13 @@ fn unavailable_oauth_returns_repair_status_and_disconnected_inventory_without_hi
             .await
             .unwrap()
             .unwrap();
-        for change in [
-            doc! {"status":"revoked"},
-            doc! {"token_scopes":""},
-            doc! {"expires_at":bson::DateTime::from_millis(0)},
+        for (cause, change) in [
+            ("revoked", doc! {"status":"revoked"}),
+            ("missing scopes", doc! {"token_scopes":""}),
+            (
+                "expired without refresh",
+                doc! {"expires_at":bson::DateTime::from_millis(0)},
+            ),
         ] {
             keys.update_one(
                 doc! {"_id":fixture.bot.connection_id.as_ref().unwrap()},
@@ -1548,7 +1551,7 @@ fn unavailable_oauth_returns_repair_status_and_disconnected_inventory_without_hi
                 super::super::platform_bot_status_service::view(&fixture.state.db, Some(&runtime))
                     .await
                     .unwrap();
-            assert_eq!(status.state, "connection_repair_required");
+            assert_eq!(status.state, "connection_repair_required", "{cause}");
             assert!(!status.faq_ready);
             assert_eq!(
                 super::super::platform_personal_binding_service::inventory_state(
@@ -1557,7 +1560,8 @@ fn unavailable_oauth_returns_repair_status_and_disconnected_inventory_without_hi
                 )
                 .await
                 .unwrap(),
-                crate::models::platform_personal_binding::PersonalBindingState::Revoked
+                crate::models::platform_personal_binding::PersonalBindingState::Revoked,
+                "{cause}"
             );
             assert!(
                 super::super::platform_personal_binding_service::native_manager_display(
@@ -1577,6 +1581,41 @@ fn unavailable_oauth_returns_repair_status_and_disconnected_inventory_without_hi
             .await
             .unwrap();
         }
+        let refresh = fixture
+            .state
+            .encryption_keys
+            .encrypt(b"synthetic-refresh-token")
+            .await
+            .unwrap();
+        keys.update_one(
+            doc! {"_id":fixture.bot.connection_id.as_ref().unwrap()},
+            doc! {"$set":{"expires_at":bson::DateTime::from_millis(0),
+                "refresh_token_encrypted":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:refresh}}},
+        ).await.unwrap();
+        let requests_before_status = fixture.server.received_requests().await.unwrap().len();
+        let refreshable =
+            super::super::platform_bot_status_service::view(&fixture.state.db, Some(&runtime))
+                .await
+                .unwrap();
+        assert_eq!(
+            refreshable.state, "active",
+            "expired refreshable credentials retain the entry identity"
+        );
+        assert!(refreshable.faq_ready);
+        assert_eq!(
+            super::super::platform_personal_binding_service::inventory_state(
+                &fixture.state.db,
+                &binding
+            )
+            .await
+            .unwrap(),
+            crate::models::platform_personal_binding::PersonalBindingState::Active
+        );
+        assert_eq!(
+            fixture.server.received_requests().await.unwrap().len(),
+            requests_before_status,
+            "status and inventory never perform provider refresh"
+        );
         keys.delete_one(doc! {"_id":fixture.bot.connection_id.as_ref().unwrap()})
             .await
             .unwrap();
