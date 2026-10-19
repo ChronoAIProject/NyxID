@@ -986,7 +986,15 @@ async fn channel_media_relay_and_gateway_follow_share_one_native_barrier_and_aut
         let (mut b, id_b) = f
             .input("receipt with caption", ThreadAddress::Mention, false, true)
             .await;
+        let _provider = super::media_tests::ingestion_provider(
+            &f.state,
+            &f.row,
+            super::media_tests::native_png(),
+        )
+        .await;
         for (body, id) in [(&mut a, &id_a), (&mut b, &id_b)] {
+            body["event_context"]["activity"]["kind"]["attachments"] =
+                json!([{"kind":"image","source":{"type":"nyxid_relay","index":0}}]);
             body["event_context"]["activity"]["thread"]["message_id"] = json!("om_native_receipt");
             let item=StoredAttachment{content_type:"image".into(),provider_ref:"https://open.larksuite.com/open-apis/im/v1/messages/om_native_receipt/resources/img_receipt?type=image".into(),platform_message_id:Some("om_native_receipt".into()),image_key:Some("img_receipt".into()),file_key:None,filename:None,mime_type:None,size_bytes:Some(42)};
             let facts: ChannelThreadFacts =
@@ -1126,6 +1134,108 @@ async fn channel_media_relay_and_gateway_follow_share_one_native_barrier_and_aut
                     .any(|r| r.url.path().contains("/resources/")),
                 "{case}: zero downloads"
             );
+        }
+    }
+}
+
+#[tokio::test]
+async fn channel_media_gateway_follow_post_text_flags_guest_and_unaddressed_first_photo() {
+    use crate::models::channel_message::StoredAttachment;
+    for media_on in [false, true] {
+        let f = Box::pin(Fixture::new("media_gateway_follow_posts")).await;
+        if media_on {
+            super::media_tests::enable_media(&f.state).await;
+        }
+        let provider = super::media_tests::ingestion_provider(
+            &f.state,
+            &f.row,
+            super::media_tests::native_png(),
+        )
+        .await;
+        for (n, text, addressed, guest) in [
+            (0, "", false, false),
+            (1, "Receipt\nDinner", true, false),
+            (2, "", false, true),
+        ] {
+            let (mut body, id) = f
+                .input(
+                    text,
+                    if addressed {
+                        ThreadAddress::Mention
+                    } else {
+                        ThreadAddress::NotAddressed
+                    },
+                    false,
+                    true,
+                )
+                .await;
+            let native = body["event_context"]["activity"]["thread"]["message_id"]
+                .as_str()
+                .unwrap();
+            let item = StoredAttachment {
+                content_type: "image".into(),
+                provider_ref: format!(
+                    "https://open.larksuite.com/open-apis/im/v1/messages/{native}/resources/img_receipt?type=image"
+                ),
+                platform_message_id: Some(native.into()),
+                image_key: Some("img_receipt".into()),
+                file_key: None,
+                filename: None,
+                mime_type: None,
+                size_bytes: None,
+            };
+            let sender = if guest { "guest" } else { "human" };
+            body["event_context"]["activity"]["actor"]["id"] = json!(sender);
+            body["event_context"]["activity"]["kind"]["attachments"] =
+                json!([{"kind":"image","variant":"embedded"}]);
+            // CMA's authenticated post flattener has removed the own-bot mention.
+            body["input"][0]["content"][0]["text"] = json!(if n == 1 {
+                "legacy post @Thread helper"
+            } else {
+                ""
+            });
+            f.state.db.collection::<ChannelMessage>(MESSAGES).update_one(doc! {"_id":&id}, doc! {"$set":{
+                "content_type":"unknown", "sender_platform_id":sender,"embedded_attachments":[bson::to_bson(&item).unwrap()]
+            }}).await.unwrap();
+            let before = provider
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .filter(|r| r.method == "GET")
+                .count();
+            let answer = f.send(&body, &id).await;
+            let calls = f.calls.lock().await;
+            if n == 0 || (guest && !media_on) {
+                assert!(!answer.contains("Here is your answer"));
+                assert_eq!(calls.len(), if n == 0 { 0 } else { 1 });
+            } else {
+                assert!(answer.contains("Here is your answer"), "{answer}");
+                let call = calls.last().unwrap();
+                let text = call["input"]
+                    .as_str()
+                    .unwrap_or_else(|| call["input"][0]["content"][0]["text"].as_str().unwrap());
+                if guest {
+                    assert!(text.contains(crate::services::assistant_channel_media::GUEST_NOTE));
+                    assert_eq!(
+                        provider
+                            .received_requests()
+                            .await
+                            .unwrap()
+                            .iter()
+                            .filter(|r| r.method == "GET")
+                            .count(),
+                        before
+                    );
+                } else if media_on {
+                    assert!(text.contains("Receipt\nDinner"));
+                    assert!(!text.contains("@Thread helper"));
+                    assert!(call.to_string().contains("input_image"));
+                } else {
+                    assert!(text.contains("legacy post @Thread helper"));
+                }
+            }
+            drop(calls);
         }
     }
 }

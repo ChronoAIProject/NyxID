@@ -418,7 +418,7 @@ async fn channel_media_shared_fetch_keeps_image_file_audio_video_resources() {
     server.abort();
 }
 
-async fn enable_media(state: &AppState) {
+pub(super) async fn enable_media(state: &AppState) {
     state
         .db
         .collection::<bson::Document>("feature_flag_overrides")
@@ -437,6 +437,7 @@ async fn channel_media_gateway_concurrent_duplicates_claim_once_and_keep_same_id
     let (state, row, key, calls, server) =
         media_fixture("media_gateway_duplicate", "gateway").await;
     enable_media(&state).await;
+    let _provider = ingestion_provider(&state, &row, native_png()).await;
     assert_eq!(
         put_binding(
             State(state.clone()),
@@ -453,7 +454,7 @@ async fn channel_media_gateway_concurrent_duplicates_claim_once_and_keep_same_id
         media_source(&state, &row, id, "om_same", "receipt").await;
     }
     let make = |id: &str| {
-        let mut body = event("receipt", "human", id);
+        let mut body = cma_media_event("receipt", "human", id);
         body["event_context"]["activity"]["source"]["platform"] = json!("lark");
         body["event_context"]["activity"]["conversation"]["id"] = json!("oc_human");
         body
@@ -1001,6 +1002,19 @@ async fn channel_media_relay_post_recomputes_after_ack_and_flag_off_keeps_empty_
         .lock()
         .unwrap()
         .insert(bot.id.clone(), adapter.clone());
+    Mock::given(method("GET"))
+        .and(path_regex("/open-apis/im/v1/messages/.*/resources/.*"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_bytes(native_png())
+                .insert_header("content-type", "image/png"),
+        )
+        .mount(&provider)
+        .await;
+    crate::services::assistant_channel_media::TEST_ADAPTERS
+        .lock()
+        .unwrap()
+        .insert(bot.id.clone(), adapter.clone());
     for enabled in [false, true] {
         if enabled {
             enable_media(&state).await;
@@ -1083,8 +1097,8 @@ async fn channel_media_relay_post_recomputes_after_ack_and_flag_off_keeps_empty_
         if enabled {
             let calls = calls.lock().await;
             assert_eq!(calls.len(), 1);
-            let input = calls[0]["input"].as_str().unwrap();
-            assert!(input.ends_with("Receipt\nDinner"), "{input}");
+            let input = captured_text(&calls[0]);
+            assert!(input.contains("Receipt\nDinner"), "{input}");
             assert!(!input.contains("@Receipt helper"), "{input}");
             assert_eq!(
                 OWN_USER_IDS.lock().unwrap()[&identity_key].0.as_deref(),
@@ -1150,4 +1164,1135 @@ async fn assert_authorized_media_download(
         1
     );
     requests.len()
+}
+
+fn cma_media_event(text: &str, sender: &str, id: &str) -> Value {
+    let mut body = event(text, sender, id);
+    body["event_context"]["activity"]["source"]["platform"] = json!("lark");
+    body["event_context"]["activity"]["conversation"]["id"] = json!("oc_human");
+    body["event_context"]["activity"]["kind"]["attachments"] =
+        json!([{"kind":"image","source":{"type":"nyxid_relay","index":0}}]);
+    body
+}
+
+pub(super) fn native_png() -> Vec<u8> {
+    use image::ImageEncoder;
+    let mut bytes = Vec::new();
+    image::codecs::png::PngEncoder::new(&mut bytes)
+        .write_image(&[255, 0, 0, 255], 1, 1, image::ExtendedColorType::Rgba8)
+        .unwrap();
+    bytes
+}
+pub(super) async fn ingestion_provider(
+    _state: &AppState,
+    row: &NyxbotChannel,
+    bytes: Vec<u8>,
+) -> MockServer {
+    let provider = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/open-apis/auth/v3/tenant_access_token/internal"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"code":0,"tenant_access_token":"mock-secret","expire":7200})),
+        )
+        .mount(&provider)
+        .await;
+    Mock::given(method("GET"))
+        .and(path_regex("/open-apis/im/v1/messages/.*/resources/.*"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_bytes(bytes)
+                .insert_header("content-type", "image/png"),
+        )
+        .mount(&provider)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/open-apis/im/v1/messages"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"code":0,"data":{"message_id":"reply"}})),
+        )
+        .mount(&provider)
+        .await;
+    let adapter = Arc::new(
+        crate::services::channel_adapters::lark::LarkFamilyAdapter::media_test_adapter(
+            &provider.uri(),
+            "lark",
+        ),
+    );
+    crate::services::assistant_channel_media::TEST_ADAPTERS
+        .lock()
+        .unwrap()
+        .insert(row.channel_bot_id.clone(), adapter.clone());
+    crate::handlers::channel_relay::TEST_REPLY_ADAPTERS
+        .lock()
+        .unwrap()
+        .insert(row.channel_bot_id.clone(), adapter);
+    provider
+}
+async fn gateway_ready(state: &AppState, key: &str) {
+    assert_eq!(
+        put_binding(
+            State(state.clone()),
+            Path("bnd_media".into()),
+            bearer(key),
+            Json(binding_body(key, OWNER))
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+    ensure_partition(state, key, PARTITION).await;
+}
+
+#[tokio::test]
+async fn channel_media_relay_gateway_first_photo_home_guest_and_caption_never_decides() {
+    for transport in ["direct", "gateway"] {
+        let (state, mut row, key, calls, server) =
+            media_fixture(&format!("media_first_{transport}"), transport).await;
+        enable_media(&state).await;
+        row.private_chats = Some("everyone".into());
+        state
+            .db
+            .collection::<NyxbotChannel>(CHANNELS)
+            .replace_one(doc! {"_id":&row.id}, &row)
+            .await
+            .unwrap();
+        if transport == "gateway" {
+            gateway_ready(&state, &key).await;
+        }
+        let provider = ingestion_provider(&state, &row, native_png()).await;
+        for (n, sender, text) in [
+            (0, "human", ""),
+            (1, "human", "yes 4821"),
+            (2, "guest", ""),
+            (3, "guest", "yes 4821"),
+        ] {
+            let id = format!("media-{n}");
+            let mut source = media_source(&state, &row, &id, &id, text).await;
+            source.sender_platform_id = Some(sender.into());
+            if transport == "direct" {
+                source.platform_conversation_id = Some(format!("oc_{sender}"));
+            }
+            state
+                .db
+                .collection::<ChannelMessage>(MESSAGES)
+                .replace_one(doc! {"_id":&id}, &source)
+                .await
+                .unwrap();
+            let downloads_before = provider
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .filter(|r| r.method == "GET")
+                .count();
+            if transport == "direct" {
+                let (_guard, done) = watch_relay_callback(&row.id, &id);
+                assert_eq!(
+                    direct_private(&state, &row, &id, sender, text).await,
+                    StatusCode::ACCEPTED
+                );
+                tokio::time::timeout(Duration::from_secs(30), done)
+                    .await
+                    .unwrap()
+                    .unwrap();
+            } else {
+                let body = cma_media_event(text, sender, &id);
+                let response = respond(&state, &key, &body, &id).await;
+                assert_eq!(response.status(), StatusCode::OK);
+                assert!(body_text(response).await.contains("Here is your answer"));
+            }
+            let written = state
+                .db
+                .collection::<NyxbotEvent>(EVENTS)
+                .find_one(doc! {"event_id":&id})
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(written.source_media_declared, Some(1));
+            let current = state
+                .db
+                .collection::<AssistantConversation>(CONVERSATIONS)
+                .find_one(doc! {"_id":&written.conversation_id})
+                .await
+                .unwrap()
+                .unwrap();
+            let messages = state
+                .db
+                .collection::<crate::models::assistant_message::AssistantMessage>(
+                    crate::models::assistant_message::COLLECTION_NAME,
+                );
+            let message=messages.find_one(doc! {"conversation_id":&current.id,"turn_id":&written.turn_id,"role":{"$ne":"assistant"}}).await.unwrap().unwrap();
+            let captured = calls.lock().await.last().unwrap().clone();
+            assert!(current.active_turn.is_none());
+            if sender == "guest" {
+                assert!(written.media.is_none());
+                assert!(message.attachments.is_empty());
+                assert!(
+                    captured
+                        .to_string()
+                        .contains(crate::services::assistant_channel_media::GUEST_NOTE)
+                );
+                assert_eq!(
+                    provider
+                        .received_requests()
+                        .await
+                        .unwrap()
+                        .iter()
+                        .filter(|r| r.method == "GET")
+                        .count(),
+                    downloads_before
+                );
+            } else {
+                assert!(written.media.is_some());
+                assert_eq!(
+                    message.attachments.len(),
+                    1,
+                    "{transport}/{n}: {}",
+                    captured
+                );
+                assert!(message.media_bound.unwrap().failed.is_empty());
+                assert!(captured.to_string().contains("input_image"), "{captured}");
+                assert!(message.media_pending.is_none());
+            }
+        }
+        server.abort();
+    }
+}
+
+#[tokio::test]
+async fn channel_media_gateway_current_request_contains_all_failed_partial_and_capped_post_context()
+{
+    for kind in ["all_failed", "partial", "capped"] {
+        let (state, row, key, calls, server) =
+            media_fixture(&format!("media_context_{kind}"), "gateway").await;
+        enable_media(&state).await;
+        gateway_ready(&state, &key).await;
+        let provider = ingestion_provider(
+            &state,
+            &row,
+            if kind == "all_failed" {
+                vec![0xff, 0, 0xff]
+            } else {
+                native_png()
+            },
+        )
+        .await;
+        let mut source = media_source(&state, &row, "post", "om_post", "Dinner").await;
+        source.embedded_attachments = source.attachments.clone();
+        source.attachments.clear();
+        if kind != "all_failed" {
+            let mut failed = source.embedded_attachments[0].clone();
+            failed.image_key = Some("bad".into());
+            failed.size_bytes = Some(u64::MAX);
+            source.embedded_attachments.push(failed);
+        }
+        if kind == "capped" {
+            while source.embedded_attachments.len() < 10 {
+                source
+                    .embedded_attachments
+                    .push(source.embedded_attachments[1].clone());
+            }
+            source.embedded_attachments_omitted = 1;
+        }
+        state
+            .db
+            .collection::<ChannelMessage>(MESSAGES)
+            .replace_one(doc! {"_id":&source.id}, &source)
+            .await
+            .unwrap();
+        let mut body = cma_media_event("Dinner", "human", "post");
+        body["input"][0]["content"][0]["text"] = json!("OLD RENDERING must disappear");
+        let text = if kind == "capped" {
+            format!("{}\n[post truncated]", "Dinner ".repeat(5000))
+        } else {
+            "Dinner".into()
+        };
+        body["event_context"]["activity"]["kind"]["text"] = json!(text);
+        body["event_context"]["activity"]["kind"]["attachments"] =
+            json!([{"kind":"image","variant":"embedded"}]);
+        assert!(
+            body_text(respond(&state, &key, &body, kind).await)
+                .await
+                .contains("Here is your answer")
+        );
+        let input = calls.lock().await.last().unwrap().to_string();
+        assert!(!input.contains("OLD RENDERING"));
+        if kind == "all_failed" {
+            assert!(input.contains(crate::services::assistant_channel_media::FAILED_NOTE));
+        } else {
+            assert!(input.contains("too_large"));
+            assert!(input.contains("input_image"));
+        }
+        if kind == "capped" {
+            assert!(input.contains("post truncated"));
+            assert!(input.contains("more embedded media omitted"));
+        }
+        let event = state
+            .db
+            .collection::<NyxbotEvent>(EVENTS)
+            .find_one(doc! {"event_id":"post"})
+            .await
+            .unwrap()
+            .unwrap();
+        let message = state
+            .db
+            .collection::<crate::models::assistant_message::AssistantMessage>(
+                crate::models::assistant_message::COLLECTION_NAME,
+            )
+            .find_one(doc! {"turn_id":&event.turn_id,"role":{"$ne":"assistant"}})
+            .await
+            .unwrap()
+            .unwrap();
+        let receipt = message.media_bound.unwrap();
+        if kind == "capped" {
+            assert_eq!(event.media.as_ref().unwrap().declared, 11);
+            assert_eq!(receipt.ok.len(), 1);
+            assert_eq!(receipt.failed.len(), 10);
+        }
+        assert!(message.text.contains(&receipt.context));
+        assert!(!provider.received_requests().await.unwrap().is_empty());
+        server.abort();
+    }
+}
+
+#[tokio::test]
+async fn channel_media_gateway_closed_shape_compatibility_forged_sources_and_missing_note() {
+    let (state, row, key, calls, server) = media_fixture("media_gateway_shapes", "gateway").await;
+    enable_media(&state).await;
+    gateway_ready(&state, &key).await;
+    for shape in ["image", "post", "audio", "video", "text", "telegram"] {
+        let mut body = cma_media_event("native text", "human", shape);
+        body["input"][0]["content"][0]["text"] = json!("rendered bytes\noriginal");
+        match shape {
+            "post" => {
+                body["event_context"]["activity"]["kind"]["attachments"] =
+                    json!([{"kind":"image","variant":"embedded"}])
+            }
+            "audio" | "video" => {
+                body["event_context"]["activity"]["kind"]["attachments"][0]["kind"] = json!(shape)
+            }
+            "text" => body["event_context"]["activity"]["kind"]["attachments"] = json!([]),
+            "telegram" => {
+                body["event_context"]["activity"]["source"]["platform"] = json!("telegram")
+            }
+            _ => {}
+        }
+        let response = respond(&state, &key, &body, shape).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        body_text(response).await;
+        let input = calls.lock().await.last().unwrap()["input"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        if matches!(shape, "image" | "post") {
+            assert!(input.contains("native text"));
+            assert!(!input.contains("rendered bytes"));
+            assert!(input.contains(crate::services::assistant_channel_media::FAILED_NOTE));
+        } else {
+            assert!(
+                input.ends_with("rendered bytes\noriginal"),
+                "{shape}: {input}"
+            );
+        }
+        let saved = state
+            .db
+            .collection::<NyxbotEvent>(EVENTS)
+            .find_one(doc! {"event_id":shape})
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(saved.media.is_none());
+    }
+    let mut source = media_source(&state, &row, "forged", "native", "receipt").await;
+    source.sender_platform_id = Some("victim".into());
+    state
+        .db
+        .collection::<ChannelMessage>(MESSAGES)
+        .replace_one(doc! {"_id":&source.id}, &source)
+        .await
+        .unwrap();
+    let before = calls.lock().await.len();
+    let response = respond(
+        &state,
+        &key,
+        &cma_media_event("", "human", "forged"),
+        "forged",
+    )
+    .await;
+    assert!(!response.status().is_success());
+    assert_eq!(calls.lock().await.len(), before);
+    server.abort();
+}
+
+fn captured_text(call: &Value) -> &str {
+    call["input"]
+        .as_str()
+        .unwrap_or_else(|| call["input"][0]["content"][0]["text"].as_str().unwrap())
+}
+
+async fn streaming_ingestion_provider(
+    state: &AppState,
+    row: &NyxbotChannel,
+    payload: Vec<u8>,
+    revoke: bool,
+    gate: Option<Arc<tokio::sync::Notify>>,
+) -> (
+    Arc<std::sync::atomic::AtomicUsize>,
+    tokio::task::JoinHandle<()>,
+) {
+    use axum::{
+        Router,
+        body::Body,
+        routing::{get, post},
+    };
+    let downloads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counted = downloads.clone();
+    let db = state.db.clone();
+    let channel = row.id.clone();
+    let payload = Arc::new(payload);
+    let app = Router::new()
+        .route(
+            "/open-apis/auth/v3/tenant_access_token/internal",
+            post(|| async {
+                Json(json!({"code":0,"tenant_access_token":"local-only","expire":7200}))
+            }),
+        )
+        .route(
+            "/open-apis/im/v1/messages/{native}/resources/{key}",
+            get(move || {
+                let counted = counted.clone();
+                let db = db.clone();
+                let channel = channel.clone();
+                let payload = payload.clone();
+                let gate = gate.clone();
+                async move {
+                    counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    if revoke {
+                        db.collection::<bson::Document>(CHANNELS)
+                            .update_one(doc! {"_id":channel}, doc! {"$set":{"owner_sender_ids":[]}})
+                            .await
+                            .unwrap();
+                    }
+                    if let Some(gate) = gate {
+                        gate.notified().await;
+                    }
+                    let chunks: Vec<_> = payload
+                        .chunks(32768)
+                        .map(|c| Ok::<_, std::io::Error>(Bytes::copy_from_slice(c)))
+                        .collect();
+                    axum::http::Response::builder()
+                        .header("content-type", "image/png")
+                        .body(Body::from_stream(futures::stream::iter(chunks)))
+                        .unwrap()
+                }
+            }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    let task = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let adapter = Arc::new(
+        crate::services::channel_adapters::lark::LarkFamilyAdapter::media_test_adapter(
+            &origin, "lark",
+        ),
+    );
+    crate::services::assistant_channel_media::TEST_ADAPTERS
+        .lock()
+        .unwrap()
+        .insert(row.channel_bot_id.clone(), adapter);
+    (downloads, task)
+}
+
+#[tokio::test]
+async fn channel_media_chunked_unknown_understated_bodies_retry_once_and_recheck_authority() {
+    use std::sync::atomic::Ordering;
+    for (declared, revoke) in [
+        (None, false),
+        (Some(0), false),
+        (Some(1024), false),
+        (Some(1024), true),
+    ] {
+        let (state, row, key, calls, server) =
+            media_fixture("media_stream_limits", "gateway").await;
+        enable_media(&state).await;
+        gateway_ready(&state, &key).await;
+        let mut payload = native_png();
+        payload.resize(5 * 1024 * 1024, 0);
+        let (downloads, provider) =
+            streaming_ingestion_provider(&state, &row, payload, revoke, None).await;
+        let mut source = media_source(&state, &row, "streamed", "streamed", "").await;
+        source.attachments[0].size_bytes = declared;
+        state
+            .db
+            .collection::<ChannelMessage>(MESSAGES)
+            .replace_one(doc! {"_id":&source.id}, source)
+            .await
+            .unwrap();
+        body_text(
+            respond(
+                &state,
+                &key,
+                &cma_media_event("", "human", "streamed"),
+                "streamed",
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(downloads.load(Ordering::SeqCst), if revoke { 1 } else { 2 });
+        let input = calls.lock().await.last().unwrap().to_string();
+        if revoke {
+            assert!(input.contains("source_unavailable"));
+            assert!(!input.contains("input_image"));
+        } else {
+            assert!(input.contains("input_image"), "{input}");
+        }
+        let attempts = state
+            .db
+            .collection::<bson::Document>("assistant_upload_limits")
+            .find_one(doc! {})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            attempts.get_i32("attempts").unwrap(),
+            2,
+            "failed attempt and retry both admitted"
+        );
+        provider.abort();
+        server.abort();
+    }
+}
+
+#[tokio::test]
+async fn channel_media_gateway_headers_return_while_download_is_blocked_in_run_task() {
+    let (state, row, key, calls, server) =
+        media_fixture("media_header_no_download_wait", "gateway").await;
+    enable_media(&state).await;
+    gateway_ready(&state, &key).await;
+    let gate = Arc::new(tokio::sync::Notify::new());
+    let (_downloads, provider) =
+        streaming_ingestion_provider(&state, &row, native_png(), false, Some(gate.clone())).await;
+    let mut source = media_source(&state, &row, "blocked", "blocked", "").await;
+    source.attachments[0].size_bytes = None;
+    state
+        .db
+        .collection::<ChannelMessage>(MESSAGES)
+        .replace_one(doc! {"_id":&source.id}, source)
+        .await
+        .unwrap();
+    let body = cma_media_event("", "human", "blocked");
+    let response = tokio::time::timeout(
+        Duration::from_secs(5),
+        respond(&state, &key, &body, "blocked"),
+    )
+    .await
+    .expect("header path waited for blocked download");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(calls.lock().await.is_empty());
+    gate.notify_one();
+    assert!(body_text(response).await.contains("Here is your answer"));
+    assert!(
+        calls
+            .lock()
+            .await
+            .last()
+            .unwrap()
+            .to_string()
+            .contains("input_image")
+    );
+    provider.abort();
+    server.abort();
+}
+
+#[tokio::test]
+async fn channel_media_stop_and_whole_step_deadline_cancel_blocked_fetch_and_finalize() {
+    for deadline in [false, true] {
+        let (state, row, key, calls, server) =
+            media_fixture("media_fetch_cancellation", "gateway").await;
+        enable_media(&state).await;
+        gateway_ready(&state, &key).await;
+        let gate = Arc::new(tokio::sync::Notify::new());
+        let (downloads, provider) =
+            streaming_ingestion_provider(&state, &row, native_png(), false, Some(gate)).await;
+        media_source(&state, &row, "cancel-fetch", "cancel-fetch", "").await;
+        let response = respond(
+            &state,
+            &key,
+            &cma_media_event("", "human", "cancel-fetch"),
+            "cancel-fetch",
+        )
+        .await;
+        for _ in 0..1000 {
+            if downloads.load(std::sync::atomic::Ordering::SeqCst) == 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(downloads.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let event = state
+            .db
+            .collection::<NyxbotEvent>(EVENTS)
+            .find_one(doc! {"event_id":"cancel-fetch"})
+            .await
+            .unwrap()
+            .unwrap();
+        if deadline {
+            tokio::time::pause();
+            tokio::time::advance(Duration::from_secs(91)).await;
+            tokio::time::resume();
+        } else {
+            engine::request_stop(&state.db, OWNER, event.conversation_id.as_deref().unwrap())
+                .await
+                .unwrap();
+        }
+        tokio::time::timeout(Duration::from_secs(30), body_text(response))
+            .await
+            .unwrap();
+        let message = state
+            .db
+            .collection::<crate::models::assistant_message::AssistantMessage>(
+                crate::models::assistant_message::COLLECTION_NAME,
+            )
+            .find_one(doc! {"turn_id":&event.turn_id,"role":"user"})
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(message.media_pending.is_none());
+        assert!(message.attachments.is_empty());
+        assert_eq!(
+            message.media_bound.unwrap().failed[0].status,
+            if deadline {
+                "not_processed: timeout"
+            } else {
+                "not_processed: stopped"
+            }
+        );
+        assert!(calls.lock().await.is_empty());
+        assert_eq!(
+            state
+                .db
+                .collection::<bson::Document>(crate::models::assistant_upload::COLLECTION_NAME)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
+        );
+        provider.abort();
+        server.abort();
+    }
+}
+
+#[tokio::test]
+async fn channel_media_caption_with_matching_confirmation_code_never_decides_pending_card() {
+    use crate::services::assistant_acknowledgement_service as acks;
+    let (state, row, key, calls, server) = media_fixture("media_caption_card", "gateway").await;
+    enable_media(&state).await;
+    gateway_ready(&state, &key).await;
+    let _provider = ingestion_provider(&state, &row, native_png()).await;
+    media_source(&state, &row, "first", "first", "photo").await;
+    body_text(
+        respond(
+            &state,
+            &key,
+            &cma_media_event("photo", "human", "first"),
+            "first",
+        )
+        .await,
+    )
+    .await;
+    let event = state
+        .db
+        .collection::<NyxbotEvent>(EVENTS)
+        .find_one(doc! {"event_id":"first"})
+        .await
+        .unwrap()
+        .unwrap();
+    let row = state
+        .db
+        .collection::<AssistantConversation>(CONVERSATIONS)
+        .find_one(doc! {"_id":&event.conversation_id})
+        .await
+        .unwrap()
+        .unwrap();
+    let chat = acks::for_key(&state.db, OWNER, Some(&row.credential_api_key_id))
+        .await
+        .unwrap()
+        .unwrap();
+    let (card, _) = acks::request_tracked(
+        &state.db,
+        &chat,
+        acks::Request {
+            kind: "action",
+            service: None,
+            tool: Some("nyxid__delete_agent_key"),
+            arguments: Some(&json!({"key_id":"test"})),
+            summary: "Delete test key",
+            platform: false,
+        },
+    )
+    .await
+    .unwrap();
+    let caption = format!("yes {}", acks::confirm_code(&card.id));
+    let channel = state
+        .db
+        .collection::<NyxbotChannel>(CHANNELS)
+        .find_one(doc! {"_id":&event.channel_id})
+        .await
+        .unwrap()
+        .unwrap();
+    media_source(&state, &channel, "caption", "caption", &caption).await;
+    body_text(
+        respond(
+            &state,
+            &key,
+            &cma_media_event(&caption, "human", "caption"),
+            "caption",
+        )
+        .await,
+    )
+    .await;
+    let history = acks::history(&state.db, OWNER, &row.id).await.unwrap();
+    assert_eq!(
+        history.iter().find(|r| r.id == card.id).unwrap().status,
+        "pending"
+    );
+    assert!(
+        !captured_text(calls.lock().await.last().unwrap())
+            .contains("the owner confirmed the pending action")
+    );
+    server.abort();
+}
+
+fn owner_turn_request(id: &str, text: &str) -> engine::TurnRequest {
+    engine::TurnRequest {
+        acknowledgement_id: None,
+        retry_of: None,
+        conversation_id: Some(id.into()),
+        attachment_ids: vec![],
+        text: text.into(),
+        agent_id: None,
+        model: None,
+        access_mode: None,
+    }
+}
+async fn finish_media_turn(state: &AppState, row: &AssistantConversation) {
+    engine::finish_turn(
+        &state.db,
+        row,
+        &row.credential_api_key_id,
+        &Uuid::new_v4().to_string(),
+        &engine::TurnResult {
+            text: "done".into(),
+            session_id: None,
+            response_id: None,
+            error: None,
+        },
+    )
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn channel_media_busy_mixed_queue_preserves_order_and_drains_after_flag_disable() {
+    let (state, row, key, calls, server) = media_fixture("media_busy_queue", "gateway").await;
+    enable_media(&state).await;
+    gateway_ready(&state, &key).await;
+    let _provider = ingestion_provider(&state, &row, native_png()).await;
+    media_source(&state, &row, "first", "first", "first").await;
+    body_text(
+        respond(
+            &state,
+            &key,
+            &cma_media_event("first", "human", "first"),
+            "first",
+        )
+        .await,
+    )
+    .await;
+    let original = state
+        .db
+        .collection::<NyxbotEvent>(EVENTS)
+        .find_one(doc! {"event_id":"first"})
+        .await
+        .unwrap()
+        .unwrap();
+    let home = original.conversation_id.unwrap();
+    let blocked = engine::begin_turn(
+        &state.db,
+        OWNER,
+        &owner_turn_request(&home, "ongoing work"),
+        &state.encryption_keys,
+    )
+    .await
+    .unwrap();
+    let mut text = cma_media_event("queued text", "human", "text");
+    text["event_context"]["activity"]["kind"]["attachments"] = json!([]);
+    body_text(respond(&state, &key, &text, "text").await).await;
+    media_source(&state, &row, "photo", "photo", "").await;
+    body_text(
+        respond(
+            &state,
+            &key,
+            &cma_media_event("", "human", "photo"),
+            "photo",
+        )
+        .await,
+    )
+    .await;
+    let queued = engine::get(&state.db, OWNER, &home).await.unwrap();
+    assert_eq!(queued.pending_events.len(), 2);
+    assert!(queued.pending_events[0].media_event_ids.is_empty());
+    assert_eq!(queued.pending_events[1].media_event_ids.len(), 1);
+    assert_eq!(queued.pending_events[1].media_declared, Some(1));
+    assert!(queued.pending_events[1].media_sent_at.is_some());
+    state
+        .db
+        .collection::<bson::Document>("feature_flag_overrides")
+        .update_many(
+            doc! {"flag_key":feature_flag_service::ASSISTANT_CHANNEL_MEDIA_FLAG_KEY},
+            doc! {"$set":{"enabled":false}},
+        )
+        .await
+        .unwrap();
+    finish_media_turn(&state, &blocked).await;
+    for expected_media in [false, true] {
+        let mut start: TurnStart = (&owner_turn_request(&home, "")).into();
+        start.origin = TurnOrigin::Event;
+        let started = start_server_turn(&state, OWNER, start, Pool::Channel { owner: OWNER })
+            .await
+            .unwrap();
+        let Started::Turn { receiver, .. } = started else {
+            panic!("queued turn was not started")
+        };
+        final_reply(receiver).await.unwrap();
+        let captured = calls.lock().await.last().unwrap().clone();
+        assert_eq!(
+            captured.to_string().contains("input_image"),
+            expected_media,
+            "{captured}"
+        );
+    }
+    assert!(
+        engine::get(&state.db, OWNER, &home)
+            .await
+            .unwrap()
+            .pending_events
+            .is_empty()
+    );
+    server.abort();
+}
+
+#[tokio::test]
+async fn channel_media_first_photo_org_bot_and_specialist_thread_bind_to_correct_agent() {
+    for mode in ["org", "specialist"] {
+        let (state, mut row, key, calls, server) =
+            media_fixture(&format!("media_first_{mode}"), "gateway").await;
+        enable_media(&state).await;
+        if mode == "org" {
+            let org = Uuid::new_v4().to_string();
+            state
+                .db
+                .collection(USERS)
+                .insert_one(test_user(&org, UserType::Org))
+                .await
+                .unwrap();
+            state.db.collection::<bson::Document>("org_memberships").insert_one(doc! {"_id":Uuid::new_v4().to_string(),"org_user_id":&org,"member_user_id":OWNER,"role":"admin","allowed_service_ids":bson::Bson::Null,"created_at":bson::DateTime::now(),"revoked_at":bson::Bson::Null}).await.unwrap();
+            row.bot_owner_id = Some(org.clone());
+            for (collection, filter) in [
+                ("channel_bots", doc! {"_id":&row.channel_bot_id}),
+                ("channel_conversations", doc! {"_id":&row.route_id}),
+                ("api_keys", doc! {"_id":&row.route_api_key_id}),
+            ] {
+                state
+                    .db
+                    .collection::<bson::Document>(collection)
+                    .update_one(filter, doc! {"$set":{"user_id":&org}})
+                    .await
+                    .unwrap();
+            }
+        } else {
+            let (agent, _) = crate::services::assistant_team_service::create_specialist(
+                &state.db,
+                &state.encryption_keys,
+                OWNER,
+                crate::services::assistant_team_service::CreateRequest {
+                    name: "receipts".into(),
+                    description: "Receipts".into(),
+                    display_name: None,
+                    persona: None,
+                    targets: Default::default(),
+                    account_read: false,
+                    specialty: None,
+                    machines: None,
+                    logins: None,
+                    created_by: "user",
+                },
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            row.agent_id = Some(agent.id);
+        }
+        state
+            .db
+            .collection::<NyxbotChannel>(CHANNELS)
+            .replace_one(doc! {"_id":&row.id}, &row)
+            .await
+            .unwrap();
+        gateway_ready(&state, &key).await;
+        let _provider = ingestion_provider(&state, &row, native_png()).await;
+        media_source(&state, &row, "first", "first", "").await;
+        assert!(
+            body_text(
+                respond(
+                    &state,
+                    &key,
+                    &cma_media_event("", "human", "first"),
+                    "first"
+                )
+                .await
+            )
+            .await
+            .contains("Here is your answer")
+        );
+        let event = state
+            .db
+            .collection::<NyxbotEvent>(EVENTS)
+            .find_one(doc! {"event_id":"first"})
+            .await
+            .unwrap()
+            .unwrap();
+        let conversation = engine::get(&state.db, OWNER, event.conversation_id.as_deref().unwrap())
+            .await
+            .unwrap();
+        if mode == "org" {
+            assert!(conversation.channel.is_some());
+        } else {
+            assert_eq!(conversation.agent_id, row.agent_id);
+        }
+        assert!(
+            calls
+                .lock()
+                .await
+                .last()
+                .unwrap()
+                .to_string()
+                .contains("input_image")
+        );
+        server.abort();
+    }
+}
+
+#[tokio::test]
+async fn channel_media_conversation_deletion_during_fetch_cannot_commit_upload() {
+    let (state, row, key, calls, server) =
+        media_fixture("media_delete_during_fetch", "gateway").await;
+    enable_media(&state).await;
+    gateway_ready(&state, &key).await;
+    let gate = Arc::new(tokio::sync::Notify::new());
+    let (downloads, provider) =
+        streaming_ingestion_provider(&state, &row, native_png(), false, Some(gate.clone())).await;
+    let mut source = media_source(&state, &row, "delete", "delete", "").await;
+    source.attachments[0].size_bytes = None;
+    state
+        .db
+        .collection::<ChannelMessage>(MESSAGES)
+        .replace_one(doc! {"_id":&source.id}, source)
+        .await
+        .unwrap();
+    let response = respond(
+        &state,
+        &key,
+        &cma_media_event("", "human", "delete"),
+        "delete",
+    )
+    .await;
+    for _ in 0..200 {
+        if downloads.load(std::sync::atomic::Ordering::SeqCst) > 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(downloads.load(std::sync::atomic::Ordering::SeqCst), 1);
+    let event = state
+        .db
+        .collection::<NyxbotEvent>(EVENTS)
+        .find_one(doc! {"event_id":"delete"})
+        .await
+        .unwrap()
+        .unwrap();
+    state
+        .db
+        .collection::<bson::Document>(CONVERSATIONS)
+        .delete_one(doc! {"_id":event.conversation_id})
+        .await
+        .unwrap();
+    gate.notify_one();
+    tokio::time::timeout(Duration::from_secs(20), body_text(response))
+        .await
+        .unwrap();
+    assert!(calls.lock().await.is_empty());
+    assert_eq!(
+        state
+            .db
+            .collection::<bson::Document>(crate::models::assistant_upload::COLLECTION_NAME)
+            .count_documents(doc! {"user_id":OWNER})
+            .await
+            .unwrap(),
+        0
+    );
+    provider.abort();
+    server.abort();
+}
+
+#[tokio::test]
+async fn channel_media_follow_post_owner_guest_and_unaddressed_photo_preserve_flag_semantics() {
+    use crate::models::channel_thread::{
+        ChannelThreadFacts, ThreadAddress, ThreadKind, ThreadSenderKind,
+    };
+    use crate::services::channel_platform::PlatformAdapter;
+    for media_on in [false, true] {
+        let (state, row, _, calls, server) = media_fixture("media_follow_posts", "direct").await;
+        if media_on {
+            enable_media(&state).await;
+        }
+        state.db.collection::<bson::Document>("feature_flag_overrides").insert_one(doc! {"_id":Uuid::new_v4().to_string(),"org_user_id":bson::Bson::Null,"flag_key":feature_flag_service::NYXBOT_THREAD_FOLLOW_FLAG_KEY,"target_kind":"user","target_key":OWNER,"enabled":true,"updated_by":"test","created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now()}).await.unwrap();
+        let provider = ingestion_provider(&state, &row, native_png()).await;
+        let adapter = Arc::new(
+            crate::services::channel_adapters::lark::LarkFamilyAdapter::media_test_adapter(
+                &provider.uri(),
+                "lark",
+            ),
+        );
+        thread_follow::TEST_ADAPTERS
+            .lock()
+            .unwrap()
+            .insert(row.channel_bot_id.clone(), adapter.clone());
+        TEST_BOT_USER_IDS
+            .lock()
+            .unwrap()
+            .insert(row.channel_bot_id.clone(), "own-bot".into());
+        Mock::given(method("GET")).and(path_regex("^/open-apis/im/v1/messages/[^/]+$"))
+            .respond_with(|request:&wiremock::Request| {
+                let id=request.url.path_segments().unwrap().next_back().unwrap();
+                ResponseTemplate::new(200).set_body_json(json!({"code":0,"data":{"items":[{"message_id":id,"chat_id":"oc_human","root_id":"root","thread_id":"omt_native","msg_type":"post","create_time":"1790000000000","sender":{"sender_type":"user","id":"human"},"body":{"content":"{}"}}]}}))
+            }).mount(&provider).await;
+        Mock::given(method("POST"))
+            .and(path_regex("/open-apis/im/v1/messages/.*/reply"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"code":0,"data":{"message_id":"thread-reply"}})),
+            )
+            .mount(&provider)
+            .await;
+        for (n, sender, addressed, post) in [
+            (0, "human", false, false),
+            (1, "human", true, true),
+            (2, "guest", false, false),
+        ] {
+            let id = format!("follow-{n}");
+            let root = if n == 0 { "silentroot" } else { "root" };
+            let content = if post {
+                json!({"title":"Receipt","content":[[{"tag":"at","user_id":"@_user_1"},{"tag":"text","text":"Dinner"},{"tag":"img","image_key":"img_receipt"}]]})
+            } else {
+                json!({"image_key":"img_receipt"})
+            };
+            let raw = json!({"header":{"event_type":"im.message.receive_v1","event_id":id},"event":{"sender":{"sender_type":"user","sender_id":{"open_id":sender}},"message":{
+                "message_id":id,"chat_id":"oc_human","chat_type":"group","thread_id":"omt_native","root_id":root,
+                "message_type":if post {"post"} else {"image"},"content":content.to_string(),"mentions":if addressed {json!([{"key":"@_user_1","id":{"open_id":"own-bot"},"name":"Receipt helper"}])} else {json!([])}
+            }}});
+            let inbound = adapter
+                .parse_inbound(&serde_json::to_vec(&raw).unwrap())
+                .await
+                .unwrap()
+                .remove(0);
+            let mut source = crate::services::channel_relay_service::inbound_metadata(
+                &row.channel_bot_id,
+                row.route_id.as_deref().unwrap(),
+                OWNER,
+                "lark",
+                &inbound,
+                &row.route_api_key_id,
+                &id,
+            );
+            let facts = ChannelThreadFacts {
+                version: 1,
+                kind: ThreadKind::Native,
+                chat_id: "oc_human".into(),
+                message_id: id.clone(),
+                root_id: Some(root.into()),
+                native_thread_id: Some("omt_native".into()),
+                sender_kind: ThreadSenderKind::Human,
+                address: if addressed {
+                    ThreadAddress::Mention
+                } else {
+                    ThreadAddress::NotAddressed
+                },
+                ..Default::default()
+            };
+            source.thread_context = Some(facts.clone());
+            state
+                .db
+                .collection::<ChannelMessage>(MESSAGES)
+                .insert_one(source)
+                .await
+                .unwrap();
+            let body = json!({"message_id":id,"correlation_id":format!("jti-{id}"),"platform":"lark","thread_context":facts,"thread_id":"omt_native","conversation":{"id":row.route_id,"platform_id":"oc_human","type":"group"},"sender":{"platform_id":sender,"display_name":"Alice"},"content":{"type":if post {"unknown"} else {"image"},"text":null,"attachments":[]},"raw_platform_data":raw});
+            let bytes = serde_json::to_vec(&body).unwrap();
+            let token = crate::crypto::jwt::generate_relay_callback_token(
+                &state.jwt_keys,
+                &state.config,
+                &format!("jti-{id}"),
+                &row.route_api_key_id,
+                &id,
+                "lark",
+                &sha256_hex(&bytes),
+            )
+            .unwrap();
+            let mut headers = HeaderMap::new();
+            headers.insert("x-nyxid-callback-token", token.parse().unwrap());
+            let (_guard, done) = watch_relay_callback(&row.id, &id);
+            assert_eq!(
+                relay_callback(
+                    State(state.clone()),
+                    Path(row.id.clone()),
+                    headers,
+                    Bytes::from(bytes)
+                )
+                .await
+                .status(),
+                StatusCode::ACCEPTED
+            );
+            tokio::time::timeout(Duration::from_secs(30), done)
+                .await
+                .unwrap()
+                .unwrap();
+            let captured = calls.lock().await;
+            assert_eq!(captured.len(), if media_on { n as usize } else { 0 });
+            if media_on && n == 1 {
+                assert!(captured_text(captured.last().unwrap()).contains("Receipt\nDinner"));
+                assert!(!captured_text(captured.last().unwrap()).contains("@Receipt helper"));
+                assert!(captured.last().unwrap().to_string().contains("input_image"));
+            }
+            if media_on && n == 2 {
+                assert!(
+                    captured_text(captured.last().unwrap())
+                        .contains(crate::services::assistant_channel_media::GUEST_NOTE)
+                );
+                assert!(!captured.last().unwrap().to_string().contains("input_image"));
+            }
+        }
+        thread_follow::TEST_ADAPTERS
+            .lock()
+            .unwrap()
+            .remove(&row.channel_bot_id);
+        TEST_BOT_USER_IDS
+            .lock()
+            .unwrap()
+            .remove(&row.channel_bot_id);
+        server.abort();
+    }
 }
