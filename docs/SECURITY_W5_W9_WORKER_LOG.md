@@ -531,6 +531,54 @@ all four CLI platforms, final backend/machine subjects, immutable distro
 packages and mandatory producer/signing/scanning gates remain separate work.
 Mobile R1-05/R1-06 remain OPEN and untouched.
 
+## W7 expected subjects, archive and OCI metadata preparation
+
+The complete publication contract now starts from an explicit policy and
+cross-checks actual cargo-dist/Cargo or image-workflow matrix inputs. It expects
+all4 CLI targets (13file subjects including releases.json) and5 image components
+on both Linux architectures (10runnable children+5indices). Structural
+validation rejects reduced scope, missing/duplicate/extra subjects, stale
+commit/epoch/target identities, wrong index children, and required jobs whose
+result is not success. Evidence closure checks hash the exact required files;
+they explicitly do not validate signatures or scanner semantics.
+
+The archive inspector rejects unexpected/nonregular/traversing members, bounds
+archive expansion, inspects executable format/architecture, and requires the
+planned GNU loader for GNU Linux targets. It independently extracts dependency
+metadata/Syft/wizard bytes and emits distinct archive and binary CycloneDX
+subjects. Local target subsets or source diffs are marked local-investigation.
+Retained built-source identity (R1-15), complete final archive coverage, actual
+scan/signature validation and final producer integration remain OPEN. A plan's
+commit label is not proof that a binary was built from that commit.
+
+OCI metadata validation was exercised on raw digest-preserved JSON captured
+from the actual default-isolation Alpine Buildx fixture. The build envelope
+index is2d2742df32b15958e9a12698192ad4c1ac18029d937a7eb36c45d51b6d06a0c3,
+runnable child ace9035facb8cad4660661cd35ca7fb2bcfd6613198d0278afcc6adaf8d30ec0,
+auxiliary28652dc776e3b9b5953e0cf2f75bf6b04a94430b78b78fb82b3ce394a3e4c74d.
+The validator preserves each identity, validates exact runnable platforms and
+metadata digest/size/config-revision bindings, and permits only explicitly
+supported bound BuildKit auxiliary statements. The unsigned embedded statement
+does not substitute for GitHub OIDC provenance. Filesystem layers are omitted
+from the metadata fixture and are not scanned by this test.
+
+Focused regressions pass8expected-set+5archive+6OCI tests. They include missing,
+duplicate, extra and stale subjects; skipped/failed signing jobs; removed or
+changed signature evidence; wrong architecture/libc/executable kind; unknown
+and unbound OCI auxiliaries; and supported arm64/v8 vs unsupported variants.
+Actual regenerated plans contain13/15subjects, and the current source-aware
+wizard seal verification passes. The cargo-dist archive compile in
+w7-actual-dist-archive-build.log is ongoing tooling evidence only: main Rust
+dependency findings and R1-15 must be resolved before final archive acceptance.
+Commands and limitations are documented in docs/PUBLICATION_SUBJECTS.md.
+
+PM's exact18cd source scan reports53package/advisory occurrences,48unique
+advisories across21package/version pairs; optional gcp-kms includes the older
+jsonwebtoken path. Supported Rust remediation and meaningful W6/SSH/crypto/KMS
+caller checks are the next implementation priority. The116fully redacted
+Gitleaks candidates require specific classification and negative controls;
+they are not116confirmed leaks. Mobile R1-05/R1-06 remain OPEN and untouched.
+
 ## Remaining authorized batches
 
 W5 final container review/integration; W7 pinned,

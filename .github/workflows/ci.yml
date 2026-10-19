@@ -268,6 +268,9 @@ jobs:
           python3 scripts/test_embedded_wizard.py
           python3 scripts/test_rust_binary_sbom.py
           python3 scripts/test_cyclonedx.py
+          python3 scripts/test_publication_contract.py
+          python3 scripts/test_dist_artifacts.py
+          python3 scripts/test_oci_subjects.py
 
   # ---------------------------------------------------------------------------
   # Permission engine: no database or Google credentials required.

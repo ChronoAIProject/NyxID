@@ -1,0 +1,20 @@
+{
+  "schema": "nyxid.publication-policy.v1",
+  "cli": {
+    "package": "nyxid-cli",
+    "binary": "nyxid",
+    "targets": ["aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu"],
+    "global_artifacts": {"source.tar.gz": "source-tarball", "source.tar.gz.sha256": "checksum", "nyxid-cli-installer.sh": "installer", "sha256.sum": "unified-checksum"},
+    "supplemental_artifacts": {"releases.json": "credential-manifest"}
+  },
+  "images": {
+    "platforms": ["linux/amd64", "linux/arm64"],
+    "components": {
+      "backend": "backend/Dockerfile",
+      "frontend": "frontend/Dockerfile",
+      "node-agent": "cli/Dockerfile.node",
+      "nyxid-node-machine": "cli/Dockerfile.machine",
+      "nyxid-machine-updater": "cli/Dockerfile.machine-updater"
+    }
+  }
+}
