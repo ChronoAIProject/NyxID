@@ -63,6 +63,7 @@ pub mod channel_event_service;
 pub mod channel_inbound_service;
 pub mod channel_managed;
 pub mod channel_media_authority;
+pub mod channel_media_events;
 pub mod channel_media_fetch;
 pub mod channel_media_service;
 pub mod channel_native_mentions;

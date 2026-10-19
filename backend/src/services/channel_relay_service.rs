@@ -225,6 +225,7 @@ pub(crate) fn inbound_metadata(
     ChannelMessage {
         embedded_attachments: embedded,
         embedded_attachments_omitted: omitted,
+        duplicate_of_media_key: None,
         thread_context: None,
         activity: None,
         platform_send: None,
@@ -289,6 +290,7 @@ pub async fn store_outbound_message(
     let message = ChannelMessage {
         embedded_attachments: Vec::new(),
         embedded_attachments_omitted: 0,
+        duplicate_of_media_key: None,
         thread_context: None,
         activity: None,
         platform_send,
@@ -360,6 +362,7 @@ pub async fn store_device_event_message(
     let message = ChannelMessage {
         embedded_attachments: Vec::new(),
         embedded_attachments_omitted: 0,
+        duplicate_of_media_key: None,
         thread_context: None,
         activity: None,
         platform_send: None,
@@ -1346,6 +1349,7 @@ mod tests {
         let message = ChannelMessage {
             embedded_attachments: Vec::new(),
             embedded_attachments_omitted: 0,
+            duplicate_of_media_key: None,
             thread_context: None,
             activity: None,
             platform_send: None,

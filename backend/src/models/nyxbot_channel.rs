@@ -277,11 +277,38 @@ impl std::fmt::Debug for NyxbotThread {
     }
 }
 
+/// Authorized source selectors only. Provider keys stay on ChannelMessage.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct EventMediaItem {
+    pub index: usize,
+    pub embedded: bool,
+    pub kind: String,
+    pub size_bytes: Option<u64>,
+}
+#[derive(Clone, Serialize, Deserialize)]
+pub struct EventMedia {
+    pub key: String,
+    pub declared: usize,
+    pub items: Vec<EventMediaItem>,
+    pub platform_chat_id: String,
+    #[serde(default)]
+    pub interrupted: bool,
+    #[serde(default)]
+    pub noted: bool,
+}
+impl std::fmt::Debug for EventMedia {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("EventMedia([REDACTED])")
+    }
+}
+
 /// Gateway turn admission, keyed by binding and idempotency key. Holds the
 /// gateway's `event_context` verbatim (encrypted; it carries message text) so
 /// `readEventContext` returns exactly what was admitted. TTL-expired.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct NyxbotEvent {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media: Option<EventMedia>,
     /// Atomic native bot budget/source-event claim. Never cleared on retries.
     #[serde(default)]
     pub native_bot_budget_claimed: bool,

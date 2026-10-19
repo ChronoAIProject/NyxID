@@ -35,6 +35,9 @@ impl std::fmt::Debug for StoredAttachment {
 /// grain state, or wherever the agent persists its conversation history).
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ChannelMessage {
+    /// SHA-256 media identity of a suppressed native redelivery (64 hex chars).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duplicate_of_media_key: Option<String>,
     /// Optional normalized thread facts, never an interaction credential.
     #[serde(default)]
     pub thread_context: Option<super::channel_thread::ChannelThreadFacts>,
@@ -139,6 +142,7 @@ mod tests {
         ChannelMessage {
             embedded_attachments: Vec::new(),
             embedded_attachments_omitted: 0,
+            duplicate_of_media_key: None,
             thread_context: None,
             activity: None,
             platform_send: None,

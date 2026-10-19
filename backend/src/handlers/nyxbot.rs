@@ -3839,6 +3839,30 @@ fn responses_with_producers(
     ))
 }
 
+async fn media_admission(
+    state: &AppState,
+    row: &NyxbotChannel,
+    source: &str,
+    chat: &str,
+    sender: &str,
+    native_thread: Option<&str>,
+) -> AppResult<Option<crate::models::nyxbot_channel::EventMedia>> {
+    Box::pin(crate::services::channel_media_events::admission(
+        &state.db,
+        &crate::services::channel_media_authority::MediaRequest {
+            channel: row.clone(),
+            source_message_id: source.to_owned(),
+            chat_id: chat.to_owned(),
+            sender_id: sender.to_owned(),
+            native_thread_id: native_thread.map(str::to_owned),
+            origin: None,
+            conversation_id: None,
+            agent_id: row.agent_id.clone(),
+        },
+    ))
+    .await
+}
+
 async fn responses_with_producers_impl(
     state: AppState,
     producers: Option<
@@ -3984,7 +4008,33 @@ async fn responses_with_producers_impl(
     };
     let mut now = Utc::now();
     let retry_digest = sha256_hex(request.to_string());
+    let media = if activity["source"]["type"] == "nyxid_relay"
+        && activity["source"]["platform"].as_str() == Some(row.platform.as_str())
+        && activity["actor"]["kind"] == "human"
+    {
+        match media_admission(
+            &state,
+            &row,
+            &event_id,
+            activity["conversation"]["id"].as_str().unwrap_or_default(),
+            activity["actor"]["id"].as_str().unwrap_or_default(),
+            activity["conversation"]["thread_id"].as_str(),
+        )
+        .await
+        {
+            Ok(media) => media,
+            Err(_) => return problem(StatusCode::SERVICE_UNAVAILABLE, "provider_unavailable"),
+        }
+    } else {
+        None
+    };
+    let retention = if media.is_some() {
+        ChronoDuration::days(7)
+    } else {
+        ChronoDuration::hours(EVENT_RETENTION_HOURS)
+    };
     let admitted = NyxbotEvent {
+        media,
         native_bot_budget_claimed: false,
         retry_request_sha256: Some(retry_digest.clone()),
         delivery: None,
@@ -4002,12 +4052,19 @@ async fn responses_with_producers_impl(
         conversation_id: None,
         turn_id: None,
         created_at: now,
-        expires_at: now + ChronoDuration::hours(EVENT_RETENTION_HOURS),
+        expires_at: now + retention,
     };
     let events = state.db.collection::<NyxbotEvent>(EVENTS);
     if let Err(error) = events.insert_one(&admitted).await {
         if !is_duplicate(&error) {
             return problem(StatusCode::SERVICE_UNAVAILABLE, "provider_unavailable");
+        }
+        match crate::services::channel_media_events::record_duplicate(&state.db, &admitted).await {
+            Ok(true) => return sse(futures::stream::iter(
+                std::iter::once(json!({"type":"response.created","response":{"id":&response_id,"status":"in_progress"}}))
+                    .chain(message_frames(&response_id, None)))),
+            Ok(false) => {},
+            Err(_) => return problem(StatusCode::SERVICE_UNAVAILABLE, "provider_unavailable"),
         }
         // Only an identical, verified human request that previously started
         // no turn may resume. Keep its original budget claim and deadline;
@@ -4718,7 +4775,34 @@ pub async fn relay_callback(
     } else {
         partition
     };
+    let media = if sender_kind == crate::models::channel_thread::ThreadSenderKind::Human
+        && chats::native_owner_eligible(&row.platform, &payload["raw_platform_data"])
+    {
+        match media_admission(
+            &state,
+            &row,
+            &claims.message_id,
+            &chat_id,
+            payload["sender"]["platform_id"]
+                .as_str()
+                .unwrap_or_default(),
+            thread_id.as_deref(),
+        )
+        .await
+        {
+            Ok(media) => media,
+            Err(_) => return problem(StatusCode::SERVICE_UNAVAILABLE, "provider_unavailable"),
+        }
+    } else {
+        None
+    };
+    let retention = if media.is_some() {
+        ChronoDuration::days(7)
+    } else {
+        ChronoDuration::hours(EVENT_RETENTION_HOURS)
+    };
     let admitted = NyxbotEvent {
+        media,
         native_bot_budget_claimed: false,
         retry_request_sha256: None,
         delivery: None,
@@ -4735,7 +4819,7 @@ pub async fn relay_callback(
         conversation_id: None,
         turn_id: None,
         created_at: now,
-        expires_at: now + ChronoDuration::hours(EVENT_RETENTION_HOURS),
+        expires_at: now + retention,
     };
     match state
         .db
@@ -4744,7 +4828,15 @@ pub async fn relay_callback(
         .await
     {
         Ok(_) => {}
-        Err(error) if is_duplicate(&error) => return StatusCode::ACCEPTED.into_response(),
+        Err(error) if is_duplicate(&error) => {
+            if crate::services::channel_media_events::record_duplicate(&state.db, &admitted)
+                .await
+                .is_err()
+            {
+                return problem(StatusCode::SERVICE_UNAVAILABLE, "provider_unavailable");
+            }
+            return StatusCode::ACCEPTED.into_response();
+        }
         Err(_) => return problem(StatusCode::SERVICE_UNAVAILABLE, "provider_unavailable"),
     }
     let text = payload["content"]["text"]
@@ -4951,6 +5043,17 @@ pub async fn relay_callback(
         .await;
         if let Err(error) = result {
             tracing::debug!(%error, "NyxBot direct channel message not answered");
+        } else if admitted.media.is_some() {
+            // Intentional silence is a completed disposition, not a crash.
+            let _ = state
+                .db
+                .collection::<NyxbotEvent>(EVENTS)
+                .update_one(
+                    doc! {"_id":&admitted.id,"status":"running","conversation_id":bson::Bson::Null,
+                    "media.interrupted":{"$ne":true}},
+                    doc! {"$set":{"status":"completed"}},
+                )
+                .await;
         }
         #[cfg(test)]
         tests::relay_callback_completed(&row.id, &message_id);

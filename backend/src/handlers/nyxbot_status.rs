@@ -317,6 +317,7 @@ pub(crate) async fn twin_bot(
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Verdict {
     Delivered,
+    Interrupted,
     /// Stable code: `refused_{status}`, `undelivered`, or `not_received`.
     Lost(String),
     /// Says nothing about delivery (e.g. a group message or photo the
@@ -340,6 +341,9 @@ pub(crate) fn failure_reason(code: &str, transport: &str) -> String {
     } else {
         "NyxID's relay"
     };
+    if code == "media_interrupted" {
+        return "a photo or file was accepted but interrupted before processing".into();
+    }
     if code == "not_received" {
         return format!("{receiver} accepted it but never passed it on");
     }
@@ -377,6 +381,37 @@ async fn private_message(state: &AppState, row: &NyxbotChannel, message: &Channe
 }
 
 async fn judge(state: &AppState, row: &NyxbotChannel, message: &ChannelMessage) -> Verdict {
+    // Resolve media aliases before transport/content shortcuts. A suppressed
+    // redelivery inherits the winner and can never trigger Lost/resend advice.
+    let alias = message.duplicate_of_media_key.as_deref();
+    let filter = match alias {
+        Some(key) => doc! {"channel_id":&row.id,"user_id":&row.user_id,"media.key":key},
+        None => {
+            doc! {"channel_id":&row.id,"user_id":&row.user_id,"event_id":&message.id,"media.key":{"$type":"string"}}
+        }
+    };
+    match state
+        .db
+        .collection::<NyxbotEvent>(EVENTS)
+        .find_one(filter)
+        .await
+    {
+        Ok(Some(event)) => {
+            if event.media.as_ref().is_some_and(|media| media.interrupted) {
+                return Verdict::Interrupted;
+            }
+            return if event.conversation_id.is_some()
+                || matches!(event.status.as_str(), "completed" | "failed" | "refused")
+            {
+                Verdict::Delivered
+            } else {
+                Verdict::Unknown
+            };
+        }
+        Ok(None) if alias.is_some() => return Verdict::Skip,
+        Err(_) if alias.is_some() => return Verdict::Unknown,
+        _ => {}
+    }
     match message.callback_status.as_deref() {
         Some("failed") => Verdict::Lost(failure_code(message.callback_http_status)),
         // NyxID's own relay receiver accepted it: the agent has it.
@@ -551,6 +586,10 @@ async fn check_delivery(state: &AppState, row: &NyxbotChannel) -> AppResult<()> 
     };
     let seen = bson::DateTime::from_chrono(seen_at);
     match verdict {
+        Verdict::Interrupted => {
+            channels.update_one(active, doc! {"$set":{"delivery_status":"interrupted",
+                "delivery_error":"media_interrupted","delivery_failed_at":seen,"delivery_seen_at":seen}}).await?;
+        }
         Verdict::Lost(code) => {
             let Some(before) = channels
                 .find_one_and_update(

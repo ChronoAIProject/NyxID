@@ -4061,6 +4061,7 @@ mod tests {
         let message = ChannelMessage {
             embedded_attachments: Vec::new(),
             embedded_attachments_omitted: 0,
+            duplicate_of_media_key: None,
             thread_context: None,
             activity: None,
             platform_send: None,
@@ -4091,6 +4092,7 @@ mod tests {
         let outbound_message = ChannelMessage {
             embedded_attachments: Vec::new(),
             embedded_attachments_omitted: 0,
+            duplicate_of_media_key: None,
             thread_context: None,
             activity: None,
             platform_send: None,
@@ -4295,6 +4297,7 @@ mod tests {
         let other_message = ChannelMessage {
             embedded_attachments: Vec::new(),
             embedded_attachments_omitted: 0,
+            duplicate_of_media_key: None,
             thread_context: None,
             activity: None,
             platform_send: None,
@@ -4907,6 +4910,7 @@ mod tests {
         let colliding = ChannelMessage {
             embedded_attachments: Vec::new(),
             embedded_attachments_omitted: 0,
+            duplicate_of_media_key: None,
             id: Uuid::new_v4().to_string(),
             platform_conversation_id: Some("chat_a".into()),
             reply_to_message_id,
@@ -5202,6 +5206,7 @@ mod tests {
         let sibling = ChannelMessage {
             embedded_attachments: Vec::new(),
             embedded_attachments_omitted: 0,
+            duplicate_of_media_key: None,
             id: Uuid::new_v4().to_string(),
             platform: "whatsapp".into(),
             platform_conversation_id: Some("chat_a".into()),

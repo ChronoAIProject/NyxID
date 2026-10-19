@@ -3239,6 +3239,12 @@ pub fn spawn_sweeps(state: AppState) {
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             interval.tick().await;
+            if crate::services::channel_media_events::sweep(&state.db)
+                .await
+                .is_err()
+            {
+                tracing::debug!("Channel media sweep deferred");
+            }
             if crate::services::channel_thread_follow_service::sweep(&state.db)
                 .await
                 .is_err()

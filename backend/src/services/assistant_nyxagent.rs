@@ -1009,6 +1009,7 @@ pub async fn reset_direct_reply_channels(db: &Database) -> mongodb::error::Resul
 }
 
 pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
+    super::channel_media_events::ensure_indexes(db).await?;
     super::async_service_operation::ensure_indexes(db).await?;
     super::assistant_resource_service::ensure_indexes(db).await?;
     let credentials =
@@ -2193,7 +2194,7 @@ pub(crate) async fn begin_owner_turn_in_session(
         );
     }
     row.guest_turn = guest;
-    let (role, text) = match start.origin {
+    let (role, mut text) = match start.origin {
         TurnOrigin::Event => {
             row.event_streak = row.event_streak.saturating_add(1);
             let mut text = events_text(&events);
@@ -2537,6 +2538,31 @@ pub(crate) async fn begin_owner_turn_in_session(
         }
         if let Some(event) = turn.events.iter().find(|e| !e.source_event_ids.is_empty()) {
             turn.question_key = event.question_key.clone();
+        }
+    }
+    if !start.guest {
+        let mut origins = Vec::new();
+        if let Some(origin) = start.reply_channel.as_ref().or(start.channel.as_ref()) {
+            origins.push(origin.clone());
+        }
+        if let Some(turn) = &row.active_turn {
+            for event in &turn.events {
+                origins.extend(event.reply_to.iter().cloned());
+            }
+        }
+        if Box::pin(super::channel_media_events::note_in_session(
+            db, session, user_id, &origins,
+        ))
+        .await?
+        {
+            let fixed = super::channel_media_events::INTERRUPTED_NOTE;
+            text.push_str(&format!("\n\n{fixed}"));
+            if let Some(turn) = row.active_turn.as_mut() {
+                turn.note = Some(match turn.note.take() {
+                    Some(note) => format!("{note}\n\n{fixed}"),
+                    None => fixed.to_owned(),
+                });
+            }
         }
     }
     Box::pin(super::async_service_operation::bind_in_session(

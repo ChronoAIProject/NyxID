@@ -942,3 +942,188 @@ async fn external_bot_mention_in_followed_thread_is_a_guest_and_spends_the_paren
     );
     assert_eq!(f.calls.lock().await.len(), 2);
 }
+
+#[tokio::test]
+async fn channel_media_relay_and_gateway_follow_share_one_native_barrier_and_authority() {
+    use crate::{
+        models::channel_message::StoredAttachment,
+        services::channel_media_authority::{self as authority, MediaRequest},
+    };
+    for gateway in [false, true] {
+        let mut f = Box::pin(Fixture::new("media_follow_barrier")).await;
+        f.state
+            .db
+            .collection::<bson::Document>("feature_flag_overrides")
+            .insert_one(doc! {
+                "_id":Uuid::new_v4().to_string(),"org_user_id":bson::Bson::Null,
+                "flag_key":crate::services::feature_flag_service::ASSISTANT_CHANNEL_MEDIA_FLAG_KEY,
+                "target_kind":"user","target_key":OWNER,"enabled":true,"updated_by":"test",
+                "created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now()
+            })
+            .await
+            .unwrap();
+        if !gateway {
+            f.row.transport = "direct".into();
+            f.state
+                .db
+                .collection::<NyxbotChannel>(CHANNELS)
+                .replace_one(doc! {"_id":&f.row.id}, &f.row)
+                .await
+                .unwrap();
+        }
+        Mock::given(path("/open-apis/im/v1/messages/om_root/reply"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"code":0,"data":{"message_id":"om_reply"}})),
+            )
+            .mount(&f.platform)
+            .await;
+        let (mut a, id_a) = f
+            .input("receipt with caption", ThreadAddress::Mention, false, true)
+            .await;
+        let (mut b, id_b) = f
+            .input("receipt with caption", ThreadAddress::Mention, false, true)
+            .await;
+        for (body, id) in [(&mut a, &id_a), (&mut b, &id_b)] {
+            body["event_context"]["activity"]["thread"]["message_id"] = json!("om_native_receipt");
+            let item=StoredAttachment{content_type:"image".into(),provider_ref:"https://open.larksuite.com/open-apis/im/v1/messages/om_native_receipt/resources/img_receipt?type=image".into(),platform_message_id:Some("om_native_receipt".into()),image_key:Some("img_receipt".into()),file_key:None,filename:None,mime_type:None,size_bytes:Some(42)};
+            let facts: ChannelThreadFacts =
+                serde_json::from_value(body["event_context"]["activity"]["thread"].clone())
+                    .unwrap();
+            f.state.db.collection::<ChannelMessage>(MESSAGES).update_one(doc!{"_id":id},doc!{"$set":{
+                "platform_message_id":"om_native_receipt","content_type":"image","attachments":[bson::to_bson(&item).unwrap()],"thread_context":bson::to_bson(&facts).unwrap()
+            }}).await.unwrap();
+        }
+        if gateway {
+            let (a, b) = tokio::join!(
+                respond(&f.state, &f.key, &a, &id_a),
+                respond(&f.state, &f.key, &b, &id_b)
+            );
+            assert_eq!(a.status(), StatusCode::OK);
+            assert_eq!(b.status(), StatusCode::OK);
+            let _ = tokio::join!(body_text(a), body_text(b));
+        } else {
+            let signed = |id: &str| {
+                let payload = json!({"message_id":id,"correlation_id":format!("jti-{id}"),"platform":"lark",
+                    "conversation":{"platform_id":"oc_chat","type":"group"},"thread_id":"omt_thread",
+                    "sender":{"platform_id":"human"},"content":{"type":"image","text":"receipt with caption"},
+                    "raw_platform_data":{"event":{"sender":{"sender_type":"user","sender_id":{"open_id":"human"}}}}});
+                let bytes = serde_json::to_vec(&payload).unwrap();
+                let token = crate::crypto::jwt::generate_relay_callback_token(
+                    &f.state.jwt_keys,
+                    &f.state.config,
+                    &format!("jti-{id}"),
+                    &f.row.route_api_key_id,
+                    id,
+                    "lark",
+                    &sha256_hex(&bytes),
+                )
+                .unwrap();
+                let mut headers = HeaderMap::new();
+                headers.insert("x-nyxid-callback-token", token.parse().unwrap());
+                (headers, Bytes::from(bytes))
+            };
+            let (ha, ba) = signed(&id_a);
+            let (hb, bb) = signed(&id_b);
+            let (a, b) = tokio::join!(
+                relay_callback(State(f.state.clone()), Path(f.row.id.clone()), ha, ba),
+                relay_callback(State(f.state.clone()), Path(f.row.id.clone()), hb, bb)
+            );
+            assert_eq!(a.status(), StatusCode::ACCEPTED);
+            assert_eq!(b.status(), StatusCode::ACCEPTED);
+            wait_for_calls(&f.calls, 1).await;
+        }
+        assert_eq!(f.calls.lock().await.len(), 1, "gateway={gateway}");
+        let events: Vec<NyxbotEvent> = f
+            .state
+            .db
+            .collection(EVENTS)
+            .find(doc! {"channel_id":&f.row.id})
+            .await
+            .unwrap()
+            .try_collect()
+            .await
+            .unwrap();
+        assert_eq!(events.len(), 1);
+        let event = &events[0];
+        assert!(event.media.is_some());
+        assert!(event.turn_id.is_some());
+        let loser = if event.event_id == id_a { &id_b } else { &id_a };
+        assert_eq!(
+            f.state
+                .db
+                .collection::<ChannelMessage>(MESSAGES)
+                .find_one(doc! {"_id":loser})
+                .await
+                .unwrap()
+                .unwrap()
+                .duplicate_of_media_key
+                .as_deref(),
+            Some(event.media.as_ref().unwrap().key.as_str())
+        );
+        let conversation = engine::get(
+            &f.state.db,
+            OWNER,
+            event.conversation_id.as_deref().unwrap(),
+        )
+        .await
+        .unwrap();
+        let origin = conversation.channel.unwrap();
+        let request = MediaRequest {
+            channel: load_channel(&f.state, OWNER, &f.row.id).await.unwrap(),
+            source_message_id: event.event_id.clone(),
+            chat_id: "oc_chat".into(),
+            sender_id: "human".into(),
+            native_thread_id: Some("omt_thread".into()),
+            agent_id: Some(origin.thread.as_ref().unwrap().agent_id.clone()),
+            origin: Some(origin.clone()),
+            conversation_id: Some(conversation.id),
+        };
+        authority::resolve(&f.state.db, &request).await.unwrap();
+        for case in ["generation", "agent", "sender", "channel_generation"] {
+            let mut bad = request.clone();
+            let binding = bad.origin.as_mut().unwrap().thread.as_mut().unwrap();
+            match case {
+                "generation" => binding.generation += 1,
+                "agent" => binding.agent_id = "changed".into(),
+                "sender" => binding.sender_id = "stranger".into(),
+                "channel_generation" => binding.channel_generation += 1,
+                _ => unreachable!(),
+            }
+            assert!(
+                authority::resolve(&f.state.db, &bad).await.is_err(),
+                "{case}: authority refusal"
+            );
+            let result = async {
+                let allowed = authority::resolve(&f.state.db, &bad).await?;
+                let adapter =
+                    crate::services::channel_adapters::lark::LarkFamilyAdapter::media_test_adapter(
+                        &f.platform.uri(),
+                        "lark",
+                    );
+                crate::services::channel_media_fetch::fetch(
+                    &f.state.db,
+                    &f.state.encryption_keys,
+                    &f.state.http_client,
+                    &allowed.bot,
+                    &allowed.source.attachments[0],
+                    &adapter,
+                    1024,
+                )
+                .await
+                .map(|_| ())
+            }
+            .await;
+            assert!(result.is_err(), "{case}");
+            assert!(
+                !f.platform
+                    .received_requests()
+                    .await
+                    .unwrap()
+                    .iter()
+                    .any(|r| r.url.path().contains("/resources/")),
+                "{case}: zero downloads"
+            );
+        }
+    }
+}

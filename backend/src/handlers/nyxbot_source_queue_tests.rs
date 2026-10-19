@@ -1033,3 +1033,65 @@ async fn managed_telegram_raw_route_retains_canonical_channel_queue_authority() 
     assert_eq!(sends(&f).await.len(), 1);
     assert_eq!(record(&f, &a.id).await.delivery.unwrap().state, "sent");
 }
+
+#[tokio::test]
+async fn channel_media_committed_queue_and_turn_never_become_interrupted() {
+    use crate::models::nyxbot_channel::EventMedia;
+    let f = fixture("media_committed_sources").await;
+    let mut queued = source(&f, "media-queued").await;
+    queued.media = Some(EventMedia {
+        key: "a".repeat(64),
+        declared: 1,
+        items: vec![],
+        platform_chat_id: "chat-1".into(),
+        interrupted: false,
+        noted: false,
+    });
+    // Model a fresh event: only queue's transaction may establish this binding.
+    queued.conversation_id = None;
+    f.state
+        .db
+        .collection::<NyxbotEvent>(EVENTS)
+        .replace_one(doc! {"_id":&queued.id}, &queued)
+        .await
+        .unwrap();
+    assert!(queue(&f, &queued, "media question").await);
+    let mut bound = source(&f, "media-bound").await;
+    bound.media = Some(EventMedia {
+        key: "b".repeat(64),
+        declared: 1,
+        items: vec![],
+        platform_chat_id: "chat-1".into(),
+        interrupted: false,
+        noted: false,
+    });
+    bound.conversation_id = None;
+    f.state
+        .db
+        .collection::<NyxbotEvent>(EVENTS)
+        .replace_one(doc! {"_id":&bound.id}, &bound)
+        .await
+        .unwrap();
+    let mut session = f.state.db.client().start_session().await.unwrap();
+    session.start_transaction().await.unwrap();
+    delivery::bind_in_session(
+        &f.state.db,
+        &mut session,
+        &bound.id,
+        OWNER,
+        f.event.conversation_id.as_deref().unwrap(),
+        "committed-turn",
+    )
+    .await
+    .unwrap();
+    session.commit_transaction().await.unwrap();
+    f.state.db.collection::<bson::Document>(EVENTS).update_many(doc!{"_id":{"$in":[&queued.id,&bound.id]}},doc!{"$set":{"created_at":bson::DateTime::from_chrono(Utc::now()-ChronoDuration::minutes(6))}}).await.unwrap();
+    assert_eq!(
+        crate::services::channel_media_events::sweep(&f.state.db)
+            .await
+            .unwrap(),
+        0
+    );
+    assert!(!record(&f, &queued.id).await.media.unwrap().interrupted);
+    assert!(!record(&f, &bound.id).await.media.unwrap().interrupted);
+}

@@ -101,7 +101,12 @@ pub async fn resolve(db: &Database, request: &MediaRequest) -> AppResult<Authori
         return Err(refused());
     }
     if let Some(org) = &channel.bot_owner_id
-        && !super::org_service::is_admin(db, &channel.user_id, org).await?
+        && (db
+            .collection::<mongodb::bson::Document>(crate::models::user::COLLECTION_NAME)
+            .find_one(doc! {"_id":org,"is_active":true})
+            .await?
+            .is_none()
+            || !super::org_service::is_admin(db, &channel.user_id, org).await?)
     {
         return Err(refused());
     }
@@ -124,6 +129,7 @@ pub async fn resolve(db: &Database, request: &MediaRequest) -> AppResult<Authori
     {
         return Err(refused());
     }
+    let mut requires_nyxbot = false;
     if let Some(origin) = &request.origin {
         if origin.nyxbot_channel_id != channel.id || origin.platform != channel.platform {
             return Err(refused());
@@ -132,13 +138,22 @@ pub async fn resolve(db: &Database, request: &MediaRequest) -> AppResult<Authori
             "channel_id": &channel.id, "user_id": &channel.user_id, "partition": &origin.partition,
             "platform_chat_id": &request.chat_id,
         }).await?.ok_or_else(refused)?;
-        if chat.platform_thread_id != request.native_thread_id
-            || chat.agent_id.as_ref().or(channel.agent_id.as_ref()) != request.agent_id.as_ref()
-        {
-            return Err(refused());
+        // Native children persist a canonical root and bound_agent_id. Their
+        // agent_id is only a request projection; platform_thread_id belongs to
+        // legacy partitions. The source already checked the exact native alias.
+        if origin.thread.is_none() {
+            if chat.platform_thread_id != request.native_thread_id {
+                return Err(refused());
+            }
+            let effective = chat.agent_id.as_ref().or(channel.agent_id.as_ref());
+            if effective.is_some() && effective != request.agent_id.as_ref() {
+                return Err(refused());
+            }
+            requires_nyxbot = effective.is_none();
         }
         if let Some(binding) = origin.thread.as_deref() {
             if binding.guest
+                || request.agent_id.as_deref() != Some(binding.agent_id.as_str())
                 || binding.source_message_id != source.id
                 || binding.sender_id != request.sender_id
             {
@@ -156,6 +171,7 @@ pub async fn resolve(db: &Database, request: &MediaRequest) -> AppResult<Authori
     if let Some(id) = request.agent_id.as_ref().or(channel.agent_id.as_ref()) {
         let agent = super::assistant_team_service::agent(db, &channel.user_id, id).await?;
         if agent.destroyed_at.is_some()
+            || (requires_nyxbot && !agent.is_nyxbot())
             || !super::org_agent_service::can_use(
                 &super::org_agent_service::access(db, &channel.user_id, &agent.user_id).await?,
             )
