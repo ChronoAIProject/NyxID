@@ -1312,3 +1312,44 @@ currently explicitly refuses; supported-platform documentation is unfinished.
 Only these seven sources plus this log belong to the foundation batch; unrelated
 Docker/mobile/dependency/PM-ledger paths remain excluded. Coordinator owns PR
 publication; no worker push/merge/deploy or remote mutation occurred.
+
+### W9.3 billing caller fixture followup (2026-10-19)
+
+- Preserved actual hosted billing-smoke failure at published a577 / generated
+  076735af: approval_failed after 300 seconds, 0 passed / 1 failed, 301.32s
+  harness duration. Its shared response helper alone does not identify ingress.
+- Read-only Pending metadata from the retained original b6ca executable showed
+  access-token POST /chat/completions for chrono-llm-public, lazy required=true,
+  no explicit service override, no delivery channel, and no usage effect.
+  Sequential first-effect/source tracing binds that diagnostic to the mounted
+  assistant direct completions caller. The bounded child was terminated after
+  observation; this incomplete diagnostic is not a smoke runtime verdict.
+- Preserved separate actual original buffered recovery failure: 0/1 in 5.63s
+  test-reported time, downstream wait elapsed, Pending GET /blocked with a
+  300-second approval timeout and zero usage rows. No product bypass was added.
+- Corrected only billing_integration_tests.rs. The smoke uses one unique owner
+  settings row false -> true for the existing exact approval/redemption block
+  -> false afterward. Readback asserts one row and the effective preference.
+  The buffered settlement fixture explicitly sets false for its ordinary route.
+  Original exact request/digest/redemption/settled-count assertions and the
+  downstream settlement recovery block remain byte-identical; insert_owner,
+  production default-required behavior and all production sources are unchanged.
+- Built an isolated detached committed ee0 snapshot plus this reviewed candidate,
+  excluding mutable node transaction work. Locked backend test build with both
+  KMS features completed with actual BuildFinished/artifact in 575.061s. Copied
+  c178e805b9c2 executable is bound to 4,277 unchanged selected tracked regular
+  files, not an exhaustive compiler environment or build-hook graph.
+- Actual copied-executable full smoke and exact buffered cases passed 2/0/0,
+  one thread, configured Mongo, no skip markers and no new database left behind.
+  Per-command runner durations were 12.076s / 0.993s; the Rust test summaries
+  reported 5.33s / 0.94s, each with 9,388 filtered cases. Mongo returned idle.
+- Locked scoped nyxid-server bins/tests Clippy with both KMS features and
+  -D warnings passed in 285.151s. All four command before/after/current input
+  maps and the copied executable remained equal. Applied the byte-identical
+  validated candidate to the main worktree after isolated validation.
+- Frozen eight-input handoff w93-billing-final-subset-v1.json SHA256
+  6401eda51308b9886af239ec9fe0905c7b560c3803bf41e0edd122ee9b176905 binds
+  the archive, four command/log pairs, original diagnostics, copied executable,
+  PM candidate/runtime/Clippy receipts and unchanged references. Earlier failed
+  diagnostic preflights remain retained separately; no hosted rerun or final
+  artifact, node transaction, W8, merge, deployment or release claim is made.
