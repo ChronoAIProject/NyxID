@@ -1506,6 +1506,107 @@ async fn channel_media_gateway_current_request_contains_all_failed_partial_and_c
 }
 
 #[tokio::test]
+async fn channel_media_gateway_post_with_embedded_image_and_video_uses_text_and_ingests_both() {
+    use crate::services::channel_platform::PlatformAdapter;
+    let (state, row, key, calls, server) = media_fixture("media_post_video", "gateway").await;
+    enable_media(&state).await;
+    gateway_ready(&state, &key).await;
+    let provider = ingestion_provider(&state, &row, native_png()).await;
+    Mock::given(method("GET"))
+        .and(path(
+            "/open-apis/im/v1/messages/om_post_video/resources/file_video",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(vec![0xff, 0, 0xff]))
+        .with_priority(1)
+        .mount(&provider)
+        .await;
+    let adapter = crate::services::channel_adapters::lark::LarkFamilyAdapter::media_test_adapter(
+        &provider.uri(),
+        "lark",
+    );
+    let raw = json!({
+        "header":{"event_type":"im.message.receive_v1","event_id":"post-video"},
+        "event":{
+            "sender":{"sender_type":"user","sender_id":{"open_id":"human"}},
+            "message":{
+                "message_id":"om_post_video","chat_id":"oc_human","chat_type":"p2p","message_type":"post",
+                "content":json!({"title":"Receipt","content":[[
+                    {"tag":"text","text":"Dinner"},
+                    {"tag":"img","image_key":"img_receipt"},
+                    {"tag":"media","file_key":"file_video"}
+                ]]}).to_string()
+            }
+        }
+    });
+    let inbound = adapter
+        .parse_inbound(&serde_json::to_vec(&raw).unwrap())
+        .await
+        .unwrap();
+    let source = crate::services::channel_relay_service::inbound_metadata(
+        &row.channel_bot_id,
+        row.route_id.as_deref().unwrap(),
+        OWNER,
+        "lark",
+        &inbound[0],
+        &row.route_api_key_id,
+        "post-video",
+    );
+    assert!(source.attachments.is_empty());
+    assert_eq!(source.embedded_attachments.len(), 2);
+    assert_eq!(source.embedded_attachments[0].content_type, "image");
+    assert_eq!(source.embedded_attachments[1].content_type, "file");
+    state
+        .db
+        .collection::<ChannelMessage>(MESSAGES)
+        .insert_one(source)
+        .await
+        .unwrap();
+    let mut body = cma_media_event("Receipt\nDinner", "human", "post-video");
+    body["input"][0]["content"][0]["text"] = json!("this agent cannot view images");
+    body["event_context"]["activity"]["kind"]["text"] = json!("Receipt\nDinner");
+    body["event_context"]["activity"]["kind"]["attachments"] = json!([
+        {"kind":"image","variant":"embedded"},
+        {"kind":"video","variant":"embedded"}
+    ]);
+    assert!(
+        body_text(respond(&state, &key, &body, "post-video").await)
+            .await
+            .contains("Here is your answer")
+    );
+    let captured = calls.lock().await.last().unwrap().to_string();
+    assert!(captured_text(calls.lock().await.last().unwrap()).contains("Receipt\nDinner"));
+    assert!(!captured.contains("this agent cannot view images"));
+    assert!(captured.contains("input_image"));
+    assert!(
+        captured.contains("Attachment 2 of 2 could not be read (unsupported or invalid file).")
+    );
+    let saved = state
+        .db
+        .collection::<NyxbotEvent>(EVENTS)
+        .find_one(doc! {"event_id":"post-video"})
+        .await
+        .unwrap()
+        .unwrap();
+    let media = saved.media.unwrap();
+    assert_eq!(media.declared, 2);
+    assert_eq!(media.items.len(), 2);
+    assert_eq!(media.items[0].outcome.as_ref().unwrap().status, "bound");
+    assert_eq!(
+        media.items[1].outcome.as_ref().unwrap().status,
+        "unsupported_or_invalid"
+    );
+    let requests = provider.received_requests().await.unwrap();
+    for handle in ["img_receipt", "file_video"] {
+        assert!(
+            requests
+                .iter()
+                .any(|r| r.method == "GET" && r.url.path().ends_with(handle))
+        );
+    }
+    server.abort();
+}
+
+#[tokio::test]
 async fn channel_media_gateway_closed_shape_compatibility_forged_sources_and_missing_note() {
     let (state, row, key, calls, server) = media_fixture("media_gateway_shapes", "gateway").await;
     enable_media(&state).await;

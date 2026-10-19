@@ -69,10 +69,10 @@ pub fn gateway_text<'a>(activity: &'a serde_json::Value, platform: &str) -> Opti
         .as_array()
         .filter(|a| !a.is_empty() && a.len() <= 16)?;
     if !items.iter().all(|item| {
-        matches!(item["kind"].as_str(), Some("image" | "file"))
-            && ((item["variant"] == "embedded" && item["source"].is_null())
-                || (item["source"]["type"] == "nyxid_relay"
-                    && item["source"]["index"].as_u64().is_some_and(|i| i < 32)))
+        (item["variant"] == "embedded" && item["source"].is_null())
+            || (matches!(item["kind"].as_str(), Some("image" | "file"))
+                && item["source"]["type"] == "nyxid_relay"
+                && item["source"]["index"].as_u64().is_some_and(|i| i < 32))
     }) {
         return None;
     }
