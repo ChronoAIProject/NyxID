@@ -1,0 +1,44 @@
+diff --git a/lib/rsa.js b/lib/rsa.js
+index a4264822b4dcd6dca44ca3e59e410c982eed7183..ec9c3f86d33f94664018d7379c62e025670a93a6 100644
+--- a/lib/rsa.js
++++ b/lib/rsa.js
+@@ -1168,11 +1168,18 @@ pki.setRsaPublicKey = pki.rsa.setPublicKey = function(n, e) {
+             parseAllBytes: options._parseAllDigestBytes
+           });
+ 
+-          // validate DigestInfo structure and element count
++          // validate DigestInfo structure and element counts (outer DigestInfo
++          // and nested DigestAlgorithm). asn1.validate ignores extra children,
++          // so length must be checked explicitly at each nesting level to
++          // prevent low-exponent PKCS#1 v1.5 signature forgery (GHSA-86w9-cpqp-85rv).
+           var capture = {};
+           var errors = [];
+           if(!asn1.validate(obj, digestInfoValidator, capture, errors) ||
+-            obj.value.length !== 2) {
++            obj.value.length !== 2 ||
++            obj.value[0].value.length !==
++              (('parameters' in capture) ? 2 : 1) ||
++            (('parameters' in capture) && capture.parameters !== '') ||
++            asn1.toDer(obj).getBytes() !== d) {
+             var error = new Error(
+               'ASN.1 object does not contain a valid RSASSA-PKCS1-v1_5 ' +
+               'DigestInfo value.');
+@@ -1198,6 +1205,18 @@ pki.setRsaPublicKey = pki.rsa.setPublicKey = function(n, e) {
+             throw error;
+           }
+ 
++          // RFC 8017 DigestInfo uses canonical DER and a digest whose size
++          // matches the selected algorithm. A syntactically parsed OID/NULL
++          // alone does not establish those semantics.
++          var digestLengths = {
++            md2: 16, md5: 16, sha1: 20, sha224: 28, sha256: 32,
++            sha384: 48, sha512: 64, 'sha512-224': 28, 'sha512-256': 32
++          };
++          if(asn1.oidToDer(oid).getBytes() !== capture.algorithmIdentifier ||
++            capture.digest.length !== digestLengths[forge.oids[oid]]) {
++            throw new Error('Invalid RSASSA-PKCS1-v1_5 DigestAlgorithm or digest length.');
++          }
++
+           // special check for md2 and md5 that NULL parameters exist
+           if(oid === forge.oids.md2 || oid === forge.oids.md5) {
+             if(!('parameters' in capture)) {
