@@ -265,7 +265,7 @@ fn validate_directory(directory: &File, final_component: bool) -> Result<()> {
     let meta = directory.metadata()?;
     let uid = unsafe { libc::geteuid() };
     let trusted_owner = meta.uid() == uid || (!final_component && meta.uid() == 0);
-    let sticky_ancestor = !final_component && meta.mode() & libc::S_ISVTX as u32 != 0;
+    let sticky_ancestor = !final_component && u64::from(meta.mode()) & u64::from(libc::S_ISVTX) != 0;
     if !meta.is_dir() || !trusted_owner || (meta.mode() & 0o022 != 0 && !sticky_ancestor) {
         return Err(invalid());
     }

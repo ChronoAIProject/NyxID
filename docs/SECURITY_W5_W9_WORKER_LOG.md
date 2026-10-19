@@ -1448,3 +1448,25 @@ three-entry input list; the final18-test command uses the full3,087-entry map.
 This establishes native ARM64 Focal loader/verification/dispatch compatibility.
 Application cargo build, embedded metadata, amd64 execution, final release
 artifacts and hosted integration remain separate open gates. Node WIP excluded.
+
+## W9 portable sticky-bit predicate — narrow Linux CI correction
+
+Actual generated229 Linux all-target both-KMS Clippy refused the redundant
+S_ISVTX-to-u32 cast in committed storage (raw118015299465). Both mode operands
+now widen losslessly to u64, preserving Darwin u16 and Linux u32 constant types.
+No lint suppression or change to directory ownership/custody checks is added.
+
+The isolated complete committed storage module reproduces Linux unnecessary_cast
+with exit101, then passes native Linux Clippy with the exact one-expression delta
+(offline, without --locked). The initial fixture omitted zeroize and stopped at
+E0433 before lint; that harness failure is retained. Corrected Linux output binds
+the exact generated lockfile. Native Darwin offline locked Clippy also passes.
+Four actual directory controls pass on each OS: sticky ancestor allowed, mutable
+nonsticky ancestor refused, private ancestor allowed, sticky final directory
+refused. These controls overlap the intended predicate behavior across platforms.
+
+Evidence w9-storage-sticky-handoff-v1.json binds the complete module, original and
+corrected fixture archives, six command/log pairs and exact proposed index bytes.
+Only committed storage plus this expression and this log append enter the commit;
+broader uncommitted W9 registration/transaction APIs remain in the working file.
+This selected type/lint/behavior result is not full workspace or W9 acceptance.
