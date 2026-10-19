@@ -18,9 +18,6 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::sync::LazyLock;
-
-static UPLOADS: LazyLock<tokio::sync::Semaphore> = LazyLock::new(|| tokio::sync::Semaphore::new(4));
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -72,9 +69,8 @@ pub async fn upload(
     engine::require_enabled(&state.db, &user).await?;
     let access = uploads::owner_scope(&state.db, &user, &scope).await?;
     uploads::admit(&state.db, &user).await?;
-    let _permit = UPLOADS.try_acquire().map_err(|_| {
-        AppError::BadRequest("Upload processing is busy. Try again shortly.".into())
-    })?;
+    let reservation =
+        uploads::byte_budget::reserve(crate::services::attachment_extraction::MAX_BYTES).await?;
     let encoded = request
         .headers()
         .get("x-attachment-name")
@@ -84,19 +80,18 @@ pub async fn upload(
     let name = urlencoding::decode(encoded)
         .map_err(|_| AppError::BadRequest("Invalid display filename".into()))?
         .into_owned();
-    let bytes = axum::body::to_bytes(
-        request.into_body(),
-        crate::services::attachment_extraction::MAX_BYTES,
-    )
-    .await
-    .map_err(|_| AppError::BadRequest("Attachment exceeds 20 MiB.".into()))?;
+    let bytes = axum::body::to_bytes(request.into_body(), reservation.payload_limit)
+        .await
+        .map_err(|_| AppError::BadRequest("Attachment exceeds 20 MiB.".into()))?;
+    let payload = bytes.to_vec();
+    drop(bytes);
     let item = Box::pin(uploads::upload_authorized(
         &state.db,
         &state.encryption_keys,
         &user,
         &scope,
         &name,
-        bytes.to_vec(),
+        payload,
         access,
     ))
     .await?;

@@ -1,4 +1,5 @@
 //! Message-bound, envelope-encrypted uploads. Every read rechecks live scope.
+pub mod byte_budget;
 use super::{
     assistant_acknowledgement_service::ChatAuthority,
     assistant_nyxagent as engine,
