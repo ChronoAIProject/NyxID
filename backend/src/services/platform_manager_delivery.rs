@@ -2463,7 +2463,7 @@ mod native_render_tests {
             let entry = EntryIdentity::NativeV2 {
                 platform_entry: crate::models::platform_entry_identity::NativeEntryIdentity {
                     version: 2,
-                    platform: platform.clone(),
+                    platform,
                     channel_bot_id: uuid::Uuid::new_v4().to_string(),
                     platform_bot_id: "100".into(),
                 },
