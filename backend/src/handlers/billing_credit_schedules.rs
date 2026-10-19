@@ -29,6 +29,8 @@ pub struct CreateCreditScheduleRequest {
     #[serde(default)]
     pub service_limits: Vec<crate::models::credit_service_limit::CreditServiceLimitInput>,
     pub request_id: Option<String>,
+    /// Legacy whole-credit input. Exact `amount`, when present, takes precedence.
+    #[serde(default)]
     pub amount_credits: i64,
     pub recurrence: ScheduleRecurrence,
     pub expiry: CreditExpiryPolicy,

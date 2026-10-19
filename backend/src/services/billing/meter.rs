@@ -118,13 +118,12 @@ async fn complete_meter(
             "Billing execution authority expired".into(),
         ));
     }
-    if let Some(admission) = &ctx.managed_admission {
-        if db.collection::<bson::Document>(crate::models::managed_execution::COLLECTION_NAME)
+    if let Some(admission) = &ctx.managed_admission
+        && db.collection::<bson::Document>(crate::models::managed_execution::COLLECTION_NAME)
             .find_one(doc! { "_id": &admission.execution_id, "billing_request_id": &ctx.billing_request_id,
                 "billing_owner_id": &ctx.billing_owner_id, "actor_user_id": &ctx.actor_user_id,
                 "route_digest": &admission.route_digest, "expires_at": { "$gt": bson::DateTime::from_chrono(Utc::now()) } }).await?.is_none() {
-            return Err(AppError::Conflict("Managed billing request authority changed".into()));
-        }
+        return Err(AppError::Conflict("Managed billing request authority changed".into()));
     }
     let authority_rows: Vec<bson::Document> = db
         .collection::<bson::Document>(USAGE_METER)
@@ -268,9 +267,10 @@ pub async fn open(
     }
     .await;
     if let Err(error) = result {
-        // The caller releases this attempt's reservation. Delete only rows
-        // inserted by this attempt: a broad request-id cleanup could erase an
-        // earlier idempotent attempt and release its funding twice.
+        // Transactional funded admission bypasses this constructor. Standalone
+        // callers own any manually created hold. Delete only rows inserted by
+        // this attempt: broad request-id cleanup could erase an earlier attempt
+        // and release its funding twice.
         if !inserted_row_ids.is_empty()
             && let Err(cleanup_error) = db
                 .collection::<UsageMeterRow>(USAGE_METER)

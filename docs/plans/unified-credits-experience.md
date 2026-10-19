@@ -1,6 +1,7 @@
 # Credit allocations on current main
 
-Current port baseline: c17173c8d, merged at c00abc38c. Previous approved feature 5e6c0ec7 is behavioral reference only; its older monetary implementation is not restored wholesale.
+Credit allocations extend the current exact-accounting implementation. All
+financial mutations retain checked picocredit arithmetic and Decimal128 storage.
 
 ## Accepted scope
 
@@ -16,6 +17,20 @@ Pending reclaim fences new reservations and extras immediately, honors admitted 
 
 New policy authoring requires explicit capability and dedicated routes, never silent fallback. Upgrade every replica and billing worker and drain old writers before enabling BILLING_ALLOCATIONS_ENABLED. It is an operational gate, not automatic version attestation. Existing policy enforcement continues with authoring off; older binaries cannot safely return against capped/pending rows. Legacy actions remain available without the summary. Exact read fields alone do not prove write capability.
 
-## Implementation / validation record
+## Validation contract
 
-Implementation is in progress in this worktree. Current results and task-owned Mongo/process paths are recorded in /tmp/nyxid-unified-credits-implementation/main-port-progress.md. Final command/count evidence will be recorded here after execution. No independent-review acceptance, CI, merge or release status is claimed; coordinator owns those decisions.
+Backend regression coverage uses a real MongoDB replica set. It must verify
+one-picocredit and legacy BSON compatibility, concurrent total/group ceilings,
+durable admission rollback and duplicate recovery, settlement claim fencing and
+takeover, pending reclaim and journal retry, frozen submissions/periods, live
+membership and role boundaries. The current main suites additionally cover
+public/pool/managed authority, machine evidence and finite reservations, exact
+rate/carry conservation, migration readiness and balanced account checkpoints.
+An existing-row upgrade test installs the settlement usage-ID indexes twice
+and checks unhinted indexed lookup plans. HTTP tests deserialize exact-only and
+legacy whole-credit bodies and reject invalid effective amounts without writes.
+
+Frontend regressions cover the live admin page/dialog/hook contracts, older
+backend fallback, reviewed sparse edits, permissions, URL tabs, mobile policy
+display, exact amounts and retry/recovery. Customer Billing remains outside the
+presentation changes.

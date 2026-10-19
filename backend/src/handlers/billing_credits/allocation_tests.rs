@@ -4,7 +4,365 @@ use crate::test_utils::test_auth_user;
 use mongodb::bson::Document;
 
 fn body(owner: &str) -> IssueGrantRequest {
-    serde_json::from_value(serde_json::json!({"amount_credits":0,"amount":"0.3","target_kind":"selected_users","target_user_ids":[owner],"all_services":true,"request_id":uuid::Uuid::new_v4().to_string()})).unwrap()
+    serde_json::from_value(serde_json::json!({"amount":"0.3","target_kind":"selected_users","target_user_ids":[owner],"all_services":true,"request_id":uuid::Uuid::new_v4().to_string()})).unwrap()
+}
+
+#[tokio::test]
+async fn legacy_missing_grant_revoke_keeps_bad_request_contract_with_either_capability() {
+    let (mut state, admin, _, _) = super::tests::setup("allocation_missing_revoke")
+        .await
+        .expect("real Mongo required");
+    for enabled in [false, true] {
+        state.config.billing_allocations_enabled = enabled;
+        let error = revoke_grant(
+            State(state.clone()),
+            test_auth_user(&admin),
+            Path(uuid::Uuid::new_v4().to_string()),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(&error, AppError::BadRequest(message) if message == "credit grant is not active or has an in-flight settlement"),
+            "unexpected legacy revoke response: {error:?}"
+        );
+    }
+    for collection in [GRANTS, "billing_ledger", "usage_meter"] {
+        assert_eq!(
+            state
+                .db
+                .collection::<Document>(collection)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
+        );
+    }
+    state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn legacy_grant_amount_bounds_keep_validation_contract_and_exact_precedence() {
+    let (state, admin, _, owner) = super::tests::setup("allocation_legacy_grants")
+        .await
+        .expect("real Mongo required");
+    let message = format!(
+        "amount_credits must be between 1 and {}",
+        billing::grants::MAX_GRANT_CREDITS
+    );
+    for amount in [-1, 0, billing::grants::MAX_GRANT_CREDITS + 1] {
+        let request: IssueGrantRequest = serde_json::from_value(serde_json::json!({
+            "amount_credits":amount,"target_kind":"selected_users",
+            "target_user_ids":[owner],"all_services":true,
+        }))
+        .unwrap();
+        let error = issue_grant(State(state.clone()), test_auth_user(&admin), Json(request))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&error, AppError::ValidationError(actual) if actual == &message),
+            "unexpected legacy issue response: {error:?}"
+        );
+    }
+    for collection in [GRANTS, "billing_ledger", "credit_allocation_requests"] {
+        assert_eq!(
+            state
+                .db
+                .collection::<Document>(collection)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
+        );
+    }
+    let request: IssueGrantRequest = serde_json::from_value(serde_json::json!({
+        "amount":"0.3", "amount_credits":-1,"target_kind":"selected_users",
+        "target_user_ids":[owner],"all_services":true,
+    }))
+    .unwrap();
+    let Json(response) = issue_grant(State(state.clone()), test_auth_user(&admin), Json(request))
+        .await
+        .unwrap();
+    assert_eq!(response.created_count, 1);
+    assert_eq!(response.activated_count, 1);
+    let stored = state
+        .db
+        .collection::<CreditGrant>(GRANTS)
+        .find_one(doc! {"batch_id": &response.batch_id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.amount.to_string(), "0.3");
+    state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn legacy_schedule_amount_errors_and_sparse_exact_updates_keep_existing_contract() {
+    use crate::handlers::billing_credit_schedules::{
+        CreateCreditScheduleRequest, UpdateCreditScheduleRequest, allocate_recurring,
+        create_schedule, update_schedule,
+    };
+    let (mut state, admin, _, owner) = super::tests::setup("allocation_legacy_amounts")
+        .await
+        .expect("real Mongo required");
+    let legacy_message = format!(
+        "amount_credits must be between 1 and {}",
+        billing::grants::MAX_GRANT_CREDITS
+    );
+    let payload = serde_json::json!({
+        "target_kind":"selected_users", "target_user_ids":[owner],
+        "all_services":true, "recurrence":"monthly", "expiry":{"kind":"never"},
+    });
+    for amount in [-1, 0, billing::grants::MAX_GRANT_CREDITS + 1] {
+        let mut invalid = payload.clone();
+        invalid["amount_credits"] = serde_json::json!(amount);
+        let request: CreateCreditScheduleRequest = serde_json::from_value(invalid).unwrap();
+        let error = create_schedule(State(state.clone()), test_auth_user(&admin), Json(request))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&error, AppError::ValidationError(message) if message == &legacy_message),
+            "unexpected legacy create response: {error:?}"
+        );
+    }
+    state.config.billing_allocations_enabled = true;
+    let mut exact = payload;
+    exact["amount"] = serde_json::json!("0.3");
+    let request: CreateCreditScheduleRequest = serde_json::from_value(exact).unwrap();
+    let Json(schedule) =
+        allocate_recurring(State(state.clone()), test_auth_user(&admin), Json(request))
+            .await
+            .unwrap();
+    for amount in [-1, 0, billing::grants::MAX_GRANT_CREDITS + 1] {
+        let request: UpdateCreditScheduleRequest =
+            serde_json::from_value(serde_json::json!({"amount_credits":amount})).unwrap();
+        let error = update_schedule(
+            State(state.clone()),
+            test_auth_user(&admin),
+            Path(schedule.id.clone()),
+            Json(request),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(&error, AppError::ValidationError(message) if message == &legacy_message),
+            "unexpected legacy update response: {error:?}"
+        );
+    }
+    let request: UpdateCreditScheduleRequest =
+        serde_json::from_value(serde_json::json!({"amount":"0", "amount_credits":7})).unwrap();
+    let error = update_schedule(
+        State(state.clone()),
+        test_auth_user(&admin),
+        Path(schedule.id.clone()),
+        Json(request),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(&error, AppError::ValidationError(message) if message == "Allocation amount must be positive and at most 1000000 credits"),
+        "unexpected exact update response: {error:?}"
+    );
+    // Sparse legacy edits preserve an exact stored amount, even when its whole
+    // compatibility projection is zero and new authoring has been disabled.
+    state.config.billing_allocations_enabled = false;
+    let Json(paused) = update_schedule(
+        State(state.clone()),
+        test_auth_user(&admin),
+        Path(schedule.id.clone()),
+        Json(UpdateCreditScheduleRequest {
+            is_active: Some(false),
+            ..Default::default()
+        }),
+    )
+    .await
+    .unwrap();
+    assert!(!paused.is_active);
+    assert_eq!(paused.amount, "0.3");
+    assert_eq!(paused.amount_credits, 0);
+    let stored = state
+        .db
+        .collection::<crate::models::credit_schedule::CreditSchedule>("credit_schedules")
+        .find_one(doc! {"_id":&schedule.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.amount.to_string(), "0.3");
+    assert!(!stored.is_active);
+    assert_eq!(
+        state
+            .db
+            .collection::<Document>("credit_schedules")
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        1
+    );
+    state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn exact_only_and_legacy_create_amounts_deserialize_and_reach_both_handlers() {
+    use crate::handlers::billing_credit_schedules::{
+        CreateCreditScheduleRequest, allocate_recurring,
+    };
+    let (mut state, admin, _, owner) = super::tests::setup("allocation_create_amounts")
+        .await
+        .expect("real Mongo required");
+    state.config.billing_allocations_enabled = true;
+    for (fields, expected) in [
+        (serde_json::json!({"amount":"0.3"}), "0.3"),
+        (
+            serde_json::json!({"amount":"0.000000000001"}),
+            "0.000000000001",
+        ),
+        (serde_json::json!({"amount_credits":7}), "7"),
+        (
+            serde_json::json!({"amount":"0.3", "amount_credits":99}),
+            "0.3",
+        ),
+    ] {
+        let mut payload = serde_json::json!({
+            "target_kind":"selected_users", "target_user_ids":[owner],
+            "all_services":true,
+        });
+        payload
+            .as_object_mut()
+            .unwrap()
+            .extend(fields.as_object().unwrap().clone());
+        let request: IssueGrantRequest = serde_json::from_value(payload.clone()).unwrap();
+        let Json(response) = allocate(State(state.clone()), test_auth_user(&admin), Json(request))
+            .await
+            .unwrap();
+        assert_eq!(response.created_count, 1);
+        assert_eq!(response.activated_count, 1);
+        let grant = state
+            .db
+            .collection::<CreditGrant>(GRANTS)
+            .find_one(doc! { "batch_id": &response.batch_id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(grant.amount.to_string(), expected);
+        assert_eq!(grant.remaining, grant.amount);
+
+        payload["recurrence"] = serde_json::json!("monthly");
+        payload["expiry"] = serde_json::json!({"kind":"never"});
+        let request: CreateCreditScheduleRequest = serde_json::from_value(payload).unwrap();
+        let Json(response) =
+            allocate_recurring(State(state.clone()), test_auth_user(&admin), Json(request))
+                .await
+                .unwrap();
+        assert_eq!(response.amount, expected);
+        let stored = state
+            .db
+            .collection::<crate::models::credit_schedule::CreditSchedule>("credit_schedules")
+            .find_one(doc! { "_id": &response.id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.amount.to_string(), expected);
+    }
+    assert_eq!(
+        state
+            .db
+            .collection::<Document>(GRANTS)
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        4
+    );
+    assert_eq!(
+        state
+            .db
+            .collection::<Document>("credit_schedules")
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        4
+    );
+    state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn missing_nonpositive_and_malformed_create_amounts_never_write_money_or_schedules() {
+    use crate::handlers::billing_credit_schedules::{
+        CreateCreditScheduleRequest, allocate_recurring,
+    };
+    let (mut state, admin, _, owner) = super::tests::setup("allocation_invalid_amounts")
+        .await
+        .expect("real Mongo required");
+    state.config.billing_allocations_enabled = true;
+    for fields in [
+        serde_json::json!({}),
+        serde_json::json!({"amount":null}),
+        serde_json::json!({"amount":"0"}),
+        serde_json::json!({"amount":"-0.3"}),
+        serde_json::json!({"amount_credits":0}),
+        serde_json::json!({"amount_credits":-1}),
+        serde_json::json!({"amount":"0", "amount_credits":5}),
+        serde_json::json!({"amount":"-1", "amount_credits":5}),
+        serde_json::json!({"amount":"garbage"}),
+        serde_json::json!({"amount":"0.0000000000001"}),
+    ] {
+        let mut payload = serde_json::json!({
+            "target_kind":"selected_users", "target_user_ids":[owner], "all_services":true,
+        });
+        payload
+            .as_object_mut()
+            .unwrap()
+            .extend(fields.as_object().unwrap().clone());
+        match serde_json::from_value::<IssueGrantRequest>(payload.clone()) {
+            Ok(request) => assert!(
+                matches!(
+                    allocate(State(state.clone()), test_auth_user(&admin), Json(request)).await,
+                    Err(AppError::ValidationError(_))
+                ),
+                "accepted invalid allocation: {payload}"
+            ),
+            Err(_) => assert!(
+                fields
+                    .get("amount")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some()
+            ),
+        }
+        payload["recurrence"] = serde_json::json!("daily");
+        payload["expiry"] = serde_json::json!({"kind":"end_of_period"});
+        match serde_json::from_value::<CreateCreditScheduleRequest>(payload.clone()) {
+            Ok(request) => assert!(
+                matches!(
+                    allocate_recurring(State(state.clone()), test_auth_user(&admin), Json(request))
+                        .await,
+                    Err(AppError::ValidationError(_))
+                ),
+                "accepted invalid recurring allocation: {payload}"
+            ),
+            Err(_) => assert!(
+                fields
+                    .get("amount")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some()
+            ),
+        }
+    }
+    for collection in [
+        GRANTS,
+        "credit_schedules",
+        "credit_allocation_requests",
+        "billing_ledger",
+    ] {
+        assert_eq!(
+            state
+                .db
+                .collection::<Document>(collection)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0,
+            "writes to {collection}"
+        );
+    }
+    state.db.drop().await.unwrap();
 }
 #[tokio::test]
 async fn disabled_legacy_revoke_never_marks_pending_and_enabled_reclaim_waits_for_holds() {

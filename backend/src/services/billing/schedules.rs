@@ -97,11 +97,10 @@ pub async fn create_schedule(
             bson::from_document(row.snapshot).map_err(|e| AppError::Internal(e.to_string()))?;
         return insert_schedule_once(db, schedule).await;
     }
-    let amount = validate_exact_amount(
-        input
-            .amount
-            .unwrap_or(Credits::from_whole(input.amount_credits)),
-    )?;
+    let amount = match input.amount {
+        Some(amount) => validate_exact_amount(amount)?,
+        None => validate_amount(input.amount_credits)?,
+    };
     validate_expiry(&input.expiry)?;
     super::targets::validate_shape(
         input.target_kind,
@@ -145,7 +144,7 @@ pub async fn create_schedule(
         last_disbursed_at: None,
         skipped_periods: 0,
     };
-    let schedule = if let Some(key) = request_id {
+    if let Some(key) = request_id {
         let mut schedule = schedule;
         schedule.id = super::submissions::identity(&actor, &key)?;
         let snapshot = encode(&schedule, "allocation schedule")?
@@ -153,11 +152,17 @@ pub async fn create_schedule(
             .cloned()
             .ok_or_else(|| AppError::Internal("Invalid schedule snapshot".into()))?;
         let frozen = super::submissions::freeze(db, &actor, &key, &payload, snapshot).await?;
-        bson::from_document(frozen.snapshot).map_err(|e| AppError::Internal(e.to_string()))?
+        let schedule =
+            bson::from_document(frozen.snapshot).map_err(|e| AppError::Internal(e.to_string()))?;
+        insert_schedule_once(db, schedule).await
     } else {
-        schedule
-    };
-    insert_schedule_once(db, schedule).await
+        // A legacy caller cannot safely replay an error after success. Keep
+        // the original insert-and-return path without a new post-write read.
+        db.collection::<CreditSchedule>(CREDIT_SCHEDULES)
+            .insert_one(&schedule)
+            .await?;
+        Ok(schedule)
+    }
 }
 
 async fn insert_schedule_once(
@@ -182,6 +187,15 @@ async fn insert_schedule_once(
         .find_one(doc! { "_id": schedule.id })
         .await?
         .ok_or_else(|| AppError::Internal("Allocation schedule disappeared".into()))
+}
+
+fn validate_amount(amount_credits: i64) -> AppResult<Credits> {
+    if !(1..=MAX_GRANT_CREDITS).contains(&amount_credits) {
+        return Err(AppError::ValidationError(format!(
+            "amount_credits must be between 1 and {MAX_GRANT_CREDITS}"
+        )));
+    }
+    Ok(Credits::from_whole(amount_credits))
 }
 
 fn validate_exact_amount(amount: Credits) -> AppResult<Credits> {
@@ -212,14 +226,11 @@ async fn update_schedule_with_current(
     input: UpdateScheduleInput,
     current: CreditSchedule,
 ) -> AppResult<CreditSchedule> {
-    let amount_credits = input.amount_credits.unwrap_or(current.amount_credits);
-    let amount = validate_exact_amount(input.amount.unwrap_or_else(|| {
-        if input.amount_credits.is_some() {
-            Credits::from_whole(amount_credits)
-        } else {
-            current.amount
-        }
-    }))?;
+    let amount = match (input.amount, input.amount_credits) {
+        (Some(amount), _) => validate_exact_amount(amount)?,
+        (None, Some(amount_credits)) => validate_amount(amount_credits)?,
+        (None, None) => validate_exact_amount(current.amount)?,
+    };
     let expiry = input.expiry.unwrap_or_else(|| current.expiry.clone());
     validate_expiry(&expiry)?;
     let target_kind = input.target_kind.unwrap_or(current.target_kind);

@@ -612,8 +612,8 @@ impl BillingService {
             ));
         }
         if reservation.is_some() {
-            // Pool funding and meter rows committed together; cancellation at
-            // any later await can recover from the durable attempt lease.
+            // All funded admission holds and meter rows committed together.
+            // Recovery owns their durable usage intent after this handoff.
             return Ok(MeteredProxyContext::from_route(&ctx));
         }
         meter::open(&self.db, &ctx, None).await

@@ -398,8 +398,24 @@ async fn concurrent_admissions_share_one_exact_cap_and_abort_has_no_orphan_holds
 }
 
 #[tokio::test]
-async fn unapplied_extra_lock_is_helped_before_reservation_and_counted_as_held() {
+async fn unapplied_extra_lock_is_helped_for_available_candidate() {
+    assert_unapplied_extra_lock_handoff(5, true).await;
+}
+
+#[tokio::test]
+async fn capped_out_extra_lock_waits_for_own_usage_drain() {
+    assert_unapplied_extra_lock_handoff(3, false).await;
+}
+
+async fn assert_unapplied_extra_lock_handoff(limit: i128, helped: bool) {
     let (db, ctx, wallet, mut layers, id) = fixture("allocation_extra_bridge").await;
+    db.collection::<Document>(CREDIT_GRANTS)
+        .update_one(
+            doc! { "_id": &id },
+            doc! { "$set": { "service_limits.0.limit": pico(limit) } },
+        )
+        .await
+        .unwrap();
     layers[0].estimated_quantity = 1;
     layers[0].reserved_credits = pico(2);
     reserve_and_open_ordinary(&db, &ctx, &wallet, layers.clone())
@@ -413,7 +429,7 @@ async fn unapplied_extra_lock_is_helped_before_reservation_and_counted_as_held()
         reserved: pico(2),
         consume: pico(3),
         applied: false,
-        updated_at: Utc::now(),
+        updated_at: bson::DateTime::now().to_chrono(),
     };
     db.collection::<Document>(CREDIT_GRANTS)
         .update_one(
@@ -432,11 +448,23 @@ async fn unapplied_extra_lock_is_helped_before_reservation_and_counted_as_held()
     let reserved = reserve_and_open_ordinary(&db, &next, &wallet, layers)
         .await
         .unwrap();
-    assert!(reserved.layers[0].grant_reservations.is_empty());
     let current = grant(&db, &id).await;
-    assert_eq!(current.remaining, pico(7));
-    assert_eq!(current.reserved, Credits::ZERO);
-    assert_eq!(current.service_limits[0].consumed, pico(3));
+    if helped {
+        assert_eq!(reserved.layers[0].grant_reservations[0].amount, pico(2));
+        assert!(current.active_settlement.is_none());
+        assert_eq!(current.remaining, pico(7));
+        assert_eq!(current.reserved, pico(2));
+        assert_eq!(current.service_limits[0].consumed, pico(3));
+    } else {
+        // An unrelated admission must not help an unusable source. Its own
+        // settlement later drains the lock by indexed usage ID, even though
+        // the source has no realizable cap capacity.
+        assert!(reserved.layers[0].grant_reservations.is_empty());
+        assert_eq!(current.active_settlement.as_ref(), Some(&lock));
+        assert_eq!(current.remaining, pico(10));
+        assert_eq!(current.reserved, pico(2));
+        assert_eq!(current.service_limits[0].consumed, Credits::ZERO);
+    }
     assert_eq!(
         settle_usage_funding(&db, &row)
             .await
@@ -444,6 +472,146 @@ async fn unapplied_extra_lock_is_helped_before_reservation_and_counted_as_held()
             .wallet_charge_credits,
         pico(7)
     );
+    let current = grant(&db, &id).await;
+    assert!(current.active_settlement.is_none());
+    assert_eq!(current.remaining, pico(7));
+    assert_eq!(
+        current.reserved,
+        if helped { pico(2) } else { Credits::ZERO }
+    );
+    assert_eq!(current.service_limits[0].reserved, current.reserved);
+    assert_eq!(current.service_limits[0].consumed, pico(3));
+    let saved = db
+        .collection::<UsageMeterRow>(USAGE_METER)
+        .find_one(doc! { "_id": &row.id })
+        .await
+        .unwrap()
+        .unwrap();
+    let funding = saved.funding.unwrap();
+    assert_eq!(funding.grant_consumptions.len(), 1);
+    assert_eq!(funding.grant_consumptions[0].amount, pico(3));
+    assert_eq!(
+        funding.grant_consumptions[0].operation_id,
+        lock.operation_id
+    );
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn admission_finishes_its_unapplied_wallet_settlement_before_reserving() {
+    assert_wallet_settlement_handoff(false, 100).await;
+}
+
+#[tokio::test]
+async fn admission_finishes_its_applied_wallet_settlement_before_reserving() {
+    assert_wallet_settlement_handoff(true, 100).await;
+}
+
+#[tokio::test]
+async fn admission_rejects_insufficient_balance_after_unapplied_wallet_true_up() {
+    assert_wallet_settlement_handoff(false, 20).await;
+}
+
+#[tokio::test]
+async fn admission_rejects_insufficient_balance_after_applied_wallet_true_up() {
+    assert_wallet_settlement_handoff(true, 20).await;
+}
+
+async fn assert_wallet_settlement_handoff(applied: bool, balance: i128) {
+    let (db, ctx, wallet, layers, id) = fixture("allocation_wallet_bridge").await;
+    db.collection::<Document>(WALLETS)
+        .update_one(
+            doc! { "_id": &wallet.id },
+            doc! { "$set": { "balance_credits": pico(balance) } },
+        )
+        .await
+        .unwrap();
+    reserve_and_open_ordinary(&db, &ctx, &wallet, layers.clone())
+        .await
+        .unwrap();
+    let row = finalize(&db, &ctx.billing_request_id, 10).await;
+    let settled = settle_usage_funding(&db, &row).await.unwrap();
+    assert_eq!(settled.wallet_charge_credits, pico(17));
+    // Persist the same crash boundary as the existing wallet settlement
+    // bridge: funding is final, wallet application or journaling is pending.
+    let mut fields = doc! { "active_settlement": {
+        "row_id": &row.id, "reserved_credits": pico(7), "actual_credits": pico(17),
+        "applied": applied, "updated_at": bson::DateTime::now(),
+    } };
+    if applied {
+        fields.insert("reserved_credits", Credits::ZERO);
+        fields.insert("pending_lago_debits", pico(17));
+    }
+    db.collection::<Document>(WALLETS)
+        .update_one(doc! { "_id": &wallet.id }, doc! { "$set": fields })
+        .await
+        .unwrap();
+    // An unrelated broken operation must never be scanned or helped.
+    db.collection::<Document>(WALLETS)
+        .insert_one(doc! { "_id": "other-wallet", "owner_id": "other",
+        "active_settlement": { "row_id": "missing", "applied": false } })
+        .await
+        .unwrap();
+    let mut next = ctx.clone();
+    next.billing_request_id = Uuid::new_v4().to_string();
+    let admitted = reserve_and_open_ordinary(&db, &next, &wallet, layers.clone()).await;
+    if balance == 100 {
+        assert_eq!(admitted.unwrap().total_reserved_credits, pico(10));
+    } else {
+        // The 7-pico estimate left 13 available, but the true 17-pico
+        // debit leaves only 3. Never admit 10 against the old snapshot.
+        assert!(matches!(admitted, Err(AppError::InsufficientCredits)));
+        assert_eq!(
+            db.collection::<UsageMeterRow>(USAGE_METER)
+                .count_documents(doc! { "billing_request_id": &next.billing_request_id })
+                .await
+                .unwrap(),
+            0
+        );
+    }
+    let current = db
+        .collection::<BillingWallet>(WALLETS)
+        .find_one(doc! { "_id": &wallet.id })
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        current.reserved_credits,
+        if balance == 100 {
+            pico(10)
+        } else {
+            Credits::ZERO
+        }
+    );
+    assert_eq!(current.pending_lago_debits, pico(17));
+    assert!(!current.is_suspended());
+    assert!(
+        !db.collection::<Document>(WALLETS)
+            .find_one(doc! { "_id": &wallet.id })
+            .await
+            .unwrap()
+            .unwrap()
+            .contains_key("active_settlement")
+    );
+    assert!(
+        db.collection::<UsageMeterRow>(USAGE_METER)
+            .find_one(doc! { "_id": &row.id })
+            .await
+            .unwrap()
+            .unwrap()
+            .released
+    );
+    super::super::reservation::finish_wallet_settlement(&db, &wallet.id, &ctx.billing_owner_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        db.collection::<Document>("billing_ledger")
+            .count_documents(doc! { "dedupe_key": format!("usage-settled:{}", row.id) })
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(grant(&db, &id).await.service_limits[0].consumed, pico(3));
     db.drop().await.unwrap();
 }
 
@@ -658,6 +826,22 @@ async fn journal_failure_retains_capped_lock_and_pending_reclaim_until_exact_ret
     db.run_command(doc! { "collMod": "billing_ledger", "validator": {} })
         .await
         .unwrap();
+    // Failed work retains its invocation claim. A fresh retry cannot take it
+    // over until its lease expires, even after journal availability returns.
+    assert!(matches!(
+        settle_usage_funding(&db, &row).await,
+        Err(AppError::Internal(message)) if message.contains("usage funding settlement is busy")
+    ));
+    assert_eq!(grant(&db, &id).await, failed);
+    let stale_claim = db
+        .collection::<Document>(USAGE_METER)
+        .update_one(
+            doc! { "_id": &row.id, "funding.settlement_claim_id": { "$type": "string" } },
+            doc! { "$set": { "funding.settlement_claimed_at": bson::DateTime::from_chrono(Utc::now() - Duration::seconds(FUNDING_CLAIM_LEASE_SECS + 1)) } },
+        )
+        .await
+        .unwrap();
+    assert_eq!(stale_claim.modified_count, 1);
     assert_eq!(
         settle_usage_funding(&db, &row)
             .await
@@ -827,8 +1011,17 @@ async fn capped_pool_recovery_respects_renewed_lease_and_releases_pending_reclai
             .unwrap(),
         1
     );
+    // Lease cleanup releases the wallet and marks the meter abandoned. The
+    // following reconciler stage durably releases its benefits and reclaim.
+    let released = grant(&db, &id).await;
+    assert_eq!(released.terminal_amount, Credits::ZERO);
+    assert_eq!(released.reserved, pico(3));
+    assert_eq!(released.service_limits[0].reserved, pico(3));
+    assert!(released.revoke_requested_at.is_some());
+    assert_eq!(recover_terminal_releases(&db).await.unwrap(), 1);
     let current = grant(&db, &id).await;
     assert_eq!(current.terminal_amount, pico(10));
+    assert_eq!(current.reserved, Credits::ZERO);
     assert_eq!(current.service_limits[0].reserved, Credits::ZERO);
     assert_eq!(
         super::super::pool_attempt::recover_expired(&db, now + Duration::minutes(7))
@@ -836,7 +1029,15 @@ async fn capped_pool_recovery_respects_renewed_lease_and_releases_pending_reclai
             .unwrap(),
         0
     );
+    assert_eq!(recover_terminal_releases(&db).await.unwrap(), 0);
     assert_eq!(grant(&db, &id).await, current);
+    assert_eq!(
+        db.collection::<Document>("billing_ledger")
+            .count_documents(doc! { "dedupe_key": format!("grant-revoked:{id}") })
+            .await
+            .unwrap(),
+        1
+    );
     db.drop().await.unwrap();
 }
 

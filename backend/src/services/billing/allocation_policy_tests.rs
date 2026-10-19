@@ -63,6 +63,157 @@ fn input() -> grants::IssueCreditGrantInput {
 }
 
 #[tokio::test]
+async fn legacy_creates_preserve_v4_identity_and_success_without_post_write_reads() {
+    use mongodb::event::{EventHandler, command::CommandEvent};
+    use std::sync::{Arc, Mutex};
+
+    let commands = Arc::new(Mutex::new(Vec::<Document>::new()));
+    let observed = commands.clone();
+    let handler = EventHandler::<CommandEvent>::callback(move |event| {
+        if let CommandEvent::Started(event) = event {
+            observed.lock().unwrap().push(event.command);
+        }
+    });
+    let db = crate::test_utils::connect_transaction_test_database_with_command_handler(
+        "allocation_legacy_write_response",
+        handler,
+    )
+    .await;
+    db.collection::<User>("users")
+        .insert_one(test_user("person", UserType::Person))
+        .await
+        .unwrap();
+    // An actual database failure at the post-issuance marker must retain the
+    // successful legacy response and defer activation, as before allocations.
+    db.create_collection(GRANTS)
+        .validator(doc! { "$or": [
+            { "issued_ledgered_at": { "$exists": false } },
+            { "issued_ledgered_at": { "$type": "null" } },
+        ] })
+        .await
+        .unwrap();
+    let mut policy = input();
+    policy.request_id = None;
+    policy.service_limits.clear();
+    commands.lock().unwrap().clear();
+    let issued = grants::issue_grants(&db, policy).await.unwrap();
+    assert_eq!(issued.len(), 1);
+    assert_eq!(
+        uuid::Uuid::parse_str(&issued[0].id)
+            .unwrap()
+            .get_version_num(),
+        4
+    );
+    assert_eq!(issued[0].amount, Credits::from_pico(10).unwrap());
+    assert!(issued[0].issued_ledgered_at.is_none());
+    let grant_commands = commands.lock().unwrap().clone();
+    assert_eq!(
+        grant_commands
+            .iter()
+            .filter(|c| c.get_str("insert").ok() == Some(GRANTS))
+            .count(),
+        1
+    );
+    assert!(
+        !grant_commands
+            .iter()
+            .any(|c| c.get_str("find").ok() == Some(GRANTS))
+    );
+    assert!(
+        grant_commands
+            .iter()
+            .any(|c| c.get_str("update").ok() == Some(GRANTS))
+    );
+    let stored = db
+        .collection::<CreditGrant>(GRANTS)
+        .find_one(doc! {"_id":&issued[0].id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.remaining, issued[0].remaining);
+    assert!(stored.issued_ledgered_at.is_none());
+    assert!(
+        grants::list_active_for_user(&db, "person", Utc::now())
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    db.run_command(doc! {"collMod": GRANTS, "validator": {}})
+        .await
+        .unwrap();
+    grants::recover_unledgered_events(&db, Utc::now())
+        .await
+        .unwrap();
+    assert_eq!(
+        grants::list_active_for_user(&db, "person", Utc::now())
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        db.collection::<Document>("billing_ledger")
+            .count_documents(doc! {
+                "dedupe_key":format!("grant-issued:{}", issued[0].id)
+            })
+            .await
+            .unwrap(),
+        1
+    );
+
+    commands.lock().unwrap().clear();
+    let schedule = schedules::create_schedule(
+        &db,
+        schedules::CreateScheduleInput {
+            amount_credits: 7,
+            amount: None,
+            request_id: None,
+            recurrence: ScheduleRecurrence::Monthly,
+            expiry: CreditExpiryPolicy::Never,
+            target_kind: BillingTargetKind::AllUsers,
+            target_user_ids: vec![],
+            target_org_ids: vec![],
+            target_group_ids: vec![],
+            all_services: true,
+            service_refs: vec![],
+            service_limits: vec![],
+            reason: None,
+            created_by: "admin".into(),
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        uuid::Uuid::parse_str(&schedule.id)
+            .unwrap()
+            .get_version_num(),
+        4
+    );
+    assert_eq!(schedule.amount, Credits::from_whole(7));
+    let schedule_commands = commands.lock().unwrap().clone();
+    assert_eq!(
+        schedule_commands
+            .iter()
+            .filter(|c| c.get_str("insert").ok() == Some("credit_schedules"))
+            .count(),
+        1
+    );
+    assert!(
+        !schedule_commands
+            .iter()
+            .any(|c| c.get_str("find").ok() == Some("credit_schedules"))
+    );
+    assert_eq!(
+        db.collection::<Document>("credit_schedules")
+            .count_documents(doc! {"_id":&schedule.id})
+            .await
+            .unwrap(),
+        1
+    );
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
 async fn streaming_summary_exceeds_i64_picos_and_excludes_units_and_future_policy_value() {
     let db = seed("allocation_summary_all_history").await;
     db.collection::<User>("users")

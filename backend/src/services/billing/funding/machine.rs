@@ -61,10 +61,10 @@ pub async fn prepare_machine_window_funding(
         );
     }
     for period in &periods {
-        if super::super::allowances::available_period_quantity(period) > 0 {
-            if let Some(lock) = &period.active_settlement {
-                super::complete_allowance_lock(db, &period.id, &period.allowance_id, lock).await?;
-            }
+        if super::super::allowances::available_period_quantity(period) > 0
+            && let Some(lock) = &period.active_settlement
+        {
+            super::complete_allowance_lock(db, &period.id, &period.allowance_id, lock).await?;
         }
     }
     for grant in super::super::grants::list_active_for_user(db, owner_id, now).await? {
@@ -77,10 +77,9 @@ pub async fn prepare_machine_window_funding(
             runtime_service_id,
             Some(runtime_service_slug),
         )? > Credits::ZERO
+            && let Some(lock) = &grant.active_settlement
         {
-            if let Some(lock) = &grant.active_settlement {
-                super::complete_grant_lock(db, &grant.id, lock).await?;
-            }
+            super::complete_grant_lock(db, &grant.id, lock).await?;
         }
     }
     periods.sort_by(|left, right| super::expiry_order(left.period_end, right.period_end));

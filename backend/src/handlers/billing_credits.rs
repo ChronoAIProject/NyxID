@@ -25,6 +25,8 @@ use crate::services::{audit_service, billing};
 
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct IssueGrantRequest {
+    /// Legacy whole-credit input. Exact `amount`, when present, takes precedence.
+    #[serde(default)]
     pub amount_credits: i64,
     pub target_kind: BillingTargetKind,
     #[serde(default)]
@@ -410,7 +412,9 @@ pub async fn revoke_grant(
         .collection::<CreditGrant>(crate::models::credit_grant::COLLECTION_NAME)
         .find_one(doc! { "_id": &grant_id })
         .await?
-        .ok_or_else(|| AppError::NotFound("Credit allocation not found".into()))?;
+        .ok_or_else(|| {
+            AppError::BadRequest("credit grant is not active or has an in-flight settlement".into())
+        })?;
     let grant = if state.config.billing_allocations_enabled {
         billing::grants::request_revoke_grant(
             &state.db,

@@ -389,6 +389,19 @@ async fn ensure_wallet_settlement_lock(
     )))
 }
 
+/// Finish only the admission owner's durable wallet operation. Call outside
+/// admission transactions so the retry sees its committed exact counters.
+pub(super) async fn finish_wallet_settlement(
+    db: &mongodb::Database,
+    wallet_id: &str,
+    owner_id: &str,
+) -> AppResult<()> {
+    if let Some(lock) = load_wallet_settlement_lock(db, wallet_id, owner_id).await? {
+        complete_wallet_settlement_lock(db, wallet_id, owner_id, &lock).await?;
+    }
+    Ok(())
+}
+
 async fn complete_wallet_settlement_lock(
     db: &mongodb::Database,
     wallet_id: &str,

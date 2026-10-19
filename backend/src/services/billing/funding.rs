@@ -35,6 +35,8 @@ fn catalog_service_id(row: &UsageMeterRow) -> Option<&str> {
 
 const FUNDING_CLAIM_LEASE_SECS: i64 = 60;
 const RESOURCE_LOCK_RETRIES: usize = 4;
+const BENEFIT_ADMISSION_BUSY: &str = "Issued or included credit settlement is completing; retry";
+const WALLET_ADMISSION_BUSY: &str = "Purchased credit settlement is completing; retry";
 
 mod machine;
 pub use machine::{
@@ -99,6 +101,41 @@ fn reserve_and_open_durable<'a>(
     layers: Vec<LayerReservation>,
 ) -> futures::future::BoxFuture<'a, AppResult<super::reservation::BillingReservation>> {
     Box::pin(async move {
+        for _ in 0..RESOURCE_LOCK_RETRIES {
+            let result = reserve_and_open_durable_once(db, ctx, wallet, layers.clone()).await;
+            match &result {
+                Err(AppError::Conflict(reason)) if reason == WALLET_ADMISSION_BUSY => {
+                    // Help only this wallet, outside the admission transaction.
+                    // Re-read its counters on retry; never reserve against an
+                    // unapplied actual debit or reject ordinary concurrent use
+                    // merely because its journal is still completing.
+                    super::reservation::finish_wallet_settlement(
+                        db,
+                        &wallet.id,
+                        &ctx.billing_owner_id,
+                    )
+                    .await?;
+                }
+                Err(AppError::Conflict(reason)) if reason == BENEFIT_ADMISSION_BUSY => {
+                    // The next attempt reloads and helps relevant usable
+                    // candidates before acquiring a fresh transaction snapshot.
+                }
+                _ => return result,
+            }
+        }
+        Err(AppError::Conflict(
+            "Billing settlement is busy; retry".into(),
+        ))
+    })
+}
+
+fn reserve_and_open_durable_once<'a>(
+    db: &'a mongodb::Database,
+    ctx: &'a BillingRouteContext,
+    wallet: &'a crate::models::billing_wallet::BillingWallet,
+    layers: Vec<LayerReservation>,
+) -> futures::future::BoxFuture<'a, AppResult<super::reservation::BillingReservation>> {
+    Box::pin(async move {
         let service_id = ctx.catalog_service_id.as_deref().map(str::to_owned);
         let now = Utc::now();
         let mut allowance_candidates = Vec::with_capacity(layers.len());
@@ -144,10 +181,10 @@ fn reserve_and_open_durable<'a>(
         });
         for periods in &allowance_candidates {
             for period in periods {
-                if super::allowances::available_period_quantity(period) > 0 {
-                    if let Some(lock) = &period.active_settlement {
-                        complete_allowance_lock(db, &period.id, &period.allowance_id, lock).await?;
-                    }
+                if super::allowances::available_period_quantity(period) > 0
+                    && let Some(lock) = &period.active_settlement
+                {
+                    complete_allowance_lock(db, &period.id, &period.allowance_id, lock).await?;
                 }
             }
         }
@@ -157,10 +194,9 @@ fn reserve_and_open_durable<'a>(
                 service_id.as_deref(),
                 ctx.service_slug.as_deref(),
             )? > Credits::ZERO
+                && let Some(lock) = &grant.active_settlement
             {
-                if let Some(lock) = &grant.active_settlement {
-                    complete_grant_lock(db, &grant.id, lock).await?;
-                }
+                complete_grant_lock(db, &grant.id, lock).await?;
             }
         }
         let mut session = db.client().start_session().await?;
@@ -226,8 +262,8 @@ fn reserve_and_open_durable<'a>(
                     let Some(period) = periods.find_one(doc! { "_id": &candidate.id })
                         .session(&mut *session).await? else { continue; };
                     if super::allowances::available_period_quantity(&period) <= 0 { continue; }
-                    if let Some(lock) = &period.active_settlement {
-                        return Err(AppError::Conflict(format!("Allowance settlement {} is completing; retry", lock.operation_id)));
+                    if period.active_settlement.is_some() {
+                        return Err(AppError::Conflict(BENEFIT_ADMISSION_BUSY.into()));
                     }
                     if period.period_end.is_some_and(|end| end <= now) { continue; }
                     let wanted = remaining.min(super::allowances::available_period_quantity(&period));
@@ -253,7 +289,7 @@ fn reserve_and_open_durable<'a>(
                         .session(&mut *session).await? else { continue; };
                     if super::service_limits::available_for_service(&grant, service_id.as_deref(), ctx.service_slug.as_deref())? <= Credits::ZERO { continue; }
                     if grant.active_settlement.is_some() {
-                        return Err(AppError::Conflict("Issued credit settlement is completing; retry".into()));
+                        return Err(AppError::Conflict(BENEFIT_ADMISSION_BUSY.into()));
                     }
                     if grant.revoke_requested_at.is_some() { continue; }
                     let wanted = remaining_cost.min(super::service_limits::available_for_service(&grant, service_id.as_deref(), ctx.service_slug.as_deref())?);
@@ -270,7 +306,7 @@ fn reserve_and_open_durable<'a>(
                 .try_fold(Credits::ZERO, Credits::checked_add)?;
             if total > Credits::ZERO {
                 if db.collection::<Document>(crate::models::billing_wallet::COLLECTION_NAME).find_one(doc! { "_id": &wallet.id, "active_settlement": { "$ne": Bson::Null } }).session(&mut *session).await?.is_some() {
-                    return Err(AppError::Conflict("Purchased credit settlement is completing; retry".into()));
+                    return Err(AppError::Conflict(WALLET_ADMISSION_BUSY.into()));
                 }
                 let prepaid = wallet.plan_kind == crate::models::billing_wallet::PlanKind::Prepaid;
                 let available = if !prepaid && wallet.has_payment_instrument {
@@ -1321,7 +1357,6 @@ async fn complete_allowance_lock(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 fn add_rule_filter(filter: &mut Document, index: usize, reserved: Credits, consume: Credits) {
     // Dot indexes in aggregation field paths do not index arrays; explicitly
     // take the frozen element before comparing exact integer counters.
@@ -1339,6 +1374,7 @@ fn add_rule_filter(filter: &mut Document, index: usize, reserved: Credits, consu
         .push(doc! { "$expr": expression }.into());
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn settle_grant_resource(
     db: &mongodb::Database,
     row: &UsageMeterRow,

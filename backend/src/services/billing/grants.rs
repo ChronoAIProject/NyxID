@@ -72,6 +72,11 @@ pub async fn issue_grants(
     input: IssueCreditGrantInput,
 ) -> AppResult<Vec<CreditGrant>> {
     super::exact_migration::require_ready(db).await?;
+    if input.amount.is_none() && !(1..=MAX_GRANT_CREDITS).contains(&input.amount_credits) {
+        return Err(AppError::ValidationError(format!(
+            "amount_credits must be between 1 and {MAX_GRANT_CREDITS}"
+        )));
+    }
     let amount = input
         .amount
         .unwrap_or(Credits::from_whole(input.amount_credits));
@@ -98,7 +103,7 @@ pub async fn issue_grants(
         .await?;
         if recipients.is_empty() {
             return Err(AppError::ValidationError(
-                "Credit allocation has no eligible recipients".into(),
+                "credit grant has no eligible user recipients".into(),
             ));
         }
         let scope = resolve_service_scope(db, input.all_services, &input.service_refs).await?;
@@ -122,14 +127,19 @@ pub async fn issue_grants(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(ToString::to_string);
+    let retryable = input.request_id.is_some();
 
     let mut grants: Vec<CreditGrant> = recipients
         .into_iter()
         .map(|recipient_user_id| CreditGrant {
-            id: Uuid::new_v5(
-                &Uuid::NAMESPACE_OID,
-                format!("{batch_id}:{recipient_user_id}").as_bytes(),
-            )
+            id: if retryable {
+                Uuid::new_v5(
+                    &Uuid::NAMESPACE_OID,
+                    format!("{batch_id}:{recipient_user_id}").as_bytes(),
+                )
+            } else {
+                Uuid::new_v4()
+            }
             .to_string(),
             batch_id: batch_id.clone(),
             schedule_origin: None,
@@ -161,8 +171,14 @@ pub async fn issue_grants(
         })
         .collect();
 
-    for chunk in grants.chunks(super::schedules::DISBURSEMENT_CHUNK) {
-        super::schedules::insert_grant_chunk(db, chunk).await?;
+    if retryable {
+        for chunk in grants.chunks(super::schedules::DISBURSEMENT_CHUNK) {
+            super::schedules::insert_grant_chunk(db, chunk).await?;
+        }
+    } else {
+        db.collection::<CreditGrant>(CREDIT_GRANTS)
+            .insert_many(&grants)
+            .await?;
     }
     // Hash-chain appends serialize on the ledger head. Keep the admin request
     // bounded for platform-wide batches; remaining grants stay deliberately
@@ -186,6 +202,11 @@ pub async fn issue_grants(
                 }
             }
         }
+    }
+    // Legacy requests have no stable retry identity. Preserve their original
+    // successful response even if a later read would fail after the write.
+    if !retryable {
+        return Ok(grants);
     }
     let ids: Vec<_> = grants.iter().map(|g| g.id.as_str()).collect();
     Ok(db
@@ -337,10 +358,6 @@ pub async fn revoke_grant_immediate(
         .ok_or_else(|| AppError::Internal("revoked credit grant disappeared".to_string()))
 }
 
-pub async fn revoke_grant(db: &mongodb::Database, grant_id: &str) -> AppResult<CreditGrant> {
-    request_revoke_grant(db, grant_id, None).await
-}
-
 pub async fn request_revoke_grant(
     db: &mongodb::Database,
     grant_id: &str,
@@ -377,8 +394,8 @@ pub async fn finalize_reclaim(db: &mongodb::Database, grant_id: &str) -> AppResu
         )
         .return_document(ReturnDocument::Before)
         .await?;
-    if let Some(grant) = previous {
-        if super::ledger::record_grant_event(
+    if let Some(grant) = previous
+        && super::ledger::record_grant_event(
             db,
             BillingLedgerEventType::GrantRevoked,
             &grant.recipient_user_id,
@@ -388,9 +405,8 @@ pub async fn finalize_reclaim(db: &mongodb::Database, grant_id: &str) -> AppResu
             format!("grant-revoked:{}", grant.id),
         )
         .await
-        {
-            mark_terminal_ledgered(db, grant_id, now).await?;
-        }
+    {
+        mark_terminal_ledgered(db, grant_id, now).await?;
     }
     Ok(())
 }

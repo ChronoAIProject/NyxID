@@ -8827,6 +8827,14 @@ missing capability. An exact read field alone is not proof of exact write suppor
 Legacy omitted fields remain supported; legacy immediate revoke rejects holds
 when the new capability is disabled.
 
+Creation accepts the canonical exact string `amount` without an
+`amount_credits` field, for both one-time and recurring allocations. Legacy
+whole-integer `amount_credits` requests remain valid. When both fields are
+present, `amount` takes precedence; omitting both, or providing a nonpositive,
+malformed or unrepresentable effective amount, rejects the request without
+creating an allocation or schedule. Sparse recurring updates preserve an
+omitted amount, and apply the same exact-field precedence when supplied.
+
 `service_limits` entries contain `service_refs` (one or more concrete catalog IDs
 or compatible slugs), exact decimal `amount`, and optional `label`. Canonical
 services must be disjoint across rules and within selected eligibility. Limits
