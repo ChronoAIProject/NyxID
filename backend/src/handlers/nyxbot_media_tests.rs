@@ -143,6 +143,8 @@ async fn channel_media_authority_refusal_matrix_never_downloads() {
     let request = media_request(&row, &source);
     authority::resolve(&state.db, &request).await.unwrap();
     let provider = MockServer::start().await;
+    let requests_before_refusal =
+        assert_authorized_media_download(&state, &source, &request, &provider).await;
     for case in [
         "cross_sender",
         "cross_chat",
@@ -176,7 +178,7 @@ async fn channel_media_authority_refusal_matrix_never_downloads() {
             "{case}"
         );
         assert!(
-            provider.received_requests().await.unwrap().is_empty(),
+            provider.received_requests().await.unwrap().len() == requests_before_refusal,
             "{case}"
         );
     }
@@ -239,7 +241,7 @@ async fn channel_media_authority_refusal_matrix_never_downloads() {
             "{case}"
         );
         assert!(
-            provider.received_requests().await.unwrap().is_empty(),
+            provider.received_requests().await.unwrap().len() == requests_before_refusal,
             "{case}"
         );
         col.update_one(filter, doc! {"$set":restore}).await.unwrap();
@@ -267,7 +269,7 @@ async fn channel_media_authority_refusal_matrix_never_downloads() {
             .await
             .is_err()
     );
-    assert!(provider.received_requests().await.unwrap().is_empty());
+    assert!(provider.received_requests().await.unwrap().len() == requests_before_refusal);
     server.abort();
 }
 
@@ -306,6 +308,8 @@ async fn channel_media_revoked_org_admin_never_downloads() {
     let request = media_request(&row, &source);
     authority::resolve(&state.db, &request).await.unwrap();
     let provider = MockServer::start().await;
+    let requests_before_refusal =
+        assert_authorized_media_download(&state, &source, &request, &provider).await;
     state
         .db
         .collection::<bson::Document>(USERS)
@@ -318,7 +322,7 @@ async fn channel_media_revoked_org_admin_never_downloads() {
             .await
             .is_err()
     );
-    assert!(provider.received_requests().await.unwrap().is_empty());
+    assert!(provider.received_requests().await.unwrap().len() == requests_before_refusal);
     state
         .db
         .collection::<bson::Document>(USERS)
@@ -337,7 +341,7 @@ async fn channel_media_revoked_org_admin_never_downloads() {
             .await
             .is_err()
     );
-    assert!(provider.received_requests().await.unwrap().is_empty());
+    assert!(provider.received_requests().await.unwrap().len() == requests_before_refusal);
     server.abort();
 }
 
@@ -1106,4 +1110,44 @@ async fn channel_media_relay_post_recomputes_after_ack_and_flag_off_keeps_empty_
     TEST_BOT_USER_IDS.lock().unwrap().remove(&bot.id);
     OWN_USER_IDS.lock().unwrap().remove(&identity_key);
     server.abort();
+}
+
+/// Both refusal harnesses must first demonstrate a real token exchange and resource GET.
+async fn assert_authorized_media_download(
+    state: &AppState,
+    source: &ChannelMessage,
+    request: &MediaRequest,
+    provider: &MockServer,
+) -> usize {
+    let native = source.platform_message_id.as_deref().unwrap();
+    let url = format!(
+        "{}/open-apis/im/v1/messages/{native}/resources/img_receipt?type=image",
+        provider.uri()
+    );
+    state
+        .db
+        .collection::<ChannelMessage>(MESSAGES)
+        .update_one(
+            doc! {"_id":&source.id},
+            doc! {"$set":{"attachments.0.provider_ref":url}},
+        )
+        .await
+        .unwrap();
+    mount_media_provider(provider, native).await;
+    authority::resolve(&state.db, request).await.unwrap();
+    fetch_if_authorized(state, request, provider).await.unwrap();
+    let requests = provider.received_requests().await.unwrap();
+    assert_eq!(
+        requests.len(),
+        2,
+        "one token exchange and one resource download"
+    );
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| request.method == "GET" && request.url.path().contains("/resources/"))
+            .count(),
+        1
+    );
+    requests.len()
 }
