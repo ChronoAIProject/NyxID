@@ -64,6 +64,9 @@ pub struct AgentEvent {
     /// of the turn that drains it.
     #[serde(default)]
     pub reply_to: Vec<ChannelOrigin>,
+    /// Original accepted channel events. Delivery capabilities live encrypted there.
+    #[serde(default)]
+    pub source_event_ids: Vec<String>,
     /// The producer proved `report_to` from a validated source (the causing
     /// turn's snapshot, a card's stored routing, or a carrier with validated
     /// provenance). Unbound (legacy) events never create NyxBot involvement.
@@ -226,6 +229,9 @@ pub struct TurnAttachment {
     pub chat_delivery: Option<bool>,
     #[serde(default)]
     pub image_input: Option<String>,
+    /// None preserves legacy automatic inspection. False requests display only.
+    #[serde(default)]
+    pub image_inspection: Option<bool>,
     #[serde(default)]
     pub origin: String,
     #[serde(default)]
@@ -271,6 +277,9 @@ pub struct EngineWorkerInstance {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ActiveTurn {
+    /// Bounded resource handles issued in this turn.
+    #[serde(default)]
+    pub resource_refs: Vec<String>,
     /// Process incarnation that claimed execution; absent on older replicas' turns.
     #[serde(default)]
     pub worker_instance: Option<EngineWorkerInstance>,

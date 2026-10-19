@@ -586,9 +586,14 @@ async fn schedule_specialist_authority_threads_and_guest_refusal() {
     let agent = specialist(&state).await;
     let trigger = automation(&state, &agent.id, None).await;
     let first = schedules::enqueue_now(&state.db, &trigger).await.unwrap();
-    let thread = schedules::run_thread(&state.db, &state.encryption_keys, &first, &trigger)
-        .await
-        .unwrap();
+    let thread = Box::pin(schedules::run_thread(
+        &state.db,
+        &state.encryption_keys,
+        &first,
+        &trigger,
+    ))
+    .await
+    .unwrap();
     assert_ne!(
         thread.id,
         team::home_thread(&state.db, &state.encryption_keys, &agent)
@@ -596,15 +601,22 @@ async fn schedule_specialist_authority_threads_and_guest_refusal() {
             .unwrap()
             .id
     );
-    let same = schedules::run_thread(&state.db, &state.encryption_keys, &first, &trigger)
-        .await
-        .unwrap();
+    let same = Box::pin(schedules::run_thread(
+        &state.db,
+        &state.encryption_keys,
+        &first,
+        &trigger,
+    ))
+    .await
+    .unwrap();
     assert_eq!(thread.id, same.id);
     let job = schedules::claim(&state.db, &first.id, Utc::now())
         .await
         .unwrap()
         .unwrap();
-    run_job_once(&state, &job).await.unwrap();
+    // Match the worker's heap boundary instead of nesting each transaction's
+    // future in this multi-stage journey on libtest's small thread stack.
+    Box::pin(run_job_once(&state, &job)).await.unwrap();
     assert_eq!(
         completed(&state, &trigger).await.outcome,
         RunOutcome::Completed
@@ -662,9 +674,14 @@ async fn schedule_specialist_authority_threads_and_guest_refusal() {
     .await;
     assert!(refused);
     let second = schedules::enqueue_now(&state.db, &trigger).await.unwrap();
-    let reused = schedules::run_thread(&state.db, &state.encryption_keys, &second, &trigger)
-        .await
-        .unwrap();
+    let reused = Box::pin(schedules::run_thread(
+        &state.db,
+        &state.encryption_keys,
+        &second,
+        &trigger,
+    ))
+    .await
+    .unwrap();
     assert_eq!(reused.id, same.id);
     schedules::finish(
         &state.db,
@@ -680,23 +697,33 @@ async fn schedule_specialist_authority_threads_and_guest_refusal() {
     let one = schedules::enqueue_now(&state.db, &new_trigger)
         .await
         .unwrap();
-    let one_thread = schedules::run_thread(&state.db, &state.encryption_keys, &one, &new_trigger)
-        .await
-        .unwrap();
+    let one_thread = Box::pin(schedules::run_thread(
+        &state.db,
+        &state.encryption_keys,
+        &one,
+        &new_trigger,
+    ))
+    .await
+    .unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(2)).await;
     let two = schedules::enqueue_now(&state.db, &new_trigger)
         .await
         .unwrap();
-    let two_thread = schedules::run_thread(&state.db, &state.encryption_keys, &two, &new_trigger)
-        .await
-        .unwrap();
+    let two_thread = Box::pin(schedules::run_thread(
+        &state.db,
+        &state.encryption_keys,
+        &two,
+        &new_trigger,
+    ))
+    .await
+    .unwrap();
     assert_ne!(one_thread.id, two_thread.id);
     team::destroy(&state.db, OWNER, &agent.id).await.unwrap();
     let job = schedules::claim(&state.db, &one.id, Utc::now())
         .await
         .unwrap()
         .unwrap();
-    run_job_once(&state, &job).await.unwrap();
+    Box::pin(run_job_once(&state, &job)).await.unwrap();
     let paused = state
         .db
         .collection::<Trigger>(TRIGGERS)
@@ -1105,6 +1132,7 @@ async fn confirmation_waits_and_resumes(kind: &str) {
             summary: "Delete a key".into(),
             status: "pending".into(),
             requested_turn_id: Some(run.id.clone()),
+            creation_turn_id: None,
             trigger_run_id: Some(run.id.clone()),
             created_at: Utc::now(),
             decided_at: None,

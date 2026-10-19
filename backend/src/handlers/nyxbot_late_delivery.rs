@@ -14,8 +14,6 @@ use crate::{
 // Finish early enough for its terminal frames and normal delivery pacing. An
 // earlier CMA deadline/close is handled by Drop; this does not extend its limit.
 pub(super) const STREAM_SECS: i64 = 570;
-const STILL_WORKING: &str =
-    "I'm still working on this. I'll post the answer here when it is ready.";
 const INCOMPLETE: &str = "\n\n[Incomplete — I could not finish this turn.]";
 
 pub(super) fn answer(text: &str, failed: bool) -> String {
@@ -60,6 +58,8 @@ pub(super) async fn prepare(
         guest,
         addressed,
         transport: channel.transport.clone(),
+        source_route_id: channel.route_id.clone(),
+        source_route_api_key_id: Some(channel.route_api_key_id.clone()),
         stream_deadline: row.created_at + ChronoDuration::seconds(STREAM_SECS),
         checked_at: row.created_at,
         claim_id: None,
@@ -117,7 +117,14 @@ pub(super) fn provider_stream(
         match tokio::time::timeout_at(deadline, final_reply(receiver)).await {
             Ok(outcome) => {
                 let status = if outcome.is_ok() { "completed" } else { "failed" };
-                if delivery::claim_stream(&state.db, &event_key, status).await.unwrap_or(false) {
+                // A completed empty result still owns a terminal delivery
+                // decision. Never acquire the stream/send barrier for silence.
+                if outcome.as_ref().is_ok_and(|text| text.trim().is_empty())
+                    && silent_result(&state, &event_key).await.unwrap_or(false)
+                {
+                    guard.disarm();
+                    for frame in message_frames(&response_id, None) { yield frame; }
+                } else if delivery::claim_stream(&state.db, &event_key, status).await.unwrap_or(false) {
                     guard.disarm();
                     match outcome {
                         Ok(text) => {
@@ -140,8 +147,9 @@ pub(super) fn provider_stream(
             Err(_) => {
                 let _ = delivery::detach(&state.db, &event_key).await;
                 guard.disarm();
-                let text = if running(&state, &event_key).await.unwrap_or(false) { Some(STILL_WORKING) } else { None };
-                for frame in message_frames(&response_id, text) { yield frame; }
+                // Accepted work continues through its original durable target.
+                // A deadline is not a failure and emits no progress message.
+                for frame in message_frames(&response_id, None) { yield frame; }
             }
         }
     })
@@ -164,10 +172,18 @@ pub(crate) fn spawn_sweep(state: AppState) {
 }
 
 pub(super) async fn sweep(state: &AppState) -> AppResult<()> {
-    let rows: Vec<NyxbotEvent> = state.db.collection(EVENTS).find(doc! {
-        "delivery.version": 1, "delivery.state": {"$in": ["waiting", "pending"]},
-        "turn_id": {"$type": "string"}, "expires_at": {"$gt": bson::DateTime::from_chrono(Utc::now())},
-    }).sort(doc! {"delivery.checked_at": 1}).limit(32).await?.try_collect().await?;
+    let rows: Vec<NyxbotEvent> = state
+        .db
+        .collection(EVENTS)
+        .find(doc! {
+            "delivery.version": 1, "delivery.state": {"$in": ["waiting", "pending"]},
+            "$or": [{"turn_id": {"$type": "string"}}, {"status": "queued"}],
+        })
+        .sort(doc! {"delivery.checked_at": 1})
+        .limit(32)
+        .await?
+        .try_collect()
+        .await?;
     use futures::StreamExt;
     futures::stream::iter(rows)
         .for_each_concurrent(4, |event| async move {
@@ -241,7 +257,7 @@ async fn process_inner(state: &AppState, event_id: &str, gateway_only: bool) -> 
     let Some(mut d) = event.delivery.clone() else {
         return Ok(());
     };
-    let (Some(conversation_id), Some(turn_id)) = (&event.conversation_id, &event.turn_id) else {
+    let Some(conversation_id) = &event.conversation_id else {
         return Ok(());
     };
     let now = Utc::now();
@@ -268,9 +284,24 @@ async fn process_inner(state: &AppState, event_id: &str, gateway_only: bool) -> 
     if d.transport == "gateway" && d.target_ciphertext.is_none() {
         mint_target(state, &event, &channel, &mut d).await?;
     }
+    let Some(turn_id) = &event.turn_id else {
+        return Ok(());
+    };
     let Some(message) = state.db.collection::<AssistantMessage>(MESSAGES).find_one(doc! {
         "user_id": &event.user_id, "conversation_id": conversation_id, "turn_id": turn_id, "role": "assistant",
     }).await? else { return Ok(()); };
+    if successful_silence(&message) {
+        if delivery::silence(&state.db, event_id).await? {
+            audit(
+                state,
+                &event.user_id,
+                "nyxbot_channel_answer_delivery",
+                json!({"event_id": event.id, "turn_id": turn_id, "outcome": "silent"}),
+            )
+            .await;
+        }
+        return Ok(());
+    }
     let text = if let Some(code) = message.error_code.as_deref() {
         let failure = if code == "capacity_exceeded" {
             crate::services::assistant_turn_observability::capacity_message(
@@ -311,7 +342,12 @@ async fn process_inner(state: &AppState, event_id: &str, gateway_only: bool) -> 
     )
     .await;
     let text = super::images::append_failure(&text, &report);
-    let result = dispatch(state, &event, &d, &channel, &conversation, &text).await;
+    let result = if text.trim().is_empty() {
+        // Image-only output has already been dispatched through its own claims.
+        Ok(report.unknown == 0 && report.failed == 0)
+    } else {
+        dispatch(state, &event, &d, &channel, &conversation, &text).await
+    };
     let status = match result {
         Ok(true) => "sent",
         Ok(false) | Err(_) => "unknown",
@@ -638,7 +674,14 @@ async fn dispatch(
     Ok(outcome == Some("confirmed"))
 }
 
-async fn running(state: &AppState, event_id: &str) -> AppResult<bool> {
+fn successful_silence(message: &AssistantMessage) -> bool {
+    message.status == "completed"
+        && message.error_code.is_none()
+        && message.text.trim().is_empty()
+        && !message.attachments.iter().any(engine::chat_tool_image)
+}
+
+async fn silent_result(state: &AppState, event_id: &str) -> AppResult<bool> {
     let Some(event) = state
         .db
         .collection::<NyxbotEvent>(EVENTS)
@@ -647,10 +690,22 @@ async fn running(state: &AppState, event_id: &str) -> AppResult<bool> {
     else {
         return Ok(false);
     };
-    let (Some(conversation), Some(turn)) = (event.conversation_id, event.turn_id) else {
+    let (Some(conversation), Some(turn)) = (&event.conversation_id, &event.turn_id) else {
         return Ok(false);
     };
-    let row = engine::get(&state.db, &event.user_id, &conversation).await?;
-    Ok(engine::live_turn(&row, Utc::now())
-        .is_some_and(|active| active.turn_id == turn && !active.stop_requested))
+    let Some(message) = state
+        .db
+        .collection::<AssistantMessage>(MESSAGES)
+        .find_one(doc! {
+            "user_id": &event.user_id, "conversation_id": conversation,
+            "turn_id": turn, "role": "assistant",
+        })
+        .await?
+    else {
+        return Ok(false);
+    };
+    if !successful_silence(&message) {
+        return Ok(false);
+    }
+    delivery::silence(&state.db, event_id).await
 }

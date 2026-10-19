@@ -33,6 +33,10 @@ pub struct PlatformBotRuntimeControls, RawPlatformBotRuntimeControls {
     pub personal_enabled: bool,
     pub public_enabled: bool,
     pub emergency_stopped: bool,
+    #[serde(default)]
+    pub remembered_personal_enabled: Option<bool>,
+    #[serde(default)]
+    pub remembered_public_enabled: Option<bool>,
     pub retired: bool,
     pub public_policy: Option<PublicRuntimePolicy>,
     pub effect_revision: i64,

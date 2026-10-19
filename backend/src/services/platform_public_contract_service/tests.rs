@@ -503,6 +503,8 @@ async fn retention_keeps_only_active_refresh_pinned_turn_and_unfinished_cleanup_
         personal_enabled: false,
         public_enabled: true,
         emergency_stopped: false,
+        remembered_personal_enabled: None,
+        remembered_public_enabled: None,
         retired: false,
         public_policy: Some(
             crate::models::platform_bot_runtime_controls::PublicRuntimePolicy {

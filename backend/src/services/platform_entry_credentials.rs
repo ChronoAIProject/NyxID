@@ -20,12 +20,20 @@ struct Guard {
     filter: Document,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TokenRequirement {
+    Identity,
+    Live,
+    UsableOrRefreshable,
+}
+
 pub(crate) struct EntryCredentialSnapshot {
     bot: CredentialSnapshot,
     shared: Option<PlatformCredential>,
     connection_identity: Option<Document>,
     connection_token: Option<Zeroizing<Vec<u8>>>,
     token_expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    connection_refreshable: bool,
     guards: Vec<Guard>,
 }
 
@@ -50,6 +58,7 @@ impl EntryCredentialSnapshot {
             connection_identity: None,
             connection_token: None,
             token_expires_at: None,
+            connection_refreshable: false,
             guards: Vec::new(),
         };
         if bot.credential_source != "connection" {
@@ -128,6 +137,7 @@ impl EntryCredentialSnapshot {
                 .ok_or_else(changed)?,
         ));
         result.token_expires_at = connection.expires_at;
+        result.connection_refreshable = connection.refresh_token_encrypted.is_some();
         result.connection_identity = Some(identity);
         result.guards.push(Guard {
             collection: crate::models::user_api_key::COLLECTION_NAME,
@@ -228,6 +238,15 @@ impl EntryCredentialSnapshot {
         Ok(hex::encode(Sha256::digest(material.as_slice())))
     }
 
+    /// Operational availability permits the authenticated refresh producer to
+    /// renew expired material without changing the stable entry identity.
+    pub(crate) fn token_usable_or_refreshable(&self) -> bool {
+        self.connection_refreshable
+            || self
+                .token_expires_at
+                .is_none_or(|expiry| expiry > chrono::Utc::now())
+    }
+
     /// Materialize exactly the encrypted credential captured before the final
     /// claim. No live same-ID connection read can substitute a successor epoch.
     pub(crate) async fn send_token(
@@ -267,10 +286,39 @@ impl EntryCredentialSnapshot {
         db: &Database,
         session: &mut ClientSession,
     ) -> AppResult<bool> {
-        if !self.fence_dependencies(db, session, true).await? {
+        if !self
+            .check_dependencies(db, session, TokenRequirement::Live, true)
+            .await?
+        {
             return Ok(false);
         }
         self.bot.fence_in_session(db, session).await
+    }
+
+    /// Changing runtime modes authorizes no provider send. Fence a currently
+    /// usable token or retained refresh access; ingress still refreshes before
+    /// admission and every delivery requires live material.
+    pub(crate) async fn fence_runtime_controls_in_session(
+        &self,
+        db: &Database,
+        session: &mut ClientSession,
+    ) -> AppResult<bool> {
+        if !self
+            .check_dependencies(db, session, TokenRequirement::UsableOrRefreshable, true)
+            .await?
+        {
+            return Ok(false);
+        }
+        self.bot.fence_in_session(db, session).await
+    }
+
+    pub(crate) async fn validate_runtime_controls_in_session(
+        &self,
+        db: &Database,
+        session: &mut ClientSession,
+    ) -> AppResult<bool> {
+        self.check_dependencies(db, session, TokenRequirement::UsableOrRefreshable, false)
+            .await
     }
 
     /// Administrative refresh admission checks persistent account authority;
@@ -280,37 +328,50 @@ impl EntryCredentialSnapshot {
         db: &Database,
         session: &mut ClientSession,
     ) -> AppResult<bool> {
-        self.fence_dependencies(db, session, false).await
+        self.check_dependencies(db, session, TokenRequirement::Identity, true)
+            .await
     }
 
-    async fn fence_dependencies(
+    async fn check_dependencies(
         &self,
         db: &Database,
         session: &mut ClientSession,
-        require_live: bool,
+        requirement: TokenRequirement,
+        write_fence: bool,
     ) -> AppResult<bool> {
         for guard in &self.guards {
             let mut filter = guard.filter.clone();
-            if require_live && guard.collection == crate::models::user_api_key::COLLECTION_NAME {
-                filter.insert(
-                    "$or",
-                    vec![
-                        doc! {"expires_at":Bson::Null},
-                        doc! {"expires_at":{"$gt":bson::DateTime::now()}},
-                    ],
-                );
-            }
-            if db
-                .collection::<Document>(guard.collection)
-                .update_one(
-                    filter,
-                    doc! {"$inc":{"platform_entry_effect_revision":1_i64}},
-                )
-                .session(&mut *session)
-                .await?
-                .matched_count
-                != 1
+            if requirement != TokenRequirement::Identity
+                && guard.collection == crate::models::user_api_key::COLLECTION_NAME
             {
+                let mut available = vec![
+                    doc! {"expires_at":Bson::Null},
+                    doc! {"expires_at":{"$gt":bson::DateTime::now()}},
+                ];
+                if requirement == TokenRequirement::UsableOrRefreshable {
+                    available.push(doc! {"refresh_token_encrypted":{"$type":"binData"}});
+                }
+                filter.insert("$or", available);
+            }
+            let collection = db.collection::<Document>(guard.collection);
+            let exists = if write_fence {
+                collection
+                    .update_one(
+                        filter,
+                        doc! {"$inc":{"platform_entry_effect_revision":1_i64}},
+                    )
+                    .session(&mut *session)
+                    .await?
+                    .matched_count
+                    == 1
+            } else {
+                collection
+                    .find_one(filter)
+                    .session(&mut *session)
+                    .await?
+                    .is_some()
+            };
+            if !exists {
                 return Ok(false);
             }
         }

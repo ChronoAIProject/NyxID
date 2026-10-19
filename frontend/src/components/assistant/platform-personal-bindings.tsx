@@ -52,8 +52,10 @@ function OwnedBindings() {
           <p className="font-medium">{row.manager.display_name}</p>
           <p className="text-muted-foreground">
             {row.chat.display_name} account{" "}
-            {row.sender.display_name ?? row.sender.id} ·{" "}
-            {row.state === "active" ? "Linked" : "Disconnected"}
+            {row.sender.display_name
+              ? `${row.sender.display_name} (${row.sender.id})`
+              : row.sender.id}{" "}
+            · {row.state === "active" ? "Linked" : "Disconnected"}
           </p>
           {row.conversation_id ? (
             <a

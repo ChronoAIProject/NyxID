@@ -1401,3 +1401,459 @@ fn reviewed_native_update_refreshes_expired_same_epoch_oauth_without_invalidatin
 
 #[path = "platform_native_x_delivery_tests.rs"]
 mod paid_delivery;
+
+#[test]
+fn basic_native_setup_and_successor_admin_repair_need_no_sponsor_membership() {
+    crate::test_utils::run_native_journey_test("basic_native_successor_repair", || async {
+        let fixture = Fixture::new().await;
+        let NativeConversionOutcome::Converted(first) = fixture
+            .convert_as(
+                &fixture.bot.user_id,
+                &fixture.bot.user_id,
+                NativeTransportChoice::Direct,
+            )
+            .await
+            .unwrap()
+        else {
+            panic!("Direct setup");
+        };
+        assert_eq!(first.funding_owner_user_id, fixture.bot.user_id);
+        let successor = uuid::Uuid::new_v4().to_string();
+        let mut person =
+            crate::test_utils::test_user(&successor, crate::models::user::UserType::Person);
+        person.role_ids = vec![
+            super::super::role_service::get_platform_role_ids(&fixture.state.db)
+                .await
+                .unwrap()
+                .admin,
+        ];
+        fixture
+            .state
+            .db
+            .collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+            .insert_one(person)
+            .await
+            .unwrap();
+        let reviewed = review_lifecycle(&fixture.state, &successor, &fixture.bot.id)
+            .await
+            .unwrap();
+        reserve_reviewed_update(
+            &fixture.state,
+            &successor,
+            &successor,
+            NativeTransportChoice::Direct,
+            &reviewed,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let NativeConversionOutcome::Converted(updated) = fixture
+            .convert_as(&successor, &successor, NativeTransportChoice::Direct)
+            .await
+            .unwrap()
+        else {
+            panic!("Reviewed repair");
+        };
+        assert!(updated.generation > first.generation);
+        assert_eq!(updated.funding_owner_user_id, successor);
+        assert_eq!(
+            updated.native_entry.as_ref().unwrap().identity,
+            first.native_entry.as_ref().unwrap().identity
+        );
+        fixture.state.db.drop().await.unwrap();
+    });
+}
+
+#[test]
+fn unavailable_oauth_returns_repair_status_and_disconnected_inventory_without_hiding_metadata() {
+    crate::test_utils::run_native_journey_test("native_oauth_repair_status", || async {
+        let fixture = Fixture::new().await;
+        let NativeConversionOutcome::Converted(profile) = fixture
+            .convert_as(
+                &fixture.bot.user_id,
+                &fixture.bot.user_id,
+                NativeTransportChoice::Direct,
+            )
+            .await
+            .unwrap()
+        else {
+            panic!("Direct setup");
+        };
+        enable_personal(&fixture, &profile).await;
+        let runtime_rows = fixture
+            .state
+            .db
+            .collection::<Document>(crate::models::platform_bot_runtime_controls::COLLECTION_NAME);
+        runtime_rows
+            .update_one(
+                doc! {"platform_config_id":&profile.id},
+                doc! {"$set":{"public_enabled":true,"emergency_stopped":false}},
+            )
+            .await
+            .unwrap();
+        let runtime =
+            super::super::platform_bot_runtime_control_service::get(&fixture.state.db, &profile.id)
+                .await
+                .unwrap()
+                .unwrap();
+        let admission = x_admission(
+            &fixture,
+            &profile,
+            runtime.manager_authority_epoch,
+            "hello",
+            "501",
+        )
+        .await;
+        let binding = super::super::platform_personal_binding_service::tests::binding(
+            &admission.verified_update(),
+            &fixture.bot.user_id,
+        );
+        let display = super::super::platform_personal_binding_service::native_manager_display(
+            &fixture.state.db,
+            &profile.id,
+            &profile.manager_bot_id,
+            &profile.native_entry.as_ref().unwrap().identity,
+        )
+        .await
+        .unwrap();
+        assert!(display.is_some());
+        assert!(
+            super::super::platform_bot_status_service::view(&fixture.state.db, Some(&runtime))
+                .await
+                .unwrap()
+                .faq_ready
+        );
+        let keys = fixture
+            .state
+            .db
+            .collection::<Document>(crate::models::user_api_key::COLLECTION_NAME);
+        let original = keys
+            .find_one(doc! {"_id":fixture.bot.connection_id.as_ref().unwrap()})
+            .await
+            .unwrap()
+            .unwrap();
+        let owners = fixture
+            .state
+            .db
+            .collection::<Document>(crate::models::user::COLLECTION_NAME);
+        owners
+            .update_one(
+                doc! {"_id":&fixture.bot.user_id},
+                doc! {"$set":{"is_active":false}},
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            super::super::platform_bot_status_service::view(&fixture.state.db, Some(&runtime))
+                .await
+                .unwrap()
+                .state,
+            "connection_repair_required",
+            "disabled credential owner"
+        );
+        assert_eq!(
+            super::super::platform_personal_binding_service::inventory_state(
+                &fixture.state.db,
+                &binding
+            )
+            .await
+            .unwrap(),
+            crate::models::platform_personal_binding::PersonalBindingState::Revoked,
+            "disabled credential owner"
+        );
+        owners
+            .update_one(
+                doc! {"_id":&fixture.bot.user_id},
+                doc! {"$set":{"is_active":true}},
+            )
+            .await
+            .unwrap();
+        for (cause, change) in [
+            ("revoked", doc! {"status":"revoked"}),
+            ("missing scopes", doc! {"token_scopes":""}),
+            (
+                "expired without refresh",
+                doc! {"expires_at":bson::DateTime::from_millis(0)},
+            ),
+        ] {
+            keys.update_one(
+                doc! {"_id":fixture.bot.connection_id.as_ref().unwrap()},
+                doc! {"$set":change},
+            )
+            .await
+            .unwrap();
+            let status =
+                super::super::platform_bot_status_service::view(&fixture.state.db, Some(&runtime))
+                    .await
+                    .unwrap();
+            assert_eq!(status.state, "connection_repair_required", "{cause}");
+            assert!(!status.faq_ready);
+            assert_eq!(
+                super::super::platform_personal_binding_service::inventory_state(
+                    &fixture.state.db,
+                    &binding
+                )
+                .await
+                .unwrap(),
+                crate::models::platform_personal_binding::PersonalBindingState::Revoked,
+                "{cause}"
+            );
+            assert!(
+                super::super::platform_personal_binding_service::native_manager_display(
+                    &fixture.state.db,
+                    &profile.id,
+                    &profile.manager_bot_id,
+                    &profile.native_entry.as_ref().unwrap().identity
+                )
+                .await
+                .unwrap()
+                .is_some()
+            );
+            keys.replace_one(
+                doc! {"_id":fixture.bot.connection_id.as_ref().unwrap()},
+                original.clone(),
+            )
+            .await
+            .unwrap();
+        }
+        let refresh = fixture
+            .state
+            .encryption_keys
+            .encrypt(b"synthetic-refresh-token")
+            .await
+            .unwrap();
+        let refresh = bson::Binary {
+            subtype: bson::spec::BinarySubtype::Generic,
+            bytes: refresh,
+        };
+        keys.update_one(
+            doc! {"_id":fixture.bot.connection_id.as_ref().unwrap()},
+            doc! {"$set":{"expires_at":bson::DateTime::from_millis(0),
+            "refresh_token_encrypted":refresh.clone()}},
+        )
+        .await
+        .unwrap();
+        let requests_before_status = fixture.server.received_requests().await.unwrap().len();
+        let refreshable =
+            super::super::platform_bot_status_service::view(&fixture.state.db, Some(&runtime))
+                .await
+                .unwrap();
+        assert_eq!(
+            refreshable.state, "active",
+            "expired refreshable credentials retain the entry identity"
+        );
+        assert!(refreshable.faq_ready);
+        assert_eq!(
+            super::super::platform_personal_binding_service::inventory_state(
+                &fixture.state.db,
+                &binding
+            )
+            .await
+            .unwrap(),
+            crate::models::platform_personal_binding::PersonalBindingState::Active
+        );
+        assert_eq!(
+            fixture.server.received_requests().await.unwrap().len(),
+            requests_before_status,
+            "status and inventory never perform provider refresh"
+        );
+        use super::super::platform_bot_runtime_control_service::{RuntimeChange, update};
+        let actor = super::super::audit_service::AuditActor::from_auth_user(
+            &crate::test_utils::test_auth_user(&fixture.bot.user_id),
+        );
+        let mut change = RuntimeChange {
+            initialize: false,
+            expected_profile_generation: None,
+            expected_manager_authority_epoch: runtime.manager_authority_epoch,
+            expected_personal_control_revision: runtime.personal_control_revision,
+            expected_public_policy_revision: runtime.public_policy_revision,
+            personal_enabled: None,
+            public_enabled: None,
+            emergency_stopped: Some(true),
+            public_policy: None,
+            public_deployment_digest: None,
+        };
+        let paused = update(
+            &fixture.state.db,
+            &actor,
+            b"native-review-test-audit",
+            &profile.id,
+            &change,
+            &NoPublic,
+        )
+        .await
+        .unwrap();
+        assert!(paused.emergency_stopped);
+        assert_eq!(
+            super::super::platform_bot_status_service::view(&fixture.state.db, Some(&paused))
+                .await
+                .unwrap()
+                .state,
+            "paused"
+        );
+        change.expected_personal_control_revision = paused.personal_control_revision;
+        change.expected_public_policy_revision = paused.public_policy_revision;
+        change.personal_enabled = Some(true);
+        change.public_enabled = Some(true);
+        change.emergency_stopped = Some(false);
+        let bot = super::super::channel_bot_service::get_bot(&fixture.state.db, &fixture.bot.id)
+            .await
+            .unwrap();
+        let snapshot = super::super::platform_entry_credentials::EntryCredentialSnapshot::load(
+            &fixture.state.db,
+            fixture.transport.adapter.as_ref(),
+            &bot,
+        )
+        .await
+        .unwrap();
+        assert!(snapshot.token_usable_or_refreshable());
+        keys.update_one(
+            doc! {"_id":fixture.bot.connection_id.as_ref().unwrap()},
+            doc! {"$unset":{"refresh_token_encrypted":""}},
+        )
+        .await
+        .unwrap();
+        let mut session = fixture.state.db.client().start_session().await.unwrap();
+        session.start_transaction().await.unwrap();
+        assert!(
+            !snapshot
+                .fence_runtime_controls_in_session(&fixture.state.db, &mut session)
+                .await
+                .unwrap(),
+            "removing refresh access after snapshot capture must fence Resume"
+        );
+        session.abort_transaction().await.unwrap();
+        assert!(
+            matches!(
+                update(
+                    &fixture.state.db,
+                    &actor,
+                    b"native-review-test-audit",
+                    &profile.id,
+                    &change,
+                    &NoPublic
+                )
+                .await,
+                Err(AppError::Conflict(_))
+            ),
+            "expired without refresh cannot resume"
+        );
+        keys.update_one(
+            doc! {"_id":fixture.bot.connection_id.as_ref().unwrap()},
+            doc! {"$set":{"refresh_token_encrypted":refresh}},
+        )
+        .await
+        .unwrap();
+        let resumed = update(
+            &fixture.state.db,
+            &actor,
+            b"native-review-test-audit",
+            &profile.id,
+            &change,
+            &NoPublic,
+        )
+        .await
+        .unwrap();
+        assert!(
+            !resumed.emergency_stopped && resumed.public_enabled && resumed.personal_enabled,
+            "expired refreshable credentials must allow one atomic Resume"
+        );
+        assert_eq!(
+            super::super::platform_bot_status_service::view(&fixture.state.db, Some(&resumed))
+                .await
+                .unwrap()
+                .state,
+            "active"
+        );
+        session.start_transaction().await.unwrap();
+        assert!(
+            !snapshot
+                .fence_in_session(&fixture.state.db, &mut session)
+                .await
+                .unwrap(),
+            "runtime configuration cannot authorize expired message admission or delivery"
+        );
+        session.abort_transaction().await.unwrap();
+        assert!(
+            snapshot
+                .send_token(&fixture.state.encryption_keys)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            fixture.server.received_requests().await.unwrap().len(),
+            requests_before_status,
+            "status, inventory and atomic Resume never perform provider refresh"
+        );
+        keys.delete_one(doc! {"_id":fixture.bot.connection_id.as_ref().unwrap()})
+            .await
+            .unwrap();
+        assert_eq!(
+            super::super::platform_bot_status_service::view(&fixture.state.db, Some(&runtime))
+                .await
+                .unwrap()
+                .state,
+            "connection_repair_required"
+        );
+        keys.insert_one(original).await.unwrap();
+        runtime_rows
+            .update_one(
+                doc! {"platform_config_id":&profile.id},
+                doc! {"$inc":{"manager_authority_epoch":1_i64}},
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            super::super::platform_personal_binding_service::inventory_state(
+                &fixture.state.db,
+                &binding
+            )
+            .await
+            .unwrap(),
+            crate::models::platform_personal_binding::PersonalBindingState::Revoked
+        );
+        fixture.state.db.drop().await.unwrap();
+    });
+}
+
+#[test]
+fn polling_only_x_cannot_advertise_a_native_shared_entry() {
+    crate::test_utils::run_native_journey_test("native_x_needs_signed_webhook", || async {
+        let fixture = Fixture::new().await;
+        fixture
+            .state
+            .db
+            .collection::<Document>(BOTS)
+            .update_one(
+                doc! {"_id":&fixture.bot.id},
+                doc! {"$set":{"webhook_registered":false}},
+            )
+            .await
+            .unwrap();
+        let error = fixture
+            .convert_as(
+                &fixture.bot.user_id,
+                &fixture.bot.user_id,
+                NativeTransportChoice::Direct,
+            )
+            .await
+            .err()
+            .unwrap();
+        assert!(
+            matches!(error,AppError::Conflict(message) if message.contains("activity webhooks"))
+        );
+        assert!(fixture.server.received_requests().await.unwrap().is_empty());
+        assert!(
+            fixture
+                .state
+                .db
+                .collection::<Document>(BOTS)
+                .find_one(doc! {"_id":&fixture.bot.id,"platform_entry_pending":{"$exists":true}})
+                .await
+                .unwrap()
+                .is_none()
+        );
+        fixture.state.db.drop().await.unwrap();
+    });
+}

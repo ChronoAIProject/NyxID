@@ -422,6 +422,7 @@ pub async fn list(
             displays.insert(key, display.clone());
             display
         };
+        let live_state = bindings::inventory_state(&state.db, &row).await?;
         projected.push(OwnedBindingResponse {
             chat: chat(&row.entry)?,
             id: row.id,
@@ -431,7 +432,7 @@ pub async fn list(
                 id: crate::services::platform_entry_scope::actor_string(&row.sender),
                 display_name: None,
             },
-            state: row.state,
+            state: live_state,
             conversation_id: row.conversation_id,
             consented_at: row.consented_at.to_rfc3339(),
             revoked_at: row.revoked_at.map(|date| date.to_rfc3339()),

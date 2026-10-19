@@ -234,49 +234,6 @@ async fn activate(
     Ok(())
 }
 
-/// Uses the existing body queue, refusing overflow rather than acknowledging
-/// work that would evict an older accepted owner message.
-pub async fn enqueue(
-    db: &Database,
-    owner: &str,
-    conversation: &str,
-    mut event: AgentEvent,
-) -> AppResult<bool> {
-    let Some(origin) = event.reply_to.first().cloned() else {
-        return Err(not_found());
-    };
-    let Some(b) = origin.thread.as_deref() else {
-        return Err(not_found());
-    };
-    if b.guest {
-        return Err(not_found());
-    }
-    event.reply_to[0].thread.as_mut().unwrap().queued = true;
-    let b = b.clone();
-    let db = db.clone();
-    let owner = owner.to_owned();
-    let conversation = conversation.to_owned();
-    let mut session = db.client().start_session().await?;
-    session.start_transaction().and_run2(async move |session| {
-            let db=&db;
-            let owner=owner.as_str();
-            let conversation=conversation.as_str();
-
-        let work:AppResult<bool>=Box::pin(async{
-            let child=validate_in_session(db,owner,&origin,conversation,false,session).await?;
-            let rows=db.collection::<AssistantConversation>(crate::models::assistant_conversation::COLLECTION_NAME);
-            let row=rows.find_one(doc! {"_id":conversation,"user_id":owner}).session(&mut *session).await?.ok_or_else(not_found)?;
-            if row.pending_events.len()>=super::super::assistant_nyxagent::MAX_PENDING_EVENTS{return Ok(false);}
-            if event.question_key.as_ref().is_some_and(|key|row.pending_events.iter().any(|e|e.question_key.as_ref()==Some(key))) {return Ok(false);}
-            rows.update_one(doc! {"_id":conversation,"user_id":owner},
-                doc! {"$push":{"pending_events":bson::to_bson(&event).map_err(|_|not_found())?}}).session(&mut *session).await?;
-            activate(db,&child,&b,session).await?;
-            Ok(true)
-        }).await;
-        transactions::transaction_result(work)
-    }).await.map_err(transactions::map_transaction_error)
-}
-
 /// Drop revoked queued authority before constructing any owner event input.
 pub async fn filter_events(
     db: &Database,
@@ -286,7 +243,43 @@ pub async fn filter_events(
     session: &mut ClientSession,
 ) -> AppResult<Vec<AgentEvent>> {
     let mut allowed = Vec::new();
-    for event in events {
+    for mut event in events {
+        if !event.source_event_ids.is_empty() {
+            let mut sources = Vec::new();
+            let mut origins = Vec::new();
+            for source in &event.source_event_ids {
+                if let Some(origin) = super::super::channel_turn_delivery::queued_origin_in_session(
+                    db,
+                    owner,
+                    conversation,
+                    source,
+                    session,
+                )
+                .await?
+                {
+                    sources.push(source.clone());
+                    origins.push(origin);
+                } else {
+                    db.collection::<bson::Document>(crate::models::nyxbot_channel::EVENTS_COLLECTION_NAME)
+                        .update_one(doc! {"_id": source, "user_id": owner,
+                            "delivery.state": {"$in": ["waiting", "pending"]}},
+                            doc! {"$set": {"status": "refused", "delivery.state": "refused"},
+                                "$unset": {"event_context_ciphertext": "", "delivery.target_ciphertext": ""}})
+                        .session(&mut *session).await?;
+                }
+            }
+            event.source_event_ids = sources;
+            event.reply_to = origins;
+            if !event.source_event_ids.is_empty() {
+                allowed.push(event);
+            }
+            continue;
+        }
+        // Legacy generic message queues have no recoverable original target.
+        // Do not turn them into a reply to whichever message arrived last.
+        if event.kind == "message" && event.reply_to.iter().any(|o| o.thread.is_none()) {
+            continue;
+        }
         let mut valid = true;
         for origin in &event.reply_to {
             if origin.thread.is_some() {
@@ -320,10 +313,8 @@ pub async fn prune_queue(db: &Database, owner: &str, conversation: &str) -> AppR
         let work:AppResult<usize>=Box::pin(async{
             let rows=db.collection::<AssistantConversation>(crate::models::assistant_conversation::COLLECTION_NAME);
             let Some(row)=rows.find_one(doc! {"_id":conversation,"user_id":owner}).session(&mut *session).await? else{return Ok(0);};
-            if !row.pending_events.iter().any(|e|e.reply_to.iter().any(|o|o.thread.is_some())){return Ok(row.pending_events.len());}
-            let count=row.pending_events.len();
             let events=filter_events(db,owner,conversation,row.pending_events,session).await?;
-            if events.len()!=count {
+            {
                 rows.update_one(doc! {"_id":conversation,"user_id":owner},doc! {"$set":{"pending_events":bson::to_bson(&events).map_err(|_|not_found())?}})
                     .session(&mut *session).await?;
             }

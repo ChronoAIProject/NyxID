@@ -103,7 +103,78 @@ it("native transport failure does not blame Telegram", () => {
   render(<ManagerRuntimeSettings profile={profile} />);
   expect(screen.getByRole("status")).not.toHaveTextContent("Telegram");
   expect(screen.getByRole("status")).toHaveTextContent(
-    /transport.*unavailable/i,
+    /Connection repair required/i,
   );
+  expect(mutateAsync).not.toHaveBeenCalled();
+});
+
+it("resumes remembered FAQ-only modes atomically without public AI setup", async () => {
+  const { fireEvent, waitFor } = await import("@testing-library/react");
+  query.data.runtime!.emergency_stopped = true;
+  query.data.runtime!.remembered_public_enabled = true;
+  query.data.runtime!.remembered_personal_enabled = false;
+  query.data.public_readiness.reason = "emergency_stopped";
+  render(<ManagerRuntimeSettings profile={profile} />);
+  expect(screen.getByRole("checkbox", { name: /Public FAQ/ })).toBeChecked();
+  expect(
+    screen.getByRole("checkbox", { name: /Personal NyxBot/ }),
+  ).not.toBeChecked();
+  expect(
+    screen.queryByRole("combobox", { name: "Public answers" }),
+  ).not.toBeInTheDocument();
+  expect(screen.getByRole("status")).toHaveTextContent(/choose Resume bot/);
+  fireEvent.click(screen.getByRole("button", { name: "Resume bot" }));
+  await waitFor(() => expect(mutateAsync).toHaveBeenCalledOnce());
+  expect(mutateAsync).toHaveBeenCalledWith({
+    action: "update",
+    body: {
+      expected_manager_authority_epoch: 1,
+      expected_personal_control_revision: 2,
+      expected_public_policy_revision: 3,
+      personal_enabled: false,
+      public_enabled: true,
+      emergency_stopped: false,
+      public_policy: null,
+    },
+  });
+});
+
+it("explains both-off Resume and permits an explicit FAQ selection", async () => {
+  const { fireEvent, waitFor } = await import("@testing-library/react");
+  query.data.runtime!.emergency_stopped = true;
+  render(<ManagerRuntimeSettings profile={profile} />);
+  expect(
+    screen.getByText("Select at least one mode to enable or resume this bot."),
+  ).toBeVisible();
+  expect(screen.getByRole("button", { name: "Resume bot" })).toBeDisabled();
+  fireEvent.click(screen.getByRole("checkbox", { name: /Public FAQ/ }));
+  fireEvent.click(screen.getByRole("button", { name: "Resume bot" }));
+  await waitFor(() => expect(mutateAsync).toHaveBeenCalledOnce());
+  expect(mutateAsync.mock.calls[0]![0].body).toMatchObject({
+    public_enabled: true,
+    personal_enabled: false,
+    emergency_stopped: false,
+  });
+});
+
+it("keeps a single access flow when optional AI is expanded and requires an org sponsor", async () => {
+  const { fireEvent, waitFor } = await import("@testing-library/react");
+  render(<ManagerRuntimeSettings profile={profile} />);
+  fireEvent.click(
+    screen.getByText("Advanced public AI deployment", { selector: "summary" }),
+  );
+  await waitFor(() =>
+    expect(screen.getByLabelText("Sponsor organization")).toBeVisible(),
+  );
+  expect(screen.getByLabelText("Sponsor organization")).toHaveValue("");
+  expect(screen.getAllByRole("button", { name: "Pause bot" })).toHaveLength(1);
+  expect(
+    screen.queryByRole("button", {
+      name: /Clear manager emergency stop|Pause personal access|Pause public guide|Enable personal access only/,
+    }),
+  ).not.toBeInTheDocument();
+  expect(
+    screen.queryByText("Advanced", { selector: "summary" }),
+  ).not.toBeInTheDocument();
   expect(mutateAsync).not.toHaveBeenCalled();
 });

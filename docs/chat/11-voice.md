@@ -962,7 +962,8 @@ verified Mini later requires only a catalog edit. Options and start validate the
 catalog choices again; no runtime model-name or voice-name allowlist exists.
 Adapters retain fixed origins and protocol/usage-source validation. Metadata alone
 never enables an unshipped adapter or overrides the paid platform rollout gate.
-Call setup displays the resolved model/voice, credential class, tariff and payer.
+Voice settings display the resolved model/voice and credential class, with the
+tariff and payer under **Credit usage**.
 
 Platform resolves through the existing shared platform ACL **before decrypting**
 the catalog master credential; fixed catalog destination, no user headers,
@@ -1010,8 +1011,9 @@ classification. Platform (`NyxidManagedMaster`) always bills the acting person,
 even when an org grant permits it. Personal own key bills that person; authorized
 org BYOK retains existing org-wallet billing. "Same billing person" identifies
 the actor, not a new rule overriding existing resource-owner BYOK accounting.
-Show the payer and both relevant prices before starting. NyxAgent/model/tool
-work retains its own normal execution billing independently of voice duration.
+Keep the payer and all applicable prices discoverable under **Credit usage** in
+voice settings; omit routine cost labels from the active call controls.
+NyxAgent/model/tool work retains its own normal execution billing independently of voice duration.
 
 ### Duration accounting in existing lanes
 
@@ -1166,10 +1168,9 @@ the authority; no browser-only lock or automatic takeover.
 
 On closure, append exactly one compact **Call receipt** through the existing
 thread message/sequence path with `via: "voice"`. Its deterministic server
-snapshot shows duration and a cost line only when usage meters exist: a voice-only
-call has one `Cost` value, mixed token/voice usage may show credits plus voice
-cost, and any unsettled meter shows `Cost: pending`; billing-disabled calls omit
-the cost line. It then lists
+snapshot shows duration without cost or pending-cost lines. Personal charges
+remain in **Billing & Usage → Usage**; creating the receipt does not query usage
+meters. It then lists
 each handed-off request using a bounded title from the user's source message,
 its `Done`, `Running`, `Queued`, `Cancelled` or `Needs your OK` state, an
 existing-thread result link when available, and any confirmation inline. Zero
@@ -1478,17 +1479,19 @@ voice action stays available while attachments or delegated text work change.
 Opening the same actor/thread voice control reveals the existing panel/session;
 it does not restart the call. The active panel is a compact composer control bar
 inside the same composer surface with status, microphone mute, speaker mute and
-End. Settings, source/pricing,
-tasks, resume, conflict/rejoin and Grok Hold to talk remain accessible. The waveform intentionally requests microphone permission and starts the exact
-available saved/default configuration after source, payer and applicable prices
-(including per-start fees) render. OpenAI defaults to Automatic hands-free input;
+End. Settings, tasks, resume, conflict/rejoin and Grok Hold to talk remain
+accessible. Prices, payer and billing explanations live under **Credit usage** in
+voice settings, outside the active controls. The waveform intentionally requests
+microphone permission and starts the exact available saved/default configuration
+after source validation. OpenAI defaults to Automatic hands-free input;
 an explicit saved mode remains authoritative and Grok requires Hold to talk. An
 unavailable saved source never silently selects another paid provider. The
 secondary Voice settings action in the microphone popup opens configuration
 without microphone permission or a provider start. End retains that panel's
 next-call settings; a later waveform start preserves them on the same binding.
-Before a provider start, the typed settings save updates the original actor's
-settings cache only after server confirmation. Close/reopen therefore retains
+Before a provider start, changed preferences are saved and update the original actor's
+settings cache only after server confirmation. Unchanged saved preferences skip
+that write; session creation still revalidates access and funding. Close/reopen therefore retains
 the confirmed source and input mode; a save completing after an account change
 cannot update either account's cache or authorize that start. Settings controls
 wait for initial saved-preference loading, and subsequent hydration does not
@@ -1514,6 +1517,12 @@ share one ephemeral capture owner. Account/thread navigation, disabled features,
 destroyed conversations, track revocation and component teardown fence late
 callbacks and close media. Audio contexts for capture/encoding are created and
 resumed during activation; autoplay rejection offers an explicit resume path.
+Dictation loads its encoder during this setup without connecting a microphone
+node. For an existing thread, read-only source/price discovery overlaps the
+permission/device wait and is reused only by that attempt and thread. New draft
+creation still follows permission; the metered connection waits for permission
+and validated source options. Rendering a price disclosure does not delay
+startup. Audio encoding starts only after the provider acknowledges readiness. Denial, cancellation and account changes cannot start a late session.
 
 ### Dictation review and draft integrity
 
@@ -1602,8 +1611,11 @@ Dictation reuses the administrator-authored OpenAI `voice_seconds` tariff and
 existing allowance → grant → wallet reservations/settlement. It measures
 **provider-confirmed transcription input seconds**, whereas conversational voice
 uses the adapter's documented conversational duration. Any actually charged,
-synced per-start `requests` component is disclosed alongside the input-second
-rate before capture. There is no source-code price or elapsed-clock user debit.
+synced per-start `requests` component is listed alongside the input-second
+rate under **Credit usage** in dictation settings. Recording and transcript review
+do not display prices or payer labels. The account menu’s **Usage** view includes
+these recorded charges and audio quantities alongside other service usage.
+There is no source-code price or elapsed-clock user debit.
 Funds are reserved before forwarding, renewed within the hard cap, and checked
 through normal funding primitives. Source labels name `gpt-live-transcribe`;
 conversational catalog model rows do not duplicate dictation choices.

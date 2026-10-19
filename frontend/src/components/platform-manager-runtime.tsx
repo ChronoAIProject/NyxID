@@ -30,16 +30,18 @@ import {
 } from "@/components/ui/form";
 
 const reasons: Record<NonNullable<PublicReadiness["reason"]>, string> = {
+  unsupported_input: "Use a text question or the available channel controls.",
   public_turn_failed:
     "The public turn failed. Try again to start a fresh turn.",
   mode_disabled: "Public access is not available on this server.",
   manager_unavailable: "The manager is unavailable.",
   emergency_stopped:
-    "The manager is stopped. Explicitly clear the stop before enabling access.",
+    "The bot is paused. Select the modes you want, then choose Resume bot.",
   personal_disabled: "Personal access is paused.",
   public_disabled: "Public access is paused.",
   owner_unavailable: "The owner account is unavailable.",
-  transport_unavailable: "Chat transport is unavailable.",
+  transport_unavailable:
+    "Connection repair required. Use Repair connection below, then refresh status.",
   origin_revoked: "This authorization was revoked.",
   engine_unavailable: "NyxAgent is unavailable.",
   insufficient_funds: "The sponsor has insufficient credits.",
@@ -94,14 +96,174 @@ export function ManagerRuntimeSettings({
     );
   const runtime = query.data.runtime;
   return (
-    <RuntimeForm
-      key={`${profile.generation}:${runtime?.manager_authority_epoch ?? 0}:${runtime?.personal_control_revision ?? 0}:${runtime?.public_policy_revision ?? 0}`}
-      profile={profile}
-      value={query.data}
-    />
+    <div className="space-y-3">
+      <BasicRuntimeForm
+        key={`${profile.generation}:${runtime?.manager_authority_epoch ?? 0}:${runtime?.personal_control_revision ?? 0}:${runtime?.public_policy_revision ?? 0}`}
+        profile={profile}
+        value={query.data}
+      />
+      <Button
+        variant="outline"
+        onClick={() => void query.refetch()}
+        disabled={query.isFetching}
+      >
+        Refresh status
+      </Button>
+    </div>
   );
 }
-function RuntimeForm({
+function BasicRuntimeForm({
+  profile,
+  value,
+}: {
+  profile: PlatformProfile;
+  value: ManagerRuntime;
+}) {
+  const runtime = value.runtime;
+  const stopped = runtime?.emergency_stopped === true;
+  const mutation = useManagerRuntimeAction(profile.id);
+  const [personal, setPersonal] = useState(
+    stopped
+      ? (runtime?.remembered_personal_enabled ?? false)
+      : (runtime?.personal_enabled ?? true),
+  );
+  const [publicEnabled, setPublic] = useState(
+    stopped
+      ? (runtime?.remembered_public_enabled ?? false)
+      : (runtime?.public_enabled ?? true),
+  );
+  const [source, setSource] = useState(runtime?.public_policy ? "ai" : "faq");
+  const [failure, setFailure] = useState<string>();
+  const [advanced, setAdvanced] = useState(false);
+  async function save(pause = false) {
+    setFailure(undefined);
+    try {
+      await mutation.mutateAsync({
+        action: "update",
+        body: {
+          ...runtimePreconditions(profile.generation, runtime),
+          ...(pause
+            ? { emergency_stopped: true }
+            : {
+                personal_enabled: personal,
+                public_enabled: publicEnabled,
+                ...(stopped ? { emergency_stopped: false } : {}),
+                ...(source === "faq" ? { public_policy: null } : {}),
+              }),
+        },
+      });
+    } catch (error) {
+      setFailure(
+        error instanceof Error
+          ? error.message
+          : "Could not save access. Refresh status and try again.",
+      );
+    }
+  }
+  return (
+    <section className="space-y-4 rounded-xl border border-border bg-card p-4 text-12">
+      <div className="flex flex-wrap gap-2">
+        <Badge variant={runtime?.public_enabled ? "success" : "secondary"}>
+          Public {runtime?.public_enabled ? "enabled" : "paused"}
+        </Badge>
+        <Badge variant={runtime?.personal_enabled ? "success" : "secondary"}>
+          Personal {runtime?.personal_enabled ? "enabled" : "paused"}
+        </Badge>
+        {stopped && <Badge variant="warning">Bot paused</Badge>}
+      </div>
+      <p role="status">
+        {value.public_readiness.status === "faq_ready"
+          ? "Built-in FAQ is ready. No model or sponsor is required."
+          : value.public_readiness.status === "ready"
+            ? "The configured public AI deployment is ready."
+            : reasons[value.public_readiness.reason ?? "public_disabled"]}
+      </p>
+      <form
+        className="space-y-3"
+        onSubmit={(event) => {
+          event.preventDefault();
+          void save();
+        }}
+      >
+        <label className="flex items-start gap-2">
+          <Checkbox
+            checked={publicEnabled}
+            onCheckedChange={(value) => setPublic(value === true)}
+          />
+          <span>
+            Public FAQ — approved help for visitors, without personal data.
+          </span>
+        </label>
+        <label className="flex items-start gap-2">
+          <Checkbox
+            checked={personal}
+            onCheckedChange={(value) => setPersonal(value === true)}
+          />
+          <span>
+            Personal NyxBot — sign in, review consent and confirm in this
+            private conversation.
+          </span>
+        </label>
+        {runtime?.public_policy ? (
+          <label className="block space-y-1">
+            Public answers
+            <select
+              aria-label="Public answers"
+              value={source}
+              onChange={(event) => setSource(event.target.value)}
+              className="h-8 w-full rounded-lg border border-input bg-background px-3"
+            >
+              <option value="faq">
+                Built-in approved FAQ (no inference credits)
+              </option>
+              <option value="ai">Saved public AI configuration</option>
+            </select>
+          </label>
+        ) : (
+          <p className="text-muted-foreground">
+            Public answers use the built-in approved FAQ. No inference credits
+            or model setup are required.
+          </p>
+        )}
+        {!personal && !publicEnabled && (
+          <p>Select at least one mode to enable or resume this bot.</p>
+        )}
+        {failure && <ErrorBanner message={failure} />}
+        <div className="flex flex-wrap gap-2">
+          <Button
+            type="submit"
+            variant="primary"
+            disabled={mutation.isPending || (!personal && !publicEnabled)}
+          >
+            {stopped ? "Resume bot" : runtime ? "Save modes" : "Enable bot"}
+          </Button>
+          {runtime && !stopped && (
+            <Button
+              type="button"
+              disabled={mutation.isPending}
+              onClick={() => void save(true)}
+            >
+              Pause bot
+            </Button>
+          )}
+        </div>
+      </form>
+      <p className="text-muted-foreground">
+        Pause stops FAQ and personal work. Personal turns use each person's
+        existing NyxBot permissions, memory and normal account billing in a
+        separate saved channel thread.
+      </p>
+      <details onToggle={(event) => setAdvanced(event.currentTarget.open)}>
+        <summary className="cursor-pointer">
+          Advanced public AI deployment
+        </summary>
+        {advanced && <AiRuntimeForm profile={profile} value={value} />}
+      </details>
+    </section>
+  );
+}
+
+export function AiRuntimeForm({
   profile,
   value,
 }: {
@@ -111,11 +273,10 @@ function RuntimeForm({
   const runtime = value.runtime;
   const policy = runtime?.public_policy;
   const mutation = useManagerRuntimeAction(profile.id);
-  const targets = useAdminPlatformTargets();
+  const targets = useAdminPlatformTargets(true);
   const [profiles, setProfiles] = useState<{ id: string; label: string }[]>([]);
   const [readiness, setReadiness] = useState(value.public_readiness);
   const [error, setError] = useState<string>();
-  const [clearConfirmed, setClearConfirmed] = useState(false);
   const form = useAppForm<PublicSetup>({
     resolver: zodResolver(publicSetupSchema),
     defaultValues: {
@@ -130,7 +291,12 @@ function RuntimeForm({
         profile.guide?.anonymous_daily_credits ??
         "0.5",
       sponsor_owner_user_id:
-        policy?.sponsor_owner_user_id ?? profile.funding_owner_user_id,
+        policy?.sponsor_owner_user_id ??
+        (targets.data?.orgs.some(
+          (org) => org.id === profile.funding_owner_user_id,
+        )
+          ? profile.funding_owner_user_id
+          : ""),
     },
   });
   const expected = runtimePreconditions(profile.generation, runtime);
@@ -138,15 +304,13 @@ function RuntimeForm({
   const stopped = runtime?.emergency_stopped === true || !!profile.deleted_at;
   const selection = form.watch("profile");
   function publicBody(values: PublicSetup) {
-    // Sponsor is selected at manager setup. An Advanced change is explicit.
     const { sponsor_owner_user_id, ...rest } = values;
     return {
       ...expected,
       public_policy: {
         ...rest,
         ...(rest.profile ? {} : { profile: undefined }),
-        ...(sponsor_owner_user_id !==
-        (policy?.sponsor_owner_user_id ?? profile.funding_owner_user_id)
+        ...(sponsor_owner_user_id !== policy?.sponsor_owner_user_id
           ? { sponsor_owner_user_id }
           : {}),
       },
@@ -214,7 +378,7 @@ function RuntimeForm({
         setError(
           values.profile
             ? reasons.profile_unavailable
-            : "Choose an advertised public profile in Advanced. This runtime has no public default.",
+            : "Choose an advertised public profile below. This runtime has no public default.",
         );
         return;
       }
@@ -251,31 +415,6 @@ function RuntimeForm({
       );
     }
   }
-  async function control(
-    action: "personal-enable" | "personal-pause" | "public-pause" | "clear",
-  ) {
-    setError(undefined);
-    try {
-      await mutation.mutateAsync({
-        action: action === "clear" ? "clear-emergency-stop" : "update",
-        body: {
-          ...expected,
-          ...(action === "personal-enable"
-            ? {
-                personal_enabled: true,
-                ...(!runtime ? { public_enabled: false } : {}),
-              }
-            : {}),
-          ...(action === "personal-pause" ? { personal_enabled: false } : {}),
-          ...(action === "public-pause" ? { public_enabled: false } : {}),
-        },
-      });
-    } catch {
-      setError(
-        "The control could not be updated. Reload settings and review the current state before retrying.",
-      );
-    }
-  }
   return (
     <Form {...form}>
       <form
@@ -292,9 +431,9 @@ function RuntimeForm({
           {stopped && <Badge variant="destructive">Manager stopped</Badge>}
         </div>
         <p>
-          Public FAQ and signup use the sponsor organization's credits. Linked
-          personal chats use each person's existing NyxBot access and normal
-          billing.
+          Optional public AI uses the selected sponsor organization's credits.
+          Built-in FAQ and signup links need no inference credits. Personal work
+          uses each person's existing account billing and organization rules.
         </p>
         <FormField
           control={form.control}
@@ -343,13 +482,6 @@ function RuntimeForm({
             />
           ))}
         </div>
-        <p>
-          Sponsor organization:{" "}
-          <span className="font-mono">
-            {form.watch("sponsor_owner_user_id") ||
-              "Select an authorized organization in Advanced"}
-          </span>
-        </p>
         <p className="text-muted-foreground">
           Public tools can read the public FAQ and offer signup or linking. They
           cannot access anyone's account, services, memory or machines.
@@ -375,19 +507,8 @@ function RuntimeForm({
                 : "Enable public guide"
               : "Enable bot"}
           </Button>
-          {runtime?.public_enabled && (
-            <Button
-              type="button"
-              variant="outline"
-              disabled={pending}
-              onClick={() => void control("public-pause")}
-            >
-              Pause public guide
-            </Button>
-          )}
         </div>
-        <details className="space-y-3 rounded-lg border border-border p-3">
-          <summary className="cursor-pointer font-medium">Advanced</summary>
+        <div className="space-y-3 rounded-lg border border-border p-3">
           <FormField
             control={form.control}
             name="profile"
@@ -466,55 +587,7 @@ function RuntimeForm({
             Rate, concurrency and execution limits are validated by the server.
             This API does not offer editable runtime bounds.
           </p>
-          <div className="space-y-2 border-t border-border pt-3">
-            <p className="font-medium">Personal Telegram access</p>
-            <p>
-              Enable personal access independently while public access is
-              unavailable. Each person still signs in, reviews consent and
-              confirms in the same private chat.
-            </p>
-            <Button
-              type="button"
-              variant="outline"
-              disabled={pending || stopped}
-              onClick={() =>
-                void control(
-                  runtime?.personal_enabled
-                    ? "personal-pause"
-                    : "personal-enable",
-                )
-              }
-            >
-              {runtime?.personal_enabled
-                ? "Pause personal access"
-                : "Enable personal access only"}
-            </Button>
-          </div>
-          {runtime?.emergency_stopped && (
-            <div className="space-y-2 border-t border-border pt-3">
-              <label className="flex items-start gap-2">
-                <Checkbox
-                  checked={clearConfirmed}
-                  onCheckedChange={(checked) =>
-                    setClearConfirmed(checked === true)
-                  }
-                />
-                <span>
-                  I reviewed the manager stop and want to clear it. This does
-                  not enable either access lane.
-                </span>
-              </label>
-              <Button
-                type="button"
-                variant="destructive"
-                disabled={!clearConfirmed || pending}
-                onClick={() => void control("clear")}
-              >
-                Clear manager emergency stop
-              </Button>
-            </div>
-          )}
-        </details>
+        </div>
       </form>
     </Form>
   );

@@ -38,6 +38,7 @@ vi.mock("@/hooks/use-platform-onboarding", () => ({
   useGatewayCleanup: () => ({ data: cleanup }),
   useGatewayCleanupAction: () => ({ mutate, isPending: false }),
   useAdminPlatformTargets: () => ({ data: { bots: [], orgs: [] } }),
+  useAdminPlatformProfile: () => ({ data: undefined }),
   useAdminPlatformProfiles: () => ({
     data: { profiles: [{ ...profile }], next_before_id: null },
   }),
@@ -64,6 +65,7 @@ beforeEach(() => {
 });
 it("requires rereview if retirement generation changes during confirmation", () => {
   const view = render(<AdminPlatformBotsPage />);
+  fireEvent.click(screen.getByText("Identifiers, cleanup and retirement"));
   fireEvent.click(screen.getByRole("button", { name: "Review retirement" }));
   profile.generation = 2;
   view.rerender(<AdminPlatformBotsPage />);

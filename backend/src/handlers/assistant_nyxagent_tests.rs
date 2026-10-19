@@ -2255,13 +2255,16 @@ async fn history_keeps_user_decisions_and_receipts_with_their_message_pages() {
     for index in 1..=30 {
         let at = start + chrono::Duration::minutes(index);
         message.id = uuid::Uuid::new_v4().to_string();
+        message.turn_id = uuid::Uuid::new_v4().to_string();
         message.seq = index + 1;
         message.created_at = at;
         messages.insert_one(&message).await.unwrap();
+        let mut chat = f.chat.clone();
+        chat.turn_id = Some(message.turn_id.clone());
         let summary = format!("Automatic change {index}");
         acks::record_auto_allowed(
             &f.state.db,
-            &f.chat,
+            &chat,
             "nyxid__update_agent_key",
             &json!({"index":index}),
             &auto,
@@ -2277,6 +2280,17 @@ async fn history_keeps_user_decisions_and_receipts_with_their_message_pages() {
             )
             .await
             .unwrap();
+        if index == 1 {
+            // Keep an older legacy receipt so the older-page assertion also
+            // exercises the timestamp fallback without presentation metadata.
+            decisions
+                .update_one(
+                    doc! {"summary": &summary},
+                    doc! {"$unset": {"creation_turn_id": ""}},
+                )
+                .await
+                .unwrap();
+        }
     }
     let page = |limit, before_seq| {
         history(
@@ -2473,6 +2487,7 @@ async fn cards_decided_during_a_turn_are_reported_to_the_next_turn_exactly_once(
         summary: "Summary text that must not be echoed".into(),
         status: status.into(),
         requested_turn_id: None,
+        creation_turn_id: None,
         trigger_run_id: None,
         created_at: Utc::now(),
         decided_at: decided,

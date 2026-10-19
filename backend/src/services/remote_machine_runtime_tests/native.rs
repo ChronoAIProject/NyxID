@@ -316,8 +316,21 @@ async fn native_delete_records_resource_cleanup_while_accounting_waits_then_sett
     Mock::given(method("GET"))
         .respond_with(|request: &wiremock::Request| {
             let path = request.url.path();
-            if path.ends_with("/pods") || path.ends_with("/persistentvolumeclaims") {
-                ResponseTemplate::new(200).set_body_json(json!({"items":[]}))
+            if path.ends_with("/pods") || path.ends_with("/persistentvolumeclaims")
+                || path.ends_with("/persistentvolumes") || path.ends_with("/volumeattachments") {
+                let kind = if path.ends_with("/pods") {
+                    "PodList"
+                } else if path.ends_with("/persistentvolumeclaims") {
+                    "PersistentVolumeClaimList"
+                } else if path.ends_with("/persistentvolumes") {
+                    "PersistentVolumeList"
+                } else {
+                    "VolumeAttachmentList"
+                };
+                ResponseTemplate::new(200).set_body_json(json!({
+                    "kind":kind,"apiVersion":if path.ends_with("/volumeattachments") {"storage.k8s.io/v1"} else {"v1"},
+                    "metadata":{"resourceVersion":"complete-native-cleanup-fixture"},"items":[]
+                }))
             } else {
                 // The bound Sandbox, tracked Pod, PVC and Delete-policy PV are
                 // all absent in this explicit Kubernetes API fixture.
@@ -338,11 +351,13 @@ async fn native_delete_records_resource_cleanup_while_accounting_waits_then_sett
     assert!(Box::pin(manager.observe(&deleting)).await.is_err());
     let pending = current(&f, &deleting.node_id).await;
     assert_eq!(pending.cleanup_state, "complete");
-    assert!(
-        pending
-            .cleanup_evidence_digest
-            .as_deref()
-            .is_some_and(|value| value.starts_with("kubernetes-native-cleanup:"))
+    let resource_evidence = pending.delete_recovery.as_ref().unwrap();
+    assert!(resource_evidence.resources_complete);
+    assert!(!resource_evidence.evidence_id.is_empty());
+    assert_eq!(
+        pending.cleanup_evidence_digest.as_deref(),
+        Some(resource_evidence.evidence_id.as_str()),
+        "resource cleanup remains durably visible before accounting finality"
     );
     assert_eq!(pending.resource_state, ResourceState::Deleting);
     assert_eq!(pending.billing_state, BillingState::Pending);
@@ -390,11 +405,28 @@ async fn native_delete_records_resource_cleanup_while_accounting_waits_then_sett
     }
 
     manager.billing = Some(f.billing.clone());
+    // The accounting dependency recovered. Advance only this original accepted
+    // delete's retry clock; resource evidence and settlement identity stay fixed.
+    let retry =
+        f.db.collection::<Document>(OPERATIONS)
+            .update_one(
+                doc! {"_id":&pending.active_operation_id,"owner_id":&pending.owner_id,
+                "machine_id":&pending.node_id,"action":"delete","terminal_at":bson::Bson::Null},
+                doc! {"$set":{"next_attempt_at":bson::Bson::Null}},
+            )
+            .await
+            .unwrap();
+    assert_eq!(retry.matched_count, 1);
     Box::pin(manager.observe(&pending)).await.unwrap();
     let deleted = current(&f, &pending.node_id).await;
     assert_eq!(deleted.resource_state, ResourceState::Deleted);
     assert_eq!(deleted.billing_state, BillingState::Closed);
     assert_eq!(deleted.cleanup_state, "complete");
+    assert_eq!(
+        deleted.cleanup_evidence_digest,
+        pending.cleanup_evidence_digest
+    );
+    assert_eq!(deleted.active_operation_id, pending.active_operation_id);
     assert_eq!(wallet(&f).await.reserved_credits, Credits::ZERO);
     assert!(
         lifecycle::list_machines(&f.db, &f.owner)

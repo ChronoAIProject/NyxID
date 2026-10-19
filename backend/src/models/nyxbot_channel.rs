@@ -83,6 +83,9 @@ pub struct NyxbotChannel {
     pub gateway_record_id: Option<String>,
     #[serde(default)]
     pub gateway_version: Option<i64>,
+    /// Confirmed gateway echo of reply.ack_after_ms=0; absent means unverified.
+    #[serde(default)]
+    pub gateway_no_progress: bool,
     #[serde(default)]
     pub binding_id: Option<String>,
     /// Gateway only: the group admission last set on the gateway channel
@@ -306,8 +309,10 @@ pub struct NyxbotEvent {
     pub relay_message_id: Option<String>,
     #[serde(with = "crate::models::bson_bytes::optional", default)]
     pub event_context_ciphertext: Option<Vec<u8>>,
-    /// `running`, `completed`, `failed`, or `refused`. A proven no-turn human
-    /// Busy attempt may be `retryable`, atomically claimed as `resuming`.
+    /// `running`, `queued`, `completed`, `failed`, or `refused`. Queued work is
+    /// accepted with its original source before it is bound to an execution turn.
+    /// A proven no-turn human Busy attempt may be `retryable`, atomically
+    /// claimed as `resuming`.
     pub status: String,
     #[serde(default)]
     pub conversation_id: Option<String>,
@@ -404,13 +409,19 @@ pub struct ChannelTurnDelivery {
     #[serde(default)]
     pub sender_kind: Option<super::channel_thread::ThreadSenderKind>,
     pub version: i32,
-    /// waiting (stream), pending (async), streamed, sending, sent, unknown, refused.
+    /// waiting (stream), pending (async), streamed, sending, sent, silent, unknown, refused.
     pub state: String,
     pub origin: super::assistant_conversation::ChannelOrigin,
     pub sender_id: String,
     pub guest: bool,
     pub addressed: bool,
     pub transport: String,
+    /// Captured managed route authority for generic queued execution. Legacy
+    /// unanchored queued work cannot adopt a replacement route/key.
+    #[serde(default)]
+    pub source_route_id: Option<String>,
+    #[serde(default)]
+    pub source_route_api_key_id: Option<String>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub stream_deadline: DateTime<Utc>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]

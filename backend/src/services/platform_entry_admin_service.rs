@@ -170,6 +170,9 @@ async fn pending(
             let row=state.db.collection::<Document>(BOTS).find_one(doc! {"_id":*bot,"is_active":true,"status":"active","$or":[{"platform_profile_id":{"$exists":false}},{"platform_entry_version":2,"platform_entry_pending":{"$exists":true}}]})
                 .session(&mut *session).await?.ok_or_else(refused)?;
             let selected = platform(row.get_str("platform").map_err(|_|refused())?)?;
+            if selected == EntryPlatform::X && row.get_bool("webhook_registered").ok() != Some(true) {
+                return Err(AppError::Conflict("Enable X activity webhooks on the connection before preparing a shared entry; ordinary DM polling cannot verify native shared login".into()));
+            }
             if **transport == bson::to_bson(&NativeTransportChoice::Gateway).map_err(|_|refused())? {
                 super::platform_entry_gateway_service::require_supported_platform(selected)?;
             }

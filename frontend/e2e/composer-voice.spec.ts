@@ -305,6 +305,7 @@ for (const width of [320, 390, 1280])
     await expect(page.getByRole("dialog")).toHaveCount(0);
     await chevron.hover();
     await expect(page.getByRole("switch", { name: "Hold to record" })).toBeVisible();
+    await expect(page.getByText("Credit usage", { exact: true })).toBeVisible();
     const menu = await page.getByRole("dialog").boundingBox();
     expect(menu!.x).toBeGreaterThanOrEqual(0);
     expect(menu!.x + menu!.width).toBeLessThanOrEqual(width);
@@ -362,6 +363,7 @@ test("dictation preserves rich selected draft and attachments; confirm focuses e
   await expect(page.getByLabel("Dictation review")).toContainText(
     "first second interim",
   );
+  await expect(page.getByText(/credits per input audio second/)).toHaveCount(0);
   await page.getByRole("button", { name: "Stop dictation for review" }).click();
   await expect(page.locator(".composer-audio-surface")).not.toHaveAttribute(
     "data-audio-active",
@@ -377,6 +379,13 @@ test("dictation preserves rich selected draft and attachments; confirm focuses e
   await expect(input).toContainText("old world");
   expect(calls.dictations).toBe(1);
   expect(calls.starts).toBe(0);
+  await page.getByRole("button", { name: "Dictate a message" }).hover();
+  await page.getByRole("button", { name: "Configure dictation" }).hover();
+  await expect(page.getByText(/credits per input audio second/)).toBeHidden();
+  await page.getByText("Credit usage", { exact: true }).click();
+  await expect(page.getByText(/credits per input audio second/)).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(page.getByText(/credits per input audio second/)).toHaveCount(0);
 });
 test("permission cancellation fences late grants and escape restores selection", async ({
   page,
@@ -422,6 +431,13 @@ test("integrated active voice uses real fixture levels, keeps one session and pr
   await expect(
     page.getByText("A real event-shaped live caption"),
   ).toBeVisible();
+  await expect(page.getByText(/credits per second/)).toHaveCount(0);
+  await page.getByRole("button", { name: "Voice settings", exact: true }).click();
+  await expect(page.getByText(/credits per second/)).toBeHidden();
+  await page.getByText("Credit usage", { exact: true }).click();
+  await expect(page.getByText(/credits per second/)).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(page.getByText(/credits per second/)).toHaveCount(0);
   await page.getByRole("button", { name: "Open voice call" }).click();
   const waveform = page.getByRole("button", { name: "Open voice call" });
   const primary = await waveform.evaluate((element) => {

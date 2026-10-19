@@ -4,8 +4,9 @@ metadata:
   name: nyxid-machine-manager
   namespace: nyxid-machine
 rules:
-  # Manager can submit and observe Sandbox intent only. The Agent Sandbox
-  # controller remains the sole Pod/PVC reconciler; no pod/exec or pvc writes.
+  # Agent Sandbox remains the Pod/PVC creator. Recovery may delete exact
+  # residual original children with UID/resourceVersion preconditions; no
+  # pod/exec, child creation, child patch or finalizer mutation is granted.
   - apiGroups: ["agents.x-k8s.io"]
     resources: ["sandboxes"]
     verbs: ["get", "list", "watch", "create", "patch", "update", "delete"]
@@ -15,7 +16,7 @@ rules:
   # Read-only observations bind Pod/PVC UIDs to Sandbox ownerReferences.
   - apiGroups: [""]
     resources: ["pods", "persistentvolumeclaims"]
-    verbs: ["get", "list", "watch"]
+    verbs: ["get", "list", "watch", "delete"]
   - apiGroups: [""]
     resources: ["events"]
     verbs: ["get", "list", "watch"]

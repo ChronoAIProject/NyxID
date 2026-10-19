@@ -38,6 +38,7 @@ import { steeringNotice } from "@/lib/assistant/nyxagent-steering";
 import type { RuntimeToolCallInfo } from "@/lib/assistant/runtime-event-semantics";
 import { describeToolActivity } from "@/lib/assistant/tool-activity-text";
 import { MachineToolCard } from "./machine-tool-card";
+import { MessageCopyAction } from "./message-copy-action";
 import { MessageTime } from "./message-time";
 import { useAssistantFeedback } from "@/hooks/use-assistant-feedback";
 import { capture } from "@/lib/telemetry";
@@ -507,7 +508,7 @@ export function ChatMessageBubble({
             </p>
           ) : null}
         </div>
-        <MessageTime value={message.timestamp} reveal />
+        <div className="flex items-center gap-1"><MessageCopyAction text={content} /><MessageTime value={message.timestamp} reveal /></div>
       </div>
     );
   }
@@ -738,6 +739,7 @@ export function ChatMessageBubble({
             streaming reply has no settled instant yet. */}
         {streaming ? null : (
           <div className="mt-2 flex flex-wrap items-center gap-1 empty:hidden">
+            <MessageCopyAction text={content} />
             {showFeedback ? (
               <div
                 role="group"

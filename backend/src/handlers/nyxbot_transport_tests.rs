@@ -573,12 +573,23 @@ async fn gateway_return_preserves_exact_private_chat_mapping_without_merging_sen
     set_flag(&state, FlagTarget::User(OWNER.into()), true).await;
     switch_to_gateway(&state).await.unwrap();
     let on = load_channel(&state, OWNER, &row.id).await.unwrap();
+    assert_eq!(
+        chats::sync_gateway_groups(&state, &on, true).await.unwrap(),
+        None
+    );
+    assert!(
+        load_channel(&state, OWNER, &row.id)
+            .await
+            .unwrap()
+            .gateway_no_progress
+    );
     chats::adopt_relay_chat(&state, &on, PARTITION, "dm", "guest", None)
         .await
         .unwrap();
     set_flag(&state, FlagTarget::User(OWNER.into()), false).await;
     switch_to_gateway(&state).await.unwrap();
     let off = load_channel(&state, OWNER, &row.id).await.unwrap();
+    assert!(!off.gateway_no_progress);
     assert_eq!(
         chats::partition_after_gateway(&state, &off, relay.clone())
             .await
@@ -592,10 +603,23 @@ async fn gateway_return_preserves_exact_private_chat_mapping_without_merging_sen
             .unwrap(),
         stranger
     );
+    // A legacy direct row may still contain proof from an old binding.
+    state
+        .db
+        .collection::<NyxbotChannel>(CHANNELS)
+        .update_one(
+            doc! {"_id": &row.id},
+            doc! {"$set": {"gateway_no_progress": true}},
+        )
+        .await
+        .unwrap();
     // A second move gets a new gateway partition but retains this same chat.
     set_flag(&state, FlagTarget::User(OWNER.into()), true).await;
     switch_to_gateway(&state).await.unwrap();
     let on = load_channel(&state, OWNER, &row.id).await.unwrap();
+    // mock_gateway asserts proof is false at the actual pending-key callback;
+    // move_to_gateway then earns new proof from its complete policy echo.
+    assert!(on.gateway_no_progress);
     let next = format!("conv_{}", "a".repeat(32));
     chats::adopt_relay_chat(&state, &on, &next, "dm", "guest", None)
         .await

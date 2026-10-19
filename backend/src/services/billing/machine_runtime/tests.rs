@@ -301,7 +301,7 @@ async fn wait_for_evidence(time: DateTime<Utc>) {
     // Production accepts no more than one second of observation clock skew.
     // Leave half that allowance as test scheduling headroom, never alter data clocks.
     if let Ok(delay) = (time - Utc::now() - Duration::milliseconds(500)).to_std() {
-        assert!(delay.as_secs() < 10);
+        assert!(delay.as_secs() < 60);
         tokio::time::sleep(delay).await;
     }
 }
@@ -1077,9 +1077,10 @@ async fn accepted_old_and_new_versions_coexist_through_renewal_settlement_and_la
 async fn fractional_windows_finalize_atomically_once_and_drop_the_final_fraction() {
     let f = fixture("runtime_fractional_windows").await;
     let base = Utc::now();
-    let boundary = base + Duration::seconds(3);
-    let end = boundary + Duration::milliseconds(600);
-    let ready_at = boundary - Duration::milliseconds(600);
+    // Keep the fractional carry while leaving time for admission on loaded runners.
+    let boundary = base + Duration::seconds(30) + Duration::milliseconds(600);
+    let end = boundary + Duration::seconds(30);
+    let stop = boundary + Duration::milliseconds(600) - Duration::nanoseconds(1);
     let (w, _, _) = start(
         &f,
         &Uuid::new_v4().to_string(),
@@ -1087,6 +1088,12 @@ async fn fractional_windows_finalize_atomically_once_and_drop_the_final_fraction
         boundary,
     )
     .await;
+    let whole_seconds = (boundary - Utc::now() - Duration::milliseconds(600)).num_seconds();
+    assert!(
+        whole_seconds > 0,
+        "initial admission exhausted the test window"
+    );
+    let ready_at = boundary - Duration::seconds(whole_seconds) - Duration::milliseconds(600);
     wait_for_evidence(ready_at).await;
     ready(&f, &w.run_id, 1, ready_at).await;
     let next = f
@@ -1141,20 +1148,30 @@ async fn fractional_windows_finalize_atomically_once_and_drop_the_final_fraction
             .is_none()
     );
     assert_eq!(finalize(&f, &w.run_id).await.len(), 1);
-    assert_eq!(run(&f, &w.run_id).await.cumulative_seconds, 0);
+    let first = run(&f, &w.run_id).await;
+    assert_eq!(
+        first.cumulative_covered_ns,
+        whole_seconds * SECOND_NS + 600_000_000
+    );
+    assert_eq!(first.cumulative_seconds, whole_seconds);
     assert!(finalize(&f, &w.run_id).await.is_empty());
     settle(&f, &w.run_id).await;
-    let stop = end - Duration::nanoseconds(1);
     wait_for_evidence(stop).await;
     stopped(&f, &w.run_id, 1, stop).await;
     assert_eq!(finalize(&f, &w.run_id).await.len(), 1);
     settle(&f, &w.run_id).await;
     let saved = run(&f, &w.run_id).await;
-    assert_eq!(saved.cumulative_covered_ns, 1_199_999_999);
-    assert_eq!(saved.cumulative_seconds, 1);
+    assert_eq!(
+        saved.cumulative_covered_ns,
+        whole_seconds * SECOND_NS + 1_199_999_999
+    );
+    assert_eq!(saved.cumulative_seconds, whole_seconds + 1);
     assert_eq!(
         wallet(&f).await.pending_lago_debits,
-        f.rate.credits_per_second
+        f.rate
+            .credits_per_second
+            .checked_mul(whole_seconds + 1)
+            .unwrap()
     );
     assert_eq!(wallet(&f).await.reserved_credits, Credits::ZERO);
     tx!(

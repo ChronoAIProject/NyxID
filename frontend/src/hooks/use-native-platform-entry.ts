@@ -38,9 +38,10 @@ export function useNativeEntryConversion() {
   const actor = useAuthStore((s) => s.user?.id);
   const client = useQueryClient();
   return useMutation({
+    gcTime: 0,
     mutationFn: async (input: {
       channel_bot_id: string;
-      funding_owner_user_id: string;
+      funding_owner_user_id?: string;
       transport: NativeTransport;
       recovery?: NativeSetupRecovery;
       lifecycle_review?: NativeLifecycleReview;
@@ -58,6 +59,7 @@ export function useNativeEntryConversion() {
       // A failed provider check can still leave a durable paused reservation.
       for (const queryKey of [
         ["admin-platform-profiles"],
+        ["admin-platform-profile"],
         ["platform-runtime"],
         ["admin-platform-targets"],
       ])
@@ -68,6 +70,7 @@ export function useNativeEntryConversion() {
 export function useNativeGatewayInspection() {
   const actor = useAuthStore((s) => s.user?.id);
   return useMutation({
+    gcTime: 0,
     mutationFn: async (bot: string) =>
       nativeSetupRecoverySchema.parse(
         await apiClient(`/admin/platform-bots/native/${bot}/inspect`, {
@@ -81,6 +84,7 @@ export function useNativeGatewayInspection() {
 export function useNativeLifecycleReview() {
   const actor = useAuthStore((s) => s.user?.id);
   return useMutation({
+    gcTime: 0,
     mutationFn: async (bot: string) =>
       nativeLifecycleReviewSchema.parse(
         await apiClient(`/admin/platform-bots/native/${bot}/review`, {

@@ -93,7 +93,8 @@ pub(super) async fn reconcile(state: &AppState) -> AppResult<()> {
             {"transport": "gateway", "pending_route_api_key_id": {"$ne": null}, "relay_attempted_at": {"$lt": stale}}
         ]},
         vec![doc! {"$set": {"pending_agent_api_key_id": "$$REMOVE", "pending_route_api_key_id": "$$REMOVE",
-            "binding_id": {"$cond": [{"$eq": ["$transport", "direct"]}, "$$REMOVE", "$binding_id"]}}}],
+            "binding_id": {"$cond": [{"$eq": ["$transport", "direct"]}, "$$REMOVE", "$binding_id"]},
+            "gateway_no_progress": {"$cond": [{"$eq": ["$transport", "direct"]}, false, "$gateway_no_progress"]}}}],
     ).await? {
         for (key, owner) in [
             (stuck.pending_agent_api_key_id.as_deref(), stuck.user_id.as_str()),
@@ -220,7 +221,7 @@ async fn move_to_direct(state: &AppState, row: &NyxbotChannel) -> Result<(), &'s
     }
     let mut fence = fence;
     fence.insert("pending_route_api_key_id", &next.id);
-    let update = doc! {"$set": {"transport": "direct", "route_api_key_id": &next.id, "updated_at": bson::DateTime::now()},
+    let update = doc! {"$set": {"transport": "direct", "gateway_no_progress": false, "route_api_key_id": &next.id, "updated_at": bson::DateTime::now()},
     "$unset": {"agent_api_key_id": "", "agent_key_ciphertext": "", "gateway_channel_id": "",
         "gateway_record_id": "", "gateway_threads": "", "gateway_version": "", "binding_id": "", "gateway_bot_id": "",
         "gateway_groups": "", "gateway_groups_retry_at": "", "gateway_attempted_at": "", "gateway_fallback_at": "",

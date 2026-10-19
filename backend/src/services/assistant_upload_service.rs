@@ -58,6 +58,7 @@ pub fn metadata(row: &AssistantUpload) -> TurnAttachment {
     TurnAttachment {
         chat_delivery: None,
         image_input: None,
+        image_inspection: None,
         id: row.id.clone(),
         label: row.label.clone(),
         content_type: row.content_type.clone(),
@@ -2493,6 +2494,7 @@ mod integration_tests {
             pages: Some(0),
             chat_delivery: None,
             image_input: None,
+            image_inspection: None,
         };
         assert_eq!(
             image_plan(
@@ -2701,6 +2703,7 @@ mod integration_tests {
             pages: None,
             chat_delivery: None,
             image_input: None,
+            image_inspection: None,
         };
         let cap = json!({"protocol":"nyxagent-input-image-v1","input_image":{"version":1,"sources":["nyxid_attachment_url"],"max_images":1,"max_image_bytes":10,"max_total_bytes":10,"content_types":["image/png"]}});
         assert!(

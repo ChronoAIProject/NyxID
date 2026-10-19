@@ -1,6 +1,9 @@
 import { beforeEach, expect, it, vi } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
-import { ManagerRuntimeSettings } from "./platform-manager-runtime";
+import {
+  AiRuntimeForm,
+  ManagerRuntimeSettings,
+} from "./platform-manager-runtime";
 import { ApiError } from "@/lib/api-client";
 import type { ManagerRuntime } from "@/schemas/platform-runtime";
 import type { PlatformProfile } from "@/schemas/platform-onboarding";
@@ -19,7 +22,9 @@ vi.mock("@/hooks/use-platform-runtime", () => ({
   useManagerRuntimeAction: () => ({ mutateAsync, isPending: false }),
 }));
 vi.mock("@/hooks/use-platform-onboarding", () => ({
-  useAdminPlatformTargets: () => ({ data: { orgs: [] } }),
+  useAdminPlatformTargets: () => ({
+    data: { orgs: [{ id: sponsor, display_name: "AI sponsor" }] },
+  }),
 }));
 const unavailable = {
   status: "unavailable" as const,
@@ -63,7 +68,7 @@ beforeEach(() => {
 });
 
 it("does no automatic paid discovery and initializes both lanes with the exact creation CAS", async () => {
-  render(<ManagerRuntimeSettings profile={profile} />);
+  render(<AiRuntimeForm profile={profile} value={query.data} />);
   expect(mutateAsync).not.toHaveBeenCalled();
   expect(screen.getByLabelText("Total public budget per day")).toHaveValue(
     "10",
@@ -86,6 +91,7 @@ it("does no automatic paid discovery and initializes both lanes with the exact c
       public_policy: {
         source: "nyxagent",
         profile: "nyxagent/chat",
+        sponsor_owner_user_id: sponsor,
         total_daily_credits: "10",
         sender_daily_credits: "0.5",
       },
@@ -99,7 +105,7 @@ it("explains rejected public authority without blaming the selected profile", as
     default_profile: null,
     readiness: { ...unavailable, reason: "public_authority_rejected" },
   });
-  render(<ManagerRuntimeSettings profile={profile} />);
+  render(<AiRuntimeForm profile={profile} value={query.data} />);
   fireEvent.click(screen.getByRole("button", { name: "Enable bot" }));
   await waitFor(() =>
     expect(screen.getByRole("status")).toHaveTextContent(
@@ -123,7 +129,7 @@ it("gives an actionable sponsor funding error and does not enable after a failed
       message: "Insufficient billing credits",
     });
   });
-  render(<ManagerRuntimeSettings profile={profile} />);
+  render(<AiRuntimeForm profile={profile} value={query.data} />);
   fireEvent.click(screen.getByRole("button", { name: "Enable bot" }));
   expect(
     await screen.findByText(/Add credits to the sponsor organization/),
@@ -141,7 +147,7 @@ it("does not enable either lane on unavailable public proof, with explicit perso
         }
       : { public_readiness: unavailable },
   );
-  render(<ManagerRuntimeSettings profile={profile} />);
+  render(<AiRuntimeForm profile={profile} value={query.data} />);
   fireEvent.click(screen.getByRole("button", { name: "Enable bot" }));
   await screen.findByText(
     /Public access is unavailable. Settings were not enabled/,
@@ -150,26 +156,16 @@ it("does not enable either lane on unavailable public proof, with explicit perso
     "profiles",
     "readiness",
   ]);
-  fireEvent.click(screen.getByText("Advanced", { selector: "summary" }));
-  fireEvent.click(
-    screen.getByRole("button", { name: "Enable personal access only" }),
-  );
-  await waitFor(() => expect(mutateAsync).toHaveBeenCalledTimes(3));
-  expect(mutateAsync.mock.calls[2]![0]).toEqual({
-    action: "update",
-    body: {
-      initialize: true,
-      expected_profile_generation: 7,
-      expected_manager_authority_epoch: 0,
-      expected_personal_control_revision: 0,
-      expected_public_policy_revision: 0,
-      personal_enabled: true,
-      public_enabled: false,
-    },
-  });
+  expect(
+    screen.queryByRole("button", { name: "Enable personal access only" }),
+  ).not.toBeInTheDocument();
+  expect(
+    screen.queryByRole("button", { name: "Clear manager emergency stop" }),
+  ).not.toBeInTheDocument();
+  expect(mutateAsync).toHaveBeenCalledTimes(2);
 });
 
-it("retains exact existing money and keeps personal control out of public save and pause", async () => {
+it("retains exact existing money and keeps lane controls out of public AI save", async () => {
   query.data.runtime = {
     manager_authority_epoch: 1,
     personal_control_revision: 2,
@@ -185,7 +181,7 @@ it("retains exact existing money and keeps personal control out of public save a
       sender_daily_credits: "0.123456789012",
     },
   };
-  render(<ManagerRuntimeSettings profile={profile} />);
+  render(<AiRuntimeForm profile={profile} value={query.data} />);
   expect(screen.getByLabelText("Free quota per person per day")).toHaveValue(
     "0.123456789012",
   );
@@ -206,13 +202,9 @@ it("retains exact existing money and keeps personal control out of public save a
       sender_daily_credits: "0.123456789012",
     },
   });
-  fireEvent.click(screen.getByRole("button", { name: "Pause public guide" }));
-  expect(mutateAsync.mock.calls[3]![0].body).toEqual({
-    expected_manager_authority_epoch: 1,
-    expected_personal_control_revision: 2,
-    expected_public_policy_revision: 3,
-    public_enabled: false,
-  });
+  expect(
+    screen.queryByRole("button", { name: "Pause public guide" }),
+  ).not.toBeInTheDocument();
 });
 
 it("preserves legacy saved monetary limits and distinguishes unsupported routes", () => {
@@ -223,7 +215,7 @@ it("preserves legacy saved monetary limits and distinguishes unsupported routes"
       anonymous_daily_credits: "0.2",
     },
   } as PlatformProfile;
-  const view = render(<ManagerRuntimeSettings profile={saved} />);
+  const view = render(<AiRuntimeForm profile={saved} value={query.data} />);
   expect(screen.getByLabelText("Total public budget per day")).toHaveValue(
     "9.123456789012",
   );
@@ -241,7 +233,7 @@ it("reports an unsupported public runtime without blaming the selected profile o
     default_profile: null,
     readiness: { ...unavailable, reason: "public_contract_unsupported" },
   });
-  render(<ManagerRuntimeSettings profile={profile} />);
+  render(<AiRuntimeForm profile={profile} value={query.data} />);
   fireEvent.click(screen.getByRole("button", { name: "Enable bot" }));
   expect(
     (
@@ -262,7 +254,7 @@ it("requires an explicit selection when discovery advertises no public default",
     default_profile: null,
     readiness: unavailable,
   });
-  render(<ManagerRuntimeSettings profile={profile} />);
+  render(<AiRuntimeForm profile={profile} value={query.data} />);
   fireEvent.click(screen.getByRole("button", { name: "Enable bot" }));
   expect(
     await screen.findByText(/This runtime has no public default/),
@@ -282,7 +274,7 @@ it("uses the advertised public default for first enable and omits a guessed prof
         ? { public_readiness: ready() }
         : query.data,
   );
-  render(<ManagerRuntimeSettings profile={profile} />);
+  render(<AiRuntimeForm profile={profile} value={query.data} />);
   fireEvent.click(screen.getByRole("button", { name: "Enable bot" }));
   await waitFor(() => expect(mutateAsync).toHaveBeenCalledTimes(3));
   expect(
@@ -312,7 +304,7 @@ it("rejects expired readiness without sending an update", async () => {
           },
         },
   );
-  render(<ManagerRuntimeSettings profile={profile} />);
+  render(<AiRuntimeForm profile={profile} value={query.data} />);
   fireEvent.click(screen.getByRole("button", { name: "Enable bot" }));
   expect(
     await screen.findByText(/Settings were not enabled/),
@@ -351,7 +343,7 @@ it("allows applying a changed deployment with unchanged public settings and bind
         ? { public_readiness: { ...ready(), policy_digest: "b".repeat(64) } }
         : query.data,
   );
-  render(<ManagerRuntimeSettings profile={profile} />);
+  render(<AiRuntimeForm profile={profile} value={query.data} />);
   const apply = screen.getByRole("button", {
     name: "Validate and apply public deployment",
   });
