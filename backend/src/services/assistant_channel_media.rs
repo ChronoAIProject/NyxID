@@ -22,7 +22,7 @@ use mongodb::{
     Database,
     bson::{self, doc},
 };
-use std::{sync::Arc, time::Duration};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 pub const FAILED_NOTE: &str =
     "The attachments in this message could not be processed; please ask the owner to resend them.";
@@ -137,6 +137,19 @@ fn outcome(
     }
 }
 
+type ItemOrder = HashMap<(String, usize, bool), (usize, usize)>;
+
+fn remember_order(order: &mut ItemOrder, event: &NyxbotEvent) {
+    if let Some(media) = &event.media {
+        for (position, item) in media.items.iter().enumerate() {
+            order.insert(
+                (event.id.clone(), item.index, item.embedded),
+                (position + 1, media.declared),
+            );
+        }
+    }
+}
+
 pub(crate) async fn pending_receipt(
     db: &Database,
     ids: &[String],
@@ -148,6 +161,7 @@ pub(crate) async fn pending_receipt(
         failed: Vec::new(),
         context: String::new(),
     };
+    let mut order = ItemOrder::new();
     for id in ids {
         if let Some(event) = db
             .collection::<NyxbotEvent>(EVENTS)
@@ -155,6 +169,7 @@ pub(crate) async fn pending_receipt(
             .await?
             && let Some(media) = &event.media
         {
+            remember_order(&mut order, &event);
             for item in &media.items {
                 receipt.failed.push(outcome(
                     &event,
@@ -187,11 +202,11 @@ pub(crate) async fn pending_receipt(
             });
         }
     }
-    receipt.context = context(&receipt);
+    receipt.context = context(&receipt, &order);
     Ok(receipt)
 }
 
-fn context(receipt: &MediaBound) -> String {
+fn context(receipt: &MediaBound, order: &ItemOrder) -> String {
     if receipt.failed.is_empty() {
         return String::new();
     }
@@ -199,8 +214,32 @@ fn context(receipt: &MediaBound) -> String {
     if receipt.ok.is_empty() {
         text.push_str(FAILED_NOTE);
     }
-    for (position, item) in receipt.failed.iter().take(100).enumerate() {
-        text.push_str(&format!("\nAttachment {}: {}.", position + 1, item.status));
+    for item in receipt.failed.iter().take(100) {
+        if item.index.is_none() && item.status.ends_with(" more embedded media omitted") {
+            text.push_str(&format!("\n{}.", item.status));
+            continue;
+        }
+        let phrase = match item.status.as_str() {
+            "too_large" => "too large",
+            "source_unavailable" => "source unavailable",
+            "unsupported_or_invalid" => "unsupported or invalid file",
+            "rate_limited" => "upload limit reached",
+            "fetch_or_store_failed" => "download or storage failed",
+            "timeout" | "not_processed: timeout" => "timed out",
+            "not_processed: stopped" => "turn stopped",
+            "not_processed: expired" => "source expired",
+            _ => "processing failed",
+        };
+        let ordinal = item
+            .index
+            .and_then(|index| order.get(&(item.event_id.clone(), index, item.embedded)));
+        if let Some((position, total)) = ordinal {
+            text.push_str(&format!(
+                "\nAttachment {position} of {total} could not be read ({phrase})."
+            ));
+        } else {
+            text.push_str(&format!("\nAn attachment could not be read ({phrase})."));
+        }
     }
     text
 }
@@ -326,6 +365,7 @@ async fn collect(
     message: &AssistantMessage,
 ) -> AppResult<MediaBound> {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(90);
+    let mut order = ItemOrder::new();
     let mut receipt = MediaBound {
         event_ids: message.media_event_ids.clone(),
         ok: Vec::new(),
@@ -351,6 +391,7 @@ async fn collect(
             continue;
         };
         let Some(media) = &event.media else { continue };
+        remember_order(&mut order, &event);
         for item in media.items.iter().take(10) {
             let fetched = if tokio::time::Instant::now() >= deadline {
                 None
@@ -411,7 +452,7 @@ async fn collect(
             ));
         }
     }
-    receipt.context = context(&receipt);
+    receipt.context = context(&receipt, &order);
     // Preserve the parser's cap signal even when input was independently rendered.
     if message.text.contains("[post truncated]") {
         receipt.context.push_str("\n[post truncated]");

@@ -1426,6 +1426,11 @@ async fn channel_media_gateway_current_request_contains_all_failed_partial_and_c
             failed.size_bytes = Some(21 * 1024 * 1024);
             source.embedded_attachments.push(failed);
         }
+        if kind == "partial" {
+            source
+                .embedded_attachments
+                .push(source.embedded_attachments[0].clone());
+        }
         if kind == "capped" {
             while source.embedded_attachments.len() < 10 {
                 source
@@ -1460,8 +1465,13 @@ async fn channel_media_gateway_current_request_contains_all_failed_partial_and_c
         if kind == "all_failed" {
             assert!(input.contains(crate::services::assistant_channel_media::FAILED_NOTE));
         } else {
-            assert!(input.contains("too_large"));
+            assert!(input.contains("too large"));
+            assert!(!input.contains("too_large"));
             assert!(input.contains("input_image"));
+            if kind == "partial" {
+                assert!(input.contains("Attachment 2 of 3 could not be read (too large)."));
+                assert!(!input.contains("Attachment 1 of 3 could not be read"));
+            }
         }
         if kind == "capped" {
             assert!(input.contains("post truncated"));
@@ -1700,7 +1710,8 @@ async fn channel_media_chunked_unknown_understated_bodies_retry_once_and_recheck
         assert_eq!(downloads.load(Ordering::SeqCst), if revoke { 1 } else { 2 });
         let input = calls.lock().await.last().unwrap().to_string();
         if revoke {
-            assert!(input.contains("source_unavailable"));
+            assert!(input.contains("Attachment 1 of 1 could not be read (source unavailable)."));
+            assert!(!input.contains("source_unavailable"));
             assert!(!input.contains("input_image"));
         } else {
             assert!(input.contains("input_image"), "{input}");
@@ -1850,7 +1861,8 @@ async fn channel_media_stop_and_whole_step_deadline_cancel_blocked_fetch_and_fin
             assert_eq!(receipt.failed[1].index, Some(2));
             let input = calls.lock().await.last().unwrap().to_string();
             assert!(input.contains("input_image"));
-            assert!(input.contains("timeout"));
+            assert!(input.contains("Attachment 2 of 3 could not be read (timed out)."));
+            assert!(input.contains("Attachment 3 of 3 could not be read (timed out)."));
             assert_eq!(downloads.load(std::sync::atomic::Ordering::SeqCst), 2);
         } else {
             assert!(message.attachments.is_empty());

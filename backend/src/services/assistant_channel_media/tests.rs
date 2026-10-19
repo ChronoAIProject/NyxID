@@ -357,6 +357,37 @@ async fn channel_media_stop_before_bind_cleans_known_roots_chunks_and_late_commi
 }
 
 #[tokio::test]
+async fn channel_media_failure_context_counts_successful_and_standalone_items_before_embedded() {
+    let (_, _, _, mut event) = fixture().await;
+    let media = event.media.as_mut().unwrap();
+    let mut second = media.items[0].clone();
+    second.index = 1;
+    let mut embedded = media.items[0].clone();
+    embedded.embedded = true;
+    media.items.extend([second, embedded]);
+    media.declared = 4;
+    let receipt = MediaBound {
+        event_ids: vec![event.id.clone()],
+        ok: vec![
+            outcome(&event, Some(0), false, "bound", Some("first".into())),
+            outcome(&event, Some(1), false, "bound", Some("second".into())),
+        ],
+        failed: vec![
+            outcome(&event, Some(0), true, "unsupported_or_invalid", None),
+            outcome(&event, None, true, "1 more embedded media omitted", None),
+        ],
+        context: String::new(),
+    };
+    let mut order = ItemOrder::new();
+    remember_order(&mut order, &event);
+    let text = context(&receipt, &order);
+    assert!(text.contains("Attachment 3 of 4 could not be read (unsupported or invalid file)."));
+    assert!(text.contains("1 more embedded media omitted"));
+    assert!(!text.contains("unsupported_or_invalid"));
+    assert!(!text.contains("Attachment 1"));
+}
+
+#[tokio::test]
 async fn channel_media_timeout_receipt_excludes_unknown_upload_and_cleans_late_commit() {
     let (state, row, message, event) = fixture().await;
     let known = upload(&state, &row, &event).await;
