@@ -1,0 +1,50 @@
+# nyxid.apk-inputs.v1
+# base-image rust:1.98.1-alpine@sha256:7cc1c22d77d9432f7fe012a70e6d3e555af54c2a6832700ed7d553f1769ae89f
+# arch aarch64
+# refreshed-on 2026-10-19
+# packages build-base clang cmake linux-headers lld perl python3
+# before-sha256 5e3420c013c7e6ad72a8e99bf11348f0dc4c86a62bf3876ea48c5622ef9d0bba
+# after-sha256 d54d73c9128862013fa8741dfeb6d4397b3e67271b751ee379d409905a76004b
+acl-libs	2.3.2-r1	aarch64	5bfce1fc46a3625268a7a60c10b5680aa846534d98856a108e692824a1f1b710	https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/acl-libs-2.3.2-r1.apk
+build-base	0.5-r4	noarch	c7ca776b4dc4044d34a9f089d4c78ac787fbc937485f7680d43b6edf4c22b386	https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/build-base-0.5-r4.apk
+clang22	22.1.3-r2	aarch64	1f147208ddca79ef7ff8ce1ac241b43fcc5d8ce7bda25f660d8761ad3615e0c0	https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/clang22-22.1.3-r2.apk
+clang22-headers	22.1.3-r2	aarch64	9740b2bbb74a62270f4014cbbb7fdf50d62914239ec1b5483c86156693dbfac0	https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/clang22-headers-22.1.3-r2.apk
+clang22-libs	22.1.3-r2	aarch64	ad2c5f44f52daa3a8dd0fcd02ed83c1f6270059306b615040d9747847caaabcf	https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/clang22-libs-22.1.3-r2.apk
+cmake	4.2.3-r0	aarch64	fbc19c4efe1a12dbcdb646952e9dc1ee2f8bf68feb6ed17fdf320f34bba252ef	https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/cmake-4.2.3-r0.apk
+file	5.47-r2	aarch64	fb1ccc520c2e80cb1d3b739500826cedf4b35b8a43ff78aa683c6f6bd48dd3e5	https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/file-5.47-r2.apk
+fortify-headers	3.0.1-r2	noarch	72bf2a77475f2550a7345683c77b39487ee94ecbc2ca11ed5314161f3b927d76	https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/fortify-headers-3.0.1-r2.apk
+g++	15.2.0-r5	aarch64	dc16babd6fdd7154ece263ca625ff832b03528d58f5060f9e92ca3b0bc0c079a	https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/g++-15.2.0-r5.apk
+gdbm	1.26-r0	aarch64	bad50eb26533e2f58e014fbcd3c1744f2fdb79954af6e3c188ccd059251c7790	https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/gdbm-1.26-r0.apk
+libarchive	3.8.10-r0	aarch64	506ffede86c7af41e7256dbbb98af368243fc9a9c9f61d19804c4c3047c8e0b1	https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/libarchive-3.8.10-r0.apk
+libbz2	1.0.8-r6	aarch64	28cb76bb6d11d2a55c3061b5fcb2ab84996412a248b2c9fe52bb710d0a2a84e7	https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/libbz2-1.0.8-r6.apk
+libcrypto3	3.5.9-r0	aarch64	2676a2b0b6e23ea2edccf3ee982b9842a665d52603d047de3d0a185dc316d983	https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/libcrypto3-3.5.9-r0.apk
+libexpat	2.9.0-r0	aarch64	7128bfe18b8a315b9cf90ddf0beffeee454648ae72ff7898ff7d7b09803a559d	https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/libexpat-2.9.0-r0.apk
+libffi	3.5.2-r1	aarch64	9a67280b0c7c62db658c2d4d32ed1199903bef859c32dd4245e1a7e35c89ab4b	https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/libffi-3.5.2-r1.apk
+libmagic	5.47-r2	aarch64	bcd233f28a6f1c07cd789c47df2234eb35d2bac295aa223ea2ccef17d75ce0f0	https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/libmagic-5.47-r2.apk
+libncursesw	6.6_p20260516-r0	aarch64	51a7aa4b3ec40b144d0801c0544e0a9f62e2a41d04b6067bb5e95786040741c6	https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/libncursesw-6.6_p20260516-r0.apk
+libpanelw	6.6_p20260516-r0	aarch64	a6912c654c821db4f8a801321709205bd482b0e515b862f2d02045e21b73d97d	https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/libpanelw-6.6_p20260516-r0.apk
+libssl3	3.5.9-r0	aarch64	20ac252b276d73f2c69c1d25f84537c7fba81caefc026c6be1094b394af2082e	https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/libssl3-3.5.9-r0.apk
+libstdc++-dev	15.2.0-r5	aarch64	8385c811d93b64ee1877005a5473cde8ebabe82d346301f2b153ff8cb6a71510	https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/libstdc++-dev-15.2.0-r5.apk
+libuv	1.52.1-r0	aarch64	64e29a6c58f8375bc9cf83d57e0913e6743746cfc60851b1cb12cd572f5924f3	https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/libuv-1.52.1-r0.apk
+libxml2	2.13.9-r2	aarch64	0a860a26ebdfea491498386fe682130f4c5565e46ee8e0a2281256db2ef1be27	https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/libxml2-2.13.9-r2.apk
+linux-headers	7.0.0-r1	aarch64	d61656e81116040ebac0bc8d9046a3ba97f01a00ee085809103576e8a437468f	https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/linux-headers-7.0.0-r1.apk
+lld22	22.1.3-r0	aarch64	bbd5767abd254135936a0ebfbc952d7d01929725f11c53c20b51662bc819c838	https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/lld22-22.1.3-r0.apk
+lld22-libs	22.1.3-r0	aarch64	aced61ba21a58132c5233b27b13fc3e2c84cf9c92a1b75b8976013ab804902aa	https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/lld22-libs-22.1.3-r0.apk
+llvm22-libs	22.1.3-r1	aarch64	6b1b25fdc82cd6d0e2fb57594d08d405569d4776e4b9c56012bd81f8dd90805a	https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/llvm22-libs-22.1.3-r1.apk
+llvm22-linker-tools	22.1.3-r1	aarch64	c2188d54124bc56289c0a64fa81f1a3309f9ca0d7b1007b3d0aab4d5a3d5303f	https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/llvm22-linker-tools-22.1.3-r1.apk
+lz4-libs	1.10.0-r1	aarch64	af6cbe553adda941e04ac40cf0123455b714d65392472389113e7d6dcebbd8d8	https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/lz4-libs-1.10.0-r1.apk
+make	4.4.1-r4	aarch64	0a2c6c3fa0d90b652bbaeac362d1bfe54b75aae57631a6b448826f8b51c85170	https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/make-4.4.1-r4.apk
+mpdecimal	4.0.1-r0	aarch64	358959600f99f58deee30ca9089c7f6f0f1bd73cc0021e321a7dbf6f735935c6	https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/mpdecimal-4.0.1-r0.apk
+ncurses-terminfo-base	6.6_p20260516-r0	noarch	e0c546b9461bdce206a90bc720cb69aa4628b5a5b8d908c3e5084e00f28f6a9d	https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/ncurses-terminfo-base-6.6_p20260516-r0.apk
+patch	2.8-r0	aarch64	c6c7bf0a5d7a9a06d6d6e4dbf44ab6b31308472ba0e15ca1b120f2281b35cf0a	https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/patch-2.8-r0.apk
+perl	5.42.2-r1	aarch64	442045cbd2c9703dbbc43bb48bcaa6278ac27f37e342f72cf31c5185c15f3967	https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/perl-5.42.2-r1.apk
+pyc	3.14.8-r0	noarch	3ccfef8bdd65ea445079696e5d2539f4b5513442d8b02fb7a0fb964ced2065f3	https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/pyc-3.14.8-r0.apk
+python3	3.14.8-r0	aarch64	fb5cc51e45afd7cc78b3189d8019a554e48c6751f0ccbe1aa551d6d94453db5c	https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/python3-3.14.8-r0.apk
+python3-pyc	3.14.8-r0	noarch	52814cbdfffe2c956c2882c05695237cbea4b92d015b14a43f79441bc348699a	https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/python3-pyc-3.14.8-r0.apk
+python3-pycache-pyc0	3.14.8-r0	aarch64	1835aa8bdc8c03a58556053ca2ed23300babab08ce1cb7b7443e5fae0dc48cba	https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/python3-pycache-pyc0-3.14.8-r0.apk
+readline	8.3.3-r1	aarch64	9f0ae0923c02b0d6aba62e9173542b65396ba3f0efefcbf087ea32f1120e7b34	https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/readline-8.3.3-r1.apk
+rhash-libs	1.4.6-r0	aarch64	7e48c2bbea516c1b97887e6d9cb50e772de9e61e0aa31c4e042cc34df07a3016	https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/rhash-libs-1.4.6-r0.apk
+scudo-malloc	22.1.3-r0	aarch64	186aa6cd23e901a21f76b12775cfe035c9ed15eecc5b5c322b9725ab62ff50f8	https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/scudo-malloc-22.1.3-r0.apk
+sqlite-libs	3.53.4-r0	aarch64	b39d8d73c1208838a436f2d481ba605b52a095f8d6ff781556eafc81cd1a13e9	https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/sqlite-libs-3.53.4-r0.apk
+xz-libs	5.8.4-r0	aarch64	9be375832e747afe14f98e400e8b55d8f6fde25e41663090c81600628daab093	https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/xz-libs-5.8.4-r0.apk
+zlib	1.3.2-r1	aarch64	1f77a542ac6634761b9fe38d8bdca19b154071dcfa25432e73f2bc8a0740a33f	https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/zlib-1.3.2-r1.apk

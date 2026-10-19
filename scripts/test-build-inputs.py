@@ -38,8 +38,9 @@ class BuildPolicy(unittest.TestCase):
         for path in (ROOT / "security").iterdir():
             if path.is_file():
                 shutil.copyfile(path, self.root / "security" / path.name)
+        shutil.copytree(ROOT / "security/apk", self.root / "security/apk")
         (self.root / "scripts").mkdir()
-        for name in ("apt-snapshot-select.awk", "install-release-dependencies.sh"):
+        for name in ("apt-snapshot-select.awk", "apk-catalog.awk", "install-release-dependencies.sh"):
             shutil.copyfile(ROOT / "scripts" / name, self.root / "scripts" / name)
         self.dockerfiles = subprocess.check_output(["git", "ls-files", "*Dockerfile*"], cwd=ROOT, text=True).splitlines()
         for name in self.dockerfiles:

@@ -1,0 +1,26 @@
+# nyxid.apk-inputs.v1
+# base-image alpine:3.22@sha256:5291449c3df73caf6ed85e649dec1b9e818b39a5d8c871e97afc13e9cd5e8fa8
+# arch x86_64
+# refreshed-on 2026-10-19
+# packages nodejs npm openssl
+# before-sha256 889efabbb45a99b74445a94ccb434fd0348e6e9ecfe971c1b2d3663cd749176a
+# after-sha256 9060f4b7c3c305d37e0d52ea42ff5b7c3a1a3077110c69a9a514e287a1da4c00
+ada-libs	2.9.2-r4	x86_64	183fd6d3164c8236b578b410d5ad9b19204d7d06f3dd60075c6a5466289fd483	https://dl-cdn.alpinelinux.org/alpine/v3.22/main/x86_64/ada-libs-2.9.2-r4.apk
+brotli-libs	1.1.0-r2	x86_64	a693524543421b3a90f163ccb48d5ad0f5fd773b5c3b640acc461eace2cb01b6	https://dl-cdn.alpinelinux.org/alpine/v3.22/main/x86_64/brotli-libs-1.1.0-r2.apk
+c-ares	1.34.8-r0	x86_64	1397ec9682ff6153e5d037965c76408e570ae6535ce479cc2af37436fdea52ce	https://dl-cdn.alpinelinux.org/alpine/v3.22/main/x86_64/c-ares-1.34.8-r0.apk
+ca-certificates	20260909-r0	x86_64	a1258993a229d2fdcc6d9665af75c9305184e4f5e5755c50b9ef0564b35138c4	https://dl-cdn.alpinelinux.org/alpine/v3.22/main/x86_64/ca-certificates-20260909-r0.apk
+icu-data-en	76.1-r1	noarch	bdb3507fd8eb21d0934ae2cc986f416d76d085dc27ca6b86b75643214eb5d0cb	https://dl-cdn.alpinelinux.org/alpine/v3.22/main/x86_64/icu-data-en-76.1-r1.apk
+icu-libs	76.1-r1	x86_64	0d6d3b9173f388f7450b168f8a98647f21356d1d4e5ae414e160db2843c6a2c8	https://dl-cdn.alpinelinux.org/alpine/v3.22/main/x86_64/icu-libs-76.1-r1.apk
+libcrypto3	3.5.9-r0	x86_64	3f5825ced5fde1c66a5376a3f6076b3c08538ad52d9ef23f069857e212d9175a	https://dl-cdn.alpinelinux.org/alpine/v3.22/main/x86_64/libcrypto3-3.5.9-r0.apk
+libgcc	14.2.0-r6	x86_64	04f3467bc967e705221a843fe4d3de5850db826e571686e0c0ed453d38cb5c59	https://dl-cdn.alpinelinux.org/alpine/v3.22/main/x86_64/libgcc-14.2.0-r6.apk
+libssl3	3.5.9-r0	x86_64	6801c740b9760b5b08da8db6367ebc18b2cc4dbaf371f7148429538b8bb04e23	https://dl-cdn.alpinelinux.org/alpine/v3.22/main/x86_64/libssl3-3.5.9-r0.apk
+libstdc++	14.2.0-r6	x86_64	939f7c99898f3e8154207a17f4acbe8bc40437e1bb1b43f5525620ca9e452a2e	https://dl-cdn.alpinelinux.org/alpine/v3.22/main/x86_64/libstdc++-14.2.0-r6.apk
+nghttp2-libs	1.69.0-r0	x86_64	d6ee515d30d703e94b55ef9c0a02aea053313f654acbd2c655d18e3907ecb66a	https://dl-cdn.alpinelinux.org/alpine/v3.22/main/x86_64/nghttp2-libs-1.69.0-r0.apk
+nodejs	22.23.2-r0	x86_64	2042a1b1e39f4130d5d74828e6cff7301e0e631abe9076cd1a3f208e4e912e7e	https://dl-cdn.alpinelinux.org/alpine/v3.22/main/x86_64/nodejs-22.23.2-r0.apk
+npm	11.6.4-r0	noarch	d99a0e253f190f513fb80c1dfb7032dbb0a423f37c43b1e7fc333f2b29ddab1c	https://dl-cdn.alpinelinux.org/alpine/v3.22/community/x86_64/npm-11.6.4-r0.apk
+openssl	3.5.9-r0	x86_64	7bcae61e09fd231b13fa3bb03684938abfe51729d32c7a0c3212eddacd738965	https://dl-cdn.alpinelinux.org/alpine/v3.22/main/x86_64/openssl-3.5.9-r0.apk
+simdjson	3.12.0-r0	x86_64	e051fefd290e6b3658e5510a09785df6db2a2b2291f69f6ddfceefc03d7a811d	https://dl-cdn.alpinelinux.org/alpine/v3.22/main/x86_64/simdjson-3.12.0-r0.apk
+simdutf	7.2.1-r0	x86_64	a29bb33167c1e2d478dab9e83172a8a455db41d62dcdfe34f680c4f18572bea0	https://dl-cdn.alpinelinux.org/alpine/v3.22/main/x86_64/simdutf-7.2.1-r0.apk
+sqlite-libs	3.49.2-r1	x86_64	7af9a58595642de91ea35d3d070cd38d969680a720ce76b14966859e6fb4af99	https://dl-cdn.alpinelinux.org/alpine/v3.22/main/x86_64/sqlite-libs-3.49.2-r1.apk
+zlib	1.3.2-r1	x86_64	af24e502645e2b392cae833856d776691ac21655362e5db69d7b89f147f76216	https://dl-cdn.alpinelinux.org/alpine/v3.22/main/x86_64/zlib-1.3.2-r1.apk
+zstd-libs	1.5.7-r0	x86_64	1bdd6e57cfbfbfd6e8481cad37ddd5d199950715bec1879b3afb600272dbb09e	https://dl-cdn.alpinelinux.org/alpine/v3.22/main/x86_64/zstd-libs-1.5.7-r0.apk

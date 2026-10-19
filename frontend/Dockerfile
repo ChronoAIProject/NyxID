@@ -37,22 +37,21 @@ ENV SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH}
 RUN npm run build
 
 # ── Stage 2: Runtime ─────────────────────────────────────────────────────────
-FROM nginxinc/nginx-unprivileged:1.30-alpine@sha256:782bb89768cc87b7f95c18b95baa1af250e5d451f26794f59363540161147c01
+FROM nginxinc/nginx-unprivileged:1.30-alpine@sha256:782bb89768cc87b7f95c18b95baa1af250e5d451f26794f59363540161147c01 AS runtime
 
-# Copy the built SPA
-# Remove the base image's stock index/50x pages before copying shipped assets.
 USER root
+COPY scripts/apk-input-install.sh scripts/apk-catalog.awk scripts/apk-inventory.awk /opt/nyxid-apk/
+COPY security/apk/ /opt/nyxid-apk/catalogs/
+ARG TARGETARCH
+RUN sh /opt/nyxid-apk/apk-input-install.sh --download /opt/nyxid-apk/catalogs/frontend-runtime-${TARGETARCH}.tsv nginxinc/nginx-unprivileged:1.30-alpine@sha256:782bb89768cc87b7f95c18b95baa1af250e5d451f26794f59363540161147c01 /opt/nyxid-apk/archives
+RUN --network=none sh /opt/nyxid-apk/apk-input-install.sh --install /opt/nyxid-apk/catalogs/frontend-runtime-${TARGETARCH}.tsv nginxinc/nginx-unprivileged:1.30-alpine@sha256:782bb89768cc87b7f95c18b95baa1af250e5d451f26794f59363540161147c01 /opt/nyxid-apk/archives
+RUN mkdir -p /etc/nginx/nyxid/generated && chown 101:101 /etc/nginx/nyxid/generated
+# Remove stock pages before copying the shipped SPA.
 RUN rm -rf /usr/share/nginx/html/*
 COPY --from=builder /build/frontend/dist /usr/share/nginx/html
 COPY --from=builder /build/frontend/dist/legal-cache.conf /etc/nginx/legal-cache.conf
 
-# The renderer validates origin-only inputs and emits complete nginx
-# policies. No environment value is substituted as an nginx/header fragment.
-USER root
-RUN apk upgrade --no-cache \
-    && apk add --no-cache python3 \
-    && mkdir -p /etc/nginx/nyxid/generated \
-    && chown 101:101 /etc/nginx/nyxid/generated
+# The renderer validates origin-only inputs and emits complete nginx policies.
 COPY frontend/nginx.conf.template /etc/nginx/nyxid/default.conf.template
 COPY frontend/scripts/render-nginx.py /etc/nginx/nyxid/render-nginx.py
 COPY --chmod=755 frontend/scripts/nginx-policy-entrypoint.sh /docker-entrypoint.d/40-nyxid-policy.sh

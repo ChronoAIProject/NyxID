@@ -10,3 +10,14 @@
 - Local verification: catalog/caller/harness tests 19/0; build-input tests 20/0; input, YAML and permission checks pass.
 - Linux execution and final application-image behavior are pending PR CI; no local Docker or remote workflow execution.
 - APK, final image packaging/SBOMs and mandatory signing remain C-2 through C-7.
+
+## C-2 — immutable APK closures
+- Reviewed/replaced APK drafts; six catalogs bind 152 signed archives to exact bases, architectures and before/after inventories.
+- Frontend runtime and updater builder/E2E use checked downloads plus physical RUN --network=none installs; no mutable APK resolution in builds.
+- Shared portable parser and build-input admission require complete architecture/stage coverage and exact requested packages.
+- Candidate generator isolates target package state, disables scripts/self-reexecution and checks signed archive identities; bounded VM resolution only.
+- PR CI requires APK Inputs; identical contents:read-only workflow runs weekly, without secrets, OIDC or publication.
+- Hosted matrix: 3 closures × 2 native arches × 14 success/tamper cases; 3 real Dockerfile package prefixes × 2 arches.
+- Local verification: APK tests 35/0; build-input tests 20/0; APT tests 19/0; YAML tests 6/0; policy, syntax and permission checks pass.
+- Native replay, offline Dockerfile execution and final application-image behavior remain pending PR CI; no local image builds.
+- C-3 retains weekly candidate-refresh/stale-catalog gates and the HTTPS-catalog/installer-only HTTP transport regression.
