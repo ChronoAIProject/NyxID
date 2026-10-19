@@ -1,9 +1,5 @@
 #!/usr/bin/env python3
-"""Restore/check NyxID's private-reporting link after managed template output.
-
-This is a local tool, not an fkst-hosted hook. Upstream must explicitly invoke
-an equivalent merge before committing its generated chooser; see the tracker.
-"""
+"""Check NyxID's managed issue chooser for a private-reporting route (read-only)."""
 import argparse
 from pathlib import Path
 import sys
@@ -21,29 +17,18 @@ POLICY_CONTACT = """  - name: Security policy and vulnerability reporting
 """
 
 
-def reconcile(content: str) -> str:
-    if CONTACT in content or POLICY_CONTACT in content:
-        return content
-    if content.count("\ncontact_links:\n") != 1:
-        raise ValueError("expected one top-level contact_links list; review the generated chooser")
-    # Fixed repository-owned text only. Preserve the generator marker, other
-    # links and blank_issues_enabled verbatim. Fail on unexpected config shape.
-    return content.replace("\ncontact_links:\n", "\ncontact_links:\n" + CONTACT, 1)
+def has_security_contact(content: str) -> bool:
+    return CONTACT in content or POLICY_CONTACT in content
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--check", action="store_true")
     parser.add_argument("path", nargs="?", type=Path, default=Path(".github/ISSUE_TEMPLATE/config.yml"))
     args = parser.parse_args()
     content = args.path.read_text()
-    result = reconcile(content)
-    if args.check:
-        if result != content:
-            print("Private security reporting contact missing from managed issue chooser", file=sys.stderr)
-            return 1
-    else:
-        args.path.write_text(result)
+    if not has_security_contact(content):
+        print("Private security reporting contact missing from managed issue chooser", file=sys.stderr)
+        return 1
     return 0
 
 

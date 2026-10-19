@@ -84,7 +84,7 @@ jobs:
       - name: Check private security-report routing
         run: |
           python3 -m unittest discover -s scripts -p 'test_security_reporting.py'
-          python3 scripts/reconcile-security-reporting.py --check
+          python3 scripts/check-security-reporting.py
       - uses: dorny/paths-filter@v4
         id: filter
         with:
