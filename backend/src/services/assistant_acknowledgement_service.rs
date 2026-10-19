@@ -31,6 +31,8 @@ use crate::{
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AssistantTurnFence {
     pub channel_adapter_origin: Option<crate::models::channel_adapter::TurnAuthority>,
+    pub invocation_id: Option<String>,
+    pub invocation_controlled: bool,
     pub platform_thread: bool,
     pub platform_origin: Option<crate::models::assistant_conversation::PlatformTurnOrigin>,
     pub conversation_id: String,
@@ -86,6 +88,15 @@ pub async fn enforce_turn_gate(
         )
         .await?;
     }
+    if let Some(id) = fence.invocation_id.as_deref() {
+        fence.require_live()?;
+        if db.collection::<bson::Document>(crate::models::assistant_invocation::COLLECTION_NAME)
+            .find_one(doc! {"_id":id,"user_id":user_id,"cancel_requested":false,"terminal_status":null,"conversation_deleted":false})
+            .projection(doc! {"_id":1}).await?.is_none()
+        {
+            return Err(AppError::AssistantTurnRequired);
+        }
+    }
     // Platform execution is mandatory independently of the ordinary rollout.
     // A later app turn on this thread remains usable without old consent.
     if fence.platform_thread || fence.platform_origin.is_some() {
@@ -137,12 +148,13 @@ pub async fn enforce_turn_gate(
                 .map_err(mutations::map_transaction_error)?;
         }
     }
-    if !crate::services::feature_flag_service::personal_flag_enabled(
-        db,
-        user_id,
-        crate::services::feature_flag_service::ASSISTANT_LIVE_TURN_GATE_FLAG_KEY,
-    )
-    .await?
+    if !fence.invocation_controlled
+        && !crate::services::feature_flag_service::personal_flag_enabled(
+            db,
+            user_id,
+            crate::services::feature_flag_service::ASSISTANT_LIVE_TURN_GATE_FLAG_KEY,
+        )
+        .await?
     {
         return Ok(());
     }
@@ -605,6 +617,7 @@ pub async fn record_auto_allowed_with_link(
     }
     let now = Utc::now();
     let row = AssistantAcknowledgement {
+        invocation_id: None,
         id: Uuid::new_v4().to_string(),
         conversation_id: chat.conversation_id.clone(),
         user_id: chat.user_id.clone(),
@@ -864,6 +877,8 @@ mod access_mode_tests {
     fn webhook_policy_floor_remains_independent_of_owner_mode() {
         let mut chat = ChatAuthority {
             channel_adapter_origin: None,
+            invocation_controlled: false,
+            invocation_id: None,
             platform_thread: false,
             platform_origin: None,
             org_agent_access: None,
@@ -894,6 +909,8 @@ mod access_mode_tests {
 #[derive(Clone)]
 pub struct ChatAuthority {
     pub channel_adapter_origin: Option<crate::models::channel_adapter::TurnAuthority>,
+    pub invocation_controlled: bool,
+    pub invocation_id: Option<String>,
     pub platform_thread: bool,
     pub platform_origin: Option<crate::models::assistant_conversation::PlatformTurnOrigin>,
     pub org_agent_access: Option<std::sync::Arc<super::org_agent_service::RequestAccess>>,
@@ -964,6 +981,8 @@ impl ChatAuthority {
     pub fn turn_fence(&self) -> AssistantTurnFence {
         AssistantTurnFence {
             channel_adapter_origin: self.channel_adapter_origin.clone(),
+            invocation_id: self.invocation_id.clone(),
+            invocation_controlled: self.invocation_controlled,
             platform_thread: self.platform_thread,
             platform_origin: self.platform_origin.clone(),
             conversation_id: self.conversation_id.clone(),
@@ -1131,12 +1150,12 @@ async fn notify_nyxbot_denied(
                     scope,
                     target.as_deref().unwrap_or("account")
                 );
-                // A notice on a NyxBot thread is a root event: unbound.
+                if !super::assistant_invocation_service::fence_in_session(&db,session,&chat.user_id,chat.invocation_id.as_deref()).await? {return Ok(());}
                 let event = super::assistant_team_service::event(
                     "permission_requested",
                     text.clone(),
                     Some(&chat.agent_id),
-                );
+                ).for_invocation(chat.invocation_id.as_deref());
                 super::assistant_nyxagent::append_events_in_session(
                     &db, &chat.user_id, &home, &[event], session,
                 ).await?;
@@ -1206,6 +1225,7 @@ pub async fn notify_nyxbot_request(
         return Ok(None);
     }
     event.id = permission_requested_event_id(&request.id);
+    event.invocation_id = request.invocation_id.clone();
     let db = db.clone();
     let chat = chat.clone();
     let request = request.clone();
@@ -1216,6 +1236,16 @@ pub async fn notify_nyxbot_request(
             let operation = Box::pin(async {
                 let (conversation, _, access) = Box::pin(fence(&db, &chat, session)).await?;
                 super::assistant_access_policy::require_same_live_turn(&chat, &conversation)?;
+                if !super::assistant_invocation_service::fence_in_session(
+                    &db,
+                    session,
+                    &chat.user_id,
+                    event.invocation_id.as_deref(),
+                )
+                .await?
+                {
+                    return Ok(None);
+                }
                 if access.as_ref().is_some_and(|a| !a.can_maintain()) {
                     return Err(AppError::Forbidden(ORG_MAINTAINER_REQUIRED.into()));
                 }
@@ -1374,6 +1404,11 @@ pub async fn for_key_with_access(
             .active_turn
             .as_ref()
             .and_then(|t| t.channel_adapter_origin.clone()),
+        invocation_controlled: conversation.invocation_controlled,
+        invocation_id: conversation
+            .active_turn
+            .as_ref()
+            .and_then(|t| t.invocation_id.clone()),
         platform_thread: conversation.platform_thread.is_some(),
         platform_origin: conversation
             .active_turn
@@ -1439,6 +1474,16 @@ pub(crate) async fn fence(
     ApiKey,
     Option<std::sync::Arc<super::org_agent_service::RequestAccess>>,
 )> {
+    if !super::assistant_invocation_service::fence_in_session(
+        db,
+        session,
+        &chat.user_id,
+        chat.invocation_id.as_deref(),
+    )
+    .await?
+    {
+        return Err(AppError::AssistantTurnRequired);
+    }
     let credential = db
         .collection::<bson::Document>(CREDENTIALS)
         .update_one(
@@ -1822,6 +1867,7 @@ pub async fn request_tracked(
 /// must not bind the original confirmation to a later voice or trigger turn.
 #[derive(Clone)]
 pub struct RequestOrigin {
+    pub invocation_id: Option<String>,
     pub requested_turn_id: Option<String>,
     pub creation_turn_id: Option<String>,
     pub voice_request_id: Option<String>,
@@ -1924,6 +1970,7 @@ async fn prepare_request_candidate(
     let now = Utc::now();
     let orchestrated = !chat.is_orchestrator() && request.kind != "action";
     let candidate = AssistantAcknowledgement {
+        invocation_id: None,
         authored_skill: if request.tool == Some(super::assistant_agent_learning_review::TOOL) {
             request
                 .arguments
@@ -2074,6 +2121,24 @@ async fn request_candidate_in_session(
         .sort(doc! {"seq": -1})
         .session(&mut *session)
         .await?;
+    row.invocation_id = origin
+        .map(|o| o.invocation_id.clone())
+        .unwrap_or_else(|| chat.invocation_id.clone());
+    if row.invocation_id.is_some() {
+        if origin.is_none() {
+            super::assistant_access_policy::require_same_live_turn(chat, &conversation)?;
+        }
+        if !super::assistant_invocation_service::fence_in_session(
+            db,
+            session,
+            &chat.user_id,
+            row.invocation_id.as_deref(),
+        )
+        .await?
+        {
+            return Err(AppError::AssistantTurnRequired);
+        }
+    }
     row.creation_turn_id = conversation
         .active_turn
         .as_ref()
@@ -2114,6 +2179,7 @@ async fn request_candidate_in_session(
     "user_id": &chat.user_id, "api_key_id": &chat.api_key_id, "kind": &row.kind,
     "service_id": &row.service_id, "tool_name": &row.tool_name,
     "arguments_digest": &row.arguments_digest,
+    "invocation_id": &row.invocation_id,
     "decider": &row.decider, "routing": routing_bson(row.routing.as_ref()),
     "$or": [{"status": "pending", "expires_at": {"$gt": bson::DateTime::from_chrono(now)}},
         {"status": "denied", "requested_turn_id": &row.requested_turn_id}]};
@@ -2175,6 +2241,7 @@ fn allowed_skill_filter(
     doc! {"conversation_id": &chat.conversation_id,
     "user_id": &chat.user_id, "api_key_id": &chat.api_key_id,
     "kind": "skills", "status": "allowed", "arguments_digest": digest,
+    "invocation_id": &chat.invocation_id,
     "routing": routing_bson(routing),
     "decided_at": {"$gt": bson::DateTime::from_chrono(now - Duration::hours(SKILL_REQUEST_ALLOW_WINDOW_HOURS))}}
 }
@@ -2756,6 +2823,8 @@ pub(crate) async fn decide_in_session(
     }
     let chat = ChatAuthority {
         channel_adapter_origin: None,
+        invocation_controlled: false,
+        invocation_id: row.invocation_id.clone(),
         platform_thread: target.platform_thread.is_some(),
         platform_origin: target
             .active_turn
@@ -2932,8 +3001,14 @@ pub(crate) async fn decide_in_session(
     if allow && row.kind == "action" {
         row.expires_at = now + Duration::seconds(ACTION_SECONDS);
     }
-    row.continuation_receipt_id =
-        Box::pin(super::assistant_voice::continuation(db, &row, session)).await?;
+    row.continuation_receipt_id = if row.invocation_id.is_some() {
+        Box::pin(super::assistant_invocation_service::decision_in_session(
+            db, session, &row,
+        ))
+        .await?
+    } else {
+        Box::pin(super::assistant_voice::continuation(db, &row, session)).await?
+    };
     collection
         .replace_one(filter, &row)
         .session(&mut *session)
@@ -3041,6 +3116,7 @@ pub async fn consume_action(
                 doc! {"_id": &id, "user_id": &chat.user_id, "conversation_id": &chat.conversation_id,
                     "api_key_id": &chat.api_key_id, "kind": "action", "tool_name": &tool,
                     "arguments_digest": &digest,
+                    "invocation_id": &chat.invocation_id,
                     "status": "allowed",
                     "decided_by": {"$ne": "access_mode"},
                     "expires_at": {"$gt": bson::DateTime::now()},
@@ -3070,6 +3146,7 @@ pub(crate) async fn consume_action_in_session(
             doc! {"_id": id, "user_id": &chat.user_id, "conversation_id": &chat.conversation_id,
             "api_key_id": &chat.api_key_id, "kind": "action", "tool_name": tool,
             "arguments_digest": arguments_digest(arguments), "status": "allowed",
+            "invocation_id": &chat.invocation_id,
             "decider": "user", "decided_by": {"$eq": "user", "$ne": "access_mode"}, "expires_at": {"$gt": bson::DateTime::now()}},
             doc! {"$set": {"status": "used"}},
         )

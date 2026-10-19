@@ -291,6 +291,7 @@ pub fn validate<'a>(
         } else if owner != job.user_id {
             return Err(AppError::MachinePermissionRevoked);
         }
+        super::assistant_invocation_service::require_machine_job_active(db, &job, &auth).await?;
         Ok(auth)
     })
 }
@@ -317,6 +318,7 @@ pub fn validate_catalog<'a>(
         if !auth.allow_all_services && !auth.allowed_service_ids.iter().any(|id| id == catalog) {
             return Err(AppError::MachinePermissionRevoked);
         }
+        super::assistant_invocation_service::require_machine_job_active(db, &job, &auth).await?;
         Ok(())
     })
 }

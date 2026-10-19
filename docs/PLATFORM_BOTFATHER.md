@@ -3,8 +3,8 @@
 Platform BotFather is an explicitly opted-in public entry to NyxID and a person's
 NyxBot. Visitors can ask NyxID FAQs or request a signup/sign-in link. A browser
 account review followed by confirmation in the original private chat links that
-sender to their own NyxBot. Telegram also provides native bot creation and
-management for the linked account.
+sender to their own NyxBot. Telegram additionally provides native bot creation
+and onboarding commands for the linked account.
 
 The separate legacy onboarding guide collects a static assistant or restaurant
 draft and provisions only the client-reviewed specialist and exact Telegram child.
@@ -92,12 +92,20 @@ it separately checks that the owned specialist still exists.
 handoffs. Safe status, help or disconnect notices may still be sent. Pause retains
 chosen modes. **Resume bot** makes one conditional update restoring the selected
 modes; there is no separate clear-stop step. If both are off, select at least one.
+The compatibility `clear-emergency-stop` API only clears the latch and leaves
+both modes off; it never restores access automatically. The UI Resume action
+saves both explicit selections atomically. A normal mode save changes only edited
+lanes; reducing personal access does not revalidate unchanged public AI. Enabling
+public AI, resuming it, or explicitly validating its deployment still checks its
+live sponsor and readiness.
 A status refresh can show a connection blocker while the remembered choices stay
 intact. Repair that blocker first, refresh, then Resume.
 
 An expired native OAuth connection without a refresh credential shows **Repair
-required** and its saved personal binding is shown as disconnected. Reconnect
-that account through the reviewed repair flow. A refreshable connection retains
+required**. Linked channels shows **Temporarily unavailable** while keeping saved
+consent visible. Repair the connection through the reviewed flow. You can choose
+**Disconnect personal access** during the outage to revoke that consent durably;
+restoring the connection will then leave it disconnected. A refreshable connection retains
 its entry identity. Atomic Resume validates the saved owner, connection and
 refresh authority without contacting the provider. Authenticated ingress or
 reviewed repair uses the existing OAuth refresh producer before admitting work.
@@ -118,6 +126,33 @@ and `/bots` use the linked account and existing reviewed setup/provisioning
 contracts. The legacy guide and public child inference retain their own funding,
 model, owner review and independent-customer activation requirements. Those are
 not prerequisites for a shared FAQ entry.
+
+## Work with specialists from a linked private chat
+
+After confirmation, use ordinary requests to your NyxBot in that same private
+conversation. On Discord, put the request in **/nyx ask → question**. These owner
+tools work across supported shared entries; Telegram's legacy `/bots`, `/bot`
+and `/onboarding` controls are a separate Telegram-only workflow.
+
+1. Ask, for example, “Create a specialist called Notes helper to summarize my
+   notes,” then describe its instructions or changes. Grant only the selected
+   services you own and want it to use. Review any action card required by your
+   account's access mode; a specialist cannot receive access you do not hold.
+2. Assign work, for example, “Ask Notes helper to summarize these notes.” Its
+   work uses the specialist's scoped grants and reports back to the originating
+   saved conversation under the normal account permissions and billing rules.
+3. To configure a new channel connection, ask for a setup link for that
+   specialist. Open the owner-reviewed browser handoff and enter provider
+   credentials there. Keep credentials out of chat; the link and its status
+   watch are bound to the requesting owner and conversation.
+4. Ask NyxBot to attach an existing bot you own, link it to the intended
+   specialist, or update its label. Another owner's bot cannot be attached or
+   changed. Each bot still needs its own required owner verification; this
+   request does not copy the shared entry's personal proof to it.
+5. Use the provider's logout control (`/logout` on Telegram, `logout` on Slack,
+   or **/nyx logout** on Discord). Personal authority ends for this conversation.
+   With built-in Public FAQ enabled, subsequent questions return to FAQ access;
+   independently linked conversations keep their own authority.
 
 ## Native chat entries and operator recovery
 
@@ -144,9 +179,14 @@ creation workflow described above.
 
 Discord uses `/nyx help`, `/nyx login`, `/nyx status`, `/nyx logout`, `/nyx confirm`
 and `/nyx ask`. Use `/nyx ask` for questions and personal action-card replies.
+For an explicitly public FAQ answer even when linked, enter `faq` followed by a
+topic (for example `faq unlink`) in its **question** option.
 Other native private-message surfaces accept exact plain-text controls `help`,
 `faq [topic]`, `login`, `status`, `logout` and `confirm P-…`. Slack uses those plain
-messages because its slash commands are a different integration. Discord ordinary
+messages because its slash commands are a different integration. These native
+plain-text control verbs are ASCII case-insensitive (`LOGIN`, `Logout`,
+`Confirm p-…`, `FAQ topic`); arguments keep their original bytes. Sentences such
+as “Login to my bank” or “Help me write” remain ordinary questions. Discord ordinary
 DM text does not reach this integration: choose the installed `/nyx` command and
 its named options. Conversion installs/reviews the exact known `/nyx` command
 without replacing unrelated application commands. Follow the exact confirmation command
@@ -181,7 +221,9 @@ owner or its transport payer. Reservation pauses the entry and revokes old chat
 receipts, confirmations and turns before provider work. A failed verification
 retains a recoverable reservation. A successful update also stays paused until
 explicit Resume, and prior authority remains invalid afterward. The Linked
-channels view shows old bindings as disconnected and requiring reconnection.
+channels view shows old bindings as **Reconnect required**. Saved active consent
+can still be disconnected from that view, even while transport or personal work
+is unavailable.
 A fresh proof creates current authority; deferred cleanup is bound to old
 revisions and cannot stop a new turn admitted after Resume.
 

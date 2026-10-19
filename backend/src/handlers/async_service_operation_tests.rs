@@ -1517,3 +1517,6 @@ fn check_disagreeing_carrier(a: &AsyncFixture) -> futures::future::BoxFuture<'_,
 
 #[path = "async_service_policy_tests.rs"]
 mod service_policy;
+
+#[path = "async_service_invocation_tests.rs"]
+mod invocation_policy;

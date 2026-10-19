@@ -395,12 +395,15 @@ pub async fn coalesce(
                     .session(&mut *session)
                     .await?
                     .ok_or_else(not_found)?;
-                let running = super::super::assistant_nyxagent::live_turn(&row, Utc::now())
-                    .filter(|turn| turn.question_key.as_deref() == Some(key.as_str()));
-                let queued = row
-                    .pending_events
-                    .iter()
-                    .find(|event| event.question_key.as_deref() == Some(key.as_str()));
+                let running =
+                    super::super::assistant_nyxagent::live_turn(&row, Utc::now()).filter(|turn| {
+                        turn.invocation_id.is_none()
+                            && turn.question_key.as_deref() == Some(key.as_str())
+                    });
+                let queued = row.pending_events.iter().find(|event| {
+                    event.invocation_id.is_none()
+                        && event.question_key.as_deref() == Some(key.as_str())
+                });
                 let previous = if let Some(turn) = running {
                     turn.asked_from.as_ref()
                 } else if let Some(event) = queued {

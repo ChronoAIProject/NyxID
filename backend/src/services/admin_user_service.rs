@@ -721,6 +721,8 @@ async fn delete_user_cascade_internal(
         crate::models::assistant_agent_credential::COLLECTION_NAME,
         crate::models::assistant_conversation::COLLECTION_NAME,
         crate::models::assistant_message::COLLECTION_NAME,
+        crate::models::assistant_invocation::COLLECTION_NAME,
+        crate::models::assistant_invocation::TURNS,
         crate::models::assistant_message_feedback::COLLECTION_NAME,
         crate::models::assistant_checkpoint::COLLECTION_NAME,
         super::assistant_service_execution::COLLECTION,

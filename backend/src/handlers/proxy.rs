@@ -4589,6 +4589,12 @@ async fn execute_resolved_proxy_inner<'a>(
                         &state.config.frontend_url,
                     )
                 })?;
+            if let Some(chat) = auth_user.assistant_chat.as_deref() {
+                crate::services::assistant_invocation_service::revalidate_after_approval(
+                    &state.db, chat,
+                )
+                .await?;
+            }
         }
     }
 
@@ -15251,6 +15257,8 @@ mod nyxagent_admission_tests {
                     auth.api_key_id = Some(row.credential_api_key_id.clone());
                     auth.assistant_turn_fence = Some(Box::new(AssistantTurnFence {
                         channel_adapter_origin: None,
+                        invocation_id: None,
+                        invocation_controlled: false,
                         platform_origin: None,
                         platform_thread: false,
                         conversation_id: row.id.clone(),

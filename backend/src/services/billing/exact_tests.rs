@@ -63,6 +63,21 @@ async fn database(name: &str) -> mongodb::Database {
     let db = crate::test_utils::connect_test_database(name)
         .await
         .unwrap();
+    // Mirror the production transaction identity constraint for every test
+    // that admits and settles durable usage.
+    db.collection::<Document>("usage_meter")
+        .create_index(
+            mongodb::IndexModel::builder()
+                .keys(doc! { "transaction_id": 1 })
+                .options(
+                    mongodb::options::IndexOptions::builder()
+                        .unique(true)
+                        .build(),
+                )
+                .build(),
+        )
+        .await
+        .unwrap();
     db.collection::<Document>("billing_ledger")
         .create_index(
             mongodb::IndexModel::builder()
@@ -158,6 +173,27 @@ fn usage(id: &str) -> Document {
         "created_at": now,
         "updated_at": now,
     }
+}
+
+// Match BillingService's funded handoff: gate_and_reserve already commits all
+// meters with its holds. Opening again would invent a second funding owner in
+// a fixture without startup indexes, rather than exercise production replay.
+async fn admitted_meter(
+    db: &mongodb::Database,
+    ctx: &route_context::BillingRouteContext,
+    reservation: &reservation::BillingReservation,
+) -> meter::MeteredProxyContext {
+    assert_eq!(reservation.owner_id, ctx.billing_owner_id);
+    assert!(meter::has_complete_funded_meter(db, ctx).await.unwrap());
+    let expected = ctx.platform_specs().count() + usize::from(ctx.resale.is_some());
+    assert_eq!(
+        db.collection::<Document>("usage_meter")
+            .count_documents(doc! { "billing_request_id": &ctx.billing_request_id })
+            .await
+            .unwrap(),
+        expected as u64
+    );
+    meter::MeteredProxyContext::from_route(ctx)
 }
 
 async fn assert_accounts(db: &mongodb::Database) {
@@ -341,7 +377,7 @@ async fn sub_micro_grant_funds_zero_wallet_end_to_end_and_44608_tokens() {
             .unwrap()
             .unwrap();
         assert_eq!(reservation.total_reserved_credits, Credits::ZERO);
-        let metered = meter::open(&db, &ctx, Some(&reservation)).await.unwrap();
+        let metered = admitted_meter(&db, &ctx, &reservation).await;
         meter::mark_forwarded(&db, &metered).await.unwrap();
         let result = PlatformUsage {
             cache_read_tokens: quantity,
@@ -1034,6 +1070,9 @@ async fn mixed_account_lifecycle_balances_after_issue_hold_release_expire_revoke
         .unwrap();
     exact_migration::run(&db).await.unwrap();
     let input = grants::IssueCreditGrantInput {
+        amount: None,
+        service_limits: Vec::new(),
+        request_id: None,
         amount_credits: 1,
         target_kind: BillingTargetKind::SelectedUsers,
         target_user_ids: vec![owner.clone()],
@@ -1087,7 +1126,9 @@ async fn mixed_account_lifecycle_balances_after_issue_hold_release_expire_revoke
         .unwrap();
     assert_eq!(expired.terminal_amount.to_string(), "0.9999992");
     let grant = grants::issue_grants(&db, input).await.unwrap().remove(0);
-    grants::revoke_grant(&db, &grant.id).await.unwrap();
+    grants::request_revoke_grant(&db, &grant.id, None)
+        .await
+        .unwrap();
     assert_accounts(&db).await;
     webhook::refresh_wallet_balance(&db, &owner, "10.12345".parse().unwrap())
         .await
@@ -1849,10 +1890,10 @@ async fn aggregation_exact_keys_take_precedence_including_null() {
     let pico = Credits::from_pico(1).unwrap();
     db.collection::<Document>("usage_meter")
         .insert_many([
-            doc! { "_id": "both", "funding": { "total_charge": pico, "total_charge_micros": 1_000_000_i64 } },
-            doc! { "_id": "null", "funding": { "total_charge": null, "total_charge_micros": 1_000_000_i64 } },
-            doc! { "_id": "old", "funding": { "total_charge_micros": 1_000_000_i64 } },
-            doc! { "_id": "none" },
+            doc! { "_id": "both", "transaction_id": "both", "funding": { "total_charge": pico, "total_charge_micros": 1_000_000_i64 } },
+            doc! { "_id": "null", "transaction_id": "null", "funding": { "total_charge": null, "total_charge_micros": 1_000_000_i64 } },
+            doc! { "_id": "old", "transaction_id": "old", "funding": { "total_charge_micros": 1_000_000_i64 } },
+            doc! { "_id": "none", "transaction_id": "none" },
         ])
         .await.unwrap();
     let rows: Vec<Document> = db
@@ -2027,7 +2068,7 @@ async fn voice_seconds_reconcile_uses_allowance_then_grant_then_wallet_once() {
         .await
         .unwrap()
         .unwrap();
-    let metered = meter::open(&db, &ctx, Some(&reservation)).await.unwrap();
+    let metered = admitted_meter(&db, &ctx, &reservation).await;
     meter::mark_forwarded(&db, &metered).await.unwrap();
     db.collection(WINDOWS)
         .insert_one(VoiceWindow {
@@ -2142,7 +2183,7 @@ async fn voice_and_reported_token_components_settle_independently_without_replay
                 .await
                 .unwrap()
                 .unwrap();
-            let metered = meter::open(&db, &ctx, Some(&reservation)).await.unwrap();
+            let metered = admitted_meter(&db, &ctx, &reservation).await;
             meter::mark_forwarded(&db, &metered).await.unwrap();
             let usage = PlatformUsage {
                 voice_seconds: duration,
@@ -2433,7 +2474,7 @@ async fn zero_admission_usage_releases_reservations_without_spending_benefits_or
                 .await
                 .unwrap()
                 .unwrap();
-            let metered = meter::open(&db, &ctx, Some(&reservation)).await.unwrap();
+            let metered = admitted_meter(&db, &ctx, &reservation).await;
             meter::mark_forwarded(&db, &metered).await.unwrap();
             meter::settle(
                 &db,

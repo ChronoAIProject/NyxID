@@ -457,6 +457,7 @@ async fn mint_intent_in_session(
         || initiation_ref.len() > 128
         || controls.retired
         || controls.emergency_stopped
+        || !controls.personal_enabled
     {
         return Err(bindings::unavailable());
     }
@@ -672,7 +673,7 @@ pub async fn review(
             let intent=intents.find_one(doc! {"token_lookup_hmac":&lookup,"purpose":PURPOSE,"state":"pending","$expr":live(),"$or":[{"claimant_user_id":bson::Bson::Null},{"claimant_user_id":&actor}]}).session(&mut *session).await?.ok_or_else(bindings::unavailable)?;
             if !equal(&intent.token_hmac,&intent_hash(&key,&intent,&token)) {return Err(bindings::unavailable());}
             let controls=super::platform_bot_runtime_control_service::fence_manager_in_session(&db,session,&intent.platform_config_id,&intent.manager_bot_id,&intent.entry,None).await?.ok_or_else(bindings::unavailable)?;
-            if controls.retired || controls.emergency_stopped || controls.manager_authority_epoch!=intent.manager_authority_epoch {return Err(bindings::unavailable());}
+            if controls.retired || controls.emergency_stopped || !controls.personal_enabled || controls.manager_authority_epoch!=intent.manager_authority_epoch {return Err(bindings::unavailable());}
             let previous=bindings::latest_for_sender(&db,session,&intent.platform_config_id,intent.manager_authority_epoch,&intent.sender).await?;
             let now=controls.updated_at;
             let mut row=PlatformLinkChallenge {id:challenge_id.clone(),intent_id:intent.id.clone(),purpose:PURPOSE.into(),platform_config_id:intent.platform_config_id.clone(),manager_bot_id:intent.manager_bot_id.clone(),entry:intent.entry.clone(),manager_authority_epoch:intent.manager_authority_epoch,sender:intent.sender.clone(),reviewed_user_id:actor.clone(),reviewed_access_mode:mode.clone(),consent_version:CONSENT_VERSION,review_digest:String::new(),previous_binding:previous.as_ref().map(reviewed),state:ChallengeState::Review,code_lookup_hmac:None,code_hmac:None,completion:None,created_at:now,expires_at:std::cmp::min(now+Duration::minutes(10),intent.expires_at),purge_after:intent.purge_after};
@@ -721,7 +722,7 @@ pub async fn approve(
             if row.previous_binding.as_ref().is_some_and(|b|b.state==PersonalBindingState::Active && b.user_id!=actor) && !replace_existing {return Err(AppError::Conflict("Explicit account replacement acknowledgement required".into()));}
             let intent=db.collection::<PlatformLinkIntent>(COLLECTION_NAME).find_one(doc! {"_id":&row.intent_id,"claimant_user_id":&actor,"current_challenge_id":&row.id,"state":"pending","$expr":live()}).session(&mut *session).await?.ok_or_else(bindings::unavailable)?;
             let controls=super::platform_bot_runtime_control_service::fence_manager_in_session(&db,session,&row.platform_config_id,&row.manager_bot_id,&row.entry,None).await?.ok_or_else(bindings::unavailable)?;
-            if controls.retired || controls.emergency_stopped || controls.manager_authority_epoch!=row.manager_authority_epoch {return Err(bindings::unavailable());}
+            if controls.retired || controls.emergency_stopped || !controls.personal_enabled || controls.manager_authority_epoch!=row.manager_authority_epoch {return Err(bindings::unavailable());}
             if bindings::latest_for_sender(&db,session,&row.platform_config_id,row.manager_authority_epoch,&row.sender).await?.as_ref().map(reviewed)!=row.previous_binding {return Err(bindings::conflict());}
             if row.state==ChallengeState::AwaitingChatConfirmation {return Ok(ChallengeApproved {challenge:row,confirmation_command:None});}
             row.state=ChallengeState::AwaitingChatConfirmation;row.code_lookup_hmac=Some(code_lookup(&key,&code)?);row.code_hmac=Some(challenge_hash(&key,&row,&code)?);
@@ -1095,6 +1096,82 @@ mod tests {
         assert!(duplicate.token.is_none());
         assert_eq!(duplicate.intent.id, issued.intent.id);
         db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn disabling_personal_blocks_review_and_approval_without_minting_proof() {
+        for after_review in [false, true] {
+            let (db, update, owner) = fixture("personal_disabled_review").await;
+            let issued = issue(&db, &update, "personal-disable").await;
+            let token = issued.token.unwrap();
+            let challenge = if after_review {
+                Some(review(&db, KEY, &owner, &token).await.unwrap())
+            } else {
+                None
+            };
+            db.collection::<Document>(
+                crate::models::platform_bot_runtime_controls::COLLECTION_NAME,
+            )
+            .update_one(
+                doc! {"platform_config_id":&update.profile_id},
+                doc! {"$set":{"personal_enabled":false},"$inc":{"personal_control_revision":1_i64}},
+            )
+            .await
+            .unwrap();
+            elapsed_spacing(&db, &owner).await;
+            if let Some(challenge) = challenge {
+                assert!(matches!(
+                    approve(
+                        &db,
+                        KEY,
+                        &owner,
+                        &challenge.id,
+                        &challenge.review_digest,
+                        false
+                    )
+                    .await,
+                    Err(AppError::NotFound(_))
+                ));
+                let unchanged = db
+                    .collection::<PlatformLinkChallenge>(CHALLENGES)
+                    .find_one(doc! {"_id":&challenge.id})
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(unchanged.state, ChallengeState::Review);
+                assert!(unchanged.code_hmac.is_none() && unchanged.code_lookup_hmac.is_none());
+            } else {
+                assert!(matches!(
+                    review(&db, KEY, &owner, &token).await,
+                    Err(AppError::NotFound(_))
+                ));
+                assert_eq!(
+                    db.collection::<Document>(CHALLENGES)
+                        .count_documents(doc! {})
+                        .await
+                        .unwrap(),
+                    0
+                );
+            }
+            let mut session = db.client().start_session().await.unwrap();
+            session.start_transaction().await.unwrap();
+            assert!(
+                begin_in_session(&db, &mut session, KEY, &update, false, "disabled-mint")
+                    .await
+                    .is_err()
+            );
+            session.abort_transaction().await.unwrap();
+            assert_eq!(
+                db.collection::<Document>(
+                    crate::models::platform_personal_binding::COLLECTION_NAME
+                )
+                .count_documents(doc! {"state":"active"})
+                .await
+                .unwrap(),
+                0
+            );
+            db.drop().await.unwrap();
+        }
     }
 
     #[test]

@@ -181,6 +181,7 @@ async fn rebuild<R: OrnnReader>(
         .encrypt(&serde_json::to_vec(&snapshot).map_err(|_| conflict())?)
         .await?;
     let next = LearningPublication {
+        invocation_id: p.invocation_id.clone(),
         operation_id: operation.clone(),
         name: p.name.clone(),
         version: p.version.clone(),

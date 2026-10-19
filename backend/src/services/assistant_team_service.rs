@@ -111,6 +111,7 @@ pub async fn in_progress(
 /// An unbound event: it proves nothing about NyxBot involvement.
 pub fn event(kind: &str, text: String, agent_id: Option<&str>) -> AgentEvent {
     AgentEvent {
+        invocation_id: None,
         id: Uuid::new_v4().to_string(),
         kind: kind.into(),
         text,
@@ -557,6 +558,8 @@ async fn create_thread_with_kind(
 ) -> AppResult<AssistantConversation> {
     let now = Utc::now();
     let mut row = AssistantConversation {
+        invocation_controlled: false,
+        credential_invocation_id: None,
         platform_thread: None,
         machine_previews: false,
         platform_cleanup_pending: false,

@@ -582,14 +582,18 @@ impl BillingService {
         }
 
         let reservation = if self.config.billing_enabled {
-            reservation::gate_and_reserve(
+            let result = reservation::gate_and_reserve(
                 &self.db,
                 self.lago.as_deref(),
                 &ctx,
                 self.config.billing_fail_closed,
                 self.config.billing_rate_cache_ttl_secs,
             )
-            .await?
+            .await;
+            if result.is_err() && meter::has_complete_meter(&self.db, &ctx).await? {
+                return Ok(MeteredProxyContext::from_route(&ctx));
+            }
+            result?
         } else {
             None
         };
@@ -607,29 +611,12 @@ impl BillingService {
                 .into(),
             ));
         }
-        if (ctx.pool_attempt.is_some() || ctx.public_admission.is_some() || managed)
-            && reservation.is_some()
-        {
-            // Pool funding and meter rows committed together; cancellation at
-            // any later await can recover from the durable attempt lease.
+        if reservation.is_some() {
+            // All funded admission holds and meter rows committed together.
+            // Recovery owns their durable usage intent after this handoff.
             return Ok(MeteredProxyContext::from_route(&ctx));
         }
-        match meter::open(&self.db, &ctx, reservation.as_ref()).await {
-            Ok(metered) => Ok(metered),
-            Err(error) => {
-                if let Some(reservation) = reservation.as_ref()
-                    && let Err(release_error) =
-                        reservation::release_billing_reservation(&self.db, reservation).await
-                {
-                    tracing::error!(
-                        billing_request_id = %ctx.billing_request_id,
-                        error = %release_error,
-                        "failed to release billing reservation after meter setup failed"
-                    );
-                }
-                Err(error)
-            }
-        }
+        meter::open(&self.db, &ctx, None).await
     }
 
     async fn ensure_wallet_for_charging(&self, owner_id: &str) -> AppResult<()> {
@@ -1750,6 +1737,9 @@ mod tests {
         grants::issue_grants(
             &db,
             grants::IssueCreditGrantInput {
+                amount: None,
+                service_limits: Vec::new(),
+                request_id: None,
                 amount_credits: 1,
                 target_kind: BillingTargetKind::SelectedUsers,
                 target_user_ids: vec![owner.clone()],
@@ -2375,3 +2365,10 @@ mod legacy_v1_fixture;
 mod operation_pricing_tests;
 
 pub mod voice;
+
+pub mod service_limits;
+mod submissions;
+pub mod summaries;
+
+#[cfg(test)]
+mod allocation_policy_tests;

@@ -808,7 +808,7 @@ pub(crate) async fn run_owner_turn(
         if row
             .active_turn
             .as_ref()
-            .is_none_or(|turn| turn.platform_origin.is_none())
+            .is_none_or(|turn| turn.platform_origin.is_none() && turn.invocation_id.is_none())
         {
             let _ = crate::services::machine_service::cancel_conversation(
                 &state,

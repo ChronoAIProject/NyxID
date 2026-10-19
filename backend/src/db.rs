@@ -232,6 +232,7 @@ async fn ensure_core_indexes(db: &Database) -> Result<(), mongodb::error::Error>
     crate::services::service_history::relay::ensure_indexes(db).await?;
     crate::services::catalog_skill_service::ensure_indexes(db).await?;
     crate::services::assistant_nyxagent::ensure_indexes(db).await?;
+    crate::services::assistant_invocation_service::ensure_indexes(db).await?;
     crate::services::assistant_agent_learning::ensure_indexes(db).await?;
     crate::services::assistant_voice::ensure_indexes(db).await?;
     crate::services::channel_image_delivery::ensure_indexes(db).await?;
@@ -3180,6 +3181,19 @@ async fn ensure_service_indexes(db: &Database) -> Result<(), mongodb::error::Err
     credit_grants
         .create_index(
             IndexModel::builder()
+                .keys(doc! { "active_settlement.usage_row_id": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .name("credit_grants_settlement_usage".to_string())
+                        .sparse(true)
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+    credit_grants
+        .create_index(
+            IndexModel::builder()
                 .keys(doc! {
                     "recipient_user_id": 1,
                     "status": 1,
@@ -3309,6 +3323,19 @@ async fn ensure_service_indexes(db: &Database) -> Result<(), mongodb::error::Err
         )
         .await?;
     let allowance_periods = db.collection::<Document>(USAGE_ALLOWANCE_PERIODS);
+    allowance_periods
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "active_settlement.usage_row_id": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .name("usage_allowance_periods_settlement_usage".to_string())
+                        .sparse(true)
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
     allowance_periods
         .create_index(
             IndexModel::builder()

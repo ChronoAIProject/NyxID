@@ -596,6 +596,72 @@ async fn definitive_refusal_clears_only_a_never_uncertain_attempt_and_fences_sta
 }
 
 #[tokio::test]
+async fn invocation_publication_dispatch_boundary_refuses_cancelled_or_missing_root() {
+    let fixture = orchestrator_fixture("invocation_publication_boundary").await;
+    let db = &fixture.state.db;
+    let root = Uuid::new_v4().to_string();
+    let mut row = proposal(false);
+    row.owner_id = fixture.owner.clone();
+    row.status = "publishing".into();
+    let publication = row.publication.as_mut().unwrap();
+    publication.invocation_id = Some(root.clone());
+    publication.lease_expires_at = Some(Utc::now() + Duration::minutes(1));
+    let publication = publication.clone();
+    db.collection::<AssistantAgentLearningProposal>(PROPOSALS_COLLECTION_NAME)
+        .insert_one(&row)
+        .await
+        .unwrap();
+    let roots =
+        db.collection::<bson::Document>(crate::models::assistant_invocation::COLLECTION_NAME);
+    roots
+        .insert_one(doc! {
+            "_id": &root, "user_id": &fixture.owner,
+            "cancel_requested": true, "terminal_status": null,
+            "conversation_deleted": false, "generation": 0_i64,
+        })
+        .await
+        .unwrap();
+    assert!(
+        mark_started(&fixture.state, &row, &publication)
+            .await
+            .is_err()
+    );
+    let stored = db
+        .collection::<AssistantAgentLearningProposal>(PROPOSALS_COLLECTION_NAME)
+        .find_one(doc! {"_id": &row.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!stored.publication.unwrap().started);
+
+    roots.delete_one(doc! {"_id": &root}).await.unwrap();
+    assert!(
+        mark_started(&fixture.state, &row, &publication)
+            .await
+            .is_err()
+    );
+    roots
+        .insert_one(doc! {
+            "_id": &root, "user_id": &fixture.owner,
+            "cancel_requested": false, "terminal_status": null,
+            "conversation_deleted": false, "generation": 0_i64,
+        })
+        .await
+        .unwrap();
+    mark_started(&fixture.state, &row, &publication)
+        .await
+        .unwrap();
+    let stored = db
+        .collection::<AssistantAgentLearningProposal>(PROPOSALS_COLLECTION_NAME)
+        .find_one(doc! {"_id": &row.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(stored.publication.unwrap().started);
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
 async fn started_boundary_and_target_state_commit_together_before_egress() {
     let fixture = orchestrator_fixture("learning_started_boundary").await;
     let mut row = proposal(false);
@@ -741,6 +807,8 @@ async fn stale_evidence_never_deletes_an_effective_operation_body() {
 fn approval_refuses_non_owner_guest_and_non_orchestrator() {
     let mut chat = crate::services::assistant_acknowledgement_service::ChatAuthority {
         channel_adapter_origin: None,
+        invocation_controlled: false,
+        invocation_id: None,
         platform_thread: false,
         platform_origin: None,
         org_agent_access: None,
@@ -1718,6 +1786,7 @@ async fn started_learned_publication(name: &str) -> StartedLearned {
             crate::models::assistant_acknowledgement::COLLECTION_NAME,
         )
         .insert_one(AssistantAcknowledgement {
+            invocation_id: None,
             link: None,
             requester_agent_id: None,
             confirmation: None,
@@ -2098,6 +2167,7 @@ async fn approval_card_is_consumed_once_and_replay_cannot_consume_again() {
             crate::models::assistant_acknowledgement::COLLECTION_NAME,
         )
         .insert_one(AssistantAcknowledgement {
+            invocation_id: None,
             link: None,
             requester_agent_id: None,
             confirmation: None,
@@ -2943,4 +3013,102 @@ async fn publication_events_are_bounded_deduplicated_and_identifier_safe() {
             .contains("published and attached; not yet tested")
     );
     f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn invocation_publication_queue_refusal_rolls_back_settlement_and_duplicate_is_success() {
+    use crate::models::assistant_conversation::COLLECTION_NAME as CONVERSATIONS;
+    let fixture = orchestrator_fixture("invocation_publication_queue").await;
+    let db = &fixture.state.db;
+    let root = Uuid::new_v4().to_string();
+    db.collection::<bson::Document>(crate::models::assistant_invocation::COLLECTION_NAME)
+        .insert_one(doc! {
+            "_id": &root, "user_id": &fixture.owner, "cancel_requested": false,
+            "terminal_status": null, "conversation_deleted": false, "generation": 0_i64,
+        })
+        .await
+        .unwrap();
+    let proposal = Uuid::new_v4().to_string();
+    let proposals = db.collection::<bson::Document>(PROPOSALS_COLLECTION_NAME);
+    proposals
+        .insert_one(doc! {"_id": &proposal, "status": "publishing"})
+        .await
+        .unwrap();
+    let event = team::event("skill_publication", "published fixture".into(), None)
+        .for_invocation(Some(&root));
+    let filler = team::event("fixture", "queued fixture".into(), None);
+    let conversations = db.collection::<bson::Document>(CONVERSATIONS);
+    for duplicate in [false, true] {
+        let mut events = vec![
+            bson::to_bson(&filler).unwrap();
+            super::super::assistant_nyxagent::MAX_PENDING_EVENTS
+        ];
+        if duplicate {
+            events[0] = bson::to_bson(&event).unwrap();
+        }
+        conversations
+            .update_one(
+                doc! {"_id": &fixture.row.id},
+                doc! {"$set": {"pending_events": events}},
+            )
+            .await
+            .unwrap();
+        let mut session = db.client().start_session().await.unwrap();
+        session.start_transaction().await.unwrap();
+        proposals
+            .update_one(doc! {"_id": &proposal}, doc! {"$set": {"status": "pinned"}})
+            .session(&mut session)
+            .await
+            .unwrap();
+        let outcome =
+            push_publication_event(db, &mut session, &fixture.row.id, &fixture.owner, &event).await;
+        if duplicate {
+            outcome.unwrap();
+            session.commit_transaction().await.unwrap();
+        } else {
+            assert!(matches!(outcome, Err(AppError::Conflict(_))));
+            session.abort_transaction().await.unwrap();
+        }
+        let stored = proposals
+            .find_one(doc! {"_id": &proposal})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            stored.get_str("status").unwrap(),
+            if duplicate { "pinned" } else { "publishing" }
+        );
+        let stored = conversations
+            .find_one(doc! {"_id": &fixture.row.id})
+            .await
+            .unwrap()
+            .unwrap();
+        let queued = stored.get_array("pending_events").unwrap();
+        assert_eq!(
+            queued.len(),
+            super::super::assistant_nyxagent::MAX_PENDING_EVENTS
+        );
+        assert_eq!(
+            queued
+                .iter()
+                .filter(|value| value.as_document().unwrap().get_str("id").unwrap() == event.id)
+                .count(),
+            usize::from(duplicate)
+        );
+    }
+    let mut session = db.client().start_session().await.unwrap();
+    session.start_transaction().await.unwrap();
+    assert!(
+        push_publication_event(
+            db,
+            &mut session,
+            "missing-conversation",
+            &fixture.owner,
+            &event
+        )
+        .await
+        .is_err()
+    );
+    session.abort_transaction().await.unwrap();
+    db.drop().await.unwrap();
 }

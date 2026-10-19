@@ -20,9 +20,15 @@ use tower::ServiceExt;
 use wiremock::matchers::path_regex;
 use zeroize::Zeroizing;
 
+#[path = "control_feedback.rs"]
+mod control_feedback;
+
+#[path = "owner_management.rs"]
+mod owner_management;
+
 struct ObservedTransport {
     inner: Arc<dyn ManagerTransportProducer>,
-    native: Arc<NativeTestTransport>,
+    native: Option<Arc<NativeTestTransport>>,
     finished: tokio::sync::mpsc::Sender<(ReplyRef, DeliveryOutcome)>,
 }
 #[async_trait]
@@ -43,12 +49,14 @@ impl ManagerTransportProducer for ObservedTransport {
     ) -> AppResult<DeliveryOutcome> {
         // The automatic consumer runs in its own task. Install the local
         // transport dependency there as well as at the ingress caller.
-        let outcome = with_transport_for_test(
-            self.native.clone(),
-            self.inner
-                .deliver_platform_reply(db, destination, reference, content),
-        )
-        .await?;
+        let delivery = self
+            .inner
+            .deliver_platform_reply(db, destination, reference, content);
+        let outcome = if let Some(native) = &self.native {
+            with_transport_for_test(native.clone(), delivery).await?
+        } else {
+            delivery.await?
+        };
         if let DeliveryRef::Reply(reply) = reference {
             self.finished
                 .send((reply.clone(), outcome.clone()))
@@ -138,7 +146,7 @@ impl NativeJourney {
         let inner = producers.transport.clone();
         Arc::get_mut(&mut producers).unwrap().transport = Arc::new(ObservedTransport {
             inner,
-            native: transport.clone(),
+            native: Some(transport.clone()),
             finished: sender,
         });
         let browser = Router::new()
@@ -1049,11 +1057,21 @@ fn confirmed_native_proof_rechecks_disable_logout_and_repair_and_new_proof_is_in
             )
             .await
             .unwrap();
+        let inventory = bindings::inventory_status(&j.state.db, &before_repair)
+            .await
+            .unwrap();
+        assert_eq!(inventory.state, PersonalBindingState::Revoked);
         assert_eq!(
-            bindings::inventory_state(&j.state.db, &before_repair)
+            inventory.availability,
+            bindings::BindingAvailability::ReconnectRequired
+        );
+        assert_eq!(
+            rows.find_one(doc! {"_id":&before_repair.id})
                 .await
-                .unwrap(),
-            PersonalBindingState::Revoked
+                .unwrap()
+                .unwrap()
+                .state,
+            PersonalBindingState::Active
         );
         assert!(!reconfirm(&j, &second_code, 209).await);
         let third_code = prove(&j, 210).await;
@@ -1062,15 +1080,17 @@ fn confirmed_native_proof_rechecks_disable_logout_and_repair_and_new_proof_is_in
         assert_ne!(current.id, old.id);
         assert_ne!(current.id, before_repair.id);
         assert_eq!(
-            bindings::inventory_state(&j.state.db, &current)
+            bindings::inventory_status(&j.state.db, &current)
                 .await
-                .unwrap(),
+                .unwrap()
+                .state,
             PersonalBindingState::Active
         );
         assert_eq!(
-            bindings::inventory_state(&j.state.db, &before_repair)
+            bindings::inventory_status(&j.state.db, &before_repair)
                 .await
-                .unwrap(),
+                .unwrap()
+                .state,
             PersonalBindingState::Revoked
         );
         j.state.db.drop().await.unwrap();

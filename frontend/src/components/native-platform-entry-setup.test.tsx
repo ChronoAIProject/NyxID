@@ -291,3 +291,52 @@ it("recovers the authoritative saved profile when the successor has an empty tar
     fixture.bots.push(...savedBots);
   }
 });
+
+it("binds each retained-setup review label to its own checkbox", () => {
+  render(
+    <>
+      <NativePlatformEntrySetup />
+      <NativePlatformEntrySetup />
+    </>,
+  );
+  for (const select of screen.getAllByLabelText("Native chat channel")) {
+    fireEvent.change(select, { target: { value: fixture.bots[0]!.id } });
+  }
+  for (const select of screen.getAllByLabelText("Native delivery transport")) {
+    fireEvent.change(select, { target: { value: "gateway" } });
+  }
+  for (const button of screen.getAllByRole("button", {
+    name: "Inspect retained gateway setup",
+  }))
+    fireEvent.click(button);
+  const review = {
+    kind: "gateway",
+    record_id: "record",
+    attempt_id: "attempt",
+    revision: 1,
+    request_hash: `sha256:${"a".repeat(64)}`,
+    credential_fingerprint: "b".repeat(64),
+    remote_channel_id: null,
+    remote_version: null,
+    remote_ready: false,
+  };
+  act(() => {
+    for (const call of fixture.inspect.mock.calls) call[1].onSuccess(review);
+  });
+  const checkboxes = screen.getAllByRole("checkbox", {
+    name: "I reviewed this exact retained setup.",
+  });
+  expect(checkboxes[0]!.id).not.toBe(checkboxes[1]!.id);
+  fireEvent.click(
+    screen.getAllByText("I reviewed this exact retained setup.", {
+      selector: "label",
+    })[1]!,
+  );
+  expect(checkboxes[0]).not.toBeChecked();
+  expect(checkboxes[1]).toBeChecked();
+  const retries = screen.getAllByRole("button", {
+    name: "Retry reviewed native setup",
+  });
+  expect(retries[0]).toBeDisabled();
+  expect(retries[1]).toBeEnabled();
+});
