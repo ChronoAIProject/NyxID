@@ -1086,6 +1086,14 @@ async fn channel_media_relay_post_recomputes_after_ack_and_flag_off_keeps_empty_
         let mut headers = HeaderMap::new();
         headers.insert("x-nyxid-callback-token", token.parse().unwrap());
         let (_watch, done) = watch_relay_callback(&row.id, id);
+        let pause = enabled.then(|| {
+            crate::services::assistant_channel_media::test_hooks::install(
+                &state.db,
+                id,
+                "relay_before_media_text",
+                false,
+            )
+        });
         assert_eq!(
             relay_callback(
                 State(state.clone()),
@@ -1100,6 +1108,21 @@ async fn channel_media_relay_post_recomputes_after_ack_and_flag_off_keeps_empty_
         // On this current-thread runtime, newly spawned work cannot run until we yield.
         // An identity cache entry here would mean lookup still preceded the acknowledgement.
         assert!(!OWN_USER_IDS.lock().unwrap().contains_key(&identity_key));
+        if let Some(pause) = pause {
+            tokio::time::timeout(Duration::from_secs(20), pause.entered.notified())
+                .await
+                .unwrap();
+            state
+                .db
+                .collection::<bson::Document>("feature_flag_overrides")
+                .update_many(
+                    doc! {"flag_key":feature_flag_service::ASSISTANT_CHANNEL_MEDIA_FLAG_KEY},
+                    doc! {"$set":{"enabled":false}},
+                )
+                .await
+                .unwrap();
+            pause.release.notify_one();
+        }
         tokio::time::timeout(Duration::from_secs(20), done)
             .await
             .unwrap()
@@ -1110,6 +1133,7 @@ async fn channel_media_relay_post_recomputes_after_ack_and_flag_off_keeps_empty_
             let input = captured_text(&calls[0]);
             assert!(input.contains("Receipt\nDinner"), "{input}");
             assert!(!input.contains("@Receipt helper"), "{input}");
+            assert!(calls[0].to_string().contains("input_image"));
             assert_eq!(
                 OWN_USER_IDS.lock().unwrap()[&identity_key].0.as_deref(),
                 Some("ou_own_bot")

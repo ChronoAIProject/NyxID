@@ -4945,18 +4945,26 @@ pub async fn relay_callback(
                     return Ok(());
                 }
             }
+            #[cfg(test)]
+            crate::services::assistant_channel_media::test_hooks::reach(
+                &state.db,
+                &message_id,
+                "relay_before_media_text",
+            )
+            .await;
             let text = if matches!(row.platform.as_str(), "lark" | "feishu")
                 && raw
                     .pointer("/event/message/message_type")
                     .and_then(Value::as_str)
                     == Some("post")
-                && feature_flag_service::personal_flag_enabled(
-                    &state.db,
-                    &row.user_id,
-                    feature_flag_service::ASSISTANT_CHANNEL_MEDIA_FLAG_KEY,
-                )
-                .await
-                .unwrap_or(false)
+                && (admitted.source_media_declared.unwrap_or(0) > 0
+                    || feature_flag_service::personal_flag_enabled(
+                        &state.db,
+                        &row.user_id,
+                        feature_flag_service::ASSISTANT_CHANNEL_MEDIA_FLAG_KEY,
+                    )
+                    .await
+                    .unwrap_or(false))
             {
                 let bot_id =
                     match channel_bot_service::get_bot(&state.db, &row.channel_bot_id).await {

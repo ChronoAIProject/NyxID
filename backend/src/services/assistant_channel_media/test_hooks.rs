@@ -5,14 +5,14 @@ use std::{
 };
 use tokio::sync::Notify;
 #[derive(Clone, Default)]
-pub(super) struct Gate {
+pub(crate) struct Gate {
     pub entered: Arc<Notify>,
     pub release: Arc<Notify>,
     pub fail: bool,
 }
 type Gates = Mutex<HashMap<(String, String, String), Gate>>;
 static GATES: LazyLock<Gates> = LazyLock::new(Default::default);
-pub(super) fn install(db: &mongodb::Database, turn: &str, phase: &str, fail: bool) -> Gate {
+pub(crate) fn install(db: &mongodb::Database, turn: &str, phase: &str, fail: bool) -> Gate {
     let gate = Gate {
         fail,
         ..Default::default()
