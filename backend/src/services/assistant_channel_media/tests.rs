@@ -781,7 +781,7 @@ async fn channel_media_browser_waits_for_shared_budget_before_body_read_and_canc
     assert_eq!(reads.load(Ordering::SeqCst), 0);
     assert!(!task.is_finished());
     task.abort();
-    assert!(task.await.unwrap_err().is_cancelled());
+    assert!(matches!(task.await, Err(error) if error.is_cancelled()));
     drop(reservation);
     let all = tokio::time::timeout(
         Duration::from_secs(1),
