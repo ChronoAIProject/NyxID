@@ -15,7 +15,7 @@ import tarfile
 import tempfile
 import uuid
 
-from publication_contract import file_digest, load_json, validate_plan
+from publication_contract import file_digest, load_json, require_build_identity, validate_plan
 
 spec = importlib.util.spec_from_file_location("rust_binary_sbom", Path(__file__).with_name("rust-binary-sbom.py"))
 binary_sbom = importlib.util.module_from_spec(spec)
@@ -153,6 +153,8 @@ def inspect(plan, artifacts, evidence, extractor, syft, targets=None, source_dif
             with receipt_path.open("w") as output:
                 subprocess.run([str(extractor), str(binary)], check=True, stdout=output)
             receipt = load_json(receipt_path)
+            identity = require_build_identity(receipt, subject["package"], plan["version"], subject["target"],
+                                              plan["source"], source_diff is not None)
             roots = [item for item in receipt["audit"]["packages"] if item.get("root")]
             if len(roots) != 1 or roots[0]["version"] != plan["version"]:
                 raise ValueError("archive binary application version differs from plan")
@@ -174,6 +176,7 @@ def inspect(plan, artifacts, evidence, extractor, syft, targets=None, source_dif
             output_path.write_text(json.dumps(archive_document, indent=2) + "\n")
             records.append({**{key: subject[key] for key in ("id", "kind", "name", "target")},
                             "source": plan["source"], "digest": inspection["digest"], "binary": receipt["subject"],
+                            "build_identity": identity,
                             "sbom": {"path": output_path.name, "digest": file_digest(output_path)}})
     return {"schema": "nyxid.archive-inspection.v1", "scope": "complete" if targets is None and source_diff is None else "local-investigation",
             "source": plan["source"], "subjects": records}

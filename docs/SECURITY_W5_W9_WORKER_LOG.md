@@ -665,6 +665,48 @@ R1-15 application wiring/actual stripped
 artifact identity, immutable distro inputs, producer signatures/scans and full
 final artifact coverage remain OPEN. Mobile R1-05/R1-06 remain untouched OPEN.
 
+## W7 R1-15 source identity and exact source export tools
+
+The shared helper records full commit, commit epoch, actual Cargo package
+version and target in a retained ELF/Mach-O section. Git working-tree builds
+are conservatively git-unverified or known git-dirty; a cached build script
+cannot certify clean source when another package introduces a new build input.
+The release contract accepts exported source only. Unknown, dirty, unverified
+and the former git-clean state cannot satisfy official publication. Actual ABI
+inspection remains separate from the declared target string.
+
+Focused helper tests execute stripped fixtures and the actual newly rebuilt
+artifact-info extractor. All seven pass, including unchanged Fresh controls,
+unstaged sibling dependency edits, linked worktrees/packed refs and optional
+untracked input creation/removal (actual outputs 2 -> 3 -> 2). The earlier
+new-input control failed because its diagnostic git status refreshed the Git
+index; that failure is retained. GIT_OPTIONAL_LOCKS=0 makes fixture inspection
+read-only; no assertion was removed. Helper SHA256 is
+39cb596250af4e0cdf90c2a5e3e5d6d06864b7f96a81462c3a59076ce6ddc592;
+test SHA256 eeb58551266f23f4601ca3d33afdb511d96adf48530a06d3044996114d630675.
+
+The new exporter validates a clean exact checkout, reads raw committed blobs
+and writes a deterministic archive outside Git. It deliberately applies no
+export-ignore/export-subst, local/global attribute or working-tree filter
+transformations. Receipt verification reconstructs the committed Git tree,
+checks the raw commit object against the expected commit/tree/epoch, validates
+each archive blob/mode and compares the extracted source to those committed
+inputs. Reviewed generated-output exclusions cannot hide tracked inputs.
+Local info/attributes can make ordinary git archive omit a clean committed
+file; the regression reproduces that omission and proves the protected export
+is unchanged. Ten exporter tests pass, including new files/empty directories,
+archive/source/receipt tampering and symlink/output boundaries.
+
+Exact command/env/exit/log receipts are in
+w7-source-identity-stable-tests-receipt.json and
+w7-identity-parser-stable-receipt.json under the active validation directory.
+Publication contract tests pass9/9, archive tests5/5, actual parser tests2/2.
+This bounded tools commit does not claim final application/builder/archive/
+image identity. The working application wiring passed locked cargo check for
+backend/CLI/updater bins with both KMS features; it remains a separate working
+integration snapshot. Official producer export/build wiring, actual stripped
+application subjects and full final evidence remain required for R1-15.
+
 ## Remaining authorized batches
 
 W5 final container review/integration; W7 pinned,

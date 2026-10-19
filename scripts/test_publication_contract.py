@@ -44,6 +44,33 @@ def records(plan):
 
 
 class PublicationContractTests(unittest.TestCase):
+    def test_actual_retained_identity_binds_version_source_target_and_release_state(self):
+        source = {"commit": "a" * 40, "epoch": 1792367116}
+        identity = {"schema": "nyxid.build-identity.v1", "package": "nyxid-cli", "package_version": "0.71.0",
+                    "target": "aarch64-unknown-linux-gnu", "commit": source["commit"],
+                    "source_date_epoch": source["epoch"], "source_state": "exported"}
+        def check(value, local=False):
+            return contract.require_build_identity({"build_identity": value}, "nyxid-cli", "0.71.0",
+                                                   "aarch64-unknown-linux-gnu", source, local)
+        self.assertEqual(check(identity), identity)
+        for field, value in [("schema", "other"), ("package", "other"), ("package_version", "0.70.0"),
+                             ("target", "aarch64-unknown-linux-musl"), ("commit", "b" * 40),
+                             ("source_date_epoch", source["epoch"] - 1), ("source_state", "unknown")]:
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                check({**identity, field: value})
+        for missing in (None, {}):
+            with self.assertRaises(ValueError):
+                check(missing)
+        for state in ("git-dirty", "git-unverified"):
+            local = {**identity, "source_state": state}
+            with self.assertRaises(ValueError):
+                check(local)
+            self.assertEqual(check(local, True), local)
+        with self.assertRaises(ValueError):
+            check({**identity, "source_state": "git-clean"})
+        with self.assertRaises(ValueError):
+            check({**identity, "unrecognized": "value"})
+
     def test_complete_four_target_and_five_component_two_platform_contract(self):
         cli, images = cli_plan(), images_plan()
         self.assertEqual(len(cli["subjects"]), 13)

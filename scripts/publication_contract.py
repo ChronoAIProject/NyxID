@@ -112,6 +112,24 @@ def require_success(results, expected_jobs):
         raise ValueError("required publication job failed, skipped, cancelled, absent or unexpected")
 
 
+def require_build_identity(receipt, package, version, target, source, local_investigation=False):
+    """Compare actual retained-section identity with the independently planned subject.
+
+    The extractor binds this identity to final binary bytes. Target ABI still
+    requires actual executable/loader inspection; a target string is insufficient.
+    """
+    identity = receipt.get("build_identity")
+    expected = {"schema": "nyxid.build-identity.v1", "package": package,
+                "package_version": version, "target": target, "commit": source["commit"],
+                "source_date_epoch": source["epoch"]}
+    allowed = {"exported"} | ({"git-unverified", "git-dirty"} if local_investigation else set())
+    if not isinstance(identity, dict) or set(identity) != set(expected) | {"source_state"} or \
+            any(identity.get(key) != value for key, value in expected.items()) or \
+            identity.get("source_state") not in allowed:
+        raise ValueError("actual retained build identity differs from planned source/package/version/target or release state")
+    return identity
+
+
 def validate_coverage(plan, records):
     validate_plan(plan)
     expected = {item["id"]: item for item in plan["subjects"]}
