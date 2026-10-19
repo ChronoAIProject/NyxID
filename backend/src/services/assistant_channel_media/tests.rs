@@ -242,15 +242,27 @@ async fn channel_media_bind_receipt_replays_after_lost_ack_stop_new_turn_and_rec
         .unwrap();
     assert!(old.media.unwrap().items[0].outcome.is_none());
     settle(&state, &row, Some("cancelled")).await;
-    state
-        .db
-        .collection::<bson::Document>(CONVERSATIONS)
-        .update_one(
-            doc! {"_id":&row.id},
-            doc! {"$set":{"active_turn.turn_id":"successor"}},
-        )
-        .await
-        .unwrap();
+    let successor = Box::pin(engine::begin_turn(
+        &state.db,
+        &row.user_id,
+        &engine::TurnRequest {
+            acknowledgement_id: None,
+            retry_of: None,
+            conversation_id: Some(row.id.clone()),
+            attachment_ids: vec![],
+            text: "successor".into(),
+            agent_id: None,
+            model: None,
+            access_mode: None,
+        },
+        &state.encryption_keys,
+    ))
+    .await
+    .unwrap();
+    assert_ne!(
+        successor.active_turn.as_ref().unwrap().turn_id,
+        message.turn_id
+    );
     let replay = binding::bind(&state.db, &message, &proposed).await.unwrap();
     binding::reconcile(&state.db, &replay).await.unwrap();
     let second = saved(&state, &message).await;
@@ -716,6 +728,69 @@ async fn channel_media_browser_single_read_accepts_above_initial_channel_limit_a
         clear.extend(state.encryption_keys.decrypt(encrypted).await.unwrap());
     }
     assert_eq!(clear, payload);
+}
+
+#[tokio::test]
+async fn channel_media_browser_waits_for_shared_budget_before_body_read_and_cancels() {
+    use axum::{
+        body::{Body, Bytes},
+        extract::{Path, State},
+        http::Request,
+    };
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let (state, row, _, _) = fixture().await;
+    let reservation = uploads::byte_budget::reserve(uploads::byte_budget::CAPACITY / 2)
+        .await
+        .unwrap();
+    let reads = Arc::new(AtomicUsize::new(0));
+    let counted = reads.clone();
+    let body = Body::from_stream(futures::stream::once(async move {
+        counted.fetch_add(1, Ordering::SeqCst);
+        Ok::<_, std::io::Error>(Bytes::from(png()))
+    }));
+    let request = Request::builder()
+        .header("x-attachment-name", "image.png")
+        .body(body)
+        .unwrap();
+    let run_state = state.clone();
+    let user = row.user_id.clone();
+    let scope = row.id.clone();
+    let task = tokio::spawn(async move {
+        crate::handlers::assistant_uploads::upload(
+            State(run_state),
+            crate::test_utils::test_auth_user(&user),
+            Path(scope),
+            request,
+        )
+        .await
+    });
+    for _ in 0..100 {
+        if state
+            .db
+            .collection::<bson::Document>("assistant_upload_limits")
+            .count_documents(doc! {})
+            .await
+            .unwrap()
+            > 0
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(reads.load(Ordering::SeqCst), 0);
+    assert!(!task.is_finished());
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+    drop(reservation);
+    let all = tokio::time::timeout(
+        Duration::from_secs(1),
+        uploads::byte_budget::reserve(uploads::byte_budget::CAPACITY / 2),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    drop(all);
 }
 
 #[tokio::test]

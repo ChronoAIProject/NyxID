@@ -3124,7 +3124,12 @@ async fn start_chat_turn(
         )
     };
     if text.contains("[post truncated]") && !message.contains("[post truncated]") {
-        message.push_str("\n[post truncated]");
+        const MARKER: &str = "\n[post truncated]";
+        message = message
+            .chars()
+            .take(engine::MAX_MESSAGE_CHARS - MARKER.len())
+            .collect();
+        message.push_str(MARKER);
     }
     let title = if shared {
         None
