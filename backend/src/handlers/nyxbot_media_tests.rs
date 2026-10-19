@@ -1399,7 +1399,7 @@ async fn channel_media_gateway_current_request_contains_all_failed_partial_and_c
         if kind != "all_failed" {
             let mut failed = source.embedded_attachments[0].clone();
             failed.image_key = Some("bad".into());
-            failed.size_bytes = Some(u64::MAX);
+            failed.size_bytes = Some(21 * 1024 * 1024);
             source.embedded_attachments.push(failed);
         }
         if kind == "capped" {
