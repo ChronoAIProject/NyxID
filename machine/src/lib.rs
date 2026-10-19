@@ -62,6 +62,8 @@ pub struct MachineProfile {
     pub computer: bool,
     pub browser: Option<bool>,
     pub authority_versions: Vec<u32>,
+    /// Conservative signed-timestamp lease timing; absent means ACK-only recovery.
+    pub authority_timing_v1: bool,
     /// Exact turn/job cancellation; absent on older nodes.
     pub exact_cancel: bool,
     /// Absent on old nodes; never inferred from protocol v2 alone.

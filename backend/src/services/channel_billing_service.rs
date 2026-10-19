@@ -229,7 +229,21 @@ impl ChannelBilling {
             .await
     }
 
-    async fn received_event(&self, event_id: &str, operation: XChannelOperation) -> AppResult<()> {
+    fn received_event<'a>(
+        &'a self,
+        event_id: &'a str,
+        operation: XChannelOperation,
+    ) -> futures::future::BoxFuture<'a, AppResult<()>> {
+        // Keep the shared reservation/settlement future out of each inbound
+        // branch's state and construct it outside the inbound caller's poll frame.
+        Box::pin(self.received_event_inner(event_id, operation))
+    }
+
+    async fn received_event_inner(
+        &self,
+        event_id: &str,
+        operation: XChannelOperation,
+    ) -> AppResult<()> {
         if !self.billing.billing_enabled() {
             return Ok(());
         }

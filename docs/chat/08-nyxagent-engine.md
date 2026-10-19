@@ -250,9 +250,9 @@ client cannot widen access by submitting a different mode. The three modes are:
   machine/saved-login, service approval, pairing/update and skill-publication
   confirmations. Successful bypassed actions leave automatic allowance receipts.
 - **Auto** (`nyxmode`) proceeds automatically for ordinary actions and asks before
-  sensitive or destructive actions.
+  sensitive or destructive actions, and before any organization connection use (including reads).
 - **Ask every time** (`ask_every_time`) asks before every action that changes something; reads do
-  not prompt.
+  not prompt unless they use an organization connection.
 
 Confirmation cards identify the action and requested scope, the risk class
 (`change`, `sensitive`, or `destructive`), the effective mode, and why the card
@@ -465,10 +465,16 @@ account inventory is:
 | Area | Tools (prefix every name with `nyxid__`) | Destructive |
 | --- | --- | --- |
 | Agent keys | `list_agent_keys`, `get_agent_key`, `update_agent_key`, `delete_agent_key`, `list_agent_key_bindings`, `bind_agent_key_credential`, `unbind_agent_key_credential` | `delete_agent_key`, `unbind_agent_key_credential` |
+| Phone and speech capabilities | `list_channel_adapters` | None |
 | Channel bots/routes | `list_channel_bots`, `get_channel_bot`, `update_channel_bot`, `delete_channel_bot`, `list_channel_routes`, `set_channel_route`, `delete_channel_route` | `delete_channel_bot`, `delete_channel_route` |
 | Connected services | `list_my_services`, `set_service_enabled`, `delete_service` | `delete_service` |
 | Nodes | `list_nodes`, `delete_node` | `delete_node` |
 | Approvals | `list_approval_configs`, `set_approval_mode`, `list_pending_approvals` | None |
+
+`list_channel_adapters` returns the compiled capability catalog, rollout status
+and a link to owner setup. Binding management and secret issuance require the
+first-party owner UI or API. See [NyxBot service adapters](../NYXBOT_SERVICE_ADAPTERS.md)
+for phone/SMS and ElevenLabs setup, guest FAQ access and live instruction updates.
 
 Key updates accept metadata, callback URL, rate limits, service/node flags,
 `allowed_service_slugs` resolved to owner-visible IDs and node IDs. Bot updates
@@ -1532,8 +1538,12 @@ or lease expiry even after socket loss. Legacy assignments remain visibly shared
 context IDs in this phase do not isolate files or browser sessions.
 
 Chat-key discovery rows carry dense authorized `preference_rank` and follow the
-owner's saved same-catalog connection order by refilling only that group's occupied slots within equal relevance buckets; search also reports `executable`. Execution targets and approval
-authority are unchanged. Guest connected search/list includes only granted
+owner's saved same-catalog connection order by refilling only that group's occupied slots within equal relevance buckets; search also reports `executable`.
+NyxBot enforces eligible personal-first order at the concrete execution boundary,
+including raw model callbacks. Exact names stay exact; one-turn owner selection
+chooses a target and does not waive org consent. See
+[service execution](../NYXBOT_SERVICE_EXECUTION.md) for raw model turn grants,
+pool pins, native execution and machine job grants. Guest connected search/list includes only granted
 UserManaged and Platform connections and drops Internal catalog entries before
 ranking. Native `nyxid` virtual tools remain subject to their separate guest
 authorization; including that virtual catalog does not grant execution access.
@@ -1627,6 +1637,43 @@ hold per-day counts and up to 100 recent rows with their comment and context;
 rows written before the snapshot existed have `context: null`. Message text is
 never included.
 
+
+### Admin NyxBot activity
+
+Studio **Usage → NyxBot** separates assistant activity and feedback from the
+billing Dashboard and List. It is available to admins and operators; the broader
+usage-read permission does not grant assistant analytics or feedback access.
+
+`GET /api/v1/admin/assistant/analytics` accepts RFC3339 `from` and `to`, defaults
+to the last seven days, and rejects non-positive windows or windows longer than
+31 days. The upper bound is exclusive. The response includes the effective
+window, `generated_at`, `active_sessions`, `active_accounts`, `running_now`,
+`outcomes`, `daily_sessions`, and `daily_turns`. MongoDB reads have a ten-second
+execution limit and project only metadata, never transcript text.
+
+- Active sessions are distinct durable conversations with persisted `role=user`
+  input in the window, including channel input and steering. These are threads,
+  not sessions inferred from an inactivity timeout. Active accounts are distinct
+  conversation owners, which may differ from guest/channel actors.
+- Running now is a live snapshot independent of the historical window: an active
+  turn must have a heartbeat no older than 75 seconds, no requested Stop, and an
+  unexpired effective lease (explicit lease or started-at plus the turn TTL).
+  Legacy turns without heartbeats are not counted. The tab polls every 30 seconds.
+- Settled outcomes use distinct turn IDs from retained assistant replies in the
+  window, deduplicating voice copies. Completed, failed, and stopped are separate;
+  `error_code=cancelled` is stopped. Tool indicators count turns with recorded
+  activities/errors, not exact calls, since the stored activity list is bounded.
+- Feedback totals and the chart use the existing feedback endpoint's daily counts
+  across the whole period. The list's vote/model/agent filters and cursor do not
+  change the overview. Helpful rate is helpful votes divided by all retained votes,
+  with no value when there are no votes. It is not a task-success rate. Feedback
+  includes group replies; turn outcomes include specialist and automated work.
+
+Chart days are zero-filled in UTC. The UI's end date includes the whole selected
+day and is translated to the respective endpoints' exclusive/inclusive bounds.
+Feedback is grouped by original submission day; vote edits, withdrawals, and
+transcript deletion can change historical reports. List entries lead with votes
+and comments; message IDs and tool identifiers are available in reply details.
 Native channel guest authority also covers positively addressed foreign
 Telegram/Lark/Feishu bot actors in owner-enabled groups. The receiving bot's
 existing channel/chat agent answers; native mention names do not select arbitrary

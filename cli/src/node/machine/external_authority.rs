@@ -1,12 +1,12 @@
 //! V3 external leases share the runtime and executor, but never a chat identity.
 use anyhow::{Context, Result, bail};
-use nyxid_machine::authority::ExternalAuthority;
+use nyxid_machine::authority::{ExternalAuthority, LeaseClock};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
     sync::Mutex,
-    time::{Duration, Instant},
+    time::Instant,
 };
 use tokio::sync::watch;
 
@@ -86,14 +86,15 @@ impl Fences {
         std::fs::File::open(directory)?.sync_all()?;
         Ok(())
     }
-    pub fn admit(
+    pub fn admit_at(
         &self,
         authority: &ExternalAuthority,
         node: &str,
         runtime: &str,
         execution: bool,
+        clock: LeaseClock,
     ) -> Result<watch::Receiver<bool>> {
-        let now = chrono::Utc::now().timestamp_millis();
+        let now = clock.now_ms;
         if !authority.valid(node, runtime, now) {
             bail!("invalid external authority");
         }
@@ -162,22 +163,32 @@ impl Fences {
                 lease.stop.send_replace(true);
             }
         }
+        // Persistence may block. Keep the committed fence but never activate
+        // work whose monotonic deadline passed while acquiring/writing it.
+        if clock.deadline <= Instant::now() {
+            bail!("authority_expired");
+        }
         let stop = watch::channel(false).0;
         let receiver = stop.subscribe();
         state.leases.insert(
             authority.lease_id.clone(),
             Lease {
                 authority: authority.clone(),
-                deadline: Instant::now()
-                    + Duration::from_millis((authority.expires_at_ms - now) as u64),
+                deadline: clock.deadline,
                 stop,
                 job: execution.then(|| authority.job_id.clone()).flatten(),
             },
         );
         Ok(receiver)
     }
-    pub fn renew(&self, authority: &ExternalAuthority, node: &str, runtime: &str) -> Result<()> {
-        let now = chrono::Utc::now().timestamp_millis();
+    pub fn renew_at(
+        &self,
+        authority: &ExternalAuthority,
+        node: &str,
+        runtime: &str,
+        clock: LeaseClock,
+    ) -> Result<()> {
+        let now = clock.now_ms;
         if !authority.valid(node, runtime, now) {
             bail!("invalid external renewal");
         }
@@ -201,6 +212,7 @@ impl Fences {
         if expected != *authority
             || *lease.stop.borrow()
             || lease.deadline <= Instant::now()
+            || clock.deadline <= Instant::now()
             || authority.expires_at_ms <= lease.authority.expires_at_ms
             || authority.auth_expires_at_ms < lease.authority.auth_expires_at_ms
             || match (
@@ -215,12 +227,17 @@ impl Fences {
             bail!("expired or changed external renewal");
         }
         lease.authority = authority.clone();
-        lease.deadline =
-            Instant::now() + Duration::from_millis((authority.expires_at_ms - now) as u64);
+        lease.deadline = clock.deadline;
         Ok(())
     }
-    pub fn revoke(&self, authority: &ExternalAuthority, node: &str, runtime: &str) -> Result<()> {
-        let now = chrono::Utc::now().timestamp_millis();
+    pub fn revoke_at(
+        &self,
+        authority: &ExternalAuthority,
+        node: &str,
+        runtime: &str,
+        clock: LeaseClock,
+    ) -> Result<()> {
+        let now = clock.now_ms;
         if !authority.valid_stop(node, runtime, now) {
             bail!("invalid external revocation");
         }
@@ -264,6 +281,31 @@ impl Fences {
             .durable
             .revoked
             .contains_key(id)
+    }
+    #[cfg(test)]
+    fn test_clock(a: &ExternalAuthority) -> LeaseClock {
+        let now = chrono::Utc::now().timestamp_millis();
+        LeaseClock {
+            now_ms: now,
+            deadline: Instant::now()
+                + std::time::Duration::from_millis(
+                    a.expires_at_ms.saturating_sub(now).max(0) as u64
+                ),
+        }
+    }
+    #[cfg(test)]
+    pub fn admit(
+        &self,
+        a: &ExternalAuthority,
+        node: &str,
+        runtime: &str,
+        execution: bool,
+    ) -> Result<watch::Receiver<bool>> {
+        self.admit_at(a, node, runtime, execution, Self::test_clock(a))
+    }
+    #[cfg(test)]
+    pub fn revoke(&self, a: &ExternalAuthority, node: &str, runtime: &str) -> Result<()> {
+        self.revoke_at(a, node, runtime, Self::test_clock(a))
     }
     pub fn finish(&self, id: &str) {
         let mut state = self.state.lock().expect("external authority lock");

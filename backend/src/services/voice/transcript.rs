@@ -1,6 +1,9 @@
 //! Authoritative sideband fragments. Browser captions never enter this buffer.
 use crate::errors::{AppError, AppResult};
 use serde_json::Value;
+pub const MAX_FRAGMENTS: usize = 256;
+pub const MAX_TEXT_BYTES: usize = 4096;
+
 use std::collections::{BTreeMap, HashSet, VecDeque};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -12,6 +15,8 @@ pub enum Speaker {
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct Segment {
+    #[serde(default)]
+    pub fragments: Vec<crate::models::assistant_message::VoiceFragment>,
     pub id: String,
     pub speaker: Speaker,
     pub text: String,
@@ -55,6 +60,21 @@ impl Transcripts {
         if event["type"] == "nyx.transcript" {
             let segment: Segment = serde_json::from_value(event["segment"].clone())
                 .map_err(|_| AppError::VoiceProviderUnavailable)?;
+            if segment.text.len() > MAX_TEXT_BYTES
+                || segment.fragments.len() > MAX_FRAGMENTS
+                || segment
+                    .fragments
+                    .iter()
+                    .any(|f| f.start_ms < 0 || f.end_ms < f.start_ms || f.end_ms > 1_830_000)
+                || segment
+                    .fragments
+                    .iter()
+                    .map(|f| f.text.len())
+                    .sum::<usize>()
+                    > MAX_TEXT_BYTES
+            {
+                return Err(AppError::VoiceProviderUnavailable);
+            }
             if segment.sealed {
                 self.normalized_pending.remove(&segment.id);
             } else {
@@ -95,6 +115,9 @@ impl Transcripts {
         {
             self.seen.remove(&old);
         }
+        if text.is_empty() {
+            return Ok(Vec::new());
+        }
         let (pending, sealed) = if speaker == Speaker::User {
             (&mut self.input, &mut self.sealed_input)
         } else {
@@ -120,6 +143,9 @@ impl Transcripts {
             fragments: BTreeMap::new(),
             last_received_ms: now_ms,
         });
+        if p.fragments.len() >= MAX_FRAGMENTS {
+            return Err(invalid());
+        }
         p.last_received_ms = now_ms;
         p.fragments.insert(
             (start, id.into()),
@@ -168,6 +194,17 @@ impl Transcripts {
 }
 fn assemble(p: &Pending, speaker: Speaker, sealed: bool, complete: bool) -> Segment {
     Segment {
+        fragments: p
+            .fragments
+            .iter()
+            .map(
+                |((start, _), fragment)| crate::models::assistant_message::VoiceFragment {
+                    text: fragment.text.clone(),
+                    start_ms: *start,
+                    end_ms: fragment.end_ms,
+                },
+            )
+            .collect(),
         id: p.id.clone(),
         speaker,
         text: p.fragments.values().map(|f| f.text.as_str()).collect(),
@@ -200,7 +237,7 @@ pub async fn persist(
             if db.collection::<bson::Document>(CALLS).update_one(super::session::fence(&call),doc!{"$set":{"transcript_fence":uuid::Uuid::new_v4().to_string()}})
                 .session(&mut *tx).await?.matched_count!=1 {return Err(AppError::Conflict("Voice lease lost".into()));}
             let messages=db.collection::<AssistantMessage>(MESSAGES);
-            let metadata=VoiceTranscript{session_id:call.id.clone(),segment_id:segment.id.clone(),start_ms:segment.start_ms,
+            let metadata=VoiceTranscript{fragments:segment.fragments.clone(),session_id:call.id.clone(),segment_id:segment.id.clone(),start_ms:segment.start_ms,
                 end_ms:segment.end_ms,sealed:segment.sealed,complete:segment.complete,delivery:if segment.speaker==Speaker::User {"received"}else{"generated"}.into(),
                 request_id:None,backend_message_id:None};
             if let Some(row)=messages.find_one(doc!{"_id":&segment.id,"user_id":&call.user_id,"conversation_id":&call.conversation_id})

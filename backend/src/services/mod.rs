@@ -1,4 +1,5 @@
 pub mod action_description;
+pub mod admin_assistant_analytics;
 pub mod admin_audit_service;
 pub mod admin_usage_service;
 pub mod admin_user_service;
@@ -35,6 +36,7 @@ pub mod auth_device_service;
 pub mod auth_service;
 pub mod billing;
 pub mod cae_webhook_service;
+pub mod call_channels;
 pub mod catalog_auth_scheme;
 pub mod catalog_delegation_service;
 pub mod catalog_discovery_service;
@@ -51,6 +53,7 @@ pub mod channel_billing_service;
 pub mod channel_bot_health;
 pub mod channel_bot_service;
 pub mod channel_bot_turn_service;
+pub mod channel_capability;
 pub mod channel_connect_link_service;
 pub mod channel_connection_webhook_service;
 pub mod channel_credentials;
@@ -143,6 +146,7 @@ pub mod operation_descriptor;
 pub(crate) mod operation_path;
 pub mod oracle_login_profile_service;
 pub mod oracle_login_snapshot_service;
+pub mod oracle_mutation_service;
 pub mod oracle_pool_service;
 pub mod oracle_session_service;
 pub mod oracle_task_service;
@@ -162,15 +166,14 @@ pub(crate) mod platform_binding_service;
 pub(crate) mod platform_bot_authority;
 pub(crate) mod platform_bot_config_service;
 pub mod platform_bot_runtime_control_service;
-pub(crate) mod platform_channel_service;
 pub mod platform_credential_service;
-pub(crate) mod platform_faq_service;
 pub mod platform_link_intent_service;
 #[allow(dead_code)]
 pub mod platform_manager_command_service;
 pub(crate) mod platform_manager_contract;
 pub mod platform_manager_dispatch_service;
 pub mod platform_manager_ingress_service;
+pub mod platform_manager_management;
 pub mod platform_personal_binding_service;
 pub mod platform_personal_owner_lifecycle;
 pub mod platform_personal_turn_service;
@@ -211,7 +214,7 @@ pub mod telegram_new_claims;
 pub mod telegram_new_connect;
 pub mod telegram_new_service;
 #[cfg(test)]
-mod telegram_new_tests;
+pub(crate) mod telegram_new_tests;
 pub mod telegram_new_worker;
 pub mod telegram_poller;
 pub mod telegram_service;
@@ -249,13 +252,17 @@ pub mod assistant_agent_credential_service;
 pub mod assistant_continuation;
 pub mod assistant_group_service;
 pub mod assistant_instruction_context;
+pub mod assistant_job_service_use;
 pub mod assistant_live;
+pub mod assistant_native_execution;
 pub mod assistant_nyxagent;
 pub mod assistant_nyxagent_egress;
 pub mod assistant_nyxagent_runtime;
 pub mod assistant_platform_reply_decision;
 pub mod assistant_profile_routing;
+pub mod assistant_service_execution;
 pub mod assistant_settings_service;
+pub(crate) mod assistant_ssh_session;
 pub mod assistant_steering;
 pub mod assistant_team_service;
 pub mod assistant_team_tools;
@@ -376,6 +383,8 @@ pub mod machine_oauth_consent_service;
 pub mod machine_external_grant_service;
 pub mod machine_external_service;
 
+pub mod remote_machine_delete_recovery;
+pub mod remote_machine_delete_retry;
 pub mod remote_machine_events;
 pub mod remote_machine_manager;
 pub mod remote_machine_native;
@@ -415,5 +424,32 @@ pub mod tools_manager_service;
 pub mod platform_manager_delivery;
 pub mod platform_manager_transport;
 
-pub mod platform_bot_connection_service;
-pub mod platform_bot_status_service;
+pub mod platform_public_contract_service;
+
+pub(crate) mod platform_chat_presentation;
+
+pub(crate) mod platform_entry_admin_service;
+
+pub(crate) mod platform_entry_credentials;
+
+pub(crate) mod platform_entry_discord_controls;
+
+pub(crate) mod platform_entry_discord_installation;
+
+pub(crate) mod platform_entry_gateway_service;
+
+pub(crate) mod platform_entry_identity;
+
+pub(crate) mod platform_entry_ingress_service;
+
+pub(crate) mod platform_entry_migration;
+
+pub(crate) mod platform_entry_native;
+
+pub(crate) mod platform_entry_receipts;
+
+pub(crate) mod platform_bot_status_service;
+pub(crate) mod platform_entry_scope;
+pub(crate) mod platform_faq_service;
+
+pub(crate) mod platform_native_reply_service;

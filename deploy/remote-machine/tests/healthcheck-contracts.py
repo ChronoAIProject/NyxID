@@ -33,7 +33,7 @@ joined = ' '.join(args)
 if os.environ.get('NYXID_TEST_DENIED') and os.environ['NYXID_TEST_DENIED'] in joined:
     sys.exit(1)
 if args[:2] == ['auth', 'can-i'] and any(value in joined for value in
-    ['create pods', 'create persistentvolumeclaims', 'delete pods']):
+    ['create pods', 'create persistentvolumeclaims', 'patch pods', 'patch persistentvolumeclaims']):
     sys.exit(1)
 if args[:2] == ['get', 'validatingadmissionpolicy']:
     print('[]')
@@ -73,6 +73,14 @@ check("unset storage selects actual cluster default without runtime or provider 
       contains=(f"get storageclasses --as={MANAGER}", "get storageclasses.storage.k8s.io",
                 "list storageclasses.storage.k8s.io", "get nodes", "get persistentvolumes", "create tokenreviews"),
       excludes=("runtimeclass", "deployment", "nodes/stats", "nodes/proxy", "get storageclass existing-csi"))
+check("delete recovery requires residual deletes and complete read permissions", EXPLICIT,
+      contains=("delete pods", "delete persistentvolumeclaims", "list pods --all-namespaces",
+                "list persistentvolumes", "get leases.coordination.k8s.io -n kube-node-lease",
+                "get volumeattachments.storage.k8s.io", "list volumeattachments.storage.k8s.io"))
+for permission in ("delete pods", "delete persistentvolumeclaims", "list pods --all-namespaces",
+                   "list persistentvolumes", "get leases.coordination.k8s.io",
+                   "get volumeattachments.storage.k8s.io", "list volumeattachments.storage.k8s.io"):
+    check(f"delete recovery missing {permission} permission fails", EXPLICIT, expected=1, denied=permission)
 check("explicit existing storage is read as manager", EXPLICIT,
       contains=(f"get storageclass existing-csi --as={MANAGER}",), excludes=("get storageclasses --as=",))
 check("blank optional storage also selects cluster default", {"NYXID_REMOTE_MACHINE_STORAGE_CLASS": ""},

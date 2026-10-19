@@ -181,6 +181,12 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
 }
 
 async fn ensure_core_indexes(db: &Database) -> Result<(), mongodb::error::Error> {
+    db.collection::<Document>(crate::services::assistant_service_execution::COLLECTION)
+        .create_indexes([
+            IndexModel::builder().keys(doc! {"expires_at": 1})
+                .options(IndexOptions::builder().expire_after(Duration::ZERO).build()).build(),
+            IndexModel::builder().keys(doc! {"user_id": 1, "conversation_id": 1, "api_key_id": 1, "turn_id": 1, "kind": 1}).build(),
+        ]).await?;
     db.collection::<Document>(crate::models::assistant_agent_learning::PROPOSALS_COLLECTION_NAME)
         .create_index(
             IndexModel::builder()
@@ -259,8 +265,8 @@ async fn ensure_core_indexes(db: &Database) -> Result<(), mongodb::error::Error>
     }
     crate::services::coordination_service::ensure_indexes(db).await?;
     crate::services::service_concurrency_service::ensure_indexes(db).await?;
+    crate::services::platform_entry_migration::ensure_indexes(db).await?;
     crate::services::platform_bot_config_service::ensure_indexes(db).await?;
-    crate::services::platform_channel_service::ensure_indexes(db).await?;
     crate::services::platform_setup_service::ensure_indexes(db).await?;
     crate::services::platform_binding_service::ensure_indexes(db).await?;
     crate::services::platform_bot_runtime_control_service::ensure_indexes(db).await?;
@@ -3412,6 +3418,9 @@ async fn ensure_service_indexes(db: &Database) -> Result<(), mongodb::error::Err
 
     crate::services::oracle_login_profile_service::ensure_indexes(db).await?;
     crate::services::oracle_worker_enrollment_service::ensure_indexes(db).await?;
+    crate::services::call_channels::session::ensure_indexes(db)
+        .await
+        .map_err(|e| mongodb::error::Error::custom(e.to_string()))?;
 
     // ── oracle_login_snapshots ──
     let oracle_login_snapshots =
@@ -3435,6 +3444,8 @@ async fn ensure_service_indexes(db: &Database) -> Result<(), mongodb::error::Err
                 .build(),
         )
         .await?;
+
+    crate::services::oracle_pool_service::ensure_lifecycle_indexes(db).await?;
 
     // ── oracle_worker_commands ──
     let oracle_worker_commands =

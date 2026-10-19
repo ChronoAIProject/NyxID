@@ -7,10 +7,6 @@ use crate::telemetry::{
 };
 
 pub(crate) struct InboundDeps<'a> {
-    pub(crate) platform_manager: Option<(
-        &'a AppState,
-        std::sync::Arc<super::platform_manager_contract::PlatformManagerProducers>,
-    )>,
     pub(crate) db: &'a crate::db::DbHandle,
     pub(crate) config: &'a crate::config::AppConfig,
     pub(crate) billing: &'a super::billing::BillingService,
@@ -25,7 +21,6 @@ pub(crate) struct InboundDeps<'a> {
 impl<'a> From<&'a AppState> for InboundDeps<'a> {
     fn from(value: &'a AppState) -> Self {
         Self {
-            platform_manager: None,
             db: &value.db,
             config: &value.config,
             billing: &value.billing,
@@ -69,15 +64,6 @@ pub(crate) async fn process_inbound_messages(
 
     let mut complete = true;
     let mut stamped = false;
-    let platform_profile = state
-        .db
-        .collection::<crate::models::platform_bot_config::PlatformBotConfig>(
-            crate::models::platform_bot_config::COLLECTION_NAME,
-        )
-        .find_one(
-            bson::doc! {"channel_bot_id":&bot.id,"channel_transport":{"$ne":bson::Bson::Null}},
-        )
-        .await?;
     for inbound in messages {
         let activity = adapter.activity_metadata(inbound);
         let notification = activity
@@ -113,22 +99,6 @@ pub(crate) async fn process_inbound_messages(
         if !stamped {
             super::channel_bot_service::record_inbound_success(state.db, bot).await;
             stamped = true;
-        }
-        if let Some(profile) = &platform_profile {
-            let Some((app, producers)) = &state.platform_manager else {
-                return Err(Box::new(crate::errors::AppError::Conflict(
-                    "Platform bot runtime is unavailable".into(),
-                )));
-            };
-            super::platform_channel_service::dispatch(
-                app,
-                producers.clone(),
-                profile,
-                bot,
-                inbound,
-            )
-            .await?;
-            continue;
         }
         if adapter.dedup_inbound_by_platform_message_id()
             && !adapter.atomic_inbound_admission()

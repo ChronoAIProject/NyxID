@@ -96,7 +96,7 @@ fn validate_credential(raw: &str) -> AppResult<()> {
     Ok(())
 }
 
-async fn lock_authority(
+pub(crate) async fn lock_authority(
     db: &Database,
     session: &mut ClientSession,
     actor: &str,
@@ -161,6 +161,7 @@ pub async fn enroll(
     }
     let db = db.clone();
     let actor = actor.to_string();
+    let expected_pool = pool.clone();
     let pool_id = pool.id.clone();
     let installation_id = installation_id.to_string();
     let requested_label = label.map(str::to_string);
@@ -173,7 +174,7 @@ pub async fn enroll(
         let operation: AppResult<OracleWorker> = async {
             // All new enrollments contend on the pool, so the inventory bound is atomic.
             let pool = db.collection::<OraclePool>(POOLS).find_one_and_update(
-                doc! { "_id": &pool_id, "is_active": true },
+                doc! { "_id": &pool_id, "is_active": true, "deleted_at": null, "user_id": &expected_pool.user_id, "worker_token_hash": &expected_pool.worker_token_hash, "$expr": {"$eq": [{"$ifNull": ["$lifecycle_version", 0]}, expected_pool.lifecycle_version]} },
                 doc! { "$inc": { "worker_enrollment_epoch": 1_i64 } },
             ).return_document(ReturnDocument::After).session(&mut *session).await?
                 .ok_or_else(|| AppError::OraclePoolInactive(pool_id.clone()))?;
@@ -182,6 +183,7 @@ pub async fn enroll(
                 owner_user_id: actor.clone(),
                 credential_hash: credential_hash.clone(),
                 pool_token_hash: pool.worker_token_hash.clone(),
+                installation_epoch: pool.installation_epoch,
                 membership_id: membership.as_ref().map(|membership| membership.id.clone()),
                 membership_created_at: membership.as_ref().map(|membership| membership.created_at),
             };
@@ -196,7 +198,8 @@ pub async fn enroll(
                     return Err(AppError::OracleWorkerLabelUnavailable("installation already has a different label".into()));
                 }
                 if previous.credential_hash == credential_hash
-                    && (previous.pool_token_hash != enrollment.pool_token_hash
+                    && (previous.installation_epoch != enrollment.installation_epoch
+                        || previous.pool_token_hash != enrollment.pool_token_hash
                         || previous.membership_id != enrollment.membership_id
                         || previous.membership_created_at != enrollment.membership_created_at) {
                     return Err(AppError::OracleWorkerCredentialRenewalRequired);
@@ -305,7 +308,7 @@ pub async fn authenticate(db: &Database, credential: &str) -> AppResult<WorkerAu
     let pool = db
         .collection::<OraclePool>(POOLS)
         .find_one(doc! { "_id": &worker.pool_id,
-        "is_active": true, "worker_token_hash": &enrollment.pool_token_hash })
+        "is_active": true, "deleted_at": null, "worker_token_hash": &enrollment.pool_token_hash, "$expr":{"$eq":[{"$ifNull":["$installation_epoch",0]},enrollment.installation_epoch]} })
         .await?
         .ok_or(AppError::OracleWorkerTokenInvalid)?;
     let membership = enrollment_membership(db, &enrollment.owner_user_id, &pool)
@@ -353,3 +356,58 @@ pub async fn ensure_can_manage_worker(
 
 #[cfg(test)]
 mod tests;
+
+/// Revalidate installation identity and contributor authority inside the pool
+/// mutation transaction; caller authentication may predate a transfer/revoke.
+pub(crate) async fn ensure_current_worker_in_session(
+    db: &Database,
+    session: &mut ClientSession,
+    expected: &OracleWorker,
+) -> AppResult<()> {
+    let pool = super::oracle_mutation_service::lock_pool(db, session, &expected.pool_id).await?;
+    let worker = db
+        .collection::<OracleWorker>(WORKERS)
+        .find_one(worker_filter(expected))
+        .session(&mut *session)
+        .await?
+        .ok_or(AppError::OracleWorkerTokenInvalid)?;
+    if let Some(enrollment) = worker.enrollment.as_ref() {
+        if !pool.is_active
+            || enrollment.installation_epoch != pool.installation_epoch
+            || enrollment.pool_token_hash != pool.worker_token_hash
+        {
+            return Err(AppError::OracleWorkerTokenInvalid);
+        }
+        let membership = lock_authority(db, session, &enrollment.owner_user_id, &pool).await?;
+        if membership.as_ref().map(|m| &m.id) != enrollment.membership_id.as_ref()
+            || membership.as_ref().map(|m| m.created_at) != enrollment.membership_created_at
+        {
+            return Err(AppError::OracleWorkerTokenInvalid);
+        }
+    }
+    Ok(())
+}
+
+pub(crate) async fn lock_worker_manager(
+    db: &Database,
+    session: &mut ClientSession,
+    actor: &str,
+    pool: &OraclePool,
+    worker: &OracleWorker,
+) -> AppResult<()> {
+    if actor == pool.user_id {
+        super::oracle_mutation_service::lock_manager(db, session, actor, &pool.user_id).await?;
+        return Ok(());
+    }
+    // Same actor/membership fences as enrollment, with existing contributor rules.
+    let membership = lock_authority(db, session, actor, pool).await?;
+    if membership.is_some_and(|m| m.role.can_admin())
+        || worker
+            .enrollment
+            .as_ref()
+            .is_some_and(|e| e.owner_user_id == actor)
+    {
+        return Ok(());
+    }
+    Err(forbidden())
+}

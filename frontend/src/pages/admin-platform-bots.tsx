@@ -1,3 +1,5 @@
+import { channelPlatformName } from "@/lib/assistant/nyxbot-labels";
+import { NativePlatformEntrySetup } from "@/components/native-platform-entry-setup";
 import { ManagerRuntimeSettings } from "@/components/platform-manager-runtime";
 import { useState } from "react";
 import { z } from "zod";
@@ -27,7 +29,6 @@ import {
 } from "@/components/ui/form";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
-import { Badge } from "@/components/ui/badge";
 import { PageHeader } from "@/components/shared/page-header";
 import { DetailSection } from "@/components/shared/detail-section";
 import { ErrorBanner } from "@/components/shared/error-banner";
@@ -176,18 +177,20 @@ export function GatewayCleanupControls({
 }
 
 function AdminProfiles() {
+  const [prepared, setPrepared] = useState<PlatformProfile>();
+  const [notice, setNotice] = useState<string>();
+  const pinned = useAdminPlatformProfile(prepared);
+  const onPrepared = (profile: PlatformProfile) => {
+    setPrepared(profile);
+    setNotice(
+      "Shared connection saved and paused. Review access below, then enable or resume. After repair everyone must link again.",
+    );
+  };
   const [before, setBefore] = useState<string>();
   const profiles = useAdminPlatformProfiles(before);
   const action = useAdminPlatformAction();
   const targets = useAdminPlatformTargets();
   const [review, setReview] = useState<PlatformProfile>();
-  const [prepared, setPrepared] = useState<string>();
-  const preparedQuery = useAdminPlatformProfile(prepared);
-  const listed = profiles.data?.profiles ?? [];
-  const pinned = preparedQuery.data;
-  const visible = pinned
-    ? [pinned, ...listed.filter((row) => row.id !== pinned.id)]
-    : listed;
   const form = useAppForm({
     resolver: zodResolver(convertSchema),
     defaultValues: { channel_bot_id: "" },
@@ -196,7 +199,7 @@ function AdminProfiles() {
     <div className="space-y-6">
       <PageHeader
         title="Platform BotFather"
-        description="Share public FAQ and let people link their own NyxBot in a verified private conversation."
+        description="Shared FAQ and personal NyxBot access. Review existing bots or prepare another channel."
       />
       {action.error && <ErrorBanner message={action.error.message} />}
       {profiles.error && (
@@ -210,22 +213,64 @@ function AdminProfiles() {
           Loading platform profiles…
         </p>
       )}
-      {visible.map((profile) => (
-        <section id={`profile-${profile.id}`} key={profile.id} tabIndex={-1}>
-          {prepared === profile.id && (
-            <p role="status" className="mb-3 text-12">
-              Shared bot prepared. Review the modes below and enable it.
-            </p>
-          )}
-          <DetailSection title={profile.display_name ?? "Shared bot"}>
-            <div className="space-y-3 p-4 text-12">
-              {profile.deleted_at && <Badge variant="secondary">Retired</Badge>}
-              {!profile.deleted_at && (
-                <ManagerRuntimeSettings
-                  key={profile.id}
-                  profile={profile}
-                />
-              )}
+      {notice && <p role="status">{notice}</p>}
+      {[
+        ...(pinned.data ? [pinned.data] : []),
+        ...(profiles.data?.profiles ?? []).filter(
+          (profile) => profile.id !== pinned.data?.id,
+        ),
+      ].map((profile) => (
+        <DetailSection
+          key={profile.id}
+          title={`${profile.display_name ?? profile.manager_bot_id} · ${channelPlatformName(profile.platform ?? "telegram")}`}
+        >
+          <div className="space-y-3 p-4 text-12">
+            {profile.deleted_at && <p>Retired</p>}
+            {!profile.deleted_at && (
+              <ManagerRuntimeSettings profile={profile} />
+            )}
+            {!profile.deleted_at && (
+              <details>
+                <summary>Repair connection</summary>
+                {profile.execution_profile === "native_entry" ? (
+                  <NativePlatformEntrySetup
+                    profile={profile}
+                    onPrepared={onPrepared}
+                  />
+                ) : (
+                  <div className="flex flex-wrap gap-2">
+                    <Button
+                      disabled={action.isPending}
+                      onClick={() =>
+                        action.mutate({ action: "verify", profile })
+                      }
+                    >
+                      Verify manager
+                    </Button>
+                    <Button
+                      disabled={action.isPending}
+                      onClick={() =>
+                        action.mutate(
+                          { action: "repair", profile },
+                          { onSuccess: onPrepared },
+                        )
+                      }
+                    >
+                      Repair webhook
+                    </Button>
+                  </div>
+                )}
+              </details>
+            )}
+            <details>
+              <summary>Identifiers, cleanup and retirement</summary>
+              <p className="break-all">
+                Profile: {profile.id} · Generation {profile.generation}
+              </p>
+              <p>
+                Setup owner: {profile.funding_owner_user_id} ·{" "}
+                {profile.transport ?? "direct"} transport
+              </p>
               <GatewayCleanupControls
                 key={`cleanup:${profile.id}:${profile.generation}`}
                 profile={profile}
@@ -277,11 +322,11 @@ function AdminProfiles() {
                   </div>
                 </div>
               )}
-            </div>
-          </DetailSection>
-        </section>
+            </details>
+          </div>
+        </DetailSection>
       ))}
-      {!visible.length && !profiles.isPending && (
+      {profiles.data?.profiles.length === 0 && (
         <p className="rounded-lg border border-dashed border-border p-4 text-12 text-muted-foreground">
           No platform profiles on this page.
         </p>
@@ -300,86 +345,81 @@ function AdminProfiles() {
           </Button>
         )}
       </div>
-      <DetailSection title="Connect a shared bot">
-        <Form {...form}>
-          <form
-            className="space-y-4 p-4"
-            onSubmit={form.handleSubmit((values) =>
-              action.mutate(
-                { action: "convert", ...values },
-                {
-                  onSuccess: (profile) => {
-                    form.reset();
-                    setBefore(undefined);
-                    setPrepared(profile.id);
-                    requestAnimationFrame(() =>
-                      document
-                        .getElementById(`profile-${profile.id}`)
-                        ?.scrollIntoView({
-                          block: "start",
-                          behavior: "smooth",
-                        }),
-                    );
-                  },
-                },
-              ),
-            )}
-          >
-            <p className="text-12 text-muted-foreground">
-              Choose a connected and verified bot. This permanently reserves it
-              for shared public FAQ and consent-based personal linking, revokes
-              its previous assistant routes, and starts with setup incomplete.
-              No inference sponsor organization is required.
-            </p>
-            {targets.error && (
-              <ErrorBanner message="Could not load eligible messaging bots. Retry after checking your connection and owner permissions." />
-            )}
-            <FormField
-              control={form.control}
-              name="channel_bot_id"
-              render={({ field }) => (
-                <FormItem>
-                  <FormLabel>Connected bot</FormLabel>
-                  <FormControl>
-                    <select
-                      {...field}
-                      className="h-8 w-full rounded-lg border border-input bg-background px-3 text-12"
-                    >
-                      <option value="">Choose a bot</option>
-                      {targets.data?.bots.map((bot) => (
-                        <option key={bot.id} value={bot.id}>
-                          {bot.label} · {bot.platform} ·{" "}
-                          {bot.platform_bot_username}
-                        </option>
-                      ))}
-                    </select>
-                  </FormControl>
-                  <FormMessage />
-                </FormItem>
-              )}
-            />
-            <a href="/channel-bots" className="text-12 underline">
-              Connect or verify a messaging bot
-            </a>
-
-            <div className="flex justify-end">
-              <Button
-                type="submit"
-                variant="primary"
-                disabled={
-                  !form.formState.isDirty || !form.watch("channel_bot_id")
-                }
-                isLoading={action.isPending}
-              >
-                Prepare shared bot
-              </Button>
-            </div>
-          </form>
-        </Form>
-      </DetailSection>
       <Button asChild>
         <a href="/admin/platform-credentials">Manage platform credentials</a>
       </Button>
+      <details>
+        <summary>Prepare another shared bot</summary>{" "}
+        <DetailSection title="Convert a manager channel">
+          <Form {...form}>
+            <form
+              className="space-y-4 p-4"
+              onSubmit={form.handleSubmit((values) =>
+                action.mutate(
+                  { action: "convert", ...values },
+                  {
+                    onSuccess: (profile) => {
+                      form.reset();
+                      onPrepared(profile);
+                    },
+                  },
+                ),
+              )}
+            >
+              <p className="text-12 text-muted-foreground">
+                Conversion replaces the channel owner’s private route with
+                shared access, revokes old assistant and route keys, and starts
+                paused. Built-in FAQ needs no model or funding organization.
+              </p>
+              {targets.error && (
+                <ErrorBanner message="Could not load your manager channels." />
+              )}
+              <FormField
+                control={form.control}
+                name="channel_bot_id"
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel>Telegram manager channel</FormLabel>
+                    <FormControl>
+                      <select
+                        {...field}
+                        className="h-8 w-full rounded-lg border border-input bg-background px-3 text-12"
+                      >
+                        <option value="">Choose a manager</option>
+                        {targets.data?.bots
+                          .filter(
+                            (bot) =>
+                              bot.credential_source === "telegram_manager",
+                          )
+                          .map((bot) => (
+                            <option key={bot.id} value={bot.id}>
+                              {bot.label}
+                            </option>
+                          ))}
+                      </select>
+                    </FormControl>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+
+              <div className="flex justify-end">
+                <Button
+                  type="submit"
+                  variant="primary"
+                  disabled={
+                    !form.formState.isDirty || !form.watch("channel_bot_id")
+                  }
+                  isLoading={action.isPending}
+                >
+                  Convert and pause manager
+                </Button>
+              </div>
+            </form>
+          </Form>
+        </DetailSection>
+        <NativePlatformEntrySetup onPrepared={onPrepared} />
+      </details>
     </div>
   );
 }

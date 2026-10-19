@@ -1,14 +1,34 @@
 # Platform BotFather repair
 
+## Main integration — current architecture
+
+The historical repair below was reviewed at `0d9b3171e`. Integration now merges
+`origin/main` at `3fc6386a2`, including the working bounded public runtime (#1914)
+and NativeV2 entry (#1925). Historical claims that the public AI contract is
+unavailable describe the old baseline only.
+
+NativeV2 is the sole non-Telegram shared-entry path. It retains opaque provider
+identity, authenticated direct/gateway ingress, `/nyx` Discord commands, encrypted
+receipt-bound transport and main's personal account parity. Telegram retains its
+TelegramV1 manager path. The earlier parallel generic mapper and `/chat` setup
+were discarded during integration. Deterministic approved FAQ is the no-policy
+default; saved public AI policies remain explicit and functional with their real
+sponsor, limits, readiness and deployment contract.
+
+Current acceptance and evidence are recorded in the integration handoff section
+below when final local checks complete. The old counts and screenshots later in
+this document are historical and are not evidence for the merged executable.
+
+
 ## Required behavior
 
 A shared channel bot answers public FAQ/help for an unlinked visitor. The visitor can sign in to NyxID, review consent, prove control of that private channel conversation, and then use their existing personal NyxBot through the shared bot. The personal NyxBot retains the person's authorization, memory, history, and billing. Each channel identity is verified independently, including when one person uses several platforms or several bots. Signing in alone must not silently claim an external account.
 
 The admin can connect a bot, enable the service, understand its status, pause it, and resume it without navigating unrelated child-bot provisioning or impossible public AI prerequisites. The end user can understand the current mode, link, recover an expired link, and unlink.
 
-## Confirmed starting defects
+## Historical diagnosis before main integration
 
-- The public NyxAgent producer has no production readiness path: profile discovery is empty and policy verification always fails. No admin configuration can make that path ready.
+- At the original repair baseline, the public NyxAgent producer had no production readiness path: profile discovery is empty and policy verification always fails. Main #1914/#1925 subsequently supplied the working public runtime; its explicit AI path is preserved.
 - The page's old `enabled` badge does not describe the newer runtime. Pause emergency-stops both modes, while clearing that stop leaves both modes off.
 - Personal linking, proof fields, display, and documentation assume Telegram.
 - Conversion, optional child-bot setup, sponsor configuration, and runtime controls obscure the basic task.
@@ -17,7 +37,7 @@ The admin can connect a bot, enable the service, understand its status, pause it
 
 ### 1. Working public FAQ and coherent lifecycle
 
-- Provide a useful public surface from approved FAQ content. This implementation uses deterministic FAQ answers; do not label them AI-generated or enable the unverified public NyxAgent execution path.
+- Provide a useful public surface from approved FAQ content. This implementation uses deterministic FAQ answers; do not label them AI-generated. Preserve the now-working main public AI runtime only as an explicitly selected, validated policy.
 - FAQ activation does not require a model profile, inference sponsor, or public AI budget. Preserve any real channel transport billing requirements and explain them where relevant.
 - Define one authoritative runtime state used by backend responses and UI. Distinguish paused, active, setup incomplete, and connection repair required with concrete recovery actions.
 - Resume atomically clears an emergency stop and restores explicitly selected modes. Normal setup enables FAQ plus personal linking in one understandable operation.
@@ -54,118 +74,111 @@ The admin can connect a bot, enable the service, understand its status, pause it
 
 The user requested one Heca implementation worker with `gpt-6.1-sol`, `xhigh`, and `full-access`. The primary agent performs the review personally. Do not create Codex subagents or additional Heca workers/reviewers. No deployment, production configuration changes, or outbound messages to real users are part of local implementation verification.
 
-## Implementation handoff
+## Integrated implementation
 
-The original partial scaffolding has been replaced or completed in this shared worktree. No commit, deployment, production configuration write or real-user message was made. The primary remains the personal reviewer.
+The integration retains main's authoritative NativeV2 entry for Slack, Discord,
+WhatsApp, Lark/Feishu and X, and TelegramV1 for the native Telegram manager. It
+removes the original repair's competing generic identity mapper and Discord
+`/chat` setup. Native direct/gateway selection, opaque identities, exact
+receipt-bound encrypted transport, provider deadlines, tombstones and ordinary
+owner-route separation remain in force.
 
-- Public work uses only the approved deterministic FAQ corpus. Metadata-only admission queues its canonical article IDs and mode guidance atomically with receipt settlement. A sweep recovers a crash before initial delivery. Delivery renders the persisted reference and refuses authority changes after admission. Personal authority and tools never enter FAQ execution.
-- Telegram, Slack, Discord, Lark/Feishu, WhatsApp and X share exact bot/platform/sender/private-conversation linking. Aurinko and OpenClaw are excluded for their current proof/transport limitations. Native Telegram manager compatibility, identity locks, old public sponsor policies and channel transport billing remain in place.
-- Live controls fence admission, consent, proof, execution and delivery. Emergency Pause gates legacy setup too; both control revisions change when stop state changes. Resume is one conditional update, preserves explicit remembered modes and requires a visible selection when both are off. Discord command readiness is checked transactionally, including API writes.
-- Shared provider identity reservations survive deletion and lost markers. Generic proof handles never appear as fake Telegram IDs in API/UI. Exact peer records remain durable; event replay identity is deterministic. Indexed identity lookups include tombstones. Work/input/rate bounds replace permanent visitor-count exhaustion.
-- Provider-authenticated human provenance is distinct from proof eligibility and supported content. Slack uses exact ordinary-DM aliases, including malformed proof attempts; file uploads receive help. Discord uses application-command identity, so `/chat` arguments cannot become controls or FAQ. In-app command setup upserts only known commands and emits metadata-only audit.
-- Final send claims capture exact encrypted bot/platform/OAuth credential material. Provider effects use that snapshot. Pre-effect preparation failures settle refused or retryable; partial/uncertain effects retain actual evidence and cannot replay. Telegram sends plain protected text; Slack and Discord suppress unintended formatting, previews and mentions. Expired Discord interaction context falls back to the same bound private DM.
-- Admin setup lists eligible targets without a funding-org request; existing Resume appears first, newly prepared profiles remain visible across pagination and use fresh generations. Runtime status keeps recovery available for expected OAuth/provider outages. Recovery is a separate form. Repair invalidates old link authority and inventory visibly, and bounded cleanup cannot stop a new epoch's work.
-- Consent, terminal success, Linked channels and thread labels show the real provider/bot/account/private-conversation identity. A friendly name is accompanied by the real external account ID. Personal work uses the person's existing NyxBot/memory/permissions/billing in a separate saved channel thread; the old home transcript is not automatically replayed. Browser bearer/proof/secret references and mutation variables are cleared at the required lifecycle boundaries.
+No public policy selects the approved deterministic FAQ. A saved public AI
+policy retains the working main runtime, its real contract, deployment, limits,
+readiness and authorized organization sponsor. Basic FAQ conversion and Resume
+have no inference or sponsor prerequisite. Existing channel ownership and
+transport billing do not change.
 
-The operational guide is `docs/PLATFORM_BOTFATHER.md`: provider matrix, setup, linking, pause/resume, repair, delivery/storage limits and rollout precautions. Historical public/personal design documents remain background; they do not expand current deterministic FAQ into an available public AI contract.
+Public FAQ admission commits canonical article IDs, live mode guidance and the
+settled ingress receipt together. Mongo server-clock windows admit at most 20
+requests per sender and 200 per profile per minute before recording a receipt.
+Recovery renders only persisted approved references through the production
+public-send pipeline; no raw FAQ question is retained. Live authority changes
+refuse old sends, and duplicate or ambiguous provider effects are not replayed.
+Provider-specific navigation is composed separately from the verbatim articles.
 
-## Verification evidence
+Pause remembers explicit mode choices, advances authority even if both lanes
+were already off, and disables public/personal admission. Resume clears the stop
+and restores selected modes in one conditional update. Deferred cleanup matches
+old revisions and leaves newly admitted turns alone. Unsupported authenticated
+human media and control-shaped Discord question arguments receive fixed help
+before any FAQ, personal or public AI work is admitted.
 
-Final frontend evidence: 28 tests in six targeted files passed, as did the app TypeScript check and ESLint over all changed/untracked frontend TypeScript files. After the final stable ConnectionControls fix, the affected component/page suites passed all 10 tests and TypeScript/changed-file ESLint passed again. The final production build, including the last Discord proof guidance, passed (tsc-b, both Vite builds, legal prerender and mock-footprint assertion). The primary independently confirmed these results; final production-build log: `/tmp/nyxid-botfather-frontend-build-reviewed.log`.
+Recovery uses the authoritative profile rather than the ordinary owner's target
+picker. A successor platform admin can repair basic setup without a sponsor org.
+Expected credential outages produce actionable connection status while database
+failures remain errors. Repair pauses and invalidates old proofs and personal
+links; inventory shows them disconnected. A fresh proof establishes independent
+current authority. Success guidance survives generation remounts and failed
+status refreshes, while secret/proof state is erased.
 
-The primary's real-frontend/mock-HTTP browser suite passed Slack and Discord consent/proof/success and token cleanup, paused FAQ-only atomic Resume, connection repair/Enter isolation and conflict retries, combined paused+repair refresh, prepared-profile pagination with consecutive repair generations, and visible repair success feedback surviving both generation changes. It also passed successful repair followed by runtime GET 503 and Retry, with Resume usable afterward, and explicitly asserted Discord's `/confirm` application-command `code` option guidance. Tests ran at 320px without overflow or page errors; screenshots were visually reviewed. Scripts/screenshots are in `/Users/chronoai/Library/Caches/nyxid-botfather-review/`. These are local fixture checks, not live provider acceptance.
+See `docs/PLATFORM_BOTFATHER.md` for the actual provider/setup/recovery matrix,
+Discord named application-command options, personal thread and billing behavior,
+optional public AI and child workflows, X signed-webhook requirement, delivery
+limits and rollout cautions.
 
-The selected backend suite passed **334 tests, 0 failed, 0 ignored** in **197.68 seconds** against the isolated MongoDB **8.0.34** replica set. It covers platform config/authority/runtime, FAQ admission/delivery/crash recovery, generic linking and credential races, personal execution/revocation, the changed Telegram/Slack/Discord payloads, X polling/webhooks/billing and native Telegram compatibility. The only subsequent Rust changes removed the unused `admit_in_session` helper and added `deferred_pause_cleanup_preserves_a_turn_admitted_after_resume`.
+## Integration acceptance matrix
 
-The final source test build then passed in **8 minutes 6 seconds with no warnings**. Its selected inventory contains **335 tests**, including that cleanup regression. The regression ran from the final binary against the same MongoDB 8 replica set and passed **1/1**, with **0 ignored**, in **1.08 seconds**. It uses real admission, claim, Pause and Resume operations, then proves deferred cleanup clears the old turn while preserving the current-revision turn. The already passing broad suite was not repeated for an unused-helper removal and test-only addition. Final `cargo fmt --all --check` and `git diff --check` passed.
+| Required behavior | Concrete local evidence |
+| --- | --- |
+| FAQ without inference/sponsor, public authority even for linked people | FAQ admission/delivery journeys, renderer corpus/provider invariant, runtime FAQ activation |
+| Atomic metadata-only queue/receipt, crash and duplicate recovery, bounded rates | FAQ crash/canonical-mode and window/abort/live-change regressions |
+| Ordinary signup/login, email verification and MFA, explicit consent and same-chat proof | Main auth/MFA journey; NativeV2 Discord journey; existing personal Playwright suite |
+| Same owner's bots/platforms independently verified | New native+Telegram same-owner journey; wrong-platform proof refusal; separate saved threads and local logout |
+| Existing NyxBot permissions, memory, credentials, payer and web continuation | Main two-account account-parity journey and actual NativeV2 personal producers |
+| Pause/Resume/repair/disconnect without authority revival | Runtime CAS/both-off/deferred cleanup; confirmed native replay after disable/logout/repair; fresh proof and inventory |
+| Provider provenance, direct/gateway choice and exact receipt-bound replies | Main entry/native direct, gateway, credential, receipt and delivery suites |
+| Human upload and Discord question arguments cannot execute controls/models | Actual signed Slack adapter file-share normalization and canonical unsupported admission regression |
+| Eligible admin targets and successor recovery | Live-admin/pagination/tombstone target regression; no-sponsor successor repair; unavailable OAuth status/inventory |
+| Clear simple UI and safe browser handoff | Six targeted frontend suites; personal Playwright; native admin and Slack/Discord browser harnesses |
 
-Task-owned target: `/tmp/nyxid-botfather-target`. All workspace/path packages used by the backend were package-scoped cleaned and rebuilt before these results; registry dependencies were retained. No unrelated target or Mongo process was touched. Final test URI: `mongodb://127.0.0.1:29744/?replicaSet=botfather8`, data `/tmp/nyxid-botfather-mongo8`, log `/tmp/nyxid-botfather-mongo8.log`.
+## Fresh integration verification
 
-Final source build and cleanup-test commands:
+The checkpoint compiles the integrated backend test target without warnings
+(8m 06s). Its first nine priority regressions passed six and exposed three new
+fixture defects: OAuth status omitted runtime initialization, a local HTTP link
+was parsed as HTTPS-only, and immediate confirmation replay hit the preserved
+750ms decision limiter. Those fixtures are corrected; the final source build
+and complete transactional rerun remain in progress. The following completed
+integrated frontend results are acceptance evidence; the original repair's 335-test result
+at `0d9b3171e` is historical and does not verify this merged executable.
+
+- Six targeted Vitest files: **44 passed**, 0 failed.
+- App TypeScript and ESLint over all 14 frontend TypeScript files changed from
+  `origin/main`: passed.
+- Production frontend build: passed, including TypeScript, both Vite builds,
+  legal prerender and mock-footprint assertion.
+- Existing main `platform-personal` Playwright suite: **7 passed**; the primary
+  repeated it after final expiry cleanup, **7/7 in 19.6s**.
+- Native admin and Slack/Discord link browser harnesses: passed on the real UI
+  with local HTTP fixtures, at 320px with no overflow or page errors. The primary
+  also reran these and visually reviewed screenshots. They cover atomic
+  remembered FAQ-only Resume, empty targets/successor repair, generations 3→4,
+  persistent repair notice, status 503 Retry, optional AI without obsolete mode
+  controls, ordinary login gate, exact account ID, consent, one-time proof,
+  reload behavior, terminal cleanup and Discord's named `code` option.
+
+Frontend commands, run from `frontend`:
 
 ```sh
-NYXID_TEST_DATABASE_URL='mongodb://127.0.0.1:29744/?replicaSet=botfather8' \
-  CARGO_TARGET_DIR=/tmp/nyxid-botfather-target CARGO_BUILD_JOBS=2 \
-  cargo test -p nyxid --bin nyxid-server --offline --no-run \
-  --config profile.test.package.nyxid.debug=0 \
-  --config profile.test.package.nyxid.incremental=false
-
-NYXID_TEST_DATABASE_URL='mongodb://127.0.0.1:29744/?replicaSet=botfather8' \
-  /tmp/nyxid-botfather-target/debug/deps/nyxid_server-1a6eebbd46f0a7a8 \
-  --exact services::platform_bot_runtime_control_service::tests::deferred_pause_cleanup_preserves_a_turn_admitted_after_resume \
-  --nocapture
+npx vitest run src/components/platform-manager-runtime.test.tsx \
+  src/components/platform-manager-runtime.native.test.tsx \
+  src/components/native-platform-entry-setup.test.tsx \
+  src/pages/admin-platform-bots.test.tsx \
+  src/schemas/platform-runtime.test.ts src/schemas/platform-personal.test.ts
+npx tsc --noEmit -p tsconfig.app.json
+# npx eslint over the exact changed .ts/.tsx inventory
+npm run build
+npx playwright test --config playwright.platform-personal.config.ts
 ```
 
-The selected suite ran with `python3 /tmp/nyxid-botfather-run-tests.py`, using two test threads. Persistent evidence is under `/Users/chronoai/Library/Caches/nyxid-botfather-implementation/2026-10-19-final/`: `backend-build-source-final.log`, `backend-selected-tests.log`, the selected and final test inventories, `backend-deferred-cleanup-source-final.log`, `frontend-build-reviewed.log`, the test runner and the exact changed-file inventory. The runner retains the complete filter list and the explicit MongoDB 8 URI; it can rerun the selected suite on the final binary.
+Logs use `/tmp/nyxid-botfather-integration-*`. Browser scripts and reviewed
+screenshots are in `/Users/chronoai/Library/Caches/nyxid-botfather-review/`.
+Local test providers are loopback/fixtures, not live provider or production
+activation. No deployment, production write or real-user message was made.
 
-The initial run used the task-owned `mongod` symlink, which resolved to MongoDB 7.0.37. That run passed 324 tests and failed 10 X billing tests because the current billing ledger uses MongoDB 8 client bulk writes. Direct ledger settlement and X allowance/duplicate-billing reproductions passed with the same binary after switching to the explicit MongoDB 8 executable. The original 10-second settlement assertions remain unchanged. `/tmp/nyxid-botfather-backend-tests-initial-mongo7.log` retains that diagnostic run; it is not final acceptance evidence.
-
-The signed Slack journey is a service integration test: real signature validation, adapter normalization, consent/proof, personal execution/origin and the production send/claim pipeline with only a local provider-adapter injection. It is not an HTTP ingress end-to-end test. Actual provider payload construction has separate adapter tests.
-
-## Changed-file inventory
-
-This includes the task scaffolding that was completed or replaced and the new implementation/test files.
-
-```text
-backend/content/platform-public-faq.json
-backend/src/db.rs
-backend/src/handlers/assistant_nyxagent.rs
-backend/src/handlers/channel_webhooks.rs
-backend/src/handlers/platform_bots.rs
-backend/src/handlers/platform_personal_bindings.rs
-backend/src/main.rs
-backend/src/models/mod.rs
-backend/src/models/platform_bot_config.rs
-backend/src/models/platform_bot_runtime_controls.rs
-backend/src/models/platform_channel_identity.rs
-backend/src/models/platform_manager_delivery.rs
-backend/src/routes.rs
-backend/src/services/channel_adapters/discord.rs
-backend/src/services/channel_adapters/slack.rs
-backend/src/services/channel_adapters/telegram.rs
-backend/src/services/channel_bot_service.rs
-backend/src/services/channel_credentials.rs
-backend/src/services/channel_inbound_service.rs
-backend/src/services/channel_platform.rs
-backend/src/services/channel_poll_service.rs
-backend/src/services/channel_verification_service.rs
-backend/src/services/mod.rs
-backend/src/services/platform_binding_service.rs
-backend/src/services/platform_bot_authority.rs
-backend/src/services/platform_bot_config_service.rs
-backend/src/services/platform_bot_connection_service.rs
-backend/src/services/platform_bot_runtime_control_service.rs
-backend/src/services/platform_bot_status_service.rs
-backend/src/services/platform_channel_service.rs
-backend/src/services/platform_faq_service.rs
-backend/src/services/platform_link_intent_service.rs
-backend/src/services/platform_manager_command_service.rs
-backend/src/services/platform_manager_contract.rs
-backend/src/services/platform_manager_delivery.rs
-backend/src/services/platform_manager_dispatch_service.rs
-backend/src/services/platform_manager_journey_tests.rs
-backend/src/services/platform_manager_transport.rs
-backend/src/services/platform_personal_binding_service.rs
-backend/src/services/platform_personal_turn_service.rs
-backend/src/services/platform_public_budget_service.rs
-backend/src/services/telegram_new_tests.rs
-docs/PLATFORM_BOTFATHER.md
-docs/plans/2026-10-19-platform-botfather-repair.md
-frontend/src/components/assistant/assistant-sidebar.tsx
-frontend/src/components/assistant/nyxbot-settings-content.tsx
-frontend/src/components/assistant/platform-personal-bindings.tsx
-frontend/src/components/platform-manager-runtime.test.tsx
-frontend/src/components/platform-manager-runtime.tsx
-frontend/src/hooks/use-platform-onboarding.test.tsx
-frontend/src/hooks/use-platform-onboarding.ts
-frontend/src/hooks/use-platform-personal.ts
-frontend/src/lib/assistant/nyxagent-transport.ts
-frontend/src/lib/platform-personal.ts
-frontend/src/pages/admin-platform-bots.test.tsx
-frontend/src/pages/admin-platform-bots.tsx
-frontend/src/pages/platform-personal-link.tsx
-frontend/src/schemas/platform-onboarding.ts
-frontend/src/schemas/platform-personal.ts
-frontend/src/schemas/platform-runtime.test.ts
-frontend/src/schemas/platform-runtime.ts
-```
+Backend verification uses the task-owned target
+`/tmp/nyxid-botfather-target` and isolated MongoDB **8.0.34** replica set:
+`mongodb://127.0.0.1:29744/?replicaSet=botfather8`. No unrelated target, Mongo
+process or worktree is modified. Final source build, selected inventory and
+transactional results will be recorded here before handoff.

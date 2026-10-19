@@ -2493,3 +2493,153 @@ async fn zero_admission_usage_releases_reservations_without_spending_benefits_or
         db.drop().await.unwrap();
     }
 }
+
+#[tokio::test]
+async fn voice_funding_zero_observed_startup_releases_wallet_and_request_fee() {
+    Box::pin(async {
+        use crate::models::{
+            billing_wallet::BillingWallet,
+            service_billing::{
+                BillingMetric, LanePriceComponent, LanePricing, PricingSyncStatus, ServiceBilling,
+            },
+        };
+        let db = database("voice_zero_seconds_fee").await;
+        crate::services::assistant_voice::ensure_indexes(&db)
+            .await
+            .unwrap();
+        db.collection::<Document>("billing_wallet")
+            .insert_one(old_wallet(100))
+            .await
+            .unwrap();
+        db.collection(crate::models::user::COLLECTION_NAME)
+            .insert_one(crate::test_utils::test_user(
+                "owner",
+                crate::models::user::UserType::Person,
+            ))
+            .await
+            .unwrap();
+        crate::services::feature_flag_service::set_platform_override(
+            &db,
+            crate::services::feature_flag_service::BILLING_FLAG_KEY,
+            &crate::services::feature_flag_service::FlagTarget::Global,
+            true,
+            "owner",
+        )
+        .await
+        .unwrap();
+        exact_migration::run(&db).await.unwrap();
+        let tariff = ServiceBilling {
+            platform_billable: true,
+            platform_key_pricing: Some(LanePricing {
+                metric: BillingMetric::VoiceSeconds,
+                credits_per_unit: "1".into(),
+                lago_metric_code: "voice-duration".into(),
+                sync_status: PricingSyncStatus::Synced,
+                sync_error: None,
+                components: vec![LanePriceComponent {
+                    metric: BillingMetric::Requests,
+                    credits_per_unit: "2".into(),
+                    lago_metric_code: "voice-start".into(),
+                    sync_status: PricingSyncStatus::Synced,
+                    sync_error: None,
+                }],
+                operations: vec![],
+            }),
+            ..Default::default()
+        };
+        let mut fee = crate::billing_integration_tests::rate("voice-start", Utc::now());
+        fee.credits_per_unit_micros = 2_000_000;
+        db.collection::<crate::models::billing_rate_cache::BillingRateCache>("billing_rate_cache")
+            .insert_many([
+                crate::billing_integration_tests::rate("voice-duration", Utc::now()),
+                fee,
+            ])
+            .await
+            .unwrap();
+        let billing = crate::billing_integration_tests::billing_service(
+            &db,
+            std::sync::Arc::new(crate::billing_integration_tests::FakeLago::default()),
+            0,
+        );
+        for forwarded in [false, true] {
+            let ctx = route_context::BillingRouteContext::new(
+                route_inventory::BillingIngress::LlmProvider,
+                "unused".into(),
+                "owner".into(),
+                "owner".into(),
+                None,
+                None,
+                Some("service".into()),
+                Some("service".into()),
+                route_context::NodeIntent::Direct,
+                "bearer".into(),
+                crate::models::usage_meter::CredentialClass::NyxidManagedMaster,
+                BillingMetric::VoiceSeconds,
+                Some(&tariff),
+                false,
+            );
+            let session = uuid::Uuid::new_v4().to_string();
+            let request = voice::window_id(&session, 0).unwrap();
+            let reserved = voice::reserve(&db, &billing, ctx, &session, 0)
+                .await
+                .unwrap();
+            let wallet = db
+                .collection::<BillingWallet>("billing_wallet")
+                .find_one(doc! {"owner_id":"owner"})
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(wallet.balance_credits, Credits::from_whole(100));
+            assert_eq!(wallet.reserved_credits, Credits::from_whole(32));
+            if forwarded {
+                billing.mark_forwarded(&reserved).await.unwrap();
+            }
+            // Failed local preparation and attempted provider creation share
+            // the zero-confirmed-usage rule. No clock-derived duration or fee.
+            voice::finalize(&db, &request, false).await.unwrap();
+            voice::finalize(&db, &request, false).await.unwrap();
+            let rows: Vec<UsageMeterRow> = db
+                .collection("usage_meter")
+                .find(doc! {"billing_request_id":&request})
+                .await
+                .unwrap()
+                .try_collect()
+                .await
+                .unwrap();
+            assert_eq!(rows.len(), 2);
+            for row in rows {
+                assert!(row.released);
+                if forwarded {
+                    assert_eq!(row.quantity, Some(0));
+                }
+                assert!(matches!(
+                    row.metric,
+                    BillingMetric::VoiceSeconds | BillingMetric::Requests
+                ));
+            }
+            let wallet = db
+                .collection::<BillingWallet>("billing_wallet")
+                .find_one(doc! {"owner_id":"owner"})
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(wallet.balance_credits, Credits::from_whole(100));
+            assert_eq!(wallet.reserved_credits, Credits::ZERO);
+            assert_eq!(wallet.pending_lago_debits, Credits::ZERO);
+        }
+        assert_eq!(
+            db.collection::<Document>("billing_ledger")
+                .count_documents(doc! {
+                    "event_type":"accounting_v2",
+                    "movement":{"$in":["usage_settled","grant_consumed"]}
+                })
+                .await
+                .unwrap(),
+            0,
+            "zero confirmed usage must create neither a wallet debit nor a grant consumption posting"
+        );
+        assert_accounts(&db).await;
+        db.drop().await.unwrap();
+    })
+    .await;
+}

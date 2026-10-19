@@ -34,6 +34,7 @@ This document describes every HTTP endpoint exposed by the NyxID backend. All en
   - [Service Endpoints](#service-endpoints)
   - [MCP Config](#mcp-config)
   - [Service Pools](#service-pools)
+  - [Oracle Pool Lifecycle](#oracle-pool-lifecycle-unreleased)
   - [Managed Execution Status](#managed-execution-status)
   - [Proxy](#proxy)
   - [Proxy Service Discovery](#proxy-service-discovery)
@@ -55,7 +56,9 @@ This document describes every HTTP endpoint exposed by the NyxID backend. All en
   - [Device Token Management](#device-token-management)
   - [Approval Management](#approval-management)
   - [Telegram New Channel Creation](#telegram-new-channel-creation)
+  - [NyxBot service adapters](#nyxbot-service-adapters)
   - [Webhooks](#webhooks)
+- [Assistant voice and dictation](#assistant-voice-and-dictation)
 
 ---
 
@@ -1772,6 +1775,15 @@ curl -X POST http://localhost:3001/api/v1/services/d1e2f3a4-b5c6-7890-1234-56789
 
 NyxID supports authenticated SSH-over-WebSocket tunnels plus short-lived SSH certificate issuance for downstream services.
 
+NyxBot callers retain these routes under the existing permission modes. Exact
+certificate/session admission binds the connection (or existing catalog-only
+authority), requested parameters and bounded lifetime. Organization use asks in
+Auto and Ask every time; Full access admits without a prompt. Retry the same
+request with `X-NyxID-Acknowledgement-Id` after allowing its action card. A tunnel
+or terminal card authorizes that one session's dynamic traffic, with live
+revocation checks; it does not represent per-frame approval. See
+[NyxBot service execution](NYXBOT_SERVICE_EXECUTION.md).
+
 SSH configuration is embedded directly in the service object under `ssh_config` when `service_type` is `"ssh"`. Create SSH services with `POST /api/v1/services` and update them with `PUT /api/v1/services/{service_id}` instead of calling separate SSH-specific CRUD endpoints.
 
 #### POST /api/v1/ssh/{service_id}/certificate
@@ -2559,6 +2571,7 @@ List all active provider configurations.
       "has_oauth_config": false,
       "default_scopes": null,
       "supports_pkce": false,
+      "authorization_nonce_required": false,
       "token_endpoint_auth_method": "client_secret_post",
       "extra_auth_params": null,
       "device_code_format": "rfc8628",
@@ -2607,6 +2620,7 @@ Register a new provider configuration. OAuth2 providers require additional field
 | `client_id`         | string   | OAuth2   | OAuth2 client ID (required for `oauth2` type, encrypted at rest)     |
 | `client_secret`     | string   | OAuth2   | OAuth2 client secret (required for `oauth2` type, encrypted at rest) |
 | `supports_pkce`     | boolean  | No       | Whether the provider supports PKCE (default: `false`)                |
+| `authorization_nonce_required` | boolean | No | Default `false`; generate a fresh nonce for each hosted OAuth2 authorization-code attempt. See the hosted nonce contract below. |
 | `token_endpoint_auth_method` | string | No | `client_secret_post` (default) or `client_secret_basic`             |
 | `extra_auth_params` | object   | No       | Extra authorization URL parameters (e.g., `{"access_type": "offline"}`) |
 | `device_code_url`   | string   | device_code | Device authorization endpoint (required for `device_code` type)   |
@@ -2618,6 +2632,14 @@ Register a new provider configuration. OAuth2 providers require additional field
 | `api_key_url`       | string   | No       | URL where users can create API keys                                  |
 | `icon_url`          | string   | No       | Provider icon/logo URL                                               |
 | `documentation_url` | string   | No       | Provider documentation URL                                           |
+
+**Hosted authorization nonce contract:** `authorization_nonce_required` is additive and default-off. Omitted create values become `false`; omitted updates preserve the stored value. Responses include the setting; consumers of older servers should treat a missing response field as `false`. Explicit `true` is rejected for provider types other than `oauth2`; missing/false remain valid. It is a client-bound OAuth setting under the existing Admin/Catalog Manager permission rules.
+
+When explicitly enabled, NyxID generates 32 cryptographically random bytes, encodes them as URL-safe base64 without padding, stores the value separately as `OAuthState.authorization_nonce`, and sends exactly that value once as `nonce` on the hosted OAuth2 authorization request. It is independent of OAuth state, PKCE and ChatConnect popup correlation. Enabled configurations reject authorization URLs containing a `nonce` query parameter (including a percent-encoded key) or a fragment, and reject `client_id_param_name` equal to `nonce` after trimming. Validation applies to the effective configuration on later URL/parameter edits too. `extra_auth_params` cannot override nonce, state or PKCE.
+
+This capability applies only to hosted OAuth2 authorization-code initiation, including ChatConnect and hosted connect links; node-owned OAuth and public login/OIDC have separate flows. Callback handling does not require a nonce or consume external ID tokens. Attempts started before activation remain valid, including legacy states without this field. Code exchange, refresh and revocation requests are unchanged; existing tokens need no migration or reconnection solely for this setting.
+
+Upgrade **all backend replicas before activation**: older initiators ignore the capability. Configure Hubstaff explicitly after upgrade while retaining `hubstaff:read`, PKCE S256 and the existing client authentication. No `openid` scope or provider-slug inference is needed. This contract does not establish live Hubstaff validation.
 
 **Slug Validation:** Must contain only lowercase letters, digits, and hyphens. No leading, trailing, or consecutive hyphens.
 
@@ -2746,6 +2768,7 @@ Update a provider configuration. Only the provided fields are updated (partial u
 | `client_id`         | string   | No       | OAuth2 client ID (encrypted at rest)                 |
 | `client_secret`     | string   | No       | OAuth2 client secret (encrypted at rest)             |
 | `supports_pkce`     | boolean  | No       | PKCE support flag                                    |
+| `authorization_nonce_required` | boolean | No | Set or clear the hosted OAuth2 authorization nonce capability. Omission preserves the stored setting. |
 | `token_endpoint_auth_method` | string | No | `client_secret_post` or `client_secret_basic`       |
 | `extra_auth_params` | object   | No       | Extra authorization URL parameters                   |
 | `device_code_url`   | string   | No       | Device authorization endpoint                        |
@@ -8563,6 +8586,38 @@ Human `POST/PUT /api/v1/services` use the same skill validation/history path; up
 The operation-contract route returns the authorized catalog service's bounded source OpenAPI document, preserving upstream server declarations. It does not rewrite proxy URLs or grant execution access; generated skills must use the consumer's authorized NyxID service connection. It reads a configured `openapi_spec_url` through NyxID's hardened, size-limited path, resolving known hosted overlay URLs locally. When the URL is absent or empty, it falls back to an embedded overlay registered for the service slug. The configured URL must be readable without downstream credentials; this route never injects a service-account or catalog credential. Authenticated custom documents need a separate, explicitly scoped contract-fetch capability. The route never resolves a user-managed `/keys` service, injects a credential, or returns the caller-wide `/mcp/config` catalog. The discovery response includes the catalog service `id`, `slug`, `name`, and current skill revision. Catalog and MCP responses retain name recommendations and expose optional refs/revision. Ref-only changes do not change the existing `catalog_digest`; `skills_manifest_digest` is a separate versioned digest. Instance names suppress inherited refs. See [Service account curation](SERVICE_ACCOUNTS.md#catalog-skill-curation) for exact payloads, grant limits, history pagination, recovery, runtime confinement, rollout ordering, and the boundary with Ornn package content CRU.
 
 
+## Assistant voice and dictation
+
+The [voice contract](chat/11-voice.md) specifies the existing call lifecycle,
+options, controls, captions and billing. Platform audio in a private specialist
+thread does not require granting OpenAI as a tool. The live conversation, agent
+and key binding, platform ACL, operation restrictions and billing admission still
+apply. BYOK retains the exact selected connection's ownership and grant checks.
+
+Dictation adds two first-party human browser routes:
+
+| Route | Contract |
+| --- | --- |
+| `GET /api/v1/assistant/nyxagent/dictation/options?conversation_id={id}` | Read-only eligibility and price discovery. Returns `options`, `transcription_model` (`gpt-live-transcribe`) and `max_seconds` (`120`). Options use the voice option schema with platform OpenAI sources. No funds are reserved by discovery. |
+| `GET /api/v1/assistant/nyxagent/conversations/{id}/dictation` | Same-origin WebSocket upgrade authenticated by a live browser session. Requires enabled voice features and a private authorized conversation; delegated credentials cannot execute it. |
+
+Within five seconds of upgrading, send one JSON message containing
+`client_request_id` and `preferences` (the existing voice preferences schema).
+The server selects only platform OpenAI transcription. After the server's `ready`
+event, send binary PCM16 mono audio at 24 kHz, at most 4096 bytes per message, or
+the exact text message `{"type":"stop"}`. Capture is bounded to 120 seconds.
+Provider commands, keys, tools and destination overrides are not accepted.
+
+Server events are `ready` (`session_id`, `model`), `delta` and `completed`
+(`item_id`, `order`, `text`; completion also includes `confirmed_seconds`),
+`stopped` (`confirmed`), and `error` (the standard sanitized `error` envelope).
+The browser reviews the resulting text before inserting it into a draft; the
+transport never submits a chat message. Closing capture releases the microphone
+immediately while the server drains forwarded audio within a bounded deadline
+and settles provider-confirmed input duration. See the
+[transport and accounting contract](chat/11-voice.md#bounded-transcription-transport-and-accounting)
+for limits, exact duration handling and recovery.
+
 ## Assistant skill review and image input
 
 `GET /api/v1/assistant/nyxagent/conversations/{id}` accepts an optional `card`
@@ -8606,6 +8661,36 @@ Tools updates distinguish omission from JSON `null` for `supplier` and `import_s
 
 CLI catalog creation requires `--endpoint-url` or `--twin-of` (otherwise the local error is `Catalog creation requires --endpoint-url or --twin-of`). Catalog updates support `--clear-supplier`, conflicting with `--supplier`. Tools table output formats prices as `Free` or `<credits> credits / <metric>`, limits as `<n>/s, burst <b>` or `none`, and topics as a comma-separated list. `tools show` prints rows for each operation (name, method, path, risk, data scope, cost class). JSON output remains the raw response.
 
+## Oracle pool lifecycle (unreleased)
+
+Oracle is an authenticated asynchronous browser-worker task relay. Pool management
+accepts the same JWT/general API-key callers as other Oracle consumer operations;
+shared worker and installation tokens do not authorize management. The pool owner
+is the existing person/org `user_id`; platform visibility grants discovery/use,
+not ownership. The first tagged release containing issues #1527/#1542 adds:
+
+| Method and path | Request | Success / conflicts |
+|---|---|---|
+| `POST /api/v1/oracle/pools/{id_or_slug}/transfer` | `owner_user_id` UUID, optional `rotate_worker_token` (default false), optional `visibility:"private"` for org-visible → person | 200 `{pool, worker_token?}`, no-store; source/destination manager ACL, active own-person or active managed org, ten-pool destination limit |
+| `DELETE /api/v1/oracle/pools/{id_or_slug}` | No body | 200 `{id,slug,status:"deleted",cleanup:"asynchronous",deleted_at}`, identical on authorized retry; 409 `oracle_pool_active_work` for queued/dispatched tasks or queued/delivered commands; 403 forbidden, 404 unknown |
+
+Transfer preserves pool identity/settings/history and the shared token by default.
+Owner changes require fresh installation credentials. Deletion reserves the slug,
+hides discovery and invalidates all workers at commit. Durable bounded cleanup
+then closes idle sessions and removes worker rows and encrypted login material;
+`cleanup:"asynchronous"` acknowledges this policy, not physical completion.
+Terminal task TTLs and readable history remain. Idle online
+workers do not block deletion. Settle active work before deletion. All replicas and
+old in-flight requests must be upgraded/drained before lifecycle operations are
+used. See [Oracle Relay](ORACLE_RELAY.md#pool-ownership-and-deletion-unreleased-1527-1542)
+for retention, retry, concurrency, token and deployment contracts and CLI examples.
+
+DELETE also settles deadline-expired worker commands from any generation in at
+most sixteen separately committed batches of 256 IDs per request. HTTP 409 /
+11017 can therefore mean that bounded expiry progress was made and more remains;
+retry DELETE. Unexpired work still blocks deletion. Authorization is checked for
+every batch, and an interruption or later conflict preserves committed expiry.
+Already-deleted pools skip expiry and return their stable acknowledgement.
 ## Complete channel replies
 
 `POST /api/v1/channel-relay/reply` and `/thread-reply` accept one complete
@@ -8632,3 +8717,90 @@ can send the same image once as a document under the
 A response with `"delivered_as": ["file"]` reports this actual transport kind,
 and the outbound message's `content_type` is `file`. The reply anchor, topic and
 caption are preserved. Other adapters can omit this field.
+
+## NyxBot exact service selection and consent
+
+An authenticated first-party human owner may prefix a new NyxAgent message with
+`/service <connection UUID or unambiguous connection slug>` followed by a newline
+and the request. The composer offers the same next-message choice. The selector
+lasts one admitted turn and chooses identity, not permission. API keys (including
+conversation, delegated and service-account keys), guests and webhook inputs
+cannot install human selection. Ordinary new turns clear it. An approved-card
+continuation inherits only that card's exact target and operation; expired,
+denied or consumed cards install no selection.
+
+Assistant raw proxy/LLM/SSH exec retries accept
+`X-NyxID-Acknowledgement-Id`; MCP service and native tools accept the existing
+`acknowledgement_id`. Native Oracle submit, attach and extract request bodies add
+optional `acknowledgement_id: string`. NyxID consumes this control metadata only
+for assistant execution; ordinary endpoint clients keep their payload contract.
+No acknowledgement transport metadata reaches the provider. Assistant chat keys
+use exact SSH exec and bounded certificate/tunnel/terminal session admission.
+For assistant calls, organization use asks in Auto and Ask every time and Full
+access proceeds without a prompt. Certificate cards bind the subject public key
+and principal; session cards bind the exact connection, principal/initial terminal
+geometry and maximum lifetime (at most one hour). Resume the same request with
+`X-NyxID-Acknowledgement-Id`. Session consent covers dynamic session traffic;
+revocation, config drift or elapsed authority closes the session. Ordinary client
+routing and existing personal catalog-only access are retained.
+
+Organization-use refusals persist the existing action card and return its
+`acknowledgement_id`. Full access bypasses consent while retaining preference
+and authority checks. Raw stateless org model consent admits an exact model and
+connection for the resumed turn; MCP/stateful actions retain exact semantic
+request consent. Machine exec cards explicitly admit declared exact organization
+connections for that command/job. See [execution contract](NYXBOT_SERVICE_EXECUTION.md).
+
+## NyxBot service adapters
+
+The default-off `nyxbot:service-adapters` flag gates adapter setup and execution.
+Upgrade every API replica before enabling it. The existing
+`GET /api/v1/channel-platforms` contract is unchanged. See the
+[operator guide](NYXBOT_SERVICE_ADAPTERS.md) for provider setup, supported
+credential modes, dynamic instructions, FAQ grants and billing requirements.
+
+Prefix every path below with `/api/v1`. Binding management and secret/session
+issuance require a first-party human account and verify ownership. Administrator
+account/allocation routes additionally require the administrator role. Capability
+metadata allows delegated `account:read`. List routes accept `after` and return
+`next_after_id`; an absent cursor marks the final page.
+
+| Method | Path | Result |
+| --- | --- | --- |
+| GET | `/channel-adapters` | Versioned executable descriptors in `adapters`, including legacy/disabled profiles. |
+| GET | `/channel-adapter-bindings` | Owner's bindings, readiness and next cursor. |
+| POST | `/channel-adapter-bindings` | Verify provider resources and create a binding; returns its descriptor and readiness. |
+| POST | `/channel-adapter-bindings/{id}/disable` | Disable admission and start cleanup; 204. |
+| POST | `/channel-adapter-bindings/{id}/verify` | Reverify and enable; returns the updated binding. |
+| DELETE | `/channel-adapter-bindings/{id}` | Remove a disabled, settled binding; 204. |
+| POST | `/channel-adapter-bindings/{id}/custom-llm-setup` | ElevenLabs Custom LLM URL, API key and model; secret-bearing response. |
+| POST | `/channel-adapter-bindings/{id}/sessions` | Issue a distinct ElevenLabs guest session and `extra_body` authentication. |
+| POST | `/channel-adapter-bindings/{id}/sessions/{sid}/end` | End an owned ElevenLabs guest session; 204. |
+| GET, POST | `/admin/channel-adapter-accounts` | List or configure trusted provider accounts; POST returns 204. |
+| DELETE | `/admin/channel-adapter-accounts/{id}` | Remove trust after allocations are removed; 204. |
+| GET, POST | `/admin/channel-adapter-allocations` | List or allocate platform number/application resources with tariff evidence. |
+| DELETE | `/admin/channel-adapter-allocations/{id}` | Revoke allocation; pending cleanup prevents premature removal. |
+
+Binding creation accepts `adapter_id`, `contract_version: 1`, `label`, `agent_id`,
+`credential` and provider-specific resource settings. `credential` is either
+`{"kind":"connection","user_service_id":"..."}` or
+`{"kind":"platform","catalog_service_id":"..."}`. Carrier settings include
+`account_id`, `resource_id`, `phone_number`, `application_id`, `voice` and
+`language`; user-owned Telnyx additionally supplies `webhook_public_key`.
+ElevenLabs uses its agent ID as `application_id`. Creation verifies ownership
+without placing a call or sending SMS. A binding response contains identifiers,
+configuration, `enabled`, `revision`, `verified_at`, `webhook_url` and per-operation
+`availability`; it never returns stored credentials.
+
+Provider-facing routes authenticate their own protocol instead of a human login:
+
+| Method | Path | Authentication and transport |
+| --- | --- | --- |
+| POST | `/webhooks/call-adapters/{id}` | Telnyx Ed25519 or Twilio signature plus bound resource proof; bounded body, XML response. |
+| POST | `/webhooks/call-adapters/{id}/sms-receipts/{send}` | Signed, correlated delivery receipt; bounded body, XML response. |
+| GET | `/webhooks/call-adapters/{id}/socket/{sid}` | Admitted session ticket, plus Twilio signature when applicable; WebSocket upgrade. |
+| POST | `/webhooks/call-adapters/{id}/v1/chat/completions` | Custom LLM bearer and separately issued guest-session credentials; bounded JSON input and SSE output. |
+
+Caller messages never grant owner authority. Specialist guest grants, live
+binding/session authority and catalog operation policy remain mandatory at
+execution. Provider retries do not automatically repeat uncertain effects.

@@ -1242,7 +1242,7 @@ pub enum ServicePreferenceCommands {
         #[command(flatten)]
         auth: AuthArgs,
     },
-    /// Set this catalog group's discovery order with IDs or slugs
+    /// Set this catalog group's agent order; NyxBot enforces personal-first execution
     Set {
         #[arg(long)]
         group: String,
@@ -1280,7 +1280,7 @@ pub enum ServicePreferenceCommands {
 // not load-bearing — accept the lint here.
 #[allow(clippy::large_enum_variant)]
 pub enum ServiceCommands {
-    /// Set agent discovery order within a service's connections
+    /// Set per-service agent order (enforced for NyxBot, advisory for other clients)
     Preference {
         #[command(subcommand)]
         command: ServicePreferenceCommands,
@@ -6377,6 +6377,34 @@ pub enum OraclePoolCommands {
         /// Activate or deactivate the pool
         #[arg(long)]
         active: Option<bool>,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Transfer pool ownership, preserving identity and history
+    Transfer {
+        pool: String,
+        /// Destination organization (UUID, slug or display name)
+        #[arg(
+            long,
+            required_unless_present = "personal",
+            conflicts_with = "personal"
+        )]
+        org: Option<String>,
+        /// Transfer to your own active personal account
+        #[arg(long)]
+        personal: bool,
+        /// Rotate the shared worker token and return its replacement once
+        #[arg(long)]
+        rotate_worker_token: bool,
+        /// Required when an org-visible pool moves to a person
+        #[arg(long, value_parser = ["private"])]
+        visibility: Option<String>,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Delete an idle pool, reserving its slug and retaining task/session history
+    Delete {
+        pool: String,
         #[command(flatten)]
         auth: AuthArgs,
     },

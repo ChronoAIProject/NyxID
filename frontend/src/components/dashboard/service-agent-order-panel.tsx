@@ -128,8 +128,8 @@ export function ServiceAgentOrderPanel({
                   <ul className="space-y-2">
                     <li>Connections that match equally are shown in your order.</li>
                     <li>
-                      The AI chooses which connection to use; this order is a
-                      preference.
+                      NyxBot follows this order within each service, using personal
+                      connections first. Choose a connection for one turn to override it.
                     </li>
                     <li>
                       Agents see only the enabled HTTP connections they can access.
@@ -147,8 +147,8 @@ export function ServiceAgentOrderPanel({
                         key.inference != null || key.service_category === "llm",
                     )) && (
                     <p>
-                      Provider gateway routing is separate from this discovery
-                      order.
+                      NyxBot model routing follows eligible connections in this
+                      order. Service Pools keep their configured strategy.
                     </p>
                   )}
                 </TooltipContent>

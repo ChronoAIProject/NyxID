@@ -484,6 +484,13 @@ pub fn insert_reply_context(metadata: &mut Option<serde_json::Value>, key: &str,
 /// to normalize webhook verification, message parsing, and reply sending.
 #[async_trait::async_trait]
 pub trait PlatformAdapter: Send + Sync {
+    fn supports_text_reply(&self) -> bool {
+        true
+    }
+    fn supports_text_ingress(&self) -> bool {
+        self.registration().webhook_ingestion || matches!(self.ingestion(), Ingestion::Poll { .. })
+    }
+
     fn activity_descriptors(
         &self,
     ) -> &'static [super::channel_activity_service::ActivityDescriptor] {
@@ -1234,14 +1241,4 @@ mod tests {
         assert_eq!(restored.text.as_deref(), Some("updated text"));
         assert!(restored.metadata.is_some());
     }
-}
-
-/// Server-authored shared-bot text must preserve proof bytes and avoid previews.
-pub(crate) fn shared_plain_text(reply: &OutboundReply) -> bool {
-    reply
-        .metadata
-        .as_ref()
-        .and_then(|value| value.get("shared_plain_text"))
-        .and_then(serde_json::Value::as_bool)
-        == Some(true)
 }

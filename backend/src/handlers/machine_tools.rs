@@ -45,9 +45,9 @@ pub fn call<'a>(
             let rows =
                 crate::services::saved_login_service::available(&state.db, &chat.user_id).await?;
             return tools::list_page("logins", rows.into_iter()
-                .filter(|login| chat.is_orchestrator() || chat.saved_login_ids.contains(&login.id))
-                .map(|row| json!({"id":row.id,"label":row.label,"allowed_origins":row.allowed_origins}))
-                .collect(), &arguments, json!({}));
+            .filter(|login| chat.is_orchestrator() || chat.saved_login_ids.contains(&login.id))
+            .map(|row| json!({"id":row.id,"label":row.label,"allowed_origins":row.allowed_origins}))
+            .collect(), &arguments, json!({}));
         }
         let nodes = machines::visible_nodes(&state.db, chat).await?;
         if name == "nyx__machine_list" {
@@ -75,22 +75,22 @@ pub fn call<'a>(
                 "No machine is available. Ask NyxBot for a machine setup link."
             };
             let visible = Box::pin(access::visible_assignments(&state.db, chat))
-                .await?
-                .into_iter()
-                .map(|(node, assignment)| {
-                    let mut row = machines::metadata(&node);
-                    row["execution_note"] = json!(tools::execution_note(
-                        &assignment.mode,
-                        node.machine.as_ref().and_then(|p| p.separated.as_ref()).is_some_and(|s| s.available),
-                    ));
-                    if assignment.mode == "separated" {
-                        row["machine"]["roots"] = json!(["."]);
-                        row["context_note"] = json!("Paths are relative to this agent context workspace; the secure and developer browsers are separate from other contexts. Full isolation requires a separate machine container or VM.");
-                    }
-                    row["access"] = json!(assignment);
-                    row
-                })
-                .collect();
+            .await?
+            .into_iter()
+            .map(|(node, assignment)| {
+                let mut row = machines::metadata(&node);
+                row["execution_note"] = json!(tools::execution_note(
+                    &assignment.mode,
+                    node.machine.as_ref().and_then(|p| p.separated.as_ref()).is_some_and(|s| s.available),
+                ));
+                if assignment.mode == "separated" {
+                    row["machine"]["roots"] = json!(["."]);
+                    row["context_note"] = json!("Paths are relative to this agent context workspace; the secure and developer browsers are separate from other contexts. Full isolation requires a separate machine container or VM.");
+                }
+                row["access"] = json!(assignment);
+                row
+            })
+            .collect();
             return tools::list_page(
                 "machines",
                 visible,
@@ -234,6 +234,25 @@ pub fn call<'a>(
                 .await?
                 .revision
         );
+        let job_plan = if operation == Operation::Exec {
+            match crate::services::assistant_job_service_use::prepare(
+                state,
+                chat,
+                &node.id,
+                &arguments,
+                &declared_services,
+            )
+            .await?
+            {
+                Ok(plan) => Some(plan),
+                Err(refusal) => return Ok(refusal),
+            }
+        } else {
+            None
+        };
+        if let Some(plan) = &job_plan {
+            arguments["job_service_use"] = plan.confirmation();
+        }
         // Arbitrary commands, writes and mutating desktop input can destroy data.
         // Filling a checked login field and asking the owner for control change
         // state, but do not themselves remove data or grant arbitrary execution.
@@ -254,11 +273,14 @@ pub fn call<'a>(
             ) || (matches!(operation, Operation::Computer | Operation::Browser)
                 && !read_only),
         };
-        let floor = machines::confirmation(&node, operation, &arguments)
+        let floor = job_plan
+            .as_ref()
+            .is_some_and(|plan| !plan.org_labels.is_empty())
+            || machines::confirmation(&node, operation, &arguments)
             || login.as_ref().is_some_and(|row| row.confirm_each_sign_in);
         let gate = acks::confirmation_needed(&state.db, chat, facts, floor).await?;
         let confirmation_arguments = arguments.clone();
-        let summary = format!(
+        let mut summary = format!(
             "Allow {name} on {}{}",
             node.name,
             if operation == Operation::Exec {
@@ -274,6 +296,15 @@ pub fn call<'a>(
                 String::new()
             }
         );
+        if let Some(plan) = &job_plan
+            && !plan.org_labels.is_empty()
+        {
+            summary.push_str(&format!(
+                "; this command may use {} for job {} until it finishes or expires",
+                plan.org_labels.join(", "),
+                plan.id
+            ));
+        }
         if let Some(need) = gate.ask() {
             // Outside webhook automations a mismatched card id raises a fresh
             // card for the exact arguments, as machine confirmation always has.
@@ -287,6 +318,9 @@ pub fn call<'a>(
             )
             .await?
             {
+                if let Some(plan) = &job_plan {
+                    plan.bind_card(&state.db, &refusal).await?;
+                }
                 return Ok(refusal);
             }
         }
@@ -310,14 +344,38 @@ pub fn call<'a>(
             arguments["environment"] = json!(
                 crate::services::machine_gateway_service::environment(&declared_services)?
             );
-            let job = machines::issue_job(
+            job_plan
+                .as_ref()
+                .expect("exec plan")
+                .revalidate(&state.db, chat)
+                .await?;
+            job_plan
+                .as_ref()
+                .expect("exec plan")
+                .claim(&state.db)
+                .await?;
+            let job = machines::issue_job_with_id(
                 &state.db,
                 chat,
                 &node,
                 arguments["timeout_secs"].as_u64().unwrap_or(120),
                 crate::services::machine_gateway_service::declared(&declared_services),
+                job_plan.as_ref().expect("exec plan").id.clone(),
             )
             .await?;
+            if let Err(error) = job_plan
+                .as_ref()
+                .expect("exec plan")
+                .publish(&state.db, &job)
+                .await
+            {
+                machines::finish(&state.db, &job.id).await?;
+                return Err(error);
+            }
+            arguments
+                .as_object_mut()
+                .expect("arguments")
+                .remove("job_service_use");
             arguments["job_id"] = json!(job.id);
             arguments["runtime_id"] = json!(job.runtime_id);
             arguments["conversation_id"] = json!(chat.conversation_id);
@@ -380,6 +438,9 @@ pub fn call<'a>(
                 crate::services::machine_desktop_service::agent_allowed(&state.db, &node.id).await
             };
             if let Err(error) = allowed {
+                if let Some(job) = &job {
+                    machines::finish(&state.db, &job.id).await?;
+                }
                 if let Some(authority) = &authority {
                     let _ = state
                         .db
@@ -437,33 +498,69 @@ pub fn call<'a>(
             )
             .await?;
         }
-        if let (Some(job), Some(authority)) = (&job, &authority) {
-            state.db.collection::<mongodb::bson::Document>(crate::models::machine_job::COLLECTION_NAME)
-                .update_one(mongodb::bson::doc!{"_id":&job.id},mongodb::bson::doc!{"$set":{"machine_authority":mongodb::bson::to_bson(authority).map_err(|_|AppError::MachineAuthorityStale)?}}).await?;
+        let preparation = async {
+    if let (Some(job), Some(authority)) = (&job, &authority) {
+        state.db.collection::<mongodb::bson::Document>(crate::models::machine_job::COLLECTION_NAME)
+            .update_one(mongodb::bson::doc!{"_id":&job.id},mongodb::bson::doc!{"$set":{"machine_authority":mongodb::bson::to_bson(authority).map_err(|_|AppError::MachineAuthorityStale)?}}).await?;
+    }
+    if let Some(login) = &login {
+        let field = argument(&arguments, "field")?.to_owned();
+        let value = crate::services::saved_login_service::materialize(
+            &state.encryption_keys,
+            login,
+            &field,
+            Utc::now().timestamp().max(0) as u64,
+        )
+        .await?;
+        arguments["value"] = json!(value.as_str());
+        arguments["allowed_origins"] = json!(login.allowed_origins);
+    }
+    let mut receipt = receipts::receipt(chat, &node.id, operation, &arguments);
+    receipt.context_mode = Some(
+        if separated {
+            "separated"
+        } else {
+            "shared_legacy"
         }
-        if let Some(login) = &login {
-            let field = argument(&arguments, "field")?.to_owned();
-            let value = crate::services::saved_login_service::materialize(
-                &state.encryption_keys,
-                login,
-                &field,
-                Utc::now().timestamp().max(0) as u64,
-            )
-            .await?;
-            arguments["value"] = json!(value.as_str());
-            arguments["allowed_origins"] = json!(login.allowed_origins);
-        }
-        let mut receipt = receipts::receipt(chat, &node.id, operation, &arguments);
-        receipt.context_mode = Some(
-            if separated {
-                "separated"
-            } else {
-                "shared_legacy"
+        .into(),
+    );
+    receipt.preview_enabled = receipts::preview_enabled(&state.db, chat).await?;
+    receipts::record(&state.db, chat, &receipt).await?;
+        Ok::<_,AppError>(receipt)
+    }.await;
+        let mut receipt = match preparation {
+            Ok(receipt) => receipt,
+            Err(error) => {
+                if let Some(job) = &job {
+                    machines::finish(&state.db, &job.id).await?;
+                }
+                if let Some(authority) = &authority {
+                    let _ = state
+                        .db
+                        .collection::<mongodb::bson::Document>(
+                            crate::models::machine_access::LEASES,
+                        )
+                        .delete_one(mongodb::bson::doc! {"_id":&authority.lease_id})
+                        .await;
+                }
+                return Err(error);
             }
-            .into(),
-        );
-        receipt.preview_enabled = receipts::preview_enabled(&state.db, chat).await?;
-        receipts::record(&state.db, chat, &receipt).await?;
+        };
+        if let Some(plan) = &job_plan
+            && let Err(error) = plan.revalidate(&state.db, chat).await
+        {
+            if let Some(job) = &job {
+                machines::finish(&state.db, &job.id).await?;
+            }
+            if let Some(authority) = &authority {
+                let _ = state
+                    .db
+                    .collection::<mongodb::bson::Document>(crate::models::machine_access::LEASES)
+                    .delete_one(mongodb::bson::doc! {"_id":&authority.lease_id})
+                    .await;
+            }
+            return Err(error);
+        }
         let started = std::time::Instant::now();
         let mut result = match operation {
             Operation::SaveAttachment => {
@@ -487,8 +584,8 @@ pub fn call<'a>(
             && operation != Operation::JobCancel
         {
             let current = state.db.collection::<mongodb::bson::Document>(crate::models::assistant_agent::COLLECTION_NAME)
-                .find_one(mongodb::bson::doc! {"_id":&authority.agent_id,"destroyed_at":mongodb::bson::Bson::Null,format!("machine_access.assignments.{}.revision",node.id):authority.revision})
-                .projection(mongodb::bson::doc! {"_id":1}).await?;
+            .find_one(mongodb::bson::doc! {"_id":&authority.agent_id,"destroyed_at":mongodb::bson::Bson::Null,format!("machine_access.assignments.{}.revision",node.id):authority.revision})
+            .projection(mongodb::bson::doc! {"_id":1}).await?;
             if current.is_none() {
                 result = Err(AppError::MachinePermissionRevoked);
             }
@@ -614,8 +711,8 @@ pub fn call<'a>(
         if let (Some(job_id), Some(exit_code)) = (&receipt.job_id, receipt.exit_code) {
             // Additional outcome metadata; do not resurrect a cancelled job.
             let _ = state.db.collection::<mongodb::bson::Document>(crate::models::machine_job::COLLECTION_NAME)
-                .update_one(mongodb::bson::doc!{"_id":job_id,"user_id":&chat.user_id,"conversation_id":&chat.conversation_id,"state":{"$ne":"cancelled"}},
-                    mongodb::bson::doc!{"$set":{"exit_code":exit_code}}).await;
+            .update_one(mongodb::bson::doc!{"_id":job_id,"user_id":&chat.user_id,"conversation_id":&chat.conversation_id,"state":{"$ne":"cancelled"}},
+                mongodb::bson::doc!{"$set":{"exit_code":exit_code}}).await;
         }
         if operation == Operation::JobCancel
             && receipt.status == "cancelled"
@@ -623,8 +720,8 @@ pub fn call<'a>(
         {
             // Presentation only: the existing job lifecycle remains authoritative.
             let _ = state.db.collection::<mongodb::bson::Document>(crate::models::machine_job::COLLECTION_NAME)
-                .update_one(mongodb::bson::doc!{"_id":job_id,"user_id":&chat.user_id,"conversation_id":&chat.conversation_id},
-                    mongodb::bson::doc!{"$set":{"receipt_cancelled":true}}).await;
+            .update_one(mongodb::bson::doc!{"_id":job_id,"user_id":&chat.user_id,"conversation_id":&chat.conversation_id},
+                mongodb::bson::doc!{"$set":{"receipt_cancelled":true}}).await;
         }
         if receipts::record(&state.db, chat, &receipt).await.is_err()
             || receipts::store_preview(state, chat, &mut receipt, &result)

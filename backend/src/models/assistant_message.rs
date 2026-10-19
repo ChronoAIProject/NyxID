@@ -113,7 +113,16 @@ impl std::fmt::Debug for AssistantMessage {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
+pub struct VoiceFragment {
+    pub text: String,
+    pub start_ms: i64,
+    pub end_ms: i64,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
 pub struct VoiceTranscript {
+    #[serde(default)]
+    pub fragments: Vec<VoiceFragment>,
     pub session_id: String,
     pub segment_id: String,
     pub start_ms: i64,
@@ -143,6 +152,15 @@ pub struct Steering {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct TurnMetadata {
+    #[serde(default)]
+    pub channel_delivery: Option<ChannelDelivery>,
     pub attempts: Option<u32>,
     pub capacity_wait_ms: Option<u64>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ChannelDelivery {
+    pub status: String,
+    pub heard_prefix_chars: Option<i64>,
+    pub heard_prefix_matches_sent: bool,
 }

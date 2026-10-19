@@ -22,7 +22,9 @@ export function MachineCapabilities({ agentId, disabled = false }: { readonly ag
   return <section aria-label="Machine capabilities" className="space-y-3">
     <p className="text-12 text-muted-foreground">Choose what this agent can do on each machine. With capability editing enabled, newly selected machines start with all permissions off. Existing legacy access stays until edited. Saving changes cancels this agent’s current work on that machine.</p>
     {!enabled ? <p role="status" className="text-12 text-muted-foreground">Capability editing is not enabled yet. Existing restrictions still apply.</p> : null}
-    {query.error ? <p role="alert" className="text-12 text-destructive">Could not load machine capabilities.</p> : null}
+    {query.error ? <p role="alert" className="text-12 text-destructive">Could not refresh machine capabilities. Displayed status may be out of date.</p> : null}
+    {query.data?.some(machine => machine.revocation_pending || machine.delivery_pending) ? <p className="text-12 text-muted-foreground">Status refreshes for up to one minute while this page is active. Use Refresh machine status for a later check.</p> : null}
+    <Button type="button" size="sm" variant="secondary" disabled={query.isFetching || disabled} onClick={() => void query.refetch()}>Refresh machine status</Button>
     {query.data?.map(machine => <MachineCapabilityForm key={`${machine.node_id}:${machine.revision}`} machine={machine} agentId={agentId} disabled={disabled || !enabled} contextEnabled={contextsEnabled} />)}
   </section>;
 }
@@ -68,7 +70,9 @@ export function MachineCapabilityForm({ machine, agentId, disabled = false, cont
       <p>{machine.separated_setup_note ?? SEPARATED_SETUP_NOTE}</p>
       {machine.separated?.reason ? <details><summary className="cursor-pointer">Separate workspace diagnostics</summary><p>{machine.separated.reason}</p></details> : null}
     </div> : null}
-    {machine.revocation_pending ? <p role="status" className="text-12 text-muted-foreground">Revocation pending on machine. Online revocation is immediate. If delivery is interrupted, v2 leased work stops within 45 seconds.</p> : null}
+    {machine.quarantine_pending ? <p role="status" className="text-12 text-warning">Browser cleanup is pending. Reconnect the machine and refresh status. New browser work stays blocked until cleanup finishes.</p> : null}
+    {machine.revocation_initialization_pending ? <p role="status" className="text-12 text-muted-foreground">Checking when earlier commands will stop. Refresh status in a few seconds.</p> : (machine.execution_revocation_pending ?? machine.revocation_pending) ? <p role="status" className="text-12 text-muted-foreground">Earlier commands are stopping.{machine.revocation_expires_at ? ` They should stop by ${new Date(machine.revocation_expires_at).toLocaleString()}.` : " Reconnect and refresh status to confirm they have stopped."} Refresh status before starting new work.</p> : machine.delivery_pending ? <p role="status" className="text-12 text-muted-foreground">Earlier commands have stopped. Updated permissions still need machine acknowledgement. Reconnect the machine and refresh status.</p> : null}
+    {machine.revocation_diagnostic ? <p role="status" className="text-12 text-warning">{machine.revocation_diagnostic === "authority_timing_upgrade_required" ? "Update and reconnect this machine to confirm permission changes." : "Recovery status needs administrator attention. Earlier commands are still marked as stopping; check machine diagnostics before continuing."}</p> : null}
     {!machine.can_edit ? <p role="status" className="text-12">Only the machine owner or an organization admin can edit this access.</p> : null}
     {!machine.protocol_v2 ? <p role="status" className="text-12">Update this machine before changing capabilities. Its existing access continues.</p> : null}
     {contextEnabled && machine.mode !== "separated" && machine.can_edit ? (

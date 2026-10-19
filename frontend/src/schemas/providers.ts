@@ -108,6 +108,7 @@ const baseProviderFields = {
     .or(z.literal("")),
   credential_mode: z.enum(CREDENTIAL_MODES).optional(),
   supports_pkce: z.boolean().optional(),
+  authorization_nonce_required: z.boolean().optional(),
   device_code_url: z
     .string()
     .refine(isValidHttpUrl, "Must be a valid URL")

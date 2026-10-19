@@ -14,16 +14,13 @@ pub(crate) fn installation_filter(bot_id: &str, platform: &str, platform_bot_id:
     }
 }
 
-/// Tombstones reserve provider identities even after a local channel is deleted.
-pub(crate) fn profile_filter(bot_id: &str, platform: &str, remote: &str) -> Document {
-    let mut alternatives = vec![
-        doc! {"channel_bot_id":bot_id},
-        doc! {"channel_transport.platform":platform,"channel_transport.platform_bot_id":remote},
-    ];
+/// Preserve exact provider/remote reservations across local channel replacement.
+pub(crate) fn profile_filter(bot_id: &str, platform: &str, remote_id: &str) -> Document {
     if matches!(platform, "telegram" | "telegram-new") {
-        alternatives.push(doc! {"manager_bot_id":remote,"channel_transport":bson::Bson::Null});
+        doc! {"$or":[{"channel_bot_id":bot_id},{"manager_bot_id":remote_id,"native_entry":bson::Bson::Null}]}
+    } else {
+        doc! {"$or":[{"channel_bot_id":bot_id},{"native_entry.identity.platform":platform,"native_entry.identity.platform_bot_id":remote_id}]}
     }
-    doc! {"$or":alternatives}
 }
 
 /// Read persisted authority rather than trusting a cached channel/link snapshot.
@@ -39,7 +36,11 @@ pub(crate) async fn permits_personal_routes(
     let Some(bot) = bot else {
         return Ok(false);
     };
-    if bot.contains_key("platform_profile_id") || bot.contains_key("platform_installation_id") {
+    if bot.contains_key("platform_profile_id")
+        || bot.contains_key("platform_installation_id")
+        || bot.contains_key("platform_entry_version")
+        || bot.contains_key("platform_entry_pending")
+    {
         return Ok(false);
     }
     if db
@@ -99,7 +100,7 @@ pub(crate) async fn fence_personal_routes(
     let bot = db
         .collection::<Document>(crate::models::channel_bot::COLLECTION_NAME)
         .find_one_and_update(
-            doc! {"_id": bot_id, "user_id": owner, "platform_profile_id": {"$exists": false}, "platform_installation_id": {"$exists": false}},
+            doc! {"_id": bot_id, "user_id": owner, "platform_profile_id": {"$exists": false}, "platform_installation_id": {"$exists": false}, "platform_entry_version": {"$exists": false}, "platform_entry_pending": {"$exists": false}},
             doc! {"$inc": {"route_revision": 1_i64}},
         )
         .session(&mut *session)
@@ -141,6 +142,79 @@ pub(crate) async fn fence_personal_routes(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn same_remote_native_entry_does_not_confer_telegram_platform_authority() {
+        let db = crate::test_utils::connect_transaction_test_database(
+            "native_remote_authority_namespace",
+        )
+        .await;
+        let bots = db.collection::<Document>(crate::models::channel_bot::COLLECTION_NAME);
+        let profiles =
+            db.collection::<Document>(crate::models::platform_bot_config::COLLECTION_NAME);
+        bots.insert_one(
+            doc! {"_id":"ordinary-telegram","user_id":"owner","platform":"telegram",
+            "platform_bot_id":"123","credential_source":"user","is_active":true},
+        )
+        .await
+        .unwrap();
+        profiles.insert_one(doc! {"_id":"native-profile","channel_bot_id":"native-channel","manager_bot_id":"123",
+            "identity_version":2,"enabled":true,"native_entry":{"identity":{"version":2,"platform":"x",
+                "channel_bot_id":"native-channel","platform_bot_id":"123"}}}).await.unwrap();
+        assert!(
+            permits_personal_routes(&db, "ordinary-telegram")
+                .await
+                .unwrap()
+        );
+        for (id, platform, allowed) in
+            [("replaced-x", "x", false), ("same-id-slack", "slack", true)]
+        {
+            bots.insert_one(doc!{"_id":id,"user_id":"owner","platform":platform,"platform_bot_id":"123","is_active":true}).await.unwrap();
+            assert_eq!(permits_personal_routes(&db, id).await.unwrap(), allowed);
+            let mut session = db.client().start_session().await.unwrap();
+            session.start_transaction().await.unwrap();
+            assert_eq!(
+                fence_personal_routes(&db, id, "owner", &mut session)
+                    .await
+                    .is_ok(),
+                allowed
+            );
+            session.abort_transaction().await.unwrap();
+        }
+        // Retirement does not free the remote identity for a new local UUID.
+        profiles
+            .update_one(
+                doc! {"_id":"native-profile"},
+                doc! {"$set":{"deleted_at":bson::DateTime::now()}},
+            )
+            .await
+            .unwrap();
+        assert!(!permits_personal_routes(&db, "replaced-x").await.unwrap());
+        let mut session = db.client().start_session().await.unwrap();
+        session.start_transaction().await.unwrap();
+        fence_personal_routes(&db, "ordinary-telegram", "owner", &mut session)
+            .await
+            .unwrap();
+        session.commit_transaction().await.unwrap();
+        // An own-channel profile remains a refusal even if its marker is missing.
+        bots.insert_one(
+            doc! {"_id":"native-channel","user_id":"owner","platform":"x","platform_bot_id":"123"},
+        )
+        .await
+        .unwrap();
+        assert!(
+            !permits_personal_routes(&db, "native-channel")
+                .await
+                .unwrap()
+        );
+        profiles.insert_one(doc! {"_id":"legacy-profile","channel_bot_id":"legacy-channel","manager_bot_id":"123",
+            "identity_version":1,"enabled":false}).await.unwrap();
+        assert!(
+            !permits_personal_routes(&db, "ordinary-telegram")
+                .await
+                .unwrap()
+        );
+    }
 
     #[tokio::test]
     async fn platform_onboarding_legacy_manager_is_opt_in_and_tombstone_is_closed() {

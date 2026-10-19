@@ -103,7 +103,7 @@ async fn maybe_rebuild_bot_token(
     Ok(Some(encryption_keys.encrypt(token.as_bytes()).await?))
 }
 
-pub(crate) async fn write_registration_fields(
+async fn write_registration_fields(
     keys: &EncryptionKeys,
     descriptor: &RegistrationDescriptor,
     fields: &RegistrationValues<'_>,

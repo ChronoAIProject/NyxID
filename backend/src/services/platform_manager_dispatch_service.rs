@@ -43,13 +43,17 @@ pub(crate) fn verified_message(
     Some(VerifiedManagerUpdate {
         profile_id: profile_id.into(),
         manager_bot_id: manager_bot_id.into(),
-        telegram_bot_id,
+        entry: EntryIdentity::TelegramV1 { telegram_bot_id },
         observation_id: observation_id.into(),
-        sender_id,
-        chat_id,
+        sender: SenderIdentity::TelegramV1 {
+            telegram_sender_id: sender_id,
+            telegram_chat_id: chat_id,
+        },
         chat_kind,
-        update_id: update["update_id"].as_i64().filter(|id| *id >= 0)?,
-        message_id: message["message_id"].as_i64().filter(|id| *id > 0)?,
+        event: EventIdentity::TelegramV1 {
+            update_id: update["update_id"].as_i64().filter(|id| *id >= 0)?,
+            message_id: message["message_id"].as_i64().filter(|id| *id > 0)?,
+        },
         command_eligibility: if original {
             ManagerCommandEligibility::OriginalPrivateMessage
         } else {
@@ -58,14 +62,13 @@ pub(crate) fn verified_message(
     })
 }
 
-async fn admit_selected_in_session(
+pub(crate) async fn admit_in_session(
     db: &Database,
     session: &mut ClientSession,
     identity: &dyn ManagerIdentityProducer,
     update: &VerifiedManagerUpdate,
     claim: &IngressClaim,
-    faq_only: bool,
-    faq: Option<&(Vec<String>, bool)>,
+    text: Option<&str>,
 ) -> AppResult<IngressAdmission> {
     // Deliberately precedes current authority resolution: retries keep history.
     if let Some(receipt) = ingress::find_in_session(db, session, update).await? {
@@ -78,7 +81,7 @@ async fn admit_selected_in_session(
         session,
         &update.profile_id,
         &update.manager_bot_id,
-        update.telegram_bot_id,
+        &update.entry,
         Some(&update.observation_id),
     )
     .await?
@@ -90,12 +93,15 @@ async fn admit_selected_in_session(
         ManagerAudience::Fixed(UnavailableReason::EmergencyStopped)
     } else if update.chat_kind != ManagerChatKind::Private {
         ManagerAudience::PrivateChatHandoff
-    } else if faq_only && policy.public_enabled && row.public_policy.is_none() {
+    } else if text == Some("/unsupported") {
+        ManagerAudience::Fixed(UnavailableReason::UnsupportedInput)
+    } else if !policy.public_enabled && text.is_some_and(explicit_faq) {
+        ManagerAudience::Fixed(UnavailableReason::PublicDisabled)
+    } else if policy.public_enabled && text.is_some_and(explicit_faq) {
         ManagerAudience::Public(PublicIngress {
             ingress: claim.clone(),
             manager: policy.manager.clone(),
-            sender_id: update.sender_id,
-            chat_id: update.chat_id,
+            sender: update.sender.clone(),
             public_policy_revision: policy.public_policy_revision,
         })
     } else {
@@ -106,15 +112,14 @@ async fn admit_selected_in_session(
                 }
                 ManagerAudience::Personal(AdmittedPersonalUpdate {
                     ingress: claim.clone(),
-                    authority,
+                    authority: *authority,
                 })
             }
             SenderResolution::Unlinked if policy.public_enabled => {
                 ManagerAudience::Public(PublicIngress {
                     ingress: claim.clone(),
                     manager: policy.manager.clone(),
-                    sender_id: update.sender_id,
-                    chat_id: update.chat_id,
+                    sender: update.sender.clone(),
                     public_policy_revision: policy.public_policy_revision,
                 })
             }
@@ -122,7 +127,33 @@ async fn admit_selected_in_session(
             SenderResolution::Unavailable(reason) => ManagerAudience::Fixed(reason),
         }
     };
-    let admission = ingress::record_admission_in_session(
+    let faq = matches!(&audience, ManagerAudience::Public(_))
+        && (row.public_policy.is_none() || text.is_some_and(explicit_faq));
+    if faq {
+        let sender_key = super::mcp_service::canonical_sha256(serde_json::json!([
+            update.profile_id,
+            update.entry,
+            update.sender
+        ]));
+        for (namespace, key, limit) in [
+            ("manager_faq_profile", update.profile_id.as_str(), 200),
+            ("manager_faq_sender", sender_key.as_str(), 20),
+        ] {
+            if !super::coordination_service::RateWindowStore::admit_in_session(
+                db,
+                namespace,
+                key,
+                limit,
+                std::time::Duration::from_secs(60),
+                session,
+            )
+            .await?
+            {
+                return Err(AppError::RateLimited);
+            }
+        }
+    }
+    let result = ingress::record_admission_in_session(
         db,
         session,
         update,
@@ -131,36 +162,37 @@ async fn admit_selected_in_session(
         &audience,
     )
     .await?;
-    if let Some((ids, help)) = faq {
-        let target = match &audience {
-            ManagerAudience::Public(public) if row.public_policy.is_none() => {
-                Some((public.clone(), false))
-            }
-            ManagerAudience::Personal(personal) if *help => Some((
-                PublicIngress {
-                    ingress: claim.clone(),
-                    manager: personal.authority.manager.clone(),
-                    sender_id: update.sender_id,
-                    chat_id: update.chat_id,
-                    public_policy_revision: policy.public_policy_revision,
-                },
-                true,
-            )),
-            _ => None,
-        };
-        if let Some((public, linked)) = target {
-            super::platform_manager_delivery::queue_faq_in_session(
-                db,
-                session,
-                &public,
-                ids,
-                linked,
-                policy.personal_enabled,
-            )
-            .await?;
+    if matches!(
+        &result,
+        IngressAdmission::Claimed {
+            audience: ManagerAudience::Public(_),
+            ..
         }
+    ) && (row.public_policy.is_none() || text.is_some_and(explicit_faq))
+    {
+        super::platform_manager_delivery::queue_faq_in_session(
+            db,
+            session,
+            update,
+            claim,
+            &row,
+            text.unwrap_or(""),
+        )
+        .await?;
     }
-    Ok(admission)
+    Ok(result)
+}
+
+pub(crate) fn explicit_faq(text: &str) -> bool {
+    matches!(
+        text.split_whitespace()
+            .next()
+            .unwrap_or("")
+            .split('@')
+            .next()
+            .unwrap_or(""),
+        "/faq" | "/help" | "/start"
+    )
 }
 
 pub async fn admit_manager_update(
@@ -168,31 +200,14 @@ pub async fn admit_manager_update(
     identity: &dyn ManagerIdentityProducer,
     update: &VerifiedManagerUpdate,
 ) -> AppResult<IngressAdmission> {
-    admit_selected(db, identity, update, false, None).await
+    admit_text_update(db, identity, update, None).await
 }
+
 pub(crate) async fn admit_text_update(
     db: &Database,
     identity: &dyn ManagerIdentityProducer,
     update: &VerifiedManagerUpdate,
-    text: &str,
-    faq_only: bool,
-) -> AppResult<IngressAdmission> {
-    let ids = super::platform_faq_service::select(text)?;
-    admit_selected(
-        db,
-        identity,
-        update,
-        faq_only,
-        Some((ids, text.trim().is_empty() || text.starts_with('/'))),
-    )
-    .await
-}
-async fn admit_selected(
-    db: &Database,
-    identity: &dyn ManagerIdentityProducer,
-    update: &VerifiedManagerUpdate,
-    faq_only: bool,
-    faq: Option<(Vec<String>, bool)>,
+    text: Option<&str>,
 ) -> AppResult<IngressAdmission> {
     let claim = IngressClaim {
         receipt_id: uuid::Uuid::new_v4().to_string(),
@@ -202,20 +217,11 @@ async fn admit_selected(
     let result = session
         .start_transaction()
         .and_run(
-            (db, identity, update, claim, faq_only, faq),
-            |session, (db, identity, update, claim, faq_only, faq)| {
+            (db, identity, update, claim, text),
+            |session, (db, identity, update, claim, text)| {
                 Box::pin(async move {
                     transaction_result(
-                        admit_selected_in_session(
-                            db,
-                            session,
-                            *identity,
-                            update,
-                            claim,
-                            *faq_only,
-                            faq.as_ref(),
-                        )
-                        .await,
+                        admit_in_session(db, session, *identity, update, claim, *text).await,
                     )
                 })
             },
@@ -252,7 +258,13 @@ mod tests {
         for field in ["forward_origin", "forward_date", "via_bot"] {
             update["message"][field] = serde_json::json!({"id":999});
             let forwarded = verified_message("profile", "99", 99, "obs", &update).unwrap();
-            assert_eq!(forwarded.sender_id, 123);
+            assert_eq!(
+                forwarded.sender,
+                SenderIdentity::TelegramV1 {
+                    telegram_sender_id: 123,
+                    telegram_chat_id: 123
+                }
+            );
             assert_eq!(
                 forwarded.command_eligibility,
                 ManagerCommandEligibility::Ineligible
@@ -318,7 +330,9 @@ mod tests {
             matches!(admit_manager_update(&db,&IdentityProducer,&update).await.unwrap(),IngressAdmission::Duplicate {receipt_id} if receipt_id==original.receipt_id)
         );
         let mut next = update.clone();
-        next.update_id += 1;
+        if let EventIdentity::TelegramV1 { update_id, .. } = &mut next.event {
+            *update_id += 1;
+        }
         assert!(matches!(
             admit_manager_update(&db, &IdentityProducer, &next)
                 .await

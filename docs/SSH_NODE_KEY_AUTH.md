@@ -158,3 +158,22 @@ Node-key command execution uses:
 - `ssh_node_exec_error` from node to NyxID for missing keys, host-key mismatch, or SSH channel errors.
 
 The browser terminal reuses `web_terminal_open` with `auth_mode: "node_key"` and the same `web_terminal_data`, `web_terminal_resize`, and `web_terminal_closed` stream frames as cert-mode terminals.
+
+### NyxBot execution
+
+Assistant chat credentials use bounded SSH exec with exact connection, command,
+principal and timeout consent. Organization use asks in Auto and Ask every time;
+Full access proceeds under the same live grants and personal-first preferences.
+Certificate issuance, tunnels and browser terminals retain their existing routes.
+Assistant calls bind the exact connection (or existing catalog-only authority),
+public key/principal or initial terminal parameters, and a lifetime of at most one
+hour. Organization use requires the existing action card in Auto and Ask every
+time; Full access proceeds without a prompt. Sessions recheck live authority at
+open and during their bounded lifetime. Consent covers the session, including its
+dynamic bytes, rather than individual frames or shell commands. No configured
+node preserves direct TCP tunnel routing; a configured unavailable node cannot
+silently become a direct connection. Ordinary MCP SSH keeps catalog node-binding
+routing; assistant exec resolves the exact selected UserService. MCP SSH exec
+retains its certificate-only contract; HTTP SSH exec also supports exact node-key
+connections. Uncertain dispatched commands are never replayed on another node.
+See [execution contract](NYXBOT_SERVICE_EXECUTION.md).

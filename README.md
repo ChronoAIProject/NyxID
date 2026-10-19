@@ -70,6 +70,9 @@ billing from either services or linked providers. See [Service configuration and
 vendor retirement](docs/SERVICE_CONFIGURATION.md). They can also give a role read-only
 access to platform-wide usage reports, for example with the seeded **Usage
 Viewer** role, without granting other admin access. See [Admin usage](docs/BILLING_UI_GLOSSARY.md#admin-usage).
+Admins and operators can open **Usage → NyxBot** for active-session counts,
+turn outcomes, and reply feedback. See [NyxBot activity](docs/chat/08-nyxagent-engine.md#admin-nyxbot-activity)
+for metric definitions and access rules.
 
 Feature flag access can be delegated to any user or group with
 `feature-flag-operator` (create flags and manage their own) or
@@ -77,6 +80,14 @@ Feature flag access can be delegated to any user or group with
 Admin → Feature Flags. See [feature flag management](docs/API.md#feature-flag-roles-and-management).
 
 ## What NyxID Does
+
+- **Connect phone and speech services to NyxBot** — [service adapters](docs/NYXBOT_SERVICE_ADAPTERS.md) add Telnyx/Twilio inbound calls and SMS plus ElevenLabs Custom LLM, with declared capabilities, verified connections and specialist tools. The feature is disabled by default; shared-platform Telnyx voice is unavailable.
+
+- **Manage Oracle pool ownership and retirement** — transfer a pool between your account and organizations you manage while preserving its identity, or delete an idle pool through the API and CLI. See [Oracle pool lifecycle](docs/ORACLE_RELAY.md#pool-ownership-and-deletion-unreleased-1527-1542) for credential renewal and coordinated rollout requirements. Available in the first tagged release containing these changes.
+
+- **Speak to NyxBot and specialists** — voice calls show live captions and audio activity in the composer. Dictation offers click-to-toggle or hold-to-talk capture, microphone selection, and transcript review before insertion into a draft. Platform audio requires enabled voice features, a configured provider and tariff, and sufficient funding; microphone access is requested when capture is activated. See [voice and dictation](docs/chat/11-voice.md#19-implemented-composer-voice-and-dictation).
+
+- **Control NyxBot service use** — NyxBot enforces saved connection order, prefers suitable working personal connections, and asks before organization use in Auto and Ask every time. Choose an exact connection for the next message without changing permission modes. See [NyxBot service execution](docs/NYXBOT_SERVICE_EXECUTION.md).
 
 - **Spend NyxID credits on Telnyx tools** — the [Telnyx platform offering](docs/TELNYX_PLATFORM_BILLING.md) supports a restricted pilot of one model's nonstreaming text chat through HTTP or MCP, including NyxBot tool calls. Administrators must configure and enable the shared credential, verified model bounds, prices, billing, and pilot access before use; users do not connect Telnyx OAuth.
 - **Connect Stripe to agents** — [Stripe Apps OAuth](docs/STRIPE_OAUTH.md) supports a managed account connection and read-only customer, invoice, payment, and subscription tools.

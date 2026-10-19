@@ -1036,6 +1036,19 @@ async fn server_main() {
     services::assistant_agent_learning::spawn(state.clone());
     spawn_broker_policy_refresh_task(state.clone());
 
+    let lifecycle_cleanup_db = state.db.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            interval.tick().await;
+            if let Err(error) =
+                services::oracle_pool_service::cleanup_deleted_pools(&lifecycle_cleanup_db).await
+            {
+                tracing::warn!(%error, "Oracle lifecycle cleanup pass failed");
+            }
+        }
+    });
     let login_cleanup_db = state.db.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600));
@@ -1065,6 +1078,7 @@ async fn server_main() {
 
     // NyxBot: destroy idle subagents and retry deferred team wake-ups.
     handlers::assistant_team::spawn_sweeps(state.clone());
+    services::call_channels::coordinator::spawn_sweep(state.clone());
     services::platform_manager_transport::spawn_sweeps(
         state.clone(),
         services::platform_manager_transport::compose(
@@ -1339,15 +1353,9 @@ async fn server_main() {
                     );
                 }
                 if poll_state.config.channel_poll_interval_secs > 0
-                    && services::channel_poll_service::sweep(
-                        &poll_state,
-                        services::platform_manager_transport::compose(
-                            poll_state.clone(),
-                            handlers::assistant_team::owner_turn_settled_hook(poll_state.clone()),
-                        ),
-                    )
-                    .await
-                    .is_err()
+                    && services::channel_poll_service::sweep(&poll_state)
+                        .await
+                        .is_err()
                 {
                     tracing::warn!("Channel poll sweep failed; retrying on the next tick");
                 }
@@ -1572,7 +1580,7 @@ async fn server_main() {
     .layer(Extension(global_rate_limiter))
     .layer(Extension(trusted_proxy_ranges))
     .layer(Extension(rate_limit_exempt_ips))
-    .layer(TraceLayer::new_for_http())
+    .layer(TraceLayer::new_for_http().make_span_with(mw::request_trace::span::<axum::body::Body>))
     .layer(axum_mw::from_fn(mw::assistant_trace::assistant_trace));
 
     // Bind both listeners before serving. Internal routes never enter the

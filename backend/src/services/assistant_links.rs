@@ -5,6 +5,9 @@ pub const AGENT_DETAILS_SKILLS: &str = "skills";
 
 #[derive(Clone, Copy)]
 pub enum AssistantPage<'a> {
+    Conversation {
+        conversation: &'a str,
+    },
     Settings {
         tab: &'a str,
     },
@@ -49,6 +52,10 @@ impl AssistantPage<'_> {
     pub fn path(self) -> String {
         let mut query = url::form_urlencoded::Serializer::new(String::new());
         let path = match self {
+            Self::Conversation { conversation } => {
+                query.append_pair("c", conversation);
+                "/assistant".into()
+            }
             Self::Settings { tab } => {
                 query
                     .append_pair("panel", "settings")

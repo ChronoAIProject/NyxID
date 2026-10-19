@@ -760,6 +760,7 @@ async fn pending_card(
         .unwrap();
     }
     let segment = transcript::Segment {
+        fragments: Vec::new(),
         id: Uuid::new_v4().to_string(),
         speaker: transcript::Speaker::User,
         text: "Delete the selected object".into(),
@@ -1015,6 +1016,16 @@ async fn voice_options_use_catalog_models_voices_and_supported_protocols_only() 
             "own-connection", &thread.user_id, &service.slug, "endpoint", Some(&service.id), None,
         );
         connection.api_key_id = Some("own-key".into());
+        connection.auth_method = "bearer".into();
+        state.db.collection(crate::models::user_endpoint::COLLECTION_NAME).insert_one(test_user_endpoint(
+            "endpoint", &thread.user_id, &service.slug, &service.base_url, None, Some(&service.id),
+        )).await.unwrap();
+        state.db.collection::<bson::Document>(crate::models::user_api_key::COLLECTION_NAME).insert_one(doc! {
+            "_id":"own-key", "user_id":&thread.user_id, "label":"Own voice", "credential_type":"bearer",
+            "credential_encrypted":bson::Binary {subtype:bson::spec::BinarySubtype::Generic,
+                bytes:state.encryption_keys.encrypt(b"own-voice-key").await.unwrap()},
+            "status":"active", "created_at":bson::DateTime::now(), "updated_at":bson::DateTime::now()
+        }).await.unwrap();
         state.db.collection(crate::models::user_service::COLLECTION_NAME).insert_one(connection).await.unwrap();
         for (pricing, allowed, quoted) in [
             (bson::Bson::Null, true, false),
@@ -1061,6 +1072,8 @@ async fn voice_options_use_catalog_models_voices_and_supported_protocols_only() 
         // A protocol switch cannot redirect credentials to the old provider origin.
         assert!(super::super::assistant_voice::options(&state.db, &state.encryption_keys, &thread).await.unwrap().is_empty());
         rows.update_one(doc! {"_id": &service.id}, doc! {"$set":{"base_url":"https://api.x.ai/v1", "billing.byok_pricing":bson::Bson::Null}}).await.unwrap();
+        state.db.collection::<bson::Document>(crate::models::user_endpoint::COLLECTION_NAME)
+            .update_one(doc! {"_id":"endpoint"}, doc! {"$set":{"url":"https://api.x.ai/v1"}}).await.unwrap();
         let grok_options=serde_json::to_value(super::super::assistant_voice::options(&state.db, &state.encryption_keys, &thread).await.unwrap()).unwrap();
         let own=grok_options.as_array().unwrap().iter().find(|o|o["key_source"]=="own").unwrap();
         assert_eq!(own["model"],"admin-added-live-model");

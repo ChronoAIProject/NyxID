@@ -1037,6 +1037,25 @@ pub(crate) async fn execute_tool(
             "Only NyxBot manages agents and channel bots. Report what you need in your reply.",
         );
     }
+    execute_authorized_tool(state, chat, tool_name, args).await
+}
+
+fn execute_authorized_tool<'a>(
+    state: &'a AppState,
+    chat: &'a ChatAuthority,
+    tool_name: &'a str,
+    args: &'a Value,
+) -> futures::future::BoxFuture<'a, (Value, bool)> {
+    Box::pin(execute_authorized_tool_impl(state, chat, tool_name, args))
+}
+
+async fn execute_authorized_tool_impl(
+    state: &AppState,
+    chat: &ChatAuthority,
+    tool_name: &str,
+    args: &Value,
+) -> (Value, bool) {
+    let name = tool_name.strip_prefix("nyxid__").unwrap_or_default();
     let result = async {
         assistant_team_tools::validate(name, args)?;
         let (caller_agent, access) = Box::pin(
@@ -3348,3 +3367,35 @@ pub(crate) async fn operation_owner_card(
 #[cfg(test)]
 #[path = "assistant_team_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod future_size_tests {
+    use super::*;
+
+    type ToolArgs = (
+        &'static AppState,
+        &'static ChatAuthority,
+        &'static str,
+        &'static Value,
+    );
+
+    fn future_size<F: Future>(_: impl FnOnce(ToolArgs) -> F) -> usize {
+        std::mem::size_of::<F>()
+    }
+
+    #[test]
+    fn tool_authority_refusals_keep_caller_futures_small() {
+        let outer = future_size(|(state, chat, tool, args)| execute_tool(state, chat, tool, args));
+        let authorized = future_size(|(state, chat, tool, args)| {
+            execute_authorized_tool(state, chat, tool, args)
+        });
+        assert!(
+            outer < 16 * 1024,
+            "tool authority guard future grew to {outer} bytes"
+        );
+        assert!(
+            authorized < 1024,
+            "authorized tool caller future grew to {authorized} bytes"
+        );
+    }
+}

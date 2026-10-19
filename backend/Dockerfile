@@ -3,6 +3,9 @@ FROM rust:1.93-bookworm AS builder
 
 WORKDIR /build
 
+# Bound simultaneous compiler work in both backend release builds.
+ENV CARGO_BUILD_JOBS=1
+
 # Commit hash baked into the binary for /health. `.git` is excluded from the
 # Docker context, so CI must pass this ARG explicitly; otherwise the build
 # script falls back to "unknown".

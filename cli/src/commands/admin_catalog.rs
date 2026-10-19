@@ -95,6 +95,7 @@ pub async fn run_provider(command: AdminProviderCommands) -> Result<()> {
                 }
             };
             reject_fields(&body, PROVIDER_SECRET_FIELDS, "provider file")?;
+            playbook::validate_authorization_nonce(&body)?;
             let mut api = ApiClient::from_auth_with_credential_transport(&auth)?;
             let client = if client_required_at_creation(&body) {
                 if client_id_env.is_some()
@@ -154,6 +155,11 @@ pub async fn run_provider(command: AdminProviderCommands) -> Result<()> {
                 }
             };
             reject_fields(&body, PROVIDER_SECRET_FIELDS, "provider file")?;
+            let mut effective = current.clone();
+            if let (Some(fields), Some(changes)) = (effective.as_object_mut(), body.as_object()) {
+                fields.extend(changes.clone());
+            }
+            playbook::validate_authorization_nonce(&effective)?;
             let client = if with_client {
                 api.require_credential_transport()?;
                 Some(read_client_values(
@@ -1097,6 +1103,11 @@ fn changed_fields(desired: &Value, current: &Value, skip: &[&str]) -> Vec<String
                 .filter(|(key, _)| !skip.contains(&key.as_str()))
                 .filter(|(key, value)| match current.get(key.as_str()) {
                     Some(existing) => existing != *value,
+                    None if key.as_str() == "authorization_nonce_required"
+                        && *value == &Value::Bool(false) =>
+                    {
+                        false
+                    }
                     None => !value.is_null(),
                 })
                 .map(|(key, _)| key.clone())
@@ -1262,13 +1273,21 @@ async fn validate(
                     "extra_auth_params",
                     "token_endpoint_auth_method",
                     "supports_pkce",
+                    "authorization_nonce_required",
                     "supports_oauth_scopes",
                     "credential_mode",
                     "revocation_url",
                     "revocation",
                 ] {
+                    let live = if field == "authorization_nonce_required"
+                        && provider.get(field).is_none()
+                    {
+                        &Value::Bool(false)
+                    } else {
+                        &provider[field]
+                    };
                     if let Some(value) = fields.get(field)
-                        && !playbook::matches_fields(value, &provider[field])
+                        && !playbook::matches_fields(value, live)
                     {
                         failures.push(format!("provider {field} differs from the manifest"));
                     }
@@ -1857,6 +1876,16 @@ fn provider_wizard(current: Option<&Value>) -> Result<Value> {
         .and_then(|row| row["supports_pkce"].as_bool())
         .map_or("yes", |on| if on { "yes" } else { "no" });
     provider["supports_pkce"] = (ask_choice("PKCE", &["yes", "no"], pkce_now)? == "yes").into();
+    if provider_type == "oauth2" {
+        let nonce_now = current
+            .and_then(|row| row["authorization_nonce_required"].as_bool())
+            .map_or("no", |on| if on { "yes" } else { "no" });
+        provider["authorization_nonce_required"] = (ask_choice(
+            "Requires a generated authorization nonce (hosted OAuth only; upgrade all backend replicas first)",
+            &["yes", "no"],
+            nonce_now,
+        )? == "yes").into();
+    }
     provider["credential_mode"] = ask_choice(
         "Who supplies the OAuth app (admin = NyxID managed, user = each user's own, both)",
         &["admin", "user", "both"],
@@ -2018,6 +2047,14 @@ fn print_provider(provider: &Value, auth: &AuthArgs) -> Result<()> {
             eprintln!("Icon URL:      {}", text(provider, "icon_url"));
             eprintln!("Authorize URL: {}", text(provider, "authorization_url"));
             eprintln!("Token URL:     {}", text(provider, "token_url"));
+            eprintln!(
+                "Auth nonce:    {} (hosted OAuth only)",
+                yes_no(Some(
+                    provider["authorization_nonce_required"]
+                        .as_bool()
+                        .unwrap_or(false)
+                ))
+            );
             let scopes = provider["default_scopes"]
                 .as_array()
                 .map(|items| {
@@ -2510,6 +2547,102 @@ mod tests {
         let service = plan.iter().find(|row| row.kind == "service").unwrap();
         assert_eq!(service.action, "update");
         assert_eq!(service.changed, ["provider"]);
+    }
+
+    #[test]
+    fn authorization_nonce_cli_validation_is_scoped_and_manifest_roundtrips() {
+        for required in [false, true] {
+            let mut row = provider_row(true);
+            row["authorization_nonce_required"] = required.into();
+            // Standalone validation does not impose catalog playbook evidence.
+            row["playbook"] = json!({"unknown_legacy_field": true});
+            assert!(playbook::validate_authorization_nonce(&row).is_ok());
+            row.as_object_mut().unwrap().remove("playbook");
+            let manifest =
+                Manifest::from_document(json!({"providers":[row.clone()]}), &[], false).unwrap();
+            assert_eq!(
+                playbook::api_fields(&manifest.providers[0])["authorization_nonce_required"],
+                required
+            );
+            for (url, param) in [
+                ("https://example.com/auth?nonce=x", "client_id"),
+                ("https://example.com/auth?%6eonce=x", "client_id"),
+                ("https://example.com/auth#fragment", "client_id"),
+                ("https://example.com/auth", " nonce "),
+            ] {
+                row["authorization_url"] = url.into();
+                row["client_id_param_name"] = param.into();
+                assert_eq!(
+                    playbook::validate_authorization_nonce(&row).is_ok(),
+                    !required
+                );
+            }
+            row["provider_type"] = "api_key".into();
+            assert_eq!(
+                playbook::validate_authorization_nonce(&row).is_ok(),
+                !required
+            );
+        }
+        let partial = Manifest::from_document(
+            json!({"providers":[{"slug":"hubstaff","authorization_nonce_required":true}]}),
+            &[],
+            false,
+        )
+        .unwrap();
+        assert_eq!(partial.providers[0]["authorization_nonce_required"], true);
+        assert!(
+            playbook::validate_authorization_nonce(&json!({"authorization_nonce_required":"true"}))
+                .is_err()
+        );
+        assert!(
+            changed_fields(
+                &json!({"authorization_nonce_required":false}),
+                &json!({}),
+                &[]
+            )
+            .is_empty()
+        );
+        assert_eq!(
+            changed_fields(
+                &json!({"authorization_nonce_required":true}),
+                &json!({}),
+                &[]
+            ),
+            ["authorization_nonce_required"]
+        );
+    }
+
+    #[tokio::test]
+    async fn authorization_nonce_catalog_readback_treats_legacy_absence_as_false() {
+        for (live, desired, drift) in [
+            (None, false, false),
+            (None, true, true),
+            (Some(false), false, false),
+            (Some(true), true, false),
+            (Some(true), false, true),
+        ] {
+            let server = MockServer::start().await;
+            let mut provider = provider_row(true);
+            if let Some(live) = live {
+                provider["authorization_nonce_required"] = live.into();
+            }
+            listing(&server, json!([provider]), json!([service_row()])).await;
+            let mut manifest = zoho(&[]).unwrap();
+            manifest.providers[0]["authorization_nonce_required"] = desired.into();
+            let mut api = ApiClient::from_auth(&mock_auth(server.uri())).unwrap();
+            let report = validate(&mut api, &manifest, "https://nyx.example/cb")
+                .await
+                .unwrap();
+            assert_eq!(
+                report[0]
+                    .issues
+                    .iter()
+                    .any(|issue| issue.contains("provider authorization_nonce_required differs")),
+                drift,
+                "{:?}",
+                report[0].issues
+            );
+        }
     }
 
     #[tokio::test]

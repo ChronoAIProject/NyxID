@@ -1159,6 +1159,24 @@ pub async fn mark_pre_dispatch_rejected(
     reject_execution(db, &reservation.execution_id, detail).await;
 }
 
+/// Only for a sender's proven refusal before any operation dispatch. A transport
+/// error or cancellation after send must retain the uncertain-outcome contract.
+pub(crate) async fn mark_send_rejected(
+    db: &mongodb::Database,
+    reservation: &DurableExecutionReservation,
+) {
+    let now = bson::DateTime::now();
+    let _ = db
+        .collection::<DurableOperationExecution>(EXECUTIONS)
+        .update_one(
+            doc! {"_id": &reservation.execution_id, "status": {"$in": ["reserved", "dispatched"]}},
+            doc! {"$set": {"status": "rejected", "downstream_attempts": 0_i64,
+            "terminal_detail": "assistant authority changed before actual send",
+            "terminal_at": now, "updated_at": now}},
+        )
+        .await;
+}
+
 pub async fn mark_terminal(
     db: &mongodb::Database,
     reservation: &DurableExecutionReservation,

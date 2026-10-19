@@ -975,8 +975,11 @@ pub(crate) async fn execute_owner_turn(
         .await
         .map_err(|_| TurnError::internal("cancelled", "prepare"))?;
     }
+    let attempt = super::assistant_service_execution::begin_model_attempt(&state.db, row)
+        .await
+        .map_err(|_| TurnError::internal("assistant_unavailable", "prepare"))?;
     let mut tool_images = images::ToolImages::default();
-    let outcome = Box::pin(execute_turn_inner(
+    let mut outcome = Box::pin(execute_turn_inner(
         state,
         egress,
         authority,
@@ -991,6 +994,36 @@ pub(crate) async fn execute_owner_turn(
         &mut tool_images,
     ))
     .await;
+    let model_refusal =
+        super::assistant_service_execution::finish_model_attempt(&state.db, &attempt)
+            .await
+            .map_err(|_| TurnError::internal("assistant_unavailable", "recovery"))?;
+    // A current callback refusal can precede any reply. Cancellation in either
+    // result shape wins, and an unrelated pending action cannot mask a failure.
+    let cancelled = outcome
+        .as_ref()
+        .is_err_and(|error| error.code == "cancelled")
+        || outcome.as_ref().is_ok_and(|result| {
+            result
+                .error
+                .as_ref()
+                .is_some_and(|error| error.code == "cancelled")
+        });
+    if !cancelled
+        && (outcome.is_err() || outcome.as_ref().is_ok_and(|result| result.error.is_some()))
+        && let Some(summary) = model_refusal
+    {
+        let text = format!(
+            "Please review the confirmation card: {summary}. I’ll continue after you allow it."
+        );
+        *partial = text.clone();
+        outcome = Ok(TurnResult {
+            text,
+            session_id: None,
+            response_id: None,
+            error: None,
+        });
+    }
     if outcome.as_ref().is_err() || outcome.as_ref().is_ok_and(|r| r.error.is_some()) {
         tool_images.failed(state, row).await;
     }

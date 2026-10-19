@@ -81,8 +81,9 @@ pub async fn save(
     Json(body): Json<SaveLoginRequest>,
 ) -> AppResult<Json<LoginProfileInfo>> {
     let pool = managed_pool(&state, &auth, &pool).await?;
-    let profile = profiles::save(
+    let profile = profiles::save_for_manager(
         &state.db,
+        &auth.user_id.to_string(),
         &state.encryption_keys,
         &pool,
         &name,
@@ -127,7 +128,7 @@ pub async fn delete(
     Path((pool, name)): Path<(String, String)>,
 ) -> AppResult<StatusCode> {
     let pool = managed_pool(&state, &auth, &pool).await?;
-    profiles::delete(&state.db, &pool.id, &name).await?;
+    profiles::delete_for_manager(&state.db, &auth.user_id.to_string(), &pool, &name).await?;
     audit_service::log_for_user(
         state.db.clone(),
         &auth,
@@ -170,8 +171,9 @@ pub async fn bind(
     Json(body): Json<BindLoginRequest>,
 ) -> AppResult<Json<BindingInfo>> {
     let pool = managed_pool(&state, &auth, &pool).await?;
-    let binding = profiles::bind(
+    let binding = profiles::bind_for_manager(
         &state.db,
+        &auth.user_id.to_string(),
         &pool,
         &body.login_profile,
         &label,
@@ -202,7 +204,7 @@ pub async fn unbind(
     Path((pool, label)): Path<(String, String)>,
 ) -> AppResult<StatusCode> {
     let pool = managed_pool(&state, &auth, &pool).await?;
-    profiles::unbind(&state.db, &pool.id, &label).await?;
+    profiles::unbind_for_manager(&state.db, &auth.user_id.to_string(), &pool, &label).await?;
     audit_service::log_for_user(
         state.db.clone(),
         &auth,

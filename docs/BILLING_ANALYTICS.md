@@ -1,11 +1,17 @@
 # Configurable billing analytics
 
-The existing `/admin/usage` page contains Dashboard and List tabs. Dashboard uses
-Recharts 3.8, the visualization library already used by NyxID, with an Operations
+The existing `/admin/usage` page contains Dashboard, List, and NyxBot tabs.
+Dashboard uses Recharts 3.8, the visualization library already used by NyxID, with an Operations
 grid and multiple private saved views. List reuses the existing service,
-credential-class, and user ranking tables. Both tabs share service, acting-user,
+credential-class, and user ranking tables. Dashboard and List share service, acting-user,
 billing-account and time-range filters. There is one Usage navigation entry;
 `/admin/analytics` redirects to it.
+
+NyxBot shows assistant activity, turn outcomes, and reply feedback using the same
+chart styling. Its date range and feedback filters are independent of the billing
+workspace, and access requires an admin or operator role. See the
+[NyxBot activity contract](chat/08-nyxagent-engine.md#admin-nyxbot-activity) for
+metric definitions, endpoint bounds, and feedback semantics.
 
 ## Design and library decision
 

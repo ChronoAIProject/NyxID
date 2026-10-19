@@ -24,10 +24,14 @@ import {
   useRemoteMachineEvents,
   useRemoteMachineQuote,
   useRemoteMachineOperation,
+  useRetryRemoteMachineDelete,
 } from "@/hooks/use-machines";
 import { usePublicConfig } from "@/hooks/use-public-config";
 import { useAuthStore } from "@/stores/auth-store";
-import { remoteMachineActionRequestSchema } from "@/schemas/machines";
+import {
+  remoteMachineActionRequestSchema,
+  remoteMachineDeleteRetryRequestSchema,
+} from "@/schemas/machines";
 import type {
   RemoteMachine,
   RemoteMachineOperation,
@@ -408,7 +412,11 @@ export function RemoteMachineDetail({
       />
       <RemoteMachineNotifications machineId={machineId} />
       {operation.data && (
-        <RemoteMachineOperationCard operation={operation.data} />
+        <RemoteMachineOperationCard
+          operation={operation.data}
+          machine={query.error ? undefined : machine}
+          onRetryAccepted={() => void query.refetch()}
+        />
       )}
       {operation.error && (
         <ErrorBanner
@@ -701,8 +709,12 @@ export function RemoteMachineDetail({
 
 export function RemoteMachineOperationCard({
   operation,
+  machine,
+  onRetryAccepted,
 }: {
   readonly operation: RemoteMachineOperation;
+  readonly machine?: RemoteMachine;
+  readonly onRetryAccepted?: () => void;
 }) {
   return (
     <DetailSection
@@ -716,9 +728,41 @@ export function RemoteMachineOperationCard({
       <DetailRow label="Operation ID" value={operation.id} mono copyable />
       <DetailRow label="Cleanup" value={readable(operation.cleanup_state)} />
       <DetailRow
-        label="Attempts after retry"
+        label={
+          operation.action === "delete"
+            ? "Total deletion attempts"
+            : "Attempts after retry"
+        }
         value={String(operation.retry_count)}
       />
+      {operation.action === "delete" &&
+        operation.delete_retry_attempts != null && (
+          <DetailRow
+            label="Attempts this round"
+            value={`${operation.delete_retry_attempts} / ${operation.delete_retry_limit}`}
+          />
+        )}
+      {operation.delete_retry_stopped && (
+        <div className="space-y-3 px-4 py-3 text-12">
+          <p role="status">
+            Automatic deletion attempts stopped. Cleanup is still pending. Retry
+            deletion manually to start another round of up to{" "}
+            {operation.delete_retry_limit} attempts, one minute apart.
+          </p>
+          {machine?.resource_state === "deleting" &&
+            machine.active_operation_id === operation.id &&
+            operation.machine_id === machine.node_id &&
+            operation.action === "delete" &&
+            !operation.terminal_at && (
+              <RemoteMachineDeleteRetry
+                key={`${operation.id}:${operation.retry_count}`}
+                machine={machine}
+                operation={operation}
+                onAccepted={onRetryAccepted}
+              />
+            )}
+        </div>
+      )}
       <DetailRow label="Created" value={time(operation.created_at)} />
       <DetailRow label="Updated" value={time(operation.updated_at)} />
       {operation.next_attempt_at && (
@@ -759,6 +803,62 @@ export function RemoteMachineOperationCard({
         reference only; owner authentication is required to view it.
       </p>
     </DetailSection>
+  );
+}
+
+function RemoteMachineDeleteRetry({
+  machine,
+  operation,
+  onAccepted,
+}: {
+  readonly machine: RemoteMachine;
+  readonly operation: RemoteMachineOperation;
+  readonly onAccepted?: () => void;
+}) {
+  const owner = useAuthStore((state) => state.user?.id ?? "");
+  const mutation = useRetryRemoteMachineDelete();
+  const [error, setError] = useState<string | null>(null);
+  const scope = `${operation.id}:retry-delete:${operation.retry_count}`;
+  async function retry() {
+    if (mutation.isPending) return;
+    setError(null);
+    try {
+      const intent = getRemoteMachineIntent(owner, scope, {
+        expected_revision: machine.revision,
+        expected_retry_count: operation.retry_count,
+      });
+      await mutation.mutateAsync({
+        machineId: machine.node_id,
+        operationId: operation.id,
+        body: remoteMachineDeleteRetryRequestSchema.parse(intent.body),
+        idempotencyKey: intent.idempotencyKey,
+      });
+      if (useAuthStore.getState().user?.id !== owner) return;
+      clearRemoteMachineIntent(owner, scope, intent.idempotencyKey);
+      onAccepted?.();
+    } catch (cause) {
+      if (useAuthStore.getState().user?.id !== owner) return;
+      if (cause instanceof ApiError && cause.status === 409)
+        clearRemoteMachineIntent(owner, scope);
+      setError(
+        cause instanceof Error
+          ? cause.message
+          : "Deletion retry could not be accepted.",
+      );
+    }
+  }
+  return (
+    <div className="space-y-2">
+      <Button onClick={() => void retry()} disabled={mutation.isPending}>
+        <RefreshCw className="size-3" />
+        {mutation.isPending ? "Retrying deletion…" : "Retry deletion"}
+      </Button>
+      {error && (
+        <p role="alert" className="text-destructive">
+          {error}
+        </p>
+      )}
+    </div>
   );
 }
 

@@ -370,14 +370,6 @@ fn build_message_body(conversation_id: &str, reply: &OutboundReply) -> serde_jso
         "parse_mode": "Markdown",
     });
 
-    if super::super::channel_platform::shared_plain_text(reply) {
-        body.as_object_mut()
-            .expect("message body")
-            .remove("parse_mode");
-        body["protect_content"] = serde_json::json!(true);
-        body["link_preview_options"] = serde_json::json!({"is_disabled": true});
-    }
-
     if let Some(ref reply_to_id) = reply.reply_to_platform_message_id
         && let Ok(id) = reply_to_id.parse::<i64>()
     {
@@ -2028,25 +2020,5 @@ mod tests {
             .as_deref(),
             Some("")
         );
-    }
-}
-
-#[cfg(test)]
-mod shared_plain_text_tests {
-    use super::*;
-    #[test]
-    fn proof_and_link_bytes_survive_actual_outbound_payload() {
-        let text = "Open https://nyxid.test/nyxbot/link#intent_token=nyx_pli_a_b-C\n/confirm P-ABCD-EFGH\n_unmatched *markup @everyone <@123>";
-        let reply = OutboundReply {
-            text: Some(text.into()),
-            attachments: vec![],
-            reply_to_platform_message_id: None,
-            metadata: Some(serde_json::json!({"shared_plain_text":true})),
-        };
-        let body = build_message_body("123", &reply);
-        assert_eq!(body["text"], text);
-        assert!(body.get("parse_mode").is_none());
-        assert_eq!(body["protect_content"], true);
-        assert_eq!(body["link_preview_options"]["is_disabled"], true);
     }
 }

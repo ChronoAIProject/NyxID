@@ -719,6 +719,10 @@ pub enum AppError {
 
     #[error("Installation credential expired; enroll with a fresh credential")]
     OracleWorkerCredentialRenewalRequired,
+    #[error(
+        "Oracle pool deletion requires settling active tasks or worker commands, or retrying DELETE to continue bounded command expiry"
+    )]
+    OraclePoolActiveWork,
 
     #[error("Service pool not found: {0}")]
     ServicePoolNotFound(String),
@@ -989,6 +993,7 @@ impl AppError {
             Self::OracleWorkerLabelUnavailable(_) => StatusCode::CONFLICT,
             Self::OracleLoginSnapshotNotFound(_) => StatusCode::NOT_FOUND,
             Self::OracleWorkerCredentialRenewalRequired => StatusCode::CONFLICT,
+            Self::OraclePoolActiveWork => StatusCode::CONFLICT,
             Self::ServicePoolInfrastructureUnavailable | Self::ServicePoolCoolingDown => {
                 StatusCode::SERVICE_UNAVAILABLE
             }
@@ -1224,6 +1229,7 @@ impl AppError {
             Self::OracleWorkerLabelUnavailable(_) => 11014,
             Self::OracleLoginSnapshotNotFound(_) => 11015,
             Self::OracleWorkerCredentialRenewalRequired => 11016,
+            Self::OraclePoolActiveWork => 11017,
             Self::ServicePoolUpstreamEncodingUnsupported => 11407,
             Self::ServicePoolInfrastructureUnavailable => 11404,
             Self::ServicePoolCoolingDown => 11405,
@@ -1488,6 +1494,7 @@ impl AppError {
             Self::OracleWorkerCommandNotFound(_) => "oracle_worker_command_not_found",
             Self::OracleWorkerLabelUnavailable(_) => "oracle_worker_label_unavailable",
             Self::OracleLoginSnapshotNotFound(_) => "oracle_login_snapshot_not_found",
+            Self::OraclePoolActiveWork => "oracle_pool_active_work",
             Self::OracleWorkerCredentialRenewalRequired => {
                 "oracle_worker_credential_renewal_required"
             }

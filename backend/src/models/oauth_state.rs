@@ -14,6 +14,9 @@ pub struct OAuthState {
     pub history_context: Option<crate::models::service_change_event::HistoryContext>,
     pub provider_config_id: String,
     pub code_verifier: Option<String>,
+    /// Outbound provider authorization parameter; independent of popup correlation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authorization_nonce: Option<String>,
     /// Encrypted device_auth_id (OpenAI) or device_code (RFC 8628) for polling
     #[serde(default)]
     pub device_code_encrypted: Option<String>,
@@ -103,6 +106,7 @@ mod tests {
             attempt_nonce: Some(uuid::Uuid::new_v4().to_string()),
             connection_id: None,
             connect_link_id: None,
+            authorization_nonce: Some("provider-nonce".to_string()),
             consumed: false,
             expires_at: Utc::now(),
             created_at: Utc::now(),
@@ -110,6 +114,11 @@ mod tests {
         let doc = bson::to_document(&state).expect("serialize");
         let restored: OAuthState = bson::from_document(doc).expect("deserialize");
         assert_eq!(state.id, restored.id);
+        assert_eq!(
+            restored.authorization_nonce.as_deref(),
+            Some("provider-nonce")
+        );
+        assert_ne!(restored.authorization_nonce, restored.attempt_nonce);
         assert_eq!(state.code_verifier, restored.code_verifier);
         assert!(restored.target_user_id.is_none());
         assert!(restored.credential_user_id.is_none());
@@ -137,6 +146,7 @@ mod tests {
             attempt_nonce: None,
             connection_id: None,
             connect_link_id: None,
+            authorization_nonce: None,
             consumed: false,
             expires_at: Utc::now(),
             created_at: Utc::now(),
@@ -169,6 +179,7 @@ mod tests {
             attempt_nonce: None,
             connection_id: None,
             connect_link_id: None,
+            authorization_nonce: None,
             consumed: false,
             expires_at: Utc::now(),
             created_at: Utc::now(),
@@ -206,9 +217,11 @@ mod tests {
         assert!(restored.connect_link_id.is_none());
         assert!(restored.flow_kind.is_none());
         assert!(restored.attempt_nonce.is_none());
+        assert!(restored.authorization_nonce.is_none());
 
         let reserialized = bson::to_document(&restored).expect("reserialize legacy document");
         assert!(!reserialized.contains_key("flow_kind"));
         assert!(!reserialized.contains_key("attempt_nonce"));
+        assert!(!reserialized.contains_key("authorization_nonce"));
     }
 }

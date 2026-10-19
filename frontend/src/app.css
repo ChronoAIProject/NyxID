@@ -988,3 +988,104 @@ html.theme-dark .assistant-halo--visible {
   color: var(--color-text-tertiary);
   pointer-events: none;
 }
+
+/* The aura breathes while audio is active; its strength and size follow live
+   amplitude. Separate opacity and filter let stopping fade out mid-breath. */
+.composer-audio-surface {
+  isolation: isolate;
+}
+.composer-audio-surface::before {
+  content: "";
+  pointer-events: none;
+  position: absolute;
+  z-index: -1;
+  inset: -0.5rem;
+  border-radius: 1.25rem;
+  background:
+    radial-gradient(ellipse at 25% 15%, var(--color-primary), transparent 65%),
+    radial-gradient(ellipse at 80% 20%, var(--color-warning), transparent 65%);
+  filter: blur(18px);
+  opacity: 0;
+  transform: scaleY(calc(1 + var(--composer-audio-level, 0) * 0.25));
+  animation: composer-aura-breathe 3.2s ease-in-out infinite paused;
+  transition:
+    opacity 800ms ease-out,
+    transform 180ms ease-out;
+}
+.composer-audio-surface[data-audio-active]::before {
+  opacity: calc(0.22 + var(--composer-audio-level, 0) * 0.55);
+  animation-play-state: running;
+  transition-duration: 450ms, 180ms;
+}
+@keyframes composer-aura-breathe {
+  0%, 100% { filter: blur(18px) opacity(0); }
+  50% { filter: blur(18px) opacity(1); }
+}
+.dictation-split-control {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  border-radius: 0.65rem;
+}
+.dictation-split-control:hover,
+.dictation-split-control:focus-within,
+.dictation-split-control:has([data-state="open"]) {
+  background: var(--color-overlay);
+}
+.dictation-split-control .dictation-chevron {
+  width: 0;
+  min-width: 0;
+  overflow: hidden;
+  padding: 0;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 120ms ease;
+}
+.dictation-split-control:hover .dictation-chevron,
+.dictation-split-control:has(:focus-visible) .dictation-chevron,
+.dictation-split-control:has([data-state="open"]) .dictation-chevron {
+  width: 1.25rem;
+  opacity: 1;
+  pointer-events: auto;
+}
+@media (hover: none) {
+  .dictation-split-control .dictation-chevron {
+    width: 1.25rem;
+    opacity: 1;
+    pointer-events: auto;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .dictation-split-control .dictation-chevron { transition: none; }
+}
+@media (max-width: 540px) {
+  [data-composer-editor].composer-compact {
+    flex-wrap: wrap;
+  }
+  .composer-compact .composer-text-region {
+    order: -1;
+    flex-basis: 100%;
+    min-width: 0;
+  }
+  .composer-compact [data-composer-footer] {
+    flex: 1;
+    min-width: 0;
+    justify-content: flex-end;
+  }
+  .composer-compact [data-composer-settings] {
+    margin-right: auto;
+  }
+  .composer-compact > [data-composer-settings] {
+    margin-left: auto;
+  }
+  .dictation-waveform {
+    gap: 2px;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .composer-audio-surface::before {
+    animation: none;
+    transform: none;
+    transition: none;
+  }
+}

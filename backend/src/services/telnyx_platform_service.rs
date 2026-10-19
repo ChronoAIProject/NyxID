@@ -8,7 +8,6 @@ use chrono::{Duration, Utc};
 use mongodb::Database;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use zeroize::Zeroize;
 
 use super::billing::{BillingRouteContext, BillingService, NodeIntent};
 use super::proxy_service::{ProxyBody, ProxyTarget};
@@ -371,173 +370,91 @@ impl ManagedExecutionError {
     }
 }
 
-struct SecretTarget(ProxyTarget);
-impl std::ops::Deref for SecretTarget {
-    type Target = ProxyTarget;
-    fn deref(&self) -> &ProxyTarget {
-        &self.0
-    }
-}
-impl Drop for SecretTarget {
-    fn drop(&mut self) {
-        self.0.credential.zeroize();
-    }
-}
+mod worker;
+#[cfg(test)]
+pub(crate) use worker::{Pause, TEST_HOOKS, TestHooks};
 
 /// The spawned exchange owns its credential and accounting work. Dropping the
 /// caller future detaches the join handle; provider usage still gets settled.
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn execute(
-    db: &Database,
+pub(crate) fn execute<'a>(
+    db: &'a Database,
     billing: Arc<BillingService>,
     ctx: BillingRouteContext,
     target: ProxyTarget,
-    method: &str,
-    path: &str,
-    query: Option<&str>,
-    body: &[u8],
+    method: &'a str,
+    path: &'a str,
+    query: Option<&'a str>,
+    body: &'a [u8],
     lease: Option<super::service_concurrency_service::Lease>,
-) -> Result<ManagedResponse, ManagedExecutionError> {
-    let target = SecretTarget(target);
-    validate_catalog(&target.service)?;
-    let mut c = contract(&target.service)
-        .ok_or_else(|| invalid("managed contract is missing"))?
-        .clone();
-    if ctx.credential_class != CredentialClass::NyxidManagedMaster
-        || ctx.node_intent != NodeIntent::Direct
-        || ctx.pool_attempt.is_some()
-        || target.target_id.is_some()
-        || target.base_url.trim_end_matches('/') != "https://api.telnyx.com/v2"
-        || target.auth_method != "bearer"
-        || target.credential.is_empty()
-        || !target.catalog_default_headers.is_empty()
-        || !target.user_service_default_headers.is_empty()
-    {
-        return Err(invalid(
-            "managed execution requires a server-held platform credential and a direct route",
-        )
-        .into());
-    }
-    if Utc::now() - c.tariff_verified_at > Duration::days(30) {
-        return Err(AppError::BillingProviderUnavailable(
-            "Telnyx tariff verification has expired".into(),
-        )
-        .into());
-    }
-    let body = validate_request(&c, method, path, query, body)?;
-    // Reserve the configured maximum, but reject provider usage beyond this
-    // individual request's smaller generation cap as incomplete evidence.
-    c.max_output_tokens = serde_json::from_slice::<ChatRequest>(&body)
-        .map_err(|_| invalid("invalid normalized request"))?
-        .max_tokens;
-    let request_digest = digest(&[&body]);
-    let catalog_digest = catalog_digest(&target)?;
-    let handle = super::managed_execution_service::prepare(
-        db,
-        &billing,
-        ctx,
-        &hex::encode(request_digest),
-        &hex::encode(catalog_digest),
-    )
-    .await?;
-    let execution_id = handle.execution_id().to_owned();
-    let worker_db = db.clone();
-    let worker_id = execution_id.clone();
-    let worker = tokio::spawn(async move {
-        let proof = ManagedEgressProof {
-            catalog: catalog_digest,
-            request: request_digest,
-        };
-        let permit = super::billing::route_inventory::managed_execution_permit(proof);
-        let exchange = async {
-            super::managed_execution_service::admit_dispatch(&worker_db, &handle).await?;
-            let response = super::proxy_service::forward_request_with_extra_outbound_headers(
-                super::proxy_service::no_redirect_http_client(),
-                &target,
-                reqwest::Method::POST,
-                CHAT_PATH,
-                None,
-                reqwest::header::HeaderMap::from_iter([(
-                    reqwest::header::CONTENT_TYPE,
-                    reqwest::header::HeaderValue::from_static("application/json"),
-                )]),
-                ProxyBody::Buffered(Some(body.clone())),
-                Vec::new(),
-                Vec::new(),
-                None,
-                &super::provider_token_exchange_service::TokenExchangeCache::new(),
-                &super::cloud_response_cache::CloudResponseCache::new(0),
-                Vec::new(),
-                permit,
+    guard: super::assistant_service_execution::OwnedHttpEgressGuard,
+) -> futures::future::BoxFuture<'a, Result<ManagedResponse, ManagedExecutionError>> {
+    // Keep managed preparation and join state out of the shared HTTP/MCP
+    // dispatch future, including ordinary calls that never select this path.
+    Box::pin(async move {
+        let target = worker::SecretTarget(target);
+        validate_catalog(&target.service)?;
+        let mut c = contract(&target.service)
+            .ok_or_else(|| invalid("managed contract is missing"))?
+            .clone();
+        if ctx.credential_class != CredentialClass::NyxidManagedMaster
+            || ctx.node_intent != NodeIntent::Direct
+            || ctx.pool_attempt.is_some()
+            || target.target_id.is_some()
+            || target.base_url.trim_end_matches('/') != "https://api.telnyx.com/v2"
+            || target.auth_method != "bearer"
+            || target.credential.is_empty()
+            || !target.catalog_default_headers.is_empty()
+            || !target.user_service_default_headers.is_empty()
+        {
+            return Err(invalid(
+                "managed execution requires a server-held platform credential and a direct route",
             )
-            .await
-            .map_err(|_| invalid("provider outcome is pending"))?;
-            let mut response = response;
-            let status = response.status().as_u16();
-            let mut bytes = Vec::new();
-            while let Some(chunk) = response
-                .chunk()
-                .await
-                .map_err(|_| invalid("provider response is incomplete"))?
-            {
-                if bytes.len().saturating_add(chunk.len()) as u64 > c.max_response_bytes {
-                    return Err(invalid("provider response exceeded its bound"));
-                }
-                bytes.extend_from_slice(&chunk);
-            }
-            // Even error statuses require authoritative complete usage; an
-            // unverified provider rejection never releases possible liability.
-            if !(200..300).contains(&status) {
-                return Err(invalid("provider returned an unverified error outcome"));
-            }
-            let (usage, provider_id) = validate_usage(&c, &bytes, body.len())?;
-            super::managed_execution_service::complete(
-                &worker_db,
-                &billing,
-                &handle,
-                usage,
-                Some(&provider_id),
-            )
-            .await?;
-            Ok::<_, AppError>(ManagedResponse {
-                execution_id: worker_id.clone(),
-                status,
-                body: Bytes::from(bytes),
-            })
-        };
-        let exchange = async {
-            match lease {
-                Some(lease) => lease.run(exchange).await,
-                None => exchange.await,
-            }
-        };
-        match tokio::time::timeout(std::time::Duration::from_secs(120), exchange).await {
-            Ok(Ok(response)) => Ok(response),
-            _ => {
-                // Safe no-op after dispatch; before dispatch this returns the
-                // reservation, including when the concurrency lease was lost.
-                if super::managed_execution_service::cancel_unforwarded(&worker_db, &handle)
-                    .await
-                    .is_err()
-                    || super::managed_execution_service::mark_pending(
-                        &worker_db,
-                        &handle,
-                        "provider_outcome_unverified",
-                    )
-                    .await
-                    .is_err()
-                {
-                    tracing::error!(execution_id = %worker_id, "Managed outcome requires durable recovery");
-                }
-                Err(ManagedExecutionError::OutcomeUnknown(
-                    AppError::ManagedExecutionPending(worker_id),
-                ))
-            }
+            .into());
         }
-    });
-    worker.await.map_err(|_| {
-        ManagedExecutionError::OutcomeUnknown(AppError::ManagedExecutionPending(execution_id))
-    })?
+        if Utc::now() - c.tariff_verified_at > Duration::days(30) {
+            return Err(AppError::BillingProviderUnavailable(
+                "Telnyx tariff verification has expired".into(),
+            )
+            .into());
+        }
+        let body = validate_request(&c, method, path, query, body)?;
+        // Reserve the configured maximum, but reject provider usage beyond this
+        // individual request's smaller generation cap as incomplete evidence.
+        c.max_output_tokens = serde_json::from_slice::<ChatRequest>(&body)
+            .map_err(|_| invalid("invalid normalized request"))?
+            .max_tokens;
+        let request_digest = digest(&[&body]);
+        let catalog_digest = catalog_digest(&target)?;
+        let handle = super::managed_execution_service::prepare(
+            db,
+            &billing,
+            ctx,
+            &hex::encode(request_digest),
+            &hex::encode(catalog_digest),
+        )
+        .await?;
+        let execution_id = handle.execution_id().to_owned();
+        let worker = tokio::spawn(worker::run(worker::Exchange {
+            db: db.clone(),
+            billing,
+            target,
+            contract: c,
+            body,
+            handle,
+            proof: ManagedEgressProof {
+                catalog: catalog_digest,
+                request: request_digest,
+            },
+            lease,
+            guard,
+            #[cfg(test)]
+            hooks: worker::TEST_HOOKS.try_with(Clone::clone).ok(),
+        }));
+        worker.await.map_err(|_| {
+            ManagedExecutionError::OutcomeUnknown(AppError::ManagedExecutionPending(execution_id))
+        })?
+    })
 }
 
 #[cfg(test)]

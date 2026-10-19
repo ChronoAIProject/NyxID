@@ -191,12 +191,31 @@ pub fn metadata(node: &Node) -> Value {
     })
 }
 
+#[cfg(test)]
 pub fn issue_job<'a>(
     db: &'a Database,
     chat: &'a ChatAuthority,
     node: &'a Node,
     timeout: u64,
     services: Vec<crate::models::machine_job::DeclaredService>,
+) -> futures::future::BoxFuture<'a, AppResult<MachineJob>> {
+    issue_job_with_id(
+        db,
+        chat,
+        node,
+        timeout,
+        services,
+        uuid::Uuid::new_v4().to_string(),
+    )
+}
+
+pub fn issue_job_with_id<'a>(
+    db: &'a Database,
+    chat: &'a ChatAuthority,
+    node: &'a Node,
+    timeout: u64,
+    services: Vec<crate::models::machine_job::DeclaredService>,
+    id: String,
 ) -> futures::future::BoxFuture<'a, AppResult<MachineJob>> {
     Box::pin(async move {
         caller(chat)?;
@@ -224,7 +243,7 @@ pub fn issue_job<'a>(
             None
         };
         let job = MachineJob {
-            id: uuid::Uuid::new_v4().to_string(),
+            id,
             user_id: chat.user_id.clone(),
             node_id: node.id.clone(),
             runtime_id,

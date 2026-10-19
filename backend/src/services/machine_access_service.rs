@@ -85,6 +85,7 @@ pub async fn ensure_indexes(db: &Database) -> AppResult<()> {
             doc! {"node_id":1,"authority.expires_at_ms":1},
         ),
         (model::OUTBOX, doc! {"pending":1,"claim_until":1}),
+        (model::OUTBOX, doc! {"agent_id":1,"pending":1,"node_id":1}),
         (
             model::CONTEXTS,
             doc! {"login_ids":1,"mode":1,"agent_id":1,"node_id":1},
@@ -539,9 +540,13 @@ async fn enqueue(
     revision: i64,
     session: &mut ClientSession,
 ) -> AppResult<()> {
-    db.collection::<Document>(model::OUTBOX).insert_one(doc!{"_id":uuid::Uuid::new_v4().to_string(),
-        "agent_id":agent,"node_id":node,"revision":revision,"pending":true,"claim_until":bson::DateTime::from_millis(0)})
-        .session(&mut *session).await?;
+    db.collection::<Document>(model::OUTBOX)
+        .insert_one(doc! {"_id":uuid::Uuid::new_v4().to_string(),
+        "agent_id":agent,"node_id":node,"revision":revision,"pending":true,
+        "created_at":bson::DateTime::now(),
+        "claim_until":bson::DateTime::from_millis(0)})
+        .session(&mut *session)
+        .await?;
     Ok(())
 }
 
@@ -820,7 +825,7 @@ pub fn admit<'a>(
                 lease.authority.expires_at_ms = lease.authority.expires_at_ms.min(cutoff.timestamp_millis());
             }
             if lease.authority.expires_at_ms <= Utc::now().timestamp_millis() { return Err(refused()); }
-            let capacity=db.collection::<Document>(NODES).update_one(doc!{"_id":&lease.node_id,"is_active":true},doc!{"$inc":{"machine_authority_admission_fence":1}}).session(&mut *session).await?;
+            let capacity=db.collection::<Document>(NODES).update_one(doc!{"_id":&lease.node_id,"is_active":true,"machine.runtime_id":&lease.authority.runtime_id},doc!{"$inc":{"machine_authority_admission_fence":1}}).session(&mut *session).await?;
             if capacity.matched_count!=1 {return Err(AppError::MachineAuthorityStale);}
             // v1 returns before this transaction. Idle sockets create no leases;
             // expired leases and other nodes never consume this node's quota.
@@ -857,6 +862,28 @@ pub fn admit<'a>(
     }).await.map_err(transactions::map_transaction_error)?;
         Ok(Some(authority))
     })
+}
+
+pub(super) async fn fence_renewal_in_session(
+    db: &Database,
+    lease: &model::Lease,
+    session: &mut ClientSession,
+) -> AppResult<()> {
+    // Serialize the deadline reservation with grant mutation. A renewal that
+    // read the old policy may not issue a deadline after its revocation commits.
+    let agent_fence = db.collection::<Document>(AGENTS).update_one(
+        doc! {"_id":&lease.authority.agent_id,"destroyed_at":bson::Bson::Null,
+            format!("machine_access.assignments.{}.revision", lease.node_id):lease.authority.revision},
+        doc! {"$inc":{"machine_admission_fence":1_i64}},
+    ).session(&mut *session).await?;
+    let node_fence = db.collection::<Document>(NODES).update_one(
+        doc! {"_id":&lease.node_id,"is_active":true,"machine.runtime_id":&lease.authority.runtime_id},
+        doc! {"$inc":{"machine_authority_admission_fence":1_i64}},
+    ).session(&mut *session).await?;
+    if agent_fence.matched_count != 1 || node_fence.matched_count != 1 {
+        return Err(refused());
+    }
+    Ok(())
 }
 
 /// Keep renewal independent of the requesting HTTP connection for background
@@ -898,45 +925,50 @@ pub(super) async fn renew_one(state: &crate::AppState, mut lease: model::Lease) 
     }
     lease.authority.expires_at_ms =
         Utc::now().timestamp_millis() + nyxid_machine::authority::LEASE_MS;
-    // Admission of the next lease shares the managed lifecycle/Billing fence;
-    // a pause or cutoff change cannot commit around this authority extension.
+    // Retry only the database reservation, under the sweep's existing 2s
+    // timeout. Same-node/agent renewals deliberately contend on these fences.
+    // Keep the proposed expiry fixed across retries; never resend control as
+    // part of a transaction retry or extend an expired/revised/runtime-old lease.
+    let db = state.db.clone();
+    let node_tx = node.clone();
+    let reservation = lease.clone();
     let mut session = state.db.client().start_session().await?;
-    session
+    lease.authority = session
         .start_transaction()
         .write_concern(mongodb::options::WriteConcern::majority())
-        .await?;
-    let runtime =
-        super::remote_machine_runtime::fence_execution_in_session(&state.db, &node, &mut session)
+        .and_run2(async move |session| {
+            let result = Box::pin(async {
+                let mut lease = reservation.clone();
+                #[cfg(test)]
+                super::machine_access_tests::renewal_snapshot_loaded(&db, &lease, session).await?;
+                // Recheck managed lifecycle/Billing and both live fences in
+                // every attempt, including after a transient snapshot conflict.
+                let runtime = super::remote_machine_runtime::fence_execution_in_session(
+                    &db, &node_tx, session,
+                )
+                .await?;
+                if let Some(cutoff) = runtime.funding_cutoff {
+                    lease.authority.expires_at_ms =
+                        lease.authority.expires_at_ms.min(cutoff.timestamp_millis());
+                }
+                if lease.authority.expires_at_ms <= Utc::now().timestamp_millis() {
+                    return Err(refused());
+                }
+                fence_renewal_in_session(&db, &lease, session).await?;
+                let fenced = db.collection::<Document>(model::LEASES).update_one(
+                    doc! {"_id":&lease.id,"authority.expires_at_ms":{"$gt":Utc::now().timestamp_millis()}},
+                    doc! {"$inc":{"renewal_fence":1_i64}},
+                ).session(session).await?;
+                if fenced.matched_count != 1 {
+                    return Err(refused());
+                }
+                Ok(lease.authority)
+            })
             .await;
-    let runtime = match runtime {
-        Ok(runtime) => runtime,
-        Err(error) => {
-            let _ = session.abort_transaction().await;
-            return Err(error);
-        }
-    };
-    if let Some(cutoff) = runtime.funding_cutoff {
-        lease.authority.expires_at_ms =
-            lease.authority.expires_at_ms.min(cutoff.timestamp_millis());
-    }
-    if lease.authority.expires_at_ms <= Utc::now().timestamp_millis() {
-        let _ = session.abort_transaction().await;
-        return Err(refused());
-    }
-    let fenced = state
-        .db
-        .collection::<Document>(model::LEASES)
-        .update_one(
-            doc! {"_id":&lease.id,"authority.expires_at_ms":{"$gt":Utc::now().timestamp_millis()}},
-            doc! {"$inc":{"renewal_fence":1_i64}},
-        )
-        .session(&mut session)
-        .await?;
-    if fenced.matched_count != 1 {
-        let _ = session.abort_transaction().await;
-        return Err(refused());
-    }
-    session.commit_transaction().await?;
+            transactions::transaction_result(result)
+        })
+        .await
+        .map_err(transactions::map_transaction_error)?;
     let expires = lease.authority.expires_at_ms;
     let result = send_control(state, &node, Operation::AuthorityRenew, lease.authority).await?;
     if result["accepted"] != true {
@@ -1001,6 +1033,68 @@ async fn dispatch_control(
         .result)
 }
 
+/// Start one conservative grace only after the committed row is observable.
+/// Enqueue/created_at can precede a slow transaction commit, during which older
+/// renewal writers can still read the old grant. Legacy rows also lack a
+/// trustworthy creation time. Include the older worker's 2s in-flight timeout;
+/// never infer an ACK or delete delivery/quarantine work on expiry.
+async fn initialize_revocation_deadlines(db: &Database, mut filter: Document) -> AppResult<()> {
+    filter.insert("pending", true);
+    filter.insert("execution_expires_at", doc! {"$exists":false});
+    // Observe committed identities before asking MongoDB to start the grace. An
+    // update_many query could otherwise include rows committed while queued.
+    let observed: Vec<Document> = db
+        .collection::<Document>(model::OUTBOX)
+        .find(filter)
+        .projection(doc! {"_id":1})
+        .limit(128)
+        .await?
+        .try_collect()
+        .await?;
+    let ids = observed
+        .iter()
+        .filter_map(|row| row.get_str("_id").ok().map(str::to_owned))
+        .collect::<Vec<_>>();
+    initialize_observed_revocations(db, &ids).await
+}
+
+pub(super) async fn initialize_observed_revocations(
+    db: &Database,
+    ids: &[String],
+) -> AppResult<()> {
+    if ids.is_empty() {
+        return Ok(());
+    }
+    // Initialization and status comparison share MongoDB's clock. Different
+    // application replicas must not shorten the grace through opposing skew.
+    db.collection::<Document>(model::OUTBOX).update_many(
+        doc! {"_id":{"$in":ids},"pending":true,"execution_expires_at":{"$exists":false}},
+        vec![doc! {"$set":{"execution_expires_at":{"$add":["$$NOW",nyxid_machine::authority::LEASE_MS+2_000]},"expiry_observed_at":"$$NOW"}}]).await?;
+    Ok(())
+}
+
+/// Aggregate before bounding results: hundreds of changes on one machine must
+/// never hide a pending revocation on another visible machine.
+pub async fn revocation_status(
+    db: &Database,
+    agent: &str,
+    nodes: &[String],
+) -> AppResult<std::collections::BTreeMap<String, Document>> {
+    if nodes.is_empty() {
+        return Ok(Default::default());
+    }
+    let filter = doc! {"agent_id":agent,"node_id":{"$in":nodes},"pending":true};
+    initialize_revocation_deadlines(db, filter.clone()).await?;
+    let rows: Vec<Document> = db.collection::<Document>(model::OUTBOX).aggregate(vec![
+        doc! {"$match":filter},
+        doc! {"$group":{"_id":"$node_id","execution_pending":{"$max":{"$cond":[{"$eq":[{"$type":"$execution_expires_at"},"date"]},{"$gt":["$execution_expires_at","$$NOW"]},true]}},"initialization_pending":{"$max":{"$eq":[{"$type":"$execution_expires_at"},"missing"]}},"invalid_deadline":{"$max":{"$and":[{"$ne":[{"$type":"$execution_expires_at"},"missing"]},{"$ne":[{"$type":"$execution_expires_at"},"date"]}]}},"quarantine_pending":{"$max":{"$eq":["$quarantine_profiles",true]}},"expires_at":{"$max":"$execution_expires_at"}}},
+    ]).await?.try_collect().await?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|row| Some((row.get_str("_id").ok()?.to_owned(), row)))
+        .collect())
+}
+
 pub(super) async fn revoke_one(state: &crate::AppState, row: Document) -> AppResult<()> {
     if row
         .get_str("kind")
@@ -1009,6 +1103,7 @@ pub(super) async fn revoke_one(state: &crate::AppState, row: Document) -> AppRes
         return super::machine_external_service::revoke_outbox(state, row).await;
     }
     let id = row.get_str("_id").map_err(|_| refused())?;
+    initialize_revocation_deadlines(&state.db, doc! {"_id":id}).await?;
     let claim = uuid::Uuid::new_v4().to_string();
     let claimed=state.db.collection::<Document>(model::OUTBOX).find_one_and_update(doc!{"_id":id,"pending":true,"claim_until":{"$lte":bson::DateTime::now()}},
         doc!{"$set":{"claim":&claim,"claim_until":bson::DateTime::from_chrono(Utc::now()+chrono::Duration::seconds(10))}})

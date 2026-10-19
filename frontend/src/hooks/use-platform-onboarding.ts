@@ -1,4 +1,5 @@
-import { useEffect, useRef } from "react";
+import { orgListResponseSchema } from "@/schemas/orgs";
+
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { z } from "zod";
 import { apiClient } from "@/lib/api-client";
@@ -103,6 +104,7 @@ export function useSetupMutation(id?: string) {
   const actor = useAuthStore((s) => s.user?.id);
   const client = useQueryClient();
   return useMutation({
+    gcTime: 0,
     mutationFn: async (
       input:
         | {
@@ -234,16 +236,16 @@ export function useAdminPlatformProfiles(before?: string) {
       ),
   });
 }
-export function useAdminPlatformProfile(id?: string) {
+export function useAdminPlatformProfile(profile?: PlatformProfile) {
   const user = useAuthStore((s) => s.user);
   return useQuery({
-    queryKey: ["admin-platform-profile", user?.id, id],
-    enabled: !!id && canAdminWrite(user),
+    queryKey: ["admin-platform-profile", user?.id, profile?.id],
+    enabled: !!profile && canAdminWrite(user),
     gcTime: 0,
-    retry: false,
+    initialData: profile,
     queryFn: async () =>
       platformProfileSchema.parse(
-        await apiClient(`/admin/platform-bots/${id}`, {
+        await apiClient(`/admin/platform-bots/${profile!.id}`, {
           authorityGuard: actorGuard(user?.id, true),
         }),
       ),
@@ -252,21 +254,8 @@ export function useAdminPlatformProfile(id?: string) {
 export function useAdminPlatformAction() {
   const actor = useAuthStore((s) => s.user?.id);
   const client = useQueryClient();
-  const pendingSecrets = useRef(new Set<{ fields?: Record<string, string> }>());
-  useEffect(() => {
-    const pending = pendingSecrets.current;
-    return () => {
-      for (const input of pending) {
-        if (input.fields)
-          for (const key of Object.keys(input.fields)) delete input.fields[key];
-        input.fields = undefined;
-      }
-      pending.clear();
-    };
-  }, [actor]);
   return useMutation({
     gcTime: 0,
-    retry: false,
     mutationFn: async (
       input:
         | {
@@ -275,15 +264,8 @@ export function useAdminPlatformAction() {
             funding_owner_user_id?: string;
           }
         | {
-            action:
-              | "pause"
-              | "verify"
-              | "repair"
-              | "retire"
-              | "discord-commands";
+            action: "pause" | "verify" | "repair" | "retire";
             profile: PlatformProfile;
-            fields?: Record<string, string>;
-            connection_id?: string;
           },
     ) => {
       const path =
@@ -296,70 +278,70 @@ export function useAdminPlatformAction() {
               channel_bot_id: input.channel_bot_id,
               funding_owner_user_id: input.funding_owner_user_id,
             }
-          : {
-              generation: input.profile.generation,
-              ...(input.action === "repair"
-                ? { fields: input.fields, connection_id: input.connection_id }
-                : {}),
-            };
-      if (input.action !== "convert") pendingSecrets.current.add(input);
-      try {
-        return platformProfileSchema.parse(
-          await apiClient(path, {
-            method: input.action === "retire" ? "DELETE" : "POST",
-            body,
-            authorityGuard: actorGuard(actor, true),
-          }),
-        );
-      } finally {
-        if (input.action !== "convert") {
-          if (input.fields)
-            for (const key of Object.keys(input.fields))
-              delete input.fields[key];
-          input.fields = undefined;
-          pendingSecrets.current.delete(input);
-        }
-      }
-    },
-    onSuccess: async (profile) => {
-      client.setQueryData(
-        ["admin-platform-profile", actor, profile.id],
-        profile,
+          : { generation: input.profile.generation };
+      return platformProfileSchema.parse(
+        await apiClient(path, {
+          method: input.action === "retire" ? "DELETE" : "POST",
+          body,
+          authorityGuard: actorGuard(actor, true),
+        }),
       );
-      await Promise.all([
-        client.invalidateQueries({ queryKey: ["admin-platform-profile"] }),
-        client.invalidateQueries({ queryKey: ["admin-platform-profiles"] }),
-        client.invalidateQueries({ queryKey: ["admin-platform-targets"] }),
-        client.invalidateQueries({ queryKey: ["platform-runtime"] }),
-      ]);
+    },
+    onSuccess: () => {
+      for (const queryKey of [
+        ["admin-platform-profiles"],
+        ["admin-platform-profile"],
+        ["admin-platform-targets"],
+        ["platform-runtime"],
+      ])
+        void client.invalidateQueries({ queryKey });
     },
   });
 }
 
-export function useAdminPlatformTargets() {
+export function useAdminPlatformTargets(includeOrganizations = false) {
   const user = useAuthStore((s) => s.user);
   return useQuery({
-    queryKey: ["admin-platform-targets", user?.id],
+    queryKey: ["admin-platform-targets", user?.id, includeOrganizations],
     enabled: canAdminWrite(user),
     gcTime: 0,
     queryFn: async () => {
       const guard = actorGuard(user?.id, true);
-      return z
-        .object({
-          bots: z.array(
-            z.object({
-              id: z.uuid(),
-              label: z.string(),
-              platform: z.string(),
-              platform_bot_username: z.string(),
-            }),
+      const [bots, orgs] = await Promise.all([
+        (async () => {
+          const bots: {
+            id: string;
+            platform: string;
+            label: string;
+            platform_bot_username: string;
+            credential_source: string;
+          }[] = [];
+          let before: string | undefined;
+          do {
+            const page = await apiClient<{
+              bots: typeof bots;
+              next_before_id: string | null;
+            }>(
+              `/admin/platform-bots/targets${before ? `?before_id=${before}` : ""}`,
+              { authorityGuard: guard },
+            );
+            bots.push(...page.bots);
+            before = page.next_before_id ?? undefined;
+          } while (before);
+          return { bots };
+        })(),
+        includeOrganizations
+          ? apiClient("/orgs", { authorityGuard: guard })
+          : Promise.resolve({ orgs: [] }),
+      ]);
+      return {
+        bots: bots.bots,
+        orgs: orgListResponseSchema
+          .parse(orgs)
+          .orgs.filter(
+            (org) => org.your_role === "admin" || org.your_role === "owner",
           ),
-        })
-        .parse(
-          await apiClient("/admin/platform-bots/targets", {
-            authorityGuard: guard,
-          }),
-        );
+      };
     },
   });
 }

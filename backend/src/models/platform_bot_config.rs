@@ -44,6 +44,7 @@ pub struct CleanupMachineJob {
 #[serde(rename_all = "snake_case")]
 pub enum PlatformExecutionProfile {
     PlatformOnboarding,
+    NativeEntry,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -51,16 +52,18 @@ pub struct PlatformBotConfig {
     #[serde(rename = "_id")]
     pub id: String,
     pub channel_bot_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub channel_transport: Option<PlatformChannelTransport>,
     pub manager_bot_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity_version: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_entry: Option<super::platform_entry_identity::NativeEntryConfiguration>,
     pub observation_id: String,
     pub execution_profile: PlatformExecutionProfile,
     pub generation: i64,
     pub enabled: bool,
     #[serde(default)]
     pub guide: Option<GuideConfiguration>,
-    /// Legacy inference sponsor. FAQ profiles may use the configuring person as an inert default; no inference is charged.
+    /// Dedicated organization wallet; never the configuring person's wallet.
     pub funding_owner_user_id: String,
     pub configured_by: String,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
@@ -69,18 +72,6 @@ pub struct PlatformBotConfig {
     pub updated_at: DateTime<Utc>,
     #[serde(default, with = "crate::models::bson_datetime::optional")]
     pub deleted_at: Option<DateTime<Utc>>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct PlatformChannelTransport {
-    pub platform: String,
-    pub platform_bot_id: String,
-    pub owner_user_id: String,
-    pub ownership_version: i64,
-    /// Internal numeric authority handle retained by the original proof format.
-    pub authority_id: i64,
-    #[serde(default)]
-    pub credential_stamp: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

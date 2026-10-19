@@ -48,7 +48,7 @@ function StudioBreadcrumbLink({
         <Link
           {...props}
           to="/admin/usage"
-          search={{ tab: tab === "list" ? "list" : "dashboard" }}
+          search={{ tab: tab === "nyxbot" ? "nyxbot" : tab === "list" ? "list" : "dashboard" }}
         />
       );
   }

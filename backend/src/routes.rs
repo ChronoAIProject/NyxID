@@ -1123,7 +1123,23 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         )
         .route(
             "/platform-bots/targets",
-            get(handlers::platform_bots::targets),
+            get(handlers::platform_bots::conversion_targets),
+        )
+        .route(
+            "/platform-bots/native/transports",
+            get(handlers::platform_bots::native_transports),
+        )
+        .route(
+            "/platform-bots/native",
+            post(handlers::platform_bots::convert_native),
+        )
+        .route(
+            "/platform-bots/native/{bot}/review",
+            post(handlers::platform_bots::review_native_lifecycle),
+        )
+        .route(
+            "/platform-bots/native/{bot}/inspect",
+            post(handlers::platform_bots::inspect_native_gateway),
         )
         .route(
             "/platform-bots/{id}",
@@ -1162,12 +1178,12 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             post(handlers::platform_bots::verify),
         )
         .route(
-            "/platform-bots/{id}/discord-commands",
-            post(handlers::platform_bots::discord_commands),
-        )
-        .route(
             "/platform-bots/{id}/repair",
             post(handlers::platform_bots::repair),
+        )
+        .route(
+            "/assistant/analytics",
+            get(handlers::admin_assistant::analytics),
         )
         .route(
             "/assistant/feedback",
@@ -2118,6 +2134,7 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
     // Routes that ALLOW delegated tokens (proxy, LLM gateway, delegation refresh)
     // Also accessible by service accounts.
     let api_v1_delegated = Router::new()
+        .route("/channel-adapters", get(handlers::call_adapters::catalog))
         .route(
             "/channel-platforms",
             get(handlers::channel_platforms::list_platforms),
@@ -2163,8 +2180,13 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             )
             .route(
                 "/pools/{id_or_slug}",
-                get(handlers::oracle_pools::get_pool).patch(handlers::oracle_pools::update_pool),
+                get(handlers::oracle_pools::get_pool).patch(handlers::oracle_pools::update_pool).delete(handlers::oracle_pools::delete_pool),
             )
+            .route("/pools/{id_or_slug}/transfer", post(handlers::oracle_pools::transfer_pool).layer(DefaultBodyLimit::max(4096))
+                .layer(middleware::map_response(|mut response: axum::response::Response| async move {
+                    response.headers_mut().insert(axum::http::header::CACHE_CONTROL, axum::http::HeaderValue::from_static("no-store"));
+                    response
+                })))
             .route(
                 "/pools/{id_or_slug}/rotate-token",
                 post(handlers::oracle_pools::rotate_token),
@@ -2591,6 +2613,50 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
     // Routes that BLOCK service account tokens (human-only endpoints)
     let api_v1_human_only = Router::new()
         .route(
+            "/channel-adapter-bindings",
+            get(handlers::call_adapters::list).post(handlers::call_adapters::create),
+        )
+        .route(
+            "/channel-adapter-bindings/{id}",
+            axum::routing::delete(handlers::call_adapters::remove),
+        )
+        .route(
+            "/channel-adapter-bindings/{id}/disable",
+            post(handlers::call_adapters::disable),
+        )
+        .route(
+            "/channel-adapter-bindings/{id}/verify",
+            post(handlers::call_adapters::reverify),
+        )
+        .route(
+            "/channel-adapter-bindings/{id}/custom-llm-setup",
+            post(handlers::call_adapters::custom_setup),
+        )
+        .route(
+            "/channel-adapter-bindings/{id}/sessions",
+            post(handlers::call_adapters::custom_session),
+        )
+        .route(
+            "/admin/channel-adapter-accounts",
+            get(handlers::call_adapters::accounts).post(handlers::call_adapters::account),
+        )
+        .route(
+            "/admin/channel-adapter-allocations",
+            get(handlers::call_adapters::allocations).post(handlers::call_adapters::allocate),
+        )
+        .route(
+            "/admin/channel-adapter-accounts/{id}",
+            axum::routing::delete(handlers::call_adapters::remove_account),
+        )
+        .route(
+            "/channel-adapter-bindings/{id}/sessions/{sid}/end",
+            post(handlers::call_adapters::end_custom_session),
+        )
+        .route(
+            "/admin/channel-adapter-allocations/{id}",
+            axum::routing::delete(handlers::call_adapters::revoke_allocation),
+        )
+        .route(
             "/remote-machine-entitlement",
             get(handlers::remote_machine::entitlement),
         )
@@ -2671,6 +2737,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             get(handlers::remote_machine::operation),
         )
         .route(
+            "/remote-machine-operations/{operation_id}/retry-delete",
+            post(handlers::remote_machine::retry_delete),
+        )
+        .route(
             "/onboarding/setups/{id}/binding",
             post(handlers::platform_setups::attach_binding),
         )
@@ -2743,6 +2813,14 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .route(
             "/machines/{node_id}/activity",
             get(handlers::machine_activity::list),
+        )
+        .route(
+            "/assistant/nyxagent/dictation/options",
+            get(handlers::assistant_voice::dictation_options),
+        )
+        .route(
+            "/assistant/nyxagent/conversations/{id}/dictation",
+            get(handlers::assistant_voice::dictation_stream),
         )
         .route(
             "/assistant/nyxagent/voice/options",
@@ -3131,6 +3209,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .nest("/api/v1/webhooks", webhook_routes)
         .nest("/api/v1/webhooks/triggers", trigger_webhook_routes)
         // Channel bot webhook routes -- unauthenticated (per-bot signature verified)
+        .route("/api/v1/webhooks/call-adapters/{id}", post(handlers::call_adapters::webhook))
+        .route("/api/v1/webhooks/call-adapters/{id}/sms-receipts/{send}", post(handlers::call_adapters::sms_receipt))
+        .route("/api/v1/webhooks/call-adapters/{id}/socket/{sid}", get(handlers::call_adapters::socket))
+        .route("/api/v1/webhooks/call-adapters/{id}/v1/chat/completions", post(handlers::call_adapters::completions))
         .route(
             "/api/v1/webhooks/channel/telegram-new/manager",
             post(handlers::telegram_new::webhook)
@@ -3139,7 +3221,7 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .route(
             "/api/v1/webhooks/channel/{platform}/{bot_id}",
             get(handlers::channel_webhooks::channel_subscription)
-                .post(handlers::channel_webhooks::channel_webhook),
+                .post(handlers::channel_webhooks::channel_webhook_with_runtime),
         )
         .route(
             "/api/v1/webhooks/channel/{platform}/platform",
@@ -3210,7 +3292,7 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
                     "/bindings/{binding_id}/conversations/{conversation_id}/events/{event_id}",
                     get(handlers::nyxbot::get_event_context),
                 )
-                .route("/responses", post(handlers::nyxbot::responses))
+                .route("/responses", post(handlers::nyxbot::responses_with_runtime))
                 .route("/relay/{channel_id}", post(handlers::nyxbot::relay_callback))
                 .layer(DefaultBodyLimit::max(2 * 1024 * 1024)),
         )

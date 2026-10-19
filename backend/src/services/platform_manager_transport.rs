@@ -84,7 +84,7 @@ pub fn compose(
     assemble(state, execution, egress, settled_hook)
 }
 
-/// Every dependency is real. The public producers remain explicitly unavailable.
+/// Every dependency is real. Public execution requires persisted activated deployment proof.
 pub fn assemble(
     state: AppState,
     execution: Arc<dyn NyxAgentExecutionProducer>,
@@ -127,34 +127,38 @@ fn fixed_destination(
 ) -> ReplyDestination {
     ReplyDestination {
         manager,
-        sender_id: update.sender_id,
-        chat_id: update.chat_id,
+        sender: update.sender.clone(),
         authority: ReplyAuthority::Fixed { ingress: claim },
         expires_at: Utc::now() + Duration::minutes(2),
     }
 }
 
-/// true means this profile is opted in and the update must never reach old guide/
-/// owner-channel execution, including malformed, paused and infrastructure cases.
+/// Explicit adapter handoff; an opted-in entry never reaches ordinary owner routing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ManagerDispatch {
+    NotOptedIn,
+    Handled,
+    LegacyConfirmation,
+}
 pub(crate) async fn dispatch_update(
     state: &AppState,
     producers: Option<Arc<PlatformManagerProducers>>,
     bot: &ChannelBot,
     update: &serde_json::Value,
     service: &super::telegram_new_service::TelegramNewService<'_>,
-) -> AppResult<bool> {
+) -> AppResult<ManagerDispatch> {
     let profile = state
         .db
         .collection::<PlatformBotConfig>(PROFILES)
-        .find_one(doc! {"manager_bot_id":&bot.platform_bot_id})
+        .find_one(doc! {"manager_bot_id":&bot.platform_bot_id,"native_entry":bson::Bson::Null})
         .await?;
     let Some(profile) = profile else {
-        return Ok(false);
+        return Ok(ManagerDispatch::NotOptedIn);
     };
     let Some(runtime) =
         super::platform_bot_runtime_control_service::get(&state.db, &profile.id).await?
     else {
-        return Ok(false);
+        return Ok(ManagerDispatch::NotOptedIn);
     };
     // Persisted controls are the explicit opt-in marker, even when paused/retired.
     let producers =
@@ -170,58 +174,100 @@ pub(crate) async fn dispatch_update(
         observation,
         update,
     ) else {
-        return Ok(true);
+        return Ok(ManagerDispatch::Handled);
     };
-    dispatch_verified_input(
+    let text = update["message"]["text"].as_str().unwrap_or("");
+    dispatch_verified(
         state,
         producers,
-        &runtime,
+        runtime,
         verified,
+        text,
         &username,
-        update["message"]["text"].as_str().unwrap_or(""),
         &service.api,
-        true,
-        true,
     )
     .await
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn dispatch_verified_input(
+/// Both entry transports provide an admission constructed from authenticated
+/// native content. Its canonical text is fixed before any control or model work.
+pub(crate) fn dispatch_native_admission(
+    state: &AppState,
+    producers: Option<Arc<PlatformManagerProducers>>,
+    admission: super::platform_entry_receipts::NativeAdmission,
+) -> futures::future::BoxFuture<'_, AppResult<()>> {
+    // Direct webhooks and gateway Responses share this native-only boundary.
+    // Construct the large dispatch future outside their caller poll frames.
+    Box::pin(dispatch_native_admission_impl(state, producers, admission))
+}
+
+async fn dispatch_native_admission_impl(
+    state: &AppState,
+    producers: Option<Arc<PlatformManagerProducers>>,
+    admission: super::platform_entry_receipts::NativeAdmission,
+) -> AppResult<()> {
+    let producers =
+        producers.ok_or_else(|| AppError::Conflict("Manager runtime is unavailable".into()))?;
+    let verified = admission.verified_update();
+    let runtime = super::platform_bot_runtime_control_service::get(&state.db, &verified.profile_id)
+        .await?
+        .ok_or_else(|| AppError::Conflict("Manager runtime is unavailable".into()))?;
+    let manager = super::platform_bot_runtime_control_service::policy(&runtime).manager;
+    if manager.entry != verified.entry
+        || manager.manager_bot_id != verified.manager_bot_id
+        || manager.manager_authority_epoch != admission.receipt().manager_authority_epoch
+    {
+        return Err(AppError::Conflict(
+            "Manager native authority changed".into(),
+        ));
+    }
+    let outcome = dispatch_verified(
+        state,
+        producers,
+        runtime,
+        verified,
+        admission.text(),
+        "",
+        &super::telegram_new_api::TelegramApi::new(&state.http_client),
+    )
+    .await?;
+    if outcome != ManagerDispatch::Handled {
+        return Err(AppError::Conflict(
+            "Manager native dispatch is unavailable".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn dispatch_verified<'a>(
+    state: &'a AppState,
+    producers: Arc<PlatformManagerProducers>,
+    runtime: crate::models::platform_bot_runtime_controls::PlatformBotRuntimeControls,
+    verified: VerifiedManagerUpdate,
+    text: &'a str,
+    username: &'a str,
+    api: &'a super::telegram_new_api::TelegramApi<'_>,
+) -> futures::future::BoxFuture<'a, AppResult<ManagerDispatch>> {
+    Box::pin(dispatch_verified_impl(
+        state, producers, runtime, verified, text, username, api,
+    ))
+}
+
+async fn dispatch_verified_impl(
     state: &AppState,
     producers: Arc<PlatformManagerProducers>,
-    runtime: &crate::models::platform_bot_runtime_controls::PlatformBotRuntimeControls,
+    runtime: crate::models::platform_bot_runtime_controls::PlatformBotRuntimeControls,
     verified: VerifiedManagerUpdate,
-    username: &str,
     text: &str,
+    username: &str,
     api: &super::telegram_new_api::TelegramApi<'_>,
-    native_setup: bool,
-    controls_allowed: bool,
-) -> AppResult<bool> {
-    // Discord's chat option is message content. A leading command is unsupported
-    // content, never an application control or an explicit public FAQ request.
-    let text = if !controls_allowed && text.trim_start().starts_with('/') {
-        "/unsupported"
-    } else {
-        text
-    };
+) -> AppResult<ManagerDispatch> {
     let verb = text.split_whitespace().next().unwrap_or("");
     let base = verb.split('@').next().unwrap_or("");
-    // Legacy setup commands retain their purpose, never becoming personal turns.
-    if native_setup
-        && (matches!(base, "/onboarding" | "/setups")
-            || (base == "/confirm" && commands::personal_command(text, username).is_none()))
-    {
-        if runtime.emergency_stopped
-            || runtime.retired
-            || verified.command_eligibility != ManagerCommandEligibility::OriginalPrivateMessage
-        {
-            refuse_control(state, &producers, &verified).await?;
-            return Ok(true);
-        }
-        return Ok(false); // The HTTP adapter retains legacy setup command handling.
-    }
-    if let Some(kind) = commands::personal_command(text, username).filter(|_| controls_allowed) {
+    let kind = super::platform_manager_management::parse(text, username)
+        .map(commands::PersonalCommandKind::Management)
+        .or_else(|| commands::personal_command(text, username));
+    if let Some(kind) = kind.filter(|_| !(runtime.public_enabled && dispatch::explicit_faq(text))) {
         if let Some(command) =
             OriginalManagerCommand::from_verified(verified.clone(), TurnInput { text: text.into() })
         {
@@ -245,7 +291,7 @@ pub(crate) async fn dispatch_verified_input(
                         "Personal manager control refused"
                     );
                     refuse_control(state, &producers, &verified).await?;
-                    return Ok(true);
+                    return Ok(ManagerDispatch::Handled);
                 }
                 Err(error) => return Err(error),
             };
@@ -253,38 +299,50 @@ pub(crate) async fn dispatch_verified_input(
                 let _ = delivery::deliver_command(state, producers.identity.clone(), output, api)
                     .await?;
             }
-            return Ok(true);
+            return Ok(ManagerDispatch::Handled);
         }
         // Forwarded proof/control is consumed here, never sent to a model.
         refuse_control(state, &producers, &verified).await?;
-        return Ok(true);
+        return Ok(ManagerDispatch::Handled);
     }
-    if matches!(base, "/link" | "/unlink" | "/confirm")
+    // An upgrade must still finish an already-issued onboarding-only proof.
+    // This explicit handoff never selects a personal account or ordinary route.
+    if !runtime.emergency_stopped
+        && matches!(verified.entry, EntryIdentity::TelegramV1 { .. })
+        && legacy_confirmation(text, username)
+        && OriginalManagerCommand::from_verified(verified.clone(), TurnInput { text: text.into() })
+            .is_some()
+    {
+        return Ok(ManagerDispatch::LegacyConfirmation);
+    }
+    if matches!(
+        base,
+        "/link"
+            | "/login"
+            | "/unlink"
+            | "/logout"
+            | "/status"
+            | "/help"
+            | "/confirm"
+            | "/onboarding"
+            | "/setups"
+            | "/setup"
+            | "/bots"
+            | "/bot"
+    ) && !(runtime.public_enabled && dispatch::explicit_faq(text))
         || text.contains("nyx_pli_")
         || text.contains("#intent_token=")
     {
         refuse_control(state, &producers, &verified).await?;
-        return Ok(true);
+        return Ok(ManagerDispatch::Handled);
     }
-    let faq_only = controls_allowed
-        && matches!(base, "/faq" | "/help" | "/start")
-        && runtime.public_enabled
-        && runtime.public_policy.is_none();
-    let admission = if runtime.public_policy.is_none() {
-        dispatch::admit_text_update(
-            &state.db,
-            producers.identity.as_ref(),
-            &verified,
-            text,
-            faq_only,
-        )
-        .await?
-    } else {
-        producers
-            .transport
-            .admit_manager_update(&state.db, &verified)
-            .await?
-    };
+    let admission = dispatch::admit_text_update(
+        &state.db,
+        producers.identity.as_ref(),
+        &verified,
+        Some(text),
+    )
+    .await?;
     let (ingress, audience) = match admission {
         IngressAdmission::Claimed { ingress, audience } => (ingress, audience),
         IngressAdmission::Duplicate { receipt_id } => {
@@ -292,7 +350,7 @@ pub(crate) async fn dispatch_verified_input(
                 receipt_id,
                 "Manager update already admitted; preserving original audience"
             );
-            return Ok(true);
+            return Ok(ManagerDispatch::Handled);
         }
     };
     match audience {
@@ -328,27 +386,24 @@ pub(crate) async fn dispatch_verified_input(
                     reason,
                 )
                 .await?;
-                return Ok(true);
+                return Ok(ManagerDispatch::Handled);
             }
             if text.trim().is_empty() || text.starts_with('/') {
-                let public = PublicIngress {
-                    manager: admitted.authority.manager.clone(),
-                    sender_id: verified.sender_id,
-                    chat_id: verified.chat_id,
-                    public_policy_revision: runtime.public_policy_revision,
-                    ingress: ingress.clone(),
-                };
-                delivery::deliver_faq(
-                    state,
-                    producers.identity.clone(),
-                    &public,
-                    text,
-                    true,
-                    runtime.personal_enabled,
-                    api,
-                )
-                .await?;
-                return Ok(true);
+                let destination = fixed_destination(
+                    super::platform_bot_runtime_control_service::policy(&runtime).manager,
+                    &verified,
+                    ingress.clone(),
+                );
+                let _ = producers
+                    .transport
+                    .deliver_platform_reply(
+                        &state.db,
+                        &destination,
+                        &DeliveryRef::Fixed { ingress },
+                        ReplyContent::Fixed(UnavailableReason::UnsupportedInput),
+                    )
+                    .await?;
+                return Ok(ManagerDispatch::Handled);
             }
             if verified.command_eligibility == ManagerCommandEligibility::OriginalPrivateMessage
                 && super::assistant_acknowledgement_service::parse_reply(text).is_some()
@@ -383,7 +438,7 @@ pub(crate) async fn dispatch_verified_input(
                         .session(&mut session)
                         .await?
                         .is_some();
-                    if authority != admitted.authority || !thread_matches {
+                    if *authority != admitted.authority || !thread_matches {
                         send_fixed(
                             state,
                             &producers,
@@ -393,7 +448,7 @@ pub(crate) async fn dispatch_verified_input(
                             UnavailableReason::OriginRevoked,
                         )
                         .await?;
-                        return Ok(true);
+                        return Ok(ManagerDispatch::Handled);
                     }
                     match producers
                         .personal
@@ -413,7 +468,7 @@ pub(crate) async fn dispatch_verified_input(
                                 allowed = decision.allowed,
                                 "Personal manager card decision committed"
                             );
-                            return Ok(true);
+                            return Ok(ManagerDispatch::Handled);
                         }
                         PlatformDecisionOutcome::Unavailable(reason) => {
                             send_fixed(
@@ -425,7 +480,7 @@ pub(crate) async fn dispatch_verified_input(
                                 reason,
                             )
                             .await?;
-                            return Ok(true);
+                            return Ok(ManagerDispatch::Handled);
                         }
                         PlatformDecisionOutcome::NoPendingDecision => {}
                     }
@@ -461,9 +516,11 @@ pub(crate) async fn dispatch_verified_input(
                         return Err(AppError::Conflict("Personal delivery turn changed".into()));
                     }
                     let state = state.clone();
-                    tokio::spawn(async move {
-                        consume_events(state, producers, destination, receiver).await;
-                    });
+                    crate::services::platform_native_reply_service::spawn_in_native_scope(
+                        async move {
+                            consume_events(state, producers, destination, receiver).await;
+                        },
+                    );
                 }
                 PersonalTurnStart::Unavailable(reason) => {
                     let destination =
@@ -513,18 +570,8 @@ pub(crate) async fn dispatch_verified_input(
                 .await?;
         }
         ManagerAudience::Public(admitted) => {
-            if runtime.public_policy.is_none() {
-                delivery::deliver_faq(
-                    state,
-                    producers.identity.clone(),
-                    &admitted,
-                    text,
-                    false,
-                    runtime.personal_enabled,
-                    api,
-                )
-                .await?;
-                return Ok(true);
+            if delivery::deliver_faq(state, producers.identity.clone(), &ingress, api).await? {
+                return Ok(ManagerDispatch::Handled);
             }
             let context = match producers
                 .public
@@ -545,7 +592,7 @@ pub(crate) async fn dispatch_verified_input(
                         reason,
                     )
                     .await?;
-                    return Ok(true);
+                    return Ok(ManagerDispatch::Handled);
                 }
             };
             let mut session = state.db.client().start_session().await?;
@@ -575,12 +622,11 @@ pub(crate) async fn dispatch_verified_input(
                     reason,
                 )
                 .await?;
-                return Ok(true);
+                return Ok(ManagerDispatch::Handled);
             }
             let destination = ReplyDestination {
                 manager: admitted.manager.clone(),
-                sender_id: admitted.sender_id,
-                chat_id: admitted.chat_id,
+                sender: admitted.sender.clone(),
                 authority: ReplyAuthority::Public {
                     ingress: admitted,
                     public_session_id: context.public_session_id.clone(),
@@ -620,13 +666,13 @@ pub(crate) async fn dispatch_verified_input(
                         reason,
                     )
                     .await?;
-                    return Ok(true);
+                    return Ok(ManagerDispatch::Handled);
                 }
             };
             if turn != expected {
                 return Err(AppError::Conflict("Public execution turn changed".into()));
             }
-            tokio::spawn(consume_events(
+            crate::services::platform_native_reply_service::spawn_in_native_scope(consume_events(
                 state.clone(),
                 producers.clone(),
                 destination,
@@ -637,7 +683,26 @@ pub(crate) async fn dispatch_verified_input(
             return Err(AppError::Conflict("Control receipt cannot execute".into()));
         }
     }
-    Ok(true)
+    Ok(ManagerDispatch::Handled)
+}
+
+fn legacy_confirmation(text: &str, username: &str) -> bool {
+    let mut words = text.split_whitespace();
+    let Some(verb) = words.next() else {
+        return false;
+    };
+    let (base, target) = verb
+        .split_once('@')
+        .map_or((verb, None), |(base, target)| (base, Some(target)));
+    if base != "/confirm" || target.is_some_and(|target| !target.eq_ignore_ascii_case(username)) {
+        return false;
+    }
+    let code = text.trim_start().strip_prefix(verb).unwrap_or("").trim();
+    // Personal proofs have their own parser and must never become legacy proofs.
+    !code
+        .get(..2)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("P-"))
+        && super::platform_binding_service::normalize_code(code).is_some()
 }
 
 async fn refuse_control(
@@ -661,13 +726,7 @@ async fn refuse_control(
                 &state.db,
                 &destination,
                 &DeliveryRef::Fixed { ingress },
-                ReplyContent::Fixed(if runtime.emergency_stopped {
-                    UnavailableReason::EmergencyStopped
-                } else if !runtime.personal_enabled {
-                    UnavailableReason::PersonalDisabled
-                } else {
-                    UnavailableReason::OriginRevoked
-                }),
+                ReplyContent::Fixed(UnavailableReason::ModeDisabled),
             )
             .await?;
     }
@@ -764,6 +823,37 @@ pub(crate) async fn deliver_saved(
     reply: &ReplyRef,
 ) -> AppResult<DeliveryOutcome> {
     if matches!(destination.authority, ReplyAuthority::Public { .. }) {
+        if let Some(expires_at) =
+            super::platform_public_credential_service::public_failure_notice_expiry(
+                &state.db,
+                destination,
+                reply,
+            )
+            .await?
+        {
+            let ReplyAuthority::Public { ingress, .. } = &destination.authority else {
+                unreachable!();
+            };
+            let fixed = ReplyDestination {
+                manager: destination.manager.clone(),
+                sender: destination.sender.clone(),
+                authority: ReplyAuthority::Fixed {
+                    ingress: ingress.ingress.clone(),
+                },
+                expires_at,
+            };
+            return producers
+                .transport
+                .deliver_platform_reply(
+                    &state.db,
+                    &fixed,
+                    &DeliveryRef::Fixed {
+                        ingress: ingress.ingress.clone(),
+                    },
+                    ReplyContent::Fixed(UnavailableReason::PublicTurnFailed),
+                )
+                .await;
+        }
         // Public transcripts never enter owner history or credential paths.
         return delivery::deliver_public_reply(
             state,
@@ -800,7 +890,7 @@ pub(crate) async fn deliver_saved(
 }
 
 pub fn spawn_sweeps(state: AppState, producers: Arc<PlatformManagerProducers>) {
-    tokio::spawn(async move {
+    crate::services::platform_native_reply_service::spawn_in_native_scope(async move {
         let mut ticks = tokio::time::interval(std::time::Duration::from_secs(15));
         ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut pending = false;
@@ -976,11 +1066,11 @@ async fn recover_ingress(
                 let retained=state.db.collection::<crate::models::platform_public_turn::PlatformPublicTurn>(crate::models::platform_public_turn::COLLECTION_NAME)
                     .find_one(doc! {"_id":&execution.turn_id,"receipt_id":&receipt.id,"claim_id":&receipt.claim_id,"reply_id":reply_id}).await?
                     .ok_or_else(||AppError::NotFound("Retained public reply unavailable".into()))?;
-                let manager=ManagerAuthority {profile_id:receipt.profile_id.clone(),manager_bot_id:receipt.manager_bot_id.clone(),telegram_bot_id:receipt.telegram_bot_id,manager_authority_epoch:receipt.manager_authority_epoch};
+                let manager=ManagerAuthority {profile_id:receipt.profile_id.clone(),manager_bot_id:receipt.manager_bot_id.clone(),entry:receipt.entry.clone(),manager_authority_epoch:receipt.manager_authority_epoch};
                 let turn=TurnRef {conversation_id:execution.conversation_id.clone(),turn_id:execution.turn_id.clone()};
-                let admitted=PublicIngress {manager:manager.clone(),sender_id:receipt.sender_id,chat_id:receipt.chat_id,public_policy_revision:*public_policy_revision,
+                let admitted=PublicIngress {manager:manager.clone(),sender:receipt.sender.clone(),public_policy_revision:*public_policy_revision,
                     ingress:IngressClaim {receipt_id:receipt.id.clone(),claim_id:receipt.claim_id.clone()}};
-                let destination=ReplyDestination {manager,sender_id:receipt.sender_id,chat_id:receipt.chat_id,expires_at:retained.expires_at,
+                let destination=ReplyDestination {manager,sender:receipt.sender.clone(),expires_at:retained.expires_at,
                     authority:ReplyAuthority::Public {ingress:admitted,public_session_id:retained.public_session_id,turn:turn.clone()}};
                 deliver_saved(state,producers,&destination,&ReplyRef {turn,reply_id:reply_id.clone()}).await?;
                 return Ok(());
@@ -1037,3 +1127,47 @@ async fn recover_ingress(
 #[cfg(test)]
 #[path = "platform_manager_journey_tests.rs"]
 mod journey_tests;
+
+#[cfg(test)]
+mod future_size_tests {
+    use super::*;
+
+    fn admission_future_size<F: std::future::Future>(
+        _: impl FnOnce(
+            &'static AppState,
+            Option<Arc<PlatformManagerProducers>>,
+            super::super::platform_entry_receipts::NativeAdmission,
+        ) -> F,
+    ) -> usize {
+        std::mem::size_of::<F>()
+    }
+
+    fn verified_future_size<F: std::future::Future>(
+        _: impl FnOnce(
+            &'static AppState,
+            Arc<PlatformManagerProducers>,
+            crate::models::platform_bot_runtime_controls::PlatformBotRuntimeControls,
+            VerifiedManagerUpdate,
+            &'static str,
+            &'static str,
+            &'static super::super::telegram_new_api::TelegramApi<'static>,
+        ) -> F,
+    ) -> usize {
+        std::mem::size_of::<F>()
+    }
+
+    #[test]
+    fn verified_dispatch_keeps_legacy_transport_caller_future_small() {
+        let size = verified_future_size(dispatch_verified);
+        assert!(
+            size < 1024,
+            "verified dispatch caller future grew to {size} bytes"
+        );
+    }
+
+    #[test]
+    fn native_admission_keeps_transport_caller_futures_small() {
+        let size = admission_future_size(dispatch_native_admission);
+        assert!(size < 1024, "native admission future grew to {size} bytes");
+    }
+}

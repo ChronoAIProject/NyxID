@@ -284,14 +284,6 @@ fn build_post_message_body(reply: &OutboundReply, conversation_id: &str) -> serd
         "text": text,
     });
 
-    if super::super::channel_platform::shared_plain_text(reply) {
-        body["mrkdwn"] = serde_json::json!(false);
-        body["parse"] = serde_json::json!("none");
-        body["link_names"] = serde_json::json!(false);
-        body["unfurl_links"] = serde_json::json!(false);
-        body["unfurl_media"] = serde_json::json!(false);
-    }
-
     let thread_ts = crate::services::channel_image_audience::native_thread("slack", reply);
     if let Some(ts) = thread_ts {
         body["thread_ts"] = serde_json::json!(ts);
@@ -717,6 +709,7 @@ impl PlatformAdapter for SlackAdapter {
         let body = build_post_message_body(reply, conversation_id);
 
         let url = format!("{}/chat.postMessage", self.base_url);
+        crate::services::channel_platform::mark_provider_attempt();
         let response = http
             .post(&url)
             .header("Authorization", format!("Bearer {bot_token}"))
@@ -1682,27 +1675,5 @@ mod tests {
             assert!(matches!(error, AppError::ChannelPlatformError(detail)
                 if detail == format!("slack send failed: {expected}")));
         }
-    }
-}
-
-#[cfg(test)]
-mod shared_plain_text_tests {
-    use super::*;
-    #[test]
-    fn proof_and_link_bytes_survive_actual_outbound_payload() {
-        let text = "Open https://nyxid.test/nyxbot/link#intent_token=nyx_pli_a_b-C\n/confirm P-ABCD-EFGH\n_unmatched *markup @everyone <@123>";
-        let reply = OutboundReply {
-            text: Some(text.into()),
-            attachments: vec![],
-            reply_to_platform_message_id: None,
-            metadata: Some(serde_json::json!({"shared_plain_text":true})),
-        };
-        let body = build_post_message_body(&reply, "D123");
-        assert_eq!(body["text"], text);
-        assert_eq!(body["mrkdwn"], false);
-        assert_eq!(body["parse"], "none");
-        assert_eq!(body["link_names"], false);
-        assert_eq!(body["unfurl_links"], false);
-        assert_eq!(body["unfurl_media"], false);
     }
 }

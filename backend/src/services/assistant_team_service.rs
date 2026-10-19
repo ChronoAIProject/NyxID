@@ -1789,6 +1789,7 @@ pub async fn destroy(db: &Database, owner: &str, agent_id: &str) -> AppResult<As
                     .session(&mut *session)
                     .await?
                     .ok_or_else(not_found)?;
+                db.collection::<bson::Document>(crate::models::channel_adapter::BINDINGS).update_many(doc!{"agent_id":&agent.id,"enabled":true},doc!{"$set":{"enabled":false},"$inc":{"revision":1}}).session(&mut *session).await?;
                 super::assistant_agent_learning::destroyed_in_session(db, &agent.id, session)
                     .await?;
                 Box::pin(super::machine_access_service::destroyed_in_session(
@@ -1804,6 +1805,7 @@ pub async fn destroy(db: &Database, owner: &str, agent_id: &str) -> AppResult<As
                     cursor.stream(&mut *session).try_collect().await?;
                 let mut children = Vec::new();
                 for row in &rows {
+                    db.collection::<bson::Document>(crate::models::channel_adapter::SESSIONS).update_many(doc!{"conversation_id":&row.id,"state":{"$ne":"closed"}},doc!{"$inc":{"generation":1},"$set":{"lease_expires_at":bson::DateTime::now()}}).session(&mut *session).await?;
                     for key in
                         thread_key_ids(db, &row.user_id, std::slice::from_ref(row), &mut *session)
                             .await?
@@ -1846,6 +1848,10 @@ pub async fn destroy(db: &Database, owner: &str, agent_id: &str) -> AppResult<As
                     .delete_many(doc! {"user_id": &row.user_id, "conversation_id": &row.id})
                     .session(&mut *session)
                     .await?;
+                    db.collection::<bson::Document>(super::assistant_service_execution::COLLECTION)
+                        .delete_many(doc! {"user_id":&row.user_id,"conversation_id":&row.id})
+                        .session(&mut *session)
+                        .await?;
                     db.collection::<bson::Document>(ACKS)
                         .update_many(
                             doc! {"user_id": &row.user_id, "conversation_id": &row.id,

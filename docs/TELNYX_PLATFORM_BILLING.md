@@ -121,6 +121,7 @@ stateDiagram-v2
     Funded --> Cancelling: expires before dispatch
     Cancelling --> Released: unforwarded holds returned
     Funded --> DispatchAdmitted: meter forwarding commits atomically
+    DispatchAdmitted --> Cancelling: proven final-sender refusal before provider send
     DispatchAdmitted --> EvidenceReady: complete usage persisted
     DispatchAdmitted --> Pending: outcome or usage unverified
     EvidenceReady --> Settled: idempotent exact settlement
@@ -133,6 +134,13 @@ HTTP or MCP caller disconnects and retains its service concurrency lease.
 Timeout, process crash after admission, malformed usage, non-success provider
 responses, or response limits preserve possible liability. No ambiguous request
 is automatically retried or settled as zero.
+
+NyxBot's final authority check runs inside the managed worker immediately before
+the provider send. A typed refusal at that boundary proves the operation was not
+sent, so its dispatch bookkeeping and reserved funding can be released. A timeout,
+lease loss or uncertain transport result cannot supply that proof. Once the
+operation may have been dispatched, its pending liability and settlement survive
+Stop and caller disconnect.
 
 Authenticated callers can read their last 50 executions using
 `GET /api/v1/billing/executions`, or one using

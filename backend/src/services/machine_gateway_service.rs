@@ -53,6 +53,27 @@ fn catalog_projection() -> mongodb::bson::Document {
 pub struct Ingress {
     pub declared_id: String,
     pub git: Option<GitHttp>,
+    /// Server-issued job identity, never populated from HTTP headers.
+    pub(crate) job: Option<JobAuthority>,
+}
+
+#[derive(Clone)]
+pub(crate) enum JobAuthority {
+    Assistant(String),
+    External(String),
+}
+
+impl From<&crate::models::machine_job::MachineJob> for JobAuthority {
+    fn from(job: &crate::models::machine_job::MachineJob) -> Self {
+        if matches!(
+            job.binding,
+            Some(crate::models::machine_job::MachineJobBinding::External { .. })
+        ) {
+            Self::External(job.id.clone())
+        } else {
+            Self::Assistant(job.id.clone())
+        }
+    }
 }
 
 /// Metadata from a persisted, live-authorized job. This is inserted only after
@@ -68,11 +89,65 @@ pub struct MachineUsageAttribution {
 }
 
 impl Ingress {
+    pub(crate) fn job_id(&self) -> Option<&str> {
+        self.job.as_ref().map(|job| match job {
+            JobAuthority::Assistant(id) | JobAuthority::External(id) => id.as_str(),
+        })
+    }
+
+    pub(crate) fn assistant_job_id(&self) -> Option<&str> {
+        match self.job.as_ref()? {
+            JobAuthority::Assistant(id) => Some(id),
+            JobAuthority::External(_) => None,
+        }
+    }
+
+    pub(crate) fn external_job_id(&self) -> Option<&str> {
+        match self.job.as_ref()? {
+            JobAuthority::External(id) => Some(id),
+            JobAuthority::Assistant(_) => None,
+        }
+    }
+
     /// Only bodies known to use bounded materialization can enter a pool.
     /// Opaque uploads and git packs are one-shot streams, even for an AI pool.
     pub fn buffered(&self, headers: &axum::http::HeaderMap) -> bool {
         self.git.is_none() && structured_body(headers)
     }
+}
+
+/// Repeat the external source, grant, runtime, lease and exact declaration
+/// checks immediately before egress. External authority never acquires chat
+/// authority or a NyxBot consent bypass.
+pub(crate) fn validate_external_job<'a>(
+    db: &'a Database,
+    job_id: &'a str,
+    declared: &'a str,
+) -> futures::future::BoxFuture<'a, AppResult<()>> {
+    Box::pin(async move {
+        use crate::models::machine_job::{MachineJob, MachineJobBinding};
+        let job = db.collection::<MachineJob>(crate::models::machine_job::COLLECTION_NAME)
+            .find_one(doc! {"_id":job_id,"state":"running","expires_at":{"$gt":mongodb::bson::DateTime::now()}})
+            .await?.ok_or(AppError::MachineAuthorityStale)?;
+        if !matches!(job.binding, Some(MachineJobBinding::External { .. })) {
+            return Err(AppError::MachineAuthorityStale);
+        }
+        let auth = Box::pin(super::machine_external_service::gateway_auth(db, &job)).await?;
+        if !auth.allowed_service_ids.iter().any(|id| id == declared) {
+            return Err(AppError::MachinePermissionRevoked);
+        }
+        let available = external_services(db, &job.user_id, &auth.allowed_service_ids).await?;
+        if !available.iter().any(|service| {
+            service.id == declared
+                && job
+                    .services
+                    .iter()
+                    .any(|saved| saved.id == service.id && saved.slug == service.slug)
+        }) {
+            return Err(AppError::MachinePermissionRevoked);
+        }
+        Ok(())
+    })
 }
 
 fn structured_body(headers: &axum::http::HeaderMap) -> bool {
@@ -470,6 +545,27 @@ pub fn git_path<'a>(raw: &'a str, method: &str) -> AppResult<(&'a str, &'a str)>
         ));
     }
     Ok((host, path))
+}
+
+/// Reproduce the catalog-controlled Git translation after resolving a fresh
+/// connection. Synthetic proxy services do not carry Git metadata themselves.
+pub(crate) fn apply_live_git_target<'a>(
+    db: &'a Database,
+    target: &'a mut super::proxy_service::ProxyTarget,
+    master: bool,
+    requested: &'a GitHttp,
+) -> futures::future::BoxFuture<'a, AppResult<()>> {
+    Box::pin(async move {
+        let catalog = db
+            .collection::<crate::models::downstream_service::DownstreamService>(
+                crate::models::downstream_service::COLLECTION_NAME,
+            )
+            .find_one(doc! { "_id": &target.service.id, "is_active": true })
+            .await?
+            .ok_or_else(|| AppError::Forbidden("Git catalog service unavailable".into()))?;
+        target.service.git_http = catalog.git_http;
+        apply_git_target(target, master, requested)
+    })
 }
 
 pub fn apply_git_target(

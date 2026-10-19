@@ -139,6 +139,7 @@ mod catalog_editor_tests;
 #[cfg(test)]
 mod tools_tests;
 
+pub mod admin_assistant;
 pub mod assistant_feedback;
 #[cfg(test)]
 mod assistant_feedback_tests;
@@ -204,3 +205,5 @@ pub mod machine_external_grant;
 pub mod admin_remote_machine_platform;
 #[cfg(test)]
 mod tools_manager_tests;
+
+pub mod call_adapters;

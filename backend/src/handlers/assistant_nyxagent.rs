@@ -189,7 +189,6 @@ impl From<&crate::models::assistant_conversation::PlatformThread> for PlatformTh
 }
 #[derive(Serialize)]
 pub struct PlatformTurnOriginResponse {
-    platform: String,
     binding_id: String,
     binding_generation: i64,
     manager_authority_epoch: i64,
@@ -200,7 +199,6 @@ impl From<&crate::models::assistant_conversation::PlatformTurnOrigin>
 {
     fn from(origin: &crate::models::assistant_conversation::PlatformTurnOrigin) -> Self {
         Self {
-            platform: origin.thread.platform.clone(),
             binding_id: origin.thread.binding_id.clone(),
             binding_generation: origin.thread.binding_generation,
             manager_authority_epoch: origin.manager_authority_epoch,
@@ -440,7 +438,15 @@ impl From<crate::models::assistant_message::AssistantErrorDetail> for ErrorDetai
 }
 
 #[derive(Serialize)]
+pub struct ChannelDeliveryResponse {
+    status: String,
+    heard_prefix_chars: Option<i64>,
+    heard_prefix_matches_sent: bool,
+}
+
+#[derive(Serialize)]
 pub struct TurnMetadataResponse {
+    channel_delivery: Option<ChannelDeliveryResponse>,
     attempts: Option<u32>,
     capacity_wait_ms: Option<u64>,
 }
@@ -497,6 +503,11 @@ impl From<AssistantMessage> for MessageResponse {
             upstream_error_code: row.upstream_error_code,
             error_detail: row.error_detail.map(ErrorDetailResponse::from),
             turn_metadata: row.turn_metadata.map(|data| TurnMetadataResponse {
+                channel_delivery: data.channel_delivery.map(|e| ChannelDeliveryResponse {
+                    status: e.status,
+                    heard_prefix_chars: e.heard_prefix_chars,
+                    heard_prefix_matches_sent: e.heard_prefix_matches_sent,
+                }),
                 attempts: data.attempts,
                 capacity_wait_ms: data.capacity_wait_ms,
             }),

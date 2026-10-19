@@ -437,6 +437,8 @@ async fn approval_rejects_wrong_owner_restricted_purpose_and_dead_sources() {
         .insert_one(test_user(&other_user, UserType::Person))
         .await
         .unwrap();
+    VerifiedExternalSource::from_verified_api_key(&f.key, None)
+        .expect("the General fixture must be an eligible external source");
     type KeyMutation = Box<dyn Fn(&mut ApiKey)>;
     let cases: Vec<(&str, KeyMutation)> = vec![
         (
@@ -446,6 +448,14 @@ async fn approval_rejects_wrong_owner_restricted_purpose_and_dead_sources() {
         (
             "permission-bound key",
             Box::new(|key| key.purpose = ApiKeyPurpose::PermissionBound),
+        ),
+        (
+            "public NyxBot key with wide scopes and machine marker",
+            Box::new(|key| {
+                key.purpose = ApiKeyPurpose::PublicNyxbot;
+                key.scopes = "proxy proxy:all llm:proxy account:read admin machine".into();
+                key.machine_external_grants_present = true;
+            }),
         ),
         (
             "assistant key",
@@ -470,9 +480,17 @@ async fn approval_rejects_wrong_owner_restricted_purpose_and_dead_sources() {
             .await
             .unwrap();
         assert!(
-            approve_api_key(&f.db, &f.user, &key.id, key.state_version, &f.selection())
-                .await
-                .is_err(),
+            matches!(
+                VerifiedExternalSource::from_verified_api_key(&key, None),
+                Err(AppError::MachineNotAllowed)
+            ),
+            "ineligible source constructed: {label}"
+        );
+        assert!(
+            matches!(
+                approve_api_key(&f.db, &f.user, &key.id, key.state_version, &f.selection()).await,
+                Err(AppError::MachineNotAllowed)
+            ),
             "ineligible source accepted: {label}"
         );
     }

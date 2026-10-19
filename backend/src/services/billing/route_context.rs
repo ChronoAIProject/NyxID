@@ -53,6 +53,8 @@ pub struct BillingRouteContext {
     pub machine_usage: Option<crate::models::usage_meter::MachineUsageAttribution>,
     /// An internal durable public call reservation; never accepted from HTTP.
     pub(crate) public_admission: Option<PublicBillingAdmission>,
+    /// Internal readiness probe uses the same durable funding transaction.
+    pub(crate) public_probe: bool,
     pub(crate) managed_admission: Option<ManagedBillingAdmission>,
     pub(crate) managed_billing: Option<ServiceBilling>,
     pub billing_request_id: String,
@@ -187,6 +189,7 @@ impl BillingRouteContext {
         }
         Self {
             public_admission: None,
+            public_probe: false,
             managed_admission: None,
             managed_billing: service_billing
                 .filter(|billing| billing.managed_execution.is_some())

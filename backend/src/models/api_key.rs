@@ -14,6 +14,8 @@ pub enum ApiKeyPurpose {
     PermissionBound,
     /// Server-issued, session-bound public runtime capability. Never a general key.
     PublicNyxbot,
+    /// Dedicated primary transport capability; accepted only by shared entry ingress.
+    SharedEntryTransport,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

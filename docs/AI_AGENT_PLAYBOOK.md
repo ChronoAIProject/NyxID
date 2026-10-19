@@ -3423,3 +3423,19 @@ Send media using `reply.attachments` on `/channel-relay/reply` or `message.attac
 A source can instead be `{"type":"url","url":"https://public.example/report.pdf"}`. Check declared outbound kinds, use at most ten attachments, and stay within `CHANNEL_MEDIA_MAX_BYTES` (default 20 MiB per attachment; the aggregate JSON body also has a base64-sized limit). Attachment-only messages are supported. `/reply/update` rejects attachments. X supports images/video with OAuth `media.write`; older connections require re-consent. OpenClaw declares no media.
 
 History contains only routing metadata plus inbound attachment descriptors/download URLs. ADR-013 still forbids persisted bytes, message bodies, outbound captions/filenames, or raw webhook content. Download URLs expire with retained rows/provider resources and are not archival storage. `/send` fingerprints media descriptors/content hashes; changing media under the same idempotency key returns 409. See [Channel Bot Relay](CHANNEL_BOT_RELAY.md#media) for transport details and SSRF protections.
+
+### Oracle pool lifecycle (unreleased)
+
+Oracle consumer operations live under `/api/v1/oracle`. Pool managers transfer via
+`POST /pools/{pool}/transfer` with `owner_user_id` (person/org UUID) and optional
+`rotate_worker_token`; the shared token is preserved by default. Source and
+destination management are both required; personal destination is your own active
+person account. Org-visible → personal requires `visibility:"private"`. The
+response contains the full updated `pool` and optional one-time `worker_token`.
+`DELETE /pools/{pool}` returns `{id,slug,status:"deleted",cleanup:"asynchronous",deleted_at}` and is
+idempotent for authorized retries; physical cleanup resumes in bounded background
+transactions. Settle queued/dispatched tasks and
+queued/delivered commands first (`oracle_pool_active_work`, 409). Deleted pools
+reserve their slug, revoke workers, and retain terminal-task TTL/history. These
+routes require the first tagged release containing #1527/#1542 and a fully
+upgraded/drained backend fleet. Full contract: `docs/ORACLE_RELAY.md`.

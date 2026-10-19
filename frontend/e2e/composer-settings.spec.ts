@@ -36,7 +36,8 @@ for (const width of [1280, 390, 320]) {
     await trigger.click();
     const menu = page.getByRole("menu", { name: "Model and permissions" });
     await expect(menu).toBeVisible();
-    await expect(menu.getByRole("menuitem")).toHaveCount(3);
+    await expect(menu.getByRole("menuitem")).toHaveCount(4);
+    await expect(menu.getByRole("menuitem", { name: /Next message connection/ })).toBeVisible();
     await expect(
       menu.getByRole("menuitemcheckbox", { name: "Thinking mode" }),
     ).toHaveCount(0);
@@ -295,7 +296,8 @@ for (const width of [1280, 320]) {
     await expect(trigger).toHaveText("Auto");
     await trigger.click();
     const menu = page.getByRole("menu", { name: "Thinking and permissions" });
-    await expect(menu.getByRole("menuitem")).toHaveCount(1);
+    await expect(menu.getByRole("menuitem")).toHaveCount(2);
+    await expect(menu.getByRole("menuitem", { name: /Next message connection/ })).toBeVisible();
     await expect(
       menu.getByRole("menuitem", { name: /^Permissions/ }),
     ).toBeVisible();
@@ -370,7 +372,37 @@ test("overflow stays scrollable after resize with controls directly below the te
   await expect(page.locator("[data-composer-editor]")).not.toHaveClass(/flex-col/);
 });
 
-test("external composer resizes its maximum while short drafts remain compact", async ({ page }, testInfo) => {
+test("multiline composer follows drag height before the draft overflows", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await openAssistant(page, { faults: { nyxagentEnabled: true, voiceEnabled: true } });
+  const input = composerInput(page);
+  const draft = "Review the changes.\nExplain the tradeoffs.\nSuggest the next step.";
+  await input.fill(draft);
+  const draftBefore = await input.innerText();
+  const handle = page.getByRole("separator", { name: "Resize composer" });
+  await expect(handle).toBeVisible();
+  await expect(input).toHaveCSS("overflow-y", "hidden");
+  // Wait for the handle to be stable before reading coordinates for raw mouse
+  // input; auto-growth can still be animating when the handle first appears.
+  await handle.hover();
+  const initial = (await input.boundingBox())!.height;
+  const grip = (await handle.boundingBox())!;
+  await page.mouse.move(grip.x + grip.width / 2, grip.y + grip.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(grip.x + grip.width / 2, grip.y + grip.height / 2 - 160, { steps: 8 });
+  await page.mouse.up();
+  await expect.poll(async () => (await input.boundingBox())!.height).toBeGreaterThan(initial + 140);
+  const resized = (await input.boundingBox())!.height;
+  expect(await input.innerText()).toBe(draftBefore);
+  await handle.focus();
+  await page.keyboard.press("ArrowDown");
+  await expect.poll(async () => (await input.boundingBox())!.height).toBeLessThan(resized - 15);
+  await handle.dblclick();
+  await expect.poll(async () => Math.abs((await input.boundingBox())!.height - initial)).toBeLessThan(2);
+  expect(await input.innerText()).toBe(draftBefore);
+});
+
+test("external composer resizes while short drafts remain compact", async ({ page }, testInfo) => {
   await page.setViewportSize({ width: 1280, height: 900 });
   await openAssistant(page, { faults: { nyxagentEnabled: true, voiceEnabled: true } });
   const input = composerInput(page);
@@ -378,6 +410,7 @@ test("external composer resizes its maximum while short drafts remain compact", 
   await input.fill(draft);
   const handle = page.getByRole("separator", { name: "Resize composer" });
   await expect(handle).toBeVisible();
+  await handle.hover();
   const initialHeight = (await input.boundingBox())!.height;
   const grip = (await handle.boundingBox())!;
   await page.mouse.move(grip.x + grip.width / 2, grip.y + grip.height / 2);
@@ -396,9 +429,140 @@ test("external composer resizes its maximum while short drafts remain compact", 
   await page.keyboard.press("ArrowDown");
   await expect.poll(async () => (await input.boundingBox())!.height).toBeLessThan(expandedHeight - 15);
   await page.setViewportSize({ width: 390, height: 500 });
-  await expect.poll(async () => (await input.boundingBox())!.height).toBeLessThanOrEqual(250);
+  await expect.poll(async () => (await page.locator("[data-composer-surface]").boundingBox())!.height).toBeLessThanOrEqual(450);
   await handle.dblclick();
   await expect.poll(async () => (await input.boundingBox())!.height).toBeLessThan(120);
+  await input.focus();
   await input.fill("");
+  await expect(input).toHaveText("");
   await expect(page.getByRole("button", { name: "Open voice call" })).toBeVisible();
 });
+
+for (const width of [390, 1280]) {
+  test(`composer grows to 90vh and overlays chat beyond its reserved band at ${width}px`, async ({ page }, testInfo) => {
+    await page.setViewportSize({ width, height: 900 });
+    await openAssistant(page, { faults: { nyxagentEnabled: true, voiceEnabled: true } });
+    await sendMessage(page, "List connected services");
+    const reply = page.getByText("Your connected services are ready.", { exact: false });
+    await expect(reply).toBeVisible();
+    const input = composerInput(page);
+    const draft = "Review the changes.\nExplain the tradeoffs.\nSuggest the next step.";
+    await input.fill(draft);
+    const originalText = await input.innerText();
+    const handle = page.getByRole("separator", { name: "Resize composer" });
+    const surface = page.locator("[data-composer-surface]");
+    const band = page.locator("[data-composer-band]");
+    await handle.hover();
+    const initial = (await surface.boundingBox())!;
+    const grip = (await handle.boundingBox())!;
+    await page.mouse.move(grip.x + grip.width / 2, grip.y + grip.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(grip.x + grip.width / 2, 10, { steps: 20 });
+    await page.mouse.up();
+    await expect.poll(async () => Math.abs((await surface.boundingBox())!.height - 810)).toBeLessThan(2);
+    await expect.poll(async () => (await band.boundingBox())!.height).toBe(450);
+    const transcript = page.locator("main div.flex-1.overflow-y-auto > div").first();
+    await expect(transcript).toHaveCSS("padding-bottom", "474px");
+    const full = (await surface.boundingBox())!;
+    const reserved = (await band.boundingBox())!;
+    expect(full.y).toBeLessThan(reserved.y - 350);
+    expect(Math.abs(full.y + full.height - initial.y - initial.height)).toBeLessThan(2);
+    await expect(page.getByRole("button", { name: "Send message", exact: true })).toBeInViewport();
+    expect(await input.innerText()).toBe(originalText);
+    await page.screenshot({ path: testInfo.outputPath(`composer-overlay-${width}.png`), animations: "disabled" });
+    const replyTop = (await reply.boundingBox())!.y;
+    await handle.focus();
+    await page.keyboard.press("ArrowDown");
+    await expect.poll(async () => (await surface.boundingBox())!.height).toBeLessThan(790);
+    await expect(transcript).toHaveCSS("padding-bottom", "474px");
+    expect((await reply.boundingBox())!.y).toBe(replyTop);
+
+    // Shrinking below the threshold returns to normal measured chat spacing.
+    await handle.focus();
+    await page.keyboard.press("Home");
+    await expect.poll(async () => Math.abs((await band.boundingBox())!.height - (await surface.boundingBox())!.height)).toBeLessThan(2);
+    await page.keyboard.press("End");
+    await expect.poll(async () => Math.abs((await surface.boundingBox())!.height - 810)).toBeLessThan(2);
+
+    // The software keyboard changes visualViewport without a window resize.
+    await page.evaluate(() => {
+      Object.defineProperties(window.visualViewport!, {
+        height: { configurable: true, value: 400 },
+        offsetTop: { configurable: true, value: 60 },
+      });
+      window.visualViewport!.dispatchEvent(new Event("resize"));
+    });
+    await expect.poll(async () => (await surface.boundingBox())!.height).toBeLessThanOrEqual(360);
+    await expect.poll(async () => (await surface.boundingBox())!.y).toBeGreaterThanOrEqual(112);
+    await expect.poll(async () => {
+      const bounds = (await surface.boundingBox())!;
+      return bounds.y + bounds.height;
+    }).toBeLessThanOrEqual(461);
+    await page.evaluate(() => {
+      Reflect.deleteProperty(window.visualViewport!, "height");
+      Reflect.deleteProperty(window.visualViewport!, "offsetTop");
+      window.visualViewport!.dispatchEvent(new Event("resize"));
+    });
+    await expect.poll(async () => Math.abs((await surface.boundingBox())!.height - 810)).toBeLessThan(2);
+
+    // Recalculate the whole surface, including toolbar and padding, on resize.
+    await page.setViewportSize({ width, height: 400 });
+    await expect.poll(async () => (await surface.boundingBox())!.height).toBeLessThanOrEqual(360);
+    await expect(handle).toBeInViewport();
+    await expect(page.getByRole("button", { name: "Send message", exact: true })).toBeInViewport();
+    expect((await handle.boundingBox())!.y).toBeGreaterThanOrEqual(52);
+    expect(await input.innerText()).toBe(originalText);
+    await input.fill("A long draft remains scrollable.\n".repeat(100));
+    await expect(input).toHaveCSS("overflow-y", "scroll");
+    await input.evaluate((element) => { element.scrollTop = element.scrollHeight; });
+    await expect.poll(() => input.evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
+    await handle.dblclick();
+    await expect.poll(async () => (await input.boundingBox())!.height).toBeLessThan(120);
+  });
+}
+
+for (const width of [1280, 320]) {
+  test(`exact organization connection picker sends and resets at ${width}px`, async ({ page }, testInfo) => {
+    await page.setViewportSize({ width, height: 900 });
+    await openAssistant(page, { faults: { nyxagentEnabled: true, modelControlsEnabled: true } });
+    const sent: string[] = [];
+    await page.exposeFunction("capturePolicyRequest", (body: string) => { sent.push(body); });
+    await page.evaluate(() => {
+      const original = globalThis.__nyxidAssistantHttpMock;
+      if (!original) throw new Error("Missing HTTP fixture");
+      const capture = (globalThis as typeof globalThis & {
+        capturePolicyRequest: (body: string) => Promise<void>;
+      }).capturePolicyRequest;
+      globalThis.__nyxidAssistantHttpMock = async (request) => {
+        if (request.init.method === "POST" && typeof request.init.body === "string") {
+          await capture(request.init.body);
+        }
+        return original(request);
+      };
+    });
+    const trigger = page.getByRole("button", { name: /Model and permissions:/ });
+    await trigger.click();
+    await page.getByRole("menuitem", { name: /Next message connection/ }).click();
+    await page.getByRole("menuitemradio", { name: /ChronoAI.*Shared GPT-4o/ }).click();
+    await expect(trigger).toHaveAccessibleName(/Connection: ChronoAI.*Shared GPT-4o/);
+    const bounds = (await trigger.boundingBox())!;
+    expect(bounds.x).toBeGreaterThanOrEqual(0);
+    expect(bounds.x + bounds.width).toBeLessThanOrEqual(width);
+    await page.screenshot({ path: testInfo.outputPath("connection-selected.png") });
+    await composerInput(page).fill("Use the selected organization account");
+    await page.getByRole("button", { name: "Send message", exact: true }).click();
+    await expect.poll(() => sent.some((body) => {
+      const request: { text?: string } = JSON.parse(body);
+      return request.text === "/service key-0008\nUse the selected organization account";
+    })).toBe(true);
+    await expect(page).toHaveURL(/c=nyxa-/);
+    await expect(trigger).not.toHaveAccessibleName(/Connection:/);
+    await expect(page.getByRole("button", { name: "Stop assistant turn" })).toHaveCount(0);
+    await composerInput(page).fill("Use the saved order next time");
+    await page.getByRole("button", { name: "Send message", exact: true }).click();
+    await expect.poll(() => sent.some((body) => {
+      const request: { text?: string } = JSON.parse(body);
+      return request.text === "Use the saved order next time";
+    })).toBe(true);
+  });
+}

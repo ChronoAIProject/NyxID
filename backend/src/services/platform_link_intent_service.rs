@@ -1,4 +1,6 @@
 //! Personal proofs: 24-hour bearer intents followed by fresh 10-minute reviews.
+use super::platform_entry_scope as scope;
+use super::platform_manager_contract::{EntryIdentity, SenderIdentity};
 use super::{
     api_key_mutation_service::{map_transaction_error, transaction_result},
     platform_manager_contract::{ManagerChatKind, PublicExecutionContext, VerifiedManagerUpdate},
@@ -26,6 +28,7 @@ use rand::{RngCore, rngs::OsRng};
 use zeroize::Zeroizing;
 
 pub struct IntentIssued {
+    pub intent_id: String,
     #[cfg(test)]
     pub intent: PlatformLinkIntent,
     pub token: Option<Zeroizing<String>>,
@@ -36,10 +39,10 @@ pub struct ChallengeApproved {
 }
 
 pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> {
+    super::platform_entry_migration::ensure_indexes(db).await?;
     let intents = db.collection::<PlatformLinkIntent>(COLLECTION_NAME);
     for index in [
         IndexModel::builder().keys(doc! {"token_lookup_hmac":1}).options(IndexOptions::builder().unique(true).build()).build(),
-        IndexModel::builder().keys(doc! {"platform_config_id":1,"manager_authority_epoch":1,"telegram_sender_id":1,"initiation_ref":1}).options(IndexOptions::builder().unique(true).build()).build(),
         IndexModel::builder().keys(doc! {"claimant_user_id":1,"state":1}).build(),
         IndexModel::builder().keys(doc! {"platform_config_id":1,"manager_authority_epoch":1,"telegram_sender_id":1,"state":1}).build(),
         IndexModel::builder().keys(doc! {"expires_at":1,"state":1}).build(),
@@ -77,20 +80,44 @@ fn token_lookup(key: &[u8], token: &str) -> AppResult<String> {
     }
     Ok(hash(key, "platform-personal-intent-lookup:v1", &[token]))
 }
+fn identity_hash(
+    key: &[u8],
+    legacy_domain: &str,
+    entry: &EntryIdentity,
+    sender: &SenderIdentity,
+    prefix: &[&str],
+    suffix: &[&str],
+) -> String {
+    let identity = scope::hmac_identity(entry, sender);
+    let domain = match entry {
+        EntryIdentity::TelegramV1 { .. } => legacy_domain.to_owned(),
+        EntryIdentity::NativeV2 { .. } => format!(
+            "{}:v2",
+            legacy_domain.strip_suffix(":v1").expect("versioned domain")
+        ),
+    };
+    let parts = prefix
+        .iter()
+        .copied()
+        .chain(identity.iter().map(String::as_str))
+        .chain(suffix.iter().copied())
+        .collect::<Vec<_>>();
+    hash(key, &domain, &parts)
+}
 fn intent_hash(key: &[u8], row: &PlatformLinkIntent, token: &str) -> String {
-    hash(
+    identity_hash(
         key,
         "platform-personal-intent:v1",
+        &row.entry,
+        &row.sender,
         &[
             &row.purpose,
             &row.id,
             &row.platform_config_id,
             &row.manager_bot_id,
             &row.manager_authority_epoch.to_string(),
-            &row.telegram_sender_id.to_string(),
-            &row.telegram_chat_id.to_string(),
-            token,
         ],
+        &[token],
     )
 }
 fn normalize_code(code: &str) -> AppResult<Zeroizing<String>> {
@@ -119,9 +146,11 @@ fn code_lookup(key: &[u8], code: &str) -> AppResult<String> {
     ))
 }
 fn challenge_hash(key: &[u8], row: &PlatformLinkChallenge, code: &str) -> AppResult<String> {
-    Ok(hash(
+    Ok(identity_hash(
         key,
         "platform-personal-challenge:v1",
+        &row.entry,
+        &row.sender,
         &[
             &row.purpose,
             &row.id,
@@ -129,8 +158,8 @@ fn challenge_hash(key: &[u8], row: &PlatformLinkChallenge, code: &str) -> AppRes
             &row.platform_config_id,
             &row.manager_bot_id,
             &row.manager_authority_epoch.to_string(),
-            &row.telegram_sender_id.to_string(),
-            &row.telegram_chat_id.to_string(),
+        ],
+        &[
             &row.reviewed_user_id,
             &row.review_digest,
             normalize_code(code)?.as_str(),
@@ -140,9 +169,11 @@ fn challenge_hash(key: &[u8], row: &PlatformLinkChallenge, code: &str) -> AppRes
 fn review_hash(key: &[u8], row: &PlatformLinkChallenge) -> AppResult<String> {
     let previous =
         serde_json::to_string(&row.previous_binding).map_err(|_| bindings::conflict())?;
-    Ok(hash(
+    Ok(identity_hash(
         key,
         "platform-personal-consent:v1",
+        &row.entry,
+        &row.sender,
         &[
             &row.purpose,
             &row.id,
@@ -150,8 +181,8 @@ fn review_hash(key: &[u8], row: &PlatformLinkChallenge) -> AppResult<String> {
             &row.platform_config_id,
             &row.manager_bot_id,
             &row.manager_authority_epoch.to_string(),
-            &row.telegram_sender_id.to_string(),
-            &row.telegram_chat_id.to_string(),
+        ],
+        &[
             &row.reviewed_user_id,
             &row.reviewed_access_mode,
             &row.consent_version.to_string(),
@@ -164,14 +195,31 @@ fn proof_command(update: &VerifiedManagerUpdate, forwarded: bool) -> AppResult<(
         || update.command_eligibility
             != super::platform_manager_contract::ManagerCommandEligibility::OriginalPrivateMessage
         || update.chat_kind != ManagerChatKind::Private
-        || update.sender_id <= 0
-        || update.sender_id != update.chat_id
+        || scope::validate(&update.entry, &update.manager_bot_id, Some(&update.sender)).is_err()
     {
         return Err(AppError::Forbidden(
-            "Personal controls require the initiating private Telegram chat".into(),
+            "Personal controls require the initiating private chat".into(),
         ));
     }
     Ok(())
+}
+fn confirmation_rate_key(update: &VerifiedManagerUpdate) -> String {
+    match &update.sender {
+        SenderIdentity::TelegramV1 {
+            telegram_sender_id,
+            telegram_chat_id,
+        } => format!(
+            "confirm:{}:{}:{}",
+            update.profile_id, telegram_sender_id, telegram_chat_id
+        ),
+        SenderIdentity::NativeV2 { .. } => format!(
+            "confirm:{}:v2:{}",
+            update.profile_id,
+            super::mcp_service::canonical_sha256(
+                serde_json::json!({"entry":update.entry,"sender":update.sender})
+            )
+        ),
+    }
 }
 fn live() -> Document {
     doc! {"$gt":["$expires_at","$$NOW"]}
@@ -194,7 +242,7 @@ pub async fn begin_in_session(
         session,
         &update.profile_id,
         &update.manager_bot_id,
-        update.telegram_bot_id,
+        &update.entry,
         Some(&update.observation_id),
     )
     .await?
@@ -205,8 +253,7 @@ pub async fn begin_in_session(
         key,
         IntentMint {
             controls: &controls,
-            sender_id: update.sender_id,
-            chat_id: update.chat_id,
+            sender: &update.sender,
             reference: initiation_ref,
         },
     )
@@ -228,8 +275,7 @@ pub(crate) async fn begin_public_in_session(
         key,
         IntentMint {
             controls: &authority.controls,
-            sender_id: authority.sender_id,
-            chat_id: authority.chat_id,
+            sender: &authority.sender,
             reference: &authority.reference,
         },
     )
@@ -253,11 +299,13 @@ pub(crate) async fn fence_public_intent_in_session(
     let mut filter = doc! {
         "token_lookup_hmac": lookup, "purpose": PURPOSE,
         "platform_config_id": &controls.platform_config_id,
-        "manager_bot_id": &controls.manager_bot_id, "telegram_bot_id": controls.telegram_bot_id,
+        "manager_bot_id": &controls.manager_bot_id,
         "manager_authority_epoch": controls.manager_authority_epoch,
-        "telegram_sender_id": authority.sender_id, "telegram_chat_id": authority.chat_id,
         "initiation_ref": &authority.reference, "state": "pending", "$expr": live(),
     };
+    filter.extend(scope::entry_fields(&controls.entry));
+    filter.extend(scope::sender_fields(&authority.sender, false));
+    scope::exclude_other_version(&mut filter, &controls.entry);
     let row = rows
         .find_one(filter.clone())
         .session(&mut *session)
@@ -284,8 +332,7 @@ pub(crate) async fn fence_public_intent_in_session(
 
 struct PublicIntentAuthority {
     controls: PlatformBotRuntimeControls,
-    sender_id: i64,
-    chat_id: i64,
+    sender: SenderIdentity,
     reference: String,
 }
 
@@ -301,23 +348,35 @@ async fn fence_public_authority_in_session(
     };
     let ingress = &context.ingress;
     let manager = &ingress.manager;
-    // A Public receipt was admitted only from a verified private Telegram chat.
+    // A public receipt was admitted only from verified private native ingress.
     // Match its own identity too: the budget fence checks execution linkage but
     // deliberately is not a constructor of private-message provenance.
-    let receipt = db.collection::<PlatformManagerIngress>(RECEIPTS).find_one(doc! {
+    let mut receipt_filter = doc! {
         "_id": &ingress.ingress.receipt_id, "claim_id": &ingress.ingress.claim_id,
         "profile_id": &manager.profile_id, "manager_bot_id": &manager.manager_bot_id,
-        "telegram_bot_id": manager.telegram_bot_id, "manager_authority_epoch": manager.manager_authority_epoch,
-        "sender_id": ingress.sender_id, "chat_id": ingress.chat_id,
+        "manager_authority_epoch": manager.manager_authority_epoch,
         "audience.kind": "public", "audience.public_policy_revision": ingress.public_policy_revision,
         "phase": "executing", "settled_at": bson::Bson::Null,
         "execution.public_session_id": &context.public_session_id,
         "execution.conversation_id": &context.turn.conversation_id, "execution.turn_id": &context.turn.turn_id,
         "execution.payer_user_id": &context.sponsor_owner_user_id,
         "execution.public_policy_digest": &context.policy_digest,
-    }).session(&mut *session).await?.ok_or_else(bindings::unavailable)?;
-    if receipt.sender_id <= 0
-        || receipt.chat_id != receipt.sender_id
+    };
+    receipt_filter.extend(scope::entry_fields(&manager.entry));
+    receipt_filter.extend(scope::sender_fields(&ingress.sender, true));
+    scope::exclude_other_version(&mut receipt_filter, &manager.entry);
+    let receipt = db
+        .collection::<PlatformManagerIngress>(RECEIPTS)
+        .find_one(receipt_filter)
+        .session(&mut *session)
+        .await?
+        .ok_or_else(bindings::unavailable)?;
+    if scope::validate(
+        &receipt.entry,
+        &receipt.manager_bot_id,
+        Some(&receipt.sender),
+    )
+    .is_err()
         || receipt.observation_id.is_empty()
     {
         return Err(bindings::unavailable());
@@ -343,7 +402,7 @@ async fn fence_public_authority_in_session(
         session,
         &receipt.profile_id,
         &receipt.manager_bot_id,
-        receipt.telegram_bot_id,
+        &receipt.entry,
         Some(&receipt.observation_id),
     )
     .await?
@@ -369,16 +428,14 @@ async fn fence_public_authority_in_session(
     );
     Ok(PublicIntentAuthority {
         controls,
-        sender_id: receipt.sender_id,
-        chat_id: receipt.chat_id,
+        sender: receipt.sender,
         reference,
     })
 }
 
 struct IntentMint<'a> {
     controls: &'a PlatformBotRuntimeControls,
-    sender_id: i64,
-    chat_id: i64,
+    sender: &'a SenderIdentity,
     reference: &'a str,
 }
 
@@ -390,8 +447,12 @@ async fn mint_intent_in_session(
 ) -> AppResult<IntentIssued> {
     let controls = subject.controls;
     let initiation_ref = subject.reference;
-    if subject.sender_id <= 0
-        || subject.chat_id != subject.sender_id
+    if scope::validate(
+        &controls.entry,
+        &controls.manager_bot_id,
+        Some(subject.sender),
+    )
+    .is_err()
         || initiation_ref.is_empty()
         || initiation_ref.len() > 128
         || controls.retired
@@ -400,8 +461,9 @@ async fn mint_intent_in_session(
         return Err(bindings::unavailable());
     }
     let rows = db.collection::<PlatformLinkIntent>(COLLECTION_NAME);
-    if let Some(_existing) = rows.find_one(doc! {"platform_config_id":&controls.platform_config_id,"manager_authority_epoch":controls.manager_authority_epoch,"telegram_sender_id":subject.sender_id,"initiation_ref":initiation_ref}).session(&mut *session).await? {
+    if let Some(_existing) = rows.find_one(doc! {"platform_config_id":&controls.platform_config_id,"manager_authority_epoch":controls.manager_authority_epoch,scope::actor_key(subject.sender,false):scope::actor_value(subject.sender),"initiation_ref":initiation_ref}).session(&mut *session).await? {
         return Ok(IntentIssued {
+            intent_id: _existing.id.clone(),
             #[cfg(test)]
             intent: _existing,
             token: None,
@@ -410,7 +472,18 @@ async fn mint_intent_in_session(
     if !super::coordination_service::RateWindowStore::admit_in_session(
         db,
         "personal_intent_sender",
-        &format!("{}:{}", controls.platform_config_id, subject.sender_id),
+        &match subject.sender {
+            SenderIdentity::TelegramV1 {
+                telegram_sender_id, ..
+            } => format!("{}:{}", controls.platform_config_id, telegram_sender_id),
+            SenderIdentity::NativeV2 { .. } => format!(
+                "{}:v2:{}",
+                controls.platform_config_id,
+                super::mcp_service::canonical_sha256(
+                    serde_json::json!({"entry":controls.entry,"sender":subject.sender})
+                )
+            ),
+        },
         10,
         std::time::Duration::from_secs(3600),
         session,
@@ -428,10 +501,9 @@ async fn mint_intent_in_session(
         purpose: PURPOSE.into(),
         platform_config_id: controls.platform_config_id.clone(),
         manager_bot_id: controls.manager_bot_id.clone(),
-        telegram_bot_id: controls.telegram_bot_id,
+        entry: controls.entry.clone(),
         manager_authority_epoch: controls.manager_authority_epoch,
-        telegram_sender_id: subject.sender_id,
-        telegram_chat_id: subject.chat_id,
+        sender: subject.sender.clone(),
         initiation_ref: initiation_ref.into(),
         token_lookup_hmac: token_lookup(key, &token)?,
         token_hmac: String::new(),
@@ -446,6 +518,7 @@ async fn mint_intent_in_session(
     row.token_hmac = intent_hash(key, &row, &token);
     rows.insert_one(&row).session(session).await?;
     Ok(IntentIssued {
+        intent_id: row.id.clone(),
         #[cfg(test)]
         intent: row,
         token: Some(token),
@@ -464,6 +537,25 @@ pub async fn preview(db: &Database, key: &[u8], token: &str) -> AppResult<Platfo
         return Err(bindings::unavailable());
     }
     Ok(row)
+}
+
+/// The committed effect identifies an intent; the ephemeral bearer must prove
+/// that exact row too. Never return token material or accept a different intent.
+pub(crate) async fn command_token_matches_in_session(
+    db: &Database,
+    session: &mut ClientSession,
+    key: &[u8],
+    intent_id: &str,
+    token: &str,
+) -> AppResult<bool> {
+    let lookup = match token_lookup(key, token) {
+        Ok(value) => value,
+        Err(_) => return Ok(false),
+    };
+    let Some(row) = db.collection::<PlatformLinkIntent>(COLLECTION_NAME)
+        .find_one(doc! {"_id":intent_id,"token_lookup_hmac":lookup,"purpose":PURPOSE,"state":"pending","$expr":live()})
+        .session(session).await? else { return Ok(false); };
+    Ok(equal(&row.token_hmac, &intent_hash(key, &row, token)))
 }
 
 /// Independent of the decision transaction: rejected guesses retain their cost.
@@ -579,11 +671,11 @@ pub async fn review(
             let intents=db.collection::<PlatformLinkIntent>(COLLECTION_NAME);
             let intent=intents.find_one(doc! {"token_lookup_hmac":&lookup,"purpose":PURPOSE,"state":"pending","$expr":live(),"$or":[{"claimant_user_id":bson::Bson::Null},{"claimant_user_id":&actor}]}).session(&mut *session).await?.ok_or_else(bindings::unavailable)?;
             if !equal(&intent.token_hmac,&intent_hash(&key,&intent,&token)) {return Err(bindings::unavailable());}
-            let controls=super::platform_bot_runtime_control_service::fence_manager_in_session(&db,session,&intent.platform_config_id,&intent.manager_bot_id,intent.telegram_bot_id,None).await?.ok_or_else(bindings::unavailable)?;
+            let controls=super::platform_bot_runtime_control_service::fence_manager_in_session(&db,session,&intent.platform_config_id,&intent.manager_bot_id,&intent.entry,None).await?.ok_or_else(bindings::unavailable)?;
             if controls.retired || controls.emergency_stopped || controls.manager_authority_epoch!=intent.manager_authority_epoch {return Err(bindings::unavailable());}
-            let previous=bindings::latest_for_sender(&db,session,&intent.platform_config_id,intent.manager_authority_epoch,intent.telegram_sender_id).await?;
+            let previous=bindings::latest_for_sender(&db,session,&intent.platform_config_id,intent.manager_authority_epoch,&intent.sender).await?;
             let now=controls.updated_at;
-            let mut row=PlatformLinkChallenge {id:challenge_id.clone(),intent_id:intent.id.clone(),purpose:PURPOSE.into(),platform_config_id:intent.platform_config_id.clone(),manager_bot_id:intent.manager_bot_id.clone(),telegram_bot_id:intent.telegram_bot_id,manager_authority_epoch:intent.manager_authority_epoch,telegram_sender_id:intent.telegram_sender_id,telegram_chat_id:intent.telegram_chat_id,reviewed_user_id:actor.clone(),reviewed_access_mode:mode.clone(),consent_version:CONSENT_VERSION,review_digest:String::new(),previous_binding:previous.as_ref().map(reviewed),state:ChallengeState::Review,code_lookup_hmac:None,code_hmac:None,completion:None,created_at:now,expires_at:std::cmp::min(now+Duration::minutes(10),intent.expires_at),purge_after:intent.purge_after};
+            let mut row=PlatformLinkChallenge {id:challenge_id.clone(),intent_id:intent.id.clone(),purpose:PURPOSE.into(),platform_config_id:intent.platform_config_id.clone(),manager_bot_id:intent.manager_bot_id.clone(),entry:intent.entry.clone(),manager_authority_epoch:intent.manager_authority_epoch,sender:intent.sender.clone(),reviewed_user_id:actor.clone(),reviewed_access_mode:mode.clone(),consent_version:CONSENT_VERSION,review_digest:String::new(),previous_binding:previous.as_ref().map(reviewed),state:ChallengeState::Review,code_lookup_hmac:None,code_hmac:None,completion:None,created_at:now,expires_at:std::cmp::min(now+Duration::minutes(10),intent.expires_at),purge_after:intent.purge_after};
             row.review_digest=review_hash(&key,&row)?;
             db.collection::<PlatformLinkChallenge>(CHALLENGES).update_many(doc! {"intent_id":&intent.id,"state":{"$in":["review","awaiting_chat_confirmation"]}},doc! {"$set":{"state":"cancelled"}}).session(&mut *session).await?;
             intents.update_one(doc! {"_id":&intent.id,"state":"pending"},doc! {"$set":{"claimant_user_id":&actor,"current_challenge_id":&row.id}}).session(&mut *session).await?;
@@ -628,14 +720,15 @@ pub async fn approve(
             if !fence_access_mode(&db,session,&actor,&row.reviewed_access_mode).await? {return Err(bindings::conflict());}
             if row.previous_binding.as_ref().is_some_and(|b|b.state==PersonalBindingState::Active && b.user_id!=actor) && !replace_existing {return Err(AppError::Conflict("Explicit account replacement acknowledgement required".into()));}
             let intent=db.collection::<PlatformLinkIntent>(COLLECTION_NAME).find_one(doc! {"_id":&row.intent_id,"claimant_user_id":&actor,"current_challenge_id":&row.id,"state":"pending","$expr":live()}).session(&mut *session).await?.ok_or_else(bindings::unavailable)?;
-            let controls=super::platform_bot_runtime_control_service::fence_manager_in_session(&db,session,&row.platform_config_id,&row.manager_bot_id,row.telegram_bot_id,None).await?.ok_or_else(bindings::unavailable)?;
+            let controls=super::platform_bot_runtime_control_service::fence_manager_in_session(&db,session,&row.platform_config_id,&row.manager_bot_id,&row.entry,None).await?.ok_or_else(bindings::unavailable)?;
             if controls.retired || controls.emergency_stopped || controls.manager_authority_epoch!=row.manager_authority_epoch {return Err(bindings::unavailable());}
-            if bindings::latest_for_sender(&db,session,&row.platform_config_id,row.manager_authority_epoch,row.telegram_sender_id).await?.as_ref().map(reviewed)!=row.previous_binding {return Err(bindings::conflict());}
+            if bindings::latest_for_sender(&db,session,&row.platform_config_id,row.manager_authority_epoch,&row.sender).await?.as_ref().map(reviewed)!=row.previous_binding {return Err(bindings::conflict());}
             if row.state==ChallengeState::AwaitingChatConfirmation {return Ok(ChallengeApproved {challenge:row,confirmation_command:None});}
             row.state=ChallengeState::AwaitingChatConfirmation;row.code_lookup_hmac=Some(code_lookup(&key,&code)?);row.code_hmac=Some(challenge_hash(&key,&row,&code)?);
             challenges.replace_one(doc! {"_id":&row.id,"state":"review"},&row).session(&mut *session).await?;
             let _=intent;
-            Ok(ChallengeApproved {challenge:row,confirmation_command:Some(Zeroizing::new(format!("/confirm {}",code.as_str())))})
+            let command=super::platform_chat_presentation::ChatPresentation::for_entry(&row.entry)?.confirmation(code.as_str())?;
+            Ok(ChallengeApproved {challenge:row,confirmation_command:Some(command)})
         }.await;transaction_result(result)
     }).await.map_err(map_transaction_error)
 }
@@ -699,15 +792,17 @@ pub async fn confirm_in_session(
     proof_command(update, forwarded)?;
     // Separate session: a failed/aborted proof transaction must not refund guesses.
     // The key is authenticated sender context, never the guessed code or account.
-    admit_decision(
-        db,
-        &format!(
-            "confirm:{}:{}:{}",
-            update.profile_id, update.sender_id, update.chat_id
-        ),
-    )
-    .await?;
-    let mut row=db.collection::<PlatformLinkChallenge>(CHALLENGES).find_one(doc! {"code_lookup_hmac":code_lookup(key,code)?,"purpose":PURPOSE,"platform_config_id":&update.profile_id,"manager_bot_id":&update.manager_bot_id,"telegram_bot_id":update.telegram_bot_id,"telegram_sender_id":update.sender_id,"telegram_chat_id":update.chat_id}).session(&mut *session).await?.ok_or_else(bindings::unavailable)?;
+    admit_decision(db, &confirmation_rate_key(update)).await?;
+    let mut filter = doc! {"code_lookup_hmac":code_lookup(key,code)?,"purpose":PURPOSE,"platform_config_id":&update.profile_id,"manager_bot_id":&update.manager_bot_id};
+    filter.extend(scope::entry_fields(&update.entry));
+    filter.extend(scope::sender_fields(&update.sender, false));
+    scope::exclude_other_version(&mut filter, &update.entry);
+    let mut row = db
+        .collection::<PlatformLinkChallenge>(CHALLENGES)
+        .find_one(filter)
+        .session(&mut *session)
+        .await?
+        .ok_or_else(bindings::unavailable)?;
     let expected_code_hmac = challenge_hash(key, &row, code)?;
     if !row
         .code_hmac
@@ -721,19 +816,52 @@ pub async fn confirm_in_session(
         session,
         &row.platform_config_id,
         &row.manager_bot_id,
-        row.telegram_bot_id,
+        &row.entry,
         Some(&update.observation_id),
     )
     .await?
     .ok_or_else(bindings::unavailable)?;
+    if row.state == ChallengeState::Confirmed {
+        if controls.retired
+            || controls.emergency_stopped
+            || !controls.personal_enabled
+            || controls.manager_authority_epoch != row.manager_authority_epoch
+            || !bindings::fence_person(db, session, &row.reviewed_user_id).await?
+            || !fence_access_mode(
+                db,
+                session,
+                &row.reviewed_user_id,
+                &row.reviewed_access_mode,
+            )
+            .await?
+        {
+            return Err(bindings::unavailable());
+        }
+        let completion = row.completion.as_ref().ok_or_else(bindings::unavailable)?;
+        let binding = bindings::latest_for_sender(
+            db,
+            session,
+            &row.platform_config_id,
+            row.manager_authority_epoch,
+            &row.sender,
+        )
+        .await?
+        .ok_or_else(bindings::unavailable)?;
+        if binding.state != PersonalBindingState::Active
+            || binding.id != completion.binding_id
+            || binding.generation != completion.binding_generation
+            || binding.user_id != row.reviewed_user_id
+            || binding.sender != row.sender
+        {
+            return Err(bindings::unavailable());
+        }
+        return Ok(completion.clone());
+    }
     if controls.retired
         || controls.emergency_stopped
         || !controls.personal_enabled
         || controls.manager_authority_epoch != row.manager_authority_epoch
-        || !matches!(
-            row.state,
-            ChallengeState::AwaitingChatConfirmation | ChallengeState::Confirmed
-        )
+        || row.state != ChallengeState::AwaitingChatConfirmation
         || row.expires_at <= controls.updated_at
         || !fence_access_mode(
             db,
@@ -746,22 +874,13 @@ pub async fn confirm_in_session(
     {
         return Err(bindings::unavailable());
     }
-    if row.state == ChallengeState::Confirmed {
-        let completion = row.completion.ok_or_else(bindings::unavailable)?;
-        let binding=db.collection::<PlatformPersonalBinding>(crate::models::platform_personal_binding::COLLECTION_NAME)
-            .find_one_and_update(doc! {"_id":&completion.binding_id,"generation":completion.binding_generation,"platform_config_id":&row.platform_config_id,"manager_authority_epoch":controls.manager_authority_epoch,"telegram_sender_id":update.sender_id,"telegram_chat_id":update.chat_id,"user_id":&row.reviewed_user_id,"state":"active"},doc! {"$inc":{"effect_revision":1_i64}}).session(&mut *session).await?;
-        if binding.is_none() {
-            return Err(bindings::unavailable());
-        }
-        return Ok(completion);
-    }
     let intent=db.collection::<PlatformLinkIntent>(COLLECTION_NAME).find_one(doc! {"_id":&row.intent_id,"purpose":PURPOSE,"claimant_user_id":&row.reviewed_user_id,"current_challenge_id":&row.id,"state":"pending","$expr":live()}).session(&mut *session).await?.ok_or_else(bindings::unavailable)?;
     let previous = bindings::latest_for_sender(
         db,
         session,
         &row.platform_config_id,
         row.manager_authority_epoch,
-        row.telegram_sender_id,
+        &row.sender,
     )
     .await?;
     if previous.as_ref().map(reviewed) != row.previous_binding {
@@ -789,10 +908,9 @@ pub async fn confirm_in_session(
             id: uuid::Uuid::new_v4().to_string(),
             platform_config_id: row.platform_config_id.clone(),
             manager_bot_id: row.manager_bot_id.clone(),
-            telegram_bot_id: row.telegram_bot_id,
+            entry: row.entry.clone(),
             manager_authority_epoch: row.manager_authority_epoch,
-            telegram_sender_id: row.telegram_sender_id,
-            telegram_chat_id: row.telegram_chat_id,
+            sender: row.sender.clone(),
             user_id: row.reviewed_user_id.clone(),
             generation: previous
                 .as_ref()
@@ -811,6 +929,7 @@ pub async fn confirm_in_session(
             consented_at: now,
             updated_at: now,
             revoked_at: None,
+            logged_out_at: None,
         };
         db.collection::<PlatformPersonalBinding>(
             crate::models::platform_personal_binding::COLLECTION_NAME,
@@ -892,7 +1011,7 @@ pub async fn confirm_original_in_session(
 }
 
 #[cfg(test)]
-pub(crate) mod tests {
+mod tests {
     use super::*;
     use crate::services::platform_personal_binding_service::tests::{binding, fixture};
     const KEY: &[u8] = b"personal-proof-test-key";
@@ -1186,7 +1305,9 @@ pub(crate) mod tests {
             &db,
             &format!(
                 "confirm:{}:{}:{}",
-                update.profile_id, update.sender_id, update.chat_id
+                update.profile_id,
+                crate::services::platform_entry_scope::legacy_sender_id(&update.sender),
+                crate::services::platform_entry_scope::legacy_chat_id(&update.sender)
             ),
         )
         .await;
@@ -1235,7 +1356,9 @@ pub(crate) mod tests {
             &db,
             &format!(
                 "confirm:{}:{}:{}",
-                update.profile_id, update.sender_id, update.chat_id
+                update.profile_id,
+                crate::services::platform_entry_scope::legacy_sender_id(&update.sender),
+                crate::services::platform_entry_scope::legacy_chat_id(&update.sender)
             ),
         )
         .await;
@@ -1281,13 +1404,13 @@ pub(crate) mod tests {
             .unwrap();
         let mut public = super::super::platform_public_agent_service::tests::fixture(
             &db,
-            update.sender_id,
+            crate::services::platform_entry_scope::legacy_sender_id(&update.sender),
             false,
         )
         .await;
         public.profile_id = update.profile_id.clone();
         public.manager_bot_id = update.manager_bot_id.clone();
-        public.telegram_bot_id = update.telegram_bot_id;
+        public.entry = update.entry.clone();
         public.manager_authority_epoch = 1;
         db.collection::<PlatformPublicSession>(PUBLIC_SESSIONS)
             .replace_one(doc! {"_id": &public.id}, &public)
@@ -1315,6 +1438,7 @@ pub(crate) mod tests {
             .unwrap();
         let turn = public.active_turn.as_ref().unwrap();
         let context = PublicExecutionContext {
+            proof_record_id: "test-proof".into(),
             ingress: PublicIngress {
                 ingress: IngressClaim {
                     receipt_id: turn.receipt_id.clone(),
@@ -1323,11 +1447,10 @@ pub(crate) mod tests {
                 manager: ManagerAuthority {
                     profile_id: public.profile_id.clone(),
                     manager_bot_id: public.manager_bot_id.clone(),
-                    telegram_bot_id: public.telegram_bot_id,
+                    entry: public.entry.clone(),
                     manager_authority_epoch: public.manager_authority_epoch,
                 },
-                sender_id: public.sender_id,
-                chat_id: public.chat_id,
+                sender: public.sender.clone(),
                 public_policy_revision: public.public_policy_revision,
             },
             public_session_id: public.id.clone(),
@@ -1420,8 +1543,14 @@ pub(crate) mod tests {
         let (db, update, context) = public_fixture("public_signup_forwarded").await;
         let issued = issue_public(&db, &context).await;
         let token = issued.token.as_ref().unwrap();
-        assert_eq!(issued.intent.telegram_sender_id, update.sender_id);
-        assert_eq!(issued.intent.telegram_chat_id, update.chat_id);
+        assert_eq!(
+            crate::services::platform_entry_scope::legacy_sender_id(&issued.intent.sender),
+            crate::services::platform_entry_scope::legacy_sender_id(&update.sender)
+        );
+        assert_eq!(
+            crate::services::platform_entry_scope::legacy_chat_id(&issued.intent.sender),
+            crate::services::platform_entry_scope::legacy_chat_id(&update.sender)
+        );
         assert_eq!(
             issued.intent.manager_authority_epoch,
             context.ingress.manager.manager_authority_epoch
@@ -1624,10 +1753,10 @@ pub(crate) mod tests {
             doc! {"purpose": "another-purpose"},
             doc! {"platform_config_id": "another-profile"},
             doc! {"manager_bot_id": "another-manager"},
-            doc! {"telegram_bot_id": context.ingress.manager.telegram_bot_id + 1},
+            doc! {"telegram_bot_id": crate::services::platform_entry_scope::legacy_bot_id(&context.ingress.manager.entry) + 1},
             doc! {"manager_authority_epoch": context.ingress.manager.manager_authority_epoch + 1},
-            doc! {"telegram_sender_id": context.ingress.sender_id + 1},
-            doc! {"telegram_chat_id": context.ingress.chat_id + 1},
+            doc! {"telegram_sender_id": crate::services::platform_entry_scope::legacy_sender_id(&context.ingress.sender) + 1},
+            doc! {"telegram_chat_id": crate::services::platform_entry_scope::legacy_chat_id(&context.ingress.sender) + 1},
             doc! {"initiation_ref": "ordinary-original-command"},
             doc! {"token_lookup_hmac": "invalid-lookup"},
             doc! {"token_hmac": "invalid-proof"},
@@ -1734,8 +1863,16 @@ pub(crate) mod tests {
         changed.turn.conversation_id = "wrong-conversation".into();
         cases.push(changed);
         let mut changed = context.clone();
-        changed.ingress.sender_id += 1;
-        changed.ingress.chat_id += 1;
+        if let SenderIdentity::TelegramV1 {
+            telegram_sender_id,
+            telegram_chat_id,
+        } = &mut changed.ingress.sender
+        {
+            *telegram_sender_id += 1;
+            *telegram_chat_id += 1;
+        } else {
+            panic!("legacy fixture");
+        }
         cases.push(changed);
         let mut changed = context.clone();
         changed.ingress.manager.profile_id = "wrong-profile".into();
@@ -1754,10 +1891,10 @@ pub(crate) mod tests {
         let filter = doc! {"_id": &context.ingress.ingress.receipt_id};
         let original = receipts.find_one(filter.clone()).await.unwrap().unwrap();
         for changes in [
-            doc! {"sender_id": context.ingress.sender_id + 1},
+            doc! {"sender_id": crate::services::platform_entry_scope::legacy_sender_id(&context.ingress.sender) + 1},
             doc! {"chat_id": -123_i64},
             doc! {"manager_bot_id": "different-manager"},
-            doc! {"telegram_bot_id": context.ingress.manager.telegram_bot_id + 1},
+            doc! {"telegram_bot_id": crate::services::platform_entry_scope::legacy_bot_id(&context.ingress.manager.entry) + 1},
             doc! {"manager_authority_epoch": context.ingress.manager.manager_authority_epoch + 1},
             doc! {"audience.kind": "control"},
             doc! {"phase": "settled"},
@@ -1785,8 +1922,10 @@ pub(crate) mod tests {
             .await
             .unwrap();
         let mut zero = context.clone();
-        zero.ingress.sender_id = 0;
-        zero.ingress.chat_id = 0;
+        zero.ingress.sender = SenderIdentity::TelegramV1 {
+            telegram_sender_id: 0,
+            telegram_chat_id: 0,
+        };
         refused_public(&db, &zero).await;
         db.drop().await.unwrap();
     }
@@ -1833,7 +1972,7 @@ pub(crate) mod tests {
             (
                 PUBLIC_SESSIONS,
                 session_filter.clone(),
-                doc! {"sender_id": context.ingress.sender_id + 1},
+                doc! {"sender_id": crate::services::platform_entry_scope::legacy_sender_id(&context.ingress.sender) + 1},
             ),
             (
                 PUBLIC_SESSIONS,
@@ -1881,8 +2020,7 @@ pub(crate) mod tests {
             &mut session,
             &PublicRevocationScope::Sender {
                 manager: context.ingress.manager.clone(),
-                sender_id: context.ingress.sender_id,
-                chat_id: context.ingress.chat_id,
+                sender: context.ingress.sender.clone(),
             },
             PublicRevocationReason::SenderUnlinked,
         )
@@ -1899,216 +2037,6 @@ pub(crate) mod tests {
             .await
             .unwrap();
         refused_public(&db, &context).await;
-        db.drop().await.unwrap();
-    }
-    pub(crate) async fn consent_code(
-        db: &Database,
-        update: &VerifiedManagerUpdate,
-        owner: &str,
-        reference: &str,
-    ) -> String {
-        let issued = issue(db, update, reference).await;
-        elapsed_spacing(db, owner).await;
-        let challenge = review(db, KEY, owner, &issued.token.unwrap())
-            .await
-            .unwrap();
-        elapsed_spacing(db, owner).await;
-        approve(
-            db,
-            KEY,
-            owner,
-            &challenge.id,
-            &challenge.review_digest,
-            false,
-        )
-        .await
-        .unwrap()
-        .confirmation_command
-        .unwrap()
-        .split_whitespace()
-        .nth(1)
-        .unwrap()
-        .to_string()
-    }
-    pub(crate) async fn confirm_code(
-        db: &Database,
-        update: &VerifiedManagerUpdate,
-        code: &str,
-    ) -> AppResult<PersonalBindingCompletion> {
-        elapsed_spacing(
-            db,
-            &format!(
-                "confirm:{}:{}:{}",
-                update.profile_id, update.sender_id, update.chat_id
-            ),
-        )
-        .await;
-        let mut session = db.client().start_session().await.unwrap();
-        session.start_transaction().await.unwrap();
-        let result = confirm_in_session(
-            db,
-            &mut session,
-            KEY,
-            b"audit-key",
-            update,
-            false,
-            code,
-            &LocalEffects,
-        )
-        .await;
-        if result.is_ok() {
-            session.commit_transaction().await.unwrap();
-        } else {
-            session.abort_transaction().await.unwrap();
-        }
-        result
-    }
-    #[tokio::test]
-    async fn generic_expired_challenge_uses_current_server_time_with_live_parent_intent() {
-        let (db, update, owner, _, _) =
-            super::super::platform_channel_service::tests::fixture("generic_proof_expiry", "slack")
-                .await;
-        let code = consent_code(&db, &update, &owner, "expiry").await;
-        db.collection::<Document>(CHALLENGES).update_many(doc! {}, doc! {"$set":{"expires_at":bson::DateTime::from_chrono(Utc::now()-Duration::minutes(11))}}).await.unwrap();
-        db.collection::<Document>(crate::models::platform_bot_runtime_controls::COLLECTION_NAME).update_one(doc! {"platform_config_id":&update.profile_id},doc! {"$set":{"updated_at":bson::DateTime::from_chrono(Utc::now()-Duration::hours(4))}}).await.unwrap();
-        assert!(
-            db.collection::<PlatformLinkIntent>(COLLECTION_NAME)
-                .find_one(doc! {"expires_at":{"$gt":bson::DateTime::now()},"state":"pending"})
-                .await
-                .unwrap()
-                .is_some()
-        );
-        assert!(confirm_code(&db, &update, &code).await.is_err());
-        assert_eq!(
-            db.collection::<Document>(crate::models::platform_personal_binding::COLLECTION_NAME)
-                .count_documents(doc! {"state":"active"})
-                .await
-                .unwrap(),
-            0
-        );
-        db.drop().await.unwrap();
-    }
-    #[tokio::test]
-    async fn generic_repair_epoch_disconnects_inventory_and_old_proof_cannot_revive_it() {
-        use crate::models::platform_personal_binding::{
-            COLLECTION_NAME as BINDINGS, PersonalBindingState,
-        };
-        let (db, update, owner, _, _) =
-            super::super::platform_channel_service::tests::fixture("generic_repair_proof", "slack")
-                .await;
-        let code = consent_code(&db, &update, &owner, "original").await;
-        let first = confirm_code(&db, &update, &code).await.unwrap();
-        assert_eq!(
-            bindings::list_owned(&db, &owner, None).await.unwrap()[0].state,
-            PersonalBindingState::Active
-        );
-        // The repair transaction changes the manager authority epoch. Historical
-        // rows stay durable, but inventory and repeated proof use live authority.
-        db.collection::<Document>(crate::models::platform_bot_runtime_controls::COLLECTION_NAME)
-            .update_one(
-                doc! {"platform_config_id":&update.profile_id},
-                doc! {"$inc":{"manager_authority_epoch":1_i64}},
-            )
-            .await
-            .unwrap();
-        assert_eq!(
-            bindings::list_owned(&db, &owner, None).await.unwrap()[0].state,
-            PersonalBindingState::Revoked
-        );
-        assert!(confirm_code(&db, &update, &code).await.is_err());
-        let fresh = consent_code(&db, &update, &owner, "after-repair").await;
-        let next = confirm_code(&db, &update, &fresh).await.unwrap();
-        assert_ne!(first.binding_id, next.binding_id);
-        let inventory = bindings::list_owned(&db, &owner, None).await.unwrap();
-        assert_eq!(
-            inventory
-                .iter()
-                .filter(|row| row.state == PersonalBindingState::Active)
-                .count(),
-            1
-        );
-        assert_eq!(
-            inventory
-                .iter()
-                .find(|row| row.state == PersonalBindingState::Active)
-                .unwrap()
-                .id,
-            next.binding_id
-        );
-        assert!(confirm_code(&db, &update, &code).await.is_err());
-        // Delayed repair cleanup may stop only the obsolete epoch's work.
-        for (id, label) in [(&first.binding_id, "old"), (&next.binding_id, "new")] {
-            let row = db
-                .collection::<PlatformPersonalBinding>(BINDINGS)
-                .find_one(doc! {"_id":id})
-                .await
-                .unwrap()
-                .unwrap();
-            let origin=bindings::stored_origin(&crate::services::platform_manager_contract::PlatformTurnOrigin {
-                authority:bindings::authority(&row,1),nyxbot_agent_id:uuid::Uuid::new_v4().to_string(),
-                source:crate::services::platform_manager_contract::PlatformOriginSource::ThreadEvent {admission_id:uuid::Uuid::new_v4().to_string()},
-            });
-            let active = crate::models::platform_personal_binding::PersonalActiveTurn {
-                conversation_id: format!("{label}-thread"),
-                turn_id: format!("{label}-turn"),
-                origin,
-            };
-            db.collection::<Document>(BINDINGS)
-                .update_one(
-                    doc! {"_id":id},
-                    doc! {"$set":{"active_turn":bson::to_bson(&active).unwrap()}},
-                )
-                .await
-                .unwrap();
-        }
-        let mut session = db.client().start_session().await.unwrap();
-        session.start_transaction().await.unwrap();
-        bindings::stop_manager_batch_in_session(
-            &db,
-            &mut session,
-            &update.profile_id,
-            None,
-            false,
-            &LocalEffects,
-        )
-        .await
-        .unwrap();
-        session.commit_transaction().await.unwrap();
-        assert!(
-            db.collection::<PlatformPersonalBinding>(BINDINGS)
-                .find_one(doc! {"_id":&first.binding_id})
-                .await
-                .unwrap()
-                .unwrap()
-                .active_turn
-                .is_none()
-        );
-        assert!(
-            db.collection::<PlatformPersonalBinding>(BINDINGS)
-                .find_one(doc! {"_id":&next.binding_id})
-                .await
-                .unwrap()
-                .unwrap()
-                .active_turn
-                .is_some()
-        );
-        db.collection::<Document>(crate::models::user::COLLECTION_NAME)
-            .update_one(doc! {"_id":&owner}, doc! {"$set":{"is_active":false}})
-            .await
-            .unwrap();
-        assert!(confirm_code(&db, &update, &fresh).await.is_err());
-        db.collection::<Document>(crate::models::user::COLLECTION_NAME)
-            .update_one(doc! {"_id":&owner}, doc! {"$set":{"is_active":true}})
-            .await
-            .unwrap();
-        db.collection::<Document>(BINDINGS)
-            .update_one(
-                doc! {"_id":&next.binding_id},
-                doc! {"$set":{"state":"revoked","revocation_reason":"unlinked"}},
-            )
-            .await
-            .unwrap();
-        assert!(confirm_code(&db, &update, &fresh).await.is_err());
         db.drop().await.unwrap();
     }
 }

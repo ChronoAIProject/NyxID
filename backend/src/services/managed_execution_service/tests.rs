@@ -342,6 +342,66 @@ async fn managed_dispatch_and_cancellation_cannot_both_win() {
 }
 
 #[tokio::test]
+async fn managed_proven_unsent_refusal_releases_admitted_holds_and_survives_cleanup_interruption() {
+    let (db, billing, ctx) = fixture("managed_final_refusal_recovery").await;
+    let handle = open(&db, &billing, ctx).await;
+    admit_dispatch(&db, &handle).await.unwrap();
+    cancel_unforwarded(&db, &handle).await.unwrap();
+    assert_eq!(
+        wallet(&db).await.reserved_credits,
+        Credits::from_pico(360).unwrap()
+    );
+    // Simulate an interrupted/failed funding cleanup. The independently durable
+    // proof must allow ordinary reconciliation to complete it later.
+    db.collection::<BillingWallet>(WALLETS)
+        .update_one(doc! {}, doc! {"$set":{"reserved_credits":Credits::ZERO}})
+        .await
+        .unwrap();
+    assert!(reject_before_send(&db, &handle).await.is_err());
+    let row = db
+        .collection::<ManagedExecution>(COLLECTION_NAME)
+        .find_one(doc! {"_id":handle.execution_id()})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.state, State::Cancelling);
+    assert_eq!(row.pending_reason.as_deref(), Some(REJECTED_BEFORE_SEND));
+    assert_eq!(
+        db.collection::<UsageMeterRow>(METERS)
+            .count_documents(doc! {"forwarded":true,"released":false})
+            .await
+            .unwrap(),
+        3
+    );
+    db.collection::<BillingWallet>(WALLETS)
+        .update_one(
+            doc! {},
+            doc! {"$set":{"reserved_credits":Credits::from_pico(360).unwrap()}},
+        )
+        .await
+        .unwrap();
+    assert_eq!(reconcile(&db).await.unwrap(), 1);
+    assert_eq!(wallet(&db).await.reserved_credits, Credits::ZERO);
+    assert_eq!(wallet(&db).await.pending_lago_debits, Credits::ZERO);
+    assert_eq!(
+        db.collection::<UsageMeterRow>(METERS)
+            .count_documents(doc! {"forwarded":false,"released":true,"status":"failed"})
+            .await
+            .unwrap(),
+        3
+    );
+    assert_eq!(
+        db.collection::<ManagedExecution>(COLLECTION_NAME)
+            .find_one(doc! {"_id":handle.execution_id()})
+            .await
+            .unwrap()
+            .unwrap()
+            .state,
+        State::Released
+    );
+}
+
+#[tokio::test]
 async fn managed_unknown_outcome_keeps_holds_and_recovery_replays_persisted_evidence() {
     let (db, billing, ctx) = fixture("managed_pending_recovery").await;
     let handle = open(&db, &billing, ctx).await;

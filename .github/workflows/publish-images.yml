@@ -93,6 +93,11 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      - name: Prepare backend image memory reserve
+        if: matrix.component == 'backend'
+        timeout-minutes: 5
+        run: bash .github/scripts/prepare-backend-runner.sh
+
       - name: Compute lowercase image repo
         id: repo
         run: |

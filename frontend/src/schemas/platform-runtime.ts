@@ -16,7 +16,7 @@ export const publicCreditsSchema = z
 export const publicSetupSchema = z
   .object({
     source: z.literal("nyxagent"),
-    profile: z.string().min(1).max(128),
+    profile: z.string().max(128),
     total_daily_credits: publicCreditsSchema,
     sender_daily_credits: publicCreditsSchema,
     sponsor_owner_user_id: z.uuid(),
@@ -51,19 +51,24 @@ export const publicReadinessSchema = z
         "transport_unavailable",
         "origin_revoked",
         "engine_unavailable",
+        "unsupported_input",
         "insufficient_funds",
         "capacity_limited",
         "public_not_ready",
         "public_quota_limited",
+        "public_turn_failed",
         "runtime_uninitialized",
         "sponsor_unavailable",
         "profile_unavailable",
         "proof_expired",
+        "public_contract_unsupported",
+        "public_authority_rejected",
       ])
       .nullable(),
     checked_at: z.iso.datetime({ offset: true }).nullable(),
     expires_at: z.iso.datetime({ offset: true }).nullable(),
     evidence_digest: z.string().nullable(),
+    policy_digest: z.string().nullable().optional(),
   })
   .superRefine((value, ctx) => {
     if (
@@ -90,36 +95,31 @@ export type PublicReadiness = z.infer<typeof publicReadinessSchema>;
 export const managerRuntimeSchema = z
   .object({
     contract_version: z.literal(1),
-    profile_generation:z.number().int().nonnegative().optional(),
     supported: z.boolean(),
+    state: z
+      .enum([
+        "setup_incomplete",
+        "connection_repair_required",
+        "paused",
+        "active",
+        "retired",
+      ])
+      .optional(),
     runtime: z
       .object({
+        activated_policy_digest: z.string().nullable().optional(),
         manager_authority_epoch: version,
         personal_control_revision: version,
         public_policy_revision: version,
         personal_enabled: z.boolean(),
         public_enabled: z.boolean(),
         emergency_stopped: z.boolean(),
-        resume_personal_enabled: z.boolean().nullish(),
-        resume_public_enabled: z.boolean().nullish(),
+        remembered_personal_enabled: z.boolean().nullable().optional(),
+        remembered_public_enabled: z.boolean().nullable().optional(),
         public_policy: publicSetupSchema.nullable(),
       })
       .nullable(),
     public_readiness: publicReadinessSchema,
-    state: z.enum([
-      "active",
-      "paused",
-      "setup_incomplete",
-      "connection_repair_required",
-      "retired",
-    ]),
-    reason: z.string().nullable(),
-    next_action: z.string(),
-    platform: z.string(),
-    display_name: z.string(),
-    connection_url: z.string(),
-    faq_preview: z.string(),
-    connection:z.object({status:z.string(),webhook_url:z.string(),credential_source:z.string(),fields:z.array(z.object({name:z.string(),label:z.string(),secret:z.boolean()})),instructions:z.array(z.string())}).nullish(),
   })
   .refine(
     (value) => value.supported || value.runtime === null,

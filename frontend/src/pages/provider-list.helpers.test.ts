@@ -37,6 +37,21 @@ function makeFormData(
   };
 }
 
+describe("hosted authorization nonce payload", () => {
+  it("retains an explicit OAuth2 setting and strips it from other types", () => {
+    for (const enabled of [true, false]) {
+      for (const provider_type of ["oauth2", "api_key", "device_code", "telegram_widget"] as const) {
+        const payload = buildCreateProviderPayload({
+          name: "Provider", slug: "provider", provider_type,
+          authorization_nonce_required: enabled,
+        });
+        if (provider_type === "oauth2") expect(payload.authorization_nonce_required).toBe(enabled);
+        else expect(payload).not.toHaveProperty("authorization_nonce_required");
+      }
+    }
+  });
+});
+
 describe("buildCreateProviderPayload", () => {
   it("strips stale telegram bot usernames from non-telegram providers", () => {
     const payload = buildCreateProviderPayload(

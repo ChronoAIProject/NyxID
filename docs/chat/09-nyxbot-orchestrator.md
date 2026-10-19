@@ -1212,7 +1212,10 @@ Specialist threads are sandboxed. Only the owner, and the owner's NyxBot for wor
 NyxBot approval behavior is controlled by the owner-level `access_mode` setting:
 **Auto** (`nyxmode`, default) confirms sensitive and destructive actions, **Ask every time** (`ask_every_time`)
 confirms every changing action, and **Full access** (`autopilot`) never asks.
-It bypasses every confirmation, including webhook automation, machine and
+Auto and Ask every time also confirm organization connection use, including
+reads and model inference. All three modes enforce saved personal-first
+connection order and exact owner selection; see [service execution](../NYXBOT_SERVICE_EXECUTION.md).
+Full access bypasses every confirmation, including webhook automation, machine and
 saved-login policies, pairing/updates, authored publication and service approvals.
 Each successful bypass leaves a non-consumable automatic receipt
 (`decided_by: access_mode`, reason `access_mode`, `webhook`, `policy` or `approval`),

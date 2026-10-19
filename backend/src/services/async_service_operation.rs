@@ -186,7 +186,7 @@ pub async fn reserve(
             let now=Utc::now();
             let watch=AsyncServiceOperation{id:Uuid::new_v4().to_string(),user_id:chat.user_id.clone(),conversation_id:row.id.clone(),agent_id:chat.agent_id.clone(),turn_id:turn.turn_id.clone(),api_key_id:chat.api_key_id.clone(),service_id:service_id.clone(),submit_endpoint_id:endpoint_id.clone(),contract:contract.clone(),
                 delivery,
-                operation_id:None,state:"submitting".into(),reason:None,attempts:0,lease_id:None,lease_until:None,created_at:now,deadline:now+Duration::hours(2),poll_at:now+Duration::seconds(60),expires_at:now+Duration::hours(4),result_encrypted:None};
+                operation_id:None,execution_binding:None,authority_version:1,contract_binding:None,state:"submitting".into(),reason:None,attempts:0,lease_id:None,lease_until:None,created_at:now,deadline:now+Duration::hours(2),poll_at:now+Duration::seconds(60),expires_at:now+Duration::hours(4),result_encrypted:None};
             watches.insert_one(&watch).session(&mut *session).await?;
             Ok(watch)
         }).await;

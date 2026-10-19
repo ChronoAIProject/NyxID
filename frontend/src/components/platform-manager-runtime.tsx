@@ -1,184 +1,468 @@
 import { useState } from "react";
-import { useAdminPlatformAction } from "@/hooks/use-platform-onboarding";
-import { Input } from "@/components/ui/input";
-import { z } from "zod";
 import { zodResolver } from "@hookform/resolvers/zod";
 import {
   useManagerRuntime,
   useManagerRuntimeAction,
 } from "@/hooks/use-platform-runtime";
+import { useAdminPlatformTargets } from "@/hooks/use-platform-onboarding";
 import {
+  publicSetupSchema,
   runtimePreconditions,
   type ManagerRuntime,
+  type PublicSetup,
+  type PublicReadiness,
 } from "@/schemas/platform-runtime";
 import type { PlatformProfile } from "@/schemas/platform-onboarding";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Badge } from "@/components/ui/badge";
 import { ErrorBanner } from "@/components/shared/error-banner";
+import { ApiError } from "@/lib/api-client";
 import {
   Form,
   FormField,
   FormItem,
   FormLabel,
   FormControl,
+  FormMessage,
   useAppForm,
 } from "@/components/ui/form";
 
-const modes = z.object({
-  public_enabled: z.boolean(),
-  personal_enabled: z.boolean(),
-});
-const statusLabels = {
-  active: "Active",
-  paused: "Paused",
-  setup_incomplete: "Setup incomplete",
-  connection_repair_required: "Connection repair required",
-  retired: "Retired",
+const reasons: Record<NonNullable<PublicReadiness["reason"]>, string> = {
+  unsupported_input: "Use a text question or the available channel controls.",
+  public_turn_failed:
+    "The public turn failed. Try again to start a fresh turn.",
+  mode_disabled: "Public access is not available on this server.",
+  manager_unavailable: "The manager is unavailable.",
+  emergency_stopped:
+    "The bot is paused. Select the modes you want, then choose Resume bot.",
+  personal_disabled: "Personal access is paused.",
+  public_disabled: "Public access is paused.",
+  owner_unavailable: "The owner account is unavailable.",
+  transport_unavailable:
+    "Connection repair required. Use Repair connection below, then refresh status.",
+  origin_revoked: "This authorization was revoked.",
+  engine_unavailable: "NyxAgent is unavailable.",
+  insufficient_funds: "The sponsor has insufficient credits.",
+  capacity_limited: "Public capacity is currently full.",
+  public_not_ready: "The restricted public runtime is not ready.",
+  public_quota_limited:
+    "The public budget cannot admit this profile’s bounded turn, or today’s quota is exhausted. Increase the configured cap or choose a lower-cost public profile.",
+  runtime_uninitialized: "Choose the settings below to enable this bot.",
+  sponsor_unavailable: "The sponsor organization is unavailable.",
+  public_contract_unsupported:
+    "The deployed NyxAgent does not support public bots yet. Upgrade it to a version with the public runtime contract, then refresh profiles and validate again.",
+  public_authority_rejected:
+    "NyxAgent rejected the public authority assertion. Verify that its version supports the public contract and that it trusts this NyxID issuer, JWKS and audience, then validate again.",
+  profile_unavailable: "The selected public profile is unavailable.",
+  proof_expired:
+    "Public readiness needs a fresh check. Enabled bots refresh it automatically on the next public message; validate again to check it now.",
 };
+function runtimeFailure(error: unknown, fallback: string): string {
+  if (!(error instanceof ApiError)) return fallback;
+  if (error.errorCode === 11300)
+    return "The sponsor has insufficient credits for the readiness check. Add credits to the sponsor organization and validate again.";
+  if (error.errorCode === 11302)
+    return "Billing could not authorize the readiness check. Check sponsor billing and the public model’s synchronized prices, then validate again.";
+  if (error.status === 429)
+    return "Public validation is temporarily limited. Wait a moment, check the remaining public budget, and validate again.";
+  return fallback;
+}
 export function ManagerRuntimeSettings({
   profile,
 }: {
   profile: PlatformProfile;
 }) {
   const query = useManagerRuntime(profile.id);
-  const mutation = useManagerRuntimeAction(profile.id);
-  const [connectionBusy, setConnectionBusy] = useState(false);
-  if (query.isPending) return <p role="status">Loading bot status…</p>;
+  if (query.isPending)
+    return (
+      <p role="status" className="text-12">
+        Loading bot access settings...
+      </p>
+    );
   if (query.error)
     return (
       <ErrorBanner
-        message={query.error.message}
+        message="Public and personal bot access is unavailable. The server may not support this feature yet."
         onRetry={() => void query.refetch()}
       />
     );
   if (!query.data.supported)
     return (
-      <p role="status">Shared bot access is unavailable on this server.</p>
+      <p role="status" className="text-12 text-muted-foreground">
+        Public and personal bot access is not supported by this server.
+      </p>
     );
   const runtime = query.data.runtime;
-  const currentProfile = {
-    ...profile,
-    generation: query.data.profile_generation ?? profile.generation,
-  };
   return (
-    <>
-      <RuntimeForm
-        key={`${currentProfile.generation}:${runtime?.manager_authority_epoch}:${runtime?.personal_control_revision}:${runtime?.public_policy_revision}`}
-        profile={currentProfile}
+    <div className="space-y-3">
+      <BasicRuntimeForm
+        key={`${profile.generation}:${runtime?.manager_authority_epoch ?? 0}:${runtime?.personal_control_revision ?? 0}:${runtime?.public_policy_revision ?? 0}`}
+        profile={profile}
         value={query.data}
-        mutation={mutation}
-        connectionBusy={connectionBusy}
       />
-      <ConnectionControls
-        profile={currentProfile}
-        value={query.data}
-        disabled={mutation.isPending}
-        onBusy={setConnectionBusy}
-        onRefresh={() => void query.refetch()}
-      />
-    </>
+      <Button
+        variant="outline"
+        onClick={() => void query.refetch()}
+        disabled={query.isFetching}
+      >
+        Refresh status
+      </Button>
+    </div>
   );
 }
-function RuntimeForm({
+function BasicRuntimeForm({
   profile,
   value,
-  mutation,
-  connectionBusy,
 }: {
   profile: PlatformProfile;
   value: ManagerRuntime;
-  mutation: ReturnType<typeof useManagerRuntimeAction>;
-  connectionBusy: boolean;
 }) {
-  const busy = mutation.isPending || connectionBusy;
   const runtime = value.runtime;
-  const stopped = runtime?.emergency_stopped ?? false;
-  const repair = value.state === "connection_repair_required";
-  const form = useAppForm<z.infer<typeof modes>>({
-    resolver: zodResolver(modes),
+  const stopped = runtime?.emergency_stopped === true;
+  const mutation = useManagerRuntimeAction(profile.id);
+  const [personal, setPersonal] = useState(
+    stopped
+      ? (runtime?.remembered_personal_enabled ?? false)
+      : (runtime?.personal_enabled ?? true),
+  );
+  const [publicEnabled, setPublic] = useState(
+    stopped
+      ? (runtime?.remembered_public_enabled ?? false)
+      : (runtime?.public_enabled ?? true),
+  );
+  const [source, setSource] = useState(runtime?.public_policy ? "ai" : "faq");
+  const [failure, setFailure] = useState<string>();
+  const [advanced, setAdvanced] = useState(false);
+  async function save(pause = false) {
+    setFailure(undefined);
+    try {
+      await mutation.mutateAsync({
+        action: "update",
+        body: {
+          ...runtimePreconditions(profile.generation, runtime),
+          ...(pause
+            ? { emergency_stopped: true }
+            : {
+                personal_enabled: personal,
+                public_enabled: publicEnabled,
+                ...(stopped ? { emergency_stopped: false } : {}),
+                ...(source === "faq" ? { public_policy: null } : {}),
+              }),
+        },
+      });
+    } catch (error) {
+      setFailure(
+        error instanceof Error
+          ? error.message
+          : "Could not save access. Refresh status and try again.",
+      );
+    }
+  }
+  return (
+    <section className="space-y-4 rounded-xl border border-border bg-card p-4 text-12">
+      <div className="flex flex-wrap gap-2">
+        <Badge variant={runtime?.public_enabled ? "success" : "secondary"}>
+          Public {runtime?.public_enabled ? "enabled" : "paused"}
+        </Badge>
+        <Badge variant={runtime?.personal_enabled ? "success" : "secondary"}>
+          Personal {runtime?.personal_enabled ? "enabled" : "paused"}
+        </Badge>
+        {stopped && <Badge variant="warning">Bot paused</Badge>}
+      </div>
+      <p role="status">
+        {value.public_readiness.status === "faq_ready"
+          ? "Built-in FAQ is ready. No model or sponsor is required."
+          : value.public_readiness.status === "ready"
+            ? "The configured public AI deployment is ready."
+            : reasons[value.public_readiness.reason ?? "public_disabled"]}
+      </p>
+      <form
+        className="space-y-3"
+        onSubmit={(event) => {
+          event.preventDefault();
+          void save();
+        }}
+      >
+        <label className="flex items-start gap-2">
+          <Checkbox
+            checked={publicEnabled}
+            onCheckedChange={(value) => setPublic(value === true)}
+          />
+          <span>
+            Public FAQ — approved help for visitors, without personal data.
+          </span>
+        </label>
+        <label className="flex items-start gap-2">
+          <Checkbox
+            checked={personal}
+            onCheckedChange={(value) => setPersonal(value === true)}
+          />
+          <span>
+            Personal NyxBot — sign in, review consent and confirm in this
+            private conversation.
+          </span>
+        </label>
+        {runtime?.public_policy ? (
+          <label className="block space-y-1">
+            Public answers
+            <select
+              aria-label="Public answers"
+              value={source}
+              onChange={(event) => setSource(event.target.value)}
+              className="h-8 w-full rounded-lg border border-input bg-background px-3"
+            >
+              <option value="faq">
+                Built-in approved FAQ (no inference credits)
+              </option>
+              <option value="ai">Saved public AI configuration</option>
+            </select>
+          </label>
+        ) : (
+          <p className="text-muted-foreground">
+            Public answers use the built-in approved FAQ. No inference credits
+            or model setup are required.
+          </p>
+        )}
+        {!personal && !publicEnabled && (
+          <p>Select at least one mode to enable or resume this bot.</p>
+        )}
+        {failure && <ErrorBanner message={failure} />}
+        <div className="flex flex-wrap gap-2">
+          <Button
+            type="submit"
+            variant="primary"
+            disabled={mutation.isPending || (!personal && !publicEnabled)}
+          >
+            {stopped ? "Resume bot" : runtime ? "Save modes" : "Enable bot"}
+          </Button>
+          {runtime && !stopped && (
+            <Button
+              type="button"
+              disabled={mutation.isPending}
+              onClick={() => void save(true)}
+            >
+              Pause bot
+            </Button>
+          )}
+        </div>
+      </form>
+      <p className="text-muted-foreground">
+        Pause stops FAQ and personal work. Personal turns use each person's
+        existing NyxBot permissions, memory and normal account billing in a
+        separate saved channel thread.
+      </p>
+      <details onToggle={(event) => setAdvanced(event.currentTarget.open)}>
+        <summary className="cursor-pointer">
+          Advanced public AI deployment
+        </summary>
+        {advanced && <AiRuntimeForm profile={profile} value={value} />}
+      </details>
+    </section>
+  );
+}
+
+export function AiRuntimeForm({
+  profile,
+  value,
+}: {
+  profile: PlatformProfile;
+  value: ManagerRuntime;
+}) {
+  const runtime = value.runtime;
+  const policy = runtime?.public_policy;
+  const mutation = useManagerRuntimeAction(profile.id);
+  const targets = useAdminPlatformTargets(true);
+  const [profiles, setProfiles] = useState<{ id: string; label: string }[]>([]);
+  const [readiness, setReadiness] = useState(value.public_readiness);
+  const [error, setError] = useState<string>();
+  const form = useAppForm<PublicSetup>({
+    resolver: zodResolver(publicSetupSchema),
     defaultValues: {
-      public_enabled: stopped
-        ? (runtime?.resume_public_enabled ?? true)
-        : !runtime
-          ? true
-          : runtime.public_enabled,
-      personal_enabled: stopped
-        ? (runtime?.resume_personal_enabled ?? true)
-        : !runtime
-          ? true
-          : runtime.personal_enabled,
+      source: "nyxagent",
+      profile: policy?.profile ?? "",
+      total_daily_credits:
+        policy?.total_daily_credits ??
+        profile.guide?.limits.daily_credits ??
+        "10",
+      sender_daily_credits:
+        policy?.sender_daily_credits ??
+        profile.guide?.anonymous_daily_credits ??
+        "0.5",
+      sponsor_owner_user_id:
+        policy?.sponsor_owner_user_id ??
+        (targets.data?.orgs.some(
+          (org) => org.id === profile.funding_owner_user_id,
+        )
+          ? profile.funding_owner_user_id
+          : ""),
     },
   });
   const expected = runtimePreconditions(profile.generation, runtime);
+  const pending = mutation.isPending;
+  const stopped = runtime?.emergency_stopped === true || !!profile.deleted_at;
+  const selection = form.watch("profile");
+  function publicBody(values: PublicSetup) {
+    const { sponsor_owner_user_id, ...rest } = values;
+    return {
+      ...expected,
+      public_policy: {
+        ...rest,
+        ...(rest.profile ? {} : { profile: undefined }),
+        ...(sponsor_owner_user_id !== policy?.sponsor_owner_user_id
+          ? { sponsor_owner_user_id }
+          : {}),
+      },
+    };
+  }
+  async function discover() {
+    const parsed = publicSetupSchema.safeParse(form.getValues());
+    if (!parsed.success) return;
+    setError(undefined);
+    try {
+      const result = await mutation.mutateAsync({
+        action: "profiles",
+        body: publicBody(parsed.data),
+      });
+      if ("profiles" in result) {
+        setProfiles(result.profiles);
+        setReadiness(result.readiness);
+        if (
+          !policy &&
+          !form.getFieldState("profile").isDirty &&
+          result.default_profile
+        )
+          form.setValue("profile", result.default_profile, {
+            shouldDirty: false,
+            shouldTouch: false,
+          });
+      }
+    } catch (error) {
+      setError(
+        runtimeFailure(
+          error,
+          "Could not discover public NyxAgent profiles. Check NyxAgent connectivity and public contract compatibility, then refresh profiles.",
+        ),
+      );
+    }
+  }
+  async function enable(values: PublicSetup) {
+    setError(undefined);
+    try {
+      let body = publicBody(values);
+      const discovery = await mutation.mutateAsync({
+        action: "profiles",
+        body,
+      });
+      if (!("profiles" in discovery)) throw new Error();
+      setProfiles(discovery.profiles);
+      setReadiness(discovery.readiness);
+      if (discovery.profiles.length === 0) {
+        setError(reasons[discovery.readiness.reason ?? "public_not_ready"]);
+        return;
+      }
+      if (
+        !policy &&
+        !form.getFieldState("profile").isDirty &&
+        discovery.default_profile
+      ) {
+        values = { ...values, profile: discovery.default_profile };
+        form.setValue("profile", values.profile, {
+          shouldDirty: false,
+          shouldTouch: false,
+        });
+        body = publicBody(values);
+      }
+      if (!discovery.profiles.some((row) => row.id === values.profile)) {
+        setError(
+          values.profile
+            ? reasons.profile_unavailable
+            : "Choose an advertised public profile below. This runtime has no public default.",
+        );
+        return;
+      }
+      const proof = await mutation.mutateAsync({ action: "readiness", body });
+      if (!("public_readiness" in proof)) throw new Error();
+      setReadiness(proof.public_readiness);
+      if (
+        proof.public_readiness.status !== "ready" ||
+        !proof.public_readiness.expires_at ||
+        Date.parse(proof.public_readiness.expires_at) <= Date.now()
+      ) {
+        setError(
+          `Public access is unavailable. Settings were not enabled. ${reasons[proof.public_readiness.reason ?? "public_not_ready"]}`,
+        );
+        return;
+      }
+      await mutation.mutateAsync({
+        action: "update",
+        body: {
+          ...body,
+          ...(!runtime ? { personal_enabled: true } : {}),
+          public_enabled: true,
+          ...(proof.public_readiness.policy_digest
+            ? { public_deployment_digest: proof.public_readiness.policy_digest }
+            : {}),
+        },
+      });
+    } catch (error) {
+      setError(
+        runtimeFailure(
+          error,
+          "Could not enable public access. Reload the current settings and check NyxAgent readiness and callback connectivity before retrying.",
+        ),
+      );
+    }
+  }
   return (
-    <>
-      <Form {...form}>
-        <form
-          className="space-y-4 rounded-xl border border-border bg-card p-4 text-12"
-          onSubmit={form.handleSubmit((selected) =>
-            mutation.mutate({
-              action: "update",
-              body: {
-                ...expected,
-                ...selected,
-                emergency_stopped: false,
-                public_policy: null,
-              },
-            }),
+    <Form {...form}>
+      <form
+        className="space-y-4 rounded-xl border border-border bg-card p-4 text-12"
+        onSubmit={form.handleSubmit(enable)}
+      >
+        <div className="flex flex-wrap gap-2">
+          <Badge variant={runtime?.public_enabled ? "success" : "secondary"}>
+            Public {runtime?.public_enabled ? "enabled" : "paused"}
+          </Badge>
+          <Badge variant={runtime?.personal_enabled ? "success" : "secondary"}>
+            Personal {runtime?.personal_enabled ? "enabled" : "paused"}
+          </Badge>
+          {stopped && <Badge variant="destructive">Manager stopped</Badge>}
+        </div>
+        <p>
+          Optional public AI uses the selected sponsor organization's credits.
+          Built-in FAQ and signup links need no inference credits. Personal work
+          uses each person's existing account billing and organization rules.
+        </p>
+        <FormField
+          control={form.control}
+          name="source"
+          render={({ field }) => (
+            <FormItem>
+              <FormLabel>Agent source</FormLabel>
+              <FormControl>
+                <select
+                  {...field}
+                  className="h-8 w-full rounded-lg border border-input bg-background px-3"
+                >
+                  <option value="nyxagent">
+                    NyxAgent
+                    {profiles.find((row) => row.id === selection)
+                      ? ` · ${profiles.find((row) => row.id === selection)!.label}`
+                      : ""}
+                  </option>
+                </select>
+              </FormControl>
+              <FormMessage />
+            </FormItem>
           )}
-        >
-          <div className="flex flex-wrap items-center gap-2">
-            <Badge variant={value.state === "active" ? "success" : "secondary"}>
-              {statusLabels[value.state]}
-            </Badge>
-            <span>
-              {value.display_name} · {value.platform}
-            </span>
-          </div>
-          <p>
-            Choose approved public FAQ answers, personal NyxBot linking, or
-            both.
-          </p>
-          <details>
-            <summary className="cursor-pointer text-muted-foreground">
-              How shared access works
-            </summary>
-            <p className="mt-2">
-              Public FAQ uses approved content and requires no model, inference
-              budget or sponsor. Personal linking requires NyxID sign-in,
-              consent, and confirmation in the same private conversation. Each
-              person uses their existing NyxBot, memory, permissions and
-              billing. Provider transport charges stay with the connected bot's
-              owner.
-            </p>
-            {value.platform === "x" && (
-              <p>
-                Paid X operations require configured channel billing and a
-                provider plan that supports the selected webhook or polling
-                mode.
-              </p>
-            )}
-          </details>
-          {value.reason === "legacy_public_policy_unavailable" && (
-            <p role="status">
-              The previous public AI configuration cannot serve replies. Enable
-              the approved FAQ below to recover this bot.
-            </p>
-          )}
-          {value.reason === "discord_commands_required" && (
-            <p role="status">
-              Configure Discord commands in Connection setup below, then enable
-              the selected modes.
-            </p>
-          )}
-          {repair && (
-            <ErrorBanner message="The connection needs attention. Verify or repair it below, then resume the selected modes. An ownership change requires restoring the original owner or retiring this profile." />
-          )}
+        />
+        <div className="grid gap-3 sm:grid-cols-2">
           {(
             [
-              ["public_enabled", "Public FAQ"],
-              ["personal_enabled", "Personal NyxBot linking"],
+              ["total_daily_credits", "Total public budget per day"],
+              ["sender_daily_credits", "Free quota per person per day"],
             ] as const
           ).map(([name, label]) => (
             <FormField
@@ -186,289 +470,125 @@ function RuntimeForm({
               control={form.control}
               name={name}
               render={({ field }) => (
-                <FormItem className="flex items-center gap-2">
-                  <FormControl>
-                    <Checkbox
-                      disabled={busy}
-                      checked={field.value}
-                      onCheckedChange={(checked) =>
-                        field.onChange(checked === true)
-                      }
-                    />
-                  </FormControl>
+                <FormItem>
                   <FormLabel>{label}</FormLabel>
+                  <FormControl>
+                    <Input {...field} inputMode="decimal" />
+                  </FormControl>
+                  <p className="text-11 text-muted-foreground">Credits</p>
+                  <FormMessage />
                 </FormItem>
               )}
             />
           ))}
-          {!form.watch("public_enabled") && !form.watch("personal_enabled") && (
-            <p role="status">
-              Select at least one mode to enable or resume this bot.
-            </p>
-          )}
-          {mutation.error && <ErrorBanner message={mutation.error.message} />}
-          <div className="flex flex-wrap gap-2">
-            <Button
-              type="submit"
-              variant="primary"
-              isLoading={mutation.isPending}
-              disabled={
-                busy ||
-                repair ||
-                value.reason === "discord_commands_required" ||
-                value.state === "retired" ||
-                (!form.watch("public_enabled") &&
-                  !form.watch("personal_enabled"))
-              }
-            >
-              {stopped
-                ? "Resume bot"
-                : value.state === "active"
-                  ? "Save modes"
-                  : "Enable bot"}
-            </Button>
-            {runtime && !stopped && (
-              <Button
-                type="button"
-                variant="outline"
-                disabled={busy}
-                onClick={() =>
-                  mutation.mutate({
-                    action: "update",
-                    body: { ...expected, emergency_stopped: true },
-                  })
-                }
-              >
-                Pause bot
-              </Button>
-            )}
-          </div>
-          {stopped && (
-            <p role="status">
-              Public FAQ and new personal work are paused. Safe status notices
-              and disconnect acknowledgments can still be sent. Resume restores
-              the selected modes in one operation. Previously started work and
-              history remain accessible in NyxID.
-            </p>
-          )}
-          <details>
-            <summary className="cursor-pointer font-medium">
-              Review public FAQ
-            </summary>
-            <pre className="mt-3 whitespace-pre-wrap break-words font-sans">
-              {value.faq_preview}
-            </pre>
-          </details>
-          <p>
-            {value.platform === "slack"
-              ? "In a Slack DM, send the exact plain text help or faq <topic>, then link. After web consent, send confirm P-… in the same DM. Send unlink to disconnect. Slash commands are not used by this integration."
-              : value.platform === "discord"
-                ? "In an app DM, use /faq topic, /link, /confirm code, /chat message, /help and /unlink. Register the application commands described in connection setup below before testing."
-                : "Test in a private conversation: send /faq, then /link. Sign in, review your account, and send the website's /confirm command in that exact conversation. Send /unlink to disconnect."}
-          </p>
-        </form>
-      </Form>
-    </>
-  );
-}
-
-function ConnectionControls({
-  profile,
-  value,
-  disabled,
-  onBusy,
-  onRefresh,
-}: {
-  profile: PlatformProfile;
-  value: ManagerRuntime;
-  disabled: boolean;
-  onBusy: (busy: boolean) => void;
-  onRefresh: () => void;
-}) {
-  const action = useAdminPlatformAction();
-  const [notice, setNotice] = useState<string>();
-  const [failure, setFailure] = useState<string>();
-  const form = useAppForm({
-    defaultValues: { fields: {} as Record<string, string>, connection_id: "" },
-  });
-  const run = (repair: boolean) =>
-    form.handleSubmit((selected) => {
-      if (disabled || action.isPending) return;
-      onBusy(true);
-      setNotice(undefined);
-      setFailure(undefined);
-      action.mutate(
-        {
-          action: repair ? "repair" : "verify",
-          profile,
-          ...(repair
-            ? {
-                fields: Object.fromEntries(
-                  Object.entries(selected.fields).filter(([, v]) => v.length),
-                ),
-                connection_id: selected.connection_id || undefined,
-              }
-            : {}),
-        },
-        {
-          onSuccess: () =>
-            setNotice(
-              repair
-                ? "Connection repair saved. Complete provider setup and send a private test message (or use the provider dashboard test). Refresh status, then resume. Everyone must link again after repair."
-                : "Provider identity verified. Complete provider setup and send a private test message to confirm webhook delivery.",
-            ),
-          onError: (error) => setFailure(error.message),
-          onSettled: () => {
-            form.reset();
-            action.reset();
-            onBusy(false);
-          },
-        },
-      );
-    })();
-  return (
-    <details className="rounded-lg border border-border p-3">
-      <summary className="cursor-pointer font-medium">
-        Connection setup and recovery
-      </summary>
-      <form
-        className="mt-3 space-y-3"
-        onSubmit={(event) => {
-          event.preventDefault();
-          void run(true);
-        }}
-      >
-        {value.connection ? (
-          <>
-            <p>
-              Connection status: {value.connection.status.replaceAll("_", " ")}.
-              Callback URL:
-            </p>
-            <code className="block break-all select-all">
-              {value.connection.webhook_url}
-            </code>
-            {value.connection.instructions.map((instruction, index) => (
-              <p key={index}>{instruction}</p>
-            ))}
-            {value.platform === "discord" && (
-              <p>
-                Install the app with bot and applications.commands scopes, then
-                open a DM with the bot. Configure commands here to add /link,
-                /confirm code, /chat message, /faq topic, /help, /start and
-                /unlink for bot DMs. Other application commands are preserved.
-                Ordinary gateway messages do not reach this webhook.
-              </p>
-            )}
-            {value.platform === "slack" && (
-              <p>
-                Subscribe to message.im with im:history and chat:write scopes.
-                Enable App Home messages, reinstall after scope changes, and
-                send the plain text help in a DM. Do not configure slash
-                commands for these controls.
-              </p>
-            )}
-            {value.connection.fields.map((field) => (
-              <div key={field.name} className="space-y-1">
-                <label htmlFor={`${profile.id}-${field.name}`}>
-                  {field.label} replacement (optional)
-                </label>
-                <Input
-                  id={`${profile.id}-${field.name}`}
-                  type={field.secret ? "password" : "text"}
-                  autoComplete="off"
-                  {...form.register(`fields.${field.name}`)}
-                />
-              </div>
-            ))}
-            {value.connection.credential_source === "connection" && (
-              <div>
-                <p>
-                  The bot owner must reconnect this same provider account in
-                  NyxID first. An administrator can then adopt its owner-scoped
-                  connection UUID below.
-                </p>
-                <label htmlFor={`${profile.id}-connection`}>
-                  Replacement connection UUID (optional)
-                </label>
-                <Input
-                  id={`${profile.id}-connection`}
-                  {...form.register("connection_id")}
-                />
-              </div>
-            )}
-            {value.connection.credential_source === "platform" && (
-              <a href="/admin/platform-credentials" className="underline">
-                Update managed platform credentials
-              </a>
-            )}
-          </>
-        ) : (
-          <p>
-            Native Telegram manager credentials are managed in{" "}
-            <a href="/admin/platform-credentials" className="underline">
-              Admin platform credentials
-            </a>
-            . Verify checks this manager's webhook; Repair configures its
-            dedicated manager callback.
-          </p>
-        )}
-        <p>
-          Repair pauses this bot, invalidates old links and pending replies, and
-          keeps the same provider account. Resume the selected modes after
-          connection setup succeeds.
+        </div>
+        <p className="text-muted-foreground">
+          Public tools can read the public FAQ and offer signup or linking. They
+          cannot access anyone's account, services, memory or machines.
         </p>
-        {failure && <ErrorBanner message={failure} />}{" "}
-        {notice && <p role="status">{notice}</p>}
+        <p role="status" className="text-muted-foreground">
+          {readiness.status === "ready"
+            ? "Readiness was verified. Apply activates this deployment. A changed deployment ends existing public sessions so senders can start fresh."
+            : reasons[readiness.reason!]}
+        </p>
+        {error && <ErrorBanner message={error} />}
         <div className="flex flex-wrap gap-2">
           <Button
-            type="button"
-            variant="outline"
-            disabled={disabled || action.isPending}
-            onClick={() => void run(false)}
-          >
-            Verify connection
-          </Button>
-          <Button
             type="submit"
-            variant="outline"
-            disabled={disabled || action.isPending}
+            variant="primary"
+            isLoading={pending}
+            disabled={stopped}
           >
-            Repair connection
-          </Button>
-          {value.platform === "discord" && (
-            <Button
-              type="button"
-              disabled={disabled || action.isPending}
-              onClick={() => {
-                onBusy(true);
-                setFailure(undefined);
-                setNotice(undefined);
-                action.mutate(
-                  { action: "discord-commands", profile },
-                  {
-                    onSettled: () => onBusy(false),
-                    onSuccess: () =>
-                      setNotice(
-                        "Discord commands configured. Open a DM with the bot and use /help.",
-                      ),
-                    onError: (error) => setFailure(error.message),
-                  },
-                );
-              }}
-            >
-              Configure Discord commands
-            </Button>
-          )}
-          <Button
-            type="button"
-            variant="outline"
-            disabled={disabled || action.isPending}
-            onClick={onRefresh}
-          >
-            Refresh status
+            {runtime
+              ? runtime.public_enabled
+                ? form.formState.isDirty
+                  ? "Save public settings"
+                  : "Validate and apply public deployment"
+                : "Enable public guide"
+              : "Enable bot"}
           </Button>
         </div>
+        <div className="space-y-3 rounded-lg border border-border p-3">
+          <FormField
+            control={form.control}
+            name="profile"
+            render={({ field }) => (
+              <FormItem>
+                <FormLabel>Public NyxAgent profile</FormLabel>
+                <FormControl>
+                  <select
+                    {...field}
+                    className="h-8 w-full rounded-lg border border-input bg-background px-3"
+                  >
+                    {!profiles.some((row) => row.id === field.value) && (
+                      <option value={field.value}>
+                        {field.value
+                          ? `${field.value} (unverified draft)`
+                          : "Use the advertised public default"}
+                      </option>
+                    )}
+                    {profiles.map((row) => (
+                      <option key={row.id} value={row.id}>
+                        {row.label}
+                      </option>
+                    ))}
+                  </select>
+                </FormControl>
+                <FormMessage />
+              </FormItem>
+            )}
+          />
+          <Button
+            type="button"
+            variant="outline"
+            disabled={pending || stopped}
+            onClick={() => void discover()}
+          >
+            Refresh public profiles
+          </Button>
+          <FormField
+            control={form.control}
+            name="sponsor_owner_user_id"
+            render={({ field }) => (
+              <FormItem>
+                <FormLabel>Sponsor organization</FormLabel>
+                <FormControl>
+                  <select
+                    {...field}
+                    className="h-8 w-full rounded-lg border border-input bg-background px-3"
+                  >
+                    <option value="">Choose an organization</option>
+                    {field.value &&
+                      !targets.data?.orgs.some(
+                        (org) => org.id === field.value,
+                      ) && (
+                        <option value={field.value}>
+                          {field.value} (authorization rechecked on save)
+                        </option>
+                      )}
+                    {targets.data?.orgs.map((org) => (
+                      <option key={org.id} value={org.id}>
+                        {org.display_name ?? org.slug}
+                      </option>
+                    ))}
+                  </select>
+                </FormControl>
+                <FormMessage />
+              </FormItem>
+            )}
+          />
+          <p>
+            Profile discovery and readiness may consume sponsor credits. Public
+            limits count admitted maximum costs for forwarded work, while
+            billing settles actual usage. Public quotas do not limit personal
+            chats.
+          </p>
+          <p>
+            Rate, concurrency and execution limits are validated by the server.
+            This API does not offer editable runtime bounds.
+          </p>
+        </div>
       </form>
-    </details>
+    </Form>
   );
 }

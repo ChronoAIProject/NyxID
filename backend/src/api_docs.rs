@@ -2,6 +2,8 @@
 #[openapi(
     modifiers(&SecurityAddon),
     paths(
+        crate::handlers::oracle_pools::transfer_pool,
+        crate::handlers::oracle_pools::delete_pool,
         crate::handlers::llm_gateway::pool_aliases,
         crate::handlers::service_pools_handler::create_pool,
         crate::handlers::service_pools_handler::list_pools,
@@ -356,6 +358,7 @@
         )
     ),
     tags(
+        (name = "Oracle", description = "Authenticated Oracle pool lifecycle; unreleased until first tagged release containing #1527/#1542"),
         (name = "Agent Key Login", description = "Human-approved CLI enrollment and child credential management"),
         (name = "Docs", description = "NyxID API documentation endpoints"),
         (name = "Proxy Docs", description = "Downstream OpenAPI and AsyncAPI catalog endpoints"),

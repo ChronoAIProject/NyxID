@@ -7,6 +7,8 @@ pub const COLLECTION_NAME: &str = "platform_public_turns";
 /// Authority and cleanup remain in non-TTL session/ingress records.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct PlatformPublicTurn {
+    #[serde(default)]
+    pub proof_record_id: String,
     #[serde(rename = "_id")]
     pub id: String,
     pub public_session_id: String,
@@ -20,6 +22,9 @@ pub struct PlatformPublicTurn {
     pub input_ciphertext: Vec<u8>,
     #[serde(with = "crate::models::bson_bytes::required")]
     pub reply_ciphertext: Vec<u8>,
+    /// HMAC of the settled reply; delivery validates without KMS in a transaction.
+    #[serde(default)]
+    pub reply_digest: String,
     pub reply_id: Option<String>,
     pub outcome: Option<String>,
     pub max_output_bytes: u32,

@@ -32,6 +32,18 @@ export const voiceSnapshotSchema = z.object({
       text: z.string(),
       sealed: z.boolean(),
       complete: z.boolean(),
+      start_ms: z.number().nonnegative().nullable().optional(),
+      end_ms: z.number().nonnegative().nullable().optional(),
+      fragments: z
+        .array(
+          z.object({
+            text: z.string(),
+            start_ms: z.number().nonnegative(),
+            end_ms: z.number().nonnegative(),
+          }),
+        )
+        .nullable()
+        .optional(),
     }),
   ),
   tasks: z.array(

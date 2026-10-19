@@ -24,13 +24,15 @@ use crate::{
         usage_meter::CredentialClass,
     },
 };
-use futures::StreamExt;
+use futures::{StreamExt, TryStreamExt};
 use mongodb::{
     Database,
     bson::{self, Document, doc},
 };
 
 const TURNS: &str = "platform_public_turns";
+const OLD_LEGACY_TURN_INDEX: &str = "source_id_1_sender_1_update_id_1";
+const LEGACY_TURN_INDEX: &str = "platform_legacy_public_turn_unique";
 const QUOTAS: &str = "platform_public_quotas";
 const RESPONSE_BYTES: usize = 64 * 1024;
 fn denied() -> AppError {
@@ -157,6 +159,122 @@ pub(crate) async fn admit_effect(state: &AppState, a: &GuideAuthority) -> AppRes
         .map_err(map_transaction_error)
 }
 
+fn legacy_turn_keys() -> Document {
+    doc! {"source_id": 1, "sender": 1, "update_id": 1}
+}
+
+fn legacy_turn_partial() -> Document {
+    // Runtime transcripts share this collection but never carry source_id.
+    // Include even null/malformed legacy identities rather than silently
+    // removing their existing deduplication constraint.
+    doc! {"source_id": {"$exists": true}}
+}
+
+fn legacy_turn_index_matches(
+    index: &mongodb::IndexModel,
+    name: &str,
+    partial: Option<Document>,
+) -> bool {
+    if !index.keys.iter().eq(legacy_turn_keys().iter()) {
+        return false;
+    }
+    let Some(options) = &index.options else {
+        return false;
+    };
+    let Ok(mut actual) = bson::to_document(options) else {
+        return false;
+    };
+    // Index format version is server metadata, not a uniqueness/filter option.
+    actual.remove("v");
+    let mut expected = doc! {"name": name, "unique": true};
+    if let Some(partial) = partial {
+        expected.insert("partialFilterExpression", partial);
+    }
+    actual == expected
+}
+
+async fn ensure_legacy_turn_index(db: &Database) -> mongodb::error::Result<()> {
+    use mongodb::{IndexModel, options::IndexOptions};
+    let review = || mongodb::error::Error::custom("Public turn identity indexes require review");
+    let collection = db.collection::<Document>(TURNS);
+    collection
+        .create_index(
+            IndexModel::builder()
+                .keys(legacy_turn_keys())
+                .options(
+                    IndexOptions::builder()
+                        .name(LEGACY_TURN_INDEX.to_owned())
+                        .unique(true)
+                        .partial_filter_expression(legacy_turn_partial())
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+    let indexes = collection
+        .list_indexes()
+        .await?
+        .try_collect::<Vec<_>>()
+        .await?;
+    let replacement_exists = |indexes: &[IndexModel]| {
+        indexes.iter().any(|index| {
+            legacy_turn_index_matches(index, LEGACY_TURN_INDEX, Some(legacy_turn_partial()))
+        })
+    };
+    if !replacement_exists(&indexes) {
+        return Err(review());
+    }
+    let mut retire_old = false;
+    for index in &indexes {
+        let name = index
+            .options
+            .as_ref()
+            .and_then(|options| options.name.as_deref());
+        if name == Some(OLD_LEGACY_TURN_INDEX) {
+            if !legacy_turn_index_matches(index, OLD_LEGACY_TURN_INDEX, None) {
+                return Err(review());
+            }
+            retire_old = true;
+        } else if index.keys.len() == legacy_turn_keys().len()
+            && legacy_turn_keys()
+                .keys()
+                .all(|field| index.keys.contains_key(field))
+            && index.options.as_ref().is_some_and(|options| {
+                options.unique == Some(true)
+                    && options.partial_filter_expression.as_ref() != Some(&legacy_turn_partial())
+            })
+        {
+            // Unknown constraints require operator review; never guess a drop.
+            return Err(review());
+        }
+    }
+    // Every legacy identity is protected by the verified replacement before
+    // retiring the recognized constraint. No stored rows are rewritten.
+    if retire_old && let Err(error) = collection.drop_index(OLD_LEGACY_TURN_INDEX).await {
+        let missing = matches!(error.kind.as_ref(), mongodb::error::ErrorKind::Command(command) if command.code == 27);
+        if !missing {
+            return Err(error);
+        }
+        let remaining = collection
+            .list_indexes()
+            .await?
+            .try_collect::<Vec<_>>()
+            .await?;
+        if !replacement_exists(&remaining)
+            || remaining.iter().any(|index| {
+                index
+                    .options
+                    .as_ref()
+                    .and_then(|options| options.name.as_deref())
+                    == Some(OLD_LEGACY_TURN_INDEX)
+            })
+        {
+            return Err(error);
+        }
+    }
+    Ok(())
+}
+
 pub(crate) async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> {
     use mongodb::{IndexModel, options::IndexOptions};
     db.collection::<Document>(QUOTAS)
@@ -174,14 +292,7 @@ pub(crate) async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::
                 .build(),
         )
         .await?;
-    db.collection::<Document>(TURNS)
-        .create_index(
-            IndexModel::builder()
-                .keys(doc! {"source_id": 1, "sender": 1, "update_id": 1})
-                .options(IndexOptions::builder().unique(true).build())
-                .build(),
-        )
-        .await?;
+    ensure_legacy_turn_index(db).await?;
     db.collection::<Document>(QUOTAS)
         .create_index(
             IndexModel::builder()
@@ -1114,6 +1225,196 @@ pub(crate) async fn funded_test_fixture() -> super::platform_onboarding_test_sup
 #[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn startup_preserves_legacy_dedupe_and_multiple_runtime_turns() {
+        use crate::models::platform_public_turn::PlatformPublicTurn;
+        use mongodb::{IndexModel, options::IndexOptions};
+
+        let db =
+            crate::test_utils::connect_transaction_test_database("shared_public_turn_index").await;
+        let turns = db.collection::<Document>(TURNS);
+        turns
+            .create_index(
+                IndexModel::builder()
+                    .keys(legacy_turn_keys())
+                    .options(IndexOptions::builder().unique(true).build())
+                    .build(),
+            )
+            .await
+            .unwrap();
+        let legacy = doc! {
+            "_id": uuid::Uuid::new_v4().to_string(),
+            "source_id": "guide:retained-profile", "sender": "retained-sender",
+            "update_id": 42_i64, "profile_id": "retained-profile",
+            "profile_generation": 1_i64, "scopes": ["guide:retained-profile"],
+            "state": "settled", "reserved_credits": Credits::ZERO.decimal(),
+        };
+        turns.insert_one(&legacy).await.unwrap();
+        let mut runtime = PlatformPublicTurn {
+            proof_record_id: uuid::Uuid::new_v4().to_string(),
+            id: uuid::Uuid::new_v4().to_string(),
+            public_session_id: uuid::Uuid::new_v4().to_string(),
+            conversation_id: uuid::Uuid::new_v4().to_string(),
+            receipt_id: uuid::Uuid::new_v4().to_string(),
+            claim_id: uuid::Uuid::new_v4().to_string(),
+            sponsor_owner_user_id: uuid::Uuid::new_v4().to_string(),
+            policy_digest: "test-policy".into(),
+            credential_api_key_id: uuid::Uuid::new_v4().to_string(),
+            input_ciphertext: vec![1, 2],
+            reply_ciphertext: vec![3, 4],
+            reply_digest: "test-reply".into(),
+            reply_id: Some(uuid::Uuid::new_v4().to_string()),
+            outcome: Some("settled".into()),
+            max_output_bytes: 512,
+            nyxagent_service_id: uuid::Uuid::new_v4().to_string(),
+            nyxagent_catalog_digest: "test-catalog".into(),
+            outer_dispatch_admitted: true,
+            expires_at: chrono::Utc::now() + chrono::Duration::days(1),
+        };
+        let first_runtime = bson::to_document(&runtime).unwrap();
+        assert!(!first_runtime.contains_key("source_id"));
+        turns.insert_one(&first_runtime).await.unwrap();
+
+        crate::db::ensure_indexes(&db).await.unwrap();
+        // Recreate the recognized old constraint while there is still only one
+        // missing-key row, then exercise competing startup retirement attempts.
+        turns
+            .create_index(
+                IndexModel::builder()
+                    .keys(legacy_turn_keys())
+                    .options(IndexOptions::builder().unique(true).build())
+                    .build(),
+            )
+            .await
+            .unwrap();
+        let (first, second) =
+            tokio::join!(ensure_legacy_turn_index(&db), ensure_legacy_turn_index(&db));
+        first.unwrap();
+        second.unwrap();
+        runtime.id = uuid::Uuid::new_v4().to_string();
+        runtime.receipt_id = uuid::Uuid::new_v4().to_string();
+        runtime.claim_id = uuid::Uuid::new_v4().to_string();
+        runtime.reply_id = Some(uuid::Uuid::new_v4().to_string());
+        let second_runtime = bson::to_document(&runtime).unwrap();
+        turns.insert_one(&second_runtime).await.unwrap();
+        crate::db::ensure_indexes(&db).await.unwrap();
+
+        for original in [&legacy, &first_runtime, &second_runtime] {
+            assert!(
+                turns
+                    .find_one(doc! {"_id": original.get_str("_id").unwrap()})
+                    .await
+                    .unwrap()
+                    .as_ref()
+                    == Some(original),
+                "startup must preserve complete retained rows"
+            );
+        }
+        assert_eq!(turns.count_documents(doc! {}).await.unwrap(), 3);
+        let mut duplicate = legacy.clone();
+        duplicate.insert("_id", uuid::Uuid::new_v4().to_string());
+        let error = turns.insert_one(duplicate).await.unwrap_err();
+        assert!(super::super::telegram_new_service::is_duplicate_key_error(
+            &error
+        ));
+        // A present-but-null legacy source remains constrained as before.
+        let malformed =
+            doc! {"source_id": bson::Bson::Null, "sender": "legacy", "update_id": 1_i64};
+        turns.insert_one(malformed.clone()).await.unwrap();
+        let error = turns.insert_one(malformed).await.unwrap_err();
+        assert!(super::super::telegram_new_service::is_duplicate_key_error(
+            &error
+        ));
+        let indexes = turns
+            .list_indexes()
+            .await
+            .unwrap()
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap();
+        assert!(indexes.iter().any(|index| legacy_turn_index_matches(
+            index,
+            LEGACY_TURN_INDEX,
+            Some(legacy_turn_partial())
+        )));
+        assert!(!indexes.iter().any(|index| {
+            index
+                .options
+                .as_ref()
+                .and_then(|options| options.name.as_deref())
+                == Some(OLD_LEGACY_TURN_INDEX)
+        }));
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn legacy_turn_index_refuses_unrecognized_definitions_without_retiring_them() {
+        use mongodb::{IndexModel, options::IndexOptions};
+
+        for (name, keys, partial, sparse) in [
+            (OLD_LEGACY_TURN_INDEX, legacy_turn_keys(), None, Some(true)),
+            ("operator_legacy_unique", legacy_turn_keys(), None, None),
+            (
+                "operator_reordered_legacy_unique",
+                doc! {"sender": 1, "update_id": 1, "source_id": 1},
+                None,
+                None,
+            ),
+            (
+                LEGACY_TURN_INDEX,
+                legacy_turn_keys(),
+                Some(doc! {"sender": {"$exists": true}}),
+                None,
+            ),
+        ] {
+            let db =
+                crate::test_utils::connect_transaction_test_database("shared_turn_index_refusal")
+                    .await;
+            let turns = db.collection::<Document>(TURNS);
+            let options = IndexOptions::builder()
+                .name(name.to_owned())
+                .unique(true)
+                .partial_filter_expression(partial)
+                .sparse(sparse)
+                .build();
+            turns
+                .create_index(IndexModel::builder().keys(keys).options(options).build())
+                .await
+                .unwrap();
+            let before = turns
+                .list_indexes()
+                .await
+                .unwrap()
+                .try_collect::<Vec<_>>()
+                .await
+                .unwrap();
+            let retained = doc! {"_id":uuid::Uuid::new_v4().to_string(),"source_id":"retained","sender":"sender","update_id":1_i64};
+            turns.insert_one(&retained).await.unwrap();
+            assert!(ensure_legacy_turn_index(&db).await.is_err());
+            let after = turns
+                .list_indexes()
+                .await
+                .unwrap()
+                .try_collect::<Vec<_>>()
+                .await
+                .unwrap();
+            let named = |index: &&IndexModel| {
+                index
+                    .options
+                    .as_ref()
+                    .and_then(|options| options.name.as_deref())
+                    == Some(name)
+            };
+            assert_eq!(
+                bson::to_document(after.iter().find(named).unwrap()).unwrap(),
+                bson::to_document(before.iter().find(named).unwrap()).unwrap(),
+                "unexpected indexes must remain intact"
+            );
+            assert_eq!(turns.find_one(doc! {}).await.unwrap(), Some(retained));
+            db.drop().await.unwrap();
+        }
+    }
 
     async fn boxed_guide_text(
         state: &AppState,

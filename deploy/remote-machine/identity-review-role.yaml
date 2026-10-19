@@ -10,8 +10,21 @@ rules:
   # native successor admission; PV claim UID and finalizers track cleanup.
   # No nodes/proxy, nodes/stats, exec or resource mutation is granted.
   - apiGroups: [""]
-    resources: ["nodes", "persistentvolumes"]
+    resources: ["nodes"]
     verbs: ["get"]
+  # Complete candidate discovery must retain conflicting claim UIDs and find
+  # late PVs. No PV mutation is allowed.
+  - apiGroups: [""]
+    resources: ["persistentvolumes"]
+    verbs: ["get", "list"]
+  # Original Pod UID/owner discovery is independent of labels and namespace.
+  # PVC use is evaluated only in the original claim's namespace.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["list"]
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["volumeattachments"]
+    verbs: ["get", "list"]
   # Resolve existing explicit or cluster-default storage without provisioning.
   - apiGroups: ["storage.k8s.io"]
     resources: ["storageclasses"]

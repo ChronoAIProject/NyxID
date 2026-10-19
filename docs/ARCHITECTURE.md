@@ -10,6 +10,40 @@ services. Provider linking and requirement mutations are serialized through the
 service record. A small retirement guard keeps historical vendor credential
 stores inaccessible. See [Service configuration and vendor retirement](SERVICE_CONFIGURATION.md).
 
+NyxBot's assistant-only concrete execution gate is shared by MCP, raw proxy,
+LLM gateway, native SSH/Oracle, and machine service requests. It preserves the
+existing authority and billing boundaries while enforcing per-catalog personal
+priority and organization consent. `assistant_service_execution` stores private
+turn input admissions, owner selections, exact card bindings, bounded model-use
+grants, model callback attempt correlation, job plans and outage evidence.
+Its compound index covers owner/conversation/key/turn/kind; `expires_at` has an
+absolute TTL index. Every read checks expiry (TTL deletion is asynchronous).
+Turn/key fences make old rows unusable immediately; conversation deletion,
+agent destruction and owner purge remove associated rows. Outages use one atomic
+bounded 32-entry array per turn with 60-second entry expiry and credential/config
+binding. Machine jobs persist their command-use grant on `machine_jobs` for their
+existing bounded lifetime. No secret or payload is stored in these digests or
+forwarded to providers. See [NyxBot service execution](NYXBOT_SERVICE_EXECUTION.md).
+
+NyxBot phone/speech adapters extend the executable channel registry with typed
+messaging, conversation and Custom LLM interfaces. Versioned capabilities derive
+from that registry; persisted bindings separately compute live readiness.
+`handlers/call_adapters.rs` handles HTTP DTOs and provider ingress, while
+`services/call_channels` owns verification, guest admission, provider transport,
+recovery and settlement. Calls reuse the specialist engine and existing tool
+permissions. Instructions refresh between turns; FAQ reads use ordinary
+credential-brokered tools. See [NyxBot service adapters](NYXBOT_SERVICE_ADAPTERS.md).
+
+The metadata collections are `channel_adapter_bindings`,
+`channel_adapter_accounts`, `channel_adapter_allocations`,
+`channel_adapter_resource_claims`, `channel_adapter_sessions` and
+`channel_adapter_events`. Credentials stay in the existing encrypted stores;
+conversation text stays in normal assistant conversations/messages. Transactional
+owner/binding/session fences order admission against disable and deletion.
+Settlement reuses admitted billing meters and retains pending provider evidence
+until cleanup completes. The default-off rollout requires all API replicas to
+understand adapter-origin tool authority before activation.
+
 ## Table of Contents
 
 - [System Overview](#system-overview)
@@ -198,6 +232,17 @@ Handlers are thin HTTP boundary functions. They:
 #### 4. Service Layer (`services/`)
 
 The service layer contains all business logic. Services receive database connections and domain objects -- they never interact with HTTP types.
+
+Oracle pool lifecycle preserves the polymorphic `oracle_pools.user_id` owner.
+`oracle_mutation_service` serializes Oracle writers through the existing pool
+enrollment fence in MongoDB transactions; lifecycle versions reject stale
+snapshots, and installation epochs invalidate credentials on ownership changes.
+Transfer and deletion commit their hash-chained audit entries atomically.
+Deletion retains a slug-reserving tombstone and a durable cleanup marker;
+bounded background transactions remove credentials and login material and close
+idle sessions while retaining task history under its existing TTL. This requires
+transaction-capable MongoDB and a coordinated upgrade/drain of old replicas
+before lifecycle operations are used. See [Oracle lifecycle](ORACLE_RELAY.md#pool-ownership-and-deletion-unreleased-1527-1542).
 
 | Module              | Responsibility                                            |
 |---------------------|-----------------------------------------------------------|
@@ -2130,6 +2175,23 @@ provider call, then accepted only after validation and outbound persistence.
 There is no persisted message queue or automatic replay. See
 [Complete IM replies](CHANNEL_COMPLETE_REPLIES.md) for the API and rollout
 contract.
+
+## Composer dictation and platform voice authority
+
+Private-thread audio uses a live conversation/key/agent binding to authorize
+platform inference independently of specialist tool grants. Platform credential
+ACLs and operation restrictions remain mandatory; BYOK uses the exact granted
+connection. Platform audio is funded by the acting person's existing billing
+account.
+
+`handlers/assistant_voice/dictation.rs` provides bounded browser WebSocket ingress
+to `services/voice/dictation.rs`, which owns the fixed OpenAI transcription
+session, authorization refresh, concurrency slot, funding and final drain.
+Dictation reuses `assistant_voice_sessions` with an additive, default-false
+`dictation` discriminator and durable confirmed-duration checkpoints. Recovery
+settles those checkpoints without reopening capture; conversational attach and
+control paths reject dictation sessions. No audio recording is stored. See the
+[voice architecture and transport contract](chat/11-voice.md).
 
 ## Native channel mention admission
 

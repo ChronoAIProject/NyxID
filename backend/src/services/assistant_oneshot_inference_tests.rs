@@ -420,7 +420,7 @@ async fn assistant_oneshot_platform_usage_bills_acting_person() {
 }
 
 #[tokio::test]
-async fn assistant_oneshot_org_byok_requires_live_actor_access_and_bills_person() {
+async fn assistant_oneshot_never_uses_org_fallback_even_with_live_membership() {
     let (mut state, service, mock) = fixture(InferenceWireProtocol::OpenaiResponses).await;
     let org = "2d86fd56-60eb-4f1d-a3f0-d4199df34dd5";
     state
@@ -465,17 +465,14 @@ async fn assistant_oneshot_org_byok_requires_live_actor_access_and_bills_person(
     assert!(
         one_shot_text(&state, ACTOR, "Summarize", "Data", limits())
             .await
-            .is_some()
+            .is_none()
     );
-    let rows = crate::services::channel_x_tests::billing::settled(&state).await;
-    assert_eq!(rows.len(), 2);
-    for row in rows {
-        assert_eq!(row.billing_owner_id, ACTOR);
-        assert_eq!(row.credential_class, CredentialClass::UserOwned);
-    }
-    for request in mock.received_requests().await.unwrap() {
-        assert_eq!(request.headers["authorization"], format!("Bearer {OWN}"));
-    }
+    assert!(mock.received_requests().await.unwrap().is_empty());
+    assert!(
+        crate::services::channel_x_tests::billing::settled(&state)
+            .await
+            .is_empty()
+    );
 }
 
 #[tokio::test]

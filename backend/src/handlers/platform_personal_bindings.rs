@@ -50,16 +50,15 @@ pub struct ManagerResponse {
     pub id: String,
     pub username: Option<String>,
     pub display_name: String,
-    pub platform: String,
 }
 #[derive(Serialize)]
 pub struct SenderResponse {
     pub id: String,
     pub display_name: Option<String>,
-    pub conversation_id: String,
 }
 #[derive(Serialize)]
 pub struct PreviewResponse {
+    pub chat: ChatResponse,
     pub purpose: &'static str,
     pub status: &'static str,
     pub manager: ManagerResponse,
@@ -76,13 +75,13 @@ pub struct AccountResponse {
 #[derive(Serialize)]
 pub struct Disclosures {
     pub telegram_transport: bool,
-    pub channel_transport: bool,
     pub existing_nyxbot_access: bool,
     pub can_approve_sensitive_actions: bool,
     pub started_work_may_continue_after_unlink: bool,
 }
 #[derive(Serialize)]
 pub struct ReviewResponse {
+    pub chat: ChatResponse,
     pub challenge_id: String,
     pub status: &'static str,
     pub expires_at: String,
@@ -100,11 +99,39 @@ pub struct BindingResponse {
 }
 #[derive(Serialize)]
 pub struct StatusResponse {
+    pub chat: ChatResponse,
     pub challenge_id: String,
     pub status: &'static str,
     pub expires_at: String,
     pub binding: Option<BindingResponse>,
     pub confirmation_command: Option<Zeroizing<String>>,
+}
+
+#[derive(Serialize)]
+pub struct ChatResponse {
+    pub platform: &'static str,
+    pub display_name: &'static str,
+    pub login_command: &'static str,
+    pub logout_command: &'static str,
+    pub status_command: &'static str,
+    pub help_command: &'static str,
+    pub question_instruction: &'static str,
+    pub transport_disclosure: &'static str,
+}
+fn chat(
+    entry: &crate::models::platform_entry_projection::StoredEntryIdentity,
+) -> AppResult<ChatResponse> {
+    let text = crate::services::platform_chat_presentation::ChatPresentation::for_entry(entry)?;
+    Ok(ChatResponse {
+        platform: text.platform(),
+        display_name: text.name(),
+        login_command: text.login(),
+        logout_command: text.logout(),
+        status_command: text.status(),
+        help_command: text.help(),
+        question_instruction: text.question_instruction(),
+        transport_disclosure: text.transport_disclosure(),
+    })
 }
 
 fn private_headers() -> HeaderMap {
@@ -117,32 +144,52 @@ async fn manager(
     db: &mongodb::Database,
     profile_id: &str,
     manager_bot_id: &str,
+    entry: &crate::models::platform_entry_projection::StoredEntryIdentity,
     required: bool,
 ) -> AppResult<ManagerResponse> {
-    let display =
-        bindings::manager_inventory_display(db, profile_id, manager_bot_id, required).await?;
+    if let crate::models::platform_entry_projection::StoredEntryIdentity::NativeV2 {
+        platform_entry,
+    } = entry
+    {
+        let display =
+            bindings::native_manager_display(db, profile_id, manager_bot_id, platform_entry)
+                .await?;
+        if let Some((username, display_name)) = display {
+            return Ok(ManagerResponse {
+                id: profile_id.into(),
+                username,
+                display_name,
+            });
+        }
+        if required {
+            return Err(bindings::unavailable());
+        }
+        return Ok(ManagerResponse {
+            id: profile_id.into(),
+            username: None,
+            display_name: format!("{} bot {}", chat(entry)?.display_name, manager_bot_id),
+        });
+    }
+    if let Some(display) = bindings::manager_display(db, profile_id, manager_bot_id).await? {
+        return Ok(ManagerResponse {
+            id: profile_id.to_owned(),
+            display_name: format!("@{}", display.username),
+            username: Some(display.username),
+        });
+    }
+    if required {
+        return Err(bindings::unavailable());
+    }
+    // Retired inventory can still identify its exact historical bot numerically.
     Ok(ManagerResponse {
-        id: profile_id.into(),
-        platform: display.platform,
-        username: display.username,
-        display_name: display.display_name,
+        id: profile_id.to_owned(),
+        username: None,
+        display_name: format!("Telegram bot {manager_bot_id}"),
     })
 }
-async fn sender(
-    db: &mongodb::Database,
-    profile: &str,
-    manager_id: &str,
-    id: i64,
-) -> AppResult<SenderResponse> {
-    let display = bindings::sender_display(db, profile, manager_id, id).await?;
-    Ok(SenderResponse {
-        id: display.id,
-        display_name: display.display_name,
-        conversation_id: display.conversation_id,
-    })
-}
-fn project_status(row: PlatformLinkChallenge) -> StatusResponse {
-    StatusResponse {
+fn project_status(row: PlatformLinkChallenge) -> AppResult<StatusResponse> {
+    Ok(StatusResponse {
+        chat: chat(&row.entry)?,
         challenge_id: row.id,
         status: match row.state {
             ChallengeState::Review => "review",
@@ -158,7 +205,7 @@ fn project_status(row: PlatformLinkChallenge) -> StatusResponse {
             generation: b.binding_generation,
         }),
         confirmation_command: None,
-    }
+    })
 }
 
 pub async fn preview(
@@ -189,22 +236,21 @@ pub async fn preview(
     Ok((
         private_headers(),
         Json(PreviewResponse {
+            chat: chat(&row.entry)?,
             purpose: "personal_nyxbot",
             status: "pending",
             manager: manager(
                 &state.db,
                 &row.platform_config_id,
                 &row.manager_bot_id,
+                &row.entry,
                 true,
             )
             .await?,
-            sender: sender(
-                &state.db,
-                &row.platform_config_id,
-                &row.manager_bot_id,
-                row.telegram_sender_id,
-            )
-            .await?,
+            sender: SenderResponse {
+                id: crate::services::platform_entry_scope::actor_string(&row.sender),
+                display_name: None,
+            },
             expires_at: row.expires_at.to_rfc3339(),
             invitation_required: crate::services::feature_flag_service::invitation_code_required(
                 &state.db,
@@ -242,6 +288,7 @@ pub async fn review(
     Ok((
         private_headers(),
         Json(ReviewResponse {
+            chat: chat(&row.entry)?,
             challenge_id: row.id,
             status: "review",
             expires_at: row.expires_at.to_rfc3339(),
@@ -254,8 +301,10 @@ pub async fn review(
             billing: "personal",
             replaces_existing_binding: replaces,
             disclosures: Disclosures {
-                telegram_transport: !row.manager_bot_id.starts_with("channel:"),
-                channel_transport: true,
+                telegram_transport: matches!(
+                    &row.entry,
+                    crate::models::platform_entry_projection::StoredEntryIdentity::TelegramV1 { .. }
+                ),
                 existing_nyxbot_access: true,
                 can_approve_sensitive_actions: true,
                 started_work_may_continue_after_unlink: true,
@@ -279,14 +328,8 @@ pub async fn approve(
         input.replace_existing,
     )
     .await?;
-    let manager = result.challenge.manager_bot_id.clone();
-    let mut response = project_status(result.challenge);
-    response.confirmation_command = result.confirmation_command.map(|command| {
-        Zeroizing::new(crate::services::platform_channel_service::format_controls(
-            &manager,
-            command.to_string(),
-        ))
-    });
+    let mut response = project_status(result.challenge)?;
+    response.confirmation_command = result.confirmation_command;
     Ok((private_headers(), Json(response)))
 }
 
@@ -305,7 +348,7 @@ pub async fn status(
                 &input.challenge_id.to_string(),
             )
             .await?,
-        )),
+        )?),
     ))
 }
 
@@ -330,6 +373,7 @@ pub async fn deny(
 
 #[derive(Serialize)]
 pub struct OwnedBindingResponse {
+    pub chat: ChatResponse,
     pub id: String,
     pub generation: i64,
     pub manager: ManagerResponse,
@@ -371,24 +415,24 @@ pub async fn list(
                 &state.db,
                 &row.platform_config_id,
                 &row.manager_bot_id,
+                &row.entry,
                 false,
             )
             .await?;
             displays.insert(key, display.clone());
             display
         };
+        let live_state = bindings::inventory_state(&state.db, &row).await?;
         projected.push(OwnedBindingResponse {
+            chat: chat(&row.entry)?,
             id: row.id,
             generation: row.generation,
             manager: display,
-            sender: sender(
-                &state.db,
-                &row.platform_config_id,
-                &row.manager_bot_id,
-                row.telegram_sender_id,
-            )
-            .await?,
-            state: row.state,
+            sender: SenderResponse {
+                id: crate::services::platform_entry_scope::actor_string(&row.sender),
+                display_name: None,
+            },
+            state: live_state,
             conversation_id: row.conversation_id,
             consented_at: row.consented_at.to_rfc3339(),
             revoked_at: row.revoked_at.map(|date| date.to_rfc3339()),
@@ -519,9 +563,15 @@ mod tests {
             )
             .await
             .unwrap();
-        let metadata = manager(&db, &update.profile_id, &update.manager_bot_id, true)
-            .await
-            .unwrap();
+        let metadata = manager(
+            &db,
+            &update.profile_id,
+            &update.manager_bot_id,
+            &update.entry,
+            true,
+        )
+        .await
+        .unwrap();
         assert_eq!(metadata.id, update.profile_id);
         assert_eq!(metadata.username.as_deref(), Some("VerifiedManagerBot"));
         assert_eq!(metadata.display_name, "@VerifiedManagerBot");
@@ -533,16 +583,28 @@ mod tests {
             .await
             .unwrap();
         assert!(
-            manager(&db, &update.profile_id, &update.manager_bot_id, true)
-                .await
-                .is_err()
-        );
-        let historical = manager(&db, &update.profile_id, &update.manager_bot_id, false)
+            manager(
+                &db,
+                &update.profile_id,
+                &update.manager_bot_id,
+                &update.entry,
+                true
+            )
             .await
-            .unwrap();
+            .is_err()
+        );
+        let historical = manager(
+            &db,
+            &update.profile_id,
+            &update.manager_bot_id,
+            &update.entry,
+            false,
+        )
+        .await
+        .unwrap();
         assert_eq!(
             historical.display_name,
-            format!("Telegram bot {}", update.telegram_bot_id)
+            format!("Telegram bot {}", update.manager_bot_id)
         );
         assert!(historical.username.is_none());
         credentials.update_one(doc! {"provider":"telegram-new"},doc! {"$set":{"fields.observation_id":&update.observation_id},"$unset":{"fields.manager_username":""}}).await.unwrap();
@@ -554,11 +616,17 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(
-            manager(&db, &update.profile_id, &update.manager_bot_id, true)
-                .await
-                .unwrap()
-                .username
-                .as_deref(),
+            manager(
+                &db,
+                &update.profile_id,
+                &update.manager_bot_id,
+                &update.entry,
+                true
+            )
+            .await
+            .unwrap()
+            .username
+            .as_deref(),
             Some("ChannelManagerBot")
         );
         db.drop().await.unwrap();

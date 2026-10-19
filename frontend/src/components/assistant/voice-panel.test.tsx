@@ -1,10 +1,28 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import type { PreparedMicrophone } from "@/lib/microphone-capture";
+import { voiceOption, voicePreferences } from "@/test/voice-fixture";
+import { QueryClient } from "@tanstack/react-query";
+import { useAuthStore } from "@/stores/auth-store";
+import { nyxBotQueryKeys } from "@/hooks/use-nyxbot-agents";
+import type { VoicePreferences } from "@/schemas/assistant-voice";
 import { VoicePanel } from "./voice-panel";
 vi.mock("@/lib/api-client", () => ({
   api: { put: vi.fn().mockResolvedValue({}) },
 }));
 const mock = vi.hoisted(() => ({
+  queryClient: null as QueryClient | null,
+  save: vi.fn(),
+  refetch: vi.fn(),
+  optionsError: false,
+  starting: false,
+  error: null as string | null,
   connected: true,
   options: [] as unknown[],
   end: vi.fn(),
@@ -14,17 +32,32 @@ const mock = vi.hoisted(() => ({
   hold: vi.fn(),
   stop: vi.fn(),
   rejoin: vi.fn(),
-  conflictSession: null as null | { id: string; resumable: boolean; control_revision: number },
+  conflictSession: null as null | {
+    id: string;
+    resumable: boolean;
+    control_revision: number;
+  },
   tasks: [] as Array<Record<string, unknown>>,
 }));
-vi.mock("@tanstack/react-query", () => ({
-  useQuery: () => ({ isSuccess: true, data: { options: mock.options } }),
+vi.mock("@/lib/assistant/nyxbot-api", () => ({
+  nyxBotApi: { updateSettings: mock.save },
+}));
+vi.mock("@tanstack/react-query", async (original) => ({
+  ...(await original<typeof import("@tanstack/react-query")>()),
+  useQueryClient: () => mock.queryClient,
+  useQuery: () => ({
+    isSuccess: !mock.optionsError,
+    isError: mock.optionsError,
+    isFetching: false,
+    data: mock.optionsError ? undefined : { options: mock.options },
+    refetch: mock.refetch,
+  }),
 }));
 vi.mock("@/hooks/use-assistant-voice", () => ({
   useAssistantVoice: () => ({
     connected: mock.connected,
-    starting: false,
-    error: null,
+    starting: mock.starting,
+    error: mock.error,
     speakerMuted: false,
     end: mock.end,
     start: mock.start,
@@ -65,8 +98,13 @@ vi.mock("@/hooks/use-assistant-voice", () => ({
 }));
 beforeEach(() => {
   vi.clearAllMocks();
+  mock.queryClient = new QueryClient();
   mock.connected = true;
   mock.options = [];
+  mock.optionsError = false;
+  mock.starting = false;
+  mock.error = null;
+  mock.refetch.mockResolvedValue({});
   mock.conflictSession = null;
   mock.tasks = [];
   vi.spyOn(Date, "now").mockReturnValue(Date.parse("2026-10-04T00:00:00Z"));
@@ -137,7 +175,9 @@ it("shows human task states and links settled results", () => {
     "href",
     "#message-result-1",
   );
-  expect(screen.getByText(/Delete the old event · Needs your OK/)).toBeInTheDocument();
+  expect(
+    screen.getByText(/Delete the old event · Needs your OK/),
+  ).toBeInTheDocument();
 });
 
 it("starts with a catalog-added model and voice and discloses the payer and tariff", async () => {
@@ -191,6 +231,8 @@ it("starts with a catalog-added model and voice and discloses the payer and tari
         model: "catalog-new-model",
         voice: "catalog-new-voice",
       }),
+      undefined,
+      expect.any(Function),
     ),
   );
 });
@@ -232,6 +274,8 @@ it("allows lane-less own-key voice and discloses metering-only pricing", async (
         key_source: "own",
         connection_id: "connection",
       }),
+      undefined,
+      expect.any(Function),
     ),
   );
 });
@@ -281,6 +325,7 @@ it("labels Grok PTT, gates automatic mode, and discloses tokens when seconds are
         input_mode: "push_to_talk",
       }),
       "xai_realtime",
+      expect.any(Function),
     ),
   );
 });
@@ -321,5 +366,400 @@ it("discloses configured Grok token prices even when catalog summary omits token
   render(<VoicePanel threadId="thread" onClose={vi.fn()} />);
   expect(screen.getByText(/0.02 credits per second/)).toHaveTextContent(
     "0.0001",
+  );
+});
+
+it("integrated active call is compact with accessible details and all media controls", () => {
+  const close = vi.fn();
+  render(
+    <VoicePanel
+      threadId="thread"
+      panelId="panel"
+      onClose={close}
+      onViewChange={vi.fn()}
+    />,
+  );
+  expect(
+    screen.queryByRole("button", { name: "Minimize voice call" }),
+  ).not.toBeInTheDocument();
+  expect(screen.queryByLabelText("Voice source")).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Voice settings" }));
+  expect(screen.getByLabelText("Voice source")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Mute speaker" }));
+  expect(mock.speaker).toHaveBeenCalledWith(true);
+  fireEvent.click(screen.getByRole("button", { name: "End call" }));
+  expect(mock.end).toHaveBeenCalledOnce();
+  expect(close).not.toHaveBeenCalled();
+});
+
+function preparation() {
+  const value = {
+    isClosed: false,
+    close: vi.fn(() => {
+      value.isClosed = true;
+    }),
+  };
+  return value as unknown as PreparedMicrophone;
+}
+it("intentional waveform preparation starts OpenAI automatic once after source/price disclosure", async () => {
+  mock.connected = false;
+  mock.options = [voiceOption];
+  const prepared = preparation();
+  const { rerender } = render(
+    <VoicePanel
+      threadId="thread"
+      preparation={prepared}
+      onClose={vi.fn()}
+      onViewChange={vi.fn()}
+    />,
+  );
+  expect(screen.getByText(/credits per second/)).toHaveTextContent(
+    "Paid by you",
+  );
+  await waitFor(() =>
+    expect(mock.start).toHaveBeenCalledWith(
+      expect.objectContaining({ input_mode: "automatic" }),
+      undefined,
+      expect.any(Function),
+      prepared,
+    ),
+  );
+  rerender(
+    <VoicePanel
+      threadId="thread"
+      preparation={prepared}
+      onClose={vi.fn()}
+      onViewChange={vi.fn()}
+    />,
+  );
+  expect(mock.start).toHaveBeenCalledOnce();
+});
+it("saved unavailable source never falls back; chosen settings survive the next waveform preparation", async () => {
+  mock.connected = false;
+  mock.options = [voiceOption];
+  const first = preparation();
+  const saved = {
+    ...voicePreferences,
+    service_id: "missing",
+    input_mode: "push_to_talk" as const,
+  };
+  const props = {
+    threadId: "thread",
+    savedPreferences: saved,
+    onClose: vi.fn(),
+    onViewChange: vi.fn(),
+  };
+  const { rerender } = render(<VoicePanel {...props} preparation={first} />);
+  await waitFor(() => expect(first.close).toHaveBeenCalledOnce());
+  expect(mock.start).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole("button", { name: "Voice settings" }));
+  fireEvent.change(screen.getByLabelText("Voice source"), {
+    target: {
+      value: `${voiceOption.service_id}:platform:${voiceOption.model}`,
+    },
+  });
+  expect(screen.getByLabelText("Microphone mode")).toHaveValue("push_to_talk");
+  fireEvent.change(screen.getByLabelText("Microphone mode"), {
+    target: { value: "automatic" },
+  });
+  const next = preparation();
+  rerender(<VoicePanel {...props} preparation={next} />);
+  await waitFor(() =>
+    expect(mock.start).toHaveBeenCalledWith(
+      expect.objectContaining({
+        service_id: voiceOption.service_id,
+        input_mode: "automatic",
+      }),
+      undefined,
+      expect.any(Function),
+      next,
+    ),
+  );
+});
+it("configuration does not capture/start; End retains next-call input choice in the same panel", async () => {
+  mock.options = [voiceOption];
+  const close = vi.fn();
+  const props = { threadId: "thread", onClose: close, onViewChange: vi.fn() };
+  const { rerender } = render(<VoicePanel {...props} />);
+  fireEvent.click(screen.getByRole("button", { name: "End call" }));
+  expect(close).not.toHaveBeenCalled();
+  mock.connected = false;
+  rerender(<VoicePanel {...props} settingsRequest={1} />);
+  fireEvent.change(screen.getByLabelText("Microphone mode"), {
+    target: { value: "push_to_talk" },
+  });
+  expect(mock.start).not.toHaveBeenCalled();
+  const next = preparation();
+  rerender(<VoicePanel {...props} settingsRequest={1} preparation={next} />);
+  await waitFor(() =>
+    expect(mock.start).toHaveBeenCalledWith(
+      expect.objectContaining({ input_mode: "push_to_talk" }),
+      undefined,
+      expect.any(Function),
+      next,
+    ),
+  );
+});
+
+it("confirmed preference save updates the actor cache so Close/reopen retains source and input mode", async () => {
+  const actor = { id: "preference-owner" } as NonNullable<
+    ReturnType<typeof useAuthStore.getState>["user"]
+  >;
+  useAuthStore.setState({ user: actor });
+  mock.connected = false;
+  const chosen = {
+    ...voiceOption,
+    service_id: "22222222-2222-4222-8222-222222222222",
+    model_label: "Chosen source",
+  };
+  mock.options = [voiceOption, chosen];
+  const key = nyxBotQueryKeys.settings(actor.id);
+  mock.queryClient!.setQueryData(key, { voice: voicePreferences });
+  let confirm!: (settings: { voice: VoicePreferences }) => void;
+  mock.save.mockImplementationOnce(
+    () =>
+      new Promise((resolve) => {
+        confirm = resolve;
+      }),
+  );
+  mock.start.mockImplementationOnce(
+    async (_prefs, _protocol, before: () => Promise<void>) => {
+      await before();
+    },
+  );
+  const cached = () =>
+    mock.queryClient!.getQueryData<{ voice: VoicePreferences }>(key)!.voice;
+  const view = render(
+    <VoicePanel
+      threadId="thread"
+      savedPreferences={cached()}
+      onClose={vi.fn()}
+    />,
+  );
+  fireEvent.change(screen.getByLabelText("Voice source"), {
+    target: { value: `${chosen.service_id}:platform:${chosen.model}` },
+  });
+  fireEvent.change(screen.getByLabelText("Microphone mode"), {
+    target: { value: "automatic" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Start voice" }));
+  await waitFor(() =>
+    expect(mock.save).toHaveBeenCalledWith({
+      voice: expect.objectContaining({
+        service_id: chosen.service_id,
+        input_mode: "automatic",
+      }),
+    }),
+  );
+  expect(cached().input_mode).toBe("push_to_talk"); // No optimistic replacement.
+  const saved = {
+    ...voicePreferences,
+    service_id: chosen.service_id,
+    voice: "marin",
+    input_mode: "automatic" as const,
+  };
+  confirm({ voice: saved });
+  await waitFor(() => expect(cached()).toEqual(saved));
+  view.unmount();
+  render(
+    <VoicePanel
+      threadId="thread"
+      savedPreferences={cached()}
+      onClose={vi.fn()}
+    />,
+  );
+  expect(screen.getByLabelText("Microphone mode")).toHaveValue("automatic");
+  expect(screen.getByLabelText("Voice source")).toHaveValue(
+    `${chosen.service_id}:platform:${chosen.model}`,
+  );
+});
+
+it("an account change during confirmed save cannot replace either actor cache or authorize provider start", async () => {
+  const actor = { id: "saving-owner" } as NonNullable<
+    ReturnType<typeof useAuthStore.getState>["user"]
+  >;
+  useAuthStore.setState({ user: actor });
+  mock.connected = false;
+  mock.options = [voiceOption];
+  const originalKey = nyxBotQueryKeys.settings(actor.id);
+  const otherKey = nyxBotQueryKeys.settings("new-owner");
+  mock.queryClient!.setQueryData(originalKey, { voice: voicePreferences });
+  mock.queryClient!.setQueryData(otherKey, { voice: null });
+  let authorize!: () => Promise<void>;
+  mock.start.mockImplementationOnce(
+    async (_prefs, _protocol, before: () => Promise<void>) => {
+      authorize = before;
+    },
+  );
+  let confirm!: (settings: { voice: VoicePreferences }) => void;
+  mock.save.mockImplementationOnce(
+    () =>
+      new Promise((resolve) => {
+        confirm = resolve;
+      }),
+  );
+  render(
+    <VoicePanel
+      threadId="thread"
+      savedPreferences={voicePreferences}
+      onClose={vi.fn()}
+    />,
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Start voice" }));
+  await waitFor(() => expect(authorize).toBeTypeOf("function"));
+  const saving = authorize();
+  act(() => useAuthStore.setState({ user: { ...actor, id: "new-owner" } }));
+  confirm({ voice: { ...voicePreferences, input_mode: "automatic" } });
+  await expect(saving).rejects.toThrow("Voice preferences could not be saved");
+  expect(mock.queryClient!.getQueryData(originalKey)).toEqual({
+    voice: voicePreferences,
+  });
+  expect(mock.queryClient!.getQueryData(otherKey)).toEqual({ voice: null });
+});
+
+it("compact startup error offers only an intentional retry of the exact selected voice source", async () => {
+  mock.connected = false;
+  mock.error =
+    "Insufficient voice credits. Check your available credits, then retry voice.";
+  mock.options = [voiceOption];
+  const props = {
+    threadId: "thread",
+    savedPreferences: voicePreferences,
+    onClose: vi.fn(),
+    onViewChange: vi.fn(),
+  };
+  const view = render(<VoicePanel {...props} />);
+  expect(mock.start).not.toHaveBeenCalled();
+  expect(screen.getByRole("alert")).toHaveTextContent(
+    "Check your available credits",
+  );
+  fireEvent.click(
+    screen.getByRole("button", { name: "Retry voice" }),
+  );
+  expect(mock.start).toHaveBeenCalledWith(
+    expect.objectContaining({
+      service_id: voicePreferences.service_id,
+      model: voicePreferences.model,
+      input_mode: voicePreferences.input_mode,
+    }),
+    undefined,
+    expect.any(Function),
+  );
+  // No failed prepared capture is reused: start() acquires new media from this gesture.
+  mock.starting = true;
+  view.rerender(<VoicePanel {...props} />);
+  expect(
+    screen.queryByRole("button", { name: "Retry voice" }),
+  ).not.toBeInTheDocument();
+  mock.starting = false;
+  mock.conflictSession = {
+    id: "active-call",
+    resumable: true,
+    control_revision: 0,
+  };
+  view.rerender(<VoicePanel {...props} />);
+  expect(
+    screen.queryByRole("button", { name: "Retry voice" }),
+  ).not.toBeInTheDocument();
+  mock.conflictSession = null;
+  view.rerender(<VoicePanel {...props} preferencesReady={false} />);
+  expect(
+    screen.queryByRole("button", { name: "Retry voice" }),
+  ).not.toBeInTheDocument();
+  view.rerender(
+    <VoicePanel
+      {...props}
+      savedPreferences={{ ...voicePreferences, service_id: "unavailable" }}
+    />,
+  );
+  expect(
+    screen.queryByRole("button", { name: "Retry voice" }),
+  ).not.toBeInTheDocument();
+});
+
+it("failed source discovery can be retried without capture or paid-source fallback", async () => {
+  mock.connected = false;
+  mock.optionsError = true;
+  const first = preparation();
+  const props = {
+    threadId: "thread",
+    savedPreferences: voicePreferences,
+    onClose: vi.fn(),
+    onViewChange: vi.fn(),
+  };
+  const view = render(<VoicePanel {...props} preparation={first} />);
+  await waitFor(() => expect(first.close).toHaveBeenCalledOnce());
+  fireEvent.click(screen.getByRole("button", { name: "Retry voice loading" }));
+  await waitFor(() => expect(mock.refetch).toHaveBeenCalledOnce());
+  expect(mock.start).not.toHaveBeenCalled();
+  mock.optionsError = false;
+  mock.options = [voiceOption];
+  view.rerender(<VoicePanel {...props} preparation={first} />);
+  expect(mock.start).not.toHaveBeenCalled();
+  const next = preparation();
+  view.rerender(<VoicePanel {...props} preparation={next} />);
+  await waitFor(() =>
+    expect(mock.start).toHaveBeenCalledWith(
+      expect.objectContaining({
+        service_id: voicePreferences.service_id,
+        input_mode: voicePreferences.input_mode,
+      }),
+      undefined,
+      expect.any(Function),
+      next,
+    ),
+  );
+});
+
+it("failed saved preferences can be retried and hydrate before editing or the next start", async () => {
+  mock.connected = false;
+  mock.options = [voiceOption];
+  const retry = vi.fn().mockResolvedValue({});
+  const first = preparation();
+  const props = {
+    threadId: "thread",
+    onClose: vi.fn(),
+    onViewChange: vi.fn(),
+    settingsRequest: 1,
+    onRetryPreferences: retry,
+  };
+  const view = render(
+    <VoicePanel {...props} preferencesError preparation={first} />,
+  );
+  await waitFor(() => expect(first.close).toHaveBeenCalledOnce());
+  expect(screen.getByLabelText("Microphone mode")).toBeDisabled();
+  fireEvent.click(screen.getByRole("button", { name: "Retry voice loading" }));
+  await waitFor(() => expect(retry).toHaveBeenCalledOnce());
+  view.rerender(<VoicePanel {...props} preferencesReady={false} />);
+  expect(screen.getByLabelText("Microphone mode")).toBeDisabled();
+  view.rerender(<VoicePanel {...props} savedPreferences={voicePreferences} />);
+  expect(screen.getByLabelText("Microphone mode")).toBeEnabled();
+  expect(screen.getByLabelText("Microphone mode")).toHaveValue(
+    voicePreferences.input_mode,
+  );
+  fireEvent.change(screen.getByLabelText("Microphone mode"), {
+    target: { value: "automatic" },
+  });
+  // A later query refresh cannot overwrite the explicit next-call edit.
+  view.rerender(
+    <VoicePanel {...props} savedPreferences={{ ...voicePreferences }} />,
+  );
+  expect(screen.getByLabelText("Microphone mode")).toHaveValue("automatic");
+  expect(mock.start).not.toHaveBeenCalled();
+  const next = preparation();
+  view.rerender(
+    <VoicePanel
+      {...props}
+      savedPreferences={voicePreferences}
+      preparation={next}
+    />,
+  );
+  await waitFor(() =>
+    expect(mock.start).toHaveBeenCalledWith(
+      expect.objectContaining({ input_mode: "automatic" }),
+      undefined,
+      expect.any(Function),
+      next,
+    ),
   );
 });
