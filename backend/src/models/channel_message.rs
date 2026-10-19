@@ -77,6 +77,11 @@ pub struct ChannelMessage {
     pub content_type: String,
     #[serde(default)]
     pub attachments: Vec<StoredAttachment>,
+    /// Post resources in document order; never part of the callback/indexed HTTP list.
+    #[serde(default)]
+    pub embedded_attachments: Vec<StoredAttachment>,
+    #[serde(default)]
+    pub embedded_attachments_omitted: usize,
     /// Platform-specific routing metadata: Telegram `message_thread_id`,
     /// Discord deferred-interaction token (`interaction:{app}:{token}`),
     /// Lark `thread_id`, etc. **This is routing metadata, not message
@@ -132,6 +137,8 @@ mod tests {
 
     fn make_message() -> ChannelMessage {
         ChannelMessage {
+            embedded_attachments: Vec::new(),
+            embedded_attachments_omitted: 0,
             thread_context: None,
             activity: None,
             platform_send: None,

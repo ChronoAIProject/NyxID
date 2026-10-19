@@ -175,6 +175,19 @@ const AGENT_OPERATION_SCOPES_FLAG: FeatureFlagDef = FeatureFlagDef {
     default_enabled: false,
 };
 
+pub const ASSISTANT_CHANNEL_MEDIA_FLAG_KEY: &str = "assistant:channel-media";
+const ASSISTANT_CHANNEL_MEDIA_FLAG: FeatureFlagDef = FeatureFlagDef {
+    key: ASSISTANT_CHANNEL_MEDIA_FLAG_KEY,
+    description: "Admit owner Lark/Feishu media after every replica supports channel uploads.",
+    default_enabled: false,
+};
+pub const ASSISTANT_ATTACHMENT_WRITES_FLAG_KEY: &str = "assistant:attachment-writes";
+const ASSISTANT_ATTACHMENT_WRITES_FLAG: FeatureFlagDef = FeatureFlagDef {
+    key: ASSISTANT_ATTACHMENT_WRITES_FLAG_KEY,
+    description: "Enable managed attachment writes after every replica supports their enforcement.",
+    default_enabled: false,
+};
+
 pub const ASSISTANT_LIVE_TURN_GATE_FLAG_KEY: &str = "assistant:live-turn-gate";
 const ASSISTANT_LIVE_TURN_GATE_FLAG: FeatureFlagDef = FeatureFlagDef {
     key: ASSISTANT_LIVE_TURN_GATE_FLAG_KEY,
@@ -274,6 +287,8 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     NYXBOT_THREAD_FOLLOW_FLAG,
     NYXBOT_ADAPTERS_FLAG,
     AGENT_OPERATION_SCOPES_FLAG,
+    ASSISTANT_CHANNEL_MEDIA_FLAG,
+    ASSISTANT_ATTACHMENT_WRITES_FLAG,
     ASSISTANT_LIVE_TURN_GATE_FLAG,
     MACHINE_CAPABILITIES_FLAG,
     MACHINE_CONTEXTS_FLAG,
@@ -308,6 +323,8 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     NYXBOT_THREAD_FOLLOW_FLAG,
     NYXBOT_ADAPTERS_FLAG,
     AGENT_OPERATION_SCOPES_FLAG,
+    ASSISTANT_CHANNEL_MEDIA_FLAG,
+    ASSISTANT_ATTACHMENT_WRITES_FLAG,
     ASSISTANT_LIVE_TURN_GATE_FLAG,
     MACHINE_CAPABILITIES_FLAG,
     MACHINE_CONTEXTS_FLAG,
@@ -3002,5 +3019,20 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(replaced.owner.is_none());
+    }
+}
+
+#[cfg(test)]
+mod channel_media_flags_tests {
+    use super::*;
+    #[test]
+    fn channel_media_and_attachment_writes_are_registered_default_off() {
+        for key in [
+            ASSISTANT_CHANNEL_MEDIA_FLAG_KEY,
+            ASSISTANT_ATTACHMENT_WRITES_FLAG_KEY,
+        ] {
+            let flag = FEATURE_FLAGS.iter().find(|flag| flag.key == key).unwrap();
+            assert!(!flag.default_enabled);
+        }
     }
 }

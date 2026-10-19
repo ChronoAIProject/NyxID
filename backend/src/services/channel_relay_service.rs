@@ -213,7 +213,18 @@ pub(crate) fn inbound_metadata(
     agent_api_key_id: &str,
     message_id: &str,
 ) -> ChannelMessage {
+    let (embedded, omitted) = if matches!(platform, "lark" | "feishu") {
+        super::channel_adapters::lark::embedded_attachments(
+            platform,
+            &inbound.raw_data,
+            &inbound.platform_message_id,
+        )
+    } else {
+        (Vec::new(), 0)
+    };
     ChannelMessage {
+        embedded_attachments: embedded,
+        embedded_attachments_omitted: omitted,
         thread_context: None,
         activity: None,
         platform_send: None,
@@ -276,6 +287,8 @@ pub async fn store_outbound_message(
 ) -> AppResult<ChannelMessage> {
     let now = Utc::now();
     let message = ChannelMessage {
+        embedded_attachments: Vec::new(),
+        embedded_attachments_omitted: 0,
         thread_context: None,
         activity: None,
         platform_send,
@@ -345,6 +358,8 @@ pub async fn store_device_event_message(
     inherited_thread_id: Option<String>,
 ) -> AppResult<ChannelMessage> {
     let message = ChannelMessage {
+        embedded_attachments: Vec::new(),
+        embedded_attachments_omitted: 0,
         thread_context: None,
         activity: None,
         platform_send: None,
@@ -1329,6 +1344,8 @@ mod tests {
     ) {
         let now = Utc::now();
         let message = ChannelMessage {
+            embedded_attachments: Vec::new(),
+            embedded_attachments_omitted: 0,
             thread_context: None,
             activity: None,
             platform_send: None,

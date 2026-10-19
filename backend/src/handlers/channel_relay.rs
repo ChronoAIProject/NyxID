@@ -4092,6 +4092,8 @@ mod tests {
         };
 
         let message = ChannelMessage {
+            embedded_attachments: Vec::new(),
+            embedded_attachments_omitted: 0,
             thread_context: None,
             activity: None,
             platform_send: None,
@@ -4120,6 +4122,8 @@ mod tests {
         };
 
         let outbound_message = ChannelMessage {
+            embedded_attachments: Vec::new(),
+            embedded_attachments_omitted: 0,
             thread_context: None,
             activity: None,
             platform_send: None,
@@ -4322,6 +4326,8 @@ mod tests {
         let db = fixture.state.db.clone();
 
         let other_message = ChannelMessage {
+            embedded_attachments: Vec::new(),
+            embedded_attachments_omitted: 0,
             thread_context: None,
             activity: None,
             platform_send: None,
@@ -4932,6 +4938,8 @@ mod tests {
             .await
             .unwrap();
         let colliding = ChannelMessage {
+            embedded_attachments: Vec::new(),
+            embedded_attachments_omitted: 0,
             id: Uuid::new_v4().to_string(),
             platform_conversation_id: Some("chat_a".into()),
             reply_to_message_id,
@@ -5225,6 +5233,8 @@ mod tests {
         }
         // Another chat's reply shares the platform message ID, not the bucket.
         let sibling = ChannelMessage {
+            embedded_attachments: Vec::new(),
+            embedded_attachments_omitted: 0,
             id: Uuid::new_v4().to_string(),
             platform: "whatsapp".into(),
             platform_conversation_id: Some("chat_a".into()),
