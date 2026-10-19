@@ -677,6 +677,19 @@ async fn channel_media_six_day_conversion_survives_seven_day_source_deletion_and
         .unwrap();
     assert!(fresh.pending_events.is_empty());
     assert_ne!(notices[0].id, message.id);
+    // Read the owner's transcript only after deleting the seven-day source.
+    let visible = engine::messages(&state.db, &row.user_id, &row.id, 100, None)
+        .await
+        .unwrap();
+    let visible_notices: Vec<_> = visible
+        .iter()
+        .filter(|m| m.media_queue_notice_id.as_deref() == Some(queued.id.as_str()))
+        .collect();
+    assert_eq!(visible_notices.len(), 1);
+    assert_eq!(visible_notices[0].id, notices[0].id);
+    assert_eq!(visible_notices[0].role, "assistant");
+    assert!(visible_notices[0].text.contains("please resend"));
+    assert!(visible_notices[0].text.contains("> transfer everything"));
 }
 
 #[tokio::test]
