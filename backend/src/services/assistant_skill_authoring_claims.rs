@@ -203,6 +203,7 @@ pub(super) async fn reserve(
                     let card = latest_card(db, &proposal, session).await?.ok_or_else(||
                         AppError::Conflict("Review or discard the interrupted draft before creating another; its original review conversation was not recorded".into()))?;
                     let claim = AuthoredDraftClaim {
+                        invocation_id:card.invocation_id.clone(),
                         proposal_id: proposal.id.clone(), conversation_id: card.conversation_id.clone(),
                         api_key_id: card.api_key_id.clone(), turn_id: card.requested_turn_id.clone().unwrap_or_default(),
                         creation_turn_id: card.creation_turn_id.clone(),
@@ -233,6 +234,7 @@ pub(super) async fn reserve(
             let started_by = db.collection::<AssistantMessage>(MESSAGES).find_one(initiating)
                 .sort(doc! {"seq":-1}).session(&mut *session).await?;
             let claim = AuthoredDraftClaim {
+                invocation_id:chat.invocation_id.clone(),
                 proposal_id: candidate.id.clone(), conversation_id: chat.conversation_id.clone(),
                 api_key_id: chat.api_key_id.clone(), turn_id: turn_id.clone(),
                 creation_turn_id: Some(turn_id.clone()),
@@ -300,6 +302,7 @@ pub(super) async fn finalize(
                 return Err(conflict());
             }
             let origin = acks::RequestOrigin {
+                invocation_id:claim.invocation_id.clone(),
                 creation_turn_id: claim.creation_turn_id.clone(),
                 requested_turn_id: claim.requested_turn_id.clone(), voice_request_id: claim.voice_request_id.clone(),
                 trigger_run_id: claim.trigger_run_id.clone(), routing: claim.routing.clone(),

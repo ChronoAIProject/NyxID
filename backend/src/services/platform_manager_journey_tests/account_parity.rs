@@ -731,6 +731,9 @@ async fn two_accounts_keep_real_credentials_memory_tools_payers_and_web_continui
     let grants = billing::grants::issue_grants(
         &j.state.db,
         billing::grants::IssueCreditGrantInput {
+            amount: None,
+            service_limits: Vec::new(),
+            request_id: None,
             amount_credits: 1,
             target_kind: crate::models::billing_target::BillingTargetKind::SelectedUsers,
             target_user_ids: vec![accounts[0].clone()],

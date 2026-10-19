@@ -206,4 +206,5 @@ pub mod admin_remote_machine_platform;
 #[cfg(test)]
 mod tools_manager_tests;
 
+pub mod assistant_invocations;
 pub mod call_adapters;

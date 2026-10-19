@@ -355,18 +355,23 @@ fn text_controls(text: &str) -> String {
     };
     // Only opted-in DM controls are adapted. Ordinary prose, including text
     // beginning with a similar word, retains its exact substantive bytes.
-    if first == "faq" && text.len() <= 4096 {
+    let verb = first.to_ascii_lowercase();
+    if verb == "faq" && text.len() <= 4096 {
         return format!(
             "/faq{}",
             text.trim_start().strip_prefix(first).unwrap_or("")
         );
     }
-    match (first, tokens.next(), tokens.next()) {
+    match (verb.as_str(), tokens.next(), tokens.next()) {
         ("login" | "link" | "status" | "logout" | "unlink" | "help", None, None) => {
-            format!("/{first}")
+            format!("/{verb}")
         }
-        ("confirm", Some(code), None) if code.to_ascii_uppercase().starts_with("P-") => {
-            format!("/confirm {code}")
+        ("confirm", None, None) => "/confirm".into(),
+        ("confirm", Some(code), _) if code.to_ascii_uppercase().starts_with("P-") => {
+            format!(
+                "/confirm{}",
+                text.trim_start().strip_prefix(first).unwrap_or("")
+            )
         }
         _ => text.into(),
     }
@@ -718,6 +723,12 @@ fn discord_command_text(data: &Value) -> AppResult<String> {
                         .is_some_and(|verb| verb.eq_ignore_ascii_case("confirm"))
                 {
                     Ok("/unsupported".into())
+                } else if value
+                    .split_whitespace()
+                    .next()
+                    .is_some_and(|verb| verb.eq_ignore_ascii_case("faq"))
+                {
+                    Ok(text_controls(value))
                 } else {
                     Ok(value.into())
                 }

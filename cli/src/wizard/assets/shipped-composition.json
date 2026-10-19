@@ -1,14 +1,14 @@
 {
   "schema": "nyxid.shipped-composition.v1",
   "component": "wizard",
-  "source_lock_sha256": "b8e51437261f9e2e450dea350187f07e78fbe601a50b3ba11f1ceb95dd61e94a",
+  "source_lock_sha256": "e965ec23434aa7a7c1d37edab6ea0e06924dd2ee2091e1902107b5fa6cf4af9a",
   "graphs": [
     {
       "path": "embedded-rendered-graph",
-      "sha256": "b2d3b69f971875ce8c2b8f0dd5688303a577852bc93ce73580a6e61175d0e73f",
+      "sha256": "2c53d3dacc1363ac22aada756f3d254b7e517bfe3522daa8d9e909485c1a207c",
       "schema": "nyxid.rendered-composition.v1",
       "component": "wizard",
-      "lock_sha256": "b8e51437261f9e2e450dea350187f07e78fbe601a50b3ba11f1ceb95dd61e94a",
+      "lock_sha256": "e965ec23434aa7a7c1d37edab6ea0e06924dd2ee2091e1902107b5fa6cf4af9a",
       "chunks": [
         {
           "path": "index.html",
@@ -3459,8 +3459,8 @@
         },
         {
           "kind": "style",
-          "sha256": "2be18faffa54fc4056a851d09f68bc41119968af3c9c95487f81da99d1bde81c",
-          "size": 209311,
+          "sha256": "84a0068dd744b50e92bbe92f6da9b714ffa7fcb09df59960648a6be6bf6b3be9",
+          "size": 209942,
           "path": "index.html",
           "transform": "pkg:npm/vite-plugin-singlefile@2.3.4"
         }
@@ -3995,8 +3995,8 @@
     },
     {
       "path": "index.html",
-      "size": 1337758,
-      "sha256": "642af3ab403cf69e398fb72a9f3c4f0a2c14e21f0b783f8178fb4571421eaf0d"
+      "size": 1338389,
+      "sha256": "fc91b735927f3a2e9aad9d07df78692322e042b6992ec6bf4f19037a9d36f542"
     },
     {
       "path": "nyxid-app-icon.svg",
@@ -4031,8 +4031,8 @@
         },
         {
           "kind": "style",
-          "sha256": "2be18faffa54fc4056a851d09f68bc41119968af3c9c95487f81da99d1bde81c",
-          "size": 209311,
+          "sha256": "84a0068dd744b50e92bbe92f6da9b714ffa7fcb09df59960648a6be6bf6b3be9",
+          "size": 209942,
           "transform": "pkg:npm/vite-plugin-singlefile@2.3.4"
         }
       ],

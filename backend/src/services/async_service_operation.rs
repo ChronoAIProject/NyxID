@@ -153,6 +153,11 @@ pub async fn reserve(
     let mut session = db.client().start_session().await?;
     let watch = session.start_transaction().and_run2(async move |session| {
         let result: AppResult<_> = Box::pin(async {
+            if !super::assistant_invocation_service::fence_in_session(
+                &db, session, &chat.user_id, chat.invocation_id.as_deref(),
+            ).await? {
+                return Err(AppError::AssistantTurnRequired);
+            }
             db.collection::<bson::Document>(QUOTAS_COLLECTION_NAME).update_one(doc!{"_id":&chat.user_id},doc!{"$inc":{"generation":1},"$set":{"user_id":&chat.user_id}}).upsert(true).session(&mut *session).await?;
             let row=db.collection::<AssistantConversation>(CONVERSATIONS).find_one_and_update(
                 doc!{"_id":&chat.conversation_id,"user_id":&chat.user_id,"active_turn.turn_id":&chat.turn_id,"active_turn.stop_requested":false,"guest_turn":{"$ne":true},"credential_api_key_id":&chat.api_key_id,"agent_id":&chat.agent_id},
@@ -166,7 +171,7 @@ pub async fn reserve(
             let mut delivery = if let Some(parent) = event_id(&row) {
                 watches.find_one(doc!{"_id":parent,"user_id":&chat.user_id,"conversation_id":&row.id,"state":"queued"}).session(&mut *session).await?.ok_or(AppError::AssistantTurnRequired)?.delivery
             } else {
-                DeliveryBinding{platform_reply:Some(platform_reply_routing(turn)),platform_origin:turn.platform_origin.clone(),origin:turn.origin,channel:turn.asked_from.clone().filter(|_|row.channel.is_some()).or_else(||row.channel.clone()),reply_channel:turn.asked_from.clone().filter(|_|row.channel.is_none()).or_else(||row.reply_channel.clone()),group_id:row.group_id.clone(),group_request_id:row.group_request_id.clone(),voice_request_id:turn.voice_request_id.clone(),trigger_run_id:turn.trigger_run_id.clone(),report_to:None,report_provenance:0}
+                DeliveryBinding{invocation_id:turn.invocation_id.clone(),platform_reply:Some(platform_reply_routing(turn)),platform_origin:turn.platform_origin.clone(),origin:turn.origin,channel:turn.asked_from.clone().filter(|_|row.channel.is_some()).or_else(||row.channel.clone()),reply_channel:turn.asked_from.clone().filter(|_|row.channel.is_none()).or_else(||row.reply_channel.clone()),group_id:row.group_id.clone(),group_request_id:row.group_request_id.clone(),voice_request_id:turn.voice_request_id.clone(),trigger_run_id:turn.trigger_run_id.clone(),report_to:None,report_provenance:0}
             };
             // Never a parent operation's stored field wholesale.
             match super::assistant_nyxagent::live_turn(&row, Utc::now()).filter(|live| !live.stop_requested) {
@@ -282,9 +287,10 @@ pub async fn enqueue(db: &Database, w: &AsyncServiceOperation) -> AppResult<bool
             let Some(row)=conversations.find_one(doc!{"_id":&w.conversation_id,"user_id":&w.user_id}).session(&mut *session).await? else {
                 db.collection::<bson::Document>(WATCHES).delete_one(lease_filter(&w)).session(&mut *session).await?;return Ok(false);
             };
+            if !super::assistant_invocation_service::fence_in_session(&db,session,&w.user_id,w.delivery.invocation_id.as_deref()).await? {return Ok(false);}
             if row.pending_events.len()>=super::assistant_nyxagent::MAX_PENDING_EVENTS {return Ok(false);}
             if db.collection::<bson::Document>(WATCHES).update_one(lease_filter(&w),doc!{"$set":{"state":"queued","lease_id":null,"lease_until":null}}).session(&mut *session).await?.modified_count==0{return Ok(false);}
-            let event = AgentEvent {
+            let event = AgentEvent { invocation_id: w.delivery.invocation_id.clone(),
                 id: w.id.clone(),
                 kind: EVENT_KIND.into(),
                 text: format!(
@@ -317,6 +323,73 @@ pub async fn cancel(db: &Database, user: &str, id: &str) -> AppResult<()> {
             db.collection::<bson::Document>(CONVERSATIONS).update_one(doc!{"_id":&id,"user_id":&user},doc!{"$pull":{"pending_events":{"kind":EVENT_KIND}}}).session(&mut *session).await?;
             Ok(())
         }).await;transactions::transaction_result(result)
+    }).await.map_err(transactions::map_transaction_error)
+}
+
+/// Record the attempt before dispatch. A crash leaves a durable unknown outcome
+/// on the root receipt, and a reclaimed lease must never repeat that RPC.
+pub async fn begin_tracked_cancellation(
+    db: &Database,
+    w: &AsyncServiceOperation,
+) -> AppResult<bool> {
+    use crate::models::assistant_invocation::COLLECTION_NAME as ROOTS;
+    let Some(root) = w.delivery.invocation_id.clone() else {
+        return Ok(false);
+    };
+    let database = db.clone();
+    let watch = w.clone();
+    let mut session = db.client().start_session().await?;
+    session.start_transaction().and_run2(async move |session| {
+        let result: AppResult<bool> = Box::pin(async {
+            let mut filter = lease_filter(&watch);
+            filter.insert("cancel_attempted", doc! {"$ne":true});
+            let claimed = database.collection::<bson::Document>(WATCHES)
+                .update_one(filter, doc! {"$set":{"cancel_attempted":true,"reason":"cancellation_unknown"}})
+                .session(&mut *session).await?.matched_count == 1;
+            if claimed {
+                database.collection::<bson::Document>(ROOTS)
+                    .update_one(doc! {"_id":&root,"user_id":&watch.user_id},
+                        doc! {"$addToSet":{"unconfirmed_async_cancellations":&watch.id},"$inc":{"generation":1_i64}})
+                    .session(&mut *session).await?;
+            }
+            Ok(claimed)
+        }).await;
+        transactions::transaction_result(result)
+    }).await.map_err(transactions::map_transaction_error)
+}
+
+/// A safe reason is retained even after the watch expires. Confirmed success
+/// removes only this watch's uncertainty; another watch's outcome is untouched.
+pub async fn finish_tracked_cancellation(
+    db: &Database,
+    w: &AsyncServiceOperation,
+    confirmed: bool,
+    reason: &str,
+) -> AppResult<()> {
+    use crate::models::assistant_invocation::COLLECTION_NAME as ROOTS;
+    let Some(root) = w.delivery.invocation_id.clone() else {
+        return Ok(());
+    };
+    let database = db.clone();
+    let watch = w.clone();
+    let reason = reason.to_owned();
+    let mut session = db.client().start_session().await?;
+    session.start_transaction().and_run2(async move |session| {
+        let result: AppResult<()> = Box::pin(async {
+            let changed = database.collection::<bson::Document>(WATCHES)
+                .update_one(lease_filter(&watch), doc! {"$set":{
+                    "state":if confirmed {"cancelled"} else {"cancellation_review"},
+                    "reason":&reason,"result_encrypted":null,"lease_id":null,"lease_until":null
+                }}).session(&mut *session).await?.matched_count == 1;
+            if changed && confirmed {
+                database.collection::<bson::Document>(ROOTS)
+                    .update_one(doc! {"_id":&root,"user_id":&watch.user_id},
+                        doc! {"$pull":{"unconfirmed_async_cancellations":&watch.id},"$inc":{"generation":1_i64}})
+                    .session(&mut *session).await?;
+            }
+            Ok(())
+        }).await;
+        transactions::transaction_result(result)
     }).await.map_err(transactions::map_transaction_error)
 }
 
@@ -368,6 +441,24 @@ fn channel_question(event: &AgentEvent) -> bool {
 /// coalesce results from different delivery places into a single reply.
 pub fn select_events(row: &mut AssistantConversation, origin: TurnOrigin) -> Vec<AgentEvent> {
     if origin == TurnOrigin::Event
+        && let Some(index) = row
+            .pending_events
+            .iter()
+            .position(|e| e.invocation_id.is_some())
+    {
+        // Exactly one async result per turn: its payload/delivery is selected
+        // through event_id(), even when several results share an invocation.
+        if row.pending_events[index].kind == EVENT_KIND {
+            return vec![row.pending_events.remove(index)];
+        }
+        let id = row.pending_events[index].invocation_id.clone();
+        let (selected, rest) = std::mem::take(&mut row.pending_events)
+            .into_iter()
+            .partition(|e| e.invocation_id == id && e.kind != EVENT_KIND);
+        row.pending_events = rest;
+        return selected;
+    }
+    if origin == TurnOrigin::Event
         && let Some(index) = row.pending_events.iter().position(|e| e.kind == EVENT_KIND)
     {
         return vec![row.pending_events.remove(index)];
@@ -381,7 +472,9 @@ pub fn select_events(row: &mut AssistantConversation, origin: TurnOrigin) -> Vec
     }
     let (deferred, ordinary) = std::mem::take(&mut row.pending_events)
         .into_iter()
-        .partition(|e: &AgentEvent| e.kind == EVENT_KIND || channel_question(e));
+        .partition(|e: &AgentEvent| {
+            e.kind == EVENT_KIND || e.invocation_id.is_some() || channel_question(e)
+        });
     row.pending_events = deferred;
     ordinary
 }

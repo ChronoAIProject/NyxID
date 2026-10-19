@@ -2469,6 +2469,7 @@ async fn group_chats_share_one_thread_and_members_talk_as_guests() {
         &state,
         OWNER,
         TurnStart {
+            invocation_id: None,
             acknowledgement_id: None,
             retry_of: None,
             channel_event_id: None,
@@ -3511,6 +3512,7 @@ async fn the_owners_private_chats_share_the_agents_own_thread() {
         &state,
         OWNER,
         TurnStart {
+            invocation_id: None,
             acknowledgement_id: None,
             retry_of: None,
             channel_event_id: None,

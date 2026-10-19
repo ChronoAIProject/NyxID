@@ -4,6 +4,20 @@ This document describes the system architecture, component design, data flows, a
 
 ---
 
+Credit allocations extend the existing `credit_grants`, `credit_schedules` and
+frozen `credit_schedule_periods` financial identities. `billing::service_limits`
+resolves disjoint catalog groups and enforces exact allocation-local counters;
+`billing::summaries` streams current exact state without financial writes.
+`credit_allocation_requests` stores actor-scoped UUID submission snapshots
+(payload, resolved policy and recipient snapshot), with its unique `_id` as the
+retry identity. `billing::submissions` freezes them before deterministic grant
+insertion; these snapshots contain no separately spendable funds. Ordinary and
+public/pool/managed admission commit all funding holds with usage rows; machine
+admission stays in its owning lifecycle transaction. Indexed
+`active_settlement.usage_row_id` lookups drain operation bridges on takeover.
+See [exact accounting](BILLING_EXACT_ACCOUNTING.md#allocation-local-service-ceilings-and-reclaim)
+for cap, reclaim, recovery and all-writer rollout constraints.
+
 Catalog services own shared credentials, audience grants, endpoint policy, and
 billing; providers supply authentication configuration and may back multiple
 services. Provider linking and requirement mutations are serialized through the

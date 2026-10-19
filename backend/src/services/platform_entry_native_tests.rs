@@ -66,6 +66,9 @@ async fn slack_authenticated_dm_controls_and_questions_have_positive_provenance(
         ("login", "/login"),
         ("status", "/status"),
         ("logout", "/logout"),
+        ("LOGIN", "/login"),
+        ("Logout", "/logout"),
+        ("Confirm p-abcd-efgh", "/confirm p-abcd-efgh"),
         ("confirm P-ABCD-EFGH", "/confirm P-ABCD-EFGH"),
         ("What is NyxID?", "What is NyxID?"),
         (
@@ -1245,8 +1248,34 @@ fn faq_alias_uses_the_same_trimmed_unicode_boundary() {
         "   faq unlink",
         "\u{2003}faq unlink",
         "\u{2003}  faq unlink",
+        "FAQ unlink",
+        "\u{2003}FaQ unlink",
     ] {
         assert_eq!(super::text_controls(text), "/faq unlink");
+    }
+    for (text, expected) in [
+        ("LOGIN", "/login"),
+        ("Logout", "/logout"),
+        ("Confirm p-aaaa-bbbb", "/confirm p-aaaa-bbbb"),
+        ("CONFIRM", "/confirm"),
+        ("Confirm p-aaaa-bbbb extra", "/confirm p-aaaa-bbbb extra"),
+        ("Login to my bank", "Login to my bank"),
+        ("Help me write", "Help me write"),
+    ] {
+        assert_eq!(super::text_controls(text), expected);
+    }
+    for (question, expected) in [
+        ("faq unlink", "/faq unlink"),
+        ("FAQ unlink", "/faq unlink"),
+        ("\u{2003}FAQ memory", "/faq memory"),
+        ("Logout", "Logout"),
+        ("Help me write", "Help me write"),
+    ] {
+        let payload = discord_message("ask", Some(("question", question)));
+        assert_eq!(
+            super::discord_command_text(&payload["data"]).unwrap(),
+            expected
+        );
     }
     for question in [
         "/logout",

@@ -59,7 +59,8 @@ const opaqueIdentity = z
   .min(1)
   .refine((value) => new TextEncoder().encode(value).byteLength <= 256)
   .refine(
-    (value) => value.trim() === value &&
+    (value) =>
+      value.trim() === value &&
       [...value].every((character) => {
         const point = character.codePointAt(0)!;
         return point >= 0x20 && !(point >= 0x7f && point <= 0x9f);
@@ -156,6 +157,16 @@ export const personalBindingSchema = z.object({
   manager,
   sender,
   state: z.enum(["active", "revoked"]),
+  consent_state: z.enum(["active", "revoked"]).optional(),
+  availability: z
+    .enum([
+      "available",
+      "temporarily_unavailable",
+      "paused",
+      "reconnect_required",
+      "disconnected",
+    ])
+    .optional(),
   conversation_id: z.string().nullable(),
   consented_at: date,
   revoked_at: date.nullable(),

@@ -172,3 +172,26 @@ async fn member_removal_blocks_new_funding_but_preserves_admitted_reservations()
         assert_eq!(settle_usage_funding(&db, &row).await.unwrap(), result);
     }
 }
+
+async fn reserve_allowances(
+    db: &mongodb::Database,
+    owner: &str,
+    service: Option<&str>,
+    slug: Option<&str>,
+    metric: BillingMetric,
+    quantity: i64,
+) -> AppResult<Vec<AllowanceReservationAllocation>> {
+    Ok(super::tests::ordinary(
+        db,
+        owner,
+        service,
+        slug,
+        metric,
+        quantity,
+        Credits::from_pico(1).unwrap(),
+    )
+    .await?
+    .layers
+    .remove(0)
+    .allowance_reservations)
+}

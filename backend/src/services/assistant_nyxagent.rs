@@ -566,6 +566,7 @@ pub struct TurnRequest {
 /// subagent, a batch of NyxID events, or a channel message.
 #[derive(Clone)]
 pub struct TurnStart {
+    pub invocation_id: Option<String>,
     pub acknowledgement_id: Option<String>,
     pub retry_of: Option<String>,
     pub channel_event_id: Option<String>,
@@ -663,10 +664,11 @@ pub async fn also_reply_to_queued(
     let updated = db
         .collection::<AssistantConversation>(CONVERSATIONS)
         .update_one(
-            doc! {"_id": id, "user_id": user_id, "pending_events.question_key": key},
+            doc! {"_id": id, "user_id": user_id,
+            "pending_events": {"$elemMatch": {"question_key": key, "invocation_id": null}}},
             doc! {"$addToSet": {"pending_events.$[e].reply_to": origin}},
         )
-        .array_filters(vec![doc! {"e.question_key": key}])
+        .array_filters(vec![doc! {"e.question_key": key, "e.invocation_id": null}])
         .await?;
     Ok(updated.matched_count == 1)
 }
@@ -687,6 +689,7 @@ pub async fn also_deliver(
         .collection::<AssistantConversation>(CONVERSATIONS)
         .update_one(
             doc! {"_id": id, "user_id": user_id, "active_turn.turn_id": turn_id,
+            "active_turn.invocation_id": null,
             &limit: {"$exists": false}},
             doc! {"$addToSet": {"active_turn.also_deliver": origin}},
         )
@@ -732,6 +735,7 @@ impl From<&TurnStart> for TurnStart {
 impl From<&TurnRequest> for TurnStart {
     fn from(request: &TurnRequest) -> Self {
         Self {
+            invocation_id: None,
             acknowledgement_id: request.acknowledgement_id.clone(),
             retry_of: request.retry_of.clone(),
             channel_event_id: None,
@@ -1886,6 +1890,18 @@ pub(crate) async fn begin_owner_turn_in_session(
     platform: Option<&crate::models::assistant_conversation::PlatformTurnOrigin>,
     voice_request_id: Option<&str>,
 ) -> AppResult<OwnerTurnAdmission> {
+    if let Some(ack) = &start.acknowledgement_id
+        && db
+            .collection::<bson::Document>(crate::models::assistant_acknowledgement::COLLECTION_NAME)
+            .find_one(doc! {"_id":ack,"user_id":user_id,"invocation_id":{"$type":"string"}})
+            .session(&mut *session)
+            .await?
+            .is_some()
+    {
+        return Err(AppError::Conflict(
+            "Invocation confirmation continuation is already queued".into(),
+        ));
+    }
     let id = ids.conversation_id.clone();
     let turn_id = ids.turn_id.clone();
     let voice_request_id = voice_request_id.map(str::to_owned);
@@ -1911,6 +1927,8 @@ pub(crate) async fn begin_owner_turn_in_session(
             .ok_or_else(not_found)?
     } else {
         AssistantConversation {
+            invocation_controlled: false,
+            credential_invocation_id: None,
             platform_thread: platform.map(|origin| origin.thread.clone()),
             machine_previews: false,
             platform_cleanup_pending: false,
@@ -2085,6 +2103,26 @@ pub(crate) async fn begin_owner_turn_in_session(
             .session(&mut *session)
             .await?;
     }
+    if row
+        .pending_events
+        .iter()
+        .any(|event| event.invocation_id.is_some())
+    {
+        let before = row.pending_events.len();
+        row.pending_events = super::assistant_invocation_service::filter_events_in_session(
+            db,
+            session,
+            user_id,
+            std::mem::take(&mut row.pending_events),
+        )
+        .await?;
+        if row.pending_events.len() != before {
+            collection.update_one(owner_filter(user_id,&id)?,doc!{"$set":{"pending_events":bson::to_bson(&row.pending_events).map_err(|_|AppError::Internal("Invalid events".into()))?}}).session(&mut *session).await?;
+            if start.origin == TurnOrigin::Event && row.pending_events.is_empty() {
+                return Ok(OwnerTurnAdmission::Drained);
+            }
+        }
+    }
     // Every turn drains queued events: an event turn renders them as
     // its message; other turns carry them in their input context.
     if start.origin == TurnOrigin::Event && row.pending_events.is_empty() {
@@ -2094,7 +2132,8 @@ pub(crate) async fn begin_owner_turn_in_session(
     // queued): a guest turn leaves them for the owner's next turn.
     // A chat app thread's queued messages wait for a turn that
     // answers in that chat, never one the owner starts in the app.
-    let events = if start.guest
+    let events = if start.invocation_id.is_some()
+        || start.guest
         || start.origin == TurnOrigin::Trigger
         || (start.origin == TurnOrigin::User && row.channel.is_some())
     {
@@ -2232,6 +2271,37 @@ pub(crate) async fn begin_owner_turn_in_session(
         }
     };
 
+    if start.invocation_id.is_some() {
+        super::assistant_invocation_service::require_owner_conversation(&row)?;
+    }
+    let next_invocation = start
+        .invocation_id
+        .clone()
+        .or_else(|| events.first().and_then(|event| event.invocation_id.clone()));
+    // NyxAgent authenticates tools with the raw conversation key. Retire that
+    // generation at invocation boundaries so an old worker cannot authenticate
+    // against a later turn's live authority. Continuations of the same family
+    // retain their card/watch binding; ordinary untouched threads keep theirs.
+    if (row.invocation_controlled || next_invocation.is_some())
+        && row.credential_invocation_id != next_invocation
+        && !row.credential_api_key_id.is_empty()
+    {
+        super::assistant_agent_credential_service::require_invocation_boundary_clear(
+            db,
+            user_id,
+            &row.id,
+            &mut *session,
+        )
+        .await?;
+        super::api_key_mutation_service::update_one(
+            db,
+            doc! {"_id":&row.credential_api_key_id,"user_id":user_id},
+            doc! {"$set":{"is_active":false}},
+            Some(&mut *session),
+        )
+        .await?;
+    }
+    row.credential_invocation_id = next_invocation;
     let credential = Box::pin(
         super::assistant_agent_credential_service::load_or_provision_in_session(
             db,
@@ -2350,6 +2420,10 @@ pub(crate) async fn begin_owner_turn_in_session(
             db, session, &row, &lost_turn, &message, now,
         ))
         .await?;
+        super::assistant_invocation_service::settle_in_session(
+            db, session, user_id, &lost_turn, &message,
+        )
+        .await?;
         super::platform_personal_turn_service::settle_saved_reply_in_session(db, session, &message)
             .await?;
         db.collection::<AssistantMessage>(MESSAGES)
@@ -2422,8 +2496,15 @@ pub(crate) async fn begin_owner_turn_in_session(
         (None, Some(retry)) => Some(retry.note.clone()),
         (None, None) => None,
     };
+    if start.invocation_id.is_some() || events.iter().any(|event| event.invocation_id.is_some()) {
+        row.invocation_controlled = true;
+    }
     row.active_turn = Some(ActiveTurn {
         channel_adapter_origin: None,
+        invocation_id: start
+            .invocation_id
+            .clone()
+            .or_else(|| events.first().and_then(|e| e.invocation_id.clone())),
         resource_refs: Vec::new(),
         worker_instance: Some(super::assistant_engine_worker::instance().clone()),
         model_attempt_id: None,
@@ -2541,6 +2622,10 @@ pub(crate) async fn begin_owner_turn_in_session(
     }
     Box::pin(super::async_service_operation::bind_in_session(
         db, &mut row, session,
+    ))
+    .await?;
+    Box::pin(super::assistant_invocation_service::bind_in_session(
+        db, session, &row,
     ))
     .await?;
     // Chats whose queued messages this turn answers get its reply
@@ -2850,8 +2935,8 @@ pub fn turn_input(row: &AssistantConversation, start: &TurnStart) -> String {
     }
 }
 
-/// Append wake-up events, bounded; the oldest are dropped first. Returns the
-/// row after the append, or `None` when the conversation is gone or destroyed.
+/// Append bounded wake-up events while preserving source work and invocation
+/// continuations. Returns the row after the append, or `None` when unavailable.
 pub async fn push_events(
     db: &Database,
     user_id: &str,
@@ -2860,6 +2945,12 @@ pub async fn push_events(
 ) -> AppResult<Option<AssistantConversation>> {
     if events.is_empty() {
         return get(db, user_id, id).await.map(Some);
+    }
+    if events.iter().any(|event| event.invocation_id.is_some()) {
+        return Box::pin(super::assistant_invocation_service::push_events(
+            db, user_id, id, events,
+        ))
+        .await;
     }
     let db = db.clone();
     let user_id = user_id.to_owned();
@@ -2883,10 +2974,9 @@ pub async fn push_events(
         .map_err(transactions::map_transaction_error)
 }
 
-/// All bounded event writers share this policy. Ordinary events keep their
-/// oldest-first eviction semantics, but accepted source work is never evicted.
-/// A queue entirely occupied by source work returns an explicit capacity error;
-/// transactional outbox/decision writers then retain their retryable state.
+/// Ordinary notices can be evicted only when no invocation continuation is
+/// queued. Accepted source questions are never evicted. Capacity refusal aborts
+/// transactional producers so their work remains available for retry.
 pub async fn append_events_in_session(
     db: &Database,
     user_id: &str,
@@ -2903,10 +2993,30 @@ pub async fn append_events_in_session(
         return Ok(false);
     };
     for event in events {
-        if row.pending_events.iter().any(|e| e.id == event.id) {
+        if !super::assistant_invocation_service::fence_in_session(
+            db,
+            session,
+            user_id,
+            event.invocation_id.as_deref(),
+        )
+        .await?
+        {
+            return Err(AppError::AssistantTurnRequired);
+        }
+        if let Some(existing) = row.pending_events.iter().find(|e| e.id == event.id) {
+            if existing.invocation_id != event.invocation_id {
+                return Err(AppError::Conflict(
+                    "Assistant event identity changed".into(),
+                ));
+            }
             continue;
         }
         if row.pending_events.len() >= MAX_PENDING_EVENTS {
+            if event.invocation_id.is_some()
+                || row.pending_events.iter().any(|e| e.invocation_id.is_some())
+            {
+                return Err(AppError::Conflict("Assistant event queue is full".into()));
+            }
             let index = row
                 .pending_events
                 .iter()
@@ -3416,6 +3526,9 @@ async fn finish_turn_inner(
                     ))
                     .await?;
                 }
+                if let Some(turn) = settled_turn.as_ref() {
+                    super::assistant_invocation_service::settle_in_session(&db,session,&row.user_id,turn,&message).await?;
+                }
                 super::platform_personal_turn_service::settle_saved_reply_in_session(&db, session, &message).await?;
                 db.collection::<AssistantMessage>(MESSAGES)
                     .insert_one(message)
@@ -3855,6 +3968,11 @@ pub(crate) async fn attach_resource_image(
                     .session(&mut *session)
                     .await?
                     .ok_or_else(resources::missing)?;
+                if !super::assistant_invocation_service::fence_in_session(
+                    &db, session, &chat.user_id, chat.invocation_id.as_deref(),
+                ).await? {
+                    return Err(AppError::AssistantTurnRequired);
+                }
                 // This benign key write serializes acceptance with concurrent revocation/rotation.
                 let key = db
                     .collection::<bson::Document>(crate::models::api_key::COLLECTION_NAME)
@@ -4820,6 +4938,10 @@ pub async fn delete(
                 let mut children = Vec::new();
                 for row in &rows {
                     let id = row.id.as_str();
+                    super::assistant_invocation_service::deleted_in_session(
+                        db, session, user_id, id,
+                    )
+                    .await?;
                     super::platform_personal_turn_service::clear_thread_in_session(
                         db, session, row,
                     )

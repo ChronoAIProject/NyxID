@@ -664,6 +664,7 @@ mod tests {
     fn billing_enabled_config() -> crate::config::AppConfig {
         crate::config::AppConfig {
             billing_enabled: true,
+            billing_allocations_enabled: false,
             ..test_app_config()
         }
     }

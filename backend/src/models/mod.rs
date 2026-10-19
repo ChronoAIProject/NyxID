@@ -214,4 +214,8 @@ pub(crate) mod platform_entry_identity;
 
 pub(crate) mod platform_entry_projection;
 
+pub mod assistant_invocation;
 pub(crate) mod platform_native_reply_handle;
+
+pub mod credit_allocation_request;
+pub mod credit_service_limit;

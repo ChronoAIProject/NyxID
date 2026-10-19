@@ -276,7 +276,7 @@ async fn dispatch_verified_impl(
                 state.auth_device_hmac_key.as_slice(),
                 state.audit_chain_hmac_key.as_slice(),
                 &command,
-                kind,
+                kind.clone(),
                 &bindings::LifecycleProducer {
                     personal: producers.personal.clone(),
                     public: producers.public.clone(),
@@ -285,12 +285,18 @@ async fn dispatch_verified_impl(
             .await;
             let output = match result {
                 Ok(output) => output,
-                Err(error) if expected_failure(&error).is_some() => {
+                Err(error) if control_failure(&error, &kind).is_some() => {
                     tracing::info!(
                         error_code = error.error_code(),
                         "Personal manager control refused"
                     );
-                    refuse_control(state, &producers, &verified).await?;
+                    refuse_control(
+                        state,
+                        &producers,
+                        &verified,
+                        control_failure(&error, &kind).unwrap(),
+                    )
+                    .await?;
                     return Ok(ManagerDispatch::Handled);
                 }
                 Err(error) => return Err(error),
@@ -302,7 +308,13 @@ async fn dispatch_verified_impl(
             return Ok(ManagerDispatch::Handled);
         }
         // Forwarded proof/control is consumed here, never sent to a model.
-        refuse_control(state, &producers, &verified).await?;
+        refuse_control(
+            state,
+            &producers,
+            &verified,
+            UnavailableReason::ModeDisabled,
+        )
+        .await?;
         return Ok(ManagerDispatch::Handled);
     }
     // An upgrade must still finish an already-issued onboarding-only proof.
@@ -333,7 +345,24 @@ async fn dispatch_verified_impl(
         || text.contains("nyx_pli_")
         || text.contains("#intent_token=")
     {
-        refuse_control(state, &producers, &verified).await?;
+        refuse_control(
+            state,
+            &producers,
+            &verified,
+            if OriginalManagerCommand::from_verified(
+                verified.clone(),
+                TurnInput { text: text.into() },
+            )
+            .is_none()
+            {
+                UnavailableReason::ModeDisabled
+            } else if base == "/confirm" {
+                UnavailableReason::ConfirmationRejected
+            } else {
+                UnavailableReason::ControlInvalid
+            },
+        )
+        .await?;
         return Ok(ManagerDispatch::Handled);
     }
     let admission = dispatch::admit_text_update(
@@ -709,6 +738,7 @@ async fn refuse_control(
     state: &AppState,
     producers: &Arc<PlatformManagerProducers>,
     update: &VerifiedManagerUpdate,
+    reason: UnavailableReason,
 ) -> AppResult<()> {
     if let IngressAdmission::Claimed { ingress, .. } = producers
         .transport
@@ -719,6 +749,18 @@ async fn refuse_control(
             .runtime_policy(&state.db, &update.profile_id)
             .await?
     {
+        let reason = if runtime.emergency_stopped {
+            UnavailableReason::EmergencyStopped
+        } else if !runtime.personal_enabled
+            && matches!(
+                reason,
+                UnavailableReason::ConfirmationRejected | UnavailableReason::ControlInvalid
+            )
+        {
+            UnavailableReason::PersonalDisabled
+        } else {
+            reason
+        };
         let destination = fixed_destination(runtime.manager, update, ingress.clone());
         let _ = producers
             .transport
@@ -726,7 +768,7 @@ async fn refuse_control(
                 &state.db,
                 &destination,
                 &DeliveryRef::Fixed { ingress },
-                ReplyContent::Fixed(UnavailableReason::ModeDisabled),
+                ReplyContent::Fixed(reason),
             )
             .await?;
     }
@@ -763,6 +805,34 @@ fn public_failure(error: &AppError) -> Option<UnavailableReason> {
             UnavailableReason::SponsorUnavailable
         }
         AppError::Conflict(_) | AppError::Forbidden(_) => UnavailableReason::PublicNotReady,
+        _ => return None,
+    })
+}
+
+fn control_failure(
+    error: &AppError,
+    kind: &commands::PersonalCommandKind,
+) -> Option<UnavailableReason> {
+    Some(match error {
+        AppError::RateLimited
+        | AppError::ServiceConcurrencyLimited
+        | AppError::AssistantTurnActive => UnavailableReason::ControlRateLimited,
+        AppError::ValidationError(_)
+        | AppError::BadRequest(_)
+        | AppError::Conflict(_)
+        | AppError::NotFound(_)
+        | AppError::Forbidden(_)
+        | AppError::ForbiddenWithGuidance { .. }
+        | AppError::PlanEntitlementRequired(_)
+        | AppError::InsufficientCredits
+        | AppError::WalletSuspended
+        | AppError::AssistantModelUnavailable => {
+            if *kind == commands::PersonalCommandKind::Confirm {
+                UnavailableReason::ConfirmationRejected
+            } else {
+                UnavailableReason::ControlInvalid
+            }
+        }
         _ => return None,
     })
 }
