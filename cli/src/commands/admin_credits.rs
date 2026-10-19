@@ -1,4 +1,4 @@
-use std::io::{IsTerminal, Write};
+use std::io::{BufRead, IsTerminal, Write};
 
 use anyhow::{Result, bail};
 use chrono::Utc;
@@ -6,6 +6,20 @@ use serde_json::{Value, json};
 
 use super::billing_support as support;
 use crate::cli::{AdminCreditsCommands, CreditGrantCommands};
+
+fn confirm_grant(amount: i64, mut input: impl BufRead, mut output: impl Write) -> Result<()> {
+    write!(
+        output,
+        "Issue {amount} credits to the selected recipient? This creates a new grant batch [y/N]: "
+    )?;
+    output.flush()?;
+    let mut answer = String::new();
+    input.read_line(&mut answer)?;
+    if !matches!(answer.trim(), "y" | "Y" | "yes" | "YES") {
+        bail!("Grant issuance cancelled");
+    }
+    Ok(())
+}
 
 pub async fn run(command: AdminCreditsCommands) -> Result<()> {
     let AdminCreditsCommands::Grant { command } = command;
@@ -55,13 +69,7 @@ pub async fn run(command: AdminCreditsCommands) -> Result<()> {
                         "Grant issue is not idempotent. Confirm in a terminal or pass --yes to issue once"
                     );
                 }
-                eprint!("Issue {amount} credits to {user}? This creates a new grant batch [y/N]: ");
-                std::io::stderr().flush()?;
-                let mut answer = String::new();
-                std::io::stdin().read_line(&mut answer)?;
-                if !matches!(answer.trim(), "y" | "Y" | "yes" | "YES") {
-                    bail!("Grant issuance cancelled");
-                }
+                confirm_grant(amount, std::io::stdin().lock(), std::io::stderr().lock())?;
             }
             let body = json!({
                 "amount_credits": amount,
@@ -201,6 +209,24 @@ mod tests {
                 .iter()
                 .all(|request| request.method == "GET")
         );
+    }
+
+    #[test]
+    fn grant_confirmation_displays_amount_without_recipient_and_requires_affirmative_answer() {
+        for answer in ["y\n", "Y\n", "yes\n", "YES\n", "n\n", "\n", ""] {
+            let mut output = Vec::new();
+            let result = confirm_grant(5, answer.as_bytes(), &mut output);
+            let prompt = String::from_utf8(output).unwrap();
+            assert!(prompt.contains("Issue 5 credits to the selected recipient?"));
+            assert!(prompt.contains("new grant batch [y/N]"));
+            assert!(!prompt.contains(ID));
+            assert!(!prompt.contains("pilot@example.test"));
+            if matches!(answer, "y\n" | "Y\n" | "yes\n" | "YES\n") {
+                result.unwrap();
+            } else {
+                assert_eq!(result.unwrap_err().to_string(), "Grant issuance cancelled");
+            }
+        }
     }
 
     #[tokio::test]

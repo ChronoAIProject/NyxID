@@ -219,9 +219,9 @@ fn effective_table(row: &Value) -> String {
     output
 }
 
-fn raw_billing_table(billing: &Value) -> String {
+fn configured_pricing_table(configuration: &Value) -> String {
     let mut output = String::from("Managed contract:\n");
-    let contract = &billing["managed_execution"];
+    let contract = &configuration["managed_execution"];
     output.push_str(&support::table(
         &["Field", "Value"],
         [
@@ -257,22 +257,24 @@ fn raw_billing_table(billing: &Value) -> String {
             "Sync error",
             "Lago code",
         ],
-        configured_rows(billing).into_iter().map(|(name, row)| {
-            let mut cells = vec![name];
-            cells.extend(
-                [
-                    "metric",
-                    "operation",
-                    "credits_per_unit",
-                    "sync_status",
-                    "sync_error",
-                    "lago_metric_code",
-                ]
-                .into_iter()
-                .map(|key| support::text(&row[key])),
-            );
-            cells
-        }),
+        configured_rows(configuration)
+            .into_iter()
+            .map(|(name, row)| {
+                let mut cells = vec![name];
+                cells.extend(
+                    [
+                        "metric",
+                        "operation",
+                        "credits_per_unit",
+                        "sync_status",
+                        "sync_error",
+                        "lago_metric_code",
+                    ]
+                    .into_iter()
+                    .map(|key| support::text(&row[key])),
+                );
+                cells
+            }),
     ));
     output
 }
@@ -298,7 +300,7 @@ async fn run_service(command: BillingServiceCommands) -> Result<()> {
                     "{}\nCredential configured: {}\n{}",
                     effective_table(&value["service"]),
                     support::text(&value["credential_configured"]),
-                    raw_billing_table(&value["billing"])
+                    configured_pricing_table(&value["billing"])
                 )
             })
         }

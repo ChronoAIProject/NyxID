@@ -1004,8 +1004,8 @@ fn explicit_human_override_wins_over_agent_key_profile() {
 }
 
 #[test]
-fn raw_billing_table_labels_contract_and_price_rows_in_stable_order() {
-    let output = raw_billing_table(&fixture("managed")["billing"]);
+fn configured_pricing_table_labels_contract_and_price_rows_in_stable_order() {
+    let output = configured_pricing_table(&fixture("managed")["billing"]);
     let mut previous = 0;
     for label in [
         "Managed contract:",
@@ -1023,6 +1023,30 @@ fn raw_billing_table_labels_contract_and_price_rows_in_stable_order() {
     }
     assert!(output.contains("0.00000025"));
     assert!(output.contains("synced"));
+}
+
+#[test]
+fn configured_pricing_table_excludes_fields_outside_contract_and_price_allowlists() {
+    let mut configuration = fixture("managed")["billing"].clone();
+    for pointer in [
+        "",
+        "/managed_execution",
+        "/platform_key_pricing",
+        "/platform_key_pricing/components/0",
+    ] {
+        let row = configuration.pointer_mut(pointer).unwrap();
+        row["credential"] = json!("PRIVATE_CREDENTIAL_SENTINEL");
+        row["recipient_user_id"] = json!("PRIVATE_RECIPIENT_SENTINEL");
+        row["unrecognized_field"] = json!("PRIVATE_UNKNOWN_SENTINEL");
+    }
+    let output = configured_pricing_table(&configuration);
+    assert!(output.contains("Managed contract:"));
+    assert!(output.contains("Configured price lanes:"));
+    assert!(output.contains("0.00000025"));
+    assert!(!output.contains("PRIVATE_"));
+    assert!(!output.contains("credential"));
+    assert!(!output.contains("recipient_user_id"));
+    assert!(!output.contains("unrecognized_field"));
 }
 
 macro_rules! unsafe_surface {
